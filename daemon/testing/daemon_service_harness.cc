@@ -170,6 +170,15 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
                   .routing_epoch = options.byte_artifact_routing.routing_epoch,
                   .shard_home_eligible = options.byte_artifact_routing.shard_home_eligible,
               },
+          .publish_prereg =
+              {
+                  .enabled = options.byte_artifact_routing.payload_transport.source_publish_prereg.enabled,
+                  .ttl = options.byte_artifact_routing.payload_transport.source_publish_prereg.ttl,
+                  .max_live_entries =
+                      options.byte_artifact_routing.payload_transport.source_publish_prereg.max_live_entries,
+                  .max_live_bytes =
+                      options.byte_artifact_routing.payload_transport.source_publish_prereg.max_live_bytes,
+              },
           .gateway_ingress_enabled = options.gateway_ingress_enabled,
       });
 

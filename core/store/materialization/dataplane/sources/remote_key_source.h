@@ -44,6 +44,8 @@ class RemoteKeySource : public SeekableSource {
     std::chrono::milliseconds stalled_log_interval{std::chrono::seconds(30)};
     // Optional artifact id used only for diagnostics.
     std::string artifact_id;
+    // Optional transport request id used only for diagnostics/correlation.
+    std::string transport_request_id;
     // Optional request-local authority label for communicator ReadPlan lowering.
     std::string authority_id;
   };

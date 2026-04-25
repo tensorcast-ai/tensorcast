@@ -159,6 +159,158 @@ absl::Status staged_copy_direct_write_batch(
   return absl::OkStatus();
 }
 
+absl::Status pump_ranges_direct_write_impl(
+    SeekableSource& src,
+    PositionedSink& dst,
+    absl::Span<const Range> ranges,
+    size_t window_bytes,
+    int concurrency,
+    PumpDebugStats* debug_stats,
+    PumpDirectWriteOptions direct_write_options) {
+  if (!src.supports_direct_write_at()) {
+    return absl::FailedPreconditionError("pump_ranges_direct_write requires a direct-write-capable source");
+  }
+  auto* cap = dynamic_cast<DirectWriteCapable*>(&dst);
+  if (cap == nullptr) {
+    return absl::FailedPreconditionError("pump_ranges_direct_write requires a DirectWriteCapable destination");
+  }
+  if (window_bytes == 0) {
+    return absl::InvalidArgumentError("pump_ranges_direct_write requires window_bytes > 0");
+  }
+
+  const size_t batch_bytes_limit = resolve_direct_write_batch_bytes(window_bytes, direct_write_options);
+  const size_t batch_ops_limit = resolve_direct_write_batch_ops(direct_write_options);
+  std::size_t direct_batch_count = 0;
+  std::size_t fallback_batch_count = 0;
+  absl::Duration plan_direct_write_elapsed = absl::ZeroDuration();
+  absl::Duration source_readv_elapsed = absl::ZeroDuration();
+  absl::Duration staged_fallback_elapsed = absl::ZeroDuration();
+  LOG(INFO) << "pump_ranges using direct-write path"
+            << " ranges=" << ranges.size() << " concurrency=" << concurrency << " window_bytes=" << window_bytes
+            << " batch_bytes_limit=" << batch_bytes_limit << " batch_ops_limit=" << batch_ops_limit;
+  if (!g_meter) {
+    g_meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+  }
+  if (!g_bytes_total) {
+    g_bytes_total = g_meter->CreateDoubleCounter("tc_tx_bytes_total");
+  }
+  if (!g_direct_win_failures_total) {
+    g_direct_win_failures_total = g_meter->CreateDoubleCounter("tc_tx_direct_window_failures_total");
+  }
+  if (!g_direct_win_retry_total) {
+    g_direct_win_retry_total = g_meter->CreateDoubleCounter("tc_tx_direct_window_retry_total");
+  }
+  if (!g_direct_win_fallback_total) {
+    g_direct_win_fallback_total = g_meter->CreateDoubleCounter("tc_tx_direct_window_fallback_total");
+  }
+  if (!g_direct_win_duration_ms) {
+    g_direct_win_duration_ms = g_meter->CreateDoubleHistogram("tc_tx_direct_window_duration_ms");
+  }
+
+  std::vector<VaRange> batch_ranges;
+  std::vector<DirectWriteOp> batch_ops;
+  std::vector<uint8_t> staging_buf;
+  size_t batch_bytes = 0;
+  uint64_t total_direct_path_bytes = 0;
+  uint64_t total_direct_path_chunks = 0;
+
+  auto clear_batch = [&]() {
+    batch_ranges.clear();
+    batch_ops.clear();
+    batch_bytes = 0;
+  };
+  auto flush_batch = [&]() -> absl::Status {
+    if (batch_ops.empty()) {
+      return absl::OkStatus();
+    }
+    const size_t expected_bytes = batch_bytes;
+    const absl::Time plan_direct_write_started_at = absl::Now();
+    auto grant_or = cap->plan_direct_write(batch_ranges);
+    plan_direct_write_elapsed += absl::Now() - plan_direct_write_started_at;
+    if (!grant_or.ok()) {
+      record_direct_failure("pre_issue_plan");
+      record_direct_fallback("pre_issue_plan");
+      ++fallback_batch_count;
+      const absl::Time staged_fallback_started_at = absl::Now();
+      auto staged_status =
+          staged_copy_direct_write_batch(src, dst, absl::MakeConstSpan(batch_ops), window_bytes, staging_buf);
+      staged_fallback_elapsed += absl::Now() - staged_fallback_started_at;
+      if (staged_status.ok()) {
+        total_direct_path_bytes += expected_bytes;
+        total_direct_path_chunks += batch_ops.size();
+      }
+      clear_batch();
+      return staged_status;
+    }
+
+    ++direct_batch_count;
+    const absl::Time direct_started_at = absl::Now();
+    auto got_or = src.readv_into_at(absl::MakeConstSpan(batch_ops), *grant_or);
+    source_readv_elapsed += absl::Now() - direct_started_at;
+    if (!got_or.ok()) {
+      record_direct_failure("post_issue_readv");
+      return got_or.status();
+    }
+    if (*got_or != expected_bytes) {
+      record_direct_failure("post_issue_short_write");
+      return absl::DataLossError("Short direct write batch");
+    }
+    record_direct_bytes("direct", *got_or);
+    total_direct_path_bytes += *got_or;
+    total_direct_path_chunks += batch_ops.size();
+    const std::map<std::string, opentelemetry::common::AttributeValue> attrs{
+        {"mode", opentelemetry::common::AttributeValue("direct")}};
+    g_direct_win_duration_ms->Record(
+        absl::ToDoubleMilliseconds(absl::Now() - direct_started_at),
+        opentelemetry::common::KeyValueIterableView(attrs),
+        opentelemetry::context::Context{});
+    clear_batch();
+    return absl::OkStatus();
+  };
+
+  for (const auto& [range_off, range_len] : ranges) {
+    uint64_t off = range_off;
+    const uint64_t end = range_off + range_len;
+    while (off < end) {
+      const size_t step = static_cast<size_t>(std::min<uint64_t>(window_bytes, end - off));
+      const bool bytes_limit_hit = !batch_ops.empty() && batch_bytes + step > batch_bytes_limit;
+      const bool ops_limit_hit = !batch_ops.empty() && batch_ops.size() >= batch_ops_limit;
+      if (bytes_limit_hit || ops_limit_hit) {
+        auto flush_status = flush_batch();
+        if (!flush_status.ok()) {
+          return flush_status;
+        }
+      }
+      batch_ranges.push_back(VaRange{off, step});
+      batch_ops.push_back(
+          DirectWriteOp{
+              .src_offset = off,
+              .dest_va_offset = off,
+              .bytes = step,
+          });
+      batch_bytes += step;
+      off += step;
+    }
+  }
+  auto flush_status = flush_batch();
+  if (!flush_status.ok()) {
+    return flush_status;
+  }
+  if (debug_stats != nullptr) {
+    debug_stats->produced_chunks = total_direct_path_chunks;
+    debug_stats->produced_bytes = total_direct_path_bytes;
+  }
+  VLOG(2) << "pump_ranges.direct_write_summary"
+          << " ranges=" << ranges.size() << " concurrency=" << concurrency << " window_bytes=" << window_bytes
+          << " batch_bytes_limit=" << batch_bytes_limit << " batch_ops_limit=" << batch_ops_limit
+          << " direct_batches=" << direct_batch_count << " fallback_batches=" << fallback_batch_count
+          << " total_chunks=" << total_direct_path_chunks << " total_bytes=" << total_direct_path_bytes
+          << " plan_direct_write_ms=" << absl::ToDoubleMilliseconds(plan_direct_write_elapsed)
+          << " source_readv_ms=" << absl::ToDoubleMilliseconds(source_readv_elapsed)
+          << " staged_fallback_ms=" << absl::ToDoubleMilliseconds(staged_fallback_elapsed);
+  return absl::OkStatus();
+}
+
 // RAII lease for a pool slot to guarantee return on all paths
 class SlotLease {
  public:
@@ -584,6 +736,23 @@ void run_range_producer(
 
 } // namespace
 
+absl::Status pump_ranges_direct_write(
+    SeekableSource& src,
+    PositionedSink& dst,
+    absl::Span<const Range> ranges,
+    size_t window_bytes,
+    int concurrency,
+    PumpDebugStats* debug_stats,
+    PumpDirectWriteOptions direct_write_options) {
+  if (concurrency <= 0) {
+    return absl::InvalidArgumentError("Concurrency must be positive");
+  }
+  if (ranges.empty()) {
+    return absl::InvalidArgumentError("Ranges cannot be empty");
+  }
+  return pump_ranges_direct_write_impl(src, dst, ranges, window_bytes, concurrency, debug_stats, direct_write_options);
+}
+
 absl::Status pump_ranges(
     SeekableSource& src,
     PositionedSink& dst,
@@ -607,138 +776,12 @@ absl::Status pump_ranges(
   // DirectWriteCapable and source supports direct writes (e.g., RDMA),
   // plan windowed grants and stream directly into destination VA ranges.
   if (src.supports_direct_write_at()) {
-    if (auto* cap = dynamic_cast<DirectWriteCapable*>(&dst)) {
-      const size_t window_bytes = pool.chunk_size();
-      const size_t batch_bytes_limit = resolve_direct_write_batch_bytes(window_bytes, direct_write_options);
-      const size_t batch_ops_limit = resolve_direct_write_batch_ops(direct_write_options);
-      std::size_t direct_batch_count = 0;
-      std::size_t fallback_batch_count = 0;
-      absl::Duration plan_direct_write_elapsed = absl::ZeroDuration();
-      absl::Duration source_readv_elapsed = absl::ZeroDuration();
-      absl::Duration staged_fallback_elapsed = absl::ZeroDuration();
-      LOG(INFO) << "pump_ranges using direct-write path"
-                << " ranges=" << ranges.size() << " concurrency=" << concurrency << " window_bytes=" << window_bytes
-                << " batch_bytes_limit=" << batch_bytes_limit << " batch_ops_limit=" << batch_ops_limit;
-      if (!g_meter) {
-        g_meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    if (dynamic_cast<DirectWriteCapable*>(&dst) != nullptr) {
+      auto direct_status = pump_ranges_direct_write_impl(
+          src, dst, ranges, pool.chunk_size(), concurrency, debug_stats, direct_write_options);
+      if (!direct_status.ok()) {
+        return direct_status;
       }
-      if (!g_bytes_total) {
-        g_bytes_total = g_meter->CreateDoubleCounter("tc_tx_bytes_total");
-      }
-      if (!g_direct_win_failures_total) {
-        g_direct_win_failures_total = g_meter->CreateDoubleCounter("tc_tx_direct_window_failures_total");
-      }
-      if (!g_direct_win_retry_total) {
-        g_direct_win_retry_total = g_meter->CreateDoubleCounter("tc_tx_direct_window_retry_total");
-      }
-      if (!g_direct_win_fallback_total) {
-        g_direct_win_fallback_total = g_meter->CreateDoubleCounter("tc_tx_direct_window_fallback_total");
-      }
-      if (!g_direct_win_duration_ms) {
-        g_direct_win_duration_ms = g_meter->CreateDoubleHistogram("tc_tx_direct_window_duration_ms");
-      }
-      // Convert to VaRanges
-      std::vector<VaRange> batch_ranges;
-      std::vector<DirectWriteOp> batch_ops;
-      std::vector<uint8_t> staging_buf;
-      size_t batch_bytes = 0;
-      uint64_t total_direct_path_bytes = 0;
-      uint64_t total_direct_path_chunks = 0;
-
-      auto clear_batch = [&]() {
-        batch_ranges.clear();
-        batch_ops.clear();
-        batch_bytes = 0;
-      };
-      auto flush_batch = [&]() -> absl::Status {
-        if (batch_ops.empty()) {
-          return absl::OkStatus();
-        }
-        const size_t expected_bytes = batch_bytes;
-        const absl::Time plan_direct_write_started_at = absl::Now();
-        auto grant_or = cap->plan_direct_write(batch_ranges);
-        plan_direct_write_elapsed += absl::Now() - plan_direct_write_started_at;
-        if (!grant_or.ok()) {
-          record_direct_failure("pre_issue_plan");
-          record_direct_fallback("pre_issue_plan");
-          ++fallback_batch_count;
-          const absl::Time staged_fallback_started_at = absl::Now();
-          auto staged_status =
-              staged_copy_direct_write_batch(src, dst, absl::MakeConstSpan(batch_ops), window_bytes, staging_buf);
-          staged_fallback_elapsed += absl::Now() - staged_fallback_started_at;
-          if (staged_status.ok()) {
-            total_direct_path_bytes += expected_bytes;
-            total_direct_path_chunks += batch_ops.size();
-          }
-          clear_batch();
-          return staged_status;
-        }
-
-        ++direct_batch_count;
-        const absl::Time direct_started_at = absl::Now();
-        auto got_or = src.readv_into_at(absl::MakeConstSpan(batch_ops), *grant_or);
-        source_readv_elapsed += absl::Now() - direct_started_at;
-        if (!got_or.ok()) {
-          record_direct_failure("post_issue_readv");
-          return got_or.status();
-        }
-        if (*got_or != expected_bytes) {
-          record_direct_failure("post_issue_short_write");
-          return absl::DataLossError("Short direct write batch");
-        }
-        record_direct_bytes("direct", *got_or);
-        total_direct_path_bytes += *got_or;
-        total_direct_path_chunks += batch_ops.size();
-        const std::map<std::string, opentelemetry::common::AttributeValue> attrs{
-            {"mode", opentelemetry::common::AttributeValue("direct")}};
-        g_direct_win_duration_ms->Record(
-            absl::ToDoubleMilliseconds(absl::Now() - direct_started_at),
-            opentelemetry::common::KeyValueIterableView(attrs),
-            opentelemetry::context::Context{});
-        clear_batch();
-        return absl::OkStatus();
-      };
-
-      for (const auto& [range_off, range_len] : ranges) {
-        uint64_t off = range_off;
-        const uint64_t end = range_off + range_len;
-        while (off < end) {
-          const size_t step = static_cast<size_t>(std::min<uint64_t>(window_bytes, end - off));
-          const bool bytes_limit_hit = !batch_ops.empty() && batch_bytes + step > batch_bytes_limit;
-          const bool ops_limit_hit = !batch_ops.empty() && batch_ops.size() >= batch_ops_limit;
-          if (bytes_limit_hit || ops_limit_hit) {
-            auto flush_status = flush_batch();
-            if (!flush_status.ok()) {
-              return flush_status;
-            }
-          }
-          batch_ranges.push_back(VaRange{off, step});
-          batch_ops.push_back(
-              DirectWriteOp{
-                  .src_offset = off,
-                  .dest_va_offset = off,
-                  .bytes = step,
-              });
-          batch_bytes += step;
-          off += step;
-        }
-      }
-      auto flush_status = flush_batch();
-      if (!flush_status.ok()) {
-        return flush_status;
-      }
-      if (debug_stats != nullptr) {
-        debug_stats->produced_chunks = total_direct_path_chunks;
-        debug_stats->produced_bytes = total_direct_path_bytes;
-      }
-      VLOG(2) << "pump_ranges.direct_write_summary"
-              << " ranges=" << ranges.size() << " concurrency=" << concurrency << " window_bytes=" << window_bytes
-              << " batch_bytes_limit=" << batch_bytes_limit << " batch_ops_limit=" << batch_ops_limit
-              << " direct_batches=" << direct_batch_count << " fallback_batches=" << fallback_batch_count
-              << " total_chunks=" << total_direct_path_chunks << " total_bytes=" << total_direct_path_bytes
-              << " plan_direct_write_ms=" << absl::ToDoubleMilliseconds(plan_direct_write_elapsed)
-              << " source_readv_ms=" << absl::ToDoubleMilliseconds(source_readv_elapsed)
-              << " staged_fallback_ms=" << absl::ToDoubleMilliseconds(staged_fallback_elapsed);
       if (auto* base_sink = dynamic_cast<Sink*>(&dst)) {
         return base_sink->close();
       }

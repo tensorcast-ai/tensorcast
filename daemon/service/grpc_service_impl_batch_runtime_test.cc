@@ -2333,6 +2333,131 @@ TEST_CASE("BodyHandle acquire_export_view reuses live export lease", "[daemon][b
   REQUIRE(rejected_or.status().code() == absl::StatusCode::kFailedPrecondition);
 }
 
+TEST_CASE("ByteArtifactBodyStore retains publish prereg entries until TTL expiry", "[daemon][batch][publish_prereg]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto options = make_daemon_options();
+  options.byte_artifact_routing.inline_payload_threshold_bytes = 8;
+  options.byte_artifact_routing.payload_transport.batch_transport_protocol_version = 0;
+  auto harness = make_harness(engine, options);
+  auto& svc = harness->service();
+
+  const std::string artifact_id = make_test_byte_artifact_id("publish-prereg:ttl");
+  const std::string payload = "publish-prereg-ttl-payload";
+  const std::uint64_t shard_id = shard_for_artifact(artifact_id);
+
+  HomeBatchPutIfAbsentRequest put_req;
+  put_req.mutable_fence()->set_shard_id(shard_id);
+  put_req.mutable_fence()->set_lease_generation(1);
+  put_req.mutable_fence()->set_holder_daemon_id(kDaemonId);
+  put_req.mutable_fence()->set_routing_epoch(1);
+  put_req.set_operation_id("op-publish-prereg-ttl");
+  auto* put_item = put_req.add_items();
+  put_item->set_artifact_id(artifact_id);
+  put_item->set_inline_payload(payload);
+  set_invariant(put_item->mutable_invariant(), "layout_v1", payload);
+
+  HomeBatchPutIfAbsentResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 1);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  auto entry = harness->kernel().byte_artifact_body_store().get(
+      artifact_id, shard_id, /*lease_generation=*/1, /*routing_epoch=*/1, absl::Now());
+  REQUIRE(entry.has_value());
+
+  const tensorcast::daemon::BodyExportRequest request{
+      .preferred_location = tensorcast::common::memory::MemoryLocation::CPU,
+      .require_remote_source = true,
+      .allow_segmented_export = true,
+  };
+  auto export_view_or = entry->backing_record.retained_body_handle.acquire_export_view(request);
+  REQUIRE(export_view_or.ok());
+  REQUIRE(export_view_or->keepalive != nullptr);
+
+  auto& body_store = harness->kernel().byte_artifact_body_store();
+  REQUIRE(body_store.retain_publish_preregistered_export(
+      entry->backing_record.identity,
+      entry->backing_record.instance_generation,
+      tensorcast::common::memory::MemoryLocation::CPU,
+      export_view_or->keepalive,
+      entry->descriptor.size_bytes,
+      absl::Now(),
+      absl::Milliseconds(50),
+      /*max_live_entries=*/8,
+      /*max_live_bytes=*/1ULL << 20));
+
+  auto prereg = body_store.inspect_publish_preregistered_export(entry->backing_record.identity);
+  REQUIRE(prereg.has_value());
+  REQUIRE(prereg->instance_generation == entry->backing_record.instance_generation);
+  REQUIRE(prereg->size_bytes == entry->descriptor.size_bytes);
+
+  absl::SleepFor(absl::Milliseconds(80));
+  body_store.run_maintenance_once();
+  REQUIRE_FALSE(body_store.inspect_publish_preregistered_export(entry->backing_record.identity).has_value());
+}
+
+TEST_CASE(
+    "ByteArtifactBodyStore clears publish prereg entries when backing is invalidated",
+    "[daemon][batch][publish_prereg]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto options = make_daemon_options();
+  options.byte_artifact_routing.inline_payload_threshold_bytes = 8;
+  options.byte_artifact_routing.payload_transport.batch_transport_protocol_version = 0;
+  auto harness = make_harness(engine, options);
+  auto& svc = harness->service();
+
+  const std::string artifact_id = make_test_byte_artifact_id("publish-prereg:invalidate");
+  const std::string payload = "publish-prereg-invalidate-payload";
+  const std::uint64_t shard_id = shard_for_artifact(artifact_id);
+
+  HomeBatchPutIfAbsentRequest put_req;
+  put_req.mutable_fence()->set_shard_id(shard_id);
+  put_req.mutable_fence()->set_lease_generation(1);
+  put_req.mutable_fence()->set_holder_daemon_id(kDaemonId);
+  put_req.mutable_fence()->set_routing_epoch(1);
+  put_req.set_operation_id("op-publish-prereg-invalidate");
+  auto* put_item = put_req.add_items();
+  put_item->set_artifact_id(artifact_id);
+  put_item->set_inline_payload(payload);
+  set_invariant(put_item->mutable_invariant(), "layout_v1", payload);
+
+  HomeBatchPutIfAbsentResponse put_resp;
+  grpc::ServerContext put_ctx;
+  REQUIRE(svc.HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
+  REQUIRE(put_resp.outcomes_size() == 1);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+
+  auto entry = harness->kernel().byte_artifact_body_store().get(
+      artifact_id, shard_id, /*lease_generation=*/1, /*routing_epoch=*/1, absl::Now());
+  REQUIRE(entry.has_value());
+
+  const tensorcast::daemon::BodyExportRequest request{
+      .preferred_location = tensorcast::common::memory::MemoryLocation::CPU,
+      .require_remote_source = true,
+      .allow_segmented_export = true,
+  };
+  auto export_view_or = entry->backing_record.retained_body_handle.acquire_export_view(request);
+  REQUIRE(export_view_or.ok());
+  REQUIRE(export_view_or->keepalive != nullptr);
+
+  auto& body_store = harness->kernel().byte_artifact_body_store();
+  REQUIRE(body_store.retain_publish_preregistered_export(
+      entry->backing_record.identity,
+      entry->backing_record.instance_generation,
+      tensorcast::common::memory::MemoryLocation::CPU,
+      export_view_or->keepalive,
+      entry->descriptor.size_bytes,
+      absl::Now(),
+      absl::Seconds(5),
+      /*max_live_entries=*/8,
+      /*max_live_bytes=*/1ULL << 20));
+
+  REQUIRE(body_store.inspect_publish_preregistered_export(entry->backing_record.identity).has_value());
+  body_store.invalidate_artifact_visibility(artifact_id, absl::Now(), "test_publish_prereg_invalidate");
+  REQUIRE_FALSE(body_store.inspect_publish_preregistered_export(entry->backing_record.identity).has_value());
+}
+
 TEST_CASE("GetServerConfig advertises segmented communicator export policy", "[daemon][batch][transport_config]") {
   auto enabled_engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   auto enabled_harness = make_harness(enabled_engine, make_daemon_options());

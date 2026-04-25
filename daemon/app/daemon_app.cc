@@ -14,6 +14,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
+#include "core/communicator/transport/request.h"
 #include "daemon/ha/worker_lifecycle_ports.h"
 
 namespace tensorcast::daemon {
@@ -161,6 +162,8 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   LOG(INFO) << "Import metadata root initialized at " << options.daemon_options.import_root.string();
 
   auto app = std::unique_ptr<DaemonApp>(new DaemonApp(std::move(options)));
+  communicator::transport::ReadRequest::set_rdma_profile_enabled_for_process(true);
+  LOG(INFO) << "Enabled communicator RDMA read profiling for daemon process";
   app->kernel_ = std::make_unique<DaemonKernel>(
       app->options_.engine,
       app->options_.async_runtime,
@@ -201,6 +204,16 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
                       app->options_.daemon_options.byte_artifact_routing.worker_directory_staleness_budget,
                   .routing_epoch = app->options_.daemon_options.byte_artifact_routing.routing_epoch,
                   .shard_home_eligible = app->options_.daemon_options.byte_artifact_routing.shard_home_eligible,
+              },
+          .publish_prereg =
+              {
+                  .enabled = app->options_.daemon_options.byte_artifact_routing.payload_transport.source_publish_prereg
+                                 .enabled,
+                  .ttl = app->options_.daemon_options.byte_artifact_routing.payload_transport.source_publish_prereg.ttl,
+                  .max_live_entries = app->options_.daemon_options.byte_artifact_routing.payload_transport
+                                          .source_publish_prereg.max_live_entries,
+                  .max_live_bytes = app->options_.daemon_options.byte_artifact_routing.payload_transport
+                                        .source_publish_prereg.max_live_bytes,
               },
           .gateway_ingress_enabled = app->options_.daemon_options.gateway_ingress_enabled,
           .batch_get_apply_threads =

@@ -4,11 +4,14 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/escaping.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
 #include "core/store/components/communication_manager.h"
@@ -44,15 +47,14 @@ store::runtime::ingestion::BackingIdentity derive_backing_identity(
 BodyHandle::BodyHandle(std::shared_ptr<CoreBacking> backing) : backing_(std::move(backing)) {}
 
 BodyHandle::CoreBacking::ExportLease::~ExportLease() {
-  if (!backing || backing->engine == nullptr || location == common::memory::MemoryLocation::NONE) {
+  if (engine == nullptr || location == common::memory::MemoryLocation::NONE) {
     return;
   }
-  const absl::Status disable_status =
-      backing->engine->disable_remote_replica_access(backing->replica_handle.key(), location);
+  const absl::Status disable_status = engine->disable_remote_replica_access(replica_key, location);
   if (!disable_status.ok()) {
     LOG(WARNING) << "BodyHandle export release failed"
-                 << " artifact_id=" << backing->replica_handle.key().artifact_id
-                 << " location=" << static_cast<int>(location) << " error=" << disable_status;
+                 << " artifact_id=" << replica_key.artifact_id << " location=" << static_cast<int>(location)
+                 << " error=" << disable_status;
   }
 }
 
@@ -151,21 +153,38 @@ absl::StatusOr<BodyExportView> BodyHandle::acquire_export_view(const BodyExportR
   }
 
   std::shared_ptr<CoreBacking::ExportLease> lease;
+  bool lease_cache_hit = false;
+  bool publish_prereg_pin_active = false;
+  absl::Duration enable_remote_replica_access_elapsed = absl::ZeroDuration();
   {
     absl::MutexLock lock(&backing_->export_mu);
     std::weak_ptr<CoreBacking::ExportLease>* export_slot = &backing_->cpu_export;
+    std::shared_ptr<void>* publish_prereg_pin_slot = &backing_->cpu_publish_prereg_pin;
+    absl::Time* publish_prereg_pin_expires_at = &backing_->cpu_publish_prereg_pin_expires_at;
     if (resolved_location == common::memory::MemoryLocation::GPU) {
       export_slot = &backing_->gpu_export;
+      publish_prereg_pin_slot = nullptr;
+      publish_prereg_pin_expires_at = nullptr;
     }
+    if (publish_prereg_pin_slot != nullptr && *publish_prereg_pin_slot != nullptr &&
+        *publish_prereg_pin_expires_at != absl::InfinitePast() && *publish_prereg_pin_expires_at <= absl::Now()) {
+      publish_prereg_pin_slot->reset();
+      *publish_prereg_pin_expires_at = absl::InfinitePast();
+    }
+    publish_prereg_pin_active = publish_prereg_pin_slot != nullptr && *publish_prereg_pin_slot != nullptr;
     lease = export_slot->lock();
+    lease_cache_hit = static_cast<bool>(lease);
     if (!lease) {
+      const absl::Time enable_started_at = absl::Now();
       auto export_or =
           backing_->engine->enable_remote_replica_access(backing_->replica_handle.key(), resolved_location);
+      enable_remote_replica_access_elapsed = absl::Now() - enable_started_at;
       if (!export_or.ok()) {
         return export_or.status();
       }
       lease = std::make_shared<CoreBacking::ExportLease>();
-      lease->backing = backing_;
+      lease->engine = backing_->engine;
+      lease->replica_key = backing_->replica_handle.key();
       lease->location = resolved_location;
       lease->registration = *export_or;
       *export_slot = lease;
@@ -174,7 +193,41 @@ absl::StatusOr<BodyExportView> BodyHandle::acquire_export_view(const BodyExportR
 
   view.communicator_export = lease->registration;
   view.keepalive = std::shared_ptr<void>(lease, lease.get());
+  std::uint64_t exported_bytes = 0;
+  for (const auto buffer_size : lease->registration.buffer_sizes) {
+    if (buffer_size > static_cast<size_t>(std::numeric_limits<std::uint64_t>::max() - exported_bytes)) {
+      exported_bytes = std::numeric_limits<std::uint64_t>::max();
+      break;
+    }
+    exported_bytes += static_cast<std::uint64_t>(buffer_size);
+  }
+  VLOG(2) << "body_handle.acquire_export_view"
+          << " artifact_id=" << backing_->replica_handle.key().artifact_id
+          << " location=" << static_cast<int>(resolved_location) << " lease_cache_hit=" << lease_cache_hit
+          << " publish_prereg_pin_active=" << publish_prereg_pin_active
+          << " enable_remote_replica_access_ms=" << absl::ToDoubleMilliseconds(enable_remote_replica_access_elapsed)
+          << " export_key_count=" << lease->registration.remote_memory_keys.size()
+          << " export_buffer_count=" << lease->registration.buffer_sizes.size() << " export_bytes=" << exported_bytes;
   return view;
+}
+
+absl::Status BodyHandle::pin_export_keepalive(
+    common::memory::MemoryLocation location,
+    std::shared_ptr<void> keepalive,
+    absl::Time expires_at) const {
+  if (empty()) {
+    return absl::FailedPreconditionError("BodyHandle is empty");
+  }
+  if (keepalive == nullptr) {
+    return absl::InvalidArgumentError("BodyHandle export keepalive is empty");
+  }
+  if (location != common::memory::MemoryLocation::CPU) {
+    return absl::InvalidArgumentError("BodyHandle publish prereg only supports CPU exports");
+  }
+  absl::MutexLock lock(&backing_->export_mu);
+  backing_->cpu_publish_prereg_pin = std::move(keepalive);
+  backing_->cpu_publish_prereg_pin_expires_at = expires_at;
+  return absl::OkStatus();
 }
 
 absl::StatusOr<std::unique_ptr<store::IArtifactLoader>> BodyHandle::make_loader() const {

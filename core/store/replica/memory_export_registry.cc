@@ -6,8 +6,11 @@
 #include <cstdlib>
 #include <string_view>
 
+#include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "core/communicator/engine/engine.h"
 #include "core/store/replica/transfer_constants.h"
 // OpenTelemetry Metrics API (impl)
@@ -110,6 +113,7 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
     common::memory::MemoryLocation location,
     absl::Span<const uint32_t> chunks,
     tensorcast::communicator::engine::Communicator& comm_engine) {
+  const absl::Time total_started_at = absl::Now();
   // Validate parameters
   if (chunks.empty()) {
     return absl::InvalidArgumentError("No chunks specified for export");
@@ -150,6 +154,13 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
   info.location = location;
   ExportRecord rec;
   std::optional<UnifiedMemoryAuthority::StableLease> stable_lease;
+  absl::Duration set_exported_elapsed = absl::ZeroDuration();
+  absl::Duration stable_lease_check_elapsed = absl::ZeroDuration();
+  absl::Duration stable_lease_acquire_elapsed = absl::ZeroDuration();
+  absl::Duration register_tensor_total_elapsed = absl::ZeroDuration();
+  bool reused_stable_lease = false;
+  std::size_t registered_range_count = 0;
+  std::uint64_t registered_bytes = 0;
 
   if (location == common::memory::MemoryLocation::CPU) {
     void* base_raw = uma_->get_cpu_base_ptr(key);
@@ -161,25 +172,32 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
     info.comm_dev_type = communicator::base::COMMUNICATE_ENGINE_DEV_CPU;
     // Always use UMA ledger/export registration in V3 final state
     std::vector<std::pair<uint32_t, uint32_t>> ranges;
+    const absl::Time set_exported_started_at = absl::Now();
     auto reg_or = uma_->set_exported(key, location, chunks, /*on=*/true);
+    set_exported_elapsed = absl::Now() - set_exported_started_at;
     if (!reg_or.ok()) {
       return reg_or.status();
     }
     ranges = reg_or->chunk_ranges;
     rec.uma_keepalive = reg_or->keepalive; // Hold VS pin leases across registration lifetime
+    const absl::Time stable_lease_check_started_at = absl::Now();
     auto has_lease_or = has_stable_lease_for_chunks(*uma_, key, absl::MakeSpan(normalized_indices));
+    stable_lease_check_elapsed = absl::Now() - stable_lease_check_started_at;
     if (!has_lease_or.ok()) {
       rollback_export();
       return has_lease_or.status();
     }
     if (!*has_lease_or) {
+      const absl::Time stable_lease_acquire_started_at = absl::Now();
       auto lease_or = uma_->acquire_stable_lease(key, absl::MakeSpan(normalized_indices));
+      stable_lease_acquire_elapsed = absl::Now() - stable_lease_acquire_started_at;
       if (!lease_or.ok()) {
         rollback_export();
         return lease_or.status();
       }
       stable_lease = std::move(*lease_or);
     } else {
+      reused_stable_lease = true;
       VLOG(1) << "export_chunks: reusing existing stable lease for artifact_id=" << key.artifact_id;
     }
     // Derive chunk size from UMA layout to ensure alignment across VS/UMA
@@ -189,6 +207,7 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
     }
     size_t range_idx = 0;
     for (const auto& [start, end] : ranges) {
+      const size_t current_range_idx = range_idx;
       uint64_t va_off = static_cast<uint64_t>(start) * kChunk;
       uint64_t va_end = std::min<uint64_t>(info.artifact_size, (static_cast<uint64_t>(end) + 1) * kChunk);
       uint64_t length = (va_end > va_off) ? (va_end - va_off) : 0;
@@ -204,14 +223,25 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
       const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(base.get()) + va_off);
       auto tensor_key = format_tensor_key(key, absl::StrCat("CPU_chunk_", range_idx++));
       tensorcast::communicator::engine::Communicator::RegisterTensorOptions opts;
-      // Avoid registering an MR for VS logical windows; CPU path will be staged for TCP
-      opts.register_mr = false;
-      // Hint: CPU staged when policy requires. For Phase 1 (TCP), staging happens in transport.
+      // RDMA producer direct-source serving requires the exported CPU chunk to
+      // carry a registered MR. TCP still uses staged transport and leaves MR
+      // registration disabled.
+      opts.register_mr = comm_engine.is_rdma_enabled();
+      opts.direct_rdma_enabled = comm_engine.is_rdma_enabled();
       opts.needs_staging = false;
       opts.async = false;
-      // UMA ledger manages CPU lease lifetime; no legacy staging mapping
 
+      const absl::Time register_tensor_started_at = absl::Now();
       auto ret = comm_engine.register_tensor_ex(tensor_key, addr, length, info.comm_dev_type, info.device_id, opts);
+      const absl::Duration register_tensor_elapsed = absl::Now() - register_tensor_started_at;
+      register_tensor_total_elapsed += register_tensor_elapsed;
+      VLOG(2) << "memory_export_registry.export_chunks.range"
+              << " artifact_id=" << key.artifact_id << " location=cpu"
+              << " range_index=" << current_range_idx << " chunk_start=" << start << " chunk_end=" << end
+              << " bytes=" << length << " register_mr=" << opts.register_mr
+              << " direct_rdma_enabled=" << opts.direct_rdma_enabled
+              << " register_tensor_ex_ms=" << absl::ToDoubleMilliseconds(register_tensor_elapsed)
+              << " tensor_key=" << tensor_key << " status=" << (ret.ok() ? "OK" : ret.ToString());
       if (!ret.ok()) {
         cleanup_registered_tensors("CPU export");
         if (stable_lease.has_value()) {
@@ -224,6 +254,8 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
       info.buffer_addresses.push_back(addr);
       info.buffer_sizes.push_back(static_cast<size_t>(length));
       info.remote_memory_keys.push_back(std::move(tensor_key));
+      ++registered_range_count;
+      registered_bytes += length;
     }
 
     // Cache record for precise unexport
@@ -244,6 +276,17 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
     }
     LOG(INFO) << "export_chunks: artifact_id=" << key.artifact_id << " location=" << loc_str(location)
               << " ranges=" << ranges.size() << " status=OK";
+    VLOG(2) << "memory_export_registry.export_chunks.summary"
+            << " artifact_id=" << key.artifact_id << " location=cpu"
+            << " normalized_chunk_count=" << normalized_indices.size() << " range_count=" << ranges.size()
+            << " registered_range_count=" << registered_range_count << " registered_bytes=" << registered_bytes
+            << " set_exported_ms=" << absl::ToDoubleMilliseconds(set_exported_elapsed)
+            << " stable_lease_check_ms=" << absl::ToDoubleMilliseconds(stable_lease_check_elapsed)
+            << " stable_lease_acquire_ms=" << absl::ToDoubleMilliseconds(stable_lease_acquire_elapsed)
+            << " reused_stable_lease=" << reused_stable_lease
+            << " register_tensor_total_ms=" << absl::ToDoubleMilliseconds(register_tensor_total_elapsed)
+            << " total_ms=" << absl::ToDoubleMilliseconds(absl::Now() - total_started_at)
+            << " remote_key_count=" << info.remote_memory_keys.size();
 
     return info;
   }

@@ -300,6 +300,18 @@ message DaemonConfig {
 
   message ByteArtifactRouting {
     message PayloadTransport {
+      message SourcePublishPrereg {
+        // Enable advisory publish-time preregistration for source exports.
+        // First cut is CPU-only and RDMA-only for routed byte-artifact flows.
+        optional bool enabled = 1;
+        // How long a preregistered source export lease may stay live.
+        google.protobuf.Duration ttl = 2;
+        // Best-effort cap on concurrent preregistered backing entries.
+        uint64 max_live_entries = 3;
+        // Best-effort cap on retained preregistered backing bytes.
+        uint64 max_live_bytes = 4;
+      }
+
       google.protobuf.Duration ref_ttl = 1;
       uint64 max_chunk_bytes = 2;
       google.protobuf.Duration fetch_deadline = 3;
@@ -325,6 +337,8 @@ message DaemonConfig {
       google.protobuf.Duration minimum_batch_transport_ttl = 11;
       // Optional grace window kept after the nominal expiry before release.
       google.protobuf.Duration transport_release_guard = 12;
+      // Advisory publish-time preregistration for source-side remote serving.
+      SourcePublishPrereg source_publish_prereg = 14;
     }
 
     // Stable shard count for shard_id derivation.

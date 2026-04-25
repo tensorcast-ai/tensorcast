@@ -4,7 +4,7 @@ title: Unified Artifact Runtime and Routed Byte Artifact Architecture
 status: implemented
 areas: ["daemon", "sdk", "global_store", "proto", "core", "integrations", "docs"]
 created: 2026-03-08
-last_updated: 2026-04-19
+last_updated: 2026-04-23
 related_code:
   - docs/designs/0017-client-generated-artifact-id.md
   - docs/designs/0056-programmable-framework-adv.md
@@ -90,8 +90,8 @@ authoritative for the artifact value model and routed byte-artifact runtime itse
 
 # Current Implementation Snapshot
 
-As of 2026-04-18, the live implementation matches this design, with the batch-get transport optimizations in this
-document accepted as follow-on work:
+As of 2026-04-23, the live implementation matches this design, with one
+narrower RDMA source-side follow-on still in progress:
 
 - `StoreDaemonServiceImpl` delegates `Batch*`, `HomeBatch*`, `FetchPayloadRefChunk`, and `FetchBatchPayloadRefChunk`
   through controller entrypoints.
@@ -109,13 +109,20 @@ document accepted as follow-on work:
 - `TargetPublicationScope`, `TargetPublicationRegistry`, `target_publication_token`, `PayloadRefScope`, and
   `BatchPayloadRefScope` are the live capability contracts.
 - `BatchGetIntoRegionRequest` no longer exposes `preference` or `source_policy`.
-- `HomeBatchGet` currently materializes each transport pack as a daemon-owned contiguous host slab before emitting
-  either `grpc_chunk_ref` or `communicator_source`.
-- Remote `communicator_source` consume paths still mirror one full pack per `transport_id` into local host memory
-  before per-item slicing, even though the underlying `RemoteKeySource` already supports direct-write reads when RDMA
-  is available.
-- `BodyHandle` is already the byte-artifact live-backing handle, but it does not yet expose the export-view API needed
-  for source-side no-copy batch communicator export.
+- `HomeBatchGet` may now realize one transport either as a staged contiguous
+  pack (`grpc_chunk_ref`, MTCP-compatible `communicator_source`, or fallback)
+  or as a segmented `communicator_source` over retained-body export views for
+  eligible RDMA packs.
+- Remote `communicator_source` consume paths now diverge by transport
+  realization: RDMA lowers the remote pack into the shared batched
+  direct-write path without a mandatory full-pack local mirror, while MTCP and
+  staged fallback paths still materialize one full local pack payload per
+  `transport_id` before per-item slicing.
+- `BodyHandle` now exposes the export-view API used by source-side segmented
+  communicator export.
+- The remaining RDMA follow-on is producer-side read-plan servicing:
+  source-side CPU byte-artifact slices are still copied from retained backing
+  into pinned staged response buffers before the remote RDMA reads them.
 - NodeAgent preserves structured `manifest`, `publish`, `hydrate`, and `evict_local` artifact results over
   `ExecutePlan`.
 
@@ -419,10 +426,18 @@ The transport family is live today:
 
 The remaining follow-ups are narrower than the original design delta:
 
-- current `v2 communicator_source` open paths resolve one remote pack source per `transport_id`, then mirror the full
-  pack into local host memory before per-item slicing,
-- current `v1 grpc_chunk_ref` consumption also materializes one full pack payload per transport before local slicing,
-- session-scoped `StreamingPinnedBuffer` reuse remains deferred and is not part of the current implementation.
+- current `v2 communicator_source` already supports segmented retained-body
+  export on eligible RDMA get paths, and current RDMA consume paths already
+  avoid the old mandatory full-pack local mirror through the shared direct-write
+  dataplane,
+- current `v1 grpc_chunk_ref` consumption and MTCP-compatible
+  `communicator_source` realizations still materialize one full local pack
+  payload per transport before local slicing,
+- current RDMA producer servicing still copies CPU source slices into pinned
+  staged response windows before remote reads, and those response windows are
+  still bounded by staged-flow credit rather than descriptor/control limits,
+- session-scoped `StreamingPinnedBuffer` reuse remains deferred and is not part
+  of the current implementation.
 
 This section should be read together with the existing split in the repository:
 
@@ -523,9 +538,13 @@ Normative rules:
    digest}` tuple.
 4. A response or request may carry multiple transports. Batching is per remote-home bucket, and segmentation is still
    allowed by size, item count, or staging constraints.
-5. Current realizations do not yet provide a reusable remote slice loader over one open remote pack. `v1 grpc_chunk_ref`
-   materializes one local payload buffer per transport, and remote `v2 communicator_source` paths mirror one full pack
-   into local host memory before serving subsequent item slices from that local mirror.
+5. Current realizations still differ by transport:
+   - `v1 grpc_chunk_ref` materializes one local payload buffer per transport,
+   - RDMA `v2 communicator_source` already provides a reusable remote slice
+     loader over one open remote pack through the shared direct-write path,
+   - MTCP or staged-fallback `v2 communicator_source` paths still mirror one
+     full pack into local host memory before serving subsequent item slices
+     from that local mirror.
 6. A per-item outcome or request item must choose exactly one payload encoding family at a time:
    `inline_payload`, singular `payload_ref`, or `batch_payload_slice`.
 7. Only items whose semantic authority outcome is success may carry `batch_payload_slice`; `MISS`, conflict, and
@@ -604,12 +623,21 @@ Normative rules:
 - Implemented.
 - Keeps the same `BatchPayloadTransport` envelope and manifest semantics, but realizes bytes through communicator export
   descriptors instead of a transport RPC payload stream.
-- The source shape is currently a daemon-owned staged host-memory slab exported through the shared communicator.
+- The source shape is now transport-dependent:
+  - eligible RDMA get paths may export one logical pack as segmented retained
+    body views without building a daemon-owned pack slab first,
+  - MTCP-compatible and fallback paths may still export a staged host-memory
+    pack.
 - `BatchPayloadCommunicatorSource` is the serializable control-plane descriptor. The broker lowers it into a runtime
   `RemoteKeySource` backed by the shared communicator rather than using `P2PSource` itself as the wire schema.
-- The current remote consume path then mirrors the full pack once into local host memory before per-item slicing. This
-  keeps the semantic contract stable while leaving the accepted RDMA-oriented no-mirror and no-copy follow-on work
-  below as future implementation work.
+- The current remote consume path is also transport-dependent:
+  - RDMA lowers item slices directly from the remote source into the shared
+    batched direct-write path without a mandatory full-pack local mirror,
+  - MTCP and staged fallback paths still mirror one full pack into local host
+    memory before per-item slicing.
+- The remaining accepted RDMA follow-on below is producer-side servicing:
+  source-backed response windows still use staged pinned buffers rather than
+  direct-readable retained CPU backings.
 
 Current selection rules:
 
@@ -729,16 +757,26 @@ Rules:
    `GPU_VRAM` enum value for future extensions, but the live controller path does not emit VRAM-backed packs.
 4. The producer pack defines one contiguous logical byte space over full byte-artifact payloads. Each manifest entry
    owns exactly one whole-artifact slice `{offset, length}` inside that pack byte space.
-5. Current remote `v2` consume paths open one communicator source per `transport_id`, mirror the full pack once into
-   local host memory via `mirror_seekable_source_payload(...)`, and then serve subsequent item slices from that local
-   mirror. Local same-daemon communicator packs can serve source slices directly without the mirror step.
-6. Semantic success remains item-scoped and whole-artifact-scoped. `v2` does not introduce sub-artifact success,
+5. Current producer `v2` realizations are transport-dependent:
+   - eligible RDMA get paths may export one logical pack as segmented retained
+     body views,
+   - MTCP-compatible and fallback paths may still realize one staged host pack.
+6. Current remote `v2` consume paths open one communicator source per
+   `transport_id`:
+   - on RDMA, item slices lower directly from that remote source into the
+     shared `0115` batched direct-write path without a mandatory full-pack
+     local mirror,
+   - on MTCP or staged fallback paths, the consumer still mirrors one full
+     pack into local host memory before per-item slicing,
+   - local same-daemon communicator packs can still serve source slices
+     directly.
+7. Semantic success remains item-scoped and whole-artifact-scoped. `v2` does not introduce sub-artifact success,
    partial artifact visibility, or sub-artifact digest semantics.
-7. `v2` does not require per-pack Global Store transport sessions. Peer addressability and export descriptors come from
+8. `v2` does not require per-pack Global Store transport sessions. Peer addressability and export descriptors come from
    `BatchPayloadCommunicatorSource`, the shared communicator, and worker-directory resolution.
-8. Verification remains manifest-first. `v2` uses the signed `batch_payload_ref` manifest digest plus per-entry digests
+9. Verification remains manifest-first. `v2` uses the signed `batch_payload_ref` manifest digest plus per-entry digests
    when present; it does not require a full-pack payload hash.
-9. `v1 grpc_chunk_ref` and legacy per-item `payload_ref` remain valid fallbacks beside `v2`.
+10. `v1 grpc_chunk_ref` and legacy per-item `payload_ref` remain valid fallbacks beside `v2`.
 
 #### 5.5.8 Failure isolation and verification
 
@@ -794,7 +832,7 @@ Rules:
 7. `PayloadTransportBroker` remains the transport boundary. Batch transport does not create a second owner-side
    lifecycle subsystem beside the lifecycle kernel.
 
-#### 5.5.10 Accepted follow-on optimization: transport-specific batch-get realization
+#### 5.5.10 Accepted follow-on optimization: RDMA source-side direct-readable batch-get realization
 
 The batch transport envelope is already correct. The accepted follow-on
 direction is to keep the manifest and capability semantics stable while
@@ -810,10 +848,26 @@ Design intent:
 - logical pack semantics remain manifest-first and transport-independent,
 - MTCP-validated pack-plus-mirror optimization remains the intended realization for transports that do not expose
   direct source-to-target writes,
-- RDMA should converge toward no-pack-copy and no-full-pack-mirror behavior whenever the existing shared dataplane can
-  preserve the same per-item semantics,
+- current RDMA get paths already remove the daemon-owned pack slab and the old
+  mandatory sink full-pack mirror on eligible paths,
+- the remaining RDMA bottleneck is producer-side servicing: CPU source slices
+  are still copied from retained backing into pinned staged response buffers
+  before remote reads,
+- RDMA should therefore converge toward direct-readable source servicing for
+  eligible retained CPU backings while keeping the existing shared `0115` sink
+  and transport execution path,
 - `BodyHandle` remains the source-side live-backing seam for export acquisition rather than teaching the transport
   broker to inspect `StoreEngine` internals directly.
+
+```mermaid
+flowchart LR
+  A["Retained CPU body backing"] -->|MTCP / fallback| B["Staged response window<br>copy into pinned staging"]
+  A -->|RDMA direct-source follow-on| C["Direct-source response window<br>descriptors over retained backings"]
+  B --> D["RemoteKeySource / communicator"]
+  C --> D
+  D --> E["Sink read_multi()<br>one issue per response window"]
+  E --> F["Shared direct-write target windows"]
+```
 
 Normative rules:
 
@@ -828,28 +882,66 @@ Normative rules:
    remote `communicator_source` lowers to a `SeekableSource` that supports `read_into_at(...)`, the consumer should
    lower per-item `SourceSlice` loaders directly from that remote source and let the shared materialization dataplane
    choose direct-write execution.
-5. Source-side RDMA communicator export should prefer no-copy segmented export over staged slab packing. The producer
-   may expose one logical pack byte space by concatenating per-entry or per-backing exported segments through
-   `remote_memory_keys[]`, `buffer_sizes[]`, and `total_payload_bytes`; it does not need to copy those bytes into one
+5. Source-side RDMA communicator export should continue to prefer no-pack-copy
+   segmented export over daemon-owned pack slab realization. The producer may
+   expose one logical pack byte space by concatenating per-entry or per-backing
+   exported segments through `remote_memory_keys[]`, `buffer_sizes[]`, and
+   `total_payload_bytes`; it does not need to copy those bytes into one
    daemon-owned slab first.
-6. The accepted source-side realization seam is `BodyHandle`, as further specified by `0089`. `BodyHandle` must grow a
-   transport-neutral export-view acquisition API so `PayloadTransportBroker` can obtain exportable backing views and
-   keepalive state without reimplementing replica-runtime inspection or export logic.
-7. RDMA zero-copy in this design means "no mandatory pack copy and no mandatory full-pack mirror" when direct-write
-   source and target paths exist. It does not remove item-scoped digests, item-scoped lowering, or per-item success and
-   failure outcomes.
-8. If a candidate pack or item cannot produce the required export view, cannot satisfy lifetime requirements, or
+6. The next RDMA follow-on is source servicing, not a new sink API. Eligible
+   retained CPU backings should be served as direct-readable source segments in
+   the read-plan response instead of first being copied into pinned staged
+   buffers.
+7. The accepted source-side realization seam is `BodyHandle`, as further
+   specified by `0089`. `BodyHandle` provides the transport-neutral export-view
+   acquisition API that `PayloadTransportBroker` uses to obtain exportable
+   backing views and keepalive state without reimplementing replica-runtime
+   inspection or export logic.
+8. Direct-source RDMA response windows are descriptor-driven, not
+   staging-driven. They must not consume `FlowCreditLedger`, `StageLease`, or
+   staged ACK-release semantics, and they must not be split merely because
+   staged `buffers_per_flow` credit is exhausted.
+9. Direct-source window sizing should instead be bounded by descriptor/control
+   limits such as segment count, control payload bytes, and request budgeting.
+   The accepted benchmark target is that one routed transport's `32` source
+   segments fit in one direct-source response window and one sink
+   `read_multi()` call, even if transport realization still posts many RDMA
+   WRs internally.
+10. RDMA producer hot paths may optionally retain a publish-time export-view
+    keepalive keyed by backing identity as an optimization hint for later
+    direct-source servicing. This cache is RDMA-only, best-effort, and advisory:
+    missing, expired, or invalidated retained exports must never change
+    authority truth or manifest semantics, and they must not disable request-
+    time export acquisition or staged fallback.
+11. Publish-time retained exports must live outside `BackingRecord` snapshots.
+    Snapshot copies of backing metadata must not silently extend export
+    lifetime; source-side preregistration is a separate bounded cache over
+    previously acquired `BodyHandle` export views.
+12. Publish-time retained-export cache lifetime must be explicitly bounded by
+    TTL and live-entry/live-byte budgets, and it must be invalidated on backing
+    lifecycle changes such as invalidation, rebind, prune, or replacement.
+13. RDMA zero-copy in this design means "no mandatory pack copy, no mandatory
+    source-side staging copy, and no mandatory full-pack mirror" when direct-
+    write source and target paths exist. It does not remove item-scoped
+    digests, item-scoped lowering, or per-item success and failure outcomes.
+14. If a candidate pack or item cannot produce the required export view, cannot satisfy lifetime requirements, or
    resolves to a non-direct-write transport, the daemon may fall back per pack to the staged contiguous realization and
    the existing `grpc_chunk_ref` or staged `communicator_source` paths. MTCP-validated behavior must remain available.
-9. The intended implementation order is:
-   - sink-side no-mirror consume path first, because the lower dataplane already supports direct-write remote sources,
-   - `BodyHandle` export-view API second,
-   - source-side no-copy segmented communicator export third.
-10. Session-scoped staging reuse remains complementary follow-on work after this transport-specific split. It must not
+15. The intended implementation order is:
+    - sink-side no-mirror consume path first, because the lower dataplane
+      already supports direct-write remote sources,
+    - `BodyHandle` export-view API second,
+    - source-side no-pack segmented communicator export third,
+    - source-side direct-readable RDMA servicing fourth,
+    - and source-side publish-time retained-export warming as an optional
+      follow-on optimization on top of the same `BodyHandle` seam.
+16. Session-scoped staging reuse remains complementary follow-on work after this transport-specific split. It must not
     be used as a reason to keep RDMA on the forced pack-plus-mirror path.
-11. Shared composite direct-write and routed vectored pull semantics are
-    defined by `0115`. `0087` owns the byte-artifact consumer and authority
-    semantics, not the generic communicator contract.
+17. Shared composite direct-write and routed vectored pull semantics are
+    defined by `0115`. `0087` owns byte-artifact authority plus the consumer-
+    side and producer-side realization rules that decide whether a routed pack
+    is staged or direct-readable; it does not own a transport-private RDMA sink
+    API.
 
 #### 5.5.11 Potential future optimization: session-scoped streaming buffer reuse
 
@@ -1252,8 +1344,10 @@ design delta.
   retention,
 - `HomeBatch*`, `FetchPayloadRefChunk`, and `FetchBatchPayloadRefChunk` assume a trusted intra-cluster network unless a
   separate peer-auth layer is introduced,
-- batch-native transport is now implemented, but current source paths still stage one daemon-owned contiguous slab per
-  pack and current remote consume paths still use one full-pack local materialized buffer per `transport_id`,
+- batch-native transport is now implemented, but the remaining RDMA cost is no
+  longer daemon-owned pack slabs or mandatory sink full-pack mirrors on the get
+  path; it is producer-side servicing that still stages retained CPU backing
+  bytes into pinned response buffers before remote reads,
 - `v1 grpc_chunk_ref` improves transport shape but still inherits gRPC chunk framing and server or client memory-copy
   costs; it should be treated as an incremental step rather than the final cross-host performance target,
 - `v2 communicator_source` reduces that gap but the current realization still pays unnecessary RDMA copy costs on both
@@ -1286,8 +1380,10 @@ design delta.
   `v2 communicator_source` realizations.
 - logical batch-pack semantics remain independent of the transport-specific physical realization used to move bytes.
 - staged contiguous pack realization remains supported for MTCP and non-direct-write fallback paths.
-- RDMA-oriented `communicator_source` realization must not require full-pack mirror or staged repack when the same
-  manifest and per-item semantics can be preserved through direct-write and `BodyHandle`-backed export views.
+- RDMA-oriented `communicator_source` realization must not require staged
+  repack, source-side staged response copy, or full-pack mirror when the same
+  manifest and per-item semantics can be preserved through direct-write and
+  `BodyHandle`-backed export views.
 - `PayloadTransportBroker` remains the transport boundary, but source-side no-copy export must consume the `BodyHandle`
   export-view seam described by `0089` rather than growing broker-private `StoreEngine` inspection logic.
 - `GetServerConfig` is the peer-discovery surface for batch-transport protocol version and realization support.

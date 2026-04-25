@@ -10,6 +10,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -76,6 +77,58 @@ struct RdmaReadPlanSourceSlice {
   bool zero_copy = false;
 };
 
+struct RdmaSourceStageProfile {
+  uint64_t window_count = 0;
+  uint64_t segment_count = 0;
+  uint64_t stage_calls = 0;
+  uint64_t staged_bytes = 0;
+  uint64_t cpu_stage_calls = 0;
+  uint64_t cpu_stage_bytes = 0;
+  uint64_t stage_total_us = 0;
+  uint64_t cpu_pool_allocate_us = 0;
+  uint64_t cpu_lease_acquire_us = 0;
+  uint64_t cpu_memcpy_us = 0;
+  uint64_t mr_us = 0;
+  uint64_t mr_cache_hits = 0;
+  uint64_t mr_cache_misses = 0;
+  uint64_t max_cpu_memcpy_us = 0;
+  uint64_t max_mr_us = 0;
+};
+
+absl::Mutex& lazy_direct_source_mr_mu() {
+  static auto* mu = new absl::Mutex();
+  return *mu;
+}
+
+absl::Status ensure_tensor_registered_on_dev(const std::shared_ptr<PartitionTensor>& tensor, const net_dev_t& dev) {
+  if (tensor == nullptr || dev == nullptr) {
+    return absl::InvalidArgumentError("tensor and dev are required for lazy MR registration");
+  }
+  if (tensor->has_registered_mr(dev)) {
+    return absl::OkStatus();
+  }
+
+  absl::MutexLock lock(&lazy_direct_source_mr_mu());
+  if (tensor->has_registered_mr(dev)) {
+    return absl::OkStatus();
+  }
+  if (tensor->get_dev_by_rail(dev->get_rail_id()) == nullptr) {
+    tensor->add_dev(dev);
+  }
+  if (!tensor->is_registered(dev)) {
+    const auto reg_status = dev->reg_async(tensor);
+    if (reg_status != misc::SUCCESS) {
+      return absl::InternalError(absl::StrCat("failed to lazily register source tensor MR on ", dev->get_name()));
+    }
+  }
+  tensor->wait_mr_ready(dev);
+  if (!tensor->has_registered_mr(dev)) {
+    return absl::InternalError(
+        absl::StrCat("lazy source tensor MR unavailable on ", dev->get_name(), " after registration"));
+  }
+  return absl::OkStatus();
+}
+
 struct RdmaReadSession {
   enum class Mode {
     kLegacyTensor = 0,
@@ -96,6 +149,21 @@ struct RdmaReadSession {
   std::unique_ptr<FlowCreditLedger> direct_ledger;
   std::unique_ptr<StagingWindow> window;
   bool zero_copy = false;
+  bool direct_source_response = false;
+  uint32_t read_plan_window_segment_limit = 0;
+  std::shared_ptr<RdmaSourceStageProfile> source_stage_profile;
+  std::chrono::steady_clock::time_point created_at = std::chrono::steady_clock::now();
+  uint64_t first_stage_start_us = 0;
+  uint64_t first_window_send_us = 0;
+  uint64_t first_window_segment_count = 0;
+  uint64_t first_window_stage_calls = 0;
+  uint64_t first_window_staged_bytes = 0;
+  uint64_t first_window_cpu_stage_bytes = 0;
+  uint64_t first_window_stage_total_us = 0;
+  uint64_t first_window_cpu_memcpy_us = 0;
+  uint64_t first_window_mr_us = 0;
+  uint64_t first_window_mr_cache_hits = 0;
+  uint64_t first_window_mr_cache_misses = 0;
   std::vector<RdmaReadPlanSourceSlice> plan_source_slices;
   size_t next_source_slice = 0;
   uint64_t next_source_slice_offset = 0;
@@ -616,7 +684,8 @@ StagingWindow::StageFn MakeStageFunction(
     std::string request_key,
     v1::RdmaConfig::StagedRdmaBackend staged_backend,
     bool use_direct,
-    ibv_mr* direct_mr) {
+    ibv_mr* direct_mr,
+    std::shared_ptr<RdmaSourceStageProfile> source_stage_profile) {
   if (use_direct) {
     const uint64_t base_addr = tensor->get_uint64_addr();
     const uint64_t tensor_bytes = tensor->get_bytes();
@@ -651,10 +720,23 @@ StagingWindow::StageFn MakeStageFunction(
   }
 
   auto fallback_stager = stager;
-  return [fallback_stager, tensor, dev, ledger, mr_cache, request_key = std::move(request_key), staged_backend](
+  return [fallback_stager,
+          tensor,
+          dev,
+          ledger,
+          mr_cache,
+          request_key = std::move(request_key),
+          staged_backend,
+          source_stage_profile = std::move(source_stage_profile)](
              uint64_t offset, uint32_t bytes, uint32_t /*segment_idx*/) -> absl::StatusOr<StageLease> {
     constexpr int kAccess = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
+    auto to_duration_us = [](std::chrono::steady_clock::time_point start,
+                             std::chrono::steady_clock::time_point end) -> uint64_t {
+      return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+    };
+    const auto stage_started_at = std::chrono::steady_clock::now();
     auto staged_or = fallback_stager->stage(tensor, offset, bytes, MemoryStager::StageMode::kTry);
+    const auto stage_finished_at = std::chrono::steady_clock::now();
     if (!staged_or.ok()) {
       return staged_or.status();
     }
@@ -663,13 +745,19 @@ StagingWindow::StageFn MakeStageFunction(
     bool deregister_mr = false;
 
     gsl::not_null<void*> exposed_ptr_nn{exposed_ptr};
+    std::optional<HostPinnedCpuStager::StageStats> cpu_stage_stats;
+    if (auto* cpu_stager = dynamic_cast<HostPinnedCpuStager*>(fallback_stager.get()); cpu_stager != nullptr) {
+      cpu_stage_stats = cpu_stager->stage_stats_for_ptr(exposed_ptr_nn);
+    }
     const char* mr_location = StagedBackendToString(staged_backend);
+    const auto mr_started_at = std::chrono::steady_clock::now();
     if (mr_cache) {
       const auto slab = NormalizeMrRegion(*fallback_stager, exposed_ptr_nn, bytes);
       gsl::not_null<void*> mr_base = slab.base;
       size_t mr_bytes = slab.bytes;
 
       auto mr_result = mr_cache->get_or_register(dev->get_pd(), mr_base, mr_bytes, kAccess);
+      const auto mr_finished_at = std::chrono::steady_clock::now();
       staged_mr = mr_result.mr;
       if (staged_mr == nullptr) {
         record_mr_register_metrics(mr_location, "cache_register_failed", false);
@@ -678,6 +766,28 @@ StagingWindow::StageFn MakeStageFunction(
           LOG(WARNING) << "Failed to release staged buffer after MR cache failure: " << release_status;
         }
         return absl::InternalError("failed to register MR via cache");
+      }
+      if (source_stage_profile != nullptr) {
+        source_stage_profile->stage_calls += 1;
+        source_stage_profile->staged_bytes += bytes;
+        source_stage_profile->stage_total_us += to_duration_us(stage_started_at, stage_finished_at);
+        source_stage_profile->mr_us += to_duration_us(mr_started_at, mr_finished_at);
+        if (mr_result.registered) {
+          source_stage_profile->mr_cache_misses += 1;
+        } else {
+          source_stage_profile->mr_cache_hits += 1;
+        }
+        source_stage_profile->max_mr_us =
+            std::max<uint64_t>(source_stage_profile->max_mr_us, to_duration_us(mr_started_at, mr_finished_at));
+        if (cpu_stage_stats.has_value()) {
+          source_stage_profile->cpu_stage_calls += 1;
+          source_stage_profile->cpu_stage_bytes += cpu_stage_stats->requested_bytes;
+          source_stage_profile->cpu_pool_allocate_us += cpu_stage_stats->pool_allocate_us;
+          source_stage_profile->cpu_lease_acquire_us += cpu_stage_stats->lease_acquire_us;
+          source_stage_profile->cpu_memcpy_us += cpu_stage_stats->memcpy_us;
+          source_stage_profile->max_cpu_memcpy_us =
+              std::max<uint64_t>(source_stage_profile->max_cpu_memcpy_us, cpu_stage_stats->memcpy_us);
+        }
       }
       if (mr_result.registered) {
         record_mr_register_metrics(mr_location, nullptr, true);
@@ -690,6 +800,25 @@ StagingWindow::StageFn MakeStageFunction(
           LOG(WARNING) << "Failed to release staged buffer after MR registration failure: " << release_status;
         }
         return absl::InternalError("failed to register staged MR");
+      }
+      const auto mr_finished_at = std::chrono::steady_clock::now();
+      if (source_stage_profile != nullptr) {
+        source_stage_profile->stage_calls += 1;
+        source_stage_profile->staged_bytes += bytes;
+        source_stage_profile->stage_total_us += to_duration_us(stage_started_at, stage_finished_at);
+        source_stage_profile->mr_us += to_duration_us(mr_started_at, mr_finished_at);
+        source_stage_profile->mr_cache_misses += 1;
+        source_stage_profile->max_mr_us =
+            std::max<uint64_t>(source_stage_profile->max_mr_us, to_duration_us(mr_started_at, mr_finished_at));
+        if (cpu_stage_stats.has_value()) {
+          source_stage_profile->cpu_stage_calls += 1;
+          source_stage_profile->cpu_stage_bytes += cpu_stage_stats->requested_bytes;
+          source_stage_profile->cpu_pool_allocate_us += cpu_stage_stats->pool_allocate_us;
+          source_stage_profile->cpu_lease_acquire_us += cpu_stage_stats->lease_acquire_us;
+          source_stage_profile->cpu_memcpy_us += cpu_stage_stats->memcpy_us;
+          source_stage_profile->max_cpu_memcpy_us =
+              std::max<uint64_t>(source_stage_profile->max_cpu_memcpy_us, cpu_stage_stats->memcpy_us);
+        }
       }
       record_mr_register_metrics(mr_location, nullptr, true);
       deregister_mr = true;
@@ -939,6 +1068,88 @@ uint32_t compute_direct_window_segments(uint64_t total_bytes, uint64_t chunk_siz
   return static_cast<uint32_t>(std::min<uint64_t>(total_segments, scaled_window));
 }
 
+uint64_t compute_read_plan_direct_chunk_bytes(uint64_t source_bytes) {
+  if (source_bytes == 0) {
+    return 1;
+  }
+  return std::min<uint64_t>(source_bytes, static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()));
+}
+
+uint32_t compute_read_plan_direct_window_segment_limit(uint64_t total_segments) {
+  if (total_segments == 0) {
+    return 1;
+  }
+  const uint64_t max_segments_by_payload =
+      (static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) - sizeof(ProtoReadPlanResponseExHeader)) /
+      sizeof(ProtoReadPlanResponseExSeg);
+  const uint64_t max_segments =
+      std::min<uint64_t>(max_segments_by_payload, static_cast<uint64_t>(std::numeric_limits<int>::max()));
+  return static_cast<uint32_t>(std::min<uint64_t>(total_segments, max_segments));
+}
+
+void log_rdma_source_stage_summary(const RdmaReadSession& session, const absl::Status& status) {
+  if (session.source_stage_profile == nullptr) {
+    return;
+  }
+  const auto& profile = *session.source_stage_profile;
+  if (profile.stage_calls == 0 && profile.window_count == 0) {
+    return;
+  }
+  const char* mode = session.mode == RdmaReadSession::Mode::kReadPlan ? "read_plan" : "legacy_tensor";
+  const double stage_total_ms = static_cast<double>(profile.stage_total_us) / 1000.0;
+  const double alloc_ms = static_cast<double>(profile.cpu_pool_allocate_us) / 1000.0;
+  const double lease_ms = static_cast<double>(profile.cpu_lease_acquire_us) / 1000.0;
+  const double copy_ms = static_cast<double>(profile.cpu_memcpy_us) / 1000.0;
+  const double mr_ms = static_cast<double>(profile.mr_us) / 1000.0;
+  const double source_prep_ms = stage_total_ms + mr_ms;
+  const double copy_share_of_stage_pct = profile.stage_total_us == 0
+      ? 0.0
+      : 100.0 * static_cast<double>(profile.cpu_memcpy_us) / static_cast<double>(profile.stage_total_us);
+  const double copy_share_of_source_prep_pct = source_prep_ms <= 0.0 ? 0.0 : 100.0 * copy_ms / source_prep_ms;
+  const double first_stage_start_ms = static_cast<double>(session.first_stage_start_us) / 1000.0;
+  const double first_window_send_ms = static_cast<double>(session.first_window_send_us) / 1000.0;
+  const double first_window_stage_total_ms = static_cast<double>(session.first_window_stage_total_us) / 1000.0;
+  const double first_window_cpu_memcpy_ms = static_cast<double>(session.first_window_cpu_memcpy_us) / 1000.0;
+  const double first_window_mr_ms = static_cast<double>(session.first_window_mr_us) / 1000.0;
+  const double first_window_other_before_send_ms =
+      std::max(0.0, first_window_send_ms - first_stage_start_ms - first_window_stage_total_ms - first_window_mr_ms);
+  std::ostringstream log;
+  log << "rdma_source_stage_summary"
+      << " mode=" << mode << " request=" << session.request_key;
+  if (session.mode == RdmaReadSession::Mode::kReadPlan) {
+    log << " request_id=" << session.plan_request.request_id
+        << " direct_source_response=" << (session.direct_source_response ? "yes" : "no")
+        << " read_plan_window_segment_limit=" << session.read_plan_window_segment_limit;
+  }
+  log << " tensor_key=" << (session.tensor_key.empty() ? "<read_plan>" : session.tensor_key) << " status=" << status
+      << " windows=" << profile.window_count << " segments=" << profile.segment_count
+      << " source_slices=" << session.plan_source_slices.size() << " stage_calls=" << profile.stage_calls
+      << " staged_bytes=" << profile.staged_bytes << " cpu_stage_calls=" << profile.cpu_stage_calls
+      << " cpu_stage_bytes=" << profile.cpu_stage_bytes << " stage_total_ms=" << stage_total_ms
+      << " cpu_pool_allocate_ms=" << alloc_ms << " cpu_lease_acquire_ms=" << lease_ms << " cpu_memcpy_ms=" << copy_ms
+      << " mr_ms=" << mr_ms << " source_prep_ms=" << source_prep_ms
+      << " copy_share_of_stage_pct=" << copy_share_of_stage_pct
+      << " copy_share_of_source_prep_pct=" << copy_share_of_source_prep_pct
+      << " mr_cache_hits=" << profile.mr_cache_hits << " mr_cache_misses=" << profile.mr_cache_misses
+      << " max_cpu_memcpy_ms=" << (static_cast<double>(profile.max_cpu_memcpy_us) / 1000.0)
+      << " max_mr_ms=" << (static_cast<double>(profile.max_mr_us) / 1000.0)
+      << " first_stage_start_ms=" << first_stage_start_ms << " first_window_send_ms=" << first_window_send_ms
+      << " first_window_segments=" << session.first_window_segment_count
+      << " first_window_stage_calls=" << session.first_window_stage_calls
+      << " first_window_staged_bytes=" << session.first_window_staged_bytes
+      << " first_window_cpu_stage_bytes=" << session.first_window_cpu_stage_bytes
+      << " first_window_stage_total_ms=" << first_window_stage_total_ms
+      << " first_window_cpu_memcpy_ms=" << first_window_cpu_memcpy_ms << " first_window_mr_ms=" << first_window_mr_ms
+      << " first_window_other_before_send_ms=" << first_window_other_before_send_ms
+      << " first_window_mr_cache_hits=" << session.first_window_mr_cache_hits
+      << " first_window_mr_cache_misses=" << session.first_window_mr_cache_misses;
+  if (session.mode == RdmaReadSession::Mode::kReadPlan) {
+    LOG(INFO) << log.str();
+  } else {
+    VLOG(2) << log.str();
+  }
+}
+
 RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession& session) {
   RdmaDriveResult result;
   while (true) {
@@ -972,6 +1183,10 @@ RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession
     if (zero_copy_segments > 0) {
       const int device_id = session.tensor ? session.tensor->get_device_id() : -1;
       record_direct_window_metrics(device_id, zero_copy_segments, zero_copy_bytes);
+    }
+    if (session.source_stage_profile != nullptr) {
+      session.source_stage_profile->window_count += 1;
+      session.source_stage_profile->segment_count += static_cast<uint64_t>(staged_window.segments.size());
     }
 
     result.made_progress = true;
@@ -1074,6 +1289,10 @@ RdmaDriveResult DriveRdmaPlanSession(Channel::FlowState& flow_state, RdmaReadSes
   };
 
   RdmaDriveResult result;
+  auto elapsed_us = [&](std::chrono::steady_clock::time_point end) -> uint64_t {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(end - session.created_at).count());
+  };
   while (true) {
     if (session.next_source_slice >= session.plan_source_slices.size()) {
       result.completed = true;
@@ -1081,8 +1300,12 @@ RdmaDriveResult DriveRdmaPlanSession(Channel::FlowState& flow_state, RdmaReadSes
       return result;
     }
 
-    const uint32_t requested_segments = std::max<uint32_t>(1, flow_state.max_window_segments);
-    auto credit_or = flow_state.ledger.try_acquire(static_cast<int>(requested_segments));
+    FlowCreditLedger* ledger = session.direct_source_response ? session.direct_ledger.get() : &flow_state.ledger;
+    CHECK(ledger != nullptr);
+    const uint32_t requested_segments = session.direct_source_response
+        ? std::max<uint32_t>(1, session.read_plan_window_segment_limit)
+        : std::max<uint32_t>(1, flow_state.max_window_segments);
+    auto credit_or = ledger->try_acquire(static_cast<int>(requested_segments));
     if (!credit_or.ok()) {
       result.status = credit_or.status();
       return result;
@@ -1098,6 +1321,25 @@ RdmaDriveResult DriveRdmaPlanSession(Channel::FlowState& flow_state, RdmaReadSes
     bool all_zero_copy = true;
     bool early_window_exit = false;
     const uint32_t window_seq = session.next_window_seq++;
+    const bool capture_first_window = session.first_window_send_us == 0;
+    uint64_t first_window_stage_calls_before = 0;
+    uint64_t first_window_staged_bytes_before = 0;
+    uint64_t first_window_cpu_stage_bytes_before = 0;
+    uint64_t first_window_stage_total_us_before = 0;
+    uint64_t first_window_cpu_memcpy_us_before = 0;
+    uint64_t first_window_mr_us_before = 0;
+    uint64_t first_window_mr_cache_hits_before = 0;
+    uint64_t first_window_mr_cache_misses_before = 0;
+    if (capture_first_window && session.source_stage_profile != nullptr) {
+      first_window_stage_calls_before = session.source_stage_profile->stage_calls;
+      first_window_staged_bytes_before = session.source_stage_profile->staged_bytes;
+      first_window_cpu_stage_bytes_before = session.source_stage_profile->cpu_stage_bytes;
+      first_window_stage_total_us_before = session.source_stage_profile->stage_total_us;
+      first_window_cpu_memcpy_us_before = session.source_stage_profile->cpu_memcpy_us;
+      first_window_mr_us_before = session.source_stage_profile->mr_us;
+      first_window_mr_cache_hits_before = session.source_stage_profile->mr_cache_hits;
+      first_window_mr_cache_misses_before = session.source_stage_profile->mr_cache_misses;
+    }
 
     for (uint32_t segment_idx = 0; segment_idx < static_cast<uint32_t>(credit_lease.granted_segments());
          ++segment_idx) {
@@ -1108,6 +1350,9 @@ RdmaDriveResult DriveRdmaPlanSession(Channel::FlowState& flow_state, RdmaReadSes
       const uint64_t source_slice_offset = session.next_source_slice_offset;
       const uint64_t remaining_slice_bytes = source_slice.bytes - source_slice_offset;
       const uint32_t bytes = static_cast<uint32_t>(std::min<uint64_t>(source_slice.chunk_size, remaining_slice_bytes));
+      if (session.first_stage_start_us == 0) {
+        session.first_stage_start_us = elapsed_us(std::chrono::steady_clock::now());
+      }
       auto lease_or = source_slice.stage_fn(source_slice.remote_offset + source_slice_offset, bytes, segment_idx);
       if (!lease_or.ok()) {
         const absl::Status status = lease_or.status();
@@ -1149,6 +1394,16 @@ RdmaDriveResult DriveRdmaPlanSession(Channel::FlowState& flow_state, RdmaReadSes
 
     const bool more_segments = early_window_exit || session.next_source_slice < session.plan_source_slices.size();
     result.made_progress = true;
+    if (session.source_stage_profile != nullptr) {
+      session.source_stage_profile->window_count += 1;
+      session.source_stage_profile->segment_count += static_cast<uint64_t>(window_segments.size());
+    }
+    VLOG(2) << "rdma_plan_window"
+            << " request=" << session.request_key
+            << " direct_source_response=" << (session.direct_source_response ? "yes" : "no")
+            << " window_seq=" << window_seq << " granted=" << credit_lease.granted_segments()
+            << " segments=" << window_segments.size() << " more=" << (more_segments ? "yes" : "no")
+            << " outstanding=" << ledger->outstanding_credit();
     const uint32_t seg_count = static_cast<uint32_t>(window_segments.size());
     auto rsp = std::make_shared<EngineMessage>(
         ENGINE_OP_READ_PLAN_RESPONSE_EX,
@@ -1211,6 +1466,27 @@ RdmaDriveResult DriveRdmaPlanSession(Channel::FlowState& flow_state, RdmaReadSes
       }
       result.status = absl::InternalError("failed to send read_plan response window");
       return result;
+    }
+
+    if (capture_first_window) {
+      session.first_window_send_us = elapsed_us(std::chrono::steady_clock::now());
+      session.first_window_segment_count = static_cast<uint64_t>(window_segments.size());
+      if (session.source_stage_profile != nullptr) {
+        session.first_window_stage_calls = session.source_stage_profile->stage_calls - first_window_stage_calls_before;
+        session.first_window_staged_bytes =
+            session.source_stage_profile->staged_bytes - first_window_staged_bytes_before;
+        session.first_window_cpu_stage_bytes =
+            session.source_stage_profile->cpu_stage_bytes - first_window_cpu_stage_bytes_before;
+        session.first_window_stage_total_us =
+            session.source_stage_profile->stage_total_us - first_window_stage_total_us_before;
+        session.first_window_cpu_memcpy_us =
+            session.source_stage_profile->cpu_memcpy_us - first_window_cpu_memcpy_us_before;
+        session.first_window_mr_us = session.source_stage_profile->mr_us - first_window_mr_us_before;
+        session.first_window_mr_cache_hits =
+            session.source_stage_profile->mr_cache_hits - first_window_mr_cache_hits_before;
+        session.first_window_mr_cache_misses =
+            session.source_stage_profile->mr_cache_misses - first_window_mr_cache_misses_before;
+      }
     }
 
     if (!hdr->staged) {
@@ -2552,6 +2828,19 @@ future_read_result_t Communicator::read_plan(
   }
   auto prepared = std::move(*prepared_or);
 
+  if (!plan.transport_request_id.empty()) {
+    LOG(INFO) << "communicator.read_plan_issue"
+              << " request_id=" << request_id << " transport_request_id=" << plan.transport_request_id
+              << " tensor_key=" << tensor_key << " peer=" << dst_ip << ":" << dst_port
+              << " source_slices=" << plan.source_slices.size() << " read_slices=" << plan.slices.size()
+              << " local_regions=" << plan.local_regions.size() << " total_bytes=" << prepared->total_bytes
+              << " local_registration_mode=" << prepared->local_registration_mode
+              << " stable_backing_chunk_count=" << prepared->stable_backing_chunk_count
+              << " stable_backing_chunk_cache_hits=" << prepared->stable_backing_chunk_cache_hits
+              << " stable_backing_chunk_cache_misses=" << prepared->stable_backing_chunk_cache_misses
+              << " rail_id=" << prepared->rail_id << " local_nic=" << prepared->local_nic;
+  }
+
   auto req =
       std::make_shared<transport::ReadRequest>(tensor_key, dst_ip, dst_port, prepared, request_id, prepared->rail_id);
   req->status_.transport_is_rdma = true;
@@ -2800,21 +3089,30 @@ absl::StatusOr<std::shared_ptr<transport::PreparedReadPlan>> Communicator::prepa
     }
   }
   const absl::Duration stable_backing_prepare_elapsed = absl::Now() - stable_backing_prepare_started_at;
-  VLOG(2) << "communicator.read_plan_prepare"
-          << " request_id=" << request_id << " tensor_key=" << tensor_key_owned
-          << " local_registration_mode=" << prepared->local_registration_mode
-          << " fallback_reason=" << prepared->local_registration_fallback_reason
-          << " stable_backing_id=" << prepared->stable_backing_id
-          << " stable_backing_chunk_bytes=" << prepared->stable_backing_chunk_bytes
-          << " stable_backing_chunk_count=" << prepared->stable_backing_chunk_count
-          << " stable_backing_chunk_cache_hits=" << prepared->stable_backing_chunk_cache_hits
-          << " stable_backing_chunk_cache_misses=" << prepared->stable_backing_chunk_cache_misses
-          << " rail_id=" << prepared->rail_id << " local_regions=" << plan.local_regions.size()
-          << " stable_local_mr_reuse_enabled=" << stable_local_mr_reuse_enabled
-          << " device_resolve_ms=" << absl::ToDoubleMilliseconds(local_region_device_resolve_elapsed)
-          << " stable_backing_prepare_ms=" << absl::ToDoubleMilliseconds(stable_backing_prepare_elapsed)
-          << " stable_backing_lookup_ms=" << absl::ToDoubleMilliseconds(stable_backing_lookup_elapsed)
-          << " stable_backing_acquire_ms=" << absl::ToDoubleMilliseconds(stable_backing_acquire_elapsed);
+  {
+    std::ostringstream log;
+    log << "communicator.read_plan_prepare"
+        << " request_id=" << request_id << " tensor_key=" << tensor_key_owned
+        << " transport_request_id=" << (plan.transport_request_id.empty() ? "<unset>" : plan.transport_request_id)
+        << " local_registration_mode=" << prepared->local_registration_mode
+        << " fallback_reason=" << prepared->local_registration_fallback_reason
+        << " stable_backing_id=" << prepared->stable_backing_id
+        << " stable_backing_chunk_bytes=" << prepared->stable_backing_chunk_bytes
+        << " stable_backing_chunk_count=" << prepared->stable_backing_chunk_count
+        << " stable_backing_chunk_cache_hits=" << prepared->stable_backing_chunk_cache_hits
+        << " stable_backing_chunk_cache_misses=" << prepared->stable_backing_chunk_cache_misses
+        << " rail_id=" << prepared->rail_id << " local_regions=" << plan.local_regions.size()
+        << " stable_local_mr_reuse_enabled=" << stable_local_mr_reuse_enabled
+        << " device_resolve_ms=" << absl::ToDoubleMilliseconds(local_region_device_resolve_elapsed)
+        << " stable_backing_prepare_ms=" << absl::ToDoubleMilliseconds(stable_backing_prepare_elapsed)
+        << " stable_backing_lookup_ms=" << absl::ToDoubleMilliseconds(stable_backing_lookup_elapsed)
+        << " stable_backing_acquire_ms=" << absl::ToDoubleMilliseconds(stable_backing_acquire_elapsed);
+    if (!plan.transport_request_id.empty()) {
+      LOG(INFO) << log.str();
+    } else {
+      VLOG(2) << log.str();
+    }
+  }
 
   const absl::Time local_region_prepare_started_at = absl::Now();
   if (prepared->local_registration_mode != "stable_backing_reuse") {
@@ -2862,19 +3160,28 @@ absl::StatusOr<std::shared_ptr<transport::PreparedReadPlan>> Communicator::prepa
     }
   }
   const absl::Duration local_region_prepare_elapsed = absl::Now() - local_region_prepare_started_at;
-  VLOG(2) << "communicator.read_plan_prepare_complete"
-          << " request_id=" << request_id << " tensor_key=" << tensor_key_owned
-          << " local_registration_mode=" << prepared->local_registration_mode
-          << " fallback_reason=" << prepared->local_registration_fallback_reason
-          << " local_regions=" << prepared->local_regions.size() << " local_regions_reused=" << local_regions_reused
-          << " local_regions_registered=" << local_regions_registered
-          << " stable_backing_chunk_count=" << prepared->stable_backing_chunk_count
-          << " stable_backing_chunk_cache_hits=" << prepared->stable_backing_chunk_cache_hits
-          << " stable_backing_chunk_cache_misses=" << prepared->stable_backing_chunk_cache_misses
-          << " rail_resolve_ms=" << absl::ToDoubleMilliseconds(rail_resolve_elapsed)
-          << " local_region_prepare_ms=" << absl::ToDoubleMilliseconds(local_region_prepare_elapsed)
-          << " local_region_reg_ms=" << absl::ToDoubleMilliseconds(local_region_reg_elapsed)
-          << " total_prepare_ms=" << absl::ToDoubleMilliseconds(absl::Now() - prepare_started_at);
+  {
+    std::ostringstream log;
+    log << "communicator.read_plan_prepare_complete"
+        << " request_id=" << request_id << " tensor_key=" << tensor_key_owned
+        << " transport_request_id=" << (plan.transport_request_id.empty() ? "<unset>" : plan.transport_request_id)
+        << " local_registration_mode=" << prepared->local_registration_mode
+        << " fallback_reason=" << prepared->local_registration_fallback_reason
+        << " local_regions=" << prepared->local_regions.size() << " local_regions_reused=" << local_regions_reused
+        << " local_regions_registered=" << local_regions_registered
+        << " stable_backing_chunk_count=" << prepared->stable_backing_chunk_count
+        << " stable_backing_chunk_cache_hits=" << prepared->stable_backing_chunk_cache_hits
+        << " stable_backing_chunk_cache_misses=" << prepared->stable_backing_chunk_cache_misses
+        << " rail_resolve_ms=" << absl::ToDoubleMilliseconds(rail_resolve_elapsed)
+        << " local_region_prepare_ms=" << absl::ToDoubleMilliseconds(local_region_prepare_elapsed)
+        << " local_region_reg_ms=" << absl::ToDoubleMilliseconds(local_region_reg_elapsed)
+        << " total_prepare_ms=" << absl::ToDoubleMilliseconds(absl::Now() - prepare_started_at);
+    if (!plan.transport_request_id.empty()) {
+      LOG(INFO) << log.str();
+    } else {
+      VLOG(2) << log.str();
+    }
+  }
   prepared->total_bytes = total_bytes;
   return prepared;
 }
@@ -2981,6 +3288,7 @@ absl::Status Communicator::register_tensor_ex(
     int dev_type,
     int dev_id,
     const RegisterTensorOptions& opts) {
+  const absl::Time total_started_at = absl::Now();
   // Check for zero-size tensor
   if (bytes == 0) {
     return absl::InvalidArgumentError("Cannot register zero-size tensor");
@@ -2990,8 +3298,11 @@ absl::Status Communicator::register_tensor_ex(
   }
 
   net_dev_t net_dev = nullptr;
+  absl::Duration net_dev_select_elapsed = absl::ZeroDuration();
   if (enable_rdma_) {
+    const absl::Time net_dev_select_started_at = absl::Now();
     net_dev = get_net_dev(dev_type, dev_id, tensor_key);
+    net_dev_select_elapsed = absl::Now() - net_dev_select_started_at;
     if (net_dev == nullptr) {
       return absl::InternalError("failed to get net dev");
     }
@@ -3011,6 +3322,17 @@ absl::Status Communicator::register_tensor_ex(
   auto tensor = std::make_shared<PartitionTensor>(tensor_key, addr, bytes, dev_type, net_dev);
   tensor->set_read_ready();
 
+  std::size_t visible_dev_count = 0;
+  absl::Duration visible_dev_attach_elapsed = absl::ZeroDuration();
+  if (enable_rdma_ && rdma_context_ != nullptr && dev_type == COMMUNICATE_ENGINE_DEV_CPU && opts.direct_rdma_enabled) {
+    const absl::Time visible_dev_attach_started_at = absl::Now();
+    for (const auto& visible_dev : rdma_context_->list_devs()) {
+      tensor->add_dev(visible_dev);
+      ++visible_dev_count;
+    }
+    visible_dev_attach_elapsed = absl::Now() - visible_dev_attach_started_at;
+  }
+
   // Set device ID for GPU tensors
   if (dev_type == COMMUNICATE_ENGINE_DEV_GPU) {
     tensor->set_device_id(dev_id);
@@ -3027,16 +3349,24 @@ absl::Status Communicator::register_tensor_ex(
     tensor->set_direct_rdma_required(true);
   }
 
+  absl::Duration reg_async_elapsed = absl::ZeroDuration();
+  absl::Duration wait_mr_elapsed = absl::ZeroDuration();
   if (enable_rdma_ && opts.register_mr) {
+    const absl::Time reg_async_started_at = absl::Now();
     net_dev->reg_async(tensor);
+    reg_async_elapsed = absl::Now() - reg_async_started_at;
     if (!opts.async) {
+      const absl::Time wait_mr_started_at = absl::Now();
       if (tensor->get_mr(net_dev) == nullptr) {
         return absl::InternalError("failed to register mr");
       }
+      wait_mr_elapsed = absl::Now() - wait_mr_started_at;
     }
   }
 
+  const absl::Time store_register_started_at = absl::Now();
   store_.register_tensor(tensor);
+  const absl::Duration store_register_elapsed = absl::Now() - store_register_started_at;
   {
     absl::MutexLock lock(&tensor_read_mu_);
     auto it = tensor_read_states_.find(tensor_key);
@@ -3046,6 +3376,20 @@ absl::Status Communicator::register_tensor_ex(
         tensor_read_states_.erase(it);
       }
     }
+  }
+  if (opts.direct_rdma_enabled || opts.register_mr) {
+    VLOG(2) << "communicator.register_tensor_ex"
+            << " key=" << tensor_key << " mem_type=" << dev_type << " dev_id=" << dev_id << " bytes=" << bytes
+            << " selected_net_dev=" << (net_dev == nullptr ? "none" : net_dev->get_name())
+            << " net_dev_select_ms=" << absl::ToDoubleMilliseconds(net_dev_select_elapsed)
+            << " visible_dev_count=" << visible_dev_count
+            << " visible_dev_attach_ms=" << absl::ToDoubleMilliseconds(visible_dev_attach_elapsed)
+            << " register_mr=" << opts.register_mr << " direct_rdma_enabled=" << opts.direct_rdma_enabled
+            << " direct_rdma_required=" << opts.direct_rdma_required
+            << " reg_async_ms=" << absl::ToDoubleMilliseconds(reg_async_elapsed)
+            << " wait_mr_ms=" << absl::ToDoubleMilliseconds(wait_mr_elapsed)
+            << " store_register_ms=" << absl::ToDoubleMilliseconds(store_register_elapsed)
+            << " total_ms=" << absl::ToDoubleMilliseconds(absl::Now() - total_started_at);
   }
   return absl::OkStatus();
 }
@@ -3181,6 +3525,7 @@ absl::Status Communicator::handle_rdma_read_request(
   session->control_transport = control_transport;
   session->transfer_id = transfer_id;
   session->zero_copy = use_direct;
+  session->source_stage_profile = std::make_shared<RdmaSourceStageProfile>();
 
   uint32_t window_segments = flow_state->max_window_segments;
   if (use_direct) {
@@ -3191,7 +3536,17 @@ absl::Status Communicator::handle_rdma_read_request(
   }
 
   auto stage_fn = MakeStageFunction(
-      tensor, ledger_ptr, stager, dev, mr_cache_ptr, tensor_key, request_key, staged_backend, use_direct, direct_mr);
+      tensor,
+      ledger_ptr,
+      stager,
+      dev,
+      mr_cache_ptr,
+      tensor_key,
+      request_key,
+      staged_backend,
+      use_direct,
+      direct_mr,
+      session->source_stage_profile);
   session->window =
       std::make_unique<StagingWindow>(*ledger_ptr, stage_fn, total_bytes, chunk_size, start_offset, window_segments);
 
@@ -3308,6 +3663,7 @@ absl::Status Communicator::resume_rdma_reads(const channel_t& channel) {
             flow_state->rdma_pending_reads.pop_front();
           }
         }
+        log_rdma_source_stage_summary(*session, result.status);
         if (!session->transfer_id.empty()) {
           this->finish_source_transfer_progress(session->transfer_id, result.status);
         }
@@ -3324,6 +3680,7 @@ absl::Status Communicator::resume_rdma_reads(const channel_t& channel) {
             flow_state->rdma_pending_reads.pop_front();
           }
         }
+        log_rdma_source_stage_summary(*session, result.status);
         continue;
       }
 
@@ -3929,6 +4286,23 @@ misc::result_t Communicator::on_receive_request(
       session->plan_request = *req;
       session->request_key = transport::get_read_plan_request_key(req->request_id);
       session->control_transport = t;
+      session->source_stage_profile = std::make_shared<RdmaSourceStageProfile>();
+
+      struct PlannedSourceSlice {
+        uint32_t source_slice_index = 0;
+        std::string tensor_key;
+        uint64_t remote_offset = 0;
+        uint64_t bytes = 0;
+        std::shared_ptr<PartitionTensor> tensor;
+        std::shared_ptr<MemoryStager> stager;
+        net_dev_t dev;
+        v1::RdmaConfig::StagedRdmaBackend staged_backend = v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED;
+        bool direct_eligible = false;
+        ibv_mr* direct_mr = nullptr;
+      };
+
+      std::vector<PlannedSourceSlice> resolved_slices;
+      resolved_slices.reserve(req->num_source_slices);
       uint64_t total_bytes = 0;
       bool failed = false;
       absl::Status failure_status = absl::OkStatus();
@@ -4017,34 +4391,48 @@ misc::result_t Communicator::on_receive_request(
         }
 
         const bool direct_requested = tensor->direct_rdma_enabled();
-        bool use_direct = false;
+        bool direct_eligible = false;
         ibv_mr* direct_mr = nullptr;
         DirectFallbackReason fallback_reason = DirectFallbackReason::kNone;
         if (direct_requested) {
-          if (tensor_on_cpu || tensor->get_mem_type() != COMMUNICATE_ENGINE_DEV_GPU) {
+          const bool direct_mem_supported = tensor_on_cpu || tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_GPU;
+          if (!direct_mem_supported) {
             fallback_reason = DirectFallbackReason::kNotGpu;
           } else if (tensor->needs_staging()) {
             fallback_reason = DirectFallbackReason::kNeedsStaging;
           } else {
-            tensor->wait_mr_ready(dev);
-            direct_mr = tensor->get_mr(dev);
-            if (direct_mr == nullptr || !tensor->has_registered_mr(dev)) {
-              fallback_reason = DirectFallbackReason::kMrUnavailable;
+            if (tensor_on_cpu) {
+              auto ensure_status = ensure_tensor_registered_on_dev(tensor, dev);
+              if (!ensure_status.ok()) {
+                fallback_reason = DirectFallbackReason::kMrUnavailable;
+              } else {
+                direct_mr = tensor->get_mr(dev);
+                direct_eligible = direct_mr != nullptr && tensor->has_registered_mr(dev);
+                if (!direct_eligible) {
+                  fallback_reason = DirectFallbackReason::kMrUnavailable;
+                }
+              }
             } else {
-              use_direct = true;
+              tensor->wait_mr_ready(dev);
+              direct_mr = tensor->get_mr(dev);
+              if (direct_mr == nullptr || !tensor->has_registered_mr(dev)) {
+                fallback_reason = DirectFallbackReason::kMrUnavailable;
+              } else {
+                direct_eligible = true;
+              }
             }
           }
-          if (!use_direct && tensor->direct_rdma_required()) {
+          if (!direct_eligible && tensor->direct_rdma_required()) {
             failed = true;
             failure_status = absl::FailedPreconditionError(
                 absl::StrCat("read_plan direct RDMA required but unavailable: ", tensor_key));
             break;
           }
-          if (!use_direct && fallback_reason != DirectFallbackReason::kNone) {
+          if (!direct_eligible && fallback_reason != DirectFallbackReason::kNone) {
             record_direct_fallback_metric(fallback_reason);
           }
         }
-        if (!use_direct && !stager) {
+        if (!direct_eligible && !stager) {
           failed = true;
           failure_status = absl::FailedPreconditionError("no staging backend available for read_plan source slice");
           break;
@@ -4055,12 +4443,8 @@ misc::result_t Communicator::on_receive_request(
         const v1::RdmaConfig::StagedRdmaBackend staged_backend = using_gpu_vram_stager
             ? v1::RdmaConfig::STAGED_RDMA_BACKEND_GPU_VRAM
             : v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED;
-        const uint64_t chunk_size = use_direct
-            ? compute_direct_chunk_bytes(
-                  source.bytes, direct_rdma_chunk_bytes_, flow_state->max_window_segments, config_.rdma().qp_count())
-            : (stager && stager->get_chunk_size() > 0 ? stager->get_chunk_size() : source.bytes);
-        session->plan_source_slices.push_back(
-            RdmaReadPlanSourceSlice{
+        resolved_slices.push_back(
+            PlannedSourceSlice{
                 .source_slice_index = source.source_slice_index,
                 .tensor_key = tensor_key,
                 .remote_offset = source.remote_offset,
@@ -4068,19 +4452,9 @@ misc::result_t Communicator::on_receive_request(
                 .tensor = tensor,
                 .stager = stager,
                 .dev = dev,
-                .stage_fn = MakeStageFunction(
-                    tensor,
-                    &flow_state->ledger,
-                    stager,
-                    dev,
-                    meta_mr_cache_.get(),
-                    tensor_key,
-                    session->request_key,
-                    staged_backend,
-                    use_direct,
-                    direct_mr),
-                .chunk_size = chunk_size,
-                .zero_copy = use_direct,
+                .staged_backend = staged_backend,
+                .direct_eligible = direct_eligible,
+                .direct_mr = direct_mr,
             });
         if (source.bytes > std::numeric_limits<uint64_t>::max() - total_bytes) {
           failed = true;
@@ -4088,6 +4462,75 @@ misc::result_t Communicator::on_receive_request(
           break;
         }
         total_bytes += source.bytes;
+      }
+
+      if (!failed) {
+        bool direct_source_response = !resolved_slices.empty();
+        uint64_t direct_source_segment_count = 0;
+        for (const auto& source : resolved_slices) {
+          if (source.tensor->get_mem_type() != COMMUNICATE_ENGINE_DEV_CPU || !source.direct_eligible) {
+            direct_source_response = false;
+            break;
+          }
+          const uint64_t chunk_size = compute_read_plan_direct_chunk_bytes(source.bytes);
+          const uint64_t source_segments = (source.bytes + chunk_size - 1) / chunk_size;
+          if (source_segments > std::numeric_limits<uint64_t>::max() - direct_source_segment_count) {
+            failed = true;
+            failure_status = absl::InvalidArgumentError("read_plan direct source segment count overflow");
+            break;
+          }
+          direct_source_segment_count += source_segments;
+        }
+        if (!failed) {
+          if (direct_source_response) {
+            session->direct_source_response = true;
+            session->read_plan_window_segment_limit =
+                compute_read_plan_direct_window_segment_limit(direct_source_segment_count);
+            session->direct_ledger =
+                std::make_unique<FlowCreditLedger>(static_cast<int>(session->read_plan_window_segment_limit));
+          }
+          FlowCreditLedger* plan_ledger =
+              session->direct_source_response ? session->direct_ledger.get() : &flow_state->ledger;
+          CHECK(plan_ledger != nullptr);
+          for (const auto& source : resolved_slices) {
+            const bool use_direct = session->direct_source_response
+                ? source.direct_eligible
+                : (source.tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_GPU && source.direct_eligible);
+            const uint64_t chunk_size = use_direct
+                ? (session->direct_source_response ? compute_read_plan_direct_chunk_bytes(source.bytes)
+                                                   : compute_direct_chunk_bytes(
+                                                         source.bytes,
+                                                         direct_rdma_chunk_bytes_,
+                                                         flow_state->max_window_segments,
+                                                         config_.rdma().qp_count()))
+                : (source.stager && source.stager->get_chunk_size() > 0 ? source.stager->get_chunk_size()
+                                                                        : source.bytes);
+            session->plan_source_slices.push_back(
+                RdmaReadPlanSourceSlice{
+                    .source_slice_index = source.source_slice_index,
+                    .tensor_key = source.tensor_key,
+                    .remote_offset = source.remote_offset,
+                    .bytes = source.bytes,
+                    .tensor = source.tensor,
+                    .stager = source.stager,
+                    .dev = source.dev,
+                    .stage_fn = MakeStageFunction(
+                        source.tensor,
+                        plan_ledger,
+                        source.stager,
+                        source.dev,
+                        meta_mr_cache_.get(),
+                        source.tensor_key,
+                        session->request_key,
+                        source.staged_backend,
+                        use_direct,
+                        source.direct_mr,
+                        session->source_stage_profile),
+                    .chunk_size = chunk_size,
+                    .zero_copy = use_direct,
+                });
+          }
+        }
       }
 
       if (failed) {

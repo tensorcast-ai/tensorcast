@@ -19,6 +19,7 @@ class ByteRangeMappedSource final : public SeekableSource {
  public:
   struct Options {
     std::string path;
+    std::string transport_request_id;
     bool enable_direct_write_at{true};
     uint64_t direct_gather_min_row_len_bytes{4ULL * 1024};
     size_t direct_gather_min_total_bytes{4ULL * 1024 * 1024};

@@ -1245,6 +1245,24 @@ int main(int argc, char** argv) {
         daemon_opts.byte_artifact_routing.payload_transport.transport_release_guard =
             duration_to_absl(pt.transport_release_guard());
       }
+      if (pt.has_source_publish_prereg()) {
+        const auto& prereg = pt.source_publish_prereg();
+        if (prereg.has_enabled()) {
+          daemon_opts.byte_artifact_routing.payload_transport.source_publish_prereg.enabled = prereg.enabled();
+        }
+        if (prereg.has_ttl()) {
+          daemon_opts.byte_artifact_routing.payload_transport.source_publish_prereg.ttl =
+              duration_to_absl(prereg.ttl());
+        }
+        if (prereg.max_live_entries() > 0) {
+          daemon_opts.byte_artifact_routing.payload_transport.source_publish_prereg.max_live_entries =
+              prereg.max_live_entries();
+        }
+        if (prereg.max_live_bytes() > 0) {
+          daemon_opts.byte_artifact_routing.payload_transport.source_publish_prereg.max_live_bytes =
+              prereg.max_live_bytes();
+        }
+      }
     }
   }
 

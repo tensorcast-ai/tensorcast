@@ -761,6 +761,172 @@ TEST_CASE("MaterializationFacade mapped loader wrapper integrates batched direct
 }
 
 TEST_CASE(
+    "MaterializationFacade direct-write CPU target does not require pinned buffer availability",
+    "[materialization_facade]") {
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_direct_write_without_pinned_pool";
+  std::filesystem::create_directories(temp_root);
+
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  auto stats = std::make_shared<RecordingDirectSourceStats>();
+  std::vector<uint8_t> source_bytes{1, 2, 3, 4, 5, 6, 7, 8};
+  std::array<uint8_t, 8> target{};
+  target.fill(0xEE);
+
+  auto pool = harness.runtime_context().pinned_buffer_pool();
+  REQUIRE(pool != nullptr);
+  const size_t available_bytes = pool->get_available_size();
+  REQUIRE(available_bytes > 0);
+  std::vector<char*> held_buffers;
+  REQUIRE(
+      pool->allocate(
+          available_bytes, held_buffers, std::chrono::milliseconds::zero(), "facade-direct-write-held-buffers") == 0);
+  REQUIRE(pool->get_available_size() == 0);
+
+  tensorcast::store::loader::ByteRangeMap mapping;
+  mapping.total_bytes = target.size();
+  mapping.num_sources = 1;
+  mapping.segments = {
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = 4,
+          .src_offset = 0,
+          .source_index = 0,
+      },
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 4,
+          .length = 4,
+          .src_offset = 4,
+          .source_index = 0,
+      },
+  };
+
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.push_back(
+      loading::IntoTargetStorage{
+          .base_ptr = gsl::not_null<void*>{static_cast<void*>(target.data())},
+          .length = target.size(),
+      });
+  target_layout.total_size = target.size();
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = "cgid:direct-write-without-pinned-pool";
+  hints.pinned_timeout = std::chrono::milliseconds(1);
+
+  auto result_or = harness.facade->materialize_mapped_loader_into_target(
+      DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+      target_layout,
+      std::make_unique<RecordingDirectLoader>(source_bytes, stats),
+      mapping,
+      hints,
+      loading::MaterializationSource::kLocalReplica);
+  REQUIRE(result_or.ok());
+  CHECK(result_or->direct_write_supported);
+  REQUIRE(result_or->debug_stats.has_value());
+  CHECK(result_or->debug_stats->produced_chunks == 1);
+  CHECK(result_or->debug_stats->produced_bytes == target.size());
+  CHECK(stats->readv_calls == 1);
+  CHECK(stats->read_into_calls == 0);
+  CHECK(pool->get_available_size() == 0);
+  const std::array<uint8_t, 8> expected_target{1, 2, 3, 4, 5, 6, 7, 8};
+  CHECK(target == expected_target);
+
+  REQUIRE(pool->deallocate(held_buffers) == 0);
+  CHECK(pool->get_available_size() == available_bytes);
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade collapses single-source direct-write composite target ranges",
+    "[materialization_facade]") {
+  auto temp_root =
+      std::filesystem::temp_directory_path() / "materialization_facade_single_source_direct_write_composite_target";
+  std::filesystem::create_directories(temp_root);
+
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  auto stats = std::make_shared<RecordingDirectSourceStats>();
+  std::vector<uint8_t> source_bytes(64);
+  for (size_t i = 0; i < source_bytes.size(); ++i) {
+    source_bytes[i] = static_cast<uint8_t>(i);
+  }
+  std::array<std::array<uint8_t, 4>, 16> target_segments{};
+  for (auto& segment : target_segments) {
+    segment.fill(0xEE);
+  }
+
+  tensorcast::store::loader::ByteRangeMap mapping;
+  mapping.total_bytes = source_bytes.size();
+  mapping.num_sources = 1;
+  for (size_t i = 0; i < target_segments.size(); ++i) {
+    mapping.segments.push_back(
+        tensorcast::store::loader::ByteRangeSegment{
+            .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+            .dst_offset = static_cast<uint64_t>(i * target_segments[i].size()),
+            .length = target_segments[i].size(),
+            .src_offset = static_cast<uint64_t>(i * target_segments[i].size()),
+            .source_index = 0,
+        });
+  }
+
+  loading::IntoTargetLayout target_layout;
+  for (auto& segment : target_segments) {
+    target_layout.storages.push_back(
+        loading::IntoTargetStorage{
+            .base_ptr = gsl::not_null<void*>{static_cast<void*>(segment.data())},
+            .length = segment.size(),
+            .stable_backing =
+                tensorcast::store::StableLocalBackingRef{
+                    .kind = tensorcast::store::StableLocalBackingKind::kHostSharedRegion,
+                    .backing_id = "region:test-single-source-direct-write-composite-target",
+                    .backing_base_addr = reinterpret_cast<uint64_t>(segment.data()),
+                    .backing_bytes = segment.size(),
+                    .dev_type = tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
+                    .dev_id = 0,
+                },
+        });
+  }
+  target_layout.total_size = source_bytes.size();
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = "cgid:single-source-direct-write-composite-target";
+
+  auto result_or = harness.facade->materialize_mapped_loader_into_target(
+      DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+      target_layout,
+      std::make_unique<RecordingDirectLoader>(source_bytes, stats),
+      mapping,
+      hints,
+      loading::MaterializationSource::kLocalReplica);
+  REQUIRE(result_or.ok());
+  CHECK(result_or->direct_write_supported);
+  REQUIRE(result_or->debug_stats.has_value());
+  CHECK(result_or->debug_stats->produced_chunks == 1);
+  CHECK(result_or->debug_stats->produced_bytes == source_bytes.size());
+  CHECK(stats->readv_calls == 1);
+  CHECK(stats->read_into_calls == 0);
+  CHECK(stats->batch_sizes == std::vector<size_t>{1});
+  CHECK(stats->readv_window_has_stable_backing == std::vector<bool>{true});
+
+  for (size_t i = 0; i < target_segments.size(); ++i) {
+    const std::array<uint8_t, 4> expected{
+        source_bytes[i * 4], source_bytes[i * 4 + 1], source_bytes[i * 4 + 2], source_bytes[i * 4 + 3]};
+    CHECK(target_segments[i] == expected);
+  }
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE(
     "MaterializationFacade mapped loader wrapper preserves pre-issue direct-write fallback",
     "[materialization_facade]") {
   auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_mapped_loader_direct_fallback";

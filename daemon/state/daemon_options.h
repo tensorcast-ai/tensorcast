@@ -64,6 +64,13 @@ struct DaemonOptions {
 
   struct ByteArtifactRouting {
     struct PayloadTransport {
+      struct SourcePublishPrereg {
+        bool enabled{false};
+        absl::Duration ttl{absl::Seconds(30)};
+        std::uint64_t max_live_entries{4096};
+        std::uint64_t max_live_bytes{16ULL << 30};
+      };
+
       absl::Duration ref_ttl{absl::Minutes(5)};
       uint64_t max_chunk_bytes{1ULL << 20};
       absl::Duration fetch_deadline{absl::Seconds(5)};
@@ -77,6 +84,7 @@ struct DaemonOptions {
       bool segmented_communicator_export_enabled{true};
       absl::Duration minimum_batch_transport_ttl{absl::Milliseconds(250)};
       absl::Duration transport_release_guard{absl::Seconds(1)};
+      SourcePublishPrereg source_publish_prereg{};
     };
 
     uint64_t shard_count{4096};

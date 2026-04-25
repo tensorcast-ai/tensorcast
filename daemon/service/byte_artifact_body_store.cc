@@ -2,6 +2,7 @@
 
 #include "daemon/service/byte_artifact_body_store.h"
 
+#include <algorithm>
 #include <map>
 #include <optional>
 #include <string>
@@ -288,6 +289,24 @@ void clear_orphan_backing_candidate_locked(
   state->orphan_backing_candidates.erase(identity);
 }
 
+void clear_publish_preregistered_export_locked(
+    const store::runtime::ingestion::BackingIdentity& identity,
+    ByteArtifactRuntimeState* state,
+    std::string_view reason) ABSL_NO_THREAD_SAFETY_ANALYSIS {
+  if (state == nullptr) {
+    return;
+  }
+  auto prereg_it = state->publish_prereg_entries.find(identity);
+  if (prereg_it == state->publish_prereg_entries.end()) {
+    return;
+  }
+  VLOG(2) << "byte_artifact.publish_prereg.cleared"
+          << " artifact_id=" << identity.replica_key.artifact_id
+          << " instance_generation=" << prereg_it->second.instance_generation
+          << " size_bytes=" << prereg_it->second.size_bytes << " reason=" << reason;
+  state->publish_prereg_entries.erase(prereg_it);
+}
+
 bool backing_has_authority_refs_locked(
     const store::runtime::ingestion::BackingIdentity& identity,
     ByteArtifactRuntimeState* state) ABSL_NO_THREAD_SAFETY_ANALYSIS {
@@ -331,6 +350,7 @@ BackingPruneOutcome maybe_prune_backing_locked(
     clear_orphan_backing_candidate_locked(identity, state);
     return BackingPruneOutcome::kNoop;
   }
+  clear_publish_preregistered_export_locked(identity, state, reason);
   maybe_retire_backing_handle(backing_it->second.retained_body_handle, reason);
   if (!backing_it->second.retained_body_handle.empty() && !backing_it->second.retained_body_handle.unique_owner()) {
     set_backing_lifecycle_state_locked(&backing_it->second, BackingLifecycleState::kDraining, reason);
@@ -354,6 +374,7 @@ void mark_backing_invalidated_locked(
   if (backing_it == state->backing_entries.end()) {
     return;
   }
+  clear_publish_preregistered_export_locked(*identity, state, "backing_invalidated");
   set_backing_lifecycle_state_locked(&backing_it->second, BackingLifecycleState::kInvalidated, "backing_invalidated");
 }
 
@@ -637,6 +658,7 @@ void install_or_rebind_backing_locked(
     const auto old_identity = *entry->retained_backing_identity;
     auto old_backing_it = state->backing_entries.find(old_identity);
     if (old_backing_it != state->backing_entries.end()) {
+      clear_publish_preregistered_export_locked(old_identity, state, "rebind_new_identity");
       set_backing_lifecycle_state_locked(
           &old_backing_it->second, BackingLifecycleState::kSuperseded, "rebind_new_identity");
     }
@@ -665,6 +687,7 @@ void install_or_rebind_backing_locked(
     (void)inserted;
     add_backing_replica_index_locked(inserted_it->second, state);
   } else {
+    clear_publish_preregistered_export_locked(backing_identity, state, "rebind_same_identity");
     const bool old_handle_unique = backing_it->second.retained_body_handle.unique_owner();
     generation = backing_it->second.instance_generation + 1;
     BodyHandle old_handle = backing_it->second.retained_body_handle;
@@ -705,7 +728,10 @@ ByteArtifactBodyStore::ByteArtifactBodyStore(ByteArtifactRuntimeState& state) : 
 
 void ByteArtifactBodyStore::run_maintenance_once(std::size_t max_candidates) {
   std::vector<store::runtime::ingestion::BackingIdentity> candidates;
+  std::vector<store::runtime::ingestion::BackingIdentity> expired_prereg;
   candidates.reserve(max_candidates);
+  expired_prereg.reserve(max_candidates);
+  const absl::Time now = absl::Now();
   {
     absl::MutexLock lock(&state_.mu);
     auto it = state_.orphan_backing_candidates.begin();
@@ -714,16 +740,27 @@ void ByteArtifactBodyStore::run_maintenance_once(std::size_t max_candidates) {
       auto erase_it = it++;
       state_.orphan_backing_candidates.erase(erase_it);
     }
-  }
-  if (candidates.empty()) {
-    return;
+    for (const auto& [identity, prereg] : state_.publish_prereg_entries) {
+      if (expired_prereg.size() >= max_candidates) {
+        break;
+      }
+      auto backing_it = state_.backing_entries.find(identity);
+      const bool stale = backing_it == state_.backing_entries.end() ||
+          backing_it->second.instance_generation != prereg.instance_generation ||
+          backing_it->second.lifecycle_state != BackingLifecycleState::kActive;
+      if (stale || (prereg.expires_at != absl::InfiniteFuture() && prereg.expires_at <= now)) {
+        expired_prereg.push_back(identity);
+      }
+    }
   }
 
   for (const auto& identity : candidates) {
-    {
-      absl::MutexLock lock(&state_.mu);
-      (void)maybe_prune_backing_locked(identity, &state_, "maintenance");
-    }
+    absl::MutexLock lock(&state_.mu);
+    (void)maybe_prune_backing_locked(identity, &state_, "maintenance");
+  }
+  for (const auto& identity : expired_prereg) {
+    absl::MutexLock lock(&state_.mu);
+    clear_publish_preregistered_export_locked(identity, &state_, "maintenance_expired");
   }
 }
 
@@ -791,6 +828,133 @@ std::optional<ByteArtifactBodyStore::PersistenceSourceSnapshot> ByteArtifactBody
       .size_bytes = backing_it->second.descriptor.size_bytes,
       .verified_content_descriptor = authority.verified_content_descriptor,
   };
+}
+
+std::optional<ByteArtifactBodyStore::PublishPreregSnapshot> ByteArtifactBodyStore::inspect_publish_preregistered_export(
+    const store::runtime::ingestion::BackingIdentity& identity) const {
+  absl::MutexLock lock(&state_.mu);
+  auto it = state_.publish_prereg_entries.find(identity);
+  if (it == state_.publish_prereg_entries.end()) {
+    return std::nullopt;
+  }
+  return PublishPreregSnapshot{
+      .backing_identity = it->second.backing_identity,
+      .instance_generation = it->second.instance_generation,
+      .memory_location = it->second.memory_location,
+      .size_bytes = it->second.size_bytes,
+      .activated_at = it->second.activated_at,
+      .expires_at = it->second.expires_at,
+  };
+}
+
+bool ByteArtifactBodyStore::retain_publish_preregistered_export(
+    const store::runtime::ingestion::BackingIdentity& identity,
+    std::uint64_t instance_generation,
+    common::memory::MemoryLocation memory_location,
+    std::shared_ptr<void> keepalive,
+    std::uint64_t size_bytes,
+    absl::Time now,
+    absl::Duration ttl,
+    std::uint64_t max_live_entries,
+    std::uint64_t max_live_bytes) {
+  if (keepalive == nullptr) {
+    return false;
+  }
+
+  absl::MutexLock lock(&state_.mu);
+  auto backing_it = state_.backing_entries.find(identity);
+  if (backing_it == state_.backing_entries.end() || backing_it->second.instance_generation != instance_generation ||
+      backing_it->second.lifecycle_state != BackingLifecycleState::kActive) {
+    VLOG(2) << "byte_artifact.publish_prereg.rejected"
+            << " artifact_id=" << identity.replica_key.artifact_id << " instance_generation=" << instance_generation
+            << " reason=stale_backing";
+    return false;
+  }
+
+  std::vector<store::runtime::ingestion::BackingIdentity> expired_identities;
+  std::uint64_t live_bytes = 0;
+  for (const auto& [entry_identity, entry] : state_.publish_prereg_entries) {
+    auto live_backing_it = state_.backing_entries.find(entry_identity);
+    const bool stale = live_backing_it == state_.backing_entries.end() ||
+        live_backing_it->second.instance_generation != entry.instance_generation ||
+        live_backing_it->second.lifecycle_state != BackingLifecycleState::kActive;
+    if (stale || (entry.expires_at != absl::InfiniteFuture() && entry.expires_at <= now)) {
+      expired_identities.push_back(entry_identity);
+      continue;
+    }
+    if (entry_identity != identity) {
+      live_bytes += entry.size_bytes;
+    }
+  }
+  for (const auto& expired_identity : expired_identities) {
+    clear_publish_preregistered_export_locked(expired_identity, &state_, "retain_expired_prune");
+  }
+
+  struct EvictionCandidate {
+    store::runtime::ingestion::BackingIdentity identity;
+    absl::Time activated_at{absl::UnixEpoch()};
+    std::uint64_t size_bytes{0};
+  };
+
+  std::vector<EvictionCandidate> eviction_candidates;
+  eviction_candidates.reserve(state_.publish_prereg_entries.size());
+  for (const auto& [entry_identity, entry] : state_.publish_prereg_entries) {
+    if (entry_identity == identity) {
+      continue;
+    }
+    eviction_candidates.push_back(
+        EvictionCandidate{
+            .identity = entry_identity,
+            .activated_at = entry.activated_at,
+            .size_bytes = entry.size_bytes,
+        });
+  }
+  std::sort(
+      eviction_candidates.begin(),
+      eviction_candidates.end(),
+      [](const EvictionCandidate& lhs, const EvictionCandidate& rhs) { return lhs.activated_at < rhs.activated_at; });
+
+  std::uint64_t live_entries = state_.publish_prereg_entries.contains(identity)
+      ? state_.publish_prereg_entries.size()
+      : state_.publish_prereg_entries.size() + 1;
+  const std::uint64_t requested_total_bytes = live_bytes + size_bytes;
+  while ((!eviction_candidates.empty() && max_live_entries > 0 && live_entries > max_live_entries) ||
+         (!eviction_candidates.empty() && max_live_bytes > 0 && requested_total_bytes > max_live_bytes &&
+          live_bytes + size_bytes > max_live_bytes)) {
+    const auto evicted = eviction_candidates.front();
+    eviction_candidates.erase(eviction_candidates.begin());
+    auto entry_it = state_.publish_prereg_entries.find(evicted.identity);
+    if (entry_it == state_.publish_prereg_entries.end()) {
+      continue;
+    }
+    live_entries = std::max<std::uint64_t>(0, live_entries - 1);
+    live_bytes = live_bytes > entry_it->second.size_bytes ? live_bytes - entry_it->second.size_bytes : 0;
+    clear_publish_preregistered_export_locked(evicted.identity, &state_, "retain_budget_evict");
+  }
+
+  if ((max_live_entries > 0 && live_entries > max_live_entries) ||
+      (max_live_bytes > 0 && live_bytes + size_bytes > max_live_bytes)) {
+    VLOG(2) << "byte_artifact.publish_prereg.rejected"
+            << " artifact_id=" << identity.replica_key.artifact_id << " instance_generation=" << instance_generation
+            << " size_bytes=" << size_bytes << " live_entries=" << live_entries << " live_bytes=" << live_bytes
+            << " max_live_entries=" << max_live_entries << " max_live_bytes=" << max_live_bytes
+            << " reason=budget_exhausted";
+    return false;
+  }
+
+  auto& entry = state_.publish_prereg_entries[identity];
+  entry.backing_identity = identity;
+  entry.instance_generation = instance_generation;
+  entry.memory_location = memory_location;
+  entry.keepalive = std::move(keepalive);
+  entry.size_bytes = size_bytes;
+  entry.activated_at = now;
+  entry.expires_at = ttl > absl::ZeroDuration() ? now + ttl : absl::InfiniteFuture();
+  VLOG(2) << "byte_artifact.publish_prereg.retained"
+          << " artifact_id=" << identity.replica_key.artifact_id << " instance_generation=" << instance_generation
+          << " size_bytes=" << size_bytes << " live_entries=" << state_.publish_prereg_entries.size()
+          << " expires_in_ms=" << absl::ToDoubleMilliseconds(entry.expires_at - now);
+  return true;
 }
 
 bool ByteArtifactBodyStore::install_policy_visibility(

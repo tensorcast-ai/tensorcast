@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -36,6 +37,16 @@ struct ByteArtifactRuntimeState {
   struct DaemonEndpointCacheEntry {
     std::string address;
     absl::Time refreshed_at{absl::UnixEpoch()};
+  };
+
+  struct PublishPreregEntry {
+    store::runtime::ingestion::BackingIdentity backing_identity;
+    std::uint64_t instance_generation{0};
+    common::memory::MemoryLocation memory_location{common::memory::MemoryLocation::NONE};
+    std::shared_ptr<void> keepalive;
+    std::uint64_t size_bytes{0};
+    absl::Time activated_at{absl::UnixEpoch()};
+    absl::Time expires_at{absl::UnixEpoch()};
   };
 
   struct AuthorityEntry {
@@ -75,6 +86,11 @@ struct ByteArtifactRuntimeState {
   absl::flat_hash_map<std::uint64_t, ShardRouteCacheEntry> shard_routes ABSL_GUARDED_BY(mu);
   absl::flat_hash_map<std::uint64_t, OwnedShardLeaseEntry> owned_shard_leases ABSL_GUARDED_BY(mu);
   absl::flat_hash_map<std::string, DaemonEndpointCacheEntry> daemon_endpoints ABSL_GUARDED_BY(mu);
+  absl::flat_hash_map<
+      store::runtime::ingestion::BackingIdentity,
+      PublishPreregEntry,
+      store::runtime::ingestion::BackingIdentityHash>
+      publish_prereg_entries ABSL_GUARDED_BY(mu);
 };
 
 } // namespace tensorcast::daemon

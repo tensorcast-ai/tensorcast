@@ -102,6 +102,7 @@ struct ReadPlan {
   std::vector<LocalRegion> local_regions;
   std::vector<SourceSlice> source_slices;
   std::vector<ReadPlanSlice> slices;
+  std::string transport_request_id;
 };
 
 absl::Status validate_read_plan(const ReadPlan& plan);

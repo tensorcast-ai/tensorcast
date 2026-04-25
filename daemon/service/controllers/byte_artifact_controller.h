@@ -34,6 +34,13 @@ namespace tensorcast::daemon {
 class ByteArtifactController {
  public:
   struct Options {
+    struct PublishPrereg {
+      bool enabled{false};
+      absl::Duration ttl{absl::Seconds(30)};
+      std::uint64_t max_live_entries{4096};
+      std::uint64_t max_live_bytes{16ULL << 30};
+    };
+
     struct Routing {
       std::uint64_t shard_count{4096};
       std::uint64_t inline_payload_threshold_bytes{1ULL << 20};
@@ -46,6 +53,7 @@ class ByteArtifactController {
     };
 
     Routing routing{};
+    PublishPrereg publish_prereg{};
     bool gateway_ingress_enabled{false};
     std::uint32_t batch_get_apply_threads{0};
   };
@@ -149,6 +157,8 @@ class ByteArtifactController {
       std::string_view daemon_id,
       absl::Time now,
       bool* cache_hit = nullptr) const;
+
+  void publish_preregistered_export(std::string_view artifact_id, const BodyHandle& body_handle, absl::Time now);
 
   Dep d_;
   ByteArtifactAuthorityService authority_service_;

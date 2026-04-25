@@ -5,12 +5,14 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 
 #include "absl/status/status.h"
 #include "absl/time/time.h"
+#include "core/common/memory/memory_location.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "daemon/service/body_backing_types.h"
 #include "daemon/service/byte_artifact_body_handle.h"
@@ -45,6 +47,15 @@ class ByteArtifactBodyStore {
     std::string source_artifact_id;
     std::uint64_t size_bytes{0};
     store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor;
+  };
+
+  struct PublishPreregSnapshot {
+    store::runtime::ingestion::BackingIdentity backing_identity;
+    std::uint64_t instance_generation{0};
+    common::memory::MemoryLocation memory_location{common::memory::MemoryLocation::NONE};
+    std::uint64_t size_bytes{0};
+    absl::Time activated_at{absl::UnixEpoch()};
+    absl::Time expires_at{absl::UnixEpoch()};
   };
 
   enum class PutOutcome {
@@ -86,6 +97,20 @@ class ByteArtifactBodyStore {
       const store::runtime::ingestion::BackingIdentity& identity) const;
 
   [[nodiscard]] std::optional<PersistenceSourceSnapshot> inspect_persistence_source(std::string_view artifact_id) const;
+
+  [[nodiscard]] std::optional<PublishPreregSnapshot> inspect_publish_preregistered_export(
+      const store::runtime::ingestion::BackingIdentity& identity) const;
+
+  [[nodiscard]] bool retain_publish_preregistered_export(
+      const store::runtime::ingestion::BackingIdentity& identity,
+      std::uint64_t instance_generation,
+      common::memory::MemoryLocation memory_location,
+      std::shared_ptr<void> keepalive,
+      std::uint64_t size_bytes,
+      absl::Time now,
+      absl::Duration ttl,
+      std::uint64_t max_live_entries,
+      std::uint64_t max_live_bytes);
 
   [[nodiscard]] bool install_policy_visibility(
       std::string_view artifact_id,

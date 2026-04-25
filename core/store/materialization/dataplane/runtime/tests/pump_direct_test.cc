@@ -444,6 +444,30 @@ TEST_CASE("pump_ranges batches direct writes into readv_into_at calls when avail
   expect_ranges_match(sink->buffer(), source_bytes, absl::MakeConstSpan(ranges));
 }
 
+TEST_CASE("pump_ranges_direct_write batches direct writes without a buffer pool", "[pump][direct]") {
+  constexpr size_t kTotalSize = 32 * 1024;
+  auto source_bytes = make_pattern(kTotalSize);
+  RecordingBatchDirectSource source(source_bytes);
+  auto sink = std::make_shared<DirectCapableSink>(kTotalSize);
+
+  std::vector<Range> ranges = {{0, 4096}, {8192, 4096}, {16384, 8192}};
+  PumpDirectWriteOptions options{
+      .direct_write_batch_bytes = 64 * 1024,
+      .direct_write_batch_ops = 8,
+  };
+
+  auto status =
+      pump_ranges_direct_write(source, *sink, absl::MakeSpan(ranges), /*window_bytes=*/4096, 2, nullptr, options);
+  REQUIRE(status.ok());
+  REQUIRE(source.readv_calls() == 1);
+  REQUIRE(source.read_into_calls() == 0);
+  REQUIRE(source.batch_sizes() == std::vector<size_t>{4});
+  REQUIRE(sink->write_calls() == 0);
+  REQUIRE_FALSE(sink->closed());
+  expect_ranges_match(sink->buffer(), source_bytes, absl::MakeConstSpan(ranges));
+  REQUIRE(sink->close().ok());
+}
+
 TEST_CASE("pump_ranges uses default direct-write batch limits when options are omitted", "[pump][direct]") {
   constexpr size_t kWindowBytes = 1024;
   constexpr size_t kWindowCount = 10;

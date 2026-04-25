@@ -4,7 +4,7 @@ title: Composite Materialization and Vectored Direct-Write
 status: implemented
 areas: ["core", "daemon", "docs", "benchmarks", "integrations"]
 created: 2026-04-19
-last_updated: 2026-04-22
+last_updated: 2026-04-23
 related_code:
   - docs/designs/0088-unified-artifact-profiles-with-shared-dataplane.md
   - docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
@@ -68,6 +68,11 @@ This design keeps the repository's current architectural boundaries:
   lifetimes,
 - and `0115` owns the new common execution contract below that seam.
 
+One boundary matters for the next RDMA optimization step: `0115` owns the sink-
+side composite execution contract and the routed vectored pull API, but it does
+not by itself remove producer-side staged response windows for CPU sources.
+That direct-readable source-side follow-on remains owned by `0087-01`.
+
 # Implementation Status
 
 As of `2026-04-20`, the generic capability owned by `0115` is implemented in
@@ -103,6 +108,10 @@ Landed outcomes:
 
 Remaining follow-on work outside `0115`:
 
+- byte-artifact source-side direct-readable RDMA servicing remains owned by
+  `0087-01`: current producer CPU source paths may still copy retained backing
+  bytes into pinned staged response windows before remote reads, and windowing
+  is still governed by staged-flow rules rather than descriptor/control limits,
 - future MTCP native vectored direct-write, if pursued, must implement the
   same shared contract rather than introducing a transport-private API.
 
@@ -131,8 +140,11 @@ flowchart LR
   `DirectWriteGrant`, not transport-specific destination keys.
 - Add one routed, protocol-neutral communicator API that can execute a vectored
   pull plan against one selected remote endpoint.
-- Let RDMA implement that API as one request that posts many WRs without
-  forcing source pack copy or sink full-pack mirror.
+- Let RDMA implement the sink-side vectored pull API as one request that may
+  post many WRs without forcing a sink full-pack mirror.
+- Keep producer-side direct-readable source servicing as an additive consumer-
+  side follow-on in `0087-01` rather than expanding `0115` into source export
+  policy or staged-credit semantics.
 - Preserve MTCP and staged fallback behavior as valid fallback realizations.
 
 ## Non-Goals
@@ -213,6 +225,10 @@ Normative rules:
 5. Generic execution semantics remain strict. Narrower profile-specific retry
    or overwrite policies may only layer above this seam; they do not relax the
    generic communicator or materialization contract.
+6. Producer-side response-window shape, staged-credit bypass, and source-backing
+   lifetime policy remain outside `0115`. Once a consumer exposes a compatible
+   remote source as one logical `SeekableSource`, `0115` owns the sink-side
+   batched direct-write execution against that source.
 
 ## 2. Shared Dataplane Contract
 

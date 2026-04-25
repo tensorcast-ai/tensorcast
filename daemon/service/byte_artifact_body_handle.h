@@ -13,6 +13,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
 #include "core/common/memory/memory_location.h"
 #include "core/store/communication_types.h"
 #include "core/store/runtime/ingestion/artifact_truth.h"
@@ -62,6 +63,10 @@ class BodyHandle {
   [[nodiscard]] bool unique_owner() const;
   [[nodiscard]] absl::StatusOr<BodyExportCapability> inspect_export_capability() const;
   [[nodiscard]] absl::StatusOr<BodyExportView> acquire_export_view(const BodyExportRequest& request) const;
+  [[nodiscard]] absl::Status pin_export_keepalive(
+      common::memory::MemoryLocation location,
+      std::shared_ptr<void> keepalive,
+      absl::Time expires_at) const;
 
   [[nodiscard]] absl::StatusOr<std::unique_ptr<store::IArtifactLoader>> make_loader() const;
   [[nodiscard]] absl::Status read_into_range(std::uint64_t offset, void* dst, std::size_t bytes) const;
@@ -79,7 +84,8 @@ class BodyHandle {
     std::atomic<bool> retired{false};
 
     struct ExportLease {
-      std::shared_ptr<CoreBacking> backing;
+      store::StoreEngine* engine{nullptr};
+      store::loading::ReplicaKey replica_key;
       common::memory::MemoryLocation location{common::memory::MemoryLocation::NONE};
       store::ExportRegistration registration;
 
@@ -89,6 +95,8 @@ class BodyHandle {
     mutable absl::Mutex export_mu;
     std::weak_ptr<ExportLease> cpu_export ABSL_GUARDED_BY(export_mu);
     std::weak_ptr<ExportLease> gpu_export ABSL_GUARDED_BY(export_mu);
+    std::shared_ptr<void> cpu_publish_prereg_pin ABSL_GUARDED_BY(export_mu);
+    absl::Time cpu_publish_prereg_pin_expires_at ABSL_GUARDED_BY(export_mu){absl::InfinitePast()};
   };
 
   explicit BodyHandle(std::shared_ptr<CoreBacking> backing);
