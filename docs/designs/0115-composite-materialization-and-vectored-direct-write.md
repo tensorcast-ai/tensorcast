@@ -4,7 +4,7 @@ title: Composite Materialization and Vectored Direct-Write
 status: implemented
 areas: ["core", "daemon", "docs", "benchmarks", "integrations"]
 created: 2026-04-19
-last_updated: 2026-04-23
+last_updated: 2026-04-25
 related_code:
   - docs/designs/0088-unified-artifact-profiles-with-shared-dataplane.md
   - docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
@@ -945,6 +945,302 @@ sequenceDiagram
   P-->>MF: target bytes visible
 ```
 
+### Source-side Read-Plan Admission and Direct-Source Lane Scheduling
+
+The routed sink-side fast path is now generic and direct-source RDMA already
+removes producer staging copies, but recent share-remote profiling exposed a
+separate source-side control-plane bottleneck: `request_first_response_ms`
+tracks the time from sink `read_plan` issue until source finally admits the
+request and emits the first `READ_PLAN_RESPONSE_EX`, and that path is still
+too serialized.
+
+The accepted concurrency split is:
+
+1. one source ingress path for wire receive and shallow validation,
+2. one bounded communicator-local admission worker pool that resolves one
+   communicator `READ_PLAN_REQUEST` into one `RdmaReadSession`,
+3. and one async execution scheduler that routes admitted sessions either to
+   a direct-source lane or to the legacy staged lane.
+
+This keeps the existing semantic unit explicit:
+
+- one communicator `request_id` is one admission and execution unit,
+- one higher-level `transport_request_id` may still fan out into multiple
+  communicator `request_id`s, often one per selected rail after routed
+  lowering,
+- therefore scheduling and observability must key off communicator
+  `request_id`, not off `transport_request_id`.
+
+The accepted source-side pipeline is:
+
+```mermaid
+flowchart LR
+  A["TCP control recv<br>READ_PLAN_REQUEST"] --> B["Ingress<br>wire validation + copy"]
+  B --> C["Admission FIFO"]
+  C --> D["Admission worker pool<br>resolve slices / leases / dev / MR / windowing"]
+  D --> E{"session.direct_source_response?"}
+  E -->|yes| F["Direct-source lane<br>key=(channel_flow_state, selected_rail_id)"]
+  E -->|no| G["Legacy staged lane<br>key=channel_flow_state"]
+  F --> H["Async execution worker pool<br>drive admitted session to completion"]
+  G --> I["Legacy async drain<br>resume_rdma_reads on staged lane"]
+  H --> J["TCP control send<br>READ_PLAN_RESPONSE_EX"]
+  I --> J
+```
+
+Normative rules:
+
+1. The source ingress thread must stay shallow. It may validate wire payload
+   shape, copy the request into one admission object, and enqueue it, but it
+   must not inline resolve source slices, wait for tensor read readiness,
+   call `ensure_tensor_registered_on_dev(...)`, or call
+   `resume_rdma_reads(...)`.
+2. Admission owns the heavy pre-issue work:
+   - `store_.get_tensor(...)`
+   - range validation
+   - read lease acquisition
+   - `tensor->wait_read_ready()`
+   - source device and rail selection
+   - stager selection
+   - direct eligibility and CPU MR readiness
+   - direct-source window sizing
+   - and `RdmaReadSession` construction
+3. Admission is keyed by communicator `request_id`. A single
+   `transport_request_id` may produce multiple admission tasks and they are
+   allowed to proceed independently.
+4. Admission completion must not directly execute the session inline on the
+   same worker. It must enqueue the session onto an execution lane and return.
+5. Direct-source execution lanes are keyed by
+   `(channel_flow_state, selected_source_rail_id)`, not by
+   `transport_request_id` and not by global rail alone.
+   - `channel_flow_state` keeps peer-local ordering, control transport, and
+     existing channel-scoped ownership intact.
+   - `selected_source_rail_id` is the right parallelization grain because
+     routed lowering already requires one admitted session to resolve to one
+     source rail.
+6. First-cut direct-source execution is serial within one lane and parallel
+   across lanes.
+   - There is exactly one logical FIFO lane per
+     `(channel_flow_state, selected_source_rail_id)`.
+   - Different lanes may execute concurrently.
+   - Same-lane parallel execution is out of scope for this cut.
+7. Direct-source execution is run-to-completion within one lane.
+   - once one lane worker starts one admitted direct-source session, that
+     worker keeps driving its response windows until the session completes or
+     fails,
+   - the session must not be requeued behind later sessions on the same lane,
+   - and the first cut deliberately prefers lower single-session completion
+     latency over intra-lane fairness.
+8. Non-direct-source or staged sessions keep the legacy staged execution
+   semantics, including `FlowCreditLedger`, `StageLeaseRegistry`, and staged
+   ACK handling, but they must still be scheduled asynchronously after
+   admission rather than being resumed inline on ingress.
+9. `TcpTransport::send(...)` remains the serialization point for actual
+   control-message writes. Lane workers may send responses directly through the
+   shared control transport; no extra transport-private send thread is
+   required in the first cut.
+10. This design does not change sink-side placement, `ReadPlan` wire
+    semantics, or direct-source response semantics. It only removes
+    source-side admission and first-window head-of-line blocking.
+
+### Accepted First-Cut Worker Model
+
+The first-cut worker model uses two bounded communicator-local pools:
+
+```yaml
+communicator:
+  enable_rdma: true
+  rdma:
+    read_plan_admission_workers: 0      # 0 = auto
+    read_plan_direct_source_workers: 0  # 0 = auto
+```
+
+Normative defaulting rules:
+
+1. `read_plan_admission_workers`
+   - `0` means auto.
+   - If RDMA is enabled and the communicator can enumerate visible rails,
+     auto means `min(4, max(2, visible_rail_count))`.
+   - If RDMA is enabled but visible rail count is unavailable at init time,
+     auto means `2`.
+   - If RDMA is disabled, auto means `1`.
+2. `read_plan_direct_source_workers`
+   - `0` means auto.
+   - If RDMA is enabled and visible rails are known, auto means
+     `min(4, max(1, visible_rail_count))`.
+   - If RDMA is enabled but visible rail count is unavailable, auto means `2`.
+   - If RDMA is disabled, auto means `1`.
+3. The admission pool is sized to absorb short request bursts without turning
+   each burst into one control-thread convoy. The cap of `4` is intentional in
+   the first cut because recent share-remote bursts only exercised a handful of
+   active remote rails per operation and higher defaults would mostly add CPU
+   contention.
+4. The direct-source execution pool is separate from admission so a burst of
+   admitted direct-source sessions cannot starve new admissions.
+5. Lane count is not a user-facing knob in the first cut.
+   - A lane is created lazily when the first session for one
+     `(channel_flow_state, selected_source_rail_id)` arrives.
+   - Lane multiplicity is therefore bounded by active peer-channel and rail
+     combinations, not by thread count.
+6. Same-rail sessions from different peers must not share one lane in the
+   first cut. They are independent lane keys because transport, channel
+   lifetime, and control ordering are peer-local.
+
+### Source-side Admission and Execution State Model
+
+```mermaid
+stateDiagram-v2
+    [*] --> WireQueued
+    WireQueued --> Admitting: admission worker dequeues request
+    Admitting --> FailedBeforeIssue: validation / lease / MR / route failure
+    Admitting --> StagedQueued: admitted staged session
+    Admitting --> DirectQueued: admitted direct-source session
+    DirectQueued --> DirectRunning: lane worker owns session
+    DirectRunning --> Completed: final window sent
+    StagedQueued --> StagedRunning: staged drain strand owns queue pass
+    StagedRunning --> Completed: staged session completes
+    StagedRunning --> StagedQueued: waits for staged credit / ack
+    FailedBeforeIssue --> [*]
+    Completed --> [*]
+```
+
+Operational consequences:
+
+- `WireQueued`
+  - request is copied out of the socket callback and is no longer on the
+    ingress critical path.
+- `Admitting`
+  - exactly one admission worker owns source resolution and session build.
+- `DirectQueued`
+  - session is fully admitted and waits only for its
+    `(channel_flow_state, rail_id)` lane turn.
+- `DirectRunning`
+  - one worker owns the admitted direct-source session until it completes or
+    fails.
+  - if multiple response windows are required, they are all emitted under the
+    same lane ownership without intra-lane requeue.
+- `StagedQueued` and `StagedRunning`
+  - preserve the legacy staged data-plane semantics while removing inline
+    ingress blocking.
+
+### Why the Lane Key is `(channel_flow_state, rail_id)`
+
+This is the smallest key that matches the admitted-session invariants already
+required by routed `read_plan(...)`.
+
+1. One admitted session must already resolve to one source rail; if different
+   source slices resolve to different rails, admission fails before issue.
+2. One higher-level `transport_request_id` is too coarse because one logical
+   byte-artifact transport may fan out into multiple communicator requests,
+   often one per selected rail.
+3. One global `rail_id` is too coarse because different peers on the same rail
+   would then share control ordering and drain state unnecessarily.
+4. `channel_flow_state + rail_id` is therefore the first-cut boundary that:
+   - removes cross-rail head-of-line blocking,
+   - keeps peer-local transport ownership intact,
+   - and avoids inventing new cross-peer flow control semantics.
+
+### CPU Direct-Source Lazy MR Admission Gate
+
+Recent share-remote profiling narrowed the remaining direct-source control-plane
+tail further: once direct-source execution lanes exist, the dominant
+`request_first_response_ms` component is often not sink preparation or RDMA
+data transfer, but CPU source-side lazy MR admission itself. The current
+head-of-line source is an over-broad admission critical section, not the direct
+RDMA semantics.
+
+The accepted minimal semantic fix is:
+
+- keep CPU direct-source lazy MR registration in admission,
+- keep `PartitionTensor` as the owner of source MR lifetime and MR lookup,
+- but replace any process-global lazy-registration gate with one
+  communicator-local in-flight gate keyed by source tensor identity,
+- and never hold a process-global lock while waiting for
+  `tensor->wait_mr_ready(dev)`.
+
+This fix is intentionally narrower than a full `PartitionTensor`
+thread-safety redesign. It removes cross-tensor serialization without changing
+wire protocol, fallback semantics, or direct-source execution semantics.
+
+Normative rules:
+
+1. CPU direct-source eligibility may still require lazy source-MR registration
+   during admission on the selected source rail.
+2. The first-cut admission gate is keyed by source tensor identity, not by
+   higher-level `transport_request_id`, not by communicator `request_id`, and
+   not by a process-global singleton.
+3. Different source tensors must be allowed to progress through lazy MR
+   preparation concurrently.
+4. Requests targeting the same source tensor may coordinate through one
+   tensor-local in-flight gate so only one owner thread performs
+   `add_dev(...)` fallback, `reg_async(...)`, and `wait_mr_ready(dev)`.
+5. Waiting for MR readiness must happen only on that tensor-local gate. A
+   request servicing tensor `A` must not block unrelated lazy MR preparation
+   for tensor `B`.
+6. First-cut coordination is intentionally per-tensor, not per
+   `(tensor, rail)` tuple.
+   - This is the smallest safe change because current `PartitionTensor`
+     bookkeeping for `devs_`, `registered_`, `mrs_`, and related maps is not a
+     separately synchronized multi-rail mutation surface.
+   - Therefore same-tensor multi-rail lazy registration remains serialized in
+     this cut.
+7. Admission must retain a fast path:
+   - if `tensor->has_registered_mr(dev)` is already true on entry, admission
+     returns direct eligibility immediately without joining any gate.
+8. The owner thread for a tensor-local gate may perform the rare
+   `tensor->add_dev(dev)` fallback if the selected rail was not pre-attached at
+   tensor registration time, but that path is not expected to be the common CPU
+   direct-source case.
+9. Failure semantics do not change in this cut.
+   - If lazy registration fails and direct-source is required, admission fails
+     before issue.
+   - If lazy registration fails and direct-source is optional, admission may
+     still fall back to the staged path under the existing pre-issue fallback
+     rules.
+10. This cut does not redefine `PartitionTensor` MR failure stickiness or add
+    hidden retry semantics. It only narrows the admission serialization scope.
+
+The accepted first-cut state model is:
+
+```mermaid
+stateDiagram-v2
+    [*] --> FastPathReady: has_registered_mr(dev)
+    [*] --> GateLookup: no ready MR
+    GateLookup --> WaiterJoin: same tensor already registering
+    GateLookup --> OwnerRegister: this request owns tensor-local registration
+    OwnerRegister --> Ready: reg_async + wait_mr_ready succeeds
+    OwnerRegister --> Failed: MR unavailable after registration
+    WaiterJoin --> Ready: owner publishes success
+    WaiterJoin --> Failed: owner publishes failure
+    FastPathReady --> [*]
+    Ready --> [*]
+    Failed --> [*]
+```
+
+Operational consequences:
+
+- `FastPathReady`
+  - the common reused-MR case adds no extra admission coordination.
+- `OwnerRegister`
+  - exactly one admission worker per tensor performs the lazy registration
+    work.
+- `WaiterJoin`
+  - same-tensor concurrent requests wait only on that tensor-local admission
+    gate.
+- cross-tensor direct-source bursts are therefore free to overlap even when
+  they all require lazy CPU MR preparation.
+
+Why the first cut is per-tensor rather than per `(tensor, rail)`:
+
+1. The current hotspot is caused by cross-tensor serialization, so removing the
+   process-global gate already attacks the dominant tail.
+2. Per-tensor coordination is the smallest change that stays aligned with
+   existing `PartitionTensor` ownership and bookkeeping.
+3. Per-`(tensor, rail)` coordination would require either stronger internal
+   synchronization in `PartitionTensor` or a larger redesign of its MR/dev
+   mutation surface.
+4. The accepted first cut therefore optimizes the dominant workload shape
+   without widening the semantic surface area.
+
 ## 8. Failure Model
 
 The key rule is that fallback is only allowed before a vectored direct-write
@@ -1012,9 +1308,24 @@ Required direction:
 7. the accepted first-cut daemon YAML surfaces are:
    - `communicator.rdma.stable_local_mr_reuse_chunk_slots`, default `1`
    - `communicator.rdma.stable_local_mr_reuse_prewarm_workers`, default disabled
+   - `communicator.rdma.read_plan_admission_workers`, default auto
+   - `communicator.rdma.read_plan_direct_source_workers`, default auto
 8. stable-backing prewarm observability must expose whether a backing was
    activated lazily or with background prewarm, how many rail jobs were
    enqueued, and whether completion lagged request service.
+9. source-side read-plan observability must expose:
+   - ingress-to-admission queue delay,
+   - admission execution time,
+   - direct-source lane queue delay,
+   - execution lane key `(peer channel, selected rail)`,
+   - and whether the session used `direct_source_lane` or `legacy_staged_lane`.
+10. CPU direct-source lazy-MR observability must expose:
+   - whether admission hit the fast MR-ready path,
+   - whether the request became the tensor-local registration owner or joined
+     as a waiter,
+   - wait time spent on the tensor-local gate,
+   - selected source rail,
+   - and final outcome `ready|failed|fallback`.
 
 Recommended metrics:
 
@@ -1030,6 +1341,13 @@ Recommended metrics:
 - `tc_comm_stable_backing_chunk_wait_ms_total{reason,backing_kind}`
 - `tc_comm_stable_backing_chunk_registrars_total{result,backing_kind}`
 - `tc_comm_stable_backing_prewarm_jobs_total{state,backing_kind}`
+- `tc_comm_read_plan_admission_queue_ms_total{mode}`
+- `tc_comm_read_plan_admission_ms_total{mode}`
+- `tc_comm_read_plan_execution_queue_ms_total{lane_mode}`
+- `tc_comm_read_plan_first_window_send_ms_total{lane_mode}`
+- `tc_comm_read_plan_lane_sessions_total{lane_mode,result}`
+- `tc_comm_read_plan_source_mr_gate_events_total{role,result}`
+- `tc_comm_read_plan_source_mr_gate_wait_ms_total{role}`
 
 ## 10. Naming Compliance
 

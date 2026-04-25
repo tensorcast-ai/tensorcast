@@ -93,6 +93,12 @@ class Channel {
   bool is_expired(uint64_t now) const;
 
   struct FlowState {
+    struct DirectSourceLaneState {
+      mutable absl::Mutex mu;
+      std::deque<std::shared_ptr<RdmaReadSession>> sessions ABSL_GUARDED_BY(mu);
+      bool scheduled ABSL_GUARDED_BY(mu) = false;
+    };
+
     FlowState(int credit, uint32_t max_window_segments)
         : ledger(credit),
           max_window_segments(max_window_segments == 0 ? static_cast<uint32_t>(credit) : max_window_segments) {}
@@ -104,6 +110,9 @@ class Channel {
     std::deque<std::shared_ptr<RdmaReadSession>> rdma_pending_reads ABSL_GUARDED_BY(rdma_pending_reads_mu);
     std::atomic_bool rdma_refill_in_progress{false};
     std::atomic_bool rdma_refill_requested{false};
+    mutable absl::Mutex direct_source_lanes_mu;
+    absl::flat_hash_map<int16_t, std::shared_ptr<DirectSourceLaneState>> direct_source_lanes
+        ABSL_GUARDED_BY(direct_source_lanes_mu);
   };
 
   std::shared_ptr<FlowState> flow_state() const {

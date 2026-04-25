@@ -95,38 +95,32 @@ struct RdmaSourceStageProfile {
   uint64_t max_mr_us = 0;
 };
 
-absl::Mutex& lazy_direct_source_mr_mu() {
+struct Communicator::LazySourceMrInflightState {
+  absl::Mutex mu;
+  absl::CondVar cv;
+  bool registering ABSL_GUARDED_BY(mu) = true;
+  absl::Status last_status ABSL_GUARDED_BY(mu) = absl::UnknownError("lazy source MR registration still pending");
+};
+
+absl::Mutex& lazy_source_mr_test_hook_mu() {
   static auto* mu = new absl::Mutex();
   return *mu;
 }
 
-absl::Status ensure_tensor_registered_on_dev(const std::shared_ptr<PartitionTensor>& tensor, const net_dev_t& dev) {
-  if (tensor == nullptr || dev == nullptr) {
-    return absl::InvalidArgumentError("tensor and dev are required for lazy MR registration");
-  }
-  if (tensor->has_registered_mr(dev)) {
-    return absl::OkStatus();
-  }
+std::function<void(int, std::string_view, int16_t)>& lazy_source_mr_test_hook_storage() {
+  static auto* hook = new std::function<void(int, std::string_view, int16_t)>();
+  return *hook;
+}
 
-  absl::MutexLock lock(&lazy_direct_source_mr_mu());
-  if (tensor->has_registered_mr(dev)) {
-    return absl::OkStatus();
+void maybe_run_lazy_source_mr_test_hook(int event, std::string_view tensor_key, int16_t rail_id) {
+  std::function<void(int, std::string_view, int16_t)> hook_copy;
+  {
+    absl::MutexLock lock(&lazy_source_mr_test_hook_mu());
+    hook_copy = lazy_source_mr_test_hook_storage();
   }
-  if (tensor->get_dev_by_rail(dev->get_rail_id()) == nullptr) {
-    tensor->add_dev(dev);
+  if (hook_copy) {
+    hook_copy(event, tensor_key, rail_id);
   }
-  if (!tensor->is_registered(dev)) {
-    const auto reg_status = dev->reg_async(tensor);
-    if (reg_status != misc::SUCCESS) {
-      return absl::InternalError(absl::StrCat("failed to lazily register source tensor MR on ", dev->get_name()));
-    }
-  }
-  tensor->wait_mr_ready(dev);
-  if (!tensor->has_registered_mr(dev)) {
-    return absl::InternalError(
-        absl::StrCat("lazy source tensor MR unavailable on ", dev->get_name(), " after registration"));
-  }
-  return absl::OkStatus();
 }
 
 struct RdmaReadSession {
@@ -2540,6 +2534,14 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, PinnedStagingPo
     }
   }
 
+  read_plan_admission_workers_ = resolve_read_plan_admission_worker_count();
+  read_plan_direct_source_workers_ = resolve_read_plan_direct_source_worker_count();
+  for (uint32_t worker_index = 0; worker_index < read_plan_admission_workers_; ++worker_index) {
+    read_plan_admission_threads_.emplace_back([this]() { this->read_plan_admission_loop(); });
+  }
+  for (uint32_t worker_index = 0; worker_index < read_plan_direct_source_workers_; ++worker_index) {
+    read_plan_execution_threads_.emplace_back([this]() { this->read_plan_execution_loop(); });
+  }
   mtcp_staging_thread_ = std::thread([this]() { this->mtcp_staging_loop(); });
 }
 
@@ -2547,6 +2549,8 @@ Communicator::~Communicator() {
   store_.clear();
   stop_.store(true);
   request_queue_.stop();
+  read_plan_admission_queue_.stop();
+  read_plan_execution_queue_.stop();
   handshake_retry_stop_.store(true);
   handshake_retry_cv_.SignalAll();
   stable_local_prewarm_queue_.stop();
@@ -2563,6 +2567,16 @@ Communicator::~Communicator() {
     mtcp_staging_thread_.join();
   }
   mtcp_staging_queue_.stop();
+  for (auto& thread : read_plan_admission_threads_) {
+    if (thread.joinable()) {
+      thread.join();
+    }
+  }
+  for (auto& thread : read_plan_execution_threads_) {
+    if (thread.joinable()) {
+      thread.join();
+    }
+  }
   if (request_thread_.joinable()) {
     request_thread_.join();
   }
@@ -2579,6 +2593,619 @@ Communicator::~Communicator() {
     absl::MutexLock lock(&stable_local_backings_mu_);
     stable_local_backings_.clear();
   }
+}
+
+misc::result_t Communicator::send_read_plan_failed_response(
+    const tcp_transport_t& control_transport,
+    uint64_t request_id,
+    uint32_t reason) {
+  if (control_transport == nullptr) {
+    return misc::FAILED;
+  }
+  auto rsp = EngineMessage::make_message<ProtoReadPlanFailed>(ENGINE_OP_READ_PLAN_FAILED);
+  auto* payload = rsp->get_payload<ProtoReadPlanFailed>();
+  payload->request_id = request_id;
+  payload->reason = reason;
+  return control_transport->send(rsp);
+}
+
+uint32_t Communicator::resolve_read_plan_admission_worker_count() const {
+  const uint32_t configured = config_.rdma().read_plan_admission_workers();
+  if (configured > 0) {
+    return configured;
+  }
+  if (!enable_rdma_) {
+    return 1;
+  }
+  if (rdma_context_ == nullptr) {
+    return 2;
+  }
+  const size_t visible_rail_count = rdma_context_->list_devs().size();
+  return static_cast<uint32_t>(std::min<size_t>(4, std::max<size_t>(2, visible_rail_count)));
+}
+
+uint32_t Communicator::resolve_read_plan_direct_source_worker_count() const {
+  const uint32_t configured = config_.rdma().read_plan_direct_source_workers();
+  if (configured > 0) {
+    return configured;
+  }
+  if (!enable_rdma_) {
+    return 1;
+  }
+  if (rdma_context_ == nullptr) {
+    return 2;
+  }
+  const size_t visible_rail_count = rdma_context_->list_devs().size();
+  return static_cast<uint32_t>(std::min<size_t>(4, std::max<size_t>(1, visible_rail_count)));
+}
+
+void Communicator::read_plan_admission_loop() {
+  while (true) {
+    auto task = read_plan_admission_queue_.pop(/*block=*/true);
+    if (task == nullptr) {
+      if (stop_.load(std::memory_order_acquire)) {
+        return;
+      }
+      continue;
+    }
+
+    auto session_or = admit_read_plan_request(*task);
+    if (!session_or.ok()) {
+      const absl::Status status = session_or.status();
+      if (send_read_plan_failed_response(
+              task->control_transport, task->request.request_id, ReadFailedReasonFromStatus(status)) != SUCCESS) {
+        LOG(WARNING) << "Failed to send READ_PLAN_FAILED after async admission failure request_id="
+                     << task->request.request_id;
+      }
+      continue;
+    }
+
+    auto session = *session_or;
+    const bool direct_source = session->direct_source_response;
+    absl::Status schedule_status = direct_source ? schedule_read_plan_direct_source_lane(task->channel, session)
+                                                 : schedule_read_plan_staged_session(task->channel, session);
+    if (!schedule_status.ok()) {
+      if (!session->transfer_id.empty()) {
+        finish_source_transfer_progress(session->transfer_id, schedule_status);
+      }
+      if (send_read_plan_failed_response(
+              task->control_transport, task->request.request_id, ReadFailedReasonFromStatus(schedule_status)) !=
+          SUCCESS) {
+        LOG(WARNING) << "Failed to send READ_PLAN_FAILED after scheduling failure request_id="
+                     << task->request.request_id;
+      }
+    }
+  }
+}
+
+void Communicator::read_plan_execution_loop() {
+  while (true) {
+    auto task = read_plan_execution_queue_.pop(/*block=*/true);
+    if (task == nullptr) {
+      if (stop_.load(std::memory_order_acquire)) {
+        return;
+      }
+      continue;
+    }
+
+    switch (task->kind) {
+      case ReadPlanExecutionTask::Kind::kDirectSourceLane:
+        process_read_plan_direct_source_lane(task->flow_state, task->lane, task->rail_id);
+        break;
+      case ReadPlanExecutionTask::Kind::kLegacyStagedResume:
+        process_read_plan_staged_resume(task->channel);
+        break;
+    }
+  }
+}
+
+absl::StatusOr<std::shared_ptr<RdmaReadSession>> Communicator::admit_read_plan_request(
+    const ReadPlanAdmissionTask& task) {
+  auto flow_state = task.channel ? task.channel->flow_state() : nullptr;
+  if (!enable_rdma_) {
+    return absl::FailedPreconditionError("RDMA transport disabled");
+  }
+  if (flow_state == nullptr) {
+    return absl::InternalError("channel missing flow state");
+  }
+
+  auto read_guards = std::make_shared<std::vector<std::shared_ptr<void>>>();
+  auto session = std::make_shared<RdmaReadSession>();
+  session->mode = RdmaReadSession::Mode::kReadPlan;
+  session->plan_request = task.request;
+  session->request_key = transport::get_read_plan_request_key(task.request.request_id);
+  session->control_transport = task.control_transport;
+  session->source_stage_profile = std::make_shared<RdmaSourceStageProfile>();
+  session->created_at = task.ingress_received_at;
+
+  struct PlannedSourceSlice {
+    uint32_t source_slice_index = 0;
+    std::string tensor_key;
+    uint64_t remote_offset = 0;
+    uint64_t bytes = 0;
+    std::shared_ptr<PartitionTensor> tensor;
+    std::shared_ptr<MemoryStager> stager;
+    net_dev_t dev;
+    v1::RdmaConfig::StagedRdmaBackend staged_backend = v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED;
+    bool direct_eligible = false;
+    ibv_mr* direct_mr = nullptr;
+  };
+
+  std::vector<PlannedSourceSlice> resolved_slices;
+  resolved_slices.reserve(task.request.num_source_slices);
+  uint64_t total_bytes = 0;
+
+  for (uint32_t index = 0; index < task.request.num_source_slices; ++index) {
+    const auto& source = task.source_slices[index];
+    const std::string tensor_key = reinterpret_cast<const char*>(source.tensor_key);
+    auto tensor = store_.get_tensor(tensor_key);
+    if (tensor == nullptr) {
+      return absl::NotFoundError(absl::StrCat("read_plan tensor not found: ", tensor_key));
+    }
+    if (source.remote_offset > tensor->get_bytes() || source.bytes > tensor->get_bytes() - source.remote_offset) {
+      return absl::OutOfRangeError(absl::StrCat("read_plan slice out of range: ", tensor_key));
+    }
+
+    auto read_guard_or = acquire_tensor_read_lease(tensor_key);
+    if (!read_guard_or.ok()) {
+      return read_guard_or.status();
+    }
+    read_guards->push_back(*read_guard_or);
+    tensor->wait_read_ready();
+
+    auto dev = task.request.rail_id >= 0 ? tensor->get_dev_by_rail(task.request.rail_id) : nullptr;
+    if (dev == nullptr) {
+      dev = tensor->get_dev();
+      if (dev != nullptr && task.request.rail_id >= 0) {
+        VLOG(2) << "READ_PLAN_REQUEST rail fallback tensor=" << tensor_key << " requested_rail=" << task.request.rail_id
+                << " selected_rail=" << dev->get_rail_id() << " nic=" << dev->get_name();
+      }
+    }
+    const bool tensor_on_cpu = tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU;
+    if (tensor_on_cpu && session->dev != nullptr &&
+        (dev == nullptr || session->dev->get_name() != dev->get_name() ||
+         session->dev->get_rail_id() != dev->get_rail_id())) {
+      VLOG(2) << "READ_PLAN_REQUEST cpu source rebinding tensor=" << tensor_key
+              << " selected_rail=" << (dev != nullptr ? dev->get_rail_id() : -1)
+              << " selected_nic=" << (dev != nullptr ? dev->get_name() : "<none>")
+              << " session_rail=" << session->dev->get_rail_id() << " session_nic=" << session->dev->get_name();
+      dev = session->dev;
+    }
+    if (dev == nullptr) {
+      return absl::FailedPreconditionError(absl::StrCat("read_plan tensor missing RDMA device: ", tensor_key));
+    }
+    if (session->dev == nullptr) {
+      session->dev = dev;
+    } else if (session->dev->get_name() != dev->get_name() || session->dev->get_rail_id() != dev->get_rail_id()) {
+      return absl::FailedPreconditionError("read_plan source slices must resolve to one RDMA device/rail");
+    }
+
+    const int device_id = tensor->get_device_id();
+    std::shared_ptr<MemoryStager> stager;
+    if (tensor_on_cpu) {
+      stager = get_cpu_stager_for_nic(dev->get_name());
+    } else if (use_gpu_vram_staging_) {
+      stager = get_gpu_vram_stager_for_id(device_id);
+    } else {
+      stager = get_gpu_mem_stager_for_id(device_id);
+    }
+    if (!stager) {
+      if (tensor_on_cpu) {
+        stager = memory_stager_;
+      } else if (use_gpu_vram_staging_) {
+        stager = get_gpu_mem_stager_for_id(device_id);
+        if (!stager) {
+          stager = gpu_memory_stager_;
+        }
+      } else {
+        stager = gpu_memory_stager_;
+      }
+    }
+
+    const bool direct_requested = tensor->direct_rdma_enabled();
+    bool direct_eligible = false;
+    ibv_mr* direct_mr = nullptr;
+    DirectFallbackReason fallback_reason = DirectFallbackReason::kNone;
+    if (direct_requested) {
+      const bool direct_mem_supported = tensor_on_cpu || tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_GPU;
+      if (!direct_mem_supported) {
+        fallback_reason = DirectFallbackReason::kNotGpu;
+      } else if (tensor->needs_staging()) {
+        fallback_reason = DirectFallbackReason::kNeedsStaging;
+      } else {
+        if (tensor_on_cpu) {
+          auto ensure_result_or = ensure_tensor_registered_on_dev(tensor, dev);
+          if (!ensure_result_or.ok()) {
+            fallback_reason = DirectFallbackReason::kMrUnavailable;
+          } else {
+            const auto& ensure_result = *ensure_result_or;
+            if (ensure_result.fast_path_hit) {
+              ++source_mr_fast_path_count;
+            }
+            if (ensure_result.owner) {
+              ++source_mr_owner_count;
+            }
+            if (ensure_result.waiter) {
+              ++source_mr_waiter_count;
+            }
+            if (ensure_result.add_dev_fallback) {
+              ++source_mr_add_dev_fallback_count;
+            }
+            if (ensure_result.reg_async_issued) {
+              ++source_mr_reg_async_count;
+            }
+            source_mr_gate_wait_ms += ensure_result.gate_wait_ms;
+            max_source_mr_gate_wait_ms = std::max(max_source_mr_gate_wait_ms, ensure_result.gate_wait_ms);
+            direct_mr = tensor->get_mr(dev);
+            direct_eligible = direct_mr != nullptr && tensor->has_registered_mr(dev);
+            if (!direct_eligible) {
+              fallback_reason = DirectFallbackReason::kMrUnavailable;
+            }
+          }
+        } else {
+          tensor->wait_mr_ready(dev);
+          direct_mr = tensor->get_mr(dev);
+          if (direct_mr == nullptr || !tensor->has_registered_mr(dev)) {
+            fallback_reason = DirectFallbackReason::kMrUnavailable;
+          } else {
+            direct_eligible = true;
+          }
+        }
+      }
+      if (!direct_eligible && tensor->direct_rdma_required()) {
+        return absl::FailedPreconditionError(
+            absl::StrCat("read_plan direct RDMA required but unavailable: ", tensor_key));
+      }
+      if (!direct_eligible && fallback_reason != DirectFallbackReason::kNone) {
+        record_direct_fallback_metric(fallback_reason);
+      }
+    }
+    if (!direct_eligible && !stager) {
+      return absl::FailedPreconditionError("no staging backend available for read_plan source slice");
+    }
+
+    const bool using_gpu_vram_stager =
+        !tensor_on_cpu && use_gpu_vram_staging_ && stager && stager == get_gpu_vram_stager_for_id(device_id);
+    const v1::RdmaConfig::StagedRdmaBackend staged_backend = using_gpu_vram_stager
+        ? v1::RdmaConfig::STAGED_RDMA_BACKEND_GPU_VRAM
+        : v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED;
+    resolved_slices.push_back(
+        PlannedSourceSlice{
+            .source_slice_index = source.source_slice_index,
+            .tensor_key = tensor_key,
+            .remote_offset = source.remote_offset,
+            .bytes = source.bytes,
+            .tensor = tensor,
+            .stager = stager,
+            .dev = dev,
+            .staged_backend = staged_backend,
+            .direct_eligible = direct_eligible,
+            .direct_mr = direct_mr,
+        });
+    if (source.bytes > std::numeric_limits<uint64_t>::max() - total_bytes) {
+      return absl::InvalidArgumentError("read_plan source byte count overflow");
+    }
+    total_bytes += source.bytes;
+  }
+
+  bool direct_source_response = !resolved_slices.empty();
+  uint64_t direct_source_segment_count = 0;
+  for (const auto& source : resolved_slices) {
+    if (source.tensor->get_mem_type() != COMMUNICATE_ENGINE_DEV_CPU || !source.direct_eligible) {
+      direct_source_response = false;
+      break;
+    }
+    const uint64_t chunk_size = compute_read_plan_direct_chunk_bytes(source.bytes);
+    const uint64_t source_segments = (source.bytes + chunk_size - 1) / chunk_size;
+    if (source_segments > std::numeric_limits<uint64_t>::max() - direct_source_segment_count) {
+      return absl::InvalidArgumentError("read_plan direct source segment count overflow");
+    }
+    direct_source_segment_count += source_segments;
+  }
+
+  if (direct_source_response) {
+    session->direct_source_response = true;
+    session->read_plan_window_segment_limit =
+        compute_read_plan_direct_window_segment_limit(direct_source_segment_count);
+    session->direct_ledger =
+        std::make_unique<FlowCreditLedger>(static_cast<int>(session->read_plan_window_segment_limit));
+  }
+
+  FlowCreditLedger* plan_ledger = session->direct_source_response ? session->direct_ledger.get() : &flow_state->ledger;
+  CHECK(plan_ledger != nullptr);
+  for (const auto& source : resolved_slices) {
+    const bool use_direct = session->direct_source_response
+        ? source.direct_eligible
+        : (source.tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_GPU && source.direct_eligible);
+    const uint64_t chunk_size = use_direct
+        ? (session->direct_source_response ? compute_read_plan_direct_chunk_bytes(source.bytes)
+                                           : compute_direct_chunk_bytes(
+                                                 source.bytes,
+                                                 direct_rdma_chunk_bytes_,
+                                                 flow_state->max_window_segments,
+                                                 config_.rdma().qp_count()))
+        : (source.stager && source.stager->get_chunk_size() > 0 ? source.stager->get_chunk_size() : source.bytes);
+    session->plan_source_slices.push_back(
+        RdmaReadPlanSourceSlice{
+            .source_slice_index = source.source_slice_index,
+            .tensor_key = source.tensor_key,
+            .remote_offset = source.remote_offset,
+            .bytes = source.bytes,
+            .tensor = source.tensor,
+            .stager = source.stager,
+            .dev = source.dev,
+            .stage_fn = MakeStageFunction(
+                source.tensor,
+                plan_ledger,
+                source.stager,
+                source.dev,
+                meta_mr_cache_.get(),
+                source.tensor_key,
+                session->request_key,
+                source.staged_backend,
+                use_direct,
+                source.direct_mr,
+                session->source_stage_profile),
+            .chunk_size = chunk_size,
+            .zero_copy = use_direct,
+        });
+  }
+
+  session->read_guard = read_guards;
+  const std::string peer = task.control_transport ? task.control_transport->get_remote_url() : std::string();
+  session->transfer_id = make_transfer_id(session->request_key, peer);
+  (void)register_source_transfer_progress(session->request_key, peer, "rdma", total_bytes, session->read_guard);
+  return session;
+}
+
+absl::Status Communicator::schedule_read_plan_direct_source_lane(
+    const channel_t& channel,
+    const std::shared_ptr<RdmaReadSession>& session) {
+  if (channel == nullptr || session == nullptr) {
+    return absl::InvalidArgumentError("channel and session are required");
+  }
+  auto flow_state = channel->flow_state();
+  if (flow_state == nullptr) {
+    return absl::InternalError("channel missing flow state");
+  }
+  if (session->dev == nullptr) {
+    return absl::FailedPreconditionError("direct-source session missing selected rail");
+  }
+
+  const int16_t rail_id = session->dev->get_rail_id();
+  std::shared_ptr<Channel::FlowState::DirectSourceLaneState> lane;
+  {
+    absl::MutexLock lock(&flow_state->direct_source_lanes_mu);
+    auto& slot = flow_state->direct_source_lanes[rail_id];
+    if (slot == nullptr) {
+      slot = std::make_shared<Channel::FlowState::DirectSourceLaneState>();
+    }
+    lane = slot;
+  }
+
+  bool need_schedule = false;
+  {
+    absl::MutexLock lock(&lane->mu);
+    lane->sessions.push_back(session);
+    if (!lane->scheduled) {
+      lane->scheduled = true;
+      need_schedule = true;
+    }
+  }
+
+  if (!need_schedule) {
+    return absl::OkStatus();
+  }
+
+  auto task = std::make_shared<ReadPlanExecutionTask>();
+  task->kind = ReadPlanExecutionTask::Kind::kDirectSourceLane;
+  task->channel = channel;
+  task->flow_state = flow_state;
+  task->lane = lane;
+  task->rail_id = rail_id;
+  if (read_plan_execution_queue_.push(task, /*block=*/false) != SUCCESS) {
+    absl::MutexLock lock(&lane->mu);
+    lane->scheduled = false;
+    return absl::UnavailableError("failed to enqueue direct-source execution task");
+  }
+  return absl::OkStatus();
+}
+
+absl::Status Communicator::schedule_read_plan_staged_session(
+    const channel_t& channel,
+    const std::shared_ptr<RdmaReadSession>& session) {
+  if (channel == nullptr || session == nullptr) {
+    return absl::InvalidArgumentError("channel and session are required");
+  }
+  auto flow_state = channel->flow_state();
+  if (flow_state == nullptr) {
+    return absl::InternalError("channel missing flow state");
+  }
+
+  {
+    absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+    flow_state->rdma_pending_reads.push_back(session);
+  }
+
+  auto task = std::make_shared<ReadPlanExecutionTask>();
+  task->kind = ReadPlanExecutionTask::Kind::kLegacyStagedResume;
+  task->channel = channel;
+  task->flow_state = flow_state;
+  if (read_plan_execution_queue_.push(task, /*block=*/false) != SUCCESS) {
+    return absl::UnavailableError("failed to enqueue staged read-plan resume");
+  }
+  return absl::OkStatus();
+}
+
+void Communicator::process_read_plan_direct_source_lane(
+    const std::shared_ptr<Channel::FlowState>& flow_state,
+    const std::shared_ptr<Channel::FlowState::DirectSourceLaneState>& lane,
+    int16_t rail_id) {
+  if (flow_state == nullptr || lane == nullptr) {
+    return;
+  }
+
+  while (true) {
+    std::shared_ptr<RdmaReadSession> session;
+    {
+      absl::MutexLock lock(&lane->mu);
+      if (lane->sessions.empty()) {
+        lane->scheduled = false;
+        return;
+      }
+      session = lane->sessions.front();
+      lane->sessions.pop_front();
+    }
+
+    while (true) {
+      auto result = DriveRdmaPlanSession(*flow_state, *session);
+      if (!result.status.ok()) {
+        if (send_read_plan_failed_response(
+                session->control_transport,
+                session->plan_request.request_id,
+                ReadFailedReasonFromStatus(result.status)) != SUCCESS) {
+          LOG(WARNING) << "Failed to send READ_PLAN_FAILED after direct-source execution failure request="
+                       << session->request_key;
+        }
+        log_rdma_source_stage_summary(*session, result.status);
+        if (!session->transfer_id.empty()) {
+          finish_source_transfer_progress(session->transfer_id, result.status);
+        }
+        break;
+      }
+
+      if (result.completed) {
+        log_rdma_source_stage_summary(*session, result.status);
+        break;
+      }
+
+      if (!result.made_progress) {
+        absl::SleepFor(absl::Milliseconds(1));
+      }
+    }
+  }
+}
+
+void Communicator::process_read_plan_staged_resume(const channel_t& channel) {
+  auto status = resume_rdma_reads(channel);
+  if (!status.ok()) {
+    LOG(WARNING) << "READ_PLAN_REQUEST failed to resume session: " << status;
+  }
+}
+
+void Communicator::set_lazy_source_mr_test_hook_for_test(LazySourceMrTestHook hook) {
+  absl::MutexLock lock(&lazy_source_mr_test_hook_mu());
+  if (!hook) {
+    lazy_source_mr_test_hook_storage() = nullptr;
+    return;
+  }
+  lazy_source_mr_test_hook_storage() = [hook = std::move(hook)](
+                                           int event, std::string_view tensor_key, int16_t rail_id) {
+    hook(static_cast<LazySourceMrTestEvent>(event), tensor_key, rail_id);
+  };
+}
+
+void Communicator::clear_lazy_source_mr_test_hook_for_test() {
+  absl::MutexLock lock(&lazy_source_mr_test_hook_mu());
+  lazy_source_mr_test_hook_storage() = nullptr;
+}
+
+absl::StatusOr<Communicator::LazySourceMrEnsureResult> Communicator::ensure_tensor_registered_on_dev(
+    const std::shared_ptr<PartitionTensor>& tensor,
+    const net_dev_t& dev) {
+  if (tensor == nullptr || dev == nullptr) {
+    return absl::InvalidArgumentError("tensor and dev are required for lazy MR registration");
+  }
+
+  LazySourceMrEnsureResult result;
+  const int16_t rail_id = dev->get_rail_id();
+  const std::string tensor_key = tensor->get_key();
+  if (tensor->has_registered_mr(dev)) {
+    result.fast_path_hit = true;
+    maybe_run_lazy_source_mr_test_hook(static_cast<int>(LazySourceMrTestEvent::kFastPathHit), tensor_key, rail_id);
+    return result;
+  }
+
+  std::shared_ptr<LazySourceMrInflightState> inflight_state;
+  bool owner = false;
+  {
+    absl::MutexLock lock(&lazy_source_mr_inflight_mu_);
+    auto it = lazy_source_mr_inflight_.find(tensor.get());
+    if (it == lazy_source_mr_inflight_.end()) {
+      inflight_state = std::make_shared<LazySourceMrInflightState>();
+      lazy_source_mr_inflight_.emplace(tensor.get(), inflight_state);
+      owner = true;
+    } else {
+      inflight_state = it->second;
+    }
+  }
+
+  if (!owner) {
+    result.waiter = true;
+    maybe_run_lazy_source_mr_test_hook(static_cast<int>(LazySourceMrTestEvent::kWaiterJoined), tensor_key, rail_id);
+    const auto wait_started_at = std::chrono::steady_clock::now();
+    absl::Status wait_status;
+    {
+      absl::MutexLock lock(&inflight_state->mu);
+      while (inflight_state->registering) {
+        inflight_state->cv.Wait(&inflight_state->mu);
+      }
+      wait_status = inflight_state->last_status;
+    }
+    result.gate_wait_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                              std::chrono::steady_clock::now() - wait_started_at)
+                              .count();
+    maybe_run_lazy_source_mr_test_hook(static_cast<int>(LazySourceMrTestEvent::kWaiterReleased), tensor_key, rail_id);
+    if (!wait_status.ok()) {
+      return wait_status;
+    }
+    if (!tensor->has_registered_mr(dev)) {
+      return absl::InternalError(
+          absl::StrCat("lazy source tensor MR unavailable on ", dev->get_name(), " after waiter release"));
+    }
+    return result;
+  }
+
+  result.owner = true;
+  maybe_run_lazy_source_mr_test_hook(static_cast<int>(LazySourceMrTestEvent::kOwnerAcquired), tensor_key, rail_id);
+  absl::Status owner_status = absl::OkStatus();
+  absl::Cleanup owner_cleanup = [&] {
+    {
+      absl::MutexLock lock(&inflight_state->mu);
+      inflight_state->last_status = owner_status;
+      inflight_state->registering = false;
+      inflight_state->cv.SignalAll();
+    }
+    {
+      absl::MutexLock lock(&lazy_source_mr_inflight_mu_);
+      auto it = lazy_source_mr_inflight_.find(tensor.get());
+      if (it != lazy_source_mr_inflight_.end() && it->second == inflight_state) {
+        lazy_source_mr_inflight_.erase(it);
+      }
+    }
+    maybe_run_lazy_source_mr_test_hook(static_cast<int>(LazySourceMrTestEvent::kOwnerCompleted), tensor_key, rail_id);
+  };
+
+  if (tensor->get_dev_by_rail(rail_id) == nullptr) {
+    tensor->add_dev(dev);
+    result.add_dev_fallback = true;
+  }
+  if (!tensor->is_registered(dev)) {
+    const auto reg_status = dev->reg_async(tensor);
+    if (reg_status != misc::SUCCESS) {
+      owner_status =
+          absl::InternalError(absl::StrCat("failed to lazily register source tensor MR on ", dev->get_name()));
+      return owner_status;
+    }
+    result.reg_async_issued = true;
+  }
+  tensor->wait_mr_ready(dev);
+  if (!tensor->has_registered_mr(dev)) {
+    owner_status = absl::InternalError(
+        absl::StrCat("lazy source tensor MR unavailable on ", dev->get_name(), " after registration"));
+    return owner_status;
+  }
+  return result;
 }
 
 absl::Status Communicator::activate_stable_local_backing(
@@ -4694,13 +5321,6 @@ misc::result_t Communicator::on_receive_request(
     const tcp_transport_t& t,
     const engine_message_t& msg) {
   static std::atomic<int> server_requests_received(0);
-  auto send_read_plan_failed = [&](uint64_t request_id, uint32_t reason) {
-    auto rsp = EngineMessage::make_message<ProtoReadPlanFailed>(ENGINE_OP_READ_PLAN_FAILED);
-    auto* payload = rsp->get_payload<ProtoReadPlanFailed>();
-    payload->request_id = request_id;
-    payload->reason = reason;
-    return t->send(rsp);
-  };
 
   switch (msg->get_op()) {
     case ENGINE_OP_RDMA_CONNECT_REQUEST: {
@@ -4853,299 +5473,31 @@ misc::result_t Communicator::on_receive_request(
       if (msg->get_payload_size() < expected_size) {
         LOG(WARNING) << "READ_PLAN_REQUEST payload truncated: expected=" << expected_size
                      << " actual=" << msg->get_payload_size();
-        send_read_plan_failed(req->request_id, TENSORCAST_READ_FAILED_MEM_MISMATCH);
+        send_read_plan_failed_response(t, req->request_id, TENSORCAST_READ_FAILED_MEM_MISMATCH);
         break;
       }
       if (!enable_rdma_ || req->transport_type != ENGINE_TRANSPORT_RDMA) {
-        send_read_plan_failed(req->request_id, TENSORCAST_READ_FAILED_MEM_MISMATCH);
+        send_read_plan_failed_response(t, req->request_id, TENSORCAST_READ_FAILED_MEM_MISMATCH);
         break;
       }
       auto flow_state = channel->flow_state();
       if (!flow_state) {
-        send_read_plan_failed(req->request_id, TENSORCAST_READ_FAILED_MEM_MISMATCH);
+        send_read_plan_failed_response(t, req->request_id, TENSORCAST_READ_FAILED_MEM_MISMATCH);
         break;
       }
 
       auto* source_payload = reinterpret_cast<ProtoReadPlanSourceSlice*>(
           reinterpret_cast<uint8_t*>(req) + sizeof(ProtoReadPlanRequestHeader));
-      auto read_guards = std::make_shared<std::vector<std::shared_ptr<void>>>();
-      auto session = std::make_shared<RdmaReadSession>();
-      session->mode = RdmaReadSession::Mode::kReadPlan;
-      session->plan_request = *req;
-      session->request_key = transport::get_read_plan_request_key(req->request_id);
-      session->control_transport = t;
-      session->source_stage_profile = std::make_shared<RdmaSourceStageProfile>();
-
-      struct PlannedSourceSlice {
-        uint32_t source_slice_index = 0;
-        std::string tensor_key;
-        uint64_t remote_offset = 0;
-        uint64_t bytes = 0;
-        std::shared_ptr<PartitionTensor> tensor;
-        std::shared_ptr<MemoryStager> stager;
-        net_dev_t dev;
-        v1::RdmaConfig::StagedRdmaBackend staged_backend = v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED;
-        bool direct_eligible = false;
-        ibv_mr* direct_mr = nullptr;
-      };
-
-      std::vector<PlannedSourceSlice> resolved_slices;
-      resolved_slices.reserve(req->num_source_slices);
-      uint64_t total_bytes = 0;
-      bool failed = false;
-      absl::Status failure_status = absl::OkStatus();
-
-      for (uint32_t index = 0; index < req->num_source_slices; ++index) {
-        const auto& source = source_payload[index];
-        const std::string tensor_key = reinterpret_cast<const char*>(source.tensor_key);
-        auto tensor = store_.get_tensor(tensor_key);
-        if (tensor == nullptr) {
-          failed = true;
-          failure_status = absl::NotFoundError(absl::StrCat("read_plan tensor not found: ", tensor_key));
-          break;
-        }
-        if (source.remote_offset > tensor->get_bytes() || source.bytes > tensor->get_bytes() - source.remote_offset) {
-          failed = true;
-          failure_status = absl::OutOfRangeError(absl::StrCat("read_plan slice out of range: ", tensor_key));
-          break;
-        }
-        auto read_guard_or = acquire_tensor_read_lease(tensor_key);
-        if (!read_guard_or.ok()) {
-          failed = true;
-          failure_status = read_guard_or.status();
-          break;
-        }
-        read_guards->push_back(*read_guard_or);
-
-        tensor->wait_read_ready();
-        auto dev = req->rail_id >= 0 ? tensor->get_dev_by_rail(req->rail_id) : nullptr;
-        if (dev == nullptr) {
-          // The requester encodes its own local rail in READ_PLAN_REQUEST.
-          // Source-side tensors must keep their local preferred NIC; otherwise
-          // routed read-plan becomes stricter than legacy READ_REQUEST and
-          // spuriously falls back to scalar reads when rail ids differ across
-          // hosts.
-          dev = tensor->get_dev();
-          if (dev != nullptr && req->rail_id >= 0) {
-            VLOG(2) << "READ_PLAN_REQUEST rail fallback tensor=" << tensor_key << " requested_rail=" << req->rail_id
-                    << " selected_rail=" << dev->get_rail_id() << " nic=" << dev->get_name();
-          }
-        }
-        const bool tensor_on_cpu = tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU;
-        if (tensor_on_cpu && session->dev != nullptr &&
-            (dev == nullptr || session->dev->get_name() != dev->get_name() ||
-             session->dev->get_rail_id() != dev->get_rail_id())) {
-          VLOG(2) << "READ_PLAN_REQUEST cpu source rebinding tensor=" << tensor_key
-                  << " selected_rail=" << (dev != nullptr ? dev->get_rail_id() : -1)
-                  << " selected_nic=" << (dev != nullptr ? dev->get_name() : "<none>")
-                  << " session_rail=" << session->dev->get_rail_id() << " session_nic=" << session->dev->get_name();
-          dev = session->dev;
-        }
-        if (dev == nullptr) {
-          failed = true;
-          failure_status =
-              absl::FailedPreconditionError(absl::StrCat("read_plan tensor missing RDMA device: ", tensor_key));
-          break;
-        }
-        if (session->dev == nullptr) {
-          session->dev = dev;
-        } else if (session->dev->get_name() != dev->get_name() || session->dev->get_rail_id() != dev->get_rail_id()) {
-          failed = true;
-          failure_status =
-              absl::FailedPreconditionError("read_plan source slices must resolve to one RDMA device/rail");
-          break;
-        }
-
-        const int device_id = tensor->get_device_id();
-        std::shared_ptr<MemoryStager> stager;
-        if (tensor_on_cpu) {
-          stager = get_cpu_stager_for_nic(dev->get_name());
-        } else if (use_gpu_vram_staging_) {
-          stager = get_gpu_vram_stager_for_id(device_id);
-        } else {
-          stager = get_gpu_mem_stager_for_id(device_id);
-        }
-        if (!stager) {
-          if (tensor_on_cpu) {
-            stager = memory_stager_;
-          } else if (use_gpu_vram_staging_) {
-            stager = get_gpu_mem_stager_for_id(device_id);
-            if (!stager) {
-              stager = gpu_memory_stager_;
-            }
-          } else {
-            stager = gpu_memory_stager_;
-          }
-        }
-
-        const bool direct_requested = tensor->direct_rdma_enabled();
-        bool direct_eligible = false;
-        ibv_mr* direct_mr = nullptr;
-        DirectFallbackReason fallback_reason = DirectFallbackReason::kNone;
-        if (direct_requested) {
-          const bool direct_mem_supported = tensor_on_cpu || tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_GPU;
-          if (!direct_mem_supported) {
-            fallback_reason = DirectFallbackReason::kNotGpu;
-          } else if (tensor->needs_staging()) {
-            fallback_reason = DirectFallbackReason::kNeedsStaging;
-          } else {
-            if (tensor_on_cpu) {
-              auto ensure_status = ensure_tensor_registered_on_dev(tensor, dev);
-              if (!ensure_status.ok()) {
-                fallback_reason = DirectFallbackReason::kMrUnavailable;
-              } else {
-                direct_mr = tensor->get_mr(dev);
-                direct_eligible = direct_mr != nullptr && tensor->has_registered_mr(dev);
-                if (!direct_eligible) {
-                  fallback_reason = DirectFallbackReason::kMrUnavailable;
-                }
-              }
-            } else {
-              tensor->wait_mr_ready(dev);
-              direct_mr = tensor->get_mr(dev);
-              if (direct_mr == nullptr || !tensor->has_registered_mr(dev)) {
-                fallback_reason = DirectFallbackReason::kMrUnavailable;
-              } else {
-                direct_eligible = true;
-              }
-            }
-          }
-          if (!direct_eligible && tensor->direct_rdma_required()) {
-            failed = true;
-            failure_status = absl::FailedPreconditionError(
-                absl::StrCat("read_plan direct RDMA required but unavailable: ", tensor_key));
-            break;
-          }
-          if (!direct_eligible && fallback_reason != DirectFallbackReason::kNone) {
-            record_direct_fallback_metric(fallback_reason);
-          }
-        }
-        if (!direct_eligible && !stager) {
-          failed = true;
-          failure_status = absl::FailedPreconditionError("no staging backend available for read_plan source slice");
-          break;
-        }
-
-        const bool using_gpu_vram_stager =
-            !tensor_on_cpu && use_gpu_vram_staging_ && stager && stager == get_gpu_vram_stager_for_id(device_id);
-        const v1::RdmaConfig::StagedRdmaBackend staged_backend = using_gpu_vram_stager
-            ? v1::RdmaConfig::STAGED_RDMA_BACKEND_GPU_VRAM
-            : v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED;
-        resolved_slices.push_back(
-            PlannedSourceSlice{
-                .source_slice_index = source.source_slice_index,
-                .tensor_key = tensor_key,
-                .remote_offset = source.remote_offset,
-                .bytes = source.bytes,
-                .tensor = tensor,
-                .stager = stager,
-                .dev = dev,
-                .staged_backend = staged_backend,
-                .direct_eligible = direct_eligible,
-                .direct_mr = direct_mr,
-            });
-        if (source.bytes > std::numeric_limits<uint64_t>::max() - total_bytes) {
-          failed = true;
-          failure_status = absl::InvalidArgumentError("read_plan source byte count overflow");
-          break;
-        }
-        total_bytes += source.bytes;
-      }
-
-      if (!failed) {
-        bool direct_source_response = !resolved_slices.empty();
-        uint64_t direct_source_segment_count = 0;
-        for (const auto& source : resolved_slices) {
-          if (source.tensor->get_mem_type() != COMMUNICATE_ENGINE_DEV_CPU || !source.direct_eligible) {
-            direct_source_response = false;
-            break;
-          }
-          const uint64_t chunk_size = compute_read_plan_direct_chunk_bytes(source.bytes);
-          const uint64_t source_segments = (source.bytes + chunk_size - 1) / chunk_size;
-          if (source_segments > std::numeric_limits<uint64_t>::max() - direct_source_segment_count) {
-            failed = true;
-            failure_status = absl::InvalidArgumentError("read_plan direct source segment count overflow");
-            break;
-          }
-          direct_source_segment_count += source_segments;
-        }
-        if (!failed) {
-          if (direct_source_response) {
-            session->direct_source_response = true;
-            session->read_plan_window_segment_limit =
-                compute_read_plan_direct_window_segment_limit(direct_source_segment_count);
-            session->direct_ledger =
-                std::make_unique<FlowCreditLedger>(static_cast<int>(session->read_plan_window_segment_limit));
-          }
-          FlowCreditLedger* plan_ledger =
-              session->direct_source_response ? session->direct_ledger.get() : &flow_state->ledger;
-          CHECK(plan_ledger != nullptr);
-          for (const auto& source : resolved_slices) {
-            const bool use_direct = session->direct_source_response
-                ? source.direct_eligible
-                : (source.tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_GPU && source.direct_eligible);
-            const uint64_t chunk_size = use_direct
-                ? (session->direct_source_response ? compute_read_plan_direct_chunk_bytes(source.bytes)
-                                                   : compute_direct_chunk_bytes(
-                                                         source.bytes,
-                                                         direct_rdma_chunk_bytes_,
-                                                         flow_state->max_window_segments,
-                                                         config_.rdma().qp_count()))
-                : (source.stager && source.stager->get_chunk_size() > 0 ? source.stager->get_chunk_size()
-                                                                        : source.bytes);
-            session->plan_source_slices.push_back(
-                RdmaReadPlanSourceSlice{
-                    .source_slice_index = source.source_slice_index,
-                    .tensor_key = source.tensor_key,
-                    .remote_offset = source.remote_offset,
-                    .bytes = source.bytes,
-                    .tensor = source.tensor,
-                    .stager = source.stager,
-                    .dev = source.dev,
-                    .stage_fn = MakeStageFunction(
-                        source.tensor,
-                        plan_ledger,
-                        source.stager,
-                        source.dev,
-                        meta_mr_cache_.get(),
-                        source.tensor_key,
-                        session->request_key,
-                        source.staged_backend,
-                        use_direct,
-                        source.direct_mr,
-                        session->source_stage_profile),
-                    .chunk_size = chunk_size,
-                    .zero_copy = use_direct,
-                });
-          }
-        }
-      }
-
-      if (failed) {
-        send_read_plan_failed(req->request_id, ReadFailedReasonFromStatus(failure_status));
-        LOG(WARNING) << "READ_PLAN_REQUEST rejected: " << failure_status;
+      auto task = std::make_shared<ReadPlanAdmissionTask>();
+      task->channel = channel;
+      task->control_transport = t;
+      task->request = *req;
+      task->source_slices.assign(source_payload, source_payload + req->num_source_slices);
+      task->ingress_received_at = std::chrono::steady_clock::now();
+      if (read_plan_admission_queue_.push(task, /*block=*/false) != SUCCESS) {
+        send_read_plan_failed_response(t, req->request_id, TENSORCAST_READ_FAILED_MEM_MISMATCH);
+        LOG(WARNING) << "READ_PLAN_REQUEST failed to enqueue admission request_id=" << req->request_id;
         break;
-      }
-
-      session->read_guard = read_guards;
-      const std::string peer = t ? t->get_remote_url() : std::string();
-      session->transfer_id = make_transfer_id(session->request_key, peer);
-      (void)register_source_transfer_progress(session->request_key, peer, "rdma", total_bytes, session->read_guard);
-
-      size_t pending_reads = 0;
-      {
-        absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
-        flow_state->rdma_pending_reads.push_back(session);
-        pending_reads = flow_state->rdma_pending_reads.size();
-      }
-      LOG(INFO) << "[rdma_plan_session] queued request=" << session->request_key
-                << " source_slices=" << session->plan_source_slices.size() << " pending_reads=" << pending_reads;
-
-      auto status = resume_rdma_reads(channel);
-      if (!status.ok()) {
-        finish_source_transfer_progress(session->transfer_id, status);
-        send_read_plan_failed(req->request_id, ReadFailedReasonFromStatus(status));
-        LOG(WARNING) << "READ_PLAN_REQUEST failed to resume session: " << status;
       }
       break;
     }

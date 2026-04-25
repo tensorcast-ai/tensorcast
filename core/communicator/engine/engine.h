@@ -4,6 +4,8 @@
 #define CORE_COMMUNICATOR_ENGINE_ENGINE_H_
 
 #include <atomic>
+#include <chrono>
+#include <functional>
 #include <memory>
 #include <queue>
 #include <string>
@@ -281,6 +283,16 @@ class Communicator {
 
   struct TensorReadLease;
   struct StableLocalBackingState;
+  struct LazySourceMrInflightState;
+
+  struct LazySourceMrEnsureResult {
+    bool fast_path_hit = false;
+    bool owner = false;
+    bool waiter = false;
+    bool add_dev_fallback = false;
+    bool reg_async_issued = false;
+    double gate_wait_ms = 0.0;
+  };
 
   struct TensorReadState {
     int inflight = 0;
@@ -305,6 +317,63 @@ class Communicator {
   void mtcp_staging_loop();
   void process_mtcp_read_task(MtcpReadTask task);
   void fail_mtcp_read_task(const MtcpReadTask& task, absl::Status status);
+
+  struct ReadPlanAdmissionTask {
+    channel_t channel;
+    transport::tcp_transport_t control_transport;
+    ProtoReadPlanRequestHeader request;
+    std::vector<ProtoReadPlanSourceSlice> source_slices;
+    std::chrono::steady_clock::time_point ingress_received_at = std::chrono::steady_clock::now();
+  };
+
+  struct ReadPlanExecutionTask {
+    enum class Kind {
+      kDirectSourceLane,
+      kLegacyStagedResume,
+    };
+
+    Kind kind = Kind::kDirectSourceLane;
+    channel_t channel;
+    std::shared_ptr<Channel::FlowState> flow_state;
+    std::shared_ptr<Channel::FlowState::DirectSourceLaneState> lane;
+    int16_t rail_id = -1;
+  };
+
+  misc::result_t send_read_plan_failed_response(
+      const transport::tcp_transport_t& control_transport,
+      uint64_t request_id,
+      uint32_t reason);
+  void read_plan_admission_loop();
+  void read_plan_execution_loop();
+  absl::StatusOr<std::shared_ptr<RdmaReadSession>> admit_read_plan_request(const ReadPlanAdmissionTask& task);
+  absl::Status schedule_read_plan_direct_source_lane(
+      const channel_t& channel,
+      const std::shared_ptr<RdmaReadSession>& session);
+  absl::Status schedule_read_plan_staged_session(
+      const channel_t& channel,
+      const std::shared_ptr<RdmaReadSession>& session);
+  void process_read_plan_direct_source_lane(
+      const std::shared_ptr<Channel::FlowState>& flow_state,
+      const std::shared_ptr<Channel::FlowState::DirectSourceLaneState>& lane,
+      int16_t rail_id);
+  void process_read_plan_staged_resume(const channel_t& channel);
+  absl::StatusOr<LazySourceMrEnsureResult> ensure_tensor_registered_on_dev(
+      const std::shared_ptr<transport::PartitionTensor>& tensor,
+      const transport::net_dev_t& dev);
+  uint32_t resolve_read_plan_admission_worker_count() const;
+  uint32_t resolve_read_plan_direct_source_worker_count() const;
+
+  enum class LazySourceMrTestEvent {
+    kFastPathHit,
+    kOwnerAcquired,
+    kOwnerCompleted,
+    kWaiterJoined,
+    kWaiterReleased,
+  };
+  using LazySourceMrTestHook =
+      std::function<void(LazySourceMrTestEvent event, std::string_view tensor_key, int16_t rail_id)>;
+  static void set_lazy_source_mr_test_hook_for_test(LazySourceMrTestHook hook);
+  static void clear_lazy_source_mr_test_hook_for_test();
 
   struct StableLocalPrewarmTask {
     std::weak_ptr<StableLocalBackingState> backing_state;
@@ -400,6 +469,9 @@ class Communicator {
   mutable absl::Mutex tensor_read_mu_;
   absl::flat_hash_map<std::string, std::unique_ptr<TensorReadState>> tensor_read_states_
       ABSL_GUARDED_BY(tensor_read_mu_);
+  mutable absl::Mutex lazy_source_mr_inflight_mu_;
+  absl::flat_hash_map<const transport::PartitionTensor*, std::shared_ptr<LazySourceMrInflightState>>
+      lazy_source_mr_inflight_ ABSL_GUARDED_BY(lazy_source_mr_inflight_mu_);
 
   // --- Simple NUMA mapping (Phase 3) ---
   // Mapping from NIC name -> CPU MemoryStager (pool per NUMA node)
@@ -422,6 +494,12 @@ class Communicator {
 
   misc::Queue<MtcpReadTask> mtcp_staging_queue_;
   std::thread mtcp_staging_thread_;
+  misc::Queue<std::shared_ptr<ReadPlanAdmissionTask>> read_plan_admission_queue_;
+  std::vector<std::thread> read_plan_admission_threads_;
+  misc::Queue<std::shared_ptr<ReadPlanExecutionTask>> read_plan_execution_queue_;
+  std::vector<std::thread> read_plan_execution_threads_;
+  uint32_t read_plan_admission_workers_ = 0;
+  uint32_t read_plan_direct_source_workers_ = 0;
   misc::Queue<StableLocalPrewarmTask> stable_local_prewarm_queue_;
   std::vector<std::thread> stable_local_prewarm_threads_;
   std::atomic<int> active_gpu_channels_{0};

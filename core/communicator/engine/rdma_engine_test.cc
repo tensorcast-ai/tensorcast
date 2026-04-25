@@ -9,6 +9,7 @@
 #include <array>
 #include <cerrno>
 #include <functional>
+#include <thread>
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
@@ -25,6 +26,9 @@ namespace tensorcast::communicator::engine {
 
 class CommunicatorTestPeer {
  public:
+  using LazySourceMrTestEvent = Communicator::LazySourceMrTestEvent;
+  using LazySourceMrTestHook = std::function<void(LazySourceMrTestEvent, std::string_view, int16_t)>;
+
   static auto& rdma_context(Communicator& communicator) {
     return communicator.rdma_context_;
   }
@@ -65,6 +69,8 @@ class CommunicatorTestPeer {
   static void stop_workers(Communicator& communicator) {
     communicator.stop_.store(true);
     communicator.request_queue_.stop();
+    communicator.read_plan_admission_queue_.stop();
+    communicator.read_plan_execution_queue_.stop();
     communicator.stable_local_prewarm_queue_.stop();
   }
 
@@ -103,6 +109,29 @@ class CommunicatorTestPeer {
       uint64_t request_id,
       std::string_view tensor_key) {
     return communicator.prepare_read_plan(plan, request_id, tensor_key);
+  }
+
+  static uint32_t read_plan_admission_workers(Communicator& communicator) {
+    return communicator.read_plan_admission_workers_;
+  }
+
+  static uint32_t read_plan_direct_source_workers(Communicator& communicator) {
+    return communicator.read_plan_direct_source_workers_;
+  }
+
+  static auto ensure_tensor_registered_on_dev(
+      Communicator& communicator,
+      const std::shared_ptr<transport::PartitionTensor>& tensor,
+      const transport::net_dev_t& dev) {
+    return communicator.ensure_tensor_registered_on_dev(tensor, dev);
+  }
+
+  static void set_lazy_source_mr_test_hook(LazySourceMrTestHook hook) {
+    communicator::engine::Communicator::set_lazy_source_mr_test_hook_for_test(std::move(hook));
+  }
+
+  static void clear_lazy_source_mr_test_hook() {
+    communicator::engine::Communicator::clear_lazy_source_mr_test_hook_for_test();
   }
 };
 
@@ -155,6 +184,22 @@ class ScopedPostSendHook {
 
   ScopedPostSendHook(const ScopedPostSendHook&) = delete;
   ScopedPostSendHook& operator=(const ScopedPostSendHook&) = delete;
+};
+
+class ScopedLazySourceMrHook {
+ public:
+  explicit ScopedLazySourceMrHook(
+      std::function<void(communicator::engine::CommunicatorTestPeer::LazySourceMrTestEvent, std::string_view, int16_t)>
+          hook) {
+    communicator::engine::CommunicatorTestPeer::set_lazy_source_mr_test_hook(std::move(hook));
+  }
+
+  ~ScopedLazySourceMrHook() {
+    communicator::engine::CommunicatorTestPeer::clear_lazy_source_mr_test_hook();
+  }
+
+  ScopedLazySourceMrHook(const ScopedLazySourceMrHook&) = delete;
+  ScopedLazySourceMrHook& operator=(const ScopedLazySourceMrHook&) = delete;
 };
 
 class DummyAckStager : public communicator::engine::MemoryStager {
@@ -1148,6 +1193,57 @@ TEST_CASE("READ_PLAN_REQUEST missing tensor sends READ_PLAN_FAILED", "[rdma][com
   CommunicatorTestPeer::stop_workers(server);
 }
 
+TEST_CASE("read-plan worker auto sizing follows communicator defaults", "[rdma][communicator][read_plan][config]") {
+  {
+    auto cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/false);
+    auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+        cfg.stager().buffers_per_flow(),
+        cfg.transport().tcp_conn_count(),
+        /*gpu_slice_bytes=*/(16ULL << 20),
+        /*cpu_slice_bytes=*/(4ULL << 20),
+        /*enable_rdma=*/false);
+    Communicator communicator(cfg, std::move(pools), /*channel_expire_sec=*/0);
+    REQUIRE(CommunicatorTestPeer::read_plan_admission_workers(communicator) == 1);
+    REQUIRE(CommunicatorTestPeer::read_plan_direct_source_workers(communicator) == 1);
+    CommunicatorTestPeer::stop_workers(communicator);
+  }
+
+  {
+    auto cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
+    auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+        cfg.stager().buffers_per_flow(),
+        cfg.transport().tcp_conn_count(),
+        /*gpu_slice_bytes=*/(16ULL << 20),
+        /*cpu_slice_bytes=*/(4ULL << 20),
+        /*enable_rdma=*/true);
+    Communicator communicator(cfg, std::move(pools), /*channel_expire_sec=*/0);
+    const size_t visible_rail_count = CommunicatorTestPeer::rdma_context(communicator)->list_devs().size();
+    REQUIRE(
+        CommunicatorTestPeer::read_plan_admission_workers(communicator) ==
+        static_cast<uint32_t>(std::min<size_t>(4, std::max<size_t>(2, visible_rail_count))));
+    REQUIRE(
+        CommunicatorTestPeer::read_plan_direct_source_workers(communicator) ==
+        static_cast<uint32_t>(std::min<size_t>(4, std::max<size_t>(1, visible_rail_count))));
+    CommunicatorTestPeer::stop_workers(communicator);
+  }
+}
+
+TEST_CASE("read-plan worker knobs honor explicit configuration", "[rdma][communicator][read_plan][config]") {
+  auto cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
+  cfg.mutable_rdma()->set_read_plan_admission_workers(3);
+  cfg.mutable_rdma()->set_read_plan_direct_source_workers(4);
+  auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+      cfg.stager().buffers_per_flow(),
+      cfg.transport().tcp_conn_count(),
+      /*gpu_slice_bytes=*/(16ULL << 20),
+      /*cpu_slice_bytes=*/(4ULL << 20),
+      /*enable_rdma=*/true);
+  Communicator communicator(cfg, std::move(pools), /*channel_expire_sec=*/0);
+  REQUIRE(CommunicatorTestPeer::read_plan_admission_workers(communicator) == 3);
+  REQUIRE(CommunicatorTestPeer::read_plan_direct_source_workers(communicator) == 4);
+  CommunicatorTestPeer::stop_workers(communicator);
+}
+
 TEST_CASE(
     "READ_PLAN_REQUEST reuses one session rail for CPU source slices with different preferred rails",
     "[rdma][communicator][read_plan]") {
@@ -1585,6 +1681,324 @@ TEST_CASE(
   (void)server.unregister_tensor(first_key);
   (void)server.unregister_tensor(second_key);
   ::close(sv[1]);
+  CommunicatorTestPeer::stop_workers(server);
+}
+
+TEST_CASE(
+    "CPU direct-source lazy MR gate coalesces same-tensor concurrent admissions",
+    "[rdma][communicator][read_plan]") {
+  using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU;
+
+  auto cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
+  auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+      cfg.stager().buffers_per_flow(),
+      cfg.transport().tcp_conn_count(),
+      /*gpu_slice_bytes=*/(16ULL << 20),
+      /*cpu_slice_bytes=*/(4ULL << 20),
+      /*enable_rdma=*/true);
+  Communicator server(cfg, std::move(pools), /*channel_expire_sec=*/0);
+  if (!CommunicatorTestPeer::has_rdma_device(server)) {
+    CommunicatorTestPeer::stop_workers(server);
+    SUCCEED("Skipping same-tensor lazy-MR gate test: no RDMA net devices available");
+    return;
+  }
+
+  auto net_dev =
+      CommunicatorTestPeer::rdma_context(server)->get_best_dev(COMMUNICATE_ENGINE_DEV_CPU, -1, -1, "lazy-gate-same");
+  REQUIRE(net_dev != nullptr);
+
+  std::array<uint8_t, 64> buffer{};
+  auto tensor = std::make_shared<tensorcast::communicator::transport::PartitionTensor>(
+      "lazy-gate-same-tensor",
+      reinterpret_cast<uint64_t>(buffer.data()),
+      static_cast<uint64_t>(buffer.size()),
+      COMMUNICATE_ENGINE_DEV_CPU,
+      net_dev);
+
+  absl::Mutex gate_mu;
+  absl::CondVar gate_cv;
+  bool owner_entered = false;
+  bool waiter_joined = false;
+  bool release_owner = false;
+  int owner_count = 0;
+  int waiter_count = 0;
+
+  ScopedLazySourceMrHook hook([&](communicator::engine::CommunicatorTestPeer::LazySourceMrTestEvent event,
+                                  std::string_view tensor_key,
+                                  int16_t rail_id) {
+    if (tensor_key != "lazy-gate-same-tensor" || rail_id != net_dev->get_rail_id()) {
+      return;
+    }
+    absl::MutexLock lock(&gate_mu);
+    if (event == communicator::engine::CommunicatorTestPeer::LazySourceMrTestEvent::kOwnerAcquired) {
+      owner_entered = true;
+      ++owner_count;
+      gate_cv.SignalAll();
+      while (!release_owner) {
+        gate_cv.Wait(&gate_mu);
+      }
+      return;
+    }
+    if (event == communicator::engine::CommunicatorTestPeer::LazySourceMrTestEvent::kWaiterJoined) {
+      waiter_joined = true;
+      ++waiter_count;
+      gate_cv.SignalAll();
+    }
+  });
+
+  absl::Status status_owner;
+  absl::Status status_waiter;
+  bool owner_role = false;
+  bool owner_fast_path = false;
+  bool owner_waiter_role = false;
+  bool waiter_role = false;
+  bool waiter_fast_path = false;
+  bool waiter_owner_role = false;
+
+  std::thread owner_thread([&]() {
+    auto ensure_or = CommunicatorTestPeer::ensure_tensor_registered_on_dev(server, tensor, net_dev);
+    status_owner = ensure_or.status();
+    if (!ensure_or.ok()) {
+      return;
+    }
+    owner_role = ensure_or->owner;
+    owner_fast_path = ensure_or->fast_path_hit;
+    owner_waiter_role = ensure_or->waiter;
+  });
+
+  {
+    absl::MutexLock lock(&gate_mu);
+    while (!owner_entered) {
+      gate_cv.Wait(&gate_mu);
+    }
+  }
+
+  std::thread waiter_thread([&]() {
+    auto ensure_or = CommunicatorTestPeer::ensure_tensor_registered_on_dev(server, tensor, net_dev);
+    status_waiter = ensure_or.status();
+    if (!ensure_or.ok()) {
+      return;
+    }
+    waiter_role = ensure_or->waiter;
+    waiter_fast_path = ensure_or->fast_path_hit;
+    waiter_owner_role = ensure_or->owner;
+  });
+
+  {
+    absl::MutexLock lock(&gate_mu);
+    while (!waiter_joined) {
+      gate_cv.Wait(&gate_mu);
+    }
+    release_owner = true;
+    gate_cv.SignalAll();
+  }
+
+  owner_thread.join();
+  waiter_thread.join();
+
+  REQUIRE(status_owner.ok());
+  REQUIRE(status_waiter.ok());
+  REQUIRE(owner_role);
+  REQUIRE_FALSE(owner_fast_path);
+  REQUIRE_FALSE(owner_waiter_role);
+  REQUIRE(waiter_role);
+  REQUIRE_FALSE(waiter_fast_path);
+  REQUIRE_FALSE(waiter_owner_role);
+  REQUIRE(owner_count == 1);
+  REQUIRE(waiter_count == 1);
+  REQUIRE(tensor->has_registered_mr(net_dev));
+
+  CommunicatorTestPeer::stop_workers(server);
+}
+
+TEST_CASE(
+    "CPU direct-source lazy MR gate does not serialize different tensors behind one owner",
+    "[rdma][communicator][read_plan]") {
+  using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU;
+
+  auto cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
+  auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+      cfg.stager().buffers_per_flow(),
+      cfg.transport().tcp_conn_count(),
+      /*gpu_slice_bytes=*/(16ULL << 20),
+      /*cpu_slice_bytes=*/(4ULL << 20),
+      /*enable_rdma=*/true);
+  Communicator server(cfg, std::move(pools), /*channel_expire_sec=*/0);
+  if (!CommunicatorTestPeer::has_rdma_device(server)) {
+    CommunicatorTestPeer::stop_workers(server);
+    SUCCEED("Skipping cross-tensor lazy-MR gate test: no RDMA net devices available");
+    return;
+  }
+
+  auto net_dev = CommunicatorTestPeer::rdma_context(server)->get_best_dev(
+      COMMUNICATE_ENGINE_DEV_CPU, -1, -1, "lazy-gate-different");
+  REQUIRE(net_dev != nullptr);
+
+  std::array<uint8_t, 64> buffer_a{};
+  std::array<uint8_t, 64> buffer_b{};
+  auto tensor_a = std::make_shared<tensorcast::communicator::transport::PartitionTensor>(
+      "lazy-gate-tensor-a",
+      reinterpret_cast<uint64_t>(buffer_a.data()),
+      static_cast<uint64_t>(buffer_a.size()),
+      COMMUNICATE_ENGINE_DEV_CPU,
+      net_dev);
+  auto tensor_b = std::make_shared<tensorcast::communicator::transport::PartitionTensor>(
+      "lazy-gate-tensor-b",
+      reinterpret_cast<uint64_t>(buffer_b.data()),
+      static_cast<uint64_t>(buffer_b.size()),
+      COMMUNICATE_ENGINE_DEV_CPU,
+      net_dev);
+
+  absl::Mutex gate_mu;
+  absl::CondVar gate_cv;
+  bool tensor_a_owner_entered = false;
+  bool tensor_b_owner_entered = false;
+  bool release_tensor_a_owner = false;
+  int tensor_a_owner_count = 0;
+  int tensor_b_owner_count = 0;
+
+  ScopedLazySourceMrHook hook([&](communicator::engine::CommunicatorTestPeer::LazySourceMrTestEvent event,
+                                  std::string_view tensor_key,
+                                  int16_t rail_id) {
+    if (rail_id != net_dev->get_rail_id() ||
+        event != communicator::engine::CommunicatorTestPeer::LazySourceMrTestEvent::kOwnerAcquired) {
+      return;
+    }
+    absl::MutexLock lock(&gate_mu);
+    if (tensor_key == "lazy-gate-tensor-a") {
+      tensor_a_owner_entered = true;
+      ++tensor_a_owner_count;
+      gate_cv.SignalAll();
+      while (!release_tensor_a_owner) {
+        gate_cv.Wait(&gate_mu);
+      }
+      return;
+    }
+    if (tensor_key == "lazy-gate-tensor-b") {
+      tensor_b_owner_entered = true;
+      ++tensor_b_owner_count;
+      gate_cv.SignalAll();
+    }
+  });
+
+  absl::Status status_a;
+  absl::Status status_b;
+  bool tensor_a_owner_role = false;
+  bool tensor_b_owner_role = false;
+  bool tensor_b_waiter_role = false;
+
+  std::thread thread_a([&]() {
+    auto ensure_or = CommunicatorTestPeer::ensure_tensor_registered_on_dev(server, tensor_a, net_dev);
+    status_a = ensure_or.status();
+    if (!ensure_or.ok()) {
+      return;
+    }
+    tensor_a_owner_role = ensure_or->owner;
+  });
+
+  {
+    absl::MutexLock lock(&gate_mu);
+    while (!tensor_a_owner_entered) {
+      gate_cv.Wait(&gate_mu);
+    }
+  }
+
+  std::thread thread_b([&]() {
+    auto ensure_or = CommunicatorTestPeer::ensure_tensor_registered_on_dev(server, tensor_b, net_dev);
+    status_b = ensure_or.status();
+    if (!ensure_or.ok()) {
+      return;
+    }
+    tensor_b_owner_role = ensure_or->owner;
+    tensor_b_waiter_role = ensure_or->waiter;
+  });
+
+  {
+    absl::MutexLock lock(&gate_mu);
+    while (!tensor_b_owner_entered) {
+      const bool timed_out = gate_cv.WaitWithTimeout(&gate_mu, absl::Seconds(2));
+      REQUIRE_FALSE(timed_out);
+    }
+    release_tensor_a_owner = true;
+    gate_cv.SignalAll();
+  }
+
+  thread_a.join();
+  thread_b.join();
+
+  REQUIRE(status_a.ok());
+  REQUIRE(status_b.ok());
+  REQUIRE(tensor_a_owner_role);
+  REQUIRE(tensor_b_owner_role);
+  REQUIRE_FALSE(tensor_b_waiter_role);
+  REQUIRE(tensor_a_owner_count == 1);
+  REQUIRE(tensor_b_owner_count == 1);
+  REQUIRE(tensor_a->has_registered_mr(net_dev));
+  REQUIRE(tensor_b->has_registered_mr(net_dev));
+
+  CommunicatorTestPeer::stop_workers(server);
+}
+
+TEST_CASE(
+    "CPU direct-source lazy MR gate bypasses coordination on MR-ready fast path",
+    "[rdma][communicator][read_plan]") {
+  using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU;
+
+  auto cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
+  auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+      cfg.stager().buffers_per_flow(),
+      cfg.transport().tcp_conn_count(),
+      /*gpu_slice_bytes=*/(16ULL << 20),
+      /*cpu_slice_bytes=*/(4ULL << 20),
+      /*enable_rdma=*/true);
+  Communicator server(cfg, std::move(pools), /*channel_expire_sec=*/0);
+  if (!CommunicatorTestPeer::has_rdma_device(server)) {
+    CommunicatorTestPeer::stop_workers(server);
+    SUCCEED("Skipping fast-path lazy-MR gate test: no RDMA net devices available");
+    return;
+  }
+
+  auto net_dev =
+      CommunicatorTestPeer::rdma_context(server)->get_best_dev(COMMUNICATE_ENGINE_DEV_CPU, -1, -1, "lazy-gate-fast");
+  REQUIRE(net_dev != nullptr);
+
+  std::array<uint8_t, 64> buffer{};
+  auto tensor = std::make_shared<tensorcast::communicator::transport::PartitionTensor>(
+      "lazy-gate-fast-tensor",
+      reinterpret_cast<uint64_t>(buffer.data()),
+      static_cast<uint64_t>(buffer.size()),
+      COMMUNICATE_ENGINE_DEV_CPU,
+      net_dev);
+  tensor->register_mr(net_dev.get());
+  REQUIRE(tensor->has_registered_mr(net_dev));
+
+  int fast_path_count = 0;
+  int owner_count = 0;
+  int waiter_count = 0;
+  ScopedLazySourceMrHook hook([&](communicator::engine::CommunicatorTestPeer::LazySourceMrTestEvent event,
+                                  std::string_view tensor_key,
+                                  int16_t rail_id) {
+    if (tensor_key != "lazy-gate-fast-tensor" || rail_id != net_dev->get_rail_id()) {
+      return;
+    }
+    if (event == communicator::engine::CommunicatorTestPeer::LazySourceMrTestEvent::kFastPathHit) {
+      ++fast_path_count;
+    } else if (event == communicator::engine::CommunicatorTestPeer::LazySourceMrTestEvent::kOwnerAcquired) {
+      ++owner_count;
+    } else if (event == communicator::engine::CommunicatorTestPeer::LazySourceMrTestEvent::kWaiterJoined) {
+      ++waiter_count;
+    }
+  });
+
+  auto ensure_or = CommunicatorTestPeer::ensure_tensor_registered_on_dev(server, tensor, net_dev);
+  REQUIRE(ensure_or.ok());
+  REQUIRE(ensure_or->fast_path_hit);
+  REQUIRE_FALSE(ensure_or->owner);
+  REQUIRE_FALSE(ensure_or->waiter);
+  REQUIRE(fast_path_count == 1);
+  REQUIRE(owner_count == 0);
+  REQUIRE(waiter_count == 0);
+
   CommunicatorTestPeer::stop_workers(server);
 }
 
