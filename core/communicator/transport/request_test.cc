@@ -1,5 +1,6 @@
 // Copyright (c) 2025-2026, TensorCast Team.
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <thread>
@@ -231,12 +232,14 @@ TEST_CASE("ReadRequest completion path is concurrency-safe", "[request][concurre
   {
     std::lock_guard<std::mutex> lock(ack_mu);
     REQUIRE(acks.size() == 2);
-    REQUIRE(std::get<0>(acks[0]) == 0);
-    REQUIRE(std::get<1>(acks[0]) == std::vector<uint64_t>({0, 64, 128, 192}));
-    REQUIRE_FALSE(std::get<2>(acks[0]));
-    REQUIRE(std::get<0>(acks[1]) == 1);
-    REQUIRE(std::get<1>(acks[1]) == std::vector<uint64_t>({256, 320, 384, 448}));
-    REQUIRE(std::get<2>(acks[1]));
+    const auto ack0 = std::find_if(acks.begin(), acks.end(), [](const auto& ack) { return std::get<0>(ack) == 0; });
+    const auto ack1 = std::find_if(acks.begin(), acks.end(), [](const auto& ack) { return std::get<0>(ack) == 1; });
+    REQUIRE(ack0 != acks.end());
+    REQUIRE(ack1 != acks.end());
+    REQUIRE(std::get<1>(*ack0) == std::vector<uint64_t>({0, 64, 128, 192}));
+    REQUIRE_FALSE(std::get<2>(*ack0));
+    REQUIRE(std::get<1>(*ack1) == std::vector<uint64_t>({256, 320, 384, 448}));
+    REQUIRE(std::get<2>(*ack1));
   }
 
   auto future = req.get_future();

@@ -6086,8 +6086,10 @@ misc::result_t Communicator::on_receive_response(
           read_request->set_mtcp_stage_unit_hint_bytes(static_cast<uint64_t>(hdr->credit_granted));
         }
         CHECK_WARN(transport->recv(read_request), "failed to recv via mtcp");
-        // Remove pending entry now; completion is tracked in request future
-        pending_requests_.del(req_key);
+        // The request completion callback also erases this entry. Keep the cleanup
+        // here idempotent because MTCP can complete quickly enough for set_result()
+        // to win the race and erase the pending entry first.
+        pending_requests_.erase_if_present(req_key);
       } else {
         LOG(ERROR) << "[on_receive_response] READ_RESPONSE_EX unsupported transport type";
         read_request->set_result(absl::InternalError("READ_RESPONSE_EX unsupported transport type"));
@@ -6188,7 +6190,7 @@ misc::result_t Communicator::on_receive_response(
         LOG(WARNING) << "failed to get read response: key=" << tensor_key;
         break;
       }
-      pending_requests_.del(req_key);
+      pending_requests_.erase_if_present(req_key);
       absl::Status failure_status = absl::InternalError("failed to read from peer");
       switch (rsp->reason) {
         case TENSORCAST_READ_FAILED_NO_TENSOR:
@@ -6219,7 +6221,7 @@ misc::result_t Communicator::on_receive_response(
         LOG(WARNING) << "failed to get read_plan response for request_id=" << rsp->request_id;
         break;
       }
-      pending_requests_.del(req_key);
+      pending_requests_.erase_if_present(req_key);
       absl::Status failure_status = absl::InternalError("failed to read plan from peer");
       switch (rsp->reason) {
         case TENSORCAST_READ_FAILED_NO_TENSOR:
