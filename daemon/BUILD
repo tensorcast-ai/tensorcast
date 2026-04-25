@@ -2534,6 +2534,22 @@ alias(
 )
 
 cc_test(
+    name = "byte_artifact_region_layout_host_shared_test",
+    srcs = ["service/byte_artifact_region_layout_host_shared_test.cc"],
+    deps = [
+        ":external_target_access_service_lib",
+        ":ipc_region_registry_lib",
+        ":materialization_target_storage_utils_lib",
+        "//core/store:communication_manager",
+        "//core/store:device_registry",
+        "//core/testing:test_helpers",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "materialize_into_target_validation_test",
     srcs = ["service/materialize_into_target_validation_test.cc"],
     data = [":cuda_ipc_helper"],

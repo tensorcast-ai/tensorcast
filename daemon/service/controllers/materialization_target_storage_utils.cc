@@ -5,9 +5,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <utility>
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "core/communicator/base/constants.h"
 #include "core/cuda/cuda_api.h"
@@ -22,6 +24,34 @@ struct ResolvedStorageSource {
   tensorcast::daemon::IpcRegionRegistry::MemoryKind memory_kind{
       tensorcast::daemon::IpcRegionRegistry::MemoryKind::kVram};
 };
+
+struct RegionReferenceKeepalive {
+  IpcRegionRegistry* registry{nullptr};
+  std::string region_id;
+
+  ~RegionReferenceKeepalive() {
+    if (registry == nullptr || region_id.empty()) {
+      return;
+    }
+    auto status = registry->release(region_id);
+    if (!status.ok()) {
+      LOG(WARNING) << "stable_local_backing.keepalive_release_failed"
+                   << " region_id=" << region_id << " status=" << status;
+    }
+  }
+};
+
+absl::StatusOr<std::shared_ptr<void>> acquire_stable_backing_keepalive(
+    IpcRegionRegistry& registry,
+    std::string_view region_id,
+    int owner_pid) {
+  auto desc_or = registry.acquire(std::string(region_id), owner_pid);
+  if (!desc_or.ok()) {
+    return desc_or.status();
+  }
+  return std::shared_ptr<void>(std::make_shared<RegionReferenceKeepalive>(
+      RegionReferenceKeepalive{.registry = &registry, .region_id = std::string(region_id)}));
+}
 
 absl::StatusOr<ResolvedStorageSource> resolve_storage_source(const v2::StorageEntry& storage) {
   switch (storage.storage_source_case()) {
@@ -98,7 +128,7 @@ absl::Status activate_stable_local_backings(
     if (!activated.insert(backing.backing_id).second) {
       continue;
     }
-    auto status = comm_manager.activate_stable_local_backing(backing, storage.keepalive);
+    auto status = comm_manager.activate_stable_local_backing(backing, storage.stable_backing_keepalive);
     if (!status.ok()) {
       return status;
     }
@@ -263,7 +293,12 @@ absl::StatusOr<TargetStorageLease> TargetStorageLease::acquire(
 
     void* region_base_ptr = static_cast<uint8_t*>(it->second.base_ptr) + storage.mapping_base_offset();
     std::optional<store::StableLocalBackingRef> stable_backing;
+    std::shared_ptr<void> stable_backing_keepalive;
     if (region_desc.memory_kind == IpcRegionRegistry::MemoryKind::kHostShared && region_desc.daemon_managed) {
+      auto stable_backing_keepalive_or = acquire_stable_backing_keepalive(registry, region_desc.region_id, owner_pid);
+      if (!stable_backing_keepalive_or.ok()) {
+        return stable_backing_keepalive_or.status();
+      }
       stable_backing = store::StableLocalBackingRef{
           .kind = store::StableLocalBackingKind::kHostSharedRegion,
           .backing_id = region_desc.region_id,
@@ -272,12 +307,14 @@ absl::StatusOr<TargetStorageLease> TargetStorageLease::acquire(
           .dev_type = communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
           .dev_id = 0,
       };
+      stable_backing_keepalive = std::move(*stable_backing_keepalive_or);
     }
     lease.storages_.push_back(
         store::loading::IntoTargetStorage{
             .base_ptr = gsl::not_null<void*>{region_base_ptr},
             .length = storage.storage_length(),
             .stable_backing = stable_backing,
+            .stable_backing_keepalive = stable_backing_keepalive,
             .keepalive = lease.shared_state_,
         });
   }

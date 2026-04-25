@@ -66,6 +66,10 @@ absl::StatusOr<ExternalTargetAccessService::ValidatedTargetAccess> ExternalTarge
   if (!device_or.ok()) {
     return device_or.status();
   }
+  auto host_region_class_status = validate_host_shared_target_region_classes(d_.regions, layout, rpc_name);
+  if (!host_region_class_status.ok()) {
+    return host_region_class_status;
+  }
 
   AcquireTargetStoragesError acquire_error = AcquireTargetStoragesError::kUnknown;
   auto storage_lease_or = TargetStorageLease::acquire(d_.regions, layout.storages(), owner_pid, &acquire_error);
@@ -78,10 +82,6 @@ absl::StatusOr<ExternalTargetAccessService::ValidatedTargetAccess> ExternalTarge
     if (!activate_status.ok()) {
       return activate_status;
     }
-  }
-  auto host_region_class_status = validate_host_shared_target_region_classes(d_.regions, layout, rpc_name);
-  if (!host_region_class_status.ok()) {
-    return host_region_class_status;
   }
 
   return ValidatedTargetAccess{

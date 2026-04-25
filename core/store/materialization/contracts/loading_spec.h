@@ -81,6 +81,7 @@ struct IntoTargetStorage {
   gsl::not_null<void*> base_ptr;
   uint64_t length{0};
   std::optional<StableLocalBackingRef> stable_backing;
+  std::shared_ptr<void> stable_backing_keepalive;
   std::shared_ptr<void> keepalive;
 };
 

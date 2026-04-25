@@ -63,6 +63,7 @@ class ByteArtifactRegionLayout {
     void* base_ptr{nullptr};
     int device_id{-1};
     std::optional<store::StableLocalBackingRef> stable_backing;
+    std::shared_ptr<void> stable_backing_keepalive;
     std::shared_ptr<void> keepalive;
   };
 

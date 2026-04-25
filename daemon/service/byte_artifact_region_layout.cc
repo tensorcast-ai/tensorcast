@@ -205,6 +205,8 @@ absl::StatusOr<ByteArtifactRegionLayout> ByteArtifactRegionLayout::acquire(
             .base_ptr = result.storage_lease_.storages().at(static_cast<std::size_t>(i)).base_ptr.get(),
             .device_id = storage.device_id(),
             .stable_backing = result.storage_lease_.storages().at(static_cast<std::size_t>(i)).stable_backing,
+            .stable_backing_keepalive =
+                result.storage_lease_.storages().at(static_cast<std::size_t>(i)).stable_backing_keepalive,
             .keepalive = result.storage_lease_.storages().at(static_cast<std::size_t>(i)).keepalive,
         });
     storage_indices.emplace(storage.storage_id(), static_cast<std::size_t>(i));
@@ -346,6 +348,7 @@ absl::StatusOr<store::loading::IntoTargetLayout> ByteArtifactRegionLayout::build
           .base_ptr = gsl::not_null<void*>{static_cast<std::uint8_t*>(storage.base_ptr) + range.storage_local_offset},
           .length = range.logical_length,
           .stable_backing = stable_backing,
+          .stable_backing_keepalive = storage.stable_backing_keepalive,
           .keepalive = storage.keepalive,
       });
   return layout;
@@ -395,7 +398,7 @@ absl::Status ByteArtifactRegionLayout::activate_stable_local_backings(
       }
       continue;
     }
-    auto status = comm_manager.activate_stable_local_backing(it->second, storage.keepalive);
+    auto status = comm_manager.activate_stable_local_backing(it->second, storage.stable_backing_keepalive);
     if (!status.ok()) {
       return status;
     }
