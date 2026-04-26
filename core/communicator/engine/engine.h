@@ -4,6 +4,8 @@
 #define CORE_COMMUNICATOR_ENGINE_ENGINE_H_
 
 #include <atomic>
+#include <chrono>
+#include <functional>
 #include <memory>
 #include <queue>
 #include <string>
@@ -22,6 +24,7 @@
 #include "core/communicator/transport/rdma_context.h"
 #include "core/communicator/transport/request.h"
 #include "core/communicator/transport/tcp_context.h"
+#include "core/store/materialization/contracts/stable_local_backing.h"
 
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/communicator/engine/channel.h"
@@ -32,6 +35,10 @@
 #include "core/communicator/engine/store.h"
 #include "tensorcast/communicator/v1/communicator_config.pb.h"
 
+namespace tensorcast::communicator::routing {
+struct ReadPlan;
+}
+
 namespace tensorcast::communicator::engine {
 
 class CommunicatorTestPeer;
@@ -39,6 +46,11 @@ class GpuVramStagingPool;
 
 class Communicator {
  public:
+  struct VisibleRdmaDeviceInfo {
+    std::string name;
+    int16_t rail_id = -1;
+  };
+
   struct PinnedStagingPools {
     // Host-pinned pool backing GPU-side staging (MTCP and staged RDMA).
     std::shared_ptr<common::memory::PinnedBufferPool> gpu_pool;
@@ -104,6 +116,24 @@ class Communicator {
       int dev_id,
       uint64_t remote_offset = 0);
 
+  transport::future_read_result_t read_plan(
+      const routing::ReadPlan& plan,
+      const std::string& dst_ip,
+      uint16_t dst_port);
+
+  absl::Status activate_stable_local_backing(
+      const tensorcast::store::StableLocalBackingRef& backing,
+      std::shared_ptr<void> keepalive = nullptr);
+
+  absl::Status deactivate_stable_local_backing(std::string_view backing_id);
+
+  // Test-only stable-backing introspection.
+  bool stable_local_backing_supported_for_test() const;
+  bool stable_local_backing_active_for_test(std::string_view backing_id) const;
+  size_t stable_local_backing_chunk_count_for_test(std::string_view backing_id, int16_t rail_id) const;
+  bool stable_local_backing_prewarm_complete_for_test(std::string_view backing_id) const;
+  bool wait_for_stable_local_backing_prewarm_for_test(std::string_view backing_id, absl::Duration timeout) const;
+
   /**
    * Register a partition tensor
    * @param tensor_key the unique tensor key
@@ -168,6 +198,12 @@ class Communicator {
   bool is_rdma_enabled() const {
     return enable_rdma_;
   }
+
+  const v1::CommunicatorConfig& config() const {
+    return config_;
+  }
+
+  std::vector<VisibleRdmaDeviceInfo> visible_rdma_devices() const;
 
   uint16_t listening_port() const;
 
@@ -240,8 +276,23 @@ class Communicator {
       std::shared_ptr<void> read_guard = nullptr);
   std::shared_ptr<TransferProgressState> lookup_source_transfer_progress(const std::string& transfer_id) const;
   void finish_source_transfer_progress(const std::string& transfer_id, const absl::Status& status);
+  absl::StatusOr<std::shared_ptr<transport::PreparedReadPlan>> prepare_read_plan(
+      const routing::ReadPlan& plan,
+      uint64_t request_id,
+      std::string_view tensor_key);
 
   struct TensorReadLease;
+  struct StableLocalBackingState;
+  struct LazySourceMrInflightState;
+
+  struct LazySourceMrEnsureResult {
+    bool fast_path_hit = false;
+    bool owner = false;
+    bool waiter = false;
+    bool add_dev_fallback = false;
+    bool reg_async_issued = false;
+    double gate_wait_ms = 0.0;
+  };
 
   struct TensorReadState {
     int inflight = 0;
@@ -266,6 +317,78 @@ class Communicator {
   void mtcp_staging_loop();
   void process_mtcp_read_task(MtcpReadTask task);
   void fail_mtcp_read_task(const MtcpReadTask& task, absl::Status status);
+
+  struct ReadPlanAdmissionTask {
+    channel_t channel;
+    transport::tcp_transport_t control_transport;
+    ProtoReadPlanRequestHeader request;
+    std::vector<ProtoReadPlanSourceSlice> source_slices;
+    std::chrono::steady_clock::time_point ingress_received_at = std::chrono::steady_clock::now();
+  };
+
+  struct ReadPlanExecutionTask {
+    enum class Kind {
+      kDirectSourceLane,
+      kLegacyStagedResume,
+    };
+
+    Kind kind = Kind::kDirectSourceLane;
+    channel_t channel;
+    std::shared_ptr<Channel::FlowState> flow_state;
+    std::shared_ptr<Channel::FlowState::DirectSourceLaneState> lane;
+    int16_t rail_id = -1;
+  };
+
+  misc::result_t send_read_plan_failed_response(
+      const transport::tcp_transport_t& control_transport,
+      uint64_t request_id,
+      uint32_t reason);
+  void read_plan_admission_loop();
+  void read_plan_execution_loop();
+  absl::StatusOr<std::shared_ptr<RdmaReadSession>> admit_read_plan_request(const ReadPlanAdmissionTask& task);
+  absl::Status schedule_read_plan_direct_source_lane(
+      const channel_t& channel,
+      const std::shared_ptr<RdmaReadSession>& session);
+  absl::Status schedule_read_plan_staged_session(
+      const channel_t& channel,
+      const std::shared_ptr<RdmaReadSession>& session);
+  void process_read_plan_direct_source_lane(
+      const std::shared_ptr<Channel::FlowState>& flow_state,
+      const std::shared_ptr<Channel::FlowState::DirectSourceLaneState>& lane,
+      int16_t rail_id);
+  void process_read_plan_staged_resume(const channel_t& channel);
+  absl::StatusOr<LazySourceMrEnsureResult> ensure_tensor_registered_on_dev(
+      const std::shared_ptr<transport::PartitionTensor>& tensor,
+      const transport::net_dev_t& dev);
+  uint32_t resolve_read_plan_admission_worker_count() const;
+  uint32_t resolve_read_plan_direct_source_worker_count() const;
+
+  enum class LazySourceMrTestEvent {
+    kFastPathHit,
+    kOwnerAcquired,
+    kOwnerCompleted,
+    kWaiterJoined,
+    kWaiterReleased,
+  };
+  using LazySourceMrTestHook =
+      std::function<void(LazySourceMrTestEvent event, std::string_view tensor_key, int16_t rail_id)>;
+  static void set_lazy_source_mr_test_hook_for_test(LazySourceMrTestHook hook);
+  static void clear_lazy_source_mr_test_hook_for_test();
+
+  struct StableLocalPrewarmTask {
+    std::weak_ptr<StableLocalBackingState> backing_state;
+    std::string backing_id;
+    transport::net_dev_t dev;
+    int16_t rail_id = -1;
+    uint64_t slot_bytes = 0;
+    uint32_t chunk_slots = 0;
+    uint64_t chunk_count = 0;
+  };
+
+  void stable_local_prewarm_loop();
+  void process_stable_local_prewarm_task(StableLocalPrewarmTask task);
+  absl::Status schedule_stable_local_backing_prewarm(const std::shared_ptr<StableLocalBackingState>& state);
+  std::vector<transport::net_dev_t> collect_primary_visible_rdma_rail_devs() const;
 
   struct GpuChannelLease;
   absl::StatusOr<std::shared_ptr<void>> acquire_gpu_channel_slot();
@@ -306,6 +429,9 @@ class Communicator {
   int buffers_per_flow_ = 4;
   uint32_t max_window_segments_ = 0;
   uint64_t direct_rdma_chunk_bytes_ = 0;
+  uint32_t stable_local_mr_reuse_chunk_slots_ = 1;
+  uint32_t stable_local_mr_reuse_prewarm_workers_ = 0;
+  bool stable_local_mr_reuse_async_prewarm_enabled_ = false;
 
   // Host-pinned GPU staging uses unified GPU MemoryStager only.
   std::shared_ptr<engine::MemoryStager> gpu_memory_stager_;
@@ -328,6 +454,9 @@ class Communicator {
 
   // MR cache for meta data on CPU
   std::unique_ptr<MrCache> meta_mr_cache_;
+  mutable absl::Mutex stable_local_backings_mu_;
+  absl::flat_hash_map<std::string, std::shared_ptr<StableLocalBackingState>> stable_local_backings_
+      ABSL_GUARDED_BY(stable_local_backings_mu_);
 
   // Serialize channel creation to avoid duplicate control connections to same peer
   mutable absl::Mutex create_channel_mu_;
@@ -340,6 +469,9 @@ class Communicator {
   mutable absl::Mutex tensor_read_mu_;
   absl::flat_hash_map<std::string, std::unique_ptr<TensorReadState>> tensor_read_states_
       ABSL_GUARDED_BY(tensor_read_mu_);
+  mutable absl::Mutex lazy_source_mr_inflight_mu_;
+  absl::flat_hash_map<const transport::PartitionTensor*, std::shared_ptr<LazySourceMrInflightState>>
+      lazy_source_mr_inflight_ ABSL_GUARDED_BY(lazy_source_mr_inflight_mu_);
 
   // --- Simple NUMA mapping (Phase 3) ---
   // Mapping from NIC name -> CPU MemoryStager (pool per NUMA node)
@@ -362,6 +494,14 @@ class Communicator {
 
   misc::Queue<MtcpReadTask> mtcp_staging_queue_;
   std::thread mtcp_staging_thread_;
+  misc::Queue<std::shared_ptr<ReadPlanAdmissionTask>> read_plan_admission_queue_;
+  std::vector<std::thread> read_plan_admission_threads_;
+  misc::Queue<std::shared_ptr<ReadPlanExecutionTask>> read_plan_execution_queue_;
+  std::vector<std::thread> read_plan_execution_threads_;
+  uint32_t read_plan_admission_workers_ = 0;
+  uint32_t read_plan_direct_source_workers_ = 0;
+  misc::Queue<StableLocalPrewarmTask> stable_local_prewarm_queue_;
+  std::vector<std::thread> stable_local_prewarm_threads_;
   std::atomic<int> active_gpu_channels_{0};
   int max_gpu_channels_ = 0;
   bool enforce_gpu_channel_limit_ = false;

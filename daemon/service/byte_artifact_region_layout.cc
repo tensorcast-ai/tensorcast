@@ -2,7 +2,9 @@
 
 #include "daemon/service/byte_artifact_region_layout.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -12,6 +14,7 @@
 #include "core/store/device_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/dataplane/sources/memory_source.h"
+#include "daemon/service/controllers/materialization_target_storage_utils.h"
 #include "gsl/pointers"
 
 namespace tensorcast::daemon {
@@ -177,11 +180,11 @@ absl::StatusOr<ByteArtifactRegionLayout> ByteArtifactRegionLayout::acquire(
     if (!storage_memory_kind_or.ok()) {
       return storage_memory_kind_or.status();
     }
+    auto region_id_or = resolve_storage_region_id(storage);
+    if (!region_id_or.ok()) {
+      return region_id_or.status();
+    }
     if (*storage_memory_kind_or == IpcRegionRegistry::MemoryKind::kHostShared) {
-      auto region_id_or = resolve_storage_region_id(storage);
-      if (!region_id_or.ok()) {
-        return region_id_or.status();
-      }
       auto region_desc_or = registry.describe(*region_id_or);
       if (!region_desc_or.ok()) {
         return region_desc_or.status();
@@ -195,13 +198,21 @@ absl::StatusOr<ByteArtifactRegionLayout> ByteArtifactRegionLayout::acquire(
     result.storages_.push_back(
         StorageRange{
             .storage_id = storage.storage_id(),
+            .region_id = *region_id_or,
             .logical_base = logical_cursor,
             .length = storage.storage_length(),
             .memory_kind = *storage_memory_kind_or,
             .base_ptr = result.storage_lease_.storages().at(static_cast<std::size_t>(i)).base_ptr.get(),
             .device_id = storage.device_id(),
+            .stable_backing = result.storage_lease_.storages().at(static_cast<std::size_t>(i)).stable_backing,
+            .stable_backing_keepalive =
+                result.storage_lease_.storages().at(static_cast<std::size_t>(i)).stable_backing_keepalive,
+            .keepalive = result.storage_lease_.storages().at(static_cast<std::size_t>(i)).keepalive,
         });
     storage_indices.emplace(storage.storage_id(), static_cast<std::size_t>(i));
+    if (storage.storage_length() > std::numeric_limits<std::uint64_t>::max() - logical_cursor) {
+      return absl::InvalidArgumentError("target_layout storage lengths overflow logical layout");
+    }
     logical_cursor += storage.storage_length();
   }
 
@@ -271,8 +282,11 @@ absl::StatusOr<ByteArtifactRegionLayout> ByteArtifactRegionLayout::acquire(
       return absl::InvalidArgumentError("target_layout.offset.logical_length does not match expected byte length");
     }
     const std::uint64_t storage_local_offset = entry.storage_offset() - storage.logical_base;
-    if (storage_local_offset + entry.logical_length() > storage.length) {
+    if (storage_local_offset > storage.length || entry.logical_length() > storage.length - storage_local_offset) {
       return absl::InvalidArgumentError("target_layout.offset exceeds storage bounds");
+    }
+    if (storage_local_offset > static_cast<std::uint64_t>(std::numeric_limits<std::ptrdiff_t>::max())) {
+      return absl::InvalidArgumentError("target_layout.offset exceeds pointer arithmetic limits");
     }
     auto [_, inserted] = result.items_.emplace(
         entry.name(),
@@ -323,12 +337,19 @@ absl::StatusOr<store::loading::IntoTargetLayout> ByteArtifactRegionLayout::build
   }
   const auto& range = it->second;
   const auto& storage = storages_.at(range.storage_index);
+  std::optional<store::StableLocalBackingRef> stable_backing = storage.stable_backing;
+  if (stable_backing.has_value() && range.slot_token.has_value() && range.logical_length > 0) {
+    stable_backing->slot_bytes = range.logical_length;
+  }
   store::loading::IntoTargetLayout layout;
   layout.total_size = range.logical_length;
   layout.storages.push_back(
       store::loading::IntoTargetStorage{
           .base_ptr = gsl::not_null<void*>{static_cast<std::uint8_t*>(storage.base_ptr) + range.storage_local_offset},
           .length = range.logical_length,
+          .stable_backing = stable_backing,
+          .stable_backing_keepalive = storage.stable_backing_keepalive,
+          .keepalive = storage.keepalive,
       });
   return layout;
 }
@@ -348,6 +369,41 @@ absl::StatusOr<std::shared_ptr<store::loader::SeekableSource>> ByteArtifactRegio
   }
   return std::shared_ptr<store::loader::SeekableSource>(std::make_shared<store::loader::GpuMemorySource>(
       gsl::not_null<void*>{item_base_ptr}, device_id_, range.logical_length));
+}
+
+absl::Status ByteArtifactRegionLayout::activate_stable_local_backings(
+    store::components::CommunicationManager& comm_manager) const {
+  if (!comm_manager.is_enabled()) {
+    return absl::OkStatus();
+  }
+
+  absl::flat_hash_map<std::string, store::StableLocalBackingRef> activated;
+  activated.reserve(items_.size());
+  for (const auto& [artifact_id, range] : items_) {
+    const auto& storage = storages_.at(range.storage_index);
+    if (!storage.stable_backing.has_value()) {
+      continue;
+    }
+    auto backing = *storage.stable_backing;
+    if (backing.backing_id.empty()) {
+      continue;
+    }
+    if (range.slot_token.has_value() && range.logical_length > 0) {
+      backing.slot_bytes = range.logical_length;
+    }
+    auto [it, inserted] = activated.emplace(backing.backing_id, backing);
+    if (!inserted) {
+      if (it->second.slot_bytes == 0 && backing.slot_bytes > 0) {
+        it->second.slot_bytes = backing.slot_bytes;
+      }
+      continue;
+    }
+    auto status = comm_manager.activate_stable_local_backing(it->second, storage.stable_backing_keepalive);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return absl::OkStatus();
 }
 
 } // namespace tensorcast::daemon

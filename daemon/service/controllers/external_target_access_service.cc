@@ -66,15 +66,22 @@ absl::StatusOr<ExternalTargetAccessService::ValidatedTargetAccess> ExternalTarge
   if (!device_or.ok()) {
     return device_or.status();
   }
+  auto host_region_class_status = validate_host_shared_target_region_classes(d_.regions, layout, rpc_name);
+  if (!host_region_class_status.ok()) {
+    return host_region_class_status;
+  }
 
   AcquireTargetStoragesError acquire_error = AcquireTargetStoragesError::kUnknown;
   auto storage_lease_or = TargetStorageLease::acquire(d_.regions, layout.storages(), owner_pid, &acquire_error);
   if (!storage_lease_or.ok()) {
     return storage_lease_or.status();
   }
-  auto host_region_class_status = validate_host_shared_target_region_classes(d_.regions, layout, rpc_name);
-  if (!host_region_class_status.ok()) {
-    return host_region_class_status;
+  if (d_.comm_manager != nullptr) {
+    auto activate_status =
+        materialization_target_storage::activate_stable_local_backings(*d_.comm_manager, storage_lease_or->storages());
+    if (!activate_status.ok()) {
+      return activate_status;
+    }
   }
 
   return ValidatedTargetAccess{
@@ -101,6 +108,12 @@ absl::StatusOr<ExternalTargetAccessService::ValidatedSourceAccess> ExternalTarge
   auto layout_or = ByteArtifactRegionLayout::acquire(d_.regions, layout, owner_pid, device_uuid, expected_lengths);
   if (!layout_or.ok()) {
     return layout_or.status();
+  }
+  if (d_.comm_manager != nullptr) {
+    auto activate_status = layout_or->activate_stable_local_backings(*d_.comm_manager);
+    if (!activate_status.ok()) {
+      return activate_status;
+    }
   }
   return ValidatedSourceAccess{.layout = std::move(*layout_or)};
 }

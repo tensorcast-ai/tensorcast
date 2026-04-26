@@ -884,6 +884,12 @@ int main(int argc, char** argv) {
         ms.has_enable_mapped_multirange_concat_jobs() ? ms.enable_mapped_multirange_concat_jobs() : true;
     strategy.sync_after_single_range_concat_job = ms.sync_after_single_range_concat_job();
     strategy.use_dedicated_single_range_concat_stream = ms.use_dedicated_single_range_concat_stream();
+    if (ms.direct_write_batch_bytes() > 0) {
+      strategy.direct_write_batch_bytes = ms.direct_write_batch_bytes();
+    }
+    if (ms.direct_write_batch_ops() > 0) {
+      strategy.direct_write_batch_ops = ms.direct_write_batch_ops();
+    }
     if (ms.owner_file_collective_peak_bytes_budget() > 0) {
       strategy.owner_file_collective_peak_bytes_budget = ms.owner_file_collective_peak_bytes_budget();
     }
@@ -1227,6 +1233,10 @@ int main(int argc, char** argv) {
         daemon_opts.byte_artifact_routing.payload_transport.host_memory_export_enabled =
             pt.host_memory_export_enabled();
       }
+      if (pt.has_segmented_communicator_export_enabled()) {
+        daemon_opts.byte_artifact_routing.payload_transport.segmented_communicator_export_enabled =
+            pt.segmented_communicator_export_enabled();
+      }
       if (pt.has_minimum_batch_transport_ttl()) {
         daemon_opts.byte_artifact_routing.payload_transport.minimum_batch_transport_ttl =
             duration_to_absl(pt.minimum_batch_transport_ttl());
@@ -1234,6 +1244,24 @@ int main(int argc, char** argv) {
       if (pt.has_transport_release_guard()) {
         daemon_opts.byte_artifact_routing.payload_transport.transport_release_guard =
             duration_to_absl(pt.transport_release_guard());
+      }
+      if (pt.has_source_publish_prereg()) {
+        const auto& prereg = pt.source_publish_prereg();
+        if (prereg.has_enabled()) {
+          daemon_opts.byte_artifact_routing.payload_transport.source_publish_prereg.enabled = prereg.enabled();
+        }
+        if (prereg.has_ttl()) {
+          daemon_opts.byte_artifact_routing.payload_transport.source_publish_prereg.ttl =
+              duration_to_absl(prereg.ttl());
+        }
+        if (prereg.max_live_entries() > 0) {
+          daemon_opts.byte_artifact_routing.payload_transport.source_publish_prereg.max_live_entries =
+              prereg.max_live_entries();
+        }
+        if (prereg.max_live_bytes() > 0) {
+          daemon_opts.byte_artifact_routing.payload_transport.source_publish_prereg.max_live_bytes =
+              prereg.max_live_bytes();
+        }
       }
     }
   }

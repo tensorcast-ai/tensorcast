@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -24,6 +25,14 @@ namespace tensorcast::communicator::engine {
 // [offset, bytes] region and releases it after memcpy completes.
 class HostPinnedCpuStager : public MemoryStager {
  public:
+  struct StageStats {
+    uint64_t requested_bytes = 0;
+    uint64_t pool_allocate_us = 0;
+    uint64_t lease_acquire_us = 0;
+    uint64_t memcpy_us = 0;
+    uint64_t total_us = 0;
+  };
+
   explicit HostPinnedCpuStager(
       gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> pool,
       size_t num_buffers_hint = 4);
@@ -75,14 +84,21 @@ class HostPinnedCpuStager : public MemoryStager {
     return pool_.get();
   }
 
+  [[nodiscard]] std::optional<StageStats> stage_stats_for_ptr(gsl::not_null<void*> exposed_ptr) const;
+
  private:
+  struct AllocationRecord {
+    std::vector<gsl::not_null<char*>> buffers;
+    StageStats stage_stats;
+  };
+
   gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> pool_;
   const size_t chunk_size_;
   const size_t num_buffers_hint_;
 
   // Track allocations so that we can deallocate correctly
   mutable absl::Mutex mu_;
-  std::unordered_map<void*, std::vector<gsl::not_null<char*>>> allocations_ ABSL_GUARDED_BY(mu_);
+  std::unordered_map<void*, AllocationRecord> allocations_ ABSL_GUARDED_BY(mu_);
 
   std::shared_ptr<LeaseProvider> lease_provider_;
 };

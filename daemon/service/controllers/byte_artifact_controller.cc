@@ -27,6 +27,7 @@
 #include "core/common/artifact_hash.h"
 #include "core/store/components/endpoint_id.h"
 #include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
+#include "core/store/materialization/dataplane/contracts/source.h"
 #include "core/store/materialization/dataplane/loaders/disk_loader.h"
 #include "core/store/runtime/ingestion/artifact_lowering_plan.h"
 #include "daemon/service/artifact_profile_registry.h"
@@ -216,12 +217,22 @@ class SeekableSourceLoader final : public store::IArtifactLoader {
         return source_->supports_direct_write_at();
       }
 
+      [[nodiscard]] bool supports_batched_direct_write_at() const override {
+        return source_->supports_batched_direct_write_at();
+      }
+
       absl::StatusOr<size_t> read_into_at(
           uint64_t src_offset,
           uint64_t dest_va_offset,
           size_t bytes,
           const store::DirectWriteGrant& grant) override {
         return source_->read_into_at(src_offset, dest_va_offset, bytes, grant);
+      }
+
+      absl::StatusOr<size_t> readv_into_at(
+          absl::Span<const store::loader::DirectWriteOp> ops,
+          const store::DirectWriteGrant& grant) override {
+        return source_->readv_into_at(ops, grant);
       }
 
      private:
@@ -296,6 +307,13 @@ struct BatchPayloadPackEntry {
   std::uint64_t backing_instance_generation{0};
   std::string digest_alg;
   std::string digest_hex;
+  absl::Time capability_expires_at{absl::InfiniteFuture()};
+};
+
+struct PlannedBatchPayload {
+  v2::BatchPayloadManifest manifest;
+  std::vector<std::size_t> source_indices;
+  std::vector<v2::BatchPayloadSlice> slices;
   absl::Time capability_expires_at{absl::InfiniteFuture()};
 };
 
@@ -539,11 +557,11 @@ absl::Duration peer_batch_transport_support_cache_ttl() {
   return absl::Seconds(30);
 }
 
-absl::StatusOr<std::vector<PackedBatchPayload>> pack_batch_payload_entries(
+absl::StatusOr<std::vector<PlannedBatchPayload>> plan_batch_payload_entries(
     const std::vector<BatchPayloadPackEntry>& entries,
     std::uint64_t max_payload_bytes,
     std::uint32_t max_items) {
-  std::vector<PackedBatchPayload> packs;
+  std::vector<PlannedBatchPayload> packs;
   if (entries.empty()) {
     return packs;
   }
@@ -554,13 +572,11 @@ absl::StatusOr<std::vector<PackedBatchPayload>> pack_batch_payload_entries(
     absl::Time capability_expires_at{absl::InfiniteFuture()};
   };
 
-  const auto flush_pack = [&](const PendingPack& pending) -> absl::StatusOr<PackedBatchPayload> {
-    PackedBatchPayload packed;
+  const auto flush_pack = [&](const PendingPack& pending) -> absl::StatusOr<PlannedBatchPayload> {
+    PlannedBatchPayload packed;
     packed.source_indices = pending.entry_indices;
     packed.capability_expires_at = pending.capability_expires_at;
 
-    std::string slab;
-    slab.resize(static_cast<std::size_t>(pending.total_bytes));
     std::uint64_t offset = 0;
     for (const auto entry_index : pending.entry_indices) {
       const auto& entry = entries[entry_index];
@@ -580,15 +596,9 @@ absl::StatusOr<std::vector<PackedBatchPayload>> pack_batch_payload_entries(
       slice.set_offset(offset);
       slice.set_length(entry.payload_size_bytes);
       packed.slices.push_back(std::move(slice));
-
-      auto fill_status = fill_batch_payload_pack_entry(entry, slab.data() + static_cast<std::size_t>(offset));
-      if (!fill_status.ok()) {
-        return fill_status;
-      }
       offset += entry.payload_size_bytes;
     }
     packed.manifest.set_total_size(offset);
-    packed.payload = std::make_shared<const std::string>(std::move(slab));
     return packed;
   };
 
@@ -629,6 +639,105 @@ absl::StatusOr<std::vector<PackedBatchPayload>> pack_batch_payload_entries(
     packs.push_back(std::move(*packed_or));
   }
   return packs;
+}
+
+absl::StatusOr<std::shared_ptr<const std::string>> realize_staged_batch_payload(
+    const std::vector<BatchPayloadPackEntry>& entries,
+    const PlannedBatchPayload& plan) {
+  if (plan.manifest.total_size() == 0) {
+    return absl::InvalidArgumentError("planned batch payload must be non-empty");
+  }
+  if (plan.manifest.total_size() > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    return absl::OutOfRangeError("planned batch payload exceeds host memory limits");
+  }
+  auto slab = std::make_shared<std::string>();
+  slab->resize(static_cast<std::size_t>(plan.manifest.total_size()));
+  std::uint64_t offset = 0;
+  for (const auto entry_index : plan.source_indices) {
+    const auto& entry = entries[entry_index];
+    auto fill_status = fill_batch_payload_pack_entry(entry, slab->data() + static_cast<std::size_t>(offset));
+    if (!fill_status.ok()) {
+      return fill_status;
+    }
+    offset += entry.payload_size_bytes;
+  }
+  if (offset != plan.manifest.total_size()) {
+    return absl::FailedPreconditionError("planned batch payload realization size mismatch");
+  }
+  return std::shared_ptr<const std::string>(std::move(slab));
+}
+
+absl::StatusOr<std::vector<PackedBatchPayload>> pack_batch_payload_entries(
+    const std::vector<BatchPayloadPackEntry>& entries,
+    std::uint64_t max_payload_bytes,
+    std::uint32_t max_items) {
+  auto plans_or = plan_batch_payload_entries(entries, max_payload_bytes, max_items);
+  if (!plans_or.ok()) {
+    return plans_or.status();
+  }
+  std::vector<PackedBatchPayload> packs;
+  packs.reserve(plans_or->size());
+  for (const auto& plan : *plans_or) {
+    auto payload_or = realize_staged_batch_payload(entries, plan);
+    if (!payload_or.ok()) {
+      return payload_or.status();
+    }
+    packs.push_back(
+        PackedBatchPayload{
+            .manifest = plan.manifest,
+            .payload = std::move(*payload_or),
+            .source_indices = plan.source_indices,
+            .slices = plan.slices,
+            .capability_expires_at = plan.capability_expires_at,
+        });
+  }
+  return packs;
+}
+
+absl::StatusOr<std::vector<PayloadTransportBroker::BatchCommunicatorSourceSegment>>
+acquire_segmented_batch_payload_source_segments(
+    const std::vector<BatchPayloadPackEntry>& entries,
+    const PlannedBatchPayload& plan) {
+  std::vector<PayloadTransportBroker::BatchCommunicatorSourceSegment> source_segments;
+  source_segments.reserve(plan.source_indices.size());
+  for (std::size_t plan_index = 0; plan_index < plan.source_indices.size(); ++plan_index) {
+    const auto entry_index = plan.source_indices[plan_index];
+    const auto& entry = entries[entry_index];
+    auto validate_status = validate_batch_payload_pack_entry(entry);
+    if (!validate_status.ok()) {
+      return validate_status;
+    }
+    if (!entry.body_handle.has_value() || !entry.body_descriptor.has_value()) {
+      return absl::FailedPreconditionError("segmented batch communicator source requires retained bodies");
+    }
+    auto export_view_or = entry.body_handle->acquire_export_view(
+        BodyExportRequest{
+            .preferred_location = common::memory::MemoryLocation::CPU,
+            .require_remote_source = true,
+            .allow_segmented_export = true,
+        });
+    if (!export_view_or.ok()) {
+      return export_view_or.status();
+    }
+    if (!export_view_or->communicator_export.has_value()) {
+      return absl::FailedPreconditionError("segmented batch communicator source requires communicator export");
+    }
+    std::uint64_t exported_bytes = 0;
+    for (const auto buffer_size : export_view_or->communicator_export->buffer_sizes) {
+      if (buffer_size > static_cast<size_t>(std::numeric_limits<std::uint64_t>::max() - exported_bytes)) {
+        return absl::OutOfRangeError("segmented batch communicator source exceeds uint64 range");
+      }
+      exported_bytes += static_cast<std::uint64_t>(buffer_size);
+    }
+    if (exported_bytes != entry.payload_size_bytes || exported_bytes != plan.slices[plan_index].length()) {
+      return absl::FailedPreconditionError("segmented batch communicator source size mismatch");
+    }
+    source_segments.push_back(
+        PayloadTransportBroker::BatchCommunicatorSourceSegment{
+            .export_view = std::move(*export_view_or),
+        });
+  }
+  return source_segments;
 }
 
 absl::StatusOr<LoaderSourceResolution> open_loader_from_resolved_source_capability(
@@ -712,6 +821,8 @@ ByteArtifactController::PeerBatchTransportSupport ByteArtifactController::local_
       .grpc_chunk_ref_enabled = d_.payload_transport_broker.batch_transport_enabled(),
       .communicator_source_enabled = d_.payload_transport_broker.batch_transport_communicator_enabled(),
       .host_memory_export_enabled = d_.payload_transport_broker.batch_transport_communicator_enabled(),
+      .segmented_communicator_export_enabled =
+          d_.payload_transport_broker.batch_transport_segmented_communicator_export_enabled(),
   };
 }
 
@@ -788,6 +899,8 @@ ByteArtifactController::PeerBatchTransportSupport ByteArtifactController::resolv
         support.grpc_chunk_ref_enabled = config_resp.batch_payload_grpc_chunk_ref_enabled();
         support.communicator_source_enabled = config_resp.batch_payload_communicator_source_enabled();
         support.host_memory_export_enabled = config_resp.batch_payload_host_memory_export_enabled();
+        support.segmented_communicator_export_enabled =
+            config_resp.batch_payload_segmented_communicator_export_enabled();
       }
     }
 
@@ -800,6 +913,61 @@ ByteArtifactController::PeerBatchTransportSupport ByteArtifactController::resolv
     }
     return support;
   }
+}
+
+void ByteArtifactController::publish_preregistered_export(
+    std::string_view artifact_id,
+    const BodyHandle& body_handle,
+    absl::Time now) {
+  if (!options_.publish_prereg.enabled || options_.publish_prereg.ttl <= absl::ZeroDuration()) {
+    return;
+  }
+  auto comm_manager = d_.engine.get_shared_comm_manager();
+  if (!comm_manager->is_enabled() || !comm_manager->get_engine().is_rdma_enabled()) {
+    return;
+  }
+  if (body_handle.empty()) {
+    VLOG(2) << "byte_artifact.publish_prereg.skip"
+            << " artifact_id=" << artifact_id << " published_at_ms=" << absl::ToUnixMillis(now)
+            << " reason=empty_handle";
+    return;
+  }
+  if (body_handle.location() != common::memory::MemoryLocation::CPU) {
+    VLOG(2) << "byte_artifact.publish_prereg.skip"
+            << " artifact_id=" << artifact_id << " published_at_ms=" << absl::ToUnixMillis(now)
+            << " location=" << static_cast<int>(body_handle.location());
+    return;
+  }
+
+  const absl::Time acquire_started_at = absl::Now();
+  auto export_view_or = body_handle.acquire_export_view(
+      BodyExportRequest{
+          .preferred_location = common::memory::MemoryLocation::CPU,
+          .require_remote_source = true,
+          .allow_segmented_export = true,
+      });
+  const absl::Duration acquire_elapsed = absl::Now() - acquire_started_at;
+  if (!export_view_or.ok()) {
+    VLOG(2) << "byte_artifact.publish_prereg.acquire_failed"
+            << " artifact_id=" << artifact_id << " acquire_ms=" << absl::ToDoubleMilliseconds(acquire_elapsed)
+            << " error=" << export_view_or.status();
+    return;
+  }
+  const absl::Status pin_status = body_handle.pin_export_keepalive(
+      common::memory::MemoryLocation::CPU, export_view_or->keepalive, now + options_.publish_prereg.ttl);
+  if (!pin_status.ok()) {
+    VLOG(2) << "byte_artifact.publish_prereg.pin_failed"
+            << " artifact_id=" << artifact_id << " acquire_ms=" << absl::ToDoubleMilliseconds(acquire_elapsed)
+            << " error=" << pin_status;
+    return;
+  }
+  const std::size_t export_key_count = export_view_or->communicator_export.has_value()
+      ? export_view_or->communicator_export->remote_memory_keys.size()
+      : 0;
+  VLOG(2) << "byte_artifact.publish_prereg.result"
+          << " artifact_id=" << artifact_id << " acquire_ms=" << absl::ToDoubleMilliseconds(acquire_elapsed)
+          << " export_key_count=" << export_key_count
+          << " expires_in_ms=" << absl::ToDoubleMilliseconds(options_.publish_prereg.ttl) << " pinned=true";
 }
 
 void ByteArtifactController::reconcile_policy_visibility(
@@ -978,8 +1146,11 @@ grpc::Status ByteArtifactController::home_batch_exists(
     RpcContext& rctx,
     const v2::HomeBatchExistsRequest& req,
     v2::HomeBatchExistsResponse& resp) {
+  const absl::Time total_started_at = absl::Now();
   const absl::Time now = absl::Now();
+  const absl::Time ensure_home_lease_started_at = absl::Now();
   auto home_lease_or = d_.route_resolver.ensure_home_lease(req.fence(), now);
+  const absl::Duration ensure_home_lease_elapsed = absl::Now() - ensure_home_lease_started_at;
   if (!home_lease_or.ok()) {
     return to_grpc_status(home_lease_or.status());
   }
@@ -1007,10 +1178,22 @@ grpc::Status ByteArtifactController::home_batch_exists(
       .shard_count = options_.routing.shard_count,
       .now = now,
   };
+  const absl::Time reconcile_started_at = absl::Now();
   reconcile_policy_visibility(artifact_ids, authority_context);
-  for (auto outcome : authority_service_.batch_exists(artifact_ids, authority_context)) {
+  const absl::Duration reconcile_elapsed = absl::Now() - reconcile_started_at;
+  const absl::Time authority_started_at = absl::Now();
+  auto outcomes = authority_service_.batch_exists(artifact_ids, authority_context);
+  const absl::Duration authority_elapsed = absl::Now() - authority_started_at;
+  for (auto outcome : outcomes) {
     *resp.add_outcomes() = std::move(outcome);
   }
+  VLOG(2) << "byte_artifact.home_batch_exists_timing_summary"
+          << " shard_id=" << req.fence().shard_id() << " requested_artifacts=" << req.artifact_ids_size()
+          << " first_artifact_id=" << (req.artifact_ids_size() == 0 ? "" : req.artifact_ids(0))
+          << " ensure_home_lease_ms=" << absl::ToDoubleMilliseconds(ensure_home_lease_elapsed)
+          << " reconcile_policy_ms=" << absl::ToDoubleMilliseconds(reconcile_elapsed)
+          << " authority_batch_exists_ms=" << absl::ToDoubleMilliseconds(authority_elapsed)
+          << " total_ms=" << absl::ToDoubleMilliseconds(absl::Now() - total_started_at);
   rctx.mark_success();
   return Status::OK;
 }
@@ -1024,24 +1207,38 @@ grpc::Status ByteArtifactController::home_batch_get(
   const std::string& local_daemon_id = d_.route_resolver.local_daemon_id();
 
   struct HomeBatchGetTimingStats {
+    absl::Duration ensure_home_lease_elapsed{absl::ZeroDuration()};
+    absl::Duration reconcile_policy_elapsed{absl::ZeroDuration()};
     absl::Duration requester_config_elapsed{absl::ZeroDuration()};
     bool requester_config_cache_hit{false};
     absl::Duration authority_batch_get_elapsed{absl::ZeroDuration()};
+    absl::Duration candidate_build_elapsed{absl::ZeroDuration()};
+    absl::Duration requester_entry_lookup_elapsed{absl::ZeroDuration()};
+    absl::Duration producer_entry_lookup_elapsed{absl::ZeroDuration()};
     absl::Duration policy_restore_elapsed{absl::ZeroDuration()};
     absl::Duration payload_read_elapsed{absl::ZeroDuration()};
     absl::Duration payload_ref_issue_elapsed{absl::ZeroDuration()};
     absl::Duration pack_build_elapsed{absl::ZeroDuration()};
+    absl::Duration staged_pack_realization_elapsed{absl::ZeroDuration()};
     absl::Duration communicator_export_elapsed{absl::ZeroDuration()};
     absl::Duration batch_payload_ref_issue_elapsed{absl::ZeroDuration()};
+    absl::Duration transport_response_emit_elapsed{absl::ZeroDuration()};
+    absl::Duration response_shape_elapsed{absl::ZeroDuration()};
     std::size_t payload_read_count{0};
     std::uint64_t payload_read_bytes{0};
     std::size_t batch_candidate_count{0};
     std::uint64_t batch_candidate_bytes{0};
     std::size_t pack_count{0};
     std::uint64_t pack_bytes{0};
+    std::size_t segmented_pack_count{0};
+    std::uint64_t segmented_pack_bytes{0};
+    std::size_t staged_pack_count{0};
+    std::uint64_t staged_pack_bytes{0};
   } timing_stats;
 
+  const absl::Time home_batch_get_ensure_home_lease_started_at = absl::Now();
   auto home_lease_or = d_.route_resolver.ensure_home_lease(req.fence(), now);
+  timing_stats.ensure_home_lease_elapsed += absl::Now() - home_batch_get_ensure_home_lease_started_at;
   if (!home_lease_or.ok()) {
     return to_grpc_status(home_lease_or.status());
   }
@@ -1069,7 +1266,9 @@ grpc::Status ByteArtifactController::home_batch_get(
       .shard_count = options_.routing.shard_count,
       .now = now,
   };
+  const absl::Time home_batch_get_reconcile_policy_started_at = absl::Now();
   reconcile_policy_visibility(artifact_ids, authority_context);
+  timing_stats.reconcile_policy_elapsed += absl::Now() - home_batch_get_reconcile_policy_started_at;
   const std::string_view operation_id =
       req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view("");
   const bool batch_transport_enabled = d_.payload_transport_broker.batch_transport_enabled();
@@ -1094,6 +1293,7 @@ grpc::Status ByteArtifactController::home_batch_get(
   const absl::Time authority_batch_get_started_at = absl::Now();
   auto authority_results = authority_service_.batch_get(artifact_ids, authority_context);
   timing_stats.authority_batch_get_elapsed += absl::Now() - authority_batch_get_started_at;
+  const absl::Time candidate_build_started_at = absl::Now();
   for (auto& result : authority_results) {
     auto* item = resp.add_items();
     const int item_index = resp.items_size() - 1;
@@ -1243,6 +1443,7 @@ grpc::Status ByteArtifactController::home_batch_get(
     *item = make_home_get_item(
         result.artifact_id, v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, "resolved source capability is not readable");
   }
+  timing_stats.candidate_build_elapsed += absl::Now() - candidate_build_started_at;
 
   if (!batch_candidates.empty()) {
     std::vector<BatchPayloadPackEntry> pack_entries;
@@ -1251,7 +1452,7 @@ grpc::Status ByteArtifactController::home_batch_get(
       pack_entries.push_back(candidate.pack_entry);
     }
     const absl::Time pack_build_started_at = absl::Now();
-    auto packs_or = pack_batch_payload_entries(
+    auto packs_or = plan_batch_payload_entries(
         pack_entries,
         d_.payload_transport_broker.max_batch_payload_bytes(),
         d_.payload_transport_broker.max_batch_items());
@@ -1268,40 +1469,111 @@ grpc::Status ByteArtifactController::home_batch_get(
         timing_stats.pack_bytes += pack.manifest.total_size();
         const bool use_communicator_transport = requester_batch_transport_support.supports_v2() &&
             d_.payload_transport_broker.batch_transport_communicator_enabled();
+        std::optional<WorkerDirectoryCache::Entry> producer_entry;
+        if (use_communicator_transport) {
+          const absl::Time producer_entry_lookup_started_at = absl::Now();
+          auto producer_entry_or = d_.worker_directory_cache.resolve_daemon_entry(
+              local_daemon_id, now, absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
+          timing_stats.producer_entry_lookup_elapsed += absl::Now() - producer_entry_lookup_started_at;
+          if (producer_entry_or.ok() && producer_entry_or->p2p_port != 0) {
+            producer_entry = *producer_entry_or;
+          }
+        }
+        const bool emit_communicator_source = producer_entry.has_value();
+        const bool use_segmented_communicator_transport = emit_communicator_source &&
+            requester_batch_transport_support.supports_segmented_communicator_export() &&
+            d_.payload_transport_broker.batch_transport_segmented_communicator_export_enabled();
         absl::Status transport_issue_status;
         std::optional<std::string> batch_payload_ref;
         std::optional<store::ExportRegistration> communicator_export;
-        if (use_communicator_transport) {
+        std::string pack_realization_mode;
+        std::shared_ptr<const std::string> staged_payload;
+        const auto ensure_staged_payload = [&]() -> absl::StatusOr<std::shared_ptr<const std::string>> {
+          if (staged_payload) {
+            return staged_payload;
+          }
+          const absl::Time staged_pack_started_at = absl::Now();
+          auto staged_payload_or = realize_staged_batch_payload(pack_entries, pack);
+          timing_stats.staged_pack_realization_elapsed += absl::Now() - staged_pack_started_at;
+          if (!staged_payload_or.ok()) {
+            return staged_payload_or.status();
+          }
+          staged_payload = *staged_payload_or;
+          ++timing_stats.staged_pack_count;
+          timing_stats.staged_pack_bytes += pack.manifest.total_size();
+          return staged_payload;
+        };
+        if (use_segmented_communicator_transport) {
           const absl::Time communicator_export_started_at = absl::Now();
-          auto communicator_export_or = d_.payload_transport_broker.issue_batch_payload_communicator_export(
-              pack.manifest,
-              pack.payload,
-              tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
-              operation_id,
-              pack.capability_expires_at,
-              req.has_requester_daemon_id() ? std::string_view(req.requester_daemon_id()) : std::string_view(""));
-          timing_stats.communicator_export_elapsed += absl::Now() - communicator_export_started_at;
-          if (communicator_export_or.ok()) {
-            batch_payload_ref = communicator_export_or->batch_payload_ref;
-            communicator_export = communicator_export_or->export_registration;
+          auto source_segments_or = acquire_segmented_batch_payload_source_segments(pack_entries, pack);
+          if (source_segments_or.ok()) {
+            auto communicator_export_or = d_.payload_transport_broker.issue_batch_payload_communicator_export(
+                pack.manifest,
+                absl::MakeSpan(*source_segments_or),
+                tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+                operation_id,
+                pack.capability_expires_at,
+                req.has_requester_daemon_id() ? std::string_view(req.requester_daemon_id()) : std::string_view(""));
+            timing_stats.communicator_export_elapsed += absl::Now() - communicator_export_started_at;
+            if (communicator_export_or.ok()) {
+              batch_payload_ref = communicator_export_or->batch_payload_ref;
+              communicator_export = communicator_export_or->export_registration;
+              pack_realization_mode = "segmented_communicator_export";
+              ++timing_stats.segmented_pack_count;
+              timing_stats.segmented_pack_bytes += pack.manifest.total_size();
+            } else {
+              transport_issue_status = communicator_export_or.status();
+            }
           } else {
-            transport_issue_status = communicator_export_or.status();
+            timing_stats.communicator_export_elapsed += absl::Now() - communicator_export_started_at;
+            transport_issue_status = source_segments_or.status();
+          }
+        }
+        if (emit_communicator_source && !batch_payload_ref.has_value()) {
+          auto staged_payload_or = ensure_staged_payload();
+          if (!staged_payload_or.ok()) {
+            transport_issue_status = staged_payload_or.status();
+          } else {
+            const absl::Time communicator_export_started_at = absl::Now();
+            auto communicator_export_or = d_.payload_transport_broker.issue_batch_payload_communicator_export(
+                pack.manifest,
+                *staged_payload_or,
+                tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+                operation_id,
+                pack.capability_expires_at,
+                req.has_requester_daemon_id() ? std::string_view(req.requester_daemon_id()) : std::string_view(""));
+            timing_stats.communicator_export_elapsed += absl::Now() - communicator_export_started_at;
+            if (communicator_export_or.ok()) {
+              batch_payload_ref = communicator_export_or->batch_payload_ref;
+              communicator_export = communicator_export_or->export_registration;
+              pack_realization_mode = "staged_slab";
+            } else {
+              transport_issue_status = communicator_export_or.status();
+            }
           }
         }
         if (!batch_payload_ref.has_value()) {
-          const absl::Time batch_payload_ref_issue_started_at = absl::Now();
-          auto batch_payload_ref_or = d_.payload_transport_broker.issue_batch_payload_ref(
-              pack.manifest,
-              pack.payload,
-              tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
-              operation_id,
-              pack.capability_expires_at,
-              req.has_requester_daemon_id() ? std::string_view(req.requester_daemon_id()) : std::string_view(""));
-          timing_stats.batch_payload_ref_issue_elapsed += absl::Now() - batch_payload_ref_issue_started_at;
-          if (batch_payload_ref_or.ok()) {
-            batch_payload_ref = *batch_payload_ref_or;
+          auto staged_payload_or = ensure_staged_payload();
+          if (!staged_payload_or.ok()) {
+            transport_issue_status = staged_payload_or.status();
           } else {
-            transport_issue_status = batch_payload_ref_or.status();
+            const absl::Time batch_payload_ref_issue_started_at = absl::Now();
+            auto batch_payload_ref_or = d_.payload_transport_broker.issue_batch_payload_ref(
+                pack.manifest,
+                *staged_payload_or,
+                tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+                operation_id,
+                pack.capability_expires_at,
+                req.has_requester_daemon_id() ? std::string_view(req.requester_daemon_id()) : std::string_view(""));
+            timing_stats.batch_payload_ref_issue_elapsed += absl::Now() - batch_payload_ref_issue_started_at;
+            if (batch_payload_ref_or.ok()) {
+              batch_payload_ref = *batch_payload_ref_or;
+              if (pack_realization_mode.empty()) {
+                pack_realization_mode = "staged_slab";
+              }
+            } else {
+              transport_issue_status = batch_payload_ref_or.status();
+            }
           }
         }
         if (!batch_payload_ref.has_value()) {
@@ -1326,43 +1598,42 @@ grpc::Status ByteArtifactController::home_batch_get(
           }
           continue;
         }
+        LOG(INFO) << "byte_artifact.home_batch_get_pack_realization"
+                  << " operation_id=" << operation_id
+                  << " requester_daemon_id=" << (req.has_requester_daemon_id() ? req.requester_daemon_id() : "")
+                  << " mode=" << pack_realization_mode << " item_count=" << pack.source_indices.size()
+                  << " payload_bytes=" << pack.manifest.total_size()
+                  << " communicator_transport=" << (emit_communicator_source && communicator_export.has_value());
 
         auto* transport = resp.add_batch_transports();
         const std::string transport_id = absl::StrCat("batch-transport-", resp.batch_transports_size());
+        const absl::Time transport_response_emit_started_at = absl::Now();
         transport->set_transport_id(transport_id);
         transport->mutable_manifest()->CopyFrom(pack.manifest);
-        if (use_communicator_transport && communicator_export.has_value()) {
-          auto producer_entry_or = d_.worker_directory_cache.resolve_daemon_entry(
-              local_daemon_id, now, absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
-          if (producer_entry_or.ok() && producer_entry_or->p2p_port != 0) {
-            auto* communicator_source = transport->mutable_communicator_source();
-            communicator_source->set_batch_payload_ref(*batch_payload_ref);
-            communicator_source->set_protocol_version(d_.payload_transport_broker.batch_transport_protocol_version());
-            communicator_source->set_producer_daemon_id(local_daemon_id);
-            if (req.has_requester_daemon_id()) {
-              communicator_source->set_consumer_daemon_id(req.requester_daemon_id());
-            }
-            communicator_source->set_producer_host(producer_entry_or->node_address);
-            communicator_source->set_producer_port(producer_entry_or->p2p_port);
-            for (const auto& remote_memory_key : communicator_export->remote_memory_keys) {
-              communicator_source->add_remote_memory_keys(remote_memory_key);
-            }
-            for (const auto buffer_size : communicator_export->buffer_sizes) {
-              communicator_source->add_buffer_sizes(buffer_size);
-            }
-            if (!producer_entry_or->node_id.empty()) {
-              communicator_source->set_remote_endpoint_id(
-                  store::components::derive_endpoint_id(
-                      producer_entry_or->node_id, common::memory::MemoryLocation::CPU, /*device_id=*/0));
-            }
-            communicator_source->set_memory_location(v2::BATCH_PAYLOAD_MEMORY_LOCATION_HOST);
-            communicator_source->set_total_payload_bytes(pack.manifest.total_size());
-            ++communicator_transport_count;
-          } else {
-            auto* grpc_chunk_ref = transport->mutable_grpc_chunk_ref();
-            grpc_chunk_ref->set_batch_payload_ref(*batch_payload_ref);
-            grpc_chunk_ref->set_protocol_version(1);
+        if (emit_communicator_source && communicator_export.has_value()) {
+          auto* communicator_source = transport->mutable_communicator_source();
+          communicator_source->set_batch_payload_ref(*batch_payload_ref);
+          communicator_source->set_protocol_version(d_.payload_transport_broker.batch_transport_protocol_version());
+          communicator_source->set_producer_daemon_id(local_daemon_id);
+          if (req.has_requester_daemon_id()) {
+            communicator_source->set_consumer_daemon_id(req.requester_daemon_id());
           }
+          communicator_source->set_producer_host(producer_entry->node_address);
+          communicator_source->set_producer_port(producer_entry->p2p_port);
+          for (const auto& remote_memory_key : communicator_export->remote_memory_keys) {
+            communicator_source->add_remote_memory_keys(remote_memory_key);
+          }
+          for (const auto buffer_size : communicator_export->buffer_sizes) {
+            communicator_source->add_buffer_sizes(buffer_size);
+          }
+          if (!producer_entry->node_id.empty()) {
+            communicator_source->set_remote_endpoint_id(
+                store::components::derive_endpoint_id(
+                    producer_entry->node_id, common::memory::MemoryLocation::CPU, /*device_id=*/0));
+          }
+          communicator_source->set_memory_location(v2::BATCH_PAYLOAD_MEMORY_LOCATION_HOST);
+          communicator_source->set_total_payload_bytes(pack.manifest.total_size());
+          ++communicator_transport_count;
         } else {
           auto* grpc_chunk_ref = transport->mutable_grpc_chunk_ref();
           grpc_chunk_ref->set_batch_payload_ref(*batch_payload_ref);
@@ -1380,16 +1651,21 @@ grpc::Status ByteArtifactController::home_batch_get(
           slice.set_transport_id(transport_id);
           resp.mutable_items(candidate.item_index)->mutable_batch_payload_slice()->CopyFrom(slice);
         }
+        timing_stats.transport_response_emit_elapsed += absl::Now() - transport_response_emit_started_at;
       }
       if (transport_count != 0) {
         VLOG(2) << "byte_artifact.home_batch_get_batch_transport_summary"
                 << " operation_id=" << operation_id << " transport_count=" << transport_count
-                << " communicator_transport_count=" << communicator_transport_count << " item_count=" << transport_items
+                << " communicator_transport_count=" << communicator_transport_count
+                << " segmented_pack_count=" << timing_stats.segmented_pack_count
+                << " staged_pack_count=" << timing_stats.staged_pack_count << " item_count=" << transport_items
                 << " payload_bytes=" << transport_bytes;
       }
     }
   }
+  const absl::Time response_shape_started_at = absl::Now();
   const auto response_shape = inspect_home_batch_get_response_shape(resp);
+  timing_stats.response_shape_elapsed += absl::Now() - response_shape_started_at;
   LOG(INFO) << "byte_artifact.home_batch_get_response_shape"
             << " operation_id=" << operation_id
             << " requester_daemon_id=" << (req.has_requester_daemon_id() ? req.requester_daemon_id() : "")
@@ -1402,24 +1678,44 @@ grpc::Status ByteArtifactController::home_batch_get(
             << " batch_slice_items=" << response_shape.batch_slice_items << " transports=" << response_shape.transports
             << " communicator_transports=" << response_shape.communicator_transports
             << " grpc_chunk_transports=" << response_shape.grpc_chunk_transports;
-  VLOG(2) << "byte_artifact.home_batch_get_timing_summary"
-          << " operation_id=" << operation_id << " shard_id=" << req.fence().shard_id()
-          << " requested_artifacts=" << req.artifact_ids_size()
-          << " batch_candidates=" << timing_stats.batch_candidate_count
-          << " batch_candidate_bytes=" << timing_stats.batch_candidate_bytes
-          << " payload_read_count=" << timing_stats.payload_read_count
-          << " payload_read_bytes=" << timing_stats.payload_read_bytes << " pack_count=" << timing_stats.pack_count
-          << " pack_bytes=" << timing_stats.pack_bytes
-          << " requester_config_ms=" << absl::ToDoubleMilliseconds(timing_stats.requester_config_elapsed)
-          << " requester_config_cache_hit=" << timing_stats.requester_config_cache_hit
-          << " authority_batch_get_ms=" << absl::ToDoubleMilliseconds(timing_stats.authority_batch_get_elapsed)
-          << " policy_restore_ms=" << absl::ToDoubleMilliseconds(timing_stats.policy_restore_elapsed)
-          << " payload_read_ms=" << absl::ToDoubleMilliseconds(timing_stats.payload_read_elapsed)
-          << " payload_ref_issue_ms=" << absl::ToDoubleMilliseconds(timing_stats.payload_ref_issue_elapsed)
-          << " pack_build_ms=" << absl::ToDoubleMilliseconds(timing_stats.pack_build_elapsed)
-          << " communicator_export_ms=" << absl::ToDoubleMilliseconds(timing_stats.communicator_export_elapsed)
-          << " batch_payload_ref_issue_ms=" << absl::ToDoubleMilliseconds(timing_stats.batch_payload_ref_issue_elapsed)
-          << " total_ms=" << absl::ToDoubleMilliseconds(absl::Now() - total_started_at);
+  {
+    std::ostringstream log;
+    log << "byte_artifact.home_batch_get_timing_summary"
+        << " operation_id=" << operation_id << " shard_id=" << req.fence().shard_id()
+        << " requested_artifacts=" << req.artifact_ids_size()
+        << " batch_candidates=" << timing_stats.batch_candidate_count
+        << " batch_candidate_bytes=" << timing_stats.batch_candidate_bytes
+        << " payload_read_count=" << timing_stats.payload_read_count
+        << " payload_read_bytes=" << timing_stats.payload_read_bytes << " pack_count=" << timing_stats.pack_count
+        << " pack_bytes=" << timing_stats.pack_bytes
+        << " ensure_home_lease_ms=" << absl::ToDoubleMilliseconds(timing_stats.ensure_home_lease_elapsed)
+        << " reconcile_policy_ms=" << absl::ToDoubleMilliseconds(timing_stats.reconcile_policy_elapsed)
+        << " requester_config_ms=" << absl::ToDoubleMilliseconds(timing_stats.requester_config_elapsed)
+        << " requester_config_cache_hit=" << timing_stats.requester_config_cache_hit
+        << " authority_batch_get_ms=" << absl::ToDoubleMilliseconds(timing_stats.authority_batch_get_elapsed)
+        << " candidate_build_ms=" << absl::ToDoubleMilliseconds(timing_stats.candidate_build_elapsed)
+        << " requester_entry_lookup_ms=" << absl::ToDoubleMilliseconds(timing_stats.requester_entry_lookup_elapsed)
+        << " producer_entry_lookup_ms=" << absl::ToDoubleMilliseconds(timing_stats.producer_entry_lookup_elapsed)
+        << " policy_restore_ms=" << absl::ToDoubleMilliseconds(timing_stats.policy_restore_elapsed)
+        << " payload_read_ms=" << absl::ToDoubleMilliseconds(timing_stats.payload_read_elapsed)
+        << " payload_ref_issue_ms=" << absl::ToDoubleMilliseconds(timing_stats.payload_ref_issue_elapsed)
+        << " pack_build_ms=" << absl::ToDoubleMilliseconds(timing_stats.pack_build_elapsed)
+        << " staged_pack_realization_ms=" << absl::ToDoubleMilliseconds(timing_stats.staged_pack_realization_elapsed)
+        << " communicator_export_ms=" << absl::ToDoubleMilliseconds(timing_stats.communicator_export_elapsed)
+        << " batch_payload_ref_issue_ms=" << absl::ToDoubleMilliseconds(timing_stats.batch_payload_ref_issue_elapsed)
+        << " transport_response_emit_ms=" << absl::ToDoubleMilliseconds(timing_stats.transport_response_emit_elapsed)
+        << " response_shape_ms=" << absl::ToDoubleMilliseconds(timing_stats.response_shape_elapsed)
+        << " segmented_pack_count=" << timing_stats.segmented_pack_count
+        << " segmented_pack_bytes=" << timing_stats.segmented_pack_bytes
+        << " staged_pack_count=" << timing_stats.staged_pack_count
+        << " staged_pack_bytes=" << timing_stats.staged_pack_bytes
+        << " total_ms=" << absl::ToDoubleMilliseconds(absl::Now() - total_started_at);
+    if (!operation_id.empty()) {
+      LOG(INFO) << log.str();
+    } else {
+      VLOG(2) << log.str();
+    }
+  }
   rctx.mark_success();
   return Status::OK;
 }
@@ -1952,6 +2248,26 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
   for (size_t index = 0; index < authority_outcomes.size(); ++index) {
     deferred_outcomes[authority_item_indices[index]] = authority_outcomes[index];
   }
+  if (options_.publish_prereg.enabled) {
+    for (size_t index = 0; index < authority_outcomes.size(); ++index) {
+      if (authority_outcomes[index].status() != v2::BATCH_ITEM_STATUS_OK) {
+        continue;
+      }
+      auto entry = d_.body_store.get(
+          authority_items[index].artifact_id,
+          req.fence().shard_id(),
+          home_lease_or->lease_generation,
+          options_.routing.routing_epoch,
+          now);
+      if (!entry.has_value()) {
+        VLOG(2) << "byte_artifact.publish_prereg.skip"
+                << " artifact_id=" << authority_items[index].artifact_id
+                << " published_at_ms=" << absl::ToUnixMillis(now) << " reason=canonical_backing_missing";
+        continue;
+      }
+      publish_preregistered_export(authority_items[index].artifact_id, entry->backing_record.retained_body_handle, now);
+    }
+  }
 
   for (int index = 0; index < req.items_size(); ++index) {
     if (deferred_outcomes[index].has_value()) {
@@ -2037,6 +2353,7 @@ grpc::Status ByteArtifactController::batch_exists(
     RpcContext& rctx,
     const v2::BatchExistsRequest& req,
     v2::BatchExistsResponse& resp) {
+  const absl::Time total_started_at = absl::Now();
   const bool local_peer = is_loopback_grpc_peer(rctx.server_context().peer());
   if (!local_peer && !options_.gateway_ingress_enabled) {
     return {StatusCode::PERMISSION_DENIED, "BatchExists requires gateway ingress on non-local peers"};
@@ -2045,6 +2362,7 @@ grpc::Status ByteArtifactController::batch_exists(
   const absl::Time now = absl::Now();
   const std::string local_daemon_id = d_.route_resolver.local_daemon_id();
   const bool allow_high_card_attrs = rctx.allow_high_card_attrs();
+  const std::string first_artifact_id = req.selections_size() == 0 ? std::string() : req.selections(0).artifact_id();
 
   struct ShardRequest {
     std::vector<std::string> artifact_ids;
@@ -2094,6 +2412,16 @@ grpc::Status ByteArtifactController::batch_exists(
         *resp.mutable_outcomes(batch.outcome_indices[idx]) = outcomes.at(idx);
       }
     }
+    VLOG(2) << "byte_artifact.batch_exists_summary"
+            << " selections=" << req.selections_size() << " shard_count=" << shard_requests.size()
+            << " first_artifact_id=" << first_artifact_id << " local_home_batches=" << shard_requests.size()
+            << " remote_home_batches=0"
+            << " local_home_items=" << req.selections_size() << " remote_home_items=0"
+            << " local_home_rpc_ms=0 remote_home_rpc_ms=0"
+            << " local_home_rpc_max_ms=0 remote_home_rpc_max_ms=0"
+            << " route_resolve_ms=0 worker_directory_warm_ms=0 total_wall_ms="
+            << absl::ToDoubleMilliseconds(absl::Now() - total_started_at)
+            << " parallel_active=" << (shard_requests.size() > 1);
     rctx.mark_success();
     return Status::OK;
   }
@@ -2103,7 +2431,9 @@ grpc::Status ByteArtifactController::batch_exists(
   for (const auto& [shard_id, /*batch*/ _] : shard_requests) {
     shard_ids.push_back(shard_id);
   }
+  const absl::Time route_resolve_started_at = absl::Now();
   auto routes = d_.route_resolver.resolve_routes(absl::MakeSpan(shard_ids), now);
+  const absl::Duration route_resolve_elapsed = absl::Now() - route_resolve_started_at;
 
   std::vector<std::string> remote_daemon_ids;
   remote_daemon_ids.reserve(routes.size());
@@ -2113,9 +2443,12 @@ grpc::Status ByteArtifactController::batch_exists(
     }
     remote_daemon_ids.push_back(route.holder_daemon_id);
   }
+  absl::Duration worker_directory_warm_elapsed = absl::ZeroDuration();
   if (!remote_daemon_ids.empty()) {
+    const absl::Time worker_directory_warm_started_at = absl::Now();
     (void)d_.worker_directory_cache.warm_for_daemons(
         remote_daemon_ids, now, absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
+    worker_directory_warm_elapsed = absl::Now() - worker_directory_warm_started_at;
   }
 
   struct PendingHomeBatchExists {
@@ -2146,6 +2479,8 @@ grpc::Status ByteArtifactController::batch_exists(
     std::size_t remote_home_item_count{0};
     absl::Duration local_home_rpc_elapsed{absl::ZeroDuration()};
     absl::Duration remote_home_rpc_elapsed{absl::ZeroDuration()};
+    absl::Duration local_home_rpc_max_elapsed{absl::ZeroDuration()};
+    absl::Duration remote_home_rpc_max_elapsed{absl::ZeroDuration()};
   } stats;
 
   absl::flat_hash_map<std::string, std::shared_ptr<grpc::Channel>> remote_channels;
@@ -2297,8 +2632,10 @@ grpc::Status ByteArtifactController::batch_exists(
     for (auto& result : results) {
       if (result.request.remote_home) {
         stats.remote_home_rpc_elapsed += result.rpc_elapsed;
+        stats.remote_home_rpc_max_elapsed = std::max(stats.remote_home_rpc_max_elapsed, result.rpc_elapsed);
       } else {
         stats.local_home_rpc_elapsed += result.rpc_elapsed;
+        stats.local_home_rpc_max_elapsed = std::max(stats.local_home_rpc_max_elapsed, result.rpc_elapsed);
       }
 
       VLOG(2) << "byte_artifact.batch_exists_home_rpc_result"
@@ -2380,12 +2717,17 @@ grpc::Status ByteArtifactController::batch_exists(
 
   VLOG(2) << "byte_artifact.batch_exists_summary"
           << " selections=" << req.selections_size() << " shard_count=" << shard_requests.size()
-          << " local_home_batches=" << stats.local_home_batch_count
+          << " first_artifact_id=" << first_artifact_id << " local_home_batches=" << stats.local_home_batch_count
           << " remote_home_batches=" << stats.remote_home_batch_count
           << " local_home_items=" << stats.local_home_item_count
           << " remote_home_items=" << stats.remote_home_item_count
           << " local_home_rpc_ms=" << absl::ToDoubleMilliseconds(stats.local_home_rpc_elapsed)
           << " remote_home_rpc_ms=" << absl::ToDoubleMilliseconds(stats.remote_home_rpc_elapsed)
+          << " local_home_rpc_max_ms=" << absl::ToDoubleMilliseconds(stats.local_home_rpc_max_elapsed)
+          << " remote_home_rpc_max_ms=" << absl::ToDoubleMilliseconds(stats.remote_home_rpc_max_elapsed)
+          << " route_resolve_ms=" << absl::ToDoubleMilliseconds(route_resolve_elapsed)
+          << " worker_directory_warm_ms=" << absl::ToDoubleMilliseconds(worker_directory_warm_elapsed)
+          << " total_wall_ms=" << absl::ToDoubleMilliseconds(absl::Now() - total_started_at)
           << " parallel_active=" << (pending_batches.size() > 1);
 
   rctx.mark_success();
@@ -2396,14 +2738,18 @@ grpc::Status ByteArtifactController::batch_get_into_region(
     RpcContext& rctx,
     const v2::BatchGetIntoRegionRequest& req,
     v2::BatchGetIntoRegionResponse& resp) {
+  const absl::Time total_started_at = absl::Now();
+  const absl::Time ensure_local_peer_started_at = total_started_at;
   auto local_peer_status =
       d_.external_target_access_service.ensure_local_region_peer(rctx.server_context().peer(), "BatchGetIntoRegion");
+  const absl::Duration ensure_local_peer_elapsed = absl::Now() - ensure_local_peer_started_at;
   if (!local_peer_status.ok()) {
     return to_grpc_status(local_peer_status);
   }
   const absl::Time now = absl::Now();
   const std::string local_daemon_id = d_.route_resolver.local_daemon_id();
   const auto requested_slot_tokens = collect_batch_item_slot_tokens(req.target_layout());
+  const absl::Time selection_build_started_at = absl::Now();
 
   struct ShardRequest {
     std::vector<std::string> artifact_ids;
@@ -2438,7 +2784,9 @@ grpc::Status ByteArtifactController::batch_get_into_region(
     entry.outcome_indices.push_back(i);
     target_layout_lengths.emplace(selection.artifact_id(), /*wildcard=*/0);
   }
+  const absl::Duration selection_build_elapsed = absl::Now() - selection_build_started_at;
 
+  const absl::Time validate_target_layout_started_at = absl::Now();
   auto target_layout_or = d_.external_target_access_service.validate_local_source_layout(
       rctx.server_context().peer(),
       "BatchGetIntoRegion",
@@ -2449,6 +2797,7 @@ grpc::Status ByteArtifactController::batch_get_into_region(
   if (!target_layout_or.ok()) {
     return to_grpc_status(target_layout_or.status());
   }
+  const absl::Duration validate_target_layout_elapsed = absl::Now() - validate_target_layout_started_at;
   auto target_layout = std::move(target_layout_or->layout);
 
   struct BatchGetInstrumentation {
@@ -2458,6 +2807,12 @@ grpc::Status ByteArtifactController::batch_get_into_region(
     std::size_t remote_home_item_count{0};
     std::size_t local_source_item_count{0};
     std::size_t remote_source_item_count{0};
+    std::size_t local_batch_transport_item_count{0};
+    std::size_t remote_batch_transport_item_count{0};
+    std::size_t local_batch_transport_per_item_materialize_calls{0};
+    std::size_t remote_batch_transport_per_item_materialize_calls{0};
+    std::size_t local_batch_transport_composite_materialize_calls{0};
+    std::size_t remote_batch_transport_composite_materialize_calls{0};
     std::size_t remote_batch_transport_count{0};
     std::size_t remote_batch_transport_communicator_count{0};
     std::size_t remote_batch_transport_grpc_count{0};
@@ -2467,6 +2822,16 @@ grpc::Status ByteArtifactController::batch_get_into_region(
     std::uint64_t remote_batch_transport_bytes{0};
     absl::Duration local_home_rpc_elapsed{absl::ZeroDuration()};
     absl::Duration remote_home_rpc_elapsed{absl::ZeroDuration()};
+    absl::Duration local_home_rpc_max_elapsed{absl::ZeroDuration()};
+    absl::Duration remote_home_rpc_max_elapsed{absl::ZeroDuration()};
+    absl::Duration local_home_queue_elapsed{absl::ZeroDuration()};
+    absl::Duration remote_home_queue_elapsed{absl::ZeroDuration()};
+    absl::Duration local_home_queue_max_elapsed{absl::ZeroDuration()};
+    absl::Duration remote_home_queue_max_elapsed{absl::ZeroDuration()};
+    absl::Duration local_home_task_elapsed{absl::ZeroDuration()};
+    absl::Duration remote_home_task_elapsed{absl::ZeroDuration()};
+    absl::Duration local_home_task_max_elapsed{absl::ZeroDuration()};
+    absl::Duration remote_home_task_max_elapsed{absl::ZeroDuration()};
     absl::Duration local_source_apply_elapsed{absl::ZeroDuration()};
     absl::Duration remote_source_apply_elapsed{absl::ZeroDuration()};
   } stats;
@@ -2475,11 +2840,19 @@ grpc::Status ByteArtifactController::batch_get_into_region(
     std::uint64_t shard_id{0};
     std::string transport_id;
     std::string kind;
+    std::string read_mode;
+    std::string materialize_mode{"per_item"};
     bool remote{false};
+    bool batched_direct_write{false};
     std::uint64_t payload_bytes{0};
     std::uint64_t staged_bytes{0};
     std::uint64_t gpu_write_bytes{0};
+    std::uint32_t source_count{0};
+    std::uint32_t mapping_segments{0};
     std::size_t items_applied{0};
+    std::size_t materialize_calls{0};
+    std::size_t per_item_materialize_calls{0};
+    std::size_t composite_materialize_calls{0};
     absl::Duration resolve_elapsed{absl::ZeroDuration()};
     absl::Duration mirror_elapsed{absl::ZeroDuration()};
     absl::Duration source_stage_copy_elapsed{absl::ZeroDuration()};
@@ -2491,6 +2864,12 @@ grpc::Status ByteArtifactController::batch_get_into_region(
   struct BatchGetInstrumentationDelta {
     std::size_t local_source_item_count{0};
     std::size_t remote_source_item_count{0};
+    std::size_t local_batch_transport_item_count{0};
+    std::size_t remote_batch_transport_item_count{0};
+    std::size_t local_batch_transport_per_item_materialize_calls{0};
+    std::size_t remote_batch_transport_per_item_materialize_calls{0};
+    std::size_t local_batch_transport_composite_materialize_calls{0};
+    std::size_t remote_batch_transport_composite_materialize_calls{0};
     std::size_t remote_batch_transport_count{0};
     std::size_t remote_batch_transport_communicator_count{0};
     std::size_t remote_batch_transport_grpc_count{0};
@@ -2541,28 +2920,55 @@ grpc::Status ByteArtifactController::batch_get_into_region(
   const std::string_view operation_id =
       req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view("");
   const std::string operation_id_owned(operation_id);
+  const std::string first_artifact_id = req.selections_size() == 0 ? std::string() : req.selections(0).artifact_id();
   const bool allow_high_card_attrs = rctx.allow_high_card_attrs();
   const bool host_target_layout = target_layout.device_id() < 0;
+  absl::Duration route_resolve_elapsed{absl::ZeroDuration()};
+  absl::Duration worker_directory_warm_elapsed{absl::ZeroDuration()};
+  absl::Duration remote_channel_resolve_elapsed{absl::ZeroDuration()};
+  absl::Duration remote_channel_resolve_max_elapsed{absl::ZeroDuration()};
+  std::size_t remote_channel_resolve_count{0};
+  absl::Duration home_dispatch_elapsed{absl::ZeroDuration()};
+  absl::Duration home_process_elapsed{absl::ZeroDuration()};
+  absl::Duration build_apply_work_elapsed{absl::ZeroDuration()};
   const auto log_transport_apply_stats = [&]() {
     for (const auto& record : transport_apply_logs) {
-      VLOG(2) << "byte_artifact.batch_get_into_region_transport_apply_summary"
-              << " operation_id=" << operation_id << " shard_id=" << record.stats.shard_id
-              << " transport_id=" << record.stats.transport_id << " kind=" << record.stats.kind
-              << " remote=" << record.stats.remote << " manifest_items=" << record.manifest_items
-              << " manifest_bytes=" << record.manifest_bytes << " payload_bytes=" << record.stats.payload_bytes
-              << " staged_bytes=" << record.stats.staged_bytes << " gpu_write_bytes=" << record.stats.gpu_write_bytes
-              << " items_applied=" << record.stats.items_applied
-              << " resolve_ms=" << absl::ToDoubleMilliseconds(record.stats.resolve_elapsed)
-              << " mirror_ms=" << absl::ToDoubleMilliseconds(record.stats.mirror_elapsed)
-              << " source_to_pinned_ms=" << absl::ToDoubleMilliseconds(record.stats.source_stage_copy_elapsed)
-              << " pinned_to_gpu_ms=" << absl::ToDoubleMilliseconds(record.stats.gpu_write_elapsed)
-              << " lowering_ms=" << absl::ToDoubleMilliseconds(record.stats.lowering_elapsed)
-              << " apply_ms=" << absl::ToDoubleMilliseconds(record.stats.apply_elapsed);
+      std::ostringstream log;
+      log << "byte_artifact.batch_get_into_region_transport_apply_summary"
+          << " operation_id=" << operation_id << " shard_id=" << record.stats.shard_id
+          << " transport_id=" << record.stats.transport_id << " kind=" << record.stats.kind
+          << " read_mode=" << record.stats.read_mode << " materialize_mode=" << record.stats.materialize_mode
+          << " batched_direct_write=" << record.stats.batched_direct_write << " remote=" << record.stats.remote
+          << " manifest_items=" << record.manifest_items << " manifest_bytes=" << record.manifest_bytes
+          << " payload_bytes=" << record.stats.payload_bytes << " staged_bytes=" << record.stats.staged_bytes
+          << " gpu_write_bytes=" << record.stats.gpu_write_bytes << " source_count=" << record.stats.source_count
+          << " mapping_segments=" << record.stats.mapping_segments << " items_applied=" << record.stats.items_applied
+          << " materialize_calls=" << record.stats.materialize_calls
+          << " per_item_materialize_calls=" << record.stats.per_item_materialize_calls
+          << " composite_materialize_calls=" << record.stats.composite_materialize_calls
+          << " resolve_ms=" << absl::ToDoubleMilliseconds(record.stats.resolve_elapsed)
+          << " mirror_ms=" << absl::ToDoubleMilliseconds(record.stats.mirror_elapsed)
+          << " source_to_pinned_ms=" << absl::ToDoubleMilliseconds(record.stats.source_stage_copy_elapsed)
+          << " pinned_to_gpu_ms=" << absl::ToDoubleMilliseconds(record.stats.gpu_write_elapsed)
+          << " lowering_ms=" << absl::ToDoubleMilliseconds(record.stats.lowering_elapsed)
+          << " apply_ms=" << absl::ToDoubleMilliseconds(record.stats.apply_elapsed);
+      if (!operation_id.empty() && record.stats.remote) {
+        LOG(INFO) << log.str();
+      } else {
+        VLOG(2) << log.str();
+      }
     }
   };
   const auto merge_stats_delta = [&](const BatchGetInstrumentationDelta& delta) {
     stats.local_source_item_count += delta.local_source_item_count;
     stats.remote_source_item_count += delta.remote_source_item_count;
+    stats.local_batch_transport_item_count += delta.local_batch_transport_item_count;
+    stats.remote_batch_transport_item_count += delta.remote_batch_transport_item_count;
+    stats.local_batch_transport_per_item_materialize_calls += delta.local_batch_transport_per_item_materialize_calls;
+    stats.remote_batch_transport_per_item_materialize_calls += delta.remote_batch_transport_per_item_materialize_calls;
+    stats.local_batch_transport_composite_materialize_calls += delta.local_batch_transport_composite_materialize_calls;
+    stats.remote_batch_transport_composite_materialize_calls +=
+        delta.remote_batch_transport_composite_materialize_calls;
     stats.remote_batch_transport_count += delta.remote_batch_transport_count;
     stats.remote_batch_transport_communicator_count += delta.remote_batch_transport_communicator_count;
     stats.remote_batch_transport_grpc_count += delta.remote_batch_transport_grpc_count;
@@ -2610,6 +3016,196 @@ grpc::Status ByteArtifactController::batch_get_into_region(
           }
           return logs;
         };
+    const auto try_apply_transport_composite = [&]() -> bool {
+      if (work_unit.batch_transport == nullptr || !host_target_layout || work_unit.items.size() <= 1) {
+        return false;
+      }
+      const auto* transport = work_unit.batch_transport;
+      if (!transport->has_communicator_source()) {
+        return false;
+      }
+
+      const std::string transport_id =
+          work_unit.transport_id.empty() ? transport->transport_id() : work_unit.transport_id;
+      auto resolved_it = resolved_batch_sources.find(transport_id);
+      absl::Duration source_resolve_elapsed{absl::ZeroDuration()};
+      if (resolved_it == resolved_batch_sources.end()) {
+        const absl::Time resolve_started_at = absl::Now();
+        auto resolved_or = d_.payload_transport_broker.open_batch_payload_communicator_source(
+            d_.worker_directory_cache,
+            now,
+            absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()),
+            local_daemon_id,
+            *transport,
+            tensorcast::common::v1::PAYLOAD_REF_DIRECTION_GET,
+            operation_id_owned);
+        if (!resolved_or.ok()) {
+          for (const auto& item_ref : work_unit.items) {
+            result.outcome_updates.push_back(
+                ApplyOutcomeUpdate{
+                    .outcome_index = item_ref.outcome_index,
+                    .outcome = make_outcome(
+                        item_ref.artifact_id,
+                        batch_item_status_from_absl_status(resolved_or.status()),
+                        std::string(resolved_or.status().message())),
+                });
+          }
+          return true;
+        }
+        source_resolve_elapsed += absl::Now() - resolve_started_at;
+        resolved_it = resolved_batch_sources.emplace(transport_id, std::move(*resolved_or)).first;
+        if (opened_remote_batch_transports.emplace(transport_id).second && resolved_it->second.remote) {
+          ++result.stats_delta.remote_batch_transport_count;
+          ++result.stats_delta.remote_batch_transport_communicator_count;
+          result.stats_delta.remote_batch_transport_bytes += transport->manifest().total_size();
+          LOG(INFO) << "byte_artifact.batch_get_into_region_transport_open"
+                    << " operation_id=" << operation_id << " shard_id=" << work_unit.shard_id
+                    << " transport_id=" << transport_id << " kind=communicator_source"
+                    << " remote=" << resolved_it->second.remote
+                    << " item_count=" << transport->manifest().entries_size()
+                    << " payload_bytes=" << transport->manifest().total_size()
+                    << " resolve_ms=" << absl::ToDoubleMilliseconds(source_resolve_elapsed);
+        }
+      }
+      if (!resolved_it->second.remote || !resolved_it->second.source->supports_batched_direct_write_at()) {
+        if (resolved_it->second.remote) {
+          VLOG(2) << "byte_artifact.batch_get_into_region_transport_composite_skip"
+                  << " operation_id=" << operation_id << " shard_id=" << work_unit.shard_id
+                  << " transport_id=" << transport_id << " reason=batched_direct_write_unsupported";
+        }
+        return false;
+      }
+
+      store::loading::IntoTargetLayout composite_target_layout;
+      composite_target_layout.storages.reserve(work_unit.items.size());
+      store::loader::ByteRangeMap composite_mapping;
+      composite_mapping.num_sources = 1;
+      composite_mapping.segments.reserve(work_unit.items.size());
+      std::uint64_t composite_cursor = 0;
+      std::uint64_t payload_bytes = 0;
+      for (const auto& item_ref : work_unit.items) {
+        const v2::HomeBatchGetItem* item = item_ref.item;
+        if (item == nullptr || item->status() != v2::BATCH_ITEM_STATUS_OK || !item->has_batch_payload_slice() ||
+            item->batch_payload_slice().transport_id() != transport_id) {
+          return false;
+        }
+        const auto* manifest_entry = find_batch_payload_entry(
+            transport->manifest(),
+            item_ref.artifact_id,
+            item->batch_payload_slice().offset(),
+            item->batch_payload_slice().length());
+        if (manifest_entry == nullptr) {
+          return false;
+        }
+        auto item_target_layout_or = target_layout.build_item_target_layout(item_ref.artifact_id);
+        if (!item_target_layout_or.ok()) {
+          return false;
+        }
+        if (item->batch_payload_slice().length() != item_target_layout_or->total_size) {
+          return false;
+        }
+        if (composite_cursor > std::numeric_limits<std::uint64_t>::max() - item_target_layout_or->total_size) {
+          return false;
+        }
+        if (payload_bytes > std::numeric_limits<std::uint64_t>::max() - item->batch_payload_slice().length()) {
+          return false;
+        }
+        composite_mapping.segments.push_back(
+            store::loader::ByteRangeSegment{
+                .kind = store::loader::ByteRangeSegment::Kind::kData,
+                .dst_offset = composite_cursor,
+                .length = item->batch_payload_slice().length(),
+                .src_offset = manifest_entry->offset(),
+                .source_index = 0,
+            });
+        composite_cursor += item_target_layout_or->total_size;
+        payload_bytes += item->batch_payload_slice().length();
+        for (const auto& storage : item_target_layout_or->storages) {
+          composite_target_layout.storages.push_back(storage);
+        }
+      }
+      if (composite_target_layout.storages.empty() || composite_cursor == 0) {
+        return false;
+      }
+      composite_target_layout.total_size = composite_cursor;
+      composite_mapping.total_bytes = composite_cursor;
+
+      auto& transport_stats = transport_apply_stats[transport];
+      if (transport_stats.transport_id.empty()) {
+        transport_stats.shard_id = work_unit.shard_id;
+        transport_stats.transport_id = transport_id;
+        transport_stats.kind = "communicator_source";
+        transport_stats.remote = true;
+        transport_stats.payload_bytes = transport->manifest().total_size();
+      }
+      transport_stats.resolve_elapsed += source_resolve_elapsed;
+      transport_stats.read_mode = "batched_direct_write";
+      transport_stats.materialize_mode = "single_source_composite";
+      transport_stats.batched_direct_write = true;
+      transport_stats.source_count = 1;
+      transport_stats.mapping_segments = static_cast<std::uint32_t>(composite_mapping.segments.size());
+      transport_stats.materialize_calls += 1;
+      transport_stats.composite_materialize_calls += 1;
+      result.stats_delta.remote_batch_transport_item_count += work_unit.items.size();
+      result.stats_delta.remote_batch_transport_composite_materialize_calls += 1;
+
+      LOG(INFO) << "byte_artifact.batch_get_into_region_transport_materialize_mode"
+                << " operation_id=" << operation_id << " shard_id=" << work_unit.shard_id
+                << " transport_id=" << transport_id << " kind=communicator_source"
+                << " remote=true"
+                << " materialize_mode=single_source_composite"
+                << " batched_direct_write=true"
+                << " source_count=1"
+                << " mapping_segments=" << composite_mapping.segments.size() << " item_count=" << work_unit.items.size()
+                << " payload_bytes=" << payload_bytes;
+
+      const absl::Time apply_started_at = absl::Now();
+      auto materialize_or = d_.engine.materialize_mapped_loader_into_target(
+          store::DeviceKey{.type = tensorcast::DeviceType::CPU, .ordinal = -1, .uuid = ""},
+          composite_target_layout,
+          std::make_unique<SeekableSourceLoader>(resolved_it->second.source, transport->manifest().total_size()),
+          composite_mapping,
+          build_lowering_hints(transport_id, operation_id_owned),
+          store::loading::MaterializationSource::kP2P);
+      const absl::Duration lowering_elapsed = absl::Now() - apply_started_at;
+      transport_stats.lowering_elapsed += lowering_elapsed;
+      transport_stats.apply_elapsed += lowering_elapsed;
+      if (!materialize_or.ok()) {
+        for (const auto& item_ref : work_unit.items) {
+          result.outcome_updates.push_back(
+              ApplyOutcomeUpdate{
+                  .outcome_index = item_ref.outcome_index,
+                  .outcome = make_outcome(
+                      item_ref.artifact_id,
+                      batch_item_status_from_absl_status(materialize_or.status()),
+                      std::string(materialize_or.status().message())),
+              });
+        }
+        return true;
+      }
+      if (materialize_or->debug_stats.has_value()) {
+        const auto& debug_stats = *materialize_or->debug_stats;
+        transport_stats.staged_bytes += debug_stats.produced_bytes == 0 ? payload_bytes : debug_stats.produced_bytes;
+        transport_stats.gpu_write_bytes += debug_stats.gpu_write_bytes_total;
+        transport_stats.source_stage_copy_elapsed += absl::Microseconds(debug_stats.source_read_at_us_total);
+        transport_stats.gpu_write_elapsed += absl::Microseconds(debug_stats.gpu_write_wait_us_total);
+      } else {
+        transport_stats.staged_bytes += payload_bytes;
+      }
+      transport_stats.items_applied += work_unit.items.size();
+      result.stats_delta.remote_source_item_count += work_unit.items.size();
+      result.stats_delta.remote_source_bytes += payload_bytes;
+      result.stats_delta.remote_source_apply_elapsed += lowering_elapsed;
+      result.outcome_updates.reserve(work_unit.items.size());
+      for (const auto& item_ref : work_unit.items) {
+        result.outcome_updates.push_back(
+            ApplyOutcomeUpdate{
+                .outcome_index = item_ref.outcome_index,
+                .outcome = make_outcome(item_ref.artifact_id, v2::BATCH_ITEM_STATUS_OK),
+            });
+      }
+      return true;
+    };
     const auto apply_item = [&](const ApplyItemRef& item_ref) {
       const absl::Time apply_started_at = absl::Now();
       auto push_outcome = [&](v2::BatchItemOutcome outcome) {
@@ -2707,48 +3303,71 @@ grpc::Status ByteArtifactController::batch_get_into_region(
             transport_stats.kind = "communicator_source";
             transport_stats.remote = resolved_it->second.remote;
             transport_stats.payload_bytes = transport_it->second->manifest().total_size();
+            transport_stats.source_count = 1;
           }
           transport_stats.resolve_elapsed += source_resolve_elapsed;
           applied_transport_stats = &transport_stats;
           source_kind = source_is_remote ? store::loading::MaterializationSource::kP2P
                                          : store::loading::MaterializationSource::kLocalReplica;
           if (source_is_remote) {
-            auto mirrored_it = mirrored_remote_batch_payloads.find(transport_id);
-            if (mirrored_it == mirrored_remote_batch_payloads.end()) {
-              const absl::Time mirror_started_at = absl::Now();
-              auto mirrored_or = mirror_seekable_source_payload(
-                  resolved_it->second.source, transport_it->second->manifest().total_size());
-              if (!mirrored_or.ok()) {
-                push_outcome(make_outcome(
-                    item_ref.artifact_id,
-                    batch_item_status_from_absl_status(mirrored_or.status()),
-                    std::string(mirrored_or.status().message())));
-                return;
+            if (resolved_it->second.source->supports_direct_write_at()) {
+              if (transport_stats.read_mode.empty()) {
+                transport_stats.read_mode = "direct_remote_slice";
+                LOG(INFO) << "byte_artifact.batch_get_into_region_transport_read_mode"
+                          << " operation_id=" << operation_id << " shard_id=" << work_unit.shard_id
+                          << " transport_id=" << transport_id << " kind=communicator_source"
+                          << " remote=true"
+                          << " read_mode=direct_remote_slice"
+                          << " payload_bytes=" << transport_it->second->manifest().total_size()
+                          << " item_count=" << transport_it->second->manifest().entries_size() << " mirror_ms=0"
+                          << " subsequent_item_slices_local=false";
               }
-              const absl::Duration mirror_elapsed = absl::Now() - mirror_started_at;
-              mirrored_it = mirrored_remote_batch_payloads.emplace(transport_id, std::move(*mirrored_or)).first;
-              auto& transport_stats = transport_apply_stats[transport_it->second];
-              if (transport_stats.transport_id.empty()) {
-                transport_stats.shard_id = work_unit.shard_id;
-                transport_stats.transport_id = transport_id;
-                transport_stats.kind = "communicator_source";
-                transport_stats.remote = true;
-                transport_stats.payload_bytes = transport_it->second->manifest().total_size();
+              loader = make_loader_from_source_slice(
+                  resolved_it->second.source,
+                  item->batch_payload_slice().offset(),
+                  item->batch_payload_slice().length());
+            } else {
+              auto mirrored_it = mirrored_remote_batch_payloads.find(transport_id);
+              if (mirrored_it == mirrored_remote_batch_payloads.end()) {
+                const absl::Time mirror_started_at = absl::Now();
+                auto mirrored_or = mirror_seekable_source_payload(
+                    resolved_it->second.source, transport_it->second->manifest().total_size());
+                if (!mirrored_or.ok()) {
+                  push_outcome(make_outcome(
+                      item_ref.artifact_id,
+                      batch_item_status_from_absl_status(mirrored_or.status()),
+                      std::string(mirrored_or.status().message())));
+                  return;
+                }
+                const absl::Duration mirror_elapsed = absl::Now() - mirror_started_at;
+                mirrored_it = mirrored_remote_batch_payloads.emplace(transport_id, std::move(*mirrored_or)).first;
+                auto& transport_stats = transport_apply_stats[transport_it->second];
+                if (transport_stats.transport_id.empty()) {
+                  transport_stats.shard_id = work_unit.shard_id;
+                  transport_stats.transport_id = transport_id;
+                  transport_stats.kind = "communicator_source";
+                  transport_stats.remote = true;
+                  transport_stats.payload_bytes = transport_it->second->manifest().total_size();
+                }
+                transport_stats.read_mode = "full_pack_mirror";
+                transport_stats.mirror_elapsed += mirror_elapsed;
+                LOG(INFO) << "byte_artifact.batch_get_into_region_transport_mirror"
+                          << " operation_id=" << operation_id << " shard_id=" << work_unit.shard_id
+                          << " transport_id=" << transport_id << " kind=communicator_source"
+                          << " remote=true"
+                          << " read_mode=full_pack_mirror"
+                          << " payload_bytes=" << transport_it->second->manifest().total_size()
+                          << " item_count=" << transport_it->second->manifest().entries_size()
+                          << " mirror_ms=" << absl::ToDoubleMilliseconds(mirror_elapsed)
+                          << " subsequent_item_slices_local=true";
               }
-              transport_stats.mirror_elapsed += mirror_elapsed;
-              LOG(INFO) << "byte_artifact.batch_get_into_region_transport_mirror"
-                        << " operation_id=" << operation_id << " shard_id=" << work_unit.shard_id
-                        << " transport_id=" << transport_id << " kind=communicator_source"
-                        << " remote=true"
-                        << " read_mode=full_pack"
-                        << " payload_bytes=" << transport_it->second->manifest().total_size()
-                        << " item_count=" << transport_it->second->manifest().entries_size()
-                        << " mirror_ms=" << absl::ToDoubleMilliseconds(mirror_elapsed)
-                        << " subsequent_item_slices_local=true";
+              loader = make_loader_from_payload_slice(
+                  mirrored_it->second, item->batch_payload_slice().offset(), item->batch_payload_slice().length());
             }
-            loader = make_loader_from_payload_slice(
-                mirrored_it->second, item->batch_payload_slice().offset(), item->batch_payload_slice().length());
           } else {
+            if (transport_stats.read_mode.empty()) {
+              transport_stats.read_mode = "local_source_slice";
+            }
             loader = make_loader_from_source_slice(
                 resolved_it->second.source, item->batch_payload_slice().offset(), item->batch_payload_slice().length());
           }
@@ -2793,9 +3412,14 @@ grpc::Status ByteArtifactController::batch_get_into_region(
             transport_stats.kind = "grpc_chunk_ref";
             transport_stats.remote = resolved_it->second.remote;
             transport_stats.payload_bytes = transport_it->second->manifest().total_size();
+            transport_stats.source_count = 1;
           }
           transport_stats.resolve_elapsed += source_resolve_elapsed;
           applied_transport_stats = &transport_stats;
+          if (transport_stats.read_mode.empty()) {
+            transport_stats.read_mode =
+                resolved_it->second.remote ? "grpc_chunk_full_pack_remote" : "grpc_chunk_full_pack_local";
+          }
           if (!resolved_it->second.payload ||
               item->batch_payload_slice().offset() + item->batch_payload_slice().length() >
                   resolved_it->second.payload->size()) {
@@ -2869,6 +3493,17 @@ grpc::Status ByteArtifactController::batch_get_into_region(
 
       const absl::Time lowering_started_at = absl::Now();
       if (host_target_layout) {
+        if (applied_transport_stats != nullptr) {
+          applied_transport_stats->materialize_calls += 1;
+          applied_transport_stats->per_item_materialize_calls += 1;
+          if (source_is_remote) {
+            result.stats_delta.remote_batch_transport_item_count += 1;
+            result.stats_delta.remote_batch_transport_per_item_materialize_calls += 1;
+          } else {
+            result.stats_delta.local_batch_transport_item_count += 1;
+            result.stats_delta.local_batch_transport_per_item_materialize_calls += 1;
+          }
+        }
         auto materialize_or = d_.engine.materialize_mapped_loader_into_target(
             store::DeviceKey{.type = tensorcast::DeviceType::CPU, .ordinal = -1, .uuid = ""},
             *item_target_layout_or,
@@ -2897,6 +3532,17 @@ grpc::Status ByteArtifactController::batch_get_into_region(
           }
         }
       } else {
+        if (applied_transport_stats != nullptr) {
+          applied_transport_stats->materialize_calls += 1;
+          applied_transport_stats->per_item_materialize_calls += 1;
+          if (source_is_remote) {
+            result.stats_delta.remote_batch_transport_item_count += 1;
+            result.stats_delta.remote_batch_transport_per_item_materialize_calls += 1;
+          } else {
+            result.stats_delta.local_batch_transport_item_count += 1;
+            result.stats_delta.local_batch_transport_per_item_materialize_calls += 1;
+          }
+        }
         const auto target_device = store::DeviceRegistry::instance().gpu_key(target_layout.device_id());
         auto lowering_or = build_into_target_lowering_plan(
             item_ref.artifact_id,
@@ -2960,6 +3606,10 @@ grpc::Status ByteArtifactController::batch_get_into_region(
       }
     };
     result.outcome_updates.reserve(work_unit.items.size());
+    if (try_apply_transport_composite()) {
+      result.transport_logs = finalize_transport_logs(transport_apply_stats);
+      return result;
+    }
     for (const auto& item_ref : work_unit.items) {
       apply_item(item_ref);
     }
@@ -3071,8 +3721,11 @@ grpc::Status ByteArtifactController::batch_get_into_region(
         return work_units;
       };
   const bool parallel_apply_enabled = can_parallelize_target_apply();
+  absl::Duration apply_wall_elapsed = absl::ZeroDuration();
   const auto execute_apply_work_units = [&](std::vector<ApplyWorkUnit> work_units) {
+    const absl::Time apply_started_at = absl::Now();
     if (work_units.empty()) {
+      apply_wall_elapsed += absl::Now() - apply_started_at;
       return;
     }
     std::size_t batch_work_units = 0;
@@ -3094,6 +3747,7 @@ grpc::Status ByteArtifactController::batch_get_into_region(
       for (const auto& work_unit : work_units) {
         merge_apply_work_unit_result(run_apply_work_unit(work_unit));
       }
+      apply_wall_elapsed += absl::Now() - apply_started_at;
       return;
     }
     std::vector<ScheduledApplyWorkUnit> scheduled;
@@ -3131,6 +3785,24 @@ grpc::Status ByteArtifactController::batch_get_into_region(
         }
       }
     }
+    apply_wall_elapsed += absl::Now() - apply_started_at;
+  };
+  const auto log_apply_breakdown = [&]() {
+    LOG(INFO) << "byte_artifact.batch_get_into_region_apply_breakdown"
+              << " operation_id=" << operation_id
+              << " local_batch_transport_items=" << stats.local_batch_transport_item_count
+              << " remote_batch_transport_items=" << stats.remote_batch_transport_item_count
+              << " local_batch_transport_per_item_materialize_calls="
+              << stats.local_batch_transport_per_item_materialize_calls
+              << " remote_batch_transport_per_item_materialize_calls="
+              << stats.remote_batch_transport_per_item_materialize_calls
+              << " local_batch_transport_composite_materialize_calls="
+              << stats.local_batch_transport_composite_materialize_calls
+              << " remote_batch_transport_composite_materialize_calls="
+              << stats.remote_batch_transport_composite_materialize_calls
+              << " local_source_items=" << stats.local_source_item_count
+              << " remote_source_items=" << stats.remote_source_item_count
+              << " apply_wall_ms=" << absl::ToDoubleMilliseconds(apply_wall_elapsed);
   };
 
   const bool local_only = (d_.global_store_client == nullptr);
@@ -3160,7 +3832,9 @@ grpc::Status ByteArtifactController::batch_get_into_region(
       RpcContext home_rctx{"HomeBatchGet", home_ctx, allow_high_card_attrs};
       const absl::Time home_rpc_started_at = absl::Now();
       const auto home_status = home_batch_get(home_rctx, home_req, home_resp);
-      stats.local_home_rpc_elapsed += absl::Now() - home_rpc_started_at;
+      const absl::Duration home_rpc_elapsed = absl::Now() - home_rpc_started_at;
+      stats.local_home_rpc_elapsed += home_rpc_elapsed;
+      stats.local_home_rpc_max_elapsed = std::max(stats.local_home_rpc_max_elapsed, home_rpc_elapsed);
       if (!home_status.ok()) {
         for (std::size_t idx = 0; idx < batch.artifact_ids.size(); ++idx) {
           *resp.mutable_outcomes(batch.outcome_indices[idx]) =
@@ -3195,27 +3869,49 @@ grpc::Status ByteArtifactController::batch_get_into_region(
     }
     execute_apply_work_units(std::move(all_work_units));
     log_transport_apply_stats();
+    log_apply_breakdown();
     attach_slot_tokens_to_outcomes(requested_slot_tokens, resp.mutable_outcomes());
-    VLOG(2) << "byte_artifact.batch_get_into_region_summary"
-            << " operation_id=" << (req.has_operation_id() ? req.operation_id() : "")
-            << " selections=" << req.selections_size() << " shard_count=" << shard_requests.size()
-            << " local_home_batches=" << stats.local_home_batch_count
-            << " remote_home_batches=" << stats.remote_home_batch_count
-            << " local_home_items=" << stats.local_home_item_count
-            << " remote_home_items=" << stats.remote_home_item_count
-            << " local_source_items=" << stats.local_source_item_count
-            << " remote_source_items=" << stats.remote_source_item_count
-            << " remote_batch_transports=" << stats.remote_batch_transport_count
-            << " remote_batch_transport_communicator=" << stats.remote_batch_transport_communicator_count
-            << " remote_batch_transport_grpc=" << stats.remote_batch_transport_grpc_count
-            << " remote_payload_ref_items=" << stats.remote_payload_ref_item_count
-            << " local_source_bytes=" << stats.local_source_bytes
-            << " remote_source_bytes=" << stats.remote_source_bytes
-            << " remote_batch_transport_bytes=" << stats.remote_batch_transport_bytes
-            << " local_home_rpc_ms=" << absl::ToDoubleMilliseconds(stats.local_home_rpc_elapsed)
-            << " remote_home_rpc_ms=" << absl::ToDoubleMilliseconds(stats.remote_home_rpc_elapsed)
-            << " local_source_apply_ms=" << absl::ToDoubleMilliseconds(stats.local_source_apply_elapsed)
-            << " remote_source_apply_ms=" << absl::ToDoubleMilliseconds(stats.remote_source_apply_elapsed);
+    {
+      std::ostringstream log;
+      log << "byte_artifact.batch_get_into_region_summary"
+          << " operation_id=" << (req.has_operation_id() ? req.operation_id() : "")
+          << " first_artifact_id=" << first_artifact_id << " selections=" << req.selections_size()
+          << " shard_count=" << shard_requests.size() << " local_home_batches=" << stats.local_home_batch_count
+          << " remote_home_batches=" << stats.remote_home_batch_count
+          << " local_home_items=" << stats.local_home_item_count
+          << " remote_home_items=" << stats.remote_home_item_count
+          << " local_source_items=" << stats.local_source_item_count
+          << " remote_source_items=" << stats.remote_source_item_count
+          << " local_batch_transport_items=" << stats.local_batch_transport_item_count
+          << " remote_batch_transport_items=" << stats.remote_batch_transport_item_count
+          << " local_batch_transport_per_item_materialize_calls="
+          << stats.local_batch_transport_per_item_materialize_calls
+          << " remote_batch_transport_per_item_materialize_calls="
+          << stats.remote_batch_transport_per_item_materialize_calls
+          << " local_batch_transport_composite_materialize_calls="
+          << stats.local_batch_transport_composite_materialize_calls
+          << " remote_batch_transport_composite_materialize_calls="
+          << stats.remote_batch_transport_composite_materialize_calls
+          << " remote_batch_transports=" << stats.remote_batch_transport_count
+          << " remote_batch_transport_communicator=" << stats.remote_batch_transport_communicator_count
+          << " remote_batch_transport_grpc=" << stats.remote_batch_transport_grpc_count
+          << " remote_payload_ref_items=" << stats.remote_payload_ref_item_count
+          << " local_source_bytes=" << stats.local_source_bytes << " remote_source_bytes=" << stats.remote_source_bytes
+          << " remote_batch_transport_bytes=" << stats.remote_batch_transport_bytes
+          << " local_home_rpc_ms=" << absl::ToDoubleMilliseconds(stats.local_home_rpc_elapsed)
+          << " remote_home_rpc_ms=" << absl::ToDoubleMilliseconds(stats.remote_home_rpc_elapsed)
+          << " local_home_rpc_max_ms=" << absl::ToDoubleMilliseconds(stats.local_home_rpc_max_elapsed)
+          << " remote_home_rpc_max_ms=" << absl::ToDoubleMilliseconds(stats.remote_home_rpc_max_elapsed)
+          << " local_source_apply_ms=" << absl::ToDoubleMilliseconds(stats.local_source_apply_elapsed)
+          << " remote_source_apply_ms=" << absl::ToDoubleMilliseconds(stats.remote_source_apply_elapsed)
+          << " apply_wall_ms=" << absl::ToDoubleMilliseconds(apply_wall_elapsed)
+          << " total_wall_ms=" << absl::ToDoubleMilliseconds(absl::Now() - total_started_at);
+      if (req.has_operation_id() && !req.operation_id().empty()) {
+        LOG(INFO) << log.str();
+      } else {
+        VLOG(2) << log.str();
+      }
+    }
     rctx.mark_success();
     return Status::OK;
   }
@@ -3225,7 +3921,9 @@ grpc::Status ByteArtifactController::batch_get_into_region(
   for (const auto& [shard_id, /*batch*/ _] : shard_requests) {
     shard_ids.push_back(shard_id);
   }
+  const absl::Time route_resolve_started_at = absl::Now();
   auto routes = d_.route_resolver.resolve_routes(absl::MakeSpan(shard_ids), now);
+  route_resolve_elapsed = absl::Now() - route_resolve_started_at;
 
   std::vector<std::string> remote_daemon_ids;
   remote_daemon_ids.reserve(routes.size());
@@ -3235,8 +3933,10 @@ grpc::Status ByteArtifactController::batch_get_into_region(
     }
   }
   if (!remote_daemon_ids.empty()) {
+    const absl::Time worker_directory_warm_started_at = absl::Now();
     (void)d_.worker_directory_cache.warm_for_daemons(
         remote_daemon_ids, now, absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
+    worker_directory_warm_elapsed += absl::Now() - worker_directory_warm_started_at;
   }
 
   struct PendingHomeBatchGet {
@@ -3252,7 +3952,9 @@ grpc::Status ByteArtifactController::batch_get_into_region(
     PendingHomeBatchGet request;
     grpc::Status status;
     v2::HomeBatchGetResponse home_resp;
+    absl::Duration queue_elapsed{absl::ZeroDuration()};
     absl::Duration rpc_elapsed{absl::ZeroDuration()};
+    absl::Duration task_elapsed{absl::ZeroDuration()};
   };
 
   struct ScheduledHomeBatchGet {
@@ -3274,8 +3976,13 @@ grpc::Status ByteArtifactController::batch_get_into_region(
     if (cached_it != remote_channels.end()) {
       return cached_it->second;
     }
+    const absl::Time resolve_started_at = absl::Now();
     auto address_or = d_.worker_directory_cache.resolve_daemon_address(
         daemon_id, absl::Now(), absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
+    const absl::Duration resolve_elapsed = absl::Now() - resolve_started_at;
+    remote_channel_resolve_elapsed += resolve_elapsed;
+    remote_channel_resolve_max_elapsed = std::max(remote_channel_resolve_max_elapsed, resolve_elapsed);
+    ++remote_channel_resolve_count;
     if (!address_or.ok()) {
       return address_or.status();
     }
@@ -3333,6 +4040,7 @@ grpc::Status ByteArtifactController::batch_get_into_region(
 
   const auto dispatch_home_batch_get_wave =
       [&](const std::vector<PendingHomeBatchGet>& wave) -> std::vector<HomeBatchGetRpcResult> {
+    const absl::Time dispatch_started_at = absl::Now();
     std::vector<HomeBatchGetRpcResult> completed_results;
     completed_results.reserve(wave.size());
     std::vector<ScheduledHomeBatchGet> scheduled;
@@ -3351,6 +4059,7 @@ grpc::Status ByteArtifactController::batch_get_into_region(
         }
         remote_channel = *channel_or;
       }
+      const absl::Time enqueued_at = absl::Now();
 
       scheduled.push_back(
           ScheduledHomeBatchGet{
@@ -3362,9 +4071,12 @@ grpc::Status ByteArtifactController::batch_get_into_region(
                              remote_channel = std::move(remote_channel),
                              allow_high_card_attrs,
                              local_daemon_id,
-                             operation_id_owned]() mutable -> HomeBatchGetRpcResult {
+                             operation_id_owned,
+                             enqueued_at]() mutable -> HomeBatchGetRpcResult {
                               HomeBatchGetRpcResult result;
                               result.request = pending;
+                              const absl::Time task_started_at = absl::Now();
+                              result.queue_elapsed = task_started_at - enqueued_at;
 
                               v2::HomeBatchGetRequest home_req;
                               home_req.mutable_fence()->set_shard_id(pending.shard_id);
@@ -3392,6 +4104,7 @@ grpc::Status ByteArtifactController::batch_get_into_region(
                                 result.status = stub->HomeBatchGet(&client_ctx, home_req, &result.home_resp);
                               }
                               result.rpc_elapsed = absl::Now() - home_rpc_started_at;
+                              result.task_elapsed = absl::Now() - enqueued_at;
                               return result;
                             })
                             .semi(),
@@ -3411,6 +4124,7 @@ grpc::Status ByteArtifactController::batch_get_into_region(
             "HomeBatchGet fanout task failed"));
       }
     }
+    home_dispatch_elapsed += absl::Now() - dispatch_started_at;
     return completed_results;
   };
 
@@ -3418,21 +4132,35 @@ grpc::Status ByteArtifactController::batch_get_into_region(
   completed_home_batches.reserve(pending_batches.size());
   std::function<void(std::vector<HomeBatchGetRpcResult>, bool)> process_home_batch_get_results;
   process_home_batch_get_results = [&](std::vector<HomeBatchGetRpcResult> results, bool allow_retry) {
+    const absl::Time process_started_at = absl::Now();
     std::vector<PendingHomeBatchGet> retry_batches;
     retry_batches.reserve(results.size());
 
     for (auto& result : results) {
       if (result.request.remote_home) {
         stats.remote_home_rpc_elapsed += result.rpc_elapsed;
+        stats.remote_home_rpc_max_elapsed = std::max(stats.remote_home_rpc_max_elapsed, result.rpc_elapsed);
+        stats.remote_home_queue_elapsed += result.queue_elapsed;
+        stats.remote_home_queue_max_elapsed = std::max(stats.remote_home_queue_max_elapsed, result.queue_elapsed);
+        stats.remote_home_task_elapsed += result.task_elapsed;
+        stats.remote_home_task_max_elapsed = std::max(stats.remote_home_task_max_elapsed, result.task_elapsed);
       } else {
         stats.local_home_rpc_elapsed += result.rpc_elapsed;
+        stats.local_home_rpc_max_elapsed = std::max(stats.local_home_rpc_max_elapsed, result.rpc_elapsed);
+        stats.local_home_queue_elapsed += result.queue_elapsed;
+        stats.local_home_queue_max_elapsed = std::max(stats.local_home_queue_max_elapsed, result.queue_elapsed);
+        stats.local_home_task_elapsed += result.task_elapsed;
+        stats.local_home_task_max_elapsed = std::max(stats.local_home_task_max_elapsed, result.task_elapsed);
       }
       LOG(INFO) << "byte_artifact.batch_get_into_region_home_rpc_result"
                 << " operation_id=" << operation_id << " shard_id=" << result.request.shard_id
                 << " remote_home=" << result.request.remote_home
                 << " holder_daemon_id=" << result.request.holder_daemon_id
                 << " requested_artifacts=" << result.request.batch->artifact_ids.size()
-                << " attempt=" << result.request.attempt << " rpc_ms=" << absl::ToDoubleMilliseconds(result.rpc_elapsed)
+                << " attempt=" << result.request.attempt
+                << " queue_ms=" << absl::ToDoubleMilliseconds(result.queue_elapsed)
+                << " rpc_ms=" << absl::ToDoubleMilliseconds(result.rpc_elapsed)
+                << " task_wall_ms=" << absl::ToDoubleMilliseconds(result.task_elapsed)
                 << " status_ok=" << result.status.ok() << " status_code=" << result.status.error_code()
                 << " status_message=" << result.status.error_message();
 
@@ -3501,6 +4229,7 @@ grpc::Status ByteArtifactController::batch_get_into_region(
     }
 
     if (retry_batches.empty()) {
+      home_process_elapsed += absl::Now() - process_started_at;
       return;
     }
 
@@ -3512,11 +4241,14 @@ grpc::Status ByteArtifactController::batch_get_into_region(
       }
     }
     if (!retry_remote_daemon_ids.empty()) {
+      const absl::Time retry_worker_directory_warm_started_at = absl::Now();
       (void)d_.worker_directory_cache.warm_for_daemons(
           retry_remote_daemon_ids,
           absl::Now(),
           absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
+      worker_directory_warm_elapsed += absl::Now() - retry_worker_directory_warm_started_at;
     }
+    home_process_elapsed += absl::Now() - process_started_at;
     auto retry_results = dispatch_home_batch_get_wave(retry_batches);
     process_home_batch_get_results(std::move(retry_results), /*allow_retry=*/false);
   };
@@ -3524,6 +4256,7 @@ grpc::Status ByteArtifactController::batch_get_into_region(
   auto first_wave_results = dispatch_home_batch_get_wave(pending_batches);
   process_home_batch_get_results(std::move(first_wave_results), /*allow_retry=*/true);
 
+  const absl::Time build_apply_work_started_at = absl::Now();
   std::vector<ApplyWorkUnit> all_work_units;
   for (const auto& [shard_id, batch] : shard_requests) {
     const auto completed_it = completed_home_batches.find(shard_id);
@@ -3536,24 +4269,65 @@ grpc::Status ByteArtifactController::batch_get_into_region(
         std::make_move_iterator(shard_work_units.begin()),
         std::make_move_iterator(shard_work_units.end()));
   }
+  build_apply_work_elapsed = absl::Now() - build_apply_work_started_at;
   execute_apply_work_units(std::move(all_work_units));
 
   log_transport_apply_stats();
+  log_apply_breakdown();
   attach_slot_tokens_to_outcomes(requested_slot_tokens, resp.mutable_outcomes());
-  VLOG(2) << "byte_artifact.batch_get_into_region_summary"
+  std::ostringstream summary;
+  summary << "byte_artifact.batch_get_into_region_summary"
           << " operation_id=" << (req.has_operation_id() ? req.operation_id() : "")
-          << " selections=" << req.selections_size() << " shard_count=" << shard_requests.size()
-          << " local_home_batches=" << stats.local_home_batch_count
+          << " first_artifact_id=" << first_artifact_id << " selections=" << req.selections_size()
+          << " shard_count=" << shard_requests.size() << " local_home_batches=" << stats.local_home_batch_count
           << " remote_home_batches=" << stats.remote_home_batch_count
           << " local_home_items=" << stats.local_home_item_count
           << " remote_home_items=" << stats.remote_home_item_count
+          << " local_batch_transport_items=" << stats.local_batch_transport_item_count
+          << " remote_batch_transport_items=" << stats.remote_batch_transport_item_count
+          << " local_batch_transport_per_item_materialize_calls="
+          << stats.local_batch_transport_per_item_materialize_calls
+          << " remote_batch_transport_per_item_materialize_calls="
+          << stats.remote_batch_transport_per_item_materialize_calls
+          << " local_batch_transport_composite_materialize_calls="
+          << stats.local_batch_transport_composite_materialize_calls
+          << " remote_batch_transport_composite_materialize_calls="
+          << stats.remote_batch_transport_composite_materialize_calls
           << " local_source_items=" << stats.local_source_item_count
           << " remote_source_items=" << stats.remote_source_item_count
           << " local_source_bytes=" << stats.local_source_bytes << " remote_source_bytes=" << stats.remote_source_bytes
+          << " ensure_local_peer_ms=" << absl::ToDoubleMilliseconds(ensure_local_peer_elapsed)
+          << " selection_build_ms=" << absl::ToDoubleMilliseconds(selection_build_elapsed)
+          << " validate_target_layout_ms=" << absl::ToDoubleMilliseconds(validate_target_layout_elapsed)
+          << " route_resolve_ms=" << absl::ToDoubleMilliseconds(route_resolve_elapsed)
+          << " worker_directory_warm_ms=" << absl::ToDoubleMilliseconds(worker_directory_warm_elapsed)
+          << " remote_channel_resolve_ms=" << absl::ToDoubleMilliseconds(remote_channel_resolve_elapsed)
+          << " remote_channel_resolve_max_ms=" << absl::ToDoubleMilliseconds(remote_channel_resolve_max_elapsed)
+          << " remote_channel_resolve_count=" << remote_channel_resolve_count
+          << " home_dispatch_ms=" << absl::ToDoubleMilliseconds(home_dispatch_elapsed)
+          << " home_process_ms=" << absl::ToDoubleMilliseconds(home_process_elapsed)
+          << " build_apply_work_ms=" << absl::ToDoubleMilliseconds(build_apply_work_elapsed)
+          << " local_home_queue_ms=" << absl::ToDoubleMilliseconds(stats.local_home_queue_elapsed)
+          << " remote_home_queue_ms=" << absl::ToDoubleMilliseconds(stats.remote_home_queue_elapsed)
+          << " local_home_queue_max_ms=" << absl::ToDoubleMilliseconds(stats.local_home_queue_max_elapsed)
+          << " remote_home_queue_max_ms=" << absl::ToDoubleMilliseconds(stats.remote_home_queue_max_elapsed)
           << " local_home_rpc_ms=" << absl::ToDoubleMilliseconds(stats.local_home_rpc_elapsed)
           << " remote_home_rpc_ms=" << absl::ToDoubleMilliseconds(stats.remote_home_rpc_elapsed)
+          << " local_home_rpc_max_ms=" << absl::ToDoubleMilliseconds(stats.local_home_rpc_max_elapsed)
+          << " remote_home_rpc_max_ms=" << absl::ToDoubleMilliseconds(stats.remote_home_rpc_max_elapsed)
+          << " local_home_task_ms=" << absl::ToDoubleMilliseconds(stats.local_home_task_elapsed)
+          << " remote_home_task_ms=" << absl::ToDoubleMilliseconds(stats.remote_home_task_elapsed)
+          << " local_home_task_max_ms=" << absl::ToDoubleMilliseconds(stats.local_home_task_max_elapsed)
+          << " remote_home_task_max_ms=" << absl::ToDoubleMilliseconds(stats.remote_home_task_max_elapsed)
           << " local_source_apply_ms=" << absl::ToDoubleMilliseconds(stats.local_source_apply_elapsed)
-          << " remote_source_apply_ms=" << absl::ToDoubleMilliseconds(stats.remote_source_apply_elapsed);
+          << " remote_source_apply_ms=" << absl::ToDoubleMilliseconds(stats.remote_source_apply_elapsed)
+          << " apply_wall_ms=" << absl::ToDoubleMilliseconds(apply_wall_elapsed)
+          << " total_wall_ms=" << absl::ToDoubleMilliseconds(absl::Now() - total_started_at);
+  if (req.has_operation_id() && !req.operation_id().empty()) {
+    LOG(INFO) << summary.str();
+  } else {
+    VLOG(2) << summary.str();
+  }
   rctx.mark_success();
   return Status::OK;
 }
@@ -3786,6 +4560,8 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
   prebuilt_remote_channels.reserve(remote_daemon_ids.size());
   absl::flat_hash_map<std::string, PeerBatchTransportSupport> prebuilt_peer_transport_support;
   prebuilt_peer_transport_support.reserve(remote_daemon_ids.size());
+  absl::flat_hash_map<std::string, std::string> prebuilt_remote_cpu_endpoint_ids;
+  prebuilt_remote_cpu_endpoint_ids.reserve(remote_daemon_ids.size());
   for (const auto& daemon_id : remote_daemon_ids) {
     auto address_or = d_.worker_directory_cache.resolve_daemon_address(
         daemon_id, now, absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
@@ -3794,6 +4570,14 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
           daemon_id, create_inter_daemon_channel(*address_or, d_.inter_daemon_channel_credentials));
     }
     prebuilt_peer_transport_support.emplace(daemon_id, resolve_peer_batch_transport_support(daemon_id, now));
+    auto entry_or = d_.worker_directory_cache.resolve_daemon_entry(
+        daemon_id, now, absl::Milliseconds(options_.routing.worker_directory_staleness_budget.count()));
+    if (entry_or.ok() && !entry_or->node_id.empty()) {
+      prebuilt_remote_cpu_endpoint_ids.emplace(
+          daemon_id,
+          store::components::derive_endpoint_id(
+              entry_or->node_id, common::memory::MemoryLocation::CPU, /*device_id=*/0));
+    }
   }
 
   struct LocalProducerEndpoint {
@@ -4129,6 +4913,27 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
       for (std::size_t index = 0; index < authority_outcomes.size(); ++index) {
         record_outcome(authority_item_indices[index], authority_outcomes[index]);
       }
+      if (options_.publish_prereg.enabled) {
+        for (std::size_t index = 0; index < authority_outcomes.size(); ++index) {
+          if (authority_outcomes[index].status() != v2::BATCH_ITEM_STATUS_OK) {
+            continue;
+          }
+          auto entry = d_.body_store.get(
+              authority_items[index].artifact_id,
+              task.shard_id,
+              home_lease_or->lease_generation,
+              options_.routing.routing_epoch,
+              now);
+          if (!entry.has_value()) {
+            VLOG(2) << "byte_artifact.publish_prereg.skip"
+                    << " artifact_id=" << authority_items[index].artifact_id
+                    << " published_at_ms=" << absl::ToUnixMillis(now) << " reason=canonical_backing_missing";
+            continue;
+          }
+          publish_preregistered_export(
+              authority_items[index].artifact_id, entry->backing_record.retained_body_handle, now);
+        }
+      }
       task_stats.local_home_apply_elapsed += absl::Now() - apply_started_at;
     };
 
@@ -4291,6 +5096,10 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
                   communicator_source->set_remote_endpoint_id(
                       store::components::derive_endpoint_id(
                           local_producer_endpoint.node_id, common::memory::MemoryLocation::CPU, /*device_id=*/0));
+                }
+                const auto consumer_endpoint_it = prebuilt_remote_cpu_endpoint_ids.find(task.route.holder_daemon_id);
+                if (consumer_endpoint_it != prebuilt_remote_cpu_endpoint_ids.end()) {
+                  communicator_source->set_local_endpoint_id_hint(consumer_endpoint_it->second);
                 }
                 communicator_source->set_memory_location(v2::BATCH_PAYLOAD_MEMORY_LOCATION_HOST);
                 communicator_source->set_total_payload_bytes(pack.manifest.total_size());

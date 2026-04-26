@@ -178,6 +178,24 @@ absl::Status validate_batch_communicator_source(
   return absl::OkStatus();
 }
 
+absl::StatusOr<std::uint64_t> export_registration_total_bytes(const store::ExportRegistration& registration) {
+  if (registration.remote_memory_keys.empty() ||
+      registration.remote_memory_keys.size() != registration.buffer_sizes.size()) {
+    return absl::InvalidArgumentError("communicator export registration is incomplete");
+  }
+  std::uint64_t total_bytes = 0;
+  for (const auto buffer_size : registration.buffer_sizes) {
+    if (buffer_size > static_cast<size_t>(std::numeric_limits<std::uint64_t>::max() - total_bytes)) {
+      return absl::OutOfRangeError("communicator export registration exceeds uint64 range");
+    }
+    total_bytes += static_cast<std::uint64_t>(buffer_size);
+  }
+  if (total_bytes == 0) {
+    return absl::InvalidArgumentError("communicator export registration is empty");
+  }
+  return total_bytes;
+}
+
 absl::StatusOr<absl::Time> resolve_payload_ref_expiry(
     absl::Time now,
     absl::Duration default_ttl,
@@ -632,6 +650,133 @@ class SharedStringSource final : public store::loader::SeekableSource {
  private:
   std::shared_ptr<const std::string> payload_;
   uint64_t cursor_{0};
+};
+
+class SharedSegmentedMemorySource final : public store::loader::SeekableSource {
+ public:
+  struct Segment {
+    const std::uint8_t* data{nullptr};
+    std::uint64_t size_bytes{0};
+  };
+
+  SharedSegmentedMemorySource(std::vector<Segment> segments, std::vector<std::shared_ptr<void>> keepalives)
+      : segments_(std::move(segments)), keepalives_(std::move(keepalives)) {
+    for (const auto& segment : segments_) {
+      if (segment.size_bytes > std::numeric_limits<std::uint64_t>::max() - total_bytes_) {
+        total_bytes_ = std::numeric_limits<std::uint64_t>::max();
+        break;
+      }
+      total_bytes_ += segment.size_bytes;
+    }
+  }
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return total_bytes_;
+  }
+
+  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
+    auto read_or = read_at(cursor_, dst, max_bytes);
+    if (!read_or.ok()) {
+      return read_or.status();
+    }
+    cursor_ += *read_or;
+    return *read_or;
+  }
+
+  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
+    if (bytes == 0 || offset >= total_bytes_) {
+      return static_cast<size_t>(0);
+    }
+    const size_t to_copy = static_cast<size_t>(std::min<std::uint64_t>(bytes, total_bytes_ - offset));
+    return copy_range_into(offset, static_cast<std::uint8_t*>(dst), to_copy);
+  }
+
+  [[nodiscard]] bool supports_direct_write_at() const override {
+    return true;
+  }
+
+  absl::StatusOr<size_t> read_into_at(
+      uint64_t src_offset,
+      uint64_t dest_va_offset,
+      size_t bytes,
+      const store::DirectWriteGrant& grant) override {
+    if (bytes == 0 || src_offset >= total_bytes_) {
+      return static_cast<size_t>(0);
+    }
+    const size_t to_copy = static_cast<size_t>(std::min<std::uint64_t>(bytes, total_bytes_ - src_offset));
+    const auto target_end_or = checked_add_u64(dest_va_offset, static_cast<uint64_t>(to_copy));
+    if (!target_end_or.ok()) {
+      return target_end_or.status();
+    }
+    const store::DirectWriteGrant::Window* target = nullptr;
+    for (const auto& window : grant.windows) {
+      const auto window_end_or = checked_add_u64(window.va_offset, window.length);
+      if (!window_end_or.ok()) {
+        return window_end_or.status();
+      }
+      if (dest_va_offset >= window.va_offset && *target_end_or <= *window_end_or) {
+        target = &window;
+        break;
+      }
+    }
+    if (target == nullptr) {
+      return absl::InvalidArgumentError("No direct-write window covers requested segmented payload range");
+    }
+    const uint64_t window_offset = dest_va_offset - target->va_offset;
+    const auto target_addr_or = checked_add_u64(target->local_addr, window_offset);
+    if (!target_addr_or.ok()) {
+      return target_addr_or.status();
+    }
+    auto* dst = reinterpret_cast<std::uint8_t*>(static_cast<std::uintptr_t>(*target_addr_or));
+    return copy_range_into(src_offset, dst, to_copy);
+  }
+
+ private:
+  static absl::StatusOr<uint64_t> checked_add_u64(uint64_t lhs, uint64_t rhs) {
+    if (lhs > std::numeric_limits<uint64_t>::max() - rhs) {
+      return absl::OutOfRangeError("segmented payload offset overflow");
+    }
+    return lhs + rhs;
+  }
+
+  absl::StatusOr<size_t> copy_range_into(uint64_t offset, std::uint8_t* dst, size_t bytes) const {
+    if (bytes == 0) {
+      return static_cast<size_t>(0);
+    }
+    if (dst == nullptr) {
+      return absl::InvalidArgumentError("segmented payload copy requires destination buffer");
+    }
+    std::uint64_t remaining = bytes;
+    std::uint64_t segment_base = 0;
+    size_t copied = 0;
+    for (const auto& segment : segments_) {
+      if (remaining == 0) {
+        break;
+      }
+      const auto segment_end_or = checked_add_u64(segment_base, segment.size_bytes);
+      if (!segment_end_or.ok()) {
+        return segment_end_or.status();
+      }
+      if (offset >= *segment_end_or) {
+        segment_base = *segment_end_or;
+        continue;
+      }
+      const std::uint64_t segment_offset = offset > segment_base ? offset - segment_base : 0;
+      const std::uint64_t available = segment.size_bytes - segment_offset;
+      const size_t to_copy = static_cast<size_t>(std::min<std::uint64_t>(remaining, available));
+      std::memcpy(dst + copied, segment.data + segment_offset, to_copy);
+      copied += to_copy;
+      remaining -= to_copy;
+      offset += to_copy;
+      segment_base = *segment_end_or;
+    }
+    return copied;
+  }
+
+  std::vector<Segment> segments_;
+  std::vector<std::shared_ptr<void>> keepalives_;
+  std::uint64_t total_bytes_{0};
+  std::uint64_t cursor_{0};
 };
 
 class RemotePayloadRefSource final : public store::loader::SeekableSource {
@@ -1422,7 +1567,7 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_payload_ref(
   return *token_or;
 }
 
-absl::StatusOr<std::string> PayloadTransportBroker::issue_batch_payload_ref(
+absl::StatusOr<PayloadTransportBroker::BatchRefIssueResult> PayloadTransportBroker::issue_batch_payload_ref_record(
     const v2::BatchPayloadManifest& manifest,
     std::shared_ptr<const std::string> payload,
     tensorcast::common::v1::PayloadRefDirection direction,
@@ -1434,9 +1579,6 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_batch_payload_ref(
   }
   if (daemon_id_.empty()) {
     return absl::FailedPreconditionError("daemon_id is required for batch_payload_ref issuance");
-  }
-  if (!payload || payload->empty()) {
-    return absl::InvalidArgumentError("payload is required for batch_payload_ref issuance");
   }
   if (capability_tokens_ == nullptr || !capability_tokens_->configured()) {
     return absl::FailedPreconditionError("capability tokens are required for batch_payload_ref transport");
@@ -1451,7 +1593,7 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_batch_payload_ref(
   if (!manifest_status.ok()) {
     return manifest_status;
   }
-  if (manifest.total_size() != payload->size()) {
+  if (payload && manifest.total_size() != payload->size()) {
     return absl::FailedPreconditionError("batch payload manifest total_size does not match payload size");
   }
 
@@ -1472,7 +1614,7 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_batch_payload_ref(
   metadata.transport_id = transport_id;
   metadata.manifest_digest_hex = compute_batch_manifest_digest_hex(manifest);
   metadata.consumer_daemon_id = std::string(consumer_daemon_id);
-  metadata.payload_size = payload->size();
+  metadata.payload_size = manifest.total_size();
   metadata.direction = direction;
   metadata.operation_id = std::string(operation_id);
   metadata.expires_at = expires_at;
@@ -1482,15 +1624,21 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_batch_payload_ref(
       std::vector<std::function<absl::Status()>>{
           [this, transport_id]() -> absl::Status {
             std::optional<store::ExportRegistration> communicator_export;
+            std::vector<std::shared_ptr<void>> communicator_export_keepalives;
+            bool communicator_export_requires_unregister = false;
             {
               absl::MutexLock lock(&mu_);
               const auto it = batch_records_.find(transport_id);
               if (it != batch_records_.end()) {
                 communicator_export = it->second.communicator_export;
+                communicator_export_keepalives = std::move(it->second.communicator_export_keepalives);
+                communicator_export_requires_unregister = it->second.communicator_export_requires_unregister;
                 batch_records_.erase(it);
               }
             }
-            if (communicator_export.has_value() && options_.comm_manager != nullptr) {
+            (void)communicator_export_keepalives;
+            if (communicator_export_requires_unregister && communicator_export.has_value() &&
+                options_.comm_manager != nullptr) {
               for (const auto& tensor_key : communicator_export->remote_memory_keys) {
                 (void)options_.comm_manager->get_engine().unregister_tensor(tensor_key);
               }
@@ -1508,6 +1656,9 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_batch_payload_ref(
     record.metadata = metadata;
     record.manifest = manifest;
     record.payload = std::move(payload);
+    record.communicator_export.reset();
+    record.communicator_export_keepalives.clear();
+    record.communicator_export_requires_unregister = false;
     record.lease_id = *lease_or;
   }
 
@@ -1538,7 +1689,29 @@ absl::StatusOr<std::string> PayloadTransportBroker::issue_batch_payload_ref(
     lifecycle_manager_->release_lease(*lease_or);
     return token_or.status();
   }
-  return *token_or;
+  return BatchRefIssueResult{
+      .metadata = metadata,
+      .batch_payload_ref = *token_or,
+      .lease_id = *lease_or,
+  };
+}
+
+absl::StatusOr<std::string> PayloadTransportBroker::issue_batch_payload_ref(
+    const v2::BatchPayloadManifest& manifest,
+    std::shared_ptr<const std::string> payload,
+    tensorcast::common::v1::PayloadRefDirection direction,
+    std::string_view operation_id,
+    absl::Time capability_expires_at,
+    std::string_view consumer_daemon_id) {
+  if (!payload || payload->empty()) {
+    return absl::InvalidArgumentError("payload is required for batch_payload_ref issuance");
+  }
+  auto issue_or = issue_batch_payload_ref_record(
+      manifest, std::move(payload), direction, operation_id, capability_expires_at, consumer_daemon_id);
+  if (!issue_or.ok()) {
+    return issue_or.status();
+  }
+  return issue_or->batch_payload_ref;
 }
 
 absl::StatusOr<PayloadTransportBroker::BatchCommunicatorExport> PayloadTransportBroker::
@@ -1581,8 +1754,8 @@ absl::StatusOr<PayloadTransportBroker::BatchCommunicatorExport> PayloadTransport
     return registration_or.status();
   }
   const absl::Time issue_ref_started_at = absl::Now();
-  auto batch_payload_ref_or =
-      issue_batch_payload_ref(manifest, payload, direction, operation_id, capability_expires_at, consumer_daemon_id);
+  auto batch_payload_ref_or = issue_batch_payload_ref_record(
+      manifest, payload, direction, operation_id, capability_expires_at, consumer_daemon_id);
   const absl::Duration issue_ref_elapsed = absl::Now() - issue_ref_started_at;
   if (!batch_payload_ref_or.ok()) {
     for (const auto& tensor_key : registration_or->remote_memory_keys) {
@@ -1590,35 +1763,152 @@ absl::StatusOr<PayloadTransportBroker::BatchCommunicatorExport> PayloadTransport
     }
     return batch_payload_ref_or.status();
   }
-  auto metadata_or = inspect_batch_payload_ref(*batch_payload_ref_or, now, /*require_not_expired=*/true);
-  if (!metadata_or.ok()) {
-    for (const auto& tensor_key : registration_or->remote_memory_keys) {
-      (void)options_.comm_manager->get_engine().unregister_tensor(tensor_key);
-    }
-    return metadata_or.status();
-  }
   {
     absl::MutexLock lock(&mu_);
-    const auto it = batch_records_.find(metadata_or->transport_id);
+    const auto it = batch_records_.find(batch_payload_ref_or->metadata.transport_id);
     if (it == batch_records_.end()) {
       for (const auto& tensor_key : registration_or->remote_memory_keys) {
         (void)options_.comm_manager->get_engine().unregister_tensor(tensor_key);
       }
+      lifecycle_manager_->release_lease(batch_payload_ref_or->lease_id);
       return absl::NotFoundError("batch communicator transport record is missing");
     }
     it->second.communicator_export = *registration_or;
+    it->second.communicator_export_requires_unregister = true;
   }
   VLOG(2) << "batch_payload_ref.communicator_export_summary"
           << " direction=" << payload_direction_label(direction) << " operation_id=" << operation_id
-          << " transport_id=" << metadata_or->transport_id << " payload_bytes=" << metadata_or->payload_size
+          << " realization=staged_slab"
+          << " transport_id=" << batch_payload_ref_or->metadata.transport_id
+          << " payload_bytes=" << batch_payload_ref_or->metadata.payload_size
           << " remote_keys=" << registration_or->remote_memory_keys.size()
           << " register_ms=" << absl::ToDoubleMilliseconds(register_elapsed)
           << " issue_ref_ms=" << absl::ToDoubleMilliseconds(issue_ref_elapsed)
           << " total_ms=" << absl::ToDoubleMilliseconds(absl::Now() - export_started_at);
   return BatchCommunicatorExport{
-      .metadata = *metadata_or,
-      .batch_payload_ref = *batch_payload_ref_or,
+      .metadata = batch_payload_ref_or->metadata,
+      .batch_payload_ref = batch_payload_ref_or->batch_payload_ref,
       .export_registration = *registration_or,
+  };
+}
+
+absl::StatusOr<PayloadTransportBroker::BatchCommunicatorExport> PayloadTransportBroker::
+    issue_batch_payload_communicator_export(
+        const v2::BatchPayloadManifest& manifest,
+        absl::Span<const BatchCommunicatorSourceSegment> source_segments,
+        tensorcast::common::v1::PayloadRefDirection direction,
+        std::string_view operation_id,
+        absl::Time capability_expires_at,
+        std::string_view consumer_daemon_id) {
+  if (!batch_transport_segmented_communicator_export_enabled()) {
+    return absl::FailedPreconditionError("segmented batch communicator transport is disabled");
+  }
+  auto manifest_status = validate_batch_payload_manifest(manifest);
+  if (!manifest_status.ok()) {
+    return manifest_status;
+  }
+  if (static_cast<int>(source_segments.size()) != manifest.entries_size()) {
+    return absl::InvalidArgumentError("segmented batch communicator source count mismatch");
+  }
+  const absl::Time now = absl::Now();
+  auto expires_at_or = resolve_payload_ref_expiry(now, options_.ttl, capability_expires_at);
+  if (!expires_at_or.ok()) {
+    return expires_at_or.status();
+  }
+  const absl::Time expires_at = *expires_at_or;
+  if (expires_at - now < options_.minimum_batch_transport_ttl) {
+    return absl::FailedPreconditionError("batch communicator transport ttl below minimum");
+  }
+
+  store::ExportRegistration registration;
+  registration.artifact_size = manifest.total_size();
+  registration.location = common::memory::MemoryLocation::CPU;
+  registration.device_id = -1;
+  std::vector<std::shared_ptr<void>> keepalives;
+  keepalives.reserve(source_segments.size());
+  std::uint64_t total_payload_bytes = 0;
+
+  for (int entry_index = 0; entry_index < manifest.entries_size(); ++entry_index) {
+    const auto& segment = source_segments[entry_index];
+    if (!segment.export_view.communicator_export.has_value()) {
+      return absl::FailedPreconditionError("segmented batch communicator source requires communicator export");
+    }
+    if (segment.export_view.keepalive == nullptr) {
+      return absl::FailedPreconditionError("segmented batch communicator source requires keepalive");
+    }
+    if (segment.export_view.memory_location != common::memory::MemoryLocation::CPU ||
+        segment.export_view.communicator_export->location != common::memory::MemoryLocation::CPU) {
+      return absl::FailedPreconditionError("segmented batch communicator source currently requires CPU exports");
+    }
+    auto segment_bytes_or = export_registration_total_bytes(*segment.export_view.communicator_export);
+    if (!segment_bytes_or.ok()) {
+      return segment_bytes_or.status();
+    }
+    if (*segment_bytes_or != manifest.entries(entry_index).length()) {
+      return absl::FailedPreconditionError("segmented batch communicator source length mismatch");
+    }
+    if (total_payload_bytes > std::numeric_limits<std::uint64_t>::max() - *segment_bytes_or) {
+      return absl::OutOfRangeError("segmented batch communicator payload exceeds uint64 range");
+    }
+    total_payload_bytes += *segment_bytes_or;
+    if (entry_index == 0) {
+      registration.comm_dev_type = segment.export_view.communicator_export->comm_dev_type;
+    } else if (registration.comm_dev_type != segment.export_view.communicator_export->comm_dev_type) {
+      return absl::FailedPreconditionError("segmented batch communicator source requires one communicator device type");
+    }
+    registration.buffer_addresses.insert(
+        registration.buffer_addresses.end(),
+        segment.export_view.communicator_export->buffer_addresses.begin(),
+        segment.export_view.communicator_export->buffer_addresses.end());
+    registration.buffer_sizes.insert(
+        registration.buffer_sizes.end(),
+        segment.export_view.communicator_export->buffer_sizes.begin(),
+        segment.export_view.communicator_export->buffer_sizes.end());
+    registration.remote_memory_keys.insert(
+        registration.remote_memory_keys.end(),
+        segment.export_view.communicator_export->remote_memory_keys.begin(),
+        segment.export_view.communicator_export->remote_memory_keys.end());
+    keepalives.push_back(segment.export_view.keepalive);
+  }
+  if (total_payload_bytes != manifest.total_size()) {
+    return absl::FailedPreconditionError("segmented batch communicator payload size mismatch");
+  }
+
+  const absl::Time issue_ref_started_at = absl::Now();
+  auto batch_payload_ref_or = issue_batch_payload_ref_record(
+      manifest,
+      /*payload=*/nullptr,
+      direction,
+      operation_id,
+      capability_expires_at,
+      consumer_daemon_id);
+  const absl::Duration issue_ref_elapsed = absl::Now() - issue_ref_started_at;
+  if (!batch_payload_ref_or.ok()) {
+    return batch_payload_ref_or.status();
+  }
+  {
+    absl::MutexLock lock(&mu_);
+    const auto it = batch_records_.find(batch_payload_ref_or->metadata.transport_id);
+    if (it == batch_records_.end()) {
+      lifecycle_manager_->release_lease(batch_payload_ref_or->lease_id);
+      return absl::NotFoundError("segmented batch communicator transport record is missing");
+    }
+    it->second.communicator_export = registration;
+    it->second.communicator_export_keepalives = std::move(keepalives);
+    it->second.communicator_export_requires_unregister = false;
+  }
+  VLOG(2) << "batch_payload_ref.communicator_export_summary"
+          << " direction=" << payload_direction_label(direction) << " operation_id=" << operation_id
+          << " realization=segmented_source"
+          << " transport_id=" << batch_payload_ref_or->metadata.transport_id
+          << " payload_bytes=" << batch_payload_ref_or->metadata.payload_size
+          << " remote_keys=" << registration.remote_memory_keys.size() << " source_segments=" << source_segments.size()
+          << " issue_ref_ms=" << absl::ToDoubleMilliseconds(issue_ref_elapsed)
+          << " total_ms=" << absl::ToDoubleMilliseconds(absl::Now() - issue_ref_started_at);
+  return BatchCommunicatorExport{
+      .metadata = batch_payload_ref_or->metadata,
+      .batch_payload_ref = batch_payload_ref_or->batch_payload_ref,
+      .export_registration = registration,
   };
 }
 
@@ -2451,6 +2741,8 @@ absl::StatusOr<PayloadTransportBroker::LocalResolvedBatchPayload> PayloadTranspo
   return LocalResolvedBatchPayload{
       .metadata = it->second.metadata,
       .payload = it->second.payload,
+      .communicator_export = it->second.communicator_export,
+      .communicator_export_keepalives = it->second.communicator_export_keepalives,
   };
 }
 
@@ -2594,6 +2886,9 @@ absl::StatusOr<PayloadTransportBroker::ResolvedBatchPayload> PayloadTransportBro
     if (!local_or.ok()) {
       return local_or.status();
     }
+    if (!local_or->payload || local_or->payload->empty()) {
+      return absl::FailedPreconditionError("batch_payload_ref payload is unavailable");
+    }
     return ResolvedBatchPayload{
         .metadata = local_or->metadata,
         .payload = local_or->payload,
@@ -2684,15 +2979,57 @@ absl::StatusOr<PayloadTransportBroker::BatchPayloadSource> PayloadTransportBroke
     if (!local_or.ok()) {
       return local_or.status();
     }
+    if (local_or->payload && !local_or->payload->empty()) {
+      VLOG(2) << "batch_payload_ref.communicator_open_summary"
+              << " direction=" << payload_direction_label(expected_direction)
+              << " operation_id=" << expected_operation_id << " transport_id=" << metadata_or->transport_id
+              << " remote=false"
+              << " producer_daemon_id=" << source.producer_daemon_id() << " consumer_daemon_id=" << local_daemon_id
+              << " payload_bytes=" << metadata_or->payload_size << " memory_keys=" << source.remote_memory_keys_size();
+      return BatchPayloadSource{
+          .metadata = local_or->metadata,
+          .source =
+              std::shared_ptr<store::loader::SeekableSource>(std::make_shared<SharedStringSource>(local_or->payload)),
+          .remote = false,
+      };
+    }
+    if (!local_or->communicator_export.has_value()) {
+      return absl::FailedPreconditionError("batch_payload_ref payload is unavailable for local communicator source");
+    }
+    auto export_total_or = export_registration_total_bytes(*local_or->communicator_export);
+    if (!export_total_or.ok()) {
+      return export_total_or.status();
+    }
+    if (*export_total_or != metadata_or->payload_size) {
+      return absl::FailedPreconditionError("local communicator export payload_size mismatch");
+    }
+    std::vector<SharedSegmentedMemorySource::Segment> segments;
+    segments.reserve(local_or->communicator_export->buffer_sizes.size());
+    for (std::size_t index = 0; index < local_or->communicator_export->buffer_sizes.size(); ++index) {
+      const auto address = local_or->communicator_export->buffer_addresses[index];
+      const auto size_bytes = local_or->communicator_export->buffer_sizes[index];
+      if (address == 0) {
+        return absl::FailedPreconditionError("local communicator export buffer address is unavailable");
+      }
+      if (size_bytes == 0) {
+        return absl::FailedPreconditionError("local communicator export buffer size must be > 0");
+      }
+      segments.push_back(
+          SharedSegmentedMemorySource::Segment{
+              .data = reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(address)),
+              .size_bytes = static_cast<std::uint64_t>(size_bytes),
+          });
+    }
     VLOG(2) << "batch_payload_ref.communicator_open_summary"
             << " direction=" << payload_direction_label(expected_direction) << " operation_id=" << expected_operation_id
             << " transport_id=" << metadata_or->transport_id << " remote=false"
             << " producer_daemon_id=" << source.producer_daemon_id() << " consumer_daemon_id=" << local_daemon_id
-            << " payload_bytes=" << metadata_or->payload_size << " memory_keys=" << source.remote_memory_keys_size();
+            << " payload_bytes=" << metadata_or->payload_size << " memory_keys=" << source.remote_memory_keys_size()
+            << " realization=communicator_export";
     return BatchPayloadSource{
         .metadata = local_or->metadata,
-        .source =
-            std::shared_ptr<store::loader::SeekableSource>(std::make_shared<SharedStringSource>(local_or->payload)),
+        .source = std::shared_ptr<store::loader::SeekableSource>(std::make_shared<SharedSegmentedMemorySource>(
+            std::move(segments), local_or->communicator_export_keepalives)),
         .remote = false,
     };
   }
@@ -2727,6 +3064,13 @@ absl::StatusOr<PayloadTransportBroker::BatchPayloadSource> PayloadTransportBroke
   }
 
   std::string local_endpoint_id = source.local_endpoint_id_hint();
+  std::string local_endpoint_id_mode = local_endpoint_id.empty() ? "missing" : "transport_hint";
+  if (local_endpoint_id.empty() && options_.local_cpu_endpoint_id_provider) {
+    local_endpoint_id = options_.local_cpu_endpoint_id_provider();
+    if (!local_endpoint_id.empty()) {
+      local_endpoint_id_mode = "local_provider";
+    }
+  }
   if (local_endpoint_id.empty()) {
     const absl::Time resolve_started_at = absl::Now();
     auto local_entry_or =
@@ -2735,6 +3079,7 @@ absl::StatusOr<PayloadTransportBroker::BatchPayloadSource> PayloadTransportBroke
     if (local_entry_or.ok() && !local_entry_or->node_id.empty()) {
       local_endpoint_id = store::components::derive_endpoint_id(
           local_entry_or->node_id, common::memory::MemoryLocation::CPU, /*device_id=*/0);
+      local_endpoint_id_mode = "worker_directory";
     }
   }
 
@@ -2768,6 +3113,9 @@ absl::StatusOr<PayloadTransportBroker::BatchPayloadSource> PayloadTransportBroke
           << " transport_id=" << metadata_or->transport_id << " remote=true"
           << " producer_daemon_id=" << source.producer_daemon_id() << " consumer_daemon_id=" << local_daemon_id
           << " producer_host=" << producer_host << " producer_port=" << producer_port
+          << " local_endpoint_id_mode=" << local_endpoint_id_mode
+          << " local_endpoint_id_present=" << !local_endpoint_id.empty()
+          << " remote_endpoint_id_present=" << !remote_endpoint_id.empty()
           << " payload_bytes=" << metadata_or->payload_size << " memory_keys=" << source.remote_memory_keys_size()
           << " endpoint_resolve_ms=" << absl::ToDoubleMilliseconds(endpoint_resolve_elapsed)
           << " total_open_ms=" << absl::ToDoubleMilliseconds(absl::Now() - open_started_at);
@@ -2879,17 +3227,32 @@ void PayloadTransportBroker::prune_locked(absl::Time now) {
     records_.erase(it);
   }
 
-  std::vector<std::pair<std::string, std::optional<store::ExportRegistration>>> expired_batch_refs;
+  struct ExpiredBatchRef {
+    std::string transport_id;
+    std::optional<store::ExportRegistration> communicator_export;
+    std::vector<std::shared_ptr<void>> communicator_export_keepalives;
+    bool communicator_export_requires_unregister{false};
+  };
+
+  std::vector<ExpiredBatchRef> expired_batch_refs;
   expired_batch_refs.reserve(batch_records_.size());
   for (const auto& [transport_id, record] : batch_records_) {
     if (record.metadata.expires_at <= now) {
-      expired_batch_refs.emplace_back(transport_id, record.communicator_export);
+      expired_batch_refs.push_back(
+          ExpiredBatchRef{
+              .transport_id = transport_id,
+              .communicator_export = record.communicator_export,
+              .communicator_export_keepalives = record.communicator_export_keepalives,
+              .communicator_export_requires_unregister = record.communicator_export_requires_unregister,
+          });
     }
   }
-  for (const auto& [transport_id, communicator_export] : expired_batch_refs) {
+  for (auto& expired : expired_batch_refs) {
+    const auto& transport_id = expired.transport_id;
     batch_records_.erase(transport_id);
-    if (communicator_export.has_value() && options_.comm_manager != nullptr) {
-      for (const auto& tensor_key : communicator_export->remote_memory_keys) {
+    if (expired.communicator_export_requires_unregister && expired.communicator_export.has_value() &&
+        options_.comm_manager != nullptr) {
+      for (const auto& tensor_key : expired.communicator_export->remote_memory_keys) {
         (void)options_.comm_manager->get_engine().unregister_tensor(tensor_key);
       }
     }

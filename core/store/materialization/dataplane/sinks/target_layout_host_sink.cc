@@ -6,23 +6,37 @@
 #include <limits>
 #include <utility>
 
+#include "absl/log/log.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
+
 namespace tensorcast::store::loader {
 
 namespace {
 
 constexpr size_t kInvalidIndex = std::numeric_limits<size_t>::max();
 
+struct CompositeKeepalive {
+  std::vector<std::shared_ptr<void>> keepalives;
+};
+
 } // namespace
 
 TargetLayoutHostSink::TargetLayoutHostSink(Options options) : keepalive_(std::move(options.keepalive)) {
+  std::vector<std::shared_ptr<void>> storage_keepalives;
+  storage_keepalives.reserve(options.storages.size());
   storage_states_.reserve(options.storages.size());
   uint64_t cursor = 0;
   for (const auto& storage : options.storages) {
+    if (storage.keepalive != nullptr) {
+      storage_keepalives.push_back(storage.keepalive);
+    }
     storage_states_.push_back(
         StorageState{
             .base_offset = cursor,
             .length = storage.length,
             .base_ptr = storage.base_ptr,
+            .stable_backing = storage.stable_backing,
         });
     if (storage.length > std::numeric_limits<uint64_t>::max() - cursor) {
       total_size_ = 0;
@@ -32,6 +46,11 @@ TargetLayoutHostSink::TargetLayoutHostSink(Options options) : keepalive_(std::mo
     cursor += storage.length;
   }
   total_size_ = cursor;
+  if (keepalive_ == nullptr && !storage_keepalives.empty()) {
+    auto composite = std::make_shared<CompositeKeepalive>();
+    composite->keepalives = std::move(storage_keepalives);
+    keepalive_ = std::move(composite);
+  }
 }
 
 size_t TargetLayoutHostSink::find_storage_index(uint64_t offset) const {
@@ -97,12 +116,19 @@ absl::StatusOr<DirectWriteGrant> TargetLayoutHostSink::plan_direct_write(absl::S
   if (!overall_status_.ok()) {
     return overall_status_;
   }
+  const absl::Time started_at = absl::Now();
   DirectWriteGrant grant;
   grant.keepalive = keepalive_;
+  uint64_t total_requested_bytes = 0;
+  size_t stable_backed_windows = 0;
   for (const auto& range : ranges) {
     if (range.length == 0) {
       continue;
     }
+    if (range.length > std::numeric_limits<uint64_t>::max() - total_requested_bytes) {
+      return absl::OutOfRangeError("plan_direct_write total requested bytes overflow");
+    }
+    total_requested_bytes += range.length;
     if (range.offset > std::numeric_limits<uint64_t>::max() - range.length) {
       return absl::OutOfRangeError("plan_direct_write offset overflows target layout");
     }
@@ -125,11 +151,20 @@ absl::StatusOr<DirectWriteGrant> TargetLayoutHostSink::plan_direct_write(absl::S
               .va_offset = cursor,
               .local_addr = reinterpret_cast<uint64_t>(static_cast<std::byte*>(state.base_ptr.get()) + local_offset),
               .length = take,
+              .stable_backing = state.stable_backing,
           });
+      if (state.stable_backing.has_value()) {
+        ++stable_backed_windows;
+      }
       cursor += take;
       remaining -= take;
     }
   }
+  VLOG(2) << "target_layout_host_sink.plan_direct_write"
+          << " ranges=" << ranges.size() << " windows=" << grant.windows.size()
+          << " storages=" << storage_states_.size() << " total_requested_bytes=" << total_requested_bytes
+          << " stable_backed_windows=" << stable_backed_windows
+          << " elapsed_ms=" << absl::ToDoubleMilliseconds(absl::Now() - started_at);
   return grant;
 }
 

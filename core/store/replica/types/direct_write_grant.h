@@ -1,11 +1,14 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // UMA V3: DirectWriteGrant with windowed authorization semantics.
 #pragma once
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
+
+#include "core/store/materialization/contracts/stable_local_backing.h"
 
 // VaRange definition
 namespace tensorcast::store {
@@ -27,6 +30,7 @@ struct DirectWriteGrant {
     uint64_t va_offset; // VA offset within the replica
     uint64_t local_addr; // Resolved local CPU address for the start of the window
     uint64_t length; // Window length in bytes
+    std::optional<StableLocalBackingRef> stable_backing;
   };
 
   std::vector<Window> windows;

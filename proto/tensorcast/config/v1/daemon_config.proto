@@ -186,6 +186,8 @@ message Engine {
     google.protobuf.Duration owner_file_collective_group_assemble_timeout = 24;
     optional bool owner_file_collective_allow_mixed_residual = 25;
     uint32 owner_file_collective_planner_cache_entries = 26;
+    uint64 direct_write_batch_bytes = 27;
+    uint32 direct_write_batch_ops = 28;
   }
   MaterializationStrategy materialization_strategy = 14;
 }
@@ -298,6 +300,18 @@ message DaemonConfig {
 
   message ByteArtifactRouting {
     message PayloadTransport {
+      message SourcePublishPrereg {
+        // Enable advisory publish-time preregistration for source exports.
+        // First cut is CPU-only and RDMA-only for routed byte-artifact flows.
+        optional bool enabled = 1;
+        // How long a preregistered source export lease may stay live.
+        google.protobuf.Duration ttl = 2;
+        // Best-effort cap on concurrent preregistered backing entries.
+        uint64 max_live_entries = 3;
+        // Best-effort cap on retained preregistered backing bytes.
+        uint64 max_live_bytes = 4;
+      }
+
       google.protobuf.Duration ref_ttl = 1;
       uint64 max_chunk_bytes = 2;
       google.protobuf.Duration fetch_deadline = 3;
@@ -315,10 +329,16 @@ message DaemonConfig {
       optional bool communicator_source_enabled = 9;
       // Enable host-memory export when serving communicator_source packs.
       optional bool host_memory_export_enabled = 10;
+      // Enable producer-side segmented communicator export for batch transport.
+      // This is the producer policy bit used by peers to decide whether
+      // communicator_source should prefer segmented no-pack realization.
+      optional bool segmented_communicator_export_enabled = 13;
       // Optional stricter floor for remaining transport TTL at issue time.
       google.protobuf.Duration minimum_batch_transport_ttl = 11;
       // Optional grace window kept after the nominal expiry before release.
       google.protobuf.Duration transport_release_guard = 12;
+      // Advisory publish-time preregistration for source-side remote serving.
+      SourcePublishPrereg source_publish_prereg = 14;
     }
 
     // Stable shard count for shard_id derivation.

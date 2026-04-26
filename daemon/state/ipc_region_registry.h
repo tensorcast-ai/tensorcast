@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -72,6 +73,8 @@ class IpcRegionRegistry {
     bool poisoned = false;
   };
 
+  using RegionCleanupCallback = std::function<void(const RegionDescriptor&)>;
+
   struct HostSharedAttachment {
     RegionDescriptor region;
     std::string attach_token;
@@ -87,6 +90,8 @@ class IpcRegionRegistry {
   };
 
   explicit IpcRegionRegistry(Options opts);
+
+  void set_pre_cleanup_callback(RegionCleanupCallback callback);
 
   // Register a new CUDA IPC region and return its descriptor.
   absl::StatusOr<RegionDescriptor> register_region(const RegisterParams& params);
@@ -154,6 +159,7 @@ class IpcRegionRegistry {
     uint64_t host_shared_attachment_refcount = 0;
     absl::Time inserted_at = absl::Now();
     bool poisoned = false;
+    bool retiring = false;
     std::unique_ptr<DaemonManagedHostSharedSlab> daemon_host_shared_slab;
   };
 
@@ -165,6 +171,7 @@ class IpcRegionRegistry {
   mutable absl::Mutex mu_;
   absl::flat_hash_map<std::string, RegionRecord> regions_ ABSL_GUARDED_BY(mu_);
   absl::flat_hash_map<std::string, std::string> attach_tokens_ ABSL_GUARDED_BY(mu_);
+  RegionCleanupCallback pre_cleanup_callback_ ABSL_GUARDED_BY(mu_);
   absl::BitGen bitgen_ ABSL_GUARDED_BY(mu_);
 };
 

@@ -5,9 +5,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <memory>
 #include <new>
+#include <optional>
 #include <typeinfo>
 #include <utility>
 
@@ -123,6 +125,49 @@ const char* run_kind_to_cstr(ByteRangeRun::Kind kind) {
 uint64_t elapsed_us(std::chrono::steady_clock::time_point start) {
   return static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+}
+
+bool is_pre_issue_direct_write_capability_miss(const absl::Status& status) {
+  return absl::IsUnimplemented(status) || absl::IsFailedPrecondition(status);
+}
+
+struct LoweredDirectWriteStep {
+  enum class Kind : uint8_t {
+    kPad = 0,
+    kSourceGroup = 1,
+  };
+
+  Kind kind{Kind::kPad};
+  uint32_t source_index{0};
+  uint64_t dest_va_offset{0};
+  size_t bytes{0};
+  std::vector<tensorcast::store::loader::DirectWriteOp> ops;
+};
+
+absl::Status validate_direct_write_grant_range(
+    uint64_t dest_va_offset,
+    size_t bytes,
+    const tensorcast::store::DirectWriteGrant& grant) {
+  size_t remaining = bytes;
+  uint64_t cursor = dest_va_offset;
+  while (remaining > 0) {
+    const tensorcast::store::DirectWriteGrant::Window* target = nullptr;
+    for (const auto& window : grant.windows) {
+      if (cursor >= window.va_offset && cursor < window.va_offset + window.length) {
+        target = &window;
+        break;
+      }
+    }
+    if (target == nullptr) {
+      return absl::InvalidArgumentError("No direct-write window covers requested range");
+    }
+    const uint64_t window_offset = cursor - target->va_offset;
+    const size_t available = static_cast<size_t>(target->length - window_offset);
+    const size_t take = std::min(remaining, available);
+    remaining -= take;
+    cursor += take;
+  }
+  return absl::OkStatus();
 }
 
 } // namespace
@@ -255,6 +300,10 @@ uint64_t ByteRangeMappedSource::total_bytes() const {
 }
 
 bool ByteRangeMappedSource::supports_direct_write_at() const {
+  return direct_write_supported_;
+}
+
+bool ByteRangeMappedSource::supports_batched_direct_write_at() const {
   return direct_write_supported_;
 }
 
@@ -946,6 +995,70 @@ absl::Status ByteRangeMappedSource::zero_fill_to_grant(
   return absl::OkStatus();
 }
 
+absl::StatusOr<size_t> ByteRangeMappedSource::execute_grouped_direct_write(
+    uint32_t source_index,
+    absl::Span<const DirectWriteOp> ops,
+    const DirectWriteGrant& grant) {
+  if (ops.empty()) {
+    return static_cast<size_t>(0);
+  }
+  if (source_index >= sources_.size()) {
+    return absl::InvalidArgumentError("ByteRangeMappedSource source index out of range");
+  }
+
+  size_t expected_bytes = 0;
+  for (const auto& op : ops) {
+    expected_bytes += static_cast<size_t>(op.bytes);
+  }
+
+  if (!sources_[source_index]->supports_batched_direct_write_at()) {
+    stats_.direct_write_fallback_calls.fetch_add(1, std::memory_order_relaxed);
+    return execute_grouped_direct_write_fallback(source_index, ops, grant);
+  }
+
+  auto wrote_or = sources_[source_index]->readv_into_at(ops, grant);
+  if (!wrote_or.ok()) {
+    if (!is_pre_issue_direct_write_capability_miss(wrote_or.status())) {
+      return wrote_or.status();
+    }
+    stats_.direct_write_fallback_calls.fetch_add(1, std::memory_order_relaxed);
+    return execute_grouped_direct_write_fallback(source_index, ops, grant);
+  }
+  if (*wrote_or != expected_bytes) {
+    return absl::DataLossError("short grouped direct write while executing byte range program");
+  }
+
+  stats_.base_read_calls.fetch_add(ops.size(), std::memory_order_relaxed);
+  stats_.base_read_bytes.fetch_add(*wrote_or, std::memory_order_relaxed);
+  return *wrote_or;
+}
+
+absl::StatusOr<size_t> ByteRangeMappedSource::execute_grouped_direct_write_fallback(
+    uint32_t source_index,
+    absl::Span<const DirectWriteOp> ops,
+    const DirectWriteGrant& grant) {
+  if (source_index >= sources_.size()) {
+    return absl::InvalidArgumentError("ByteRangeMappedSource source index out of range");
+  }
+
+  size_t wrote_bytes = 0;
+  for (const auto& op : ops) {
+    auto wrote_or =
+        sources_[source_index]->read_into_at(op.src_offset, op.dest_va_offset, static_cast<size_t>(op.bytes), grant);
+    if (!wrote_or.ok()) {
+      return wrote_or.status();
+    }
+    if (*wrote_or != op.bytes) {
+      return absl::DataLossError("short direct-write fallback while executing byte range program");
+    }
+    wrote_bytes += *wrote_or;
+  }
+
+  stats_.base_read_calls.fetch_add(ops.size(), std::memory_order_relaxed);
+  stats_.base_read_bytes.fetch_add(wrote_bytes, std::memory_order_relaxed);
+  return wrote_bytes;
+}
+
 absl::StatusOr<size_t> ByteRangeMappedSource::read_into_at(
     uint64_t src_offset,
     uint64_t dest_va_offset,
@@ -1014,6 +1127,181 @@ absl::StatusOr<size_t> ByteRangeMappedSource::read_into_at(
   stats_.direct_write_bytes.fetch_add(copied, std::memory_order_relaxed);
   stats_.output_bytes.fetch_add(copied, std::memory_order_relaxed);
   return copied;
+}
+
+absl::StatusOr<size_t> ByteRangeMappedSource::readv_into_at(
+    absl::Span<const DirectWriteOp> ops,
+    const DirectWriteGrant& grant) {
+  const auto total_started_at = std::chrono::steady_clock::now();
+  if (!supports_direct_write_at()) {
+    stats_.direct_write_fallback_calls.fetch_add(1, std::memory_order_relaxed);
+    return absl::UnimplementedError("direct write not supported for byte range program");
+  }
+  if (ops.empty()) {
+    return static_cast<size_t>(0);
+  }
+
+  stats_.direct_write_calls.fetch_add(1, std::memory_order_relaxed);
+
+  const auto lowering_started_at = std::chrono::steady_clock::now();
+  size_t expected_output_bytes = 0;
+  std::vector<LoweredDirectWriteStep> lowered_steps;
+  lowered_steps.reserve(ops.size());
+  std::vector<DirectWriteOp> pending_group_ops;
+  pending_group_ops.reserve(ops.size());
+  std::optional<uint32_t> pending_source_index;
+
+  auto flush_pending_group = [&]() {
+    if (!pending_source_index.has_value() || pending_group_ops.empty()) {
+      return;
+    }
+    LoweredDirectWriteStep step;
+    step.kind = LoweredDirectWriteStep::Kind::kSourceGroup;
+    step.source_index = *pending_source_index;
+    step.ops = std::move(pending_group_ops);
+    lowered_steps.push_back(std::move(step));
+    pending_group_ops = {};
+    pending_source_index.reset();
+  };
+
+  for (const auto& op : ops) {
+    if (op.bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+      return absl::InvalidArgumentError("byte range direct-write op exceeds size_t range");
+    }
+    if (expected_output_bytes > std::numeric_limits<size_t>::max() - static_cast<size_t>(op.bytes)) {
+      return absl::InvalidArgumentError("byte range direct-write batch exceeds size_t range");
+    }
+    expected_output_bytes += static_cast<size_t>(op.bytes);
+  }
+
+  for (const auto& op : ops) {
+    if (op.bytes == 0) {
+      continue;
+    }
+    if (op.src_offset >= program_->total_bytes) {
+      return absl::DataLossError("byte range direct-write op starts beyond EOF");
+    }
+    const uint64_t remaining_bytes = program_->total_bytes - op.src_offset;
+    if (op.bytes > remaining_bytes) {
+      return absl::DataLossError("byte range direct-write op extends beyond EOF");
+    }
+    const size_t to_copy = static_cast<size_t>(op.bytes);
+    auto grant_status = validate_direct_write_grant_range(op.dest_va_offset, to_copy, grant);
+    if (!grant_status.ok()) {
+      return grant_status;
+    }
+    size_t copied = 0;
+    uint64_t cursor = op.src_offset;
+
+    size_t run_index = find_run_index(op.src_offset);
+    while (run_index < program_->runs.size() && copied < to_copy) {
+      const auto& run = program_->runs[run_index];
+      if (cursor >= run.dst_end) {
+        ++run_index;
+        continue;
+      }
+      if (cursor < run.dst_begin) {
+        return absl::InternalError("byte range program contains uncovered gaps");
+      }
+      const uint64_t run_offset = cursor - run.dst_begin;
+      const size_t available = static_cast<size_t>(run.dst_end - cursor);
+      const size_t chunk = std::min(to_copy - copied, available);
+      switch (run.kind) {
+        case ByteRangeRun::Kind::kPad: {
+          flush_pending_group();
+          lowered_steps.push_back(
+              LoweredDirectWriteStep{
+                  .kind = LoweredDirectWriteStep::Kind::kPad,
+                  .source_index = 0,
+                  .dest_va_offset = op.dest_va_offset + copied,
+                  .bytes = chunk,
+              });
+          copied += chunk;
+          cursor += chunk;
+          break;
+        }
+        case ByteRangeRun::Kind::kContiguous: {
+          if (!pending_source_index.has_value() || *pending_source_index != run.source_index) {
+            flush_pending_group();
+            pending_source_index = run.source_index;
+          }
+          pending_group_ops.push_back(
+              DirectWriteOp{
+                  .src_offset = run.src_begin + run_offset,
+                  .dest_va_offset = op.dest_va_offset + copied,
+                  .bytes = chunk,
+              });
+          copied += chunk;
+          cursor += chunk;
+          break;
+        }
+        case ByteRangeRun::Kind::kStrided:
+          stats_.direct_write_fallback_calls.fetch_add(1, std::memory_order_relaxed);
+          return absl::UnimplementedError("direct write not supported for strided runs");
+      }
+      if (cursor >= run.dst_end) {
+        ++run_index;
+      }
+    }
+
+    if (copied != to_copy || static_cast<uint64_t>(copied) != op.bytes) {
+      return absl::DataLossError("byte range direct-write batch short write");
+    }
+  }
+
+  flush_pending_group();
+  const auto lowering_finished_at = std::chrono::steady_clock::now();
+
+  size_t source_output_bytes = 0;
+  size_t pad_output_bytes = 0;
+  std::size_t source_group_count = 0;
+  std::size_t pad_step_count = 0;
+  const auto execute_started_at = std::chrono::steady_clock::now();
+  for (const auto& step : lowered_steps) {
+    switch (step.kind) {
+      case LoweredDirectWriteStep::Kind::kPad: {
+        ++pad_step_count;
+        auto zero_status = zero_fill_to_grant(step.dest_va_offset, step.bytes, grant);
+        if (!zero_status.ok()) {
+          return zero_status;
+        }
+        stats_.pad_bytes.fetch_add(step.bytes, std::memory_order_relaxed);
+        pad_output_bytes += step.bytes;
+        break;
+      }
+      case LoweredDirectWriteStep::Kind::kSourceGroup: {
+        ++source_group_count;
+        auto wrote_or = execute_grouped_direct_write(step.source_index, step.ops, grant);
+        if (!wrote_or.ok()) {
+          return wrote_or.status();
+        }
+        source_output_bytes += *wrote_or;
+        break;
+      }
+    }
+  }
+  const auto execute_finished_at = std::chrono::steady_clock::now();
+
+  if (source_output_bytes + pad_output_bytes != expected_output_bytes) {
+    return absl::InternalError("byte range direct-write batch accounting mismatch");
+  }
+
+  stats_.direct_write_bytes.fetch_add(expected_output_bytes, std::memory_order_relaxed);
+  stats_.output_bytes.fetch_add(expected_output_bytes, std::memory_order_relaxed);
+  VLOG(2)
+      << "byte_range_mapped_source.readv_direct_write_summary"
+      << " ops=" << ops.size() << " lowered_steps=" << lowered_steps.size() << " source_groups=" << source_group_count
+      << " pad_steps=" << pad_step_count << " expected_output_bytes=" << expected_output_bytes << " lowering_ms="
+      << std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+             lowering_finished_at - lowering_started_at)
+             .count()
+      << " execute_ms="
+      << std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(execute_finished_at - execute_started_at)
+             .count()
+      << " total_ms="
+      << std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(execute_finished_at - total_started_at)
+             .count();
+  return expected_output_bytes;
 }
 
 } // namespace tensorcast::store::loader

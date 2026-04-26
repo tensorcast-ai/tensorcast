@@ -171,6 +171,7 @@ sc_cc_library(
         "//core/communicator:config_io_lib",
         "//core/communicator:engine_lib",
         "//core/communicator:routing_context_lib",
+        "//core/store/materialization/contracts:stable_local_backing",
         "//proto/tensorcast/communicator/v1:communicator_cc",
     ],
 )
@@ -555,6 +556,16 @@ cc_test(
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
         "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "communication_manager_test",
+    srcs = ["components/communication_manager_test.cc"],
+    deps = [
+        ":communication_manager",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
     ],
 )
 

@@ -5,11 +5,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "core/store/materialization/contracts/stable_local_backing.h"
 #include "core/store/materialization/dataplane/contracts/sink.h"
 #include "gsl/pointers"
 
@@ -18,6 +20,8 @@ namespace tensorcast::store::loader {
 struct HostTargetStorage {
   gsl::not_null<void*> base_ptr;
   uint64_t length{0};
+  std::optional<StableLocalBackingRef> stable_backing;
+  std::shared_ptr<void> keepalive;
 };
 
 class TargetLayoutHostSink : public Sink, public PositionedSink, public DirectWriteCapable {
@@ -47,6 +51,7 @@ class TargetLayoutHostSink : public Sink, public PositionedSink, public DirectWr
     uint64_t base_offset{0};
     uint64_t length{0};
     gsl::not_null<void*> base_ptr;
+    std::optional<StableLocalBackingRef> stable_backing;
   };
 
   size_t find_storage_index(uint64_t offset) const;

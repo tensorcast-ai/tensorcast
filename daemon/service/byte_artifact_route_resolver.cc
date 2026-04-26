@@ -324,27 +324,15 @@ absl::StatusOr<ByteArtifactRouteResolver::HomeLeaseDecision> ByteArtifactRouteRe
   }
 
   std::uint64_t owned_generation = 0;
-  bool owned_present = false;
-  bool owned_usable = false;
-  std::uint64_t cached_local_route_generation = 0;
-  absl::Time cached_local_route_expires_at = absl::UnixEpoch();
   {
     absl::MutexLock lock(&state_.mu);
-    const auto route_it = state_.shard_routes.find(fence.shard_id());
-    if (route_it != state_.shard_routes.end() && route_it->second.holder_daemon_id == local_daemon_id_ &&
-        route_it->second.routing_epoch == options_.routing_epoch) {
-      cached_local_route_generation = route_it->second.lease_generation;
-      cached_local_route_expires_at = route_it->second.expires_at;
-    }
     if (is_local_only()) {
       owned_generation = 1;
     } else {
       const auto it = state_.owned_shard_leases.find(fence.shard_id());
       if (it != state_.owned_shard_leases.end()) {
-        owned_present = true;
         owned_generation = it->second.lease_generation;
-        owned_usable = is_owned_lease_usable(it->second, now, options_.routing_epoch);
-        if (!owned_usable) {
+        if (!is_owned_lease_usable(it->second, now, options_.routing_epoch)) {
           state_.owned_shard_leases.erase(it);
           owned_generation = 0;
         }
@@ -354,13 +342,6 @@ absl::StatusOr<ByteArtifactRouteResolver::HomeLeaseDecision> ByteArtifactRouteRe
 
   if (!is_local_only() && owned_generation == 0 && global_store_client_ != nullptr &&
       global_store_client_->is_connected()) {
-    VLOG(1) << "byte_artifact.ensure_home_lease_reacquire shard_id=" << fence.shard_id()
-            << " fence_generation=" << fence.lease_generation() << " owned_present=" << owned_present
-            << " owned_usable=" << owned_usable << " cached_local_route_generation=" << cached_local_route_generation
-            << " cached_local_route_expires_in_ms="
-            << (cached_local_route_expires_at == absl::UnixEpoch()
-                    ? -1
-                    : absl::ToInt64Milliseconds(cached_local_route_expires_at - now));
     store::components::RpcOptions rpc_options;
     rpc_options.timeout = options_.route_refresh_timeout;
     const auto ttl_ms = static_cast<std::uint64_t>(std::max<int64_t>(1, absl::ToInt64Milliseconds(options_.lease_ttl)));

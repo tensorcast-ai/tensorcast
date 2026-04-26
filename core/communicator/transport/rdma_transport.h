@@ -42,6 +42,7 @@ class RdmaTransport {
 
   struct RdmaReadSeg {
     uint64_t local_addr;
+    uint32_t local_lkey = 0;
     uint32_t length;
     uint64_t remote_addr;
     uint32_t rkey;
@@ -84,7 +85,12 @@ class RdmaTransport {
     transport_index_ = index;
   }
 
+  friend class RdmaTransportTestPeer;
+
  private:
+  using PostSendHook = std::function<int(struct ibv_qp*, struct ibv_send_wr*, struct ibv_send_wr**)>;
+  static PostSendHook& post_send_hook_for_tests();
+
   static constexpr int kMaxQpCount = 16;
   static_assert(kMaxQpCount > 0, "kMaxQpCount must be positive");
 

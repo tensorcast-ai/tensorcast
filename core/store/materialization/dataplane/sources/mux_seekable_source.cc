@@ -12,6 +12,34 @@
 
 namespace tensorcast::store::loader {
 
+namespace {
+
+absl::StatusOr<SeekableSource*> freeze_direct_branch(
+    const std::shared_ptr<SeekableSource>& primary,
+    const std::shared_ptr<SeekableSource>& fallback) {
+  if (primary != nullptr && primary->supports_direct_write_at()) {
+    return primary.get();
+  }
+  if (fallback != nullptr && fallback->supports_direct_write_at()) {
+    return fallback.get();
+  }
+  return absl::UnimplementedError("direct write not supported by mux sources");
+}
+
+absl::StatusOr<SeekableSource*> freeze_batched_direct_branch(
+    const std::shared_ptr<SeekableSource>& primary,
+    const std::shared_ptr<SeekableSource>& fallback) {
+  if (primary != nullptr && primary->supports_batched_direct_write_at()) {
+    return primary.get();
+  }
+  if (fallback != nullptr && fallback->supports_batched_direct_write_at()) {
+    return fallback.get();
+  }
+  return absl::UnimplementedError("batched direct write not supported by mux sources");
+}
+
+} // namespace
+
 MuxSeekableSource::MuxSeekableSource(
     gsl::not_null<std::shared_ptr<SeekableSource>> primary,
     gsl::not_null<std::shared_ptr<SeekableSource>> fallback)
@@ -103,22 +131,33 @@ bool MuxSeekableSource::supports_direct_write_at() const {
   return primary_->supports_direct_write_at() || fallback_->supports_direct_write_at();
 }
 
+bool MuxSeekableSource::supports_batched_direct_write_at() const {
+  return primary_->supports_batched_direct_write_at() || fallback_->supports_batched_direct_write_at();
+}
+
 absl::StatusOr<size_t> MuxSeekableSource::read_into_at(
     uint64_t src_offset,
     uint64_t dest_va_offset,
     size_t bytes,
     const DirectWriteGrant& grant) {
-  if (primary_->supports_direct_write_at()) {
-    auto st = primary_->read_into_at(src_offset, dest_va_offset, bytes, grant);
-    if (st.ok()) {
-      return st;
-    }
-    VLOG(1) << "MuxSeekableSource: primary read_into_at failed: " << st.status();
+  auto selected_or = freeze_direct_branch(primary_, fallback_);
+  if (!selected_or.ok()) {
+    return selected_or.status();
   }
-  if (fallback_->supports_direct_write_at()) {
-    return fallback_->read_into_at(src_offset, dest_va_offset, bytes, grant);
+  return (*selected_or)->read_into_at(src_offset, dest_va_offset, bytes, grant);
+}
+
+absl::StatusOr<size_t> MuxSeekableSource::readv_into_at(
+    absl::Span<const DirectWriteOp> ops,
+    const DirectWriteGrant& grant) {
+  if (ops.empty()) {
+    return static_cast<size_t>(0);
   }
-  return absl::UnimplementedError("direct write not supported by mux sources");
+  auto selected_or = freeze_batched_direct_branch(primary_, fallback_);
+  if (!selected_or.ok()) {
+    return selected_or.status();
+  }
+  return (*selected_or)->readv_into_at(ops, grant);
 }
 
 } // namespace tensorcast::store::loader

@@ -23,6 +23,7 @@
 #include "core/common/ready_signal.h"
 #include "core/store/communication_types.h"
 #include "core/store/device_types.h"
+#include "core/store/materialization/contracts/stable_local_backing.h"
 #include "core/store/materialization/contracts/view/view_id.h"
 #include "core/store/replica/memory_state.h"
 #include "gsl/pointers"
@@ -79,6 +80,9 @@ struct MaterializeIntoTargetResult {
 struct IntoTargetStorage {
   gsl::not_null<void*> base_ptr;
   uint64_t length{0};
+  std::optional<StableLocalBackingRef> stable_backing;
+  std::shared_ptr<void> stable_backing_keepalive;
+  std::shared_ptr<void> keepalive;
 };
 
 struct IntoTargetLayout {

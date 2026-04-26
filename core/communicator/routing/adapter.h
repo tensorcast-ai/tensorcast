@@ -24,6 +24,11 @@ class ConnectionAdapter {
       const EndpointBinding& local,
       const EndpointBinding& remote) = 0;
 
+  virtual transport::future_read_result_t read_plan(
+      const ReadPlan& plan,
+      const EndpointBinding& local,
+      const EndpointBinding& remote) = 0;
+
   virtual absl::Status close(const EndpointBinding& remote) = 0;
 };
 
@@ -41,6 +46,11 @@ class EngineAdapter final : public ConnectionAdapter {
 
   transport::future_read_result_t read_tensor(
       const ReadRequest& request,
+      const EndpointBinding& local,
+      const EndpointBinding& remote) override;
+
+  transport::future_read_result_t read_plan(
+      const ReadPlan& plan,
       const EndpointBinding& local,
       const EndpointBinding& remote) override;
 
@@ -71,6 +81,11 @@ class NvlinkAdapter final : public ConnectionAdapter {
       const EndpointBinding& local,
       const EndpointBinding& remote) override;
 
+  transport::future_read_result_t read_plan(
+      const ReadPlan& plan,
+      const EndpointBinding& local,
+      const EndpointBinding& remote) override;
+
   absl::Status close(const EndpointBinding& remote) override;
 
  private:
@@ -91,6 +106,11 @@ class PcieAdapter final : public ConnectionAdapter {
 
   transport::future_read_result_t read_tensor(
       const ReadRequest& request,
+      const EndpointBinding& local,
+      const EndpointBinding& remote) override;
+
+  transport::future_read_result_t read_plan(
+      const ReadPlan& plan,
       const EndpointBinding& local,
       const EndpointBinding& remote) override;
 

@@ -92,6 +92,11 @@ uint32_t clamp_ttl_ms(uint32_t requested, absl::Duration max_ttl) {
 
 IpcRegionRegistry::IpcRegionRegistry(Options opts) : opts_(std::move(opts)) {}
 
+void IpcRegionRegistry::set_pre_cleanup_callback(RegionCleanupCallback callback) {
+  absl::MutexLock lock(&mu_);
+  pre_cleanup_callback_ = std::move(callback);
+}
+
 absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::register_region(const RegisterParams& params) {
   if (params.owner_pid <= 0) {
     return absl::InvalidArgumentError("owner_pid must be > 0");
@@ -179,6 +184,7 @@ absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::register_
   rec.refcount = 0;
   rec.inserted_at = absl::Now();
   rec.poisoned = false;
+  rec.retiring = false;
 
   auto [it, inserted] = regions_.emplace(rec.desc.region_id, std::move(rec));
   if (!inserted) {
@@ -192,16 +198,32 @@ absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::register_
 }
 
 absl::StatusOr<bool> IpcRegionRegistry::unregister_region(const std::string& region_id, int owner_pid, bool force) {
+  RegionDescriptor desc;
+  RegionCleanupCallback callback;
+  {
+    absl::MutexLock lock(&mu_);
+    auto it = regions_.find(region_id);
+    if (it == regions_.end()) {
+      return absl::NotFoundError("region_id not found");
+    }
+    if (owner_pid != it->second.desc.owner_pid) {
+      return absl::PermissionDeniedError("owner_pid mismatch");
+    }
+    if (!force && it->second.refcount > 0) {
+      return absl::FailedPreconditionError("region has active references");
+    }
+    it->second.retiring = true;
+    desc = it->second.desc;
+    desc.poisoned = it->second.poisoned;
+    callback = pre_cleanup_callback_;
+  }
+  if (callback) {
+    callback(desc);
+  }
   absl::MutexLock lock(&mu_);
   auto it = regions_.find(region_id);
   if (it == regions_.end()) {
-    return absl::NotFoundError("region_id not found");
-  }
-  if (owner_pid != it->second.desc.owner_pid) {
-    return absl::PermissionDeniedError("owner_pid mismatch");
-  }
-  if (!force && it->second.refcount > 0) {
-    return absl::FailedPreconditionError("region has active references");
+    return true;
   }
   cleanup_region_record_locked(&it->second);
   regions_.erase(it);
@@ -243,26 +265,41 @@ bool IpcRegionRegistry::refresh_ttl(const std::string& region_id, uint32_t ttl_m
 
 std::vector<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::sweep_expired(absl::Time now) {
   std::vector<RegionDescriptor> expired;
-  absl::MutexLock lock(&mu_);
-  for (auto it = regions_.begin(); it != regions_.end();) {
-    if (it->second.desc.expires_at <= now) {
-      if (it->second.refcount > 0) {
-        if (it->second.desc.ttl_ms == 0) {
-          it->second.desc.expires_at = absl::InfiniteFuture();
-        } else {
-          it->second.desc.expires_at = absl::Now() + absl::Milliseconds(it->second.desc.ttl_ms);
-        }
-        ++it;
+  std::vector<RegionDescriptor> pending_cleanup;
+  RegionCleanupCallback callback;
+  {
+    absl::MutexLock lock(&mu_);
+    callback = pre_cleanup_callback_;
+    for (auto& [region_id, record] : regions_) {
+      if (record.desc.expires_at > now) {
         continue;
       }
-      expired.push_back(it->second.desc);
-      cleanup_region_record_locked(&it->second);
-      auto to_erase = it;
-      ++it;
-      regions_.erase(to_erase);
-    } else {
-      ++it;
+      if (record.refcount > 0) {
+        if (record.desc.ttl_ms == 0) {
+          record.desc.expires_at = absl::InfiniteFuture();
+        } else {
+          record.desc.expires_at = absl::Now() + absl::Milliseconds(record.desc.ttl_ms);
+        }
+        continue;
+      }
+      record.retiring = true;
+      auto desc = record.desc;
+      desc.poisoned = record.poisoned;
+      pending_cleanup.push_back(std::move(desc));
     }
+  }
+  for (const auto& desc : pending_cleanup) {
+    if (callback) {
+      callback(desc);
+    }
+    absl::MutexLock lock(&mu_);
+    auto it = regions_.find(desc.region_id);
+    if (it == regions_.end()) {
+      continue;
+    }
+    expired.push_back(it->second.desc);
+    cleanup_region_record_locked(&it->second);
+    regions_.erase(it);
   }
   return expired;
 }
@@ -272,17 +309,33 @@ std::vector<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::handle_pid_e
   if (owner_pid <= 0) {
     return removed;
   }
-  absl::MutexLock lock(&mu_);
-  for (auto it = regions_.begin(); it != regions_.end();) {
-    if (it->second.desc.owner_pid == owner_pid) {
-      removed.push_back(it->second.desc);
-      cleanup_region_record_locked(&it->second);
-      auto to_erase = it;
-      ++it;
-      regions_.erase(to_erase);
-    } else {
-      ++it;
+  std::vector<RegionDescriptor> pending_cleanup;
+  RegionCleanupCallback callback;
+  {
+    absl::MutexLock lock(&mu_);
+    callback = pre_cleanup_callback_;
+    for (auto& [region_id, record] : regions_) {
+      if (record.desc.owner_pid != owner_pid) {
+        continue;
+      }
+      record.retiring = true;
+      auto desc = record.desc;
+      desc.poisoned = record.poisoned;
+      pending_cleanup.push_back(std::move(desc));
     }
+  }
+  for (const auto& desc : pending_cleanup) {
+    if (callback) {
+      callback(desc);
+    }
+    absl::MutexLock lock(&mu_);
+    auto it = regions_.find(desc.region_id);
+    if (it == regions_.end()) {
+      continue;
+    }
+    removed.push_back(it->second.desc);
+    cleanup_region_record_locked(&it->second);
+    regions_.erase(it);
   }
   return removed;
 }
@@ -318,6 +371,9 @@ absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::acquire(
   }
   if (it->second.poisoned) {
     return absl::FailedPreconditionError("region is poisoned");
+  }
+  if (it->second.retiring) {
+    return absl::FailedPreconditionError("region is retiring");
   }
   if (owner_pid != 0 && owner_pid != it->second.desc.owner_pid) {
     return absl::PermissionDeniedError("owner_pid mismatch");
@@ -394,6 +450,9 @@ absl::StatusOr<IpcRegionRegistry::HostSharedAttachment> IpcRegionRegistry::acqui
   if (rec.poisoned) {
     return absl::FailedPreconditionError("region is poisoned");
   }
+  if (rec.retiring) {
+    return absl::FailedPreconditionError("region is retiring");
+  }
   if (owner_pid <= 0 || owner_pid != rec.desc.owner_pid) {
     return absl::PermissionDeniedError("owner_pid mismatch");
   }
@@ -460,6 +519,9 @@ absl::StatusOr<IpcRegionRegistry::HostSharedLocalMapping> IpcRegionRegistry::acq
   RegionRecord& rec = it->second;
   if (rec.poisoned) {
     return absl::FailedPreconditionError("region is poisoned");
+  }
+  if (rec.retiring) {
+    return absl::FailedPreconditionError("region is retiring");
   }
   if (owner_pid != 0 && owner_pid != rec.desc.owner_pid) {
     return absl::PermissionDeniedError("owner_pid mismatch");

@@ -100,6 +100,40 @@ TEST_CASE("IpcRegionRegistry host shared register/describe/unregister", "[daemon
   REQUIRE(*unreg_or);
 }
 
+TEST_CASE("IpcRegionRegistry pre-cleanup callback observes retiring host shared regions", "[daemon][region]") {
+  IpcRegionRegistry reg(
+      IpcRegionRegistry::Options{
+          .capacity = 16,
+          .max_ttl = absl::Milliseconds(5000),
+      });
+
+  IpcRegionRegistry::RegisterParams params;
+  params.memory_kind = IpcRegionRegistry::MemoryKind::kHostShared;
+  params.device_id = -1;
+  params.owner_pid = 9123;
+  params.size_bytes = 1 << 20;
+  params.ttl_ms = 0;
+  params.daemon_managed = true;
+  params.host_region_class = IpcRegionRegistry::HostRegionClass::kScratch;
+
+  auto desc_or = reg.register_region(params);
+  REQUIRE(desc_or.ok());
+
+  int callback_count = 0;
+  reg.set_pre_cleanup_callback([&](const IpcRegionRegistry::RegionDescriptor& desc) {
+    ++callback_count;
+    CHECK(desc.region_id == desc_or->region_id);
+    auto acquire_or = reg.acquire(desc.region_id, params.owner_pid);
+    REQUIRE_FALSE(acquire_or.ok());
+    CHECK(acquire_or.status().message() == "region is retiring");
+  });
+
+  auto unreg_or = reg.unregister_region(desc_or->region_id, params.owner_pid, /*force=*/true);
+  REQUIRE(unreg_or.ok());
+  REQUIRE(*unreg_or);
+  CHECK(callback_count == 1);
+}
+
 TEST_CASE("IpcRegionRegistry TTL refresh and sweep", "[daemon][region]") {
   IpcRegionRegistry reg(
       IpcRegionRegistry::Options{

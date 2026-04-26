@@ -45,6 +45,13 @@ transport:
   REQUIRE(cfg.transport().tcp_conn_count() == 4);
   REQUIRE(cfg.transport().connect_timeout_sec() == 10);
   REQUIRE(cfg.transport().so_reuseport() == false);
+  REQUIRE(cfg.rdma().enable_stable_local_mr_reuse() == true);
+  REQUIRE(cfg.rdma().stable_local_mr_reuse_chunk_slots() == 1);
+  REQUIRE(cfg.rdma().has_stable_local_mr_reuse_eager_prereg_all_rails() == false);
+  REQUIRE(cfg.rdma().has_stable_local_mr_reuse_prewarm_workers() == false);
+  REQUIRE(cfg.rdma().stable_local_mr_reuse_prewarm_workers() == 0);
+  REQUIRE(cfg.rdma().read_plan_admission_workers() == 0);
+  REQUIRE(cfg.rdma().read_plan_direct_source_workers() == 0);
   REQUIRE(cfg.topology_discovery().lldp().file_path() == "/host-config/lldp-info.txt");
   REQUIRE(cfg.topology_discovery().merge_policy().emit_rail_switch_endpoints() == true);
 }
@@ -65,6 +72,13 @@ TEST_CASE("config_io JSON parse + defaults", "[communicator][config]") {
   REQUIRE(cfg.stager().buffers_per_flow() == 4);
   REQUIRE(cfg.transport().tcp_tos() == 0);
   REQUIRE(cfg.transport().so_reuseport() == false);
+  REQUIRE(cfg.rdma().enable_stable_local_mr_reuse() == true);
+  REQUIRE(cfg.rdma().stable_local_mr_reuse_chunk_slots() == 1);
+  REQUIRE(cfg.rdma().has_stable_local_mr_reuse_eager_prereg_all_rails() == false);
+  REQUIRE(cfg.rdma().has_stable_local_mr_reuse_prewarm_workers() == false);
+  REQUIRE(cfg.rdma().stable_local_mr_reuse_prewarm_workers() == 0);
+  REQUIRE(cfg.rdma().read_plan_admission_workers() == 0);
+  REQUIRE(cfg.rdma().read_plan_direct_source_workers() == 0);
   REQUIRE(
       cfg.topology_discovery().nvlink().source() ==
       tensorcast::communicator::v1::NvlinkDiscoveryConfig::SOURCE_DISABLED);
@@ -89,6 +103,56 @@ communicator:
   REQUIRE(cfg.transport().tcp_conn_count() == 2);
   REQUIRE(cfg.transport().connect_timeout_sec() == 10);
   REQUIRE(cfg.transport().so_reuseport() == false);
+  REQUIRE(cfg.rdma().enable_stable_local_mr_reuse() == true);
+  REQUIRE(cfg.rdma().stable_local_mr_reuse_chunk_slots() == 1);
+  REQUIRE(cfg.rdma().has_stable_local_mr_reuse_eager_prereg_all_rails() == false);
+  REQUIRE(cfg.rdma().has_stable_local_mr_reuse_prewarm_workers() == false);
+  REQUIRE(cfg.rdma().stable_local_mr_reuse_prewarm_workers() == 0);
+  REQUIRE(cfg.rdma().read_plan_admission_workers() == 0);
+  REQUIRE(cfg.rdma().read_plan_direct_source_workers() == 0);
+}
+
+TEST_CASE("config_io honors explicit stable local MR reuse setting", "[communicator][config]") {
+  const char* yaml = R"YAML(
+communicator:
+  enable_rdma: true
+  rdma:
+    enable_stable_local_mr_reuse: false
+    stable_local_mr_reuse_chunk_slots: 4
+    stable_local_mr_reuse_eager_prereg_all_rails: true
+    stable_local_mr_reuse_prewarm_workers: 3
+    read_plan_admission_workers: 5
+    read_plan_direct_source_workers: 2
+)YAML";
+  const std::string path = write_temp_file(yaml, "stable_local_mr_reuse.yaml");
+  auto cfg_or = LoadCommunicatorConfigFromFile(path);
+  REQUIRE(cfg_or.ok());
+  const CommunicatorConfig& cfg = cfg_or.value();
+
+  REQUIRE(cfg.enable_rdma() == true);
+  REQUIRE(cfg.rdma().enable_stable_local_mr_reuse() == false);
+  REQUIRE(cfg.rdma().stable_local_mr_reuse_chunk_slots() == 4);
+  REQUIRE(cfg.rdma().stable_local_mr_reuse_eager_prereg_all_rails() == true);
+  REQUIRE(cfg.rdma().stable_local_mr_reuse_prewarm_workers() == 3);
+  REQUIRE(cfg.rdma().read_plan_admission_workers() == 5);
+  REQUIRE(cfg.rdma().read_plan_direct_source_workers() == 2);
+}
+
+TEST_CASE("config_io maps legacy eager prereg flag to async prewarm workers", "[communicator][config]") {
+  const char* yaml = R"YAML(
+communicator:
+  enable_rdma: true
+  rdma:
+    stable_local_mr_reuse_eager_prereg_all_rails: true
+)YAML";
+  const std::string path = write_temp_file(yaml, "legacy_prewarm_alias.yaml");
+  auto cfg_or = LoadCommunicatorConfigFromFile(path);
+  REQUIRE(cfg_or.ok());
+  const CommunicatorConfig& cfg = cfg_or.value();
+
+  REQUIRE(cfg.rdma().stable_local_mr_reuse_eager_prereg_all_rails() == true);
+  REQUIRE(cfg.rdma().has_stable_local_mr_reuse_prewarm_workers() == true);
+  REQUIRE(cfg.rdma().stable_local_mr_reuse_prewarm_workers() == 1);
 }
 
 TEST_CASE("config_io topology discovery explicit values", "[communicator][config]") {

@@ -127,6 +127,8 @@ sc_cc_library(
     deps = [
         ":metric_lib",
         ":partition_tensor_lib",
+        ":routing_types_lib",
+        "//core/store/materialization/contracts:stable_local_backing",
     ],
 )
 
@@ -439,6 +441,7 @@ sc_cc_library(
         ":mtcp_transport_lib",
         ":protocol_lib",
         ":rdma_lib",
+        ":routing_types_lib",
         ":staging_flow_controller_lib",
         ":store_lib",
         ":tcp_lib",
@@ -448,6 +451,7 @@ sc_cc_library(
         "//core/cuda:cuda_api_lib",
         "//core/cuda:device_guard_lib",
         "//core/cuda:error_handling_lib",
+        "//core/store/materialization/contracts:stable_local_backing",
         "//proto/tensorcast/communicator/v1:communicator_cc",
         "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/strings",
@@ -573,6 +577,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":constants_lib",
+        "//core/store/materialization/contracts:stable_local_backing",
         "@abseil-cpp//absl/hash:hash",
         "@abseil-cpp//absl/time:time",
     ],
@@ -828,6 +833,16 @@ cc_test(
         ":routing_connection_lib",
         ":routing_context_lib",
         "//core/common:async_runtime_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "routing_read_plan_validation_test",
+    srcs = ["routing/read_plan_validation_test.cc"],
+    deps = [
+        ":routing_types_lib",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],

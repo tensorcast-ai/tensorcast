@@ -64,6 +64,12 @@ absl::StatusOr<size_t> ViewPlanSource::read_into_at(
   return mapped_source_->read_into_at(src_offset, dest_va_offset, bytes, grant);
 }
 
+absl::StatusOr<size_t> ViewPlanSource::readv_into_at(
+    absl::Span<const DirectWriteOp> ops,
+    const DirectWriteGrant& grant) {
+  return mapped_source_->readv_into_at(ops, grant);
+}
+
 std::unique_ptr<SeekableSource> make_view_plan_source(
     std::unique_ptr<SeekableSource> base,
     SelectionPlan plan,
@@ -109,6 +115,10 @@ std::unique_ptr<SeekableSource> make_view_plan_source(
         size_t bytes,
         const DirectWriteGrant& grant) override {
       return adapter_.read_into_at(src_offset, dest_va_offset, bytes, grant);
+    }
+
+    absl::StatusOr<size_t> readv_into_at(absl::Span<const DirectWriteOp> ops, const DirectWriteGrant& grant) override {
+      return adapter_.readv_into_at(ops, grant);
     }
 
    private:

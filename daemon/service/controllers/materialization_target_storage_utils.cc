@@ -2,10 +2,16 @@
 
 #include "daemon/service/controllers/materialization_target_storage_utils.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <memory>
 #include <utility>
 
+#include "absl/container/flat_hash_set.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "core/communicator/base/constants.h"
 #include "core/cuda/cuda_api.h"
 #include "gsl/pointers"
 
@@ -18,6 +24,34 @@ struct ResolvedStorageSource {
   tensorcast::daemon::IpcRegionRegistry::MemoryKind memory_kind{
       tensorcast::daemon::IpcRegionRegistry::MemoryKind::kVram};
 };
+
+struct RegionReferenceKeepalive {
+  IpcRegionRegistry* registry{nullptr};
+  std::string region_id;
+
+  ~RegionReferenceKeepalive() {
+    if (registry == nullptr || region_id.empty()) {
+      return;
+    }
+    auto status = registry->release(region_id);
+    if (!status.ok()) {
+      LOG(WARNING) << "stable_local_backing.keepalive_release_failed"
+                   << " region_id=" << region_id << " status=" << status;
+    }
+  }
+};
+
+absl::StatusOr<std::shared_ptr<void>> acquire_stable_backing_keepalive(
+    IpcRegionRegistry& registry,
+    std::string_view region_id,
+    int owner_pid) {
+  auto desc_or = registry.acquire(std::string(region_id), owner_pid);
+  if (!desc_or.ok()) {
+    return desc_or.status();
+  }
+  return std::shared_ptr<void>(std::make_shared<RegionReferenceKeepalive>(
+      RegionReferenceKeepalive{.registry = &registry, .region_id = std::string(region_id)}));
+}
 
 absl::StatusOr<ResolvedStorageSource> resolve_storage_source(const v2::StorageEntry& storage) {
   switch (storage.storage_source_case()) {
@@ -74,26 +108,56 @@ std::string_view acquire_error_reason(AcquireTargetStoragesError error) {
   }
 }
 
-TargetStorageLease::TargetStorageLease(TargetStorageLease&& other) noexcept
-    : registry_(other.registry_),
-      acquired_region_ids_(std::move(other.acquired_region_ids_)),
-      region_map_(std::move(other.region_map_)),
-      storages_(std::move(other.storages_)) {
-  other.registry_ = nullptr;
-  other.acquired_region_ids_.clear();
+absl::Status activate_stable_local_backings(
+    store::components::CommunicationManager& comm_manager,
+    absl::Span<const store::loading::IntoTargetStorage> storages) {
+  if (!comm_manager.is_enabled()) {
+    return absl::OkStatus();
+  }
+
+  absl::flat_hash_set<std::string> activated;
+  activated.reserve(storages.size());
+  for (const auto& storage : storages) {
+    if (!storage.stable_backing.has_value()) {
+      continue;
+    }
+    const auto& backing = *storage.stable_backing;
+    if (backing.backing_id.empty()) {
+      continue;
+    }
+    if (!activated.insert(backing.backing_id).second) {
+      continue;
+    }
+    auto status = comm_manager.activate_stable_local_backing(backing, storage.stable_backing_keepalive);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return absl::OkStatus();
 }
+
+TargetStorageLease::SharedState::~SharedState() {
+  if (registry == nullptr) {
+    return;
+  }
+  for (const auto& region_id : acquired_region_ids) {
+    registry->release(region_id).IgnoreError();
+  }
+}
+
+TargetStorageLease::TargetStorageLease(TargetStorageLease&& other) noexcept
+    : shared_state_(std::move(other.shared_state_)),
+      region_map_(std::move(other.region_map_)),
+      storages_(std::move(other.storages_)) {}
 
 TargetStorageLease& TargetStorageLease::operator=(TargetStorageLease&& other) noexcept {
   if (this == &other) {
     return *this;
   }
   release_now();
-  registry_ = other.registry_;
-  acquired_region_ids_ = std::move(other.acquired_region_ids_);
+  shared_state_ = std::move(other.shared_state_);
   region_map_ = std::move(other.region_map_);
   storages_ = std::move(other.storages_);
-  other.registry_ = nullptr;
-  other.acquired_region_ids_.clear();
   return *this;
 }
 
@@ -106,7 +170,8 @@ const std::vector<store::loading::IntoTargetStorage>& TargetStorageLease::storag
 }
 
 const std::vector<std::string>& TargetStorageLease::acquired_region_ids() const {
-  return acquired_region_ids_;
+  static const std::vector<std::string> kEmpty;
+  return shared_state_ != nullptr ? shared_state_->acquired_region_ids : kEmpty;
 }
 
 absl::StatusOr<TargetStorageLease> TargetStorageLease::acquire(
@@ -119,9 +184,10 @@ absl::StatusOr<TargetStorageLease> TargetStorageLease::acquire(
   }
 
   TargetStorageLease lease;
-  lease.registry_ = &registry;
+  lease.shared_state_ = std::make_shared<SharedState>();
+  lease.shared_state_->registry = &registry;
   lease.region_map_.reserve(storages.size());
-  lease.acquired_region_ids_.reserve(storages.size());
+  lease.shared_state_->acquired_region_ids.reserve(storages.size());
   lease.storages_.reserve(storages.size());
 
   for (const auto& storage : storages) {
@@ -185,7 +251,7 @@ absl::StatusOr<TargetStorageLease> TargetStorageLease::acquire(
 
       auto [inserted_it, _] = lease.region_map_.emplace(storage_source.region_id, std::move(mapping));
       it = inserted_it;
-      lease.acquired_region_ids_.push_back(storage_source.region_id);
+      lease.shared_state_->acquired_region_ids.push_back(storage_source.region_id);
     }
 
     const auto& region_desc = it->second.desc;
@@ -203,8 +269,8 @@ absl::StatusOr<TargetStorageLease> TargetStorageLease::acquire(
       return absl::FailedPreconditionError("HOST_SHARED storage.device_id must be -1");
     }
 
-    const uint64_t region_end = storage.mapping_base_offset() + storage.storage_length();
-    if (region_end > region_desc.size_bytes) {
+    if (storage.mapping_base_offset() > region_desc.size_bytes ||
+        storage.storage_length() > region_desc.size_bytes - storage.mapping_base_offset()) {
       if (error != nullptr) {
         *error = AcquireTargetStoragesError::kBounds;
       }
@@ -218,12 +284,38 @@ absl::StatusOr<TargetStorageLease> TargetStorageLease::acquire(
       return absl::FailedPreconditionError("region base pointer is unavailable");
     }
 
-    void* region_base_ptr =
-        static_cast<uint8_t*>(it->second.base_ptr) + static_cast<uint64_t>(storage.mapping_base_offset());
+    if (storage.mapping_base_offset() > static_cast<std::uint64_t>(std::numeric_limits<std::ptrdiff_t>::max())) {
+      if (error != nullptr) {
+        *error = AcquireTargetStoragesError::kBounds;
+      }
+      return absl::FailedPreconditionError("region-backed storage offset exceeds pointer arithmetic limits");
+    }
+
+    void* region_base_ptr = static_cast<uint8_t*>(it->second.base_ptr) + storage.mapping_base_offset();
+    std::optional<store::StableLocalBackingRef> stable_backing;
+    std::shared_ptr<void> stable_backing_keepalive;
+    if (region_desc.memory_kind == IpcRegionRegistry::MemoryKind::kHostShared && region_desc.daemon_managed) {
+      auto stable_backing_keepalive_or = acquire_stable_backing_keepalive(registry, region_desc.region_id, owner_pid);
+      if (!stable_backing_keepalive_or.ok()) {
+        return stable_backing_keepalive_or.status();
+      }
+      stable_backing = store::StableLocalBackingRef{
+          .kind = store::StableLocalBackingKind::kHostSharedRegion,
+          .backing_id = region_desc.region_id,
+          .backing_base_addr = reinterpret_cast<uint64_t>(it->second.base_ptr),
+          .backing_bytes = region_desc.size_bytes,
+          .dev_type = communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
+          .dev_id = 0,
+      };
+      stable_backing_keepalive = std::move(*stable_backing_keepalive_or);
+    }
     lease.storages_.push_back(
         store::loading::IntoTargetStorage{
             .base_ptr = gsl::not_null<void*>{region_base_ptr},
             .length = storage.storage_length(),
+            .stable_backing = stable_backing,
+            .stable_backing_keepalive = stable_backing_keepalive,
+            .keepalive = lease.shared_state_,
         });
   }
 
@@ -231,13 +323,9 @@ absl::StatusOr<TargetStorageLease> TargetStorageLease::acquire(
 }
 
 void TargetStorageLease::release_now() {
-  if (registry_ == nullptr) {
-    return;
-  }
-  for (const auto& region_id : acquired_region_ids_) {
-    registry_->release(region_id).IgnoreError();
-  }
-  acquired_region_ids_.clear();
+  storages_.clear();
+  region_map_.clear();
+  shared_state_.reset();
 }
 
 } // namespace tensorcast::daemon::materialization_target_storage
