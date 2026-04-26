@@ -1771,6 +1771,13 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
     std::size_t remote_direct_slice_transport_count{0};
     std::size_t remote_direct_slice_items{0};
     std::uint64_t remote_direct_slice_bytes{0};
+    std::size_t remote_composite_stage_transport_count{0};
+    std::size_t remote_composite_stage_items{0};
+    std::uint64_t remote_composite_stage_bytes{0};
+    std::size_t remote_composite_materialize_calls{0};
+    std::size_t remote_composite_batched_direct_write_count{0};
+    std::size_t remote_composite_fallback_count{0};
+    std::size_t remote_composite_fallback_items{0};
     std::size_t remote_full_pack_mirror_items{0};
     std::size_t stage_body_count{0};
     std::size_t fast_cpu_stage_count{0};
@@ -1784,6 +1791,7 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
     absl::Duration communicator_open_elapsed{absl::ZeroDuration()};
     absl::Duration grpc_fetch_elapsed{absl::ZeroDuration()};
     absl::Duration remote_mirror_elapsed{absl::ZeroDuration()};
+    absl::Duration remote_composite_stage_elapsed{absl::ZeroDuration()};
     absl::Duration stage_body_elapsed{absl::ZeroDuration()};
     absl::Duration fast_cpu_stage_elapsed{absl::ZeroDuration()};
     absl::Duration reuse_elapsed{absl::ZeroDuration()};
@@ -1827,11 +1835,18 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
   absl::flat_hash_map<std::string, std::shared_ptr<std::mutex>> remote_direct_source_mutexes;
   absl::flat_hash_set<std::string> direct_remote_batch_payloads;
 
+  struct CompositeStageCandidate {
+    std::string transport_id;
+    std::uint64_t source_offset{0};
+    std::uint64_t length{0};
+  };
+
   struct PreparedHomeBatchPutItem {
     const v2::HomeBatchPutIfAbsentItem* item{nullptr};
     std::string artifact_id;
     std::unique_ptr<store::IArtifactLoader> loader;
     std::optional<BodyBackingManager::LocalByteSpan> local_source;
+    std::optional<CompositeStageCandidate> composite_candidate;
     store::loading::MaterializationSource source_kind = store::loading::MaterializationSource::kLocalReplica;
     std::optional<BodyBackingManager::StageResult> staged_body;
   };
@@ -1890,6 +1905,7 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
 
     std::unique_ptr<store::IArtifactLoader> loader;
     std::optional<BodyBackingManager::LocalByteSpan> local_source;
+    std::optional<CompositeStageCandidate> composite_candidate;
     store::loading::MaterializationSource source_kind = store::loading::MaterializationSource::kLocalReplica;
     std::optional<BodyBackingManager::StageResult> staged_body;
     if (has_batch_payload_slice) {
@@ -1957,7 +1973,16 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
                                                  : store::loading::MaterializationSource::kLocalReplica;
         if (resolved_it->second.remote) {
           const auto eligibility = classify_put_remote_communicator_source(resolved_it->second);
-          if (eligibility.direct_remote_slice) {
+          const bool composite_stage_eligible = eligibility.direct_remote_slice &&
+              eligibility.source_supports_batched_direct_write &&
+              !verification_mode_requires_payload_digest(invariant_verification_mode(item.invariant()));
+          if (composite_stage_eligible) {
+            composite_candidate = CompositeStageCandidate{
+                .transport_id = transport_id,
+                .source_offset = item.batch_payload_slice().offset(),
+                .length = item.batch_payload_slice().length(),
+            };
+          } else if (eligibility.direct_remote_slice) {
             if (direct_remote_batch_payloads.emplace(transport_id).second) {
               ++timing_stats.remote_direct_slice_transport_count;
               timing_stats.remote_direct_slice_bytes += transport_it->second->manifest().total_size();
@@ -2080,7 +2105,7 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
         continue;
       }
     }
-    if (loader != nullptr || local_source.has_value()) {
+    if (loader != nullptr || local_source.has_value() || composite_candidate.has_value()) {
       // Batch transport already provided a readable source.
     } else if (!item.inline_payload().empty()) {
       auto payload = std::make_shared<std::string>(item.inline_payload());
@@ -2164,9 +2189,221 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
         .artifact_id = artifact_id,
         .loader = std::move(loader),
         .local_source = std::move(local_source),
+        .composite_candidate = std::move(composite_candidate),
         .source_kind = source_kind,
         .staged_body = std::move(staged_body),
     };
+  }
+
+  const auto fallback_composite_group_to_direct_slice =
+      [&](const std::string& transport_id, const std::vector<int>& indices, std::string_view reason) {
+        ++timing_stats.remote_composite_fallback_count;
+        timing_stats.remote_composite_fallback_items += indices.size();
+        const auto transport_it = batch_transports_by_id.find(transport_id);
+        const auto resolved_it = resolved_batch_sources.find(transport_id);
+        if (transport_it == batch_transports_by_id.end() || resolved_it == resolved_batch_sources.end() ||
+            resolved_it->second.source == nullptr || !resolved_it->second.source->supports_direct_write_at()) {
+          for (const int index : indices) {
+            deferred_outcomes[index] = make_outcome(
+                req.items(index).artifact_id(),
+                v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION,
+                absl::StrCat("composite fallback unavailable: ", reason));
+          }
+          return;
+        }
+        const auto eligibility = classify_put_remote_communicator_source(resolved_it->second);
+        LOG(INFO) << "byte_artifact.home_batch_put_if_absent_transport_apply_summary"
+                  << " operation_id=" << operation_id << " transport_id=" << transport_id << " kind=communicator_source"
+                  << " remote=true"
+                  << " read_mode=direct_remote_slice"
+                  << " materialize_mode=per_item"
+                  << " stage_mode=source_slice_loader"
+                  << " batched_direct_write=false"
+                  << " source_count=1"
+                  << " mapping_segments=0"
+                  << " item_count=" << indices.size() << " item_bytes=0"
+                  << " transport_payload_bytes=" << transport_it->second->manifest().total_size() << " mirror_ms=0"
+                  << " fallback_reason=" << reason;
+        if (direct_remote_batch_payloads.emplace(transport_id).second) {
+          ++timing_stats.remote_direct_slice_transport_count;
+          timing_stats.remote_direct_slice_bytes += transport_it->second->manifest().total_size();
+          timing_stats.remote_direct_slice_items += transport_it->second->manifest().entries_size();
+          LOG(INFO) << "byte_artifact.home_batch_put_if_absent_transport_read_mode"
+                    << " operation_id=" << operation_id << " transport_id=" << transport_id
+                    << " kind=communicator_source"
+                    << " remote=true"
+                    << " read_mode=direct_remote_slice"
+                    << " realization=source_slice_loader"
+                    << " payload_bytes=" << transport_it->second->manifest().total_size()
+                    << " item_count=" << transport_it->second->manifest().entries_size()
+                    << " source_direct_write_at=" << eligibility.source_supports_direct_write
+                    << " source_batched_direct_write_at=" << eligibility.source_supports_batched_direct_write
+                    << " mirror_ms=0"
+                    << " subsequent_item_slices_local=false";
+        }
+        auto& source_mutex = remote_direct_source_mutexes[transport_id];
+        if (source_mutex == nullptr) {
+          source_mutex = std::make_shared<std::mutex>();
+        }
+        for (const int index : indices) {
+          if (deferred_outcomes[index].has_value()) {
+            continue;
+          }
+          auto& prepared_item = prepared_items[static_cast<std::size_t>(index)];
+          if (!prepared_item.composite_candidate.has_value()) {
+            continue;
+          }
+          prepared_item.loader = make_loader_from_source_slice(
+              resolved_it->second.source,
+              prepared_item.composite_candidate->source_offset,
+              prepared_item.composite_candidate->length,
+              source_mutex);
+          prepared_item.composite_candidate.reset();
+        }
+      };
+
+  absl::flat_hash_map<std::string, std::vector<int>> composite_groups;
+  for (int index = 0; index < req.items_size(); ++index) {
+    if (deferred_outcomes[index].has_value()) {
+      continue;
+    }
+    const auto& prepared_item = prepared_items[static_cast<std::size_t>(index)];
+    if (prepared_item.composite_candidate.has_value()) {
+      composite_groups[prepared_item.composite_candidate->transport_id].push_back(index);
+    }
+  }
+  for (const auto& [transport_id, indices] : composite_groups) {
+    if (indices.empty()) {
+      continue;
+    }
+    const auto transport_it = batch_transports_by_id.find(transport_id);
+    const auto resolved_it = resolved_batch_sources.find(transport_id);
+    if (transport_it == batch_transports_by_id.end() || resolved_it == resolved_batch_sources.end() ||
+        resolved_it->second.source == nullptr) {
+      for (const int index : indices) {
+        deferred_outcomes[index] = make_outcome(
+            req.items(index).artifact_id(),
+            v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION,
+            "composite transport source is missing");
+      }
+      continue;
+    }
+    absl::flat_hash_set<std::string> seen_artifacts;
+    bool has_duplicate = false;
+    for (const int index : indices) {
+      if (!seen_artifacts.emplace(prepared_items[static_cast<std::size_t>(index)].artifact_id).second) {
+        has_duplicate = true;
+        break;
+      }
+    }
+    if (has_duplicate) {
+      fallback_composite_group_to_direct_slice(transport_id, indices, "duplicate_key");
+      continue;
+    }
+
+    std::vector<BodyBackingManager::CompositeStageItem> composite_items;
+    composite_items.reserve(indices.size());
+    std::uint64_t item_bytes = 0;
+    bool invalid_group = false;
+    for (const int index : indices) {
+      const auto& prepared_item = prepared_items[static_cast<std::size_t>(index)];
+      if (!prepared_item.composite_candidate.has_value() || prepared_item.item == nullptr) {
+        invalid_group = true;
+        break;
+      }
+      if (item_bytes > std::numeric_limits<std::uint64_t>::max() - prepared_item.composite_candidate->length) {
+        invalid_group = true;
+        break;
+      }
+      item_bytes += prepared_item.composite_candidate->length;
+      composite_items.push_back(
+          BodyBackingManager::CompositeStageItem{
+              .artifact_id = prepared_item.artifact_id,
+              .invariant = prepared_item.item->invariant(),
+              .source_offset = prepared_item.composite_candidate->source_offset,
+              .length = prepared_item.composite_candidate->length,
+              .access_class = BodyAccessClass::kHomeDefault,
+              .route_role = BodyRouteRole::kHomeAuthority,
+          });
+    }
+    if (invalid_group) {
+      fallback_composite_group_to_direct_slice(transport_id, indices, "mapping_invalid");
+      continue;
+    }
+
+    const absl::Time composite_started_at = absl::Now();
+    auto composite_or = body_backing_manager_.stage_bodies_composite(
+        BodyBackingManager::StageBodiesCompositeRequest{
+            .source = resolved_it->second.source,
+            .items = std::move(composite_items),
+            .source_kind = store::loading::MaterializationSource::kP2P,
+            .operation_id = std::string(operation_id),
+            .transport_id = transport_id,
+        });
+    const absl::Duration composite_elapsed = absl::Now() - composite_started_at;
+    timing_stats.remote_composite_stage_elapsed += composite_elapsed;
+    if (!composite_or.ok()) {
+      LOG(INFO) << "byte_artifact.home_batch_put_if_absent_transport_apply_summary"
+                << " operation_id=" << operation_id << " transport_id=" << transport_id << " kind=communicator_source"
+                << " remote=true"
+                << " read_mode=batched_direct_write"
+                << " materialize_mode=single_source_composite"
+                << " stage_mode=composite_final_body"
+                << " batched_direct_write=true"
+                << " source_count=1"
+                << " mapping_segments=" << indices.size() << " item_count=" << indices.size()
+                << " item_bytes=" << item_bytes
+                << " transport_payload_bytes=" << transport_it->second->manifest().total_size() << " mirror_ms=0"
+                << " materialize_ms=" << absl::ToDoubleMilliseconds(composite_elapsed) << " outcome=failed"
+                << " status=" << composite_or.status();
+      for (const int index : indices) {
+        deferred_outcomes[index] = make_outcome(
+            prepared_items[static_cast<std::size_t>(index)].artifact_id,
+            batch_item_status_from_absl_status(composite_or.status()),
+            std::string(composite_or.status().message()));
+      }
+      continue;
+    }
+    if (composite_or->staged_bodies.size() != indices.size()) {
+      for (auto& staged_body : composite_or->staged_bodies) {
+        (void)staged_body.body_handle.retire();
+      }
+      for (const int index : indices) {
+        deferred_outcomes[index] = make_outcome(
+            prepared_items[static_cast<std::size_t>(index)].artifact_id,
+            v2::BATCH_ITEM_STATUS_INTERNAL_ERROR,
+            "composite stage returned unexpected item count");
+      }
+      continue;
+    }
+    ++timing_stats.remote_composite_stage_transport_count;
+    timing_stats.remote_composite_stage_items += indices.size();
+    timing_stats.remote_composite_stage_bytes += item_bytes;
+    ++timing_stats.remote_composite_materialize_calls;
+    if (composite_or->materialize_result.direct_write_supported) {
+      ++timing_stats.remote_composite_batched_direct_write_count;
+    }
+    LOG(INFO) << "byte_artifact.home_batch_put_if_absent_transport_apply_summary"
+              << " operation_id=" << operation_id << " transport_id=" << transport_id << " kind=communicator_source"
+              << " remote=true"
+              << " read_mode=batched_direct_write"
+              << " materialize_mode=single_source_composite"
+              << " stage_mode=composite_final_body"
+              << " batched_direct_write=true"
+              << " source_count=1"
+              << " mapping_segments=" << indices.size() << " item_count=" << indices.size()
+              << " item_bytes=" << item_bytes
+              << " transport_payload_bytes=" << transport_it->second->manifest().total_size() << " mirror_ms=0"
+              << " materialize_ms=" << absl::ToDoubleMilliseconds(composite_elapsed)
+              << " direct_write_supported=" << composite_or->materialize_result.direct_write_supported
+              << " fallback_reason=none";
+    for (std::size_t local_index = 0; local_index < indices.size(); ++local_index) {
+      auto& prepared_item = prepared_items[static_cast<std::size_t>(indices[local_index])];
+      prepared_item.staged_body = std::move(composite_or->staged_bodies[local_index]);
+      prepared_item.loader.reset();
+      prepared_item.local_source.reset();
+      prepared_item.composite_candidate.reset();
+    }
   }
 
   std::vector<StageWorkItem> stage_work_items;
@@ -2402,6 +2639,13 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
           << " remote_direct_slice_transport_count=" << timing_stats.remote_direct_slice_transport_count
           << " remote_direct_slice_items=" << timing_stats.remote_direct_slice_items
           << " remote_direct_slice_bytes=" << timing_stats.remote_direct_slice_bytes
+          << " remote_composite_stage_transport_count=" << timing_stats.remote_composite_stage_transport_count
+          << " remote_composite_stage_items=" << timing_stats.remote_composite_stage_items
+          << " remote_composite_stage_bytes=" << timing_stats.remote_composite_stage_bytes
+          << " remote_composite_materialize_calls=" << timing_stats.remote_composite_materialize_calls
+          << " remote_composite_batched_direct_write_count=" << timing_stats.remote_composite_batched_direct_write_count
+          << " remote_composite_fallback_count=" << timing_stats.remote_composite_fallback_count
+          << " remote_composite_fallback_items=" << timing_stats.remote_composite_fallback_items
           << " remote_mirror_count=" << timing_stats.remote_mirror_count
           << " remote_mirror_bytes=" << timing_stats.remote_mirror_bytes
           << " remote_full_pack_mirror_items=" << timing_stats.remote_full_pack_mirror_items
@@ -2418,6 +2662,7 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
           << " communicator_open_ms=" << absl::ToDoubleMilliseconds(timing_stats.communicator_open_elapsed)
           << " grpc_fetch_ms=" << absl::ToDoubleMilliseconds(timing_stats.grpc_fetch_elapsed)
           << " remote_mirror_ms=" << absl::ToDoubleMilliseconds(timing_stats.remote_mirror_elapsed)
+          << " remote_composite_stage_ms=" << absl::ToDoubleMilliseconds(timing_stats.remote_composite_stage_elapsed)
           << " stage_body_ms=" << absl::ToDoubleMilliseconds(timing_stats.stage_body_elapsed)
           << " fast_cpu_stage_ms=" << absl::ToDoubleMilliseconds(timing_stats.fast_cpu_stage_elapsed)
           << " reuse_ms=" << absl::ToDoubleMilliseconds(timing_stats.reuse_elapsed)

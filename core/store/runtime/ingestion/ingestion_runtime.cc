@@ -89,6 +89,17 @@ absl::StatusOr<loading::ReplicaHandle> IngestionRuntime::ingest_mapped_loader_in
       logical_artifact_id, physical_artifact_id, target_device, target, std::move(loader), mapping, hints, source_kind);
 }
 
+absl::StatusOr<ingestion::MaterializationFacade::IngestMappedSourcesIntoReplicasResult> IngestionRuntime::
+    ingest_mapped_sources_into_replicas(
+        std::vector<ingestion::MaterializationFacade::MappedReplicaTarget> targets,
+        std::vector<std::shared_ptr<loader::SeekableSource>> sources,
+        const loader::ByteRangeMap& mapping,
+        const loading::MaterializeHints& hints,
+        loading::MaterializationSource source_kind) {
+  return materialization_facade_->ingest_mapped_sources_into_replicas(
+      std::move(targets), std::move(sources), mapping, hints, source_kind);
+}
+
 absl::StatusOr<ingestion::ArtifactLoweringResult> IngestionRuntime::execute_artifact_lowering_plan(
     ingestion::ArtifactLoweringPlan plan) {
   return materialization_facade_->execute_artifact_lowering_plan(std::move(plan));

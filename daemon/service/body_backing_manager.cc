@@ -801,6 +801,163 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
   return stage_result_or;
 }
 
+absl::StatusOr<BodyBackingManager::StageBodiesCompositeResult> BodyBackingManager::stage_bodies_composite(
+    StageBodiesCompositeRequest request) const {
+  if (request.source == nullptr) {
+    return absl::InvalidArgumentError("composite body staging requires source");
+  }
+  if (request.items.empty()) {
+    return absl::InvalidArgumentError("composite body staging requires at least one item");
+  }
+  if (!request.source->supports_direct_write_at() || !request.source->supports_batched_direct_write_at()) {
+    return absl::FailedPreconditionError("composite body staging requires batched direct-write source");
+  }
+
+  struct PreparedCompositeItem {
+    const CompositeStageItem* item{nullptr};
+    ResolvedStorePolicy resolved_policy;
+    BodyBackingIntent intent;
+    std::string physical_artifact_id;
+    v2::ByteArtifactVerificationMode verification_mode{v2::BYTE_ARTIFACT_VERIFICATION_MODE_UNSPECIFIED};
+  };
+
+  std::vector<PreparedCompositeItem> prepared_items;
+  prepared_items.reserve(request.items.size());
+  std::vector<store::runtime::ingestion::MaterializationFacade::MappedReplicaTarget> targets;
+  targets.reserve(request.items.size());
+  store::loader::ByteRangeMap mapping;
+  mapping.num_sources = 1;
+  mapping.segments.reserve(request.items.size());
+
+  std::uint64_t target_cursor = 0;
+  const std::uint64_t source_total_bytes = request.source->total_bytes();
+  for (const auto& item : request.items) {
+    if (item.artifact_id.empty()) {
+      return absl::InvalidArgumentError("composite body staging requires artifact_id");
+    }
+    if (item.invariant.layout_id().empty()) {
+      return absl::InvalidArgumentError("composite body staging requires invariant.layout_id");
+    }
+    if (item.length == 0 || item.length != item.invariant.byte_length()) {
+      return absl::InvalidArgumentError("composite body staging length must match invariant.byte_length");
+    }
+    if (item.source_offset > std::numeric_limits<std::uint64_t>::max() - item.length) {
+      return absl::OutOfRangeError("composite body staging source range overflow");
+    }
+    if (source_total_bytes != 0 && item.source_offset + item.length > source_total_bytes) {
+      return absl::OutOfRangeError("composite body staging source range exceeds source size");
+    }
+    if (target_cursor > std::numeric_limits<std::uint64_t>::max() - item.length) {
+      return absl::OutOfRangeError("composite body staging target range overflow");
+    }
+
+    const auto verification_mode = invariant_verification_mode(item.invariant);
+    if (verification_mode_requires_payload_digest(verification_mode)) {
+      return absl::FailedPreconditionError("composite body staging supports layout-and-size verification only");
+    }
+
+    auto resolved_policy_or = resolve_body_store_policy(item.access_class, item.route_role, item.resolved_store_policy);
+    if (!resolved_policy_or.ok()) {
+      return resolved_policy_or.status();
+    }
+    const BodyPlacementContext context =
+        normalize_placement_context(item.access_class, item.route_role, item.invariant.byte_length());
+    const BodyBackingIntent intent = classify_intent(context, *resolved_policy_or);
+    if (intent.preferred_residency != BodyPreferredResidency::kCpu) {
+      record_body_backing_metrics("stage_composite", item.access_class, intent, "target_not_cpu");
+      return absl::FailedPreconditionError("composite body staging requires CPU final backings");
+    }
+
+    const std::string physical_artifact_id = build_body_backing_artifact_id(item.artifact_id, item.invariant);
+    const auto target_device = resolve_target_device(intent);
+    targets.push_back(
+        store::runtime::ingestion::MaterializationFacade::MappedReplicaTarget{
+            .logical_artifact_id = item.artifact_id,
+            .physical_artifact_id = physical_artifact_id,
+            .target_device = target_device,
+            .target = build_replica_target(intent),
+            .size_bytes = item.invariant.byte_length(),
+        });
+    mapping.segments.push_back(
+        store::loader::ByteRangeSegment{
+            .kind = store::loader::ByteRangeSegment::Kind::kData,
+            .dst_offset = target_cursor,
+            .length = item.length,
+            .src_offset = item.source_offset,
+            .source_index = 0,
+        });
+    prepared_items.push_back(
+        PreparedCompositeItem{
+            .item = &item,
+            .resolved_policy = std::move(*resolved_policy_or),
+            .intent = intent,
+            .physical_artifact_id = physical_artifact_id,
+            .verification_mode = verification_mode,
+        });
+    target_cursor += item.length;
+  }
+  mapping.total_bytes = target_cursor;
+  if (mapping.total_bytes == 0) {
+    return absl::InvalidArgumentError("composite body staging requires non-empty total bytes");
+  }
+
+  auto hints = build_lowering_hints(
+      request.transport_id.empty() ? std::string_view("home_batch_put_if_absent_composite")
+                                   : std::string_view(request.transport_id),
+      request.operation_id);
+  auto materialized_or = engine_.ingestion_runtime().ingest_mapped_sources_into_replicas(
+      std::move(targets),
+      std::vector<std::shared_ptr<store::loader::SeekableSource>>{std::move(request.source)},
+      mapping,
+      hints,
+      request.source_kind);
+  if (!materialized_or.ok()) {
+    return materialized_or.status();
+  }
+  if (materialized_or->replica_handles.size() != prepared_items.size()) {
+    for (auto& handle : materialized_or->replica_handles) {
+      (void)engine_.retire_replica_status(handle.key());
+    }
+    return absl::InternalError("composite body staging returned unexpected replica handle count");
+  }
+
+  StageBodiesCompositeResult result;
+  result.materialize_result = std::move(materialized_or->materialize_result);
+  result.staged_bodies.reserve(prepared_items.size());
+  auto retire_unpublished = [&]() {
+    for (auto& staged_body : result.staged_bodies) {
+      (void)staged_body.body_handle.retire();
+    }
+  };
+  for (std::size_t index = 0; index < prepared_items.size(); ++index) {
+    const auto& prepared = prepared_items[index];
+    const auto* item = prepared.item;
+    auto stage_result_or = finalize_staged_replica(
+        engine_,
+        "stage_composite",
+        item->access_class,
+        prepared.intent,
+        prepared.resolved_policy,
+        item->invariant.layout_id(),
+        prepared.verification_mode,
+        std::move(materialized_or->replica_handles[index]),
+        store::runtime::ingestion::BackingIdentity{
+            .physical_artifact_id = prepared.physical_artifact_id,
+        },
+        build_invariant_verified_content_descriptor(item->invariant),
+        build_layout_and_size_verification_record(item->invariant.layout_id(), absl::Now()));
+    if (!stage_result_or.ok()) {
+      retire_unpublished();
+      for (std::size_t remaining = index + 1; remaining < materialized_or->replica_handles.size(); ++remaining) {
+        (void)engine_.retire_replica_status(materialized_or->replica_handles[remaining].key());
+      }
+      return stage_result_or.status();
+    }
+    result.staged_bodies.push_back(std::move(*stage_result_or));
+  }
+  return result;
+}
+
 absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body_fast_cpu_verified(
     std::string artifact_id,
     const v2::PutIfAbsentInvariant& invariant,

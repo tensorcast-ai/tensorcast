@@ -17,6 +17,8 @@ related_code:
   - daemon/state/daemon_kernel.h
   - daemon/state/worker_directory_cache.h
   - daemon/service/artifact_profile_registry.h
+  - daemon/service/body_backing_manager.h
+  - daemon/service/body_backing_manager.cc
   - daemon/service/byte_artifact_body_handle.h
   - daemon/service/byte_artifact_body_handle.cc
   - daemon/service/byte_artifact_body_store.h
@@ -124,6 +126,11 @@ RDMA realization follow-ons still in progress:
   first put-side cut intentionally keeps source-side staged-slab pack
   construction and per-item home staging in place; it only removes the home
   daemon's mandatory remote full-pack mirror.
+- The put-side composite final-body staging cut is implemented for eligible
+  `LAYOUT_AND_SIZE_ONLY` byte artifacts: the home daemon prepares unpublished
+  retained body backings, lowers one remote pack source into a composite target
+  layout, and lets the shared `0115` dataplane execute one batched direct-write
+  materialization before authority join installation.
 - `BodyHandle` now exposes the export-view API used by source-side segmented
   communicator export.
 - The remaining RDMA follow-on is producer-side read-plan servicing:
@@ -837,6 +844,132 @@ Observability rules:
    prove that `remote_mirror_count` and `remote_mirror_bytes` collapse to zero
    on the intended RDMA put path.
 
+#### 5.5.6b Accepted put-side composite final-body stage
+
+After the no-mirror consume cut, the remaining put-side batch-set cost is
+per-item home staging. The accepted next realization is to stage one eligible
+remote pack directly into the unpublished final retained body backings for all
+eligible items in that transport, using the shared composite/vectored
+direct-write execution contract from `0115`.
+
+Scope and eligibility:
+
+1. This path applies only inside `HomeBatchPutIfAbsent` after the home shard,
+   fence, route epoch, request operation, transport capability, and manifest
+   slice validation have already succeeded.
+2. The first implementation is limited to remote `v2 communicator_source`
+   transports opened with `PAYLOAD_REF_DIRECTION_PUT` whose resolved
+   `SeekableSource` is non-null and advertises
+   `supports_batched_direct_write_at() == true`.
+3. The group is initially per `transport_id`: all composite items share one
+   opened source and one transport manifest. Ineligible items in the same RPC
+   continue through the 5.5.6a per-item direct-slice path or the existing
+   full-pack fallback path.
+4. Each item must use
+   `BYTE_ARTIFACT_VERIFICATION_MODE_LAYOUT_AND_SIZE_ONLY`. Modes that require
+   payload digest verification, including the default strict SHA256 mode, stay
+   on the existing per-item staging path until a later stream or post-write
+   digest phase is accepted.
+5. The resolved body policy must produce CPU final backings that can be exposed
+   as writable target-layout storage for the shared materialization dataplane.
+   GPU-only, non-direct-writable, zero-length, or otherwise unsupported target
+   shapes are pre-issue fallback cases.
+6. Duplicate artifact ids or duplicate join keys inside one composite group are
+   pre-issue fallback cases until a batch-level de-duplication policy is
+   explicitly defined. This keeps authority join and cleanup semantics
+   identical to the existing item-scoped path.
+
+Body staging seam:
+
+1. `BodyBackingManager` needs an internal batch staging seam such as
+   `stage_bodies_composite(...)`, or an equivalent
+   `prepare_body_stage_targets(...)` plus `finalize_staged_bodies(...)` split.
+2. That seam owns final body backing preparation. It creates one unpublished
+   retained backing per item, with the same logical body identity,
+   `BodyBackingIntent`, `ResolvedStorePolicy`, stable-retention admission, and
+   `BodyHandle` lifetime rules that single-item `stage_body(...)` uses.
+3. Prepared bodies are not routed truth. They are transient unpublished
+   candidates until `ByteArtifactAuthorityService::batch_put_if_absent(...)`
+   accepts the corresponding item.
+4. The first implementation may expose one all-in-one
+   `stage_bodies_composite(...)` API that prepares, materializes, finalizes,
+   and cleans up on failure. A later split is allowed if tests need finer
+   control over pre-issue preparation.
+
+Composite mapping semantics:
+
+1. The source byte space is the transport pack manifest byte space. Each item
+   contributes exactly one source slice
+   `{source_index=0, src_offset=manifest.offset, length=manifest.length}`.
+2. The target byte space is a synthetic concatenation of the unpublished final
+   body backings in composite item order. Item `i` owns target range
+   `[cursor_i, cursor_i + invariant.byte_length)`, and the backing storage for
+   that range must have exactly that length.
+3. The `ByteRangeMap` uses `total_bytes=sum(item.byte_length)`,
+   `num_sources=1`, and one segment per item mapping the source pack slice to
+   the corresponding composite target range. `mapping.total_bytes` is the
+   composite target byte count, not the remote pack's total advertised size.
+4. The `IntoTargetLayout` storages are the final body backing writable spans.
+   Stable local backing metadata may be attached when the backing manager can
+   prove the storage is daemon-managed and long-lived enough for the `0115`
+   direct-write grant, but this metadata remains local placement state and not
+   routed artifact identity.
+5. The controller calls the shared materialization seam with one source vector
+   entry, the composite `ByteRangeMap`, `source_kind=kP2P`, and a
+   transport-scoped operation hint. The expected fast path is
+   `readv_into_at(...)` / `ReadPlan` / RDMA vectored direct-write, not a
+   byte-artifact-private communicator API.
+
+Verification, authority, and cleanup:
+
+1. For `LAYOUT_AND_SIZE_ONLY`, successful composite materialization produces
+   the same per-item `StageResult` shape as `stage_body(...)`: descriptor,
+   observation, `BodyHandle`, `VerifiedContentDescriptor`, verification
+   record, and backing identity. Payload digest fields remain advisory and
+   must not block publication.
+2. Each finalized item still runs
+   `validate_invariant_body_descriptor(...)` through
+   `ByteArtifactAuthorityService::batch_put_if_absent(...)`; composite staging
+   does not install authority truth by itself.
+3. Conflict, duplicate-writer, invalid-artifact, or invariant failures after
+   finalization retire the corresponding unpublished body handle using the
+   existing authority cleanup path.
+4. If preparation, capability validation, policy resolution, target layout
+   construction, or mapping validation fails before the composite dataplane is
+   issued, the controller may fall back to the per-item 5.5.6a path for the
+   affected items.
+5. Once the composite materialization has crossed the `0115` issue boundary,
+   hidden full-pack mirror or per-item staged fallback is forbidden. A
+   post-issue failure marks the affected composite items failed and retires all
+   prepared body handles that were not installed.
+6. Partial success is item-scoped only after composite materialization
+   succeeds. A composite execution failure before per-item finalization fails
+   the whole composite group because individual final backings may have been
+   partially dirtied.
+
+Observability rules:
+
+1. Eligible composite execution must log a put-side apply summary such as
+   `byte_artifact.home_batch_put_if_absent_transport_apply_summary` with
+   `read_mode=batched_direct_write`,
+   `materialize_mode=single_source_composite`,
+   `stage_mode=composite_final_body`,
+   `batched_direct_write=true`, `source_count=1`, `mapping_segments`,
+   `item_count`, `item_bytes`, `transport_payload_bytes`, and `mirror_ms=0`.
+2. Pre-issue fallback must log a bounded `fallback_reason` and preserve the
+   existing `read_mode=direct_remote_slice` or `full_pack_mirror` records so
+   benchmarks can distinguish no-mirror scalar staging from composite staging.
+3. Home summaries should add composite counters for transport count, item
+   count, byte count, materialization calls, batched-direct-write calls,
+   fallback count, fallback items, and cleanup/retire count, while retaining
+   the existing remote mirror and direct-slice counters.
+4. Expected RDMA SGLang KV evidence is: source batch-set packs still show
+   `mode=staged_slab`, home full-pack mirror remains zero, eligible home
+   transports move from `read_mode=direct_remote_slice` to
+   `read_mode=batched_direct_write`, and `stage_loader_count` for eligible
+   layout-and-size items drops toward zero because per-item
+   `SeekableSourceLoader` staging is bypassed.
+
 #### 5.5.7 Implemented v2 communicator-backed realization
 
 `v2 communicator_source` is the current communicator-backed realization. It moves routed byte-artifact remote transport
@@ -964,6 +1097,10 @@ Design intent:
 - put-side `HomeBatchPutIfAbsent` now removes the same mandatory home-daemon
   full-pack mirror for eligible RDMA `communicator_source` transports while
   keeping source-side staged-slab pack construction in place,
+- put-side `HomeBatchPutIfAbsent` may next consume the same shared `0115`
+  composite execution contract to batch-stage one remote pack into unpublished
+  final body backings for `LAYOUT_AND_SIZE_ONLY` items, while preserving
+  first-writer authority semantics,
 - the remaining RDMA bottleneck is producer-side servicing: CPU source slices
   are still copied from retained backing into pinned staged response buffers
   before remote reads,
@@ -1001,22 +1138,28 @@ Normative rules:
    per-item `SourceSlice` loaders over the remote pack and stage those items
    through `BodyBackingManager::stage_body(...)` instead of first materializing
    a full local pack mirror.
-6. Source-side RDMA communicator export should continue to prefer no-pack-copy
+6. The accepted next put-side step is composite final-body staging, not a new
+   transport API: `HomeBatchPutIfAbsent` prepares unpublished final retained
+   backings through the body-backing seam, constructs a one-source
+   `ByteRangeMap` from pack offsets to those backing offsets, and delegates
+   materialization to the shared `0115` composite/vectored direct-write
+   dataplane before authority join installation.
+7. Source-side RDMA communicator export should continue to prefer no-pack-copy
    segmented export over daemon-owned pack slab realization. The producer may
    expose one logical pack byte space by concatenating per-entry or per-backing
    exported segments through `remote_memory_keys[]`, `buffer_sizes[]`, and
    `total_payload_bytes`; it does not need to copy those bytes into one
    daemon-owned slab first.
-7. The next RDMA get-side follow-on is source servicing, not a new sink API. Eligible
+8. The next RDMA get-side follow-on is source servicing, not a new sink API. Eligible
    retained CPU backings should be served as direct-readable source segments in
    the read-plan response instead of first being copied into pinned staged
    buffers.
-8. The accepted source-side realization seam is `BodyHandle`, as further
+9. The accepted source-side realization seam is `BodyHandle`, as further
    specified by `0089`. `BodyHandle` provides the transport-neutral export-view
    acquisition API that `PayloadTransportBroker` uses to obtain exportable
    backing views and keepalive state without reimplementing replica-runtime
    inspection or export logic.
-9. Direct-source RDMA response windows are descriptor-driven, not
+10. Direct-source RDMA response windows are descriptor-driven, not
    staging-driven. They must not consume `FlowCreditLedger`, `StageLease`, or
    staged ACK-release semantics, and they must not be split merely because
    staged `buffers_per_flow` credit is exhausted.
@@ -1142,6 +1285,7 @@ Rules:
    - `byte_artifact.home_batch_put_if_absent_transport_open`
    - `byte_artifact.home_batch_put_if_absent_transport_read_mode`
    - `byte_artifact.home_batch_put_if_absent_transport_mirror`
+   - `byte_artifact.home_batch_put_if_absent_transport_apply_summary`
    - `byte_artifact.home_batch_put_if_absent_stage_plan`
    - `byte_artifact.home_batch_put_if_absent_summary`
    - `byte_artifact.batch_put_if_absent_from_region_pack_realization`
@@ -1511,8 +1655,13 @@ design delta.
   manifest and per-item semantics can be preserved through direct-write and
   `BodyHandle`-backed export views.
 - Put-side `HomeBatchPutIfAbsent` RDMA `communicator_source` consumption now
-  follows the same no-mirror remote-slice rule before any larger batch-set
-  composite or vectored optimization is considered accepted.
+  follows the same no-mirror remote-slice rule, which is the required baseline
+  for larger batch-set composite or vectored optimizations.
+- Put-side composite final-body staging is accepted as the next
+  `LAYOUT_AND_SIZE_ONLY` batch-set optimization only if it uses the shared
+  `0115` composite/vectored direct-write dataplane, stages into unpublished
+  final body backings, and keeps authority join, conflict, and cleanup behavior
+  item-scoped after successful materialization.
 - `PayloadTransportBroker` remains the transport boundary, but source-side no-copy export must consume the `BodyHandle`
   export-view seam described by `0089` rather than growing broker-private `StoreEngine` inspection logic.
 - `GetServerConfig` is the peer-discovery surface for batch-transport protocol version and realization support.

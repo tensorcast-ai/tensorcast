@@ -3919,6 +3919,164 @@ TEST_CASE("BodyBackingManager fast CPU staging hashes during local byte ingress"
   REQUIRE(staged_or->body_handle.retire().ok());
 }
 
+class RecordingCompositeSource final : public tensorcast::store::loader::SeekableSource {
+ public:
+  explicit RecordingCompositeSource(std::string data) : data_(std::move(data)) {}
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return data_.size();
+  }
+
+  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
+    auto read_or = read_at(cursor_, dst, max_bytes);
+    if (!read_or.ok()) {
+      return read_or.status();
+    }
+    cursor_ += *read_or;
+    return *read_or;
+  }
+
+  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
+    if (offset >= data_.size() || bytes == 0) {
+      return static_cast<size_t>(0);
+    }
+    const size_t to_copy = static_cast<size_t>(std::min<uint64_t>(bytes, data_.size() - offset));
+    std::memcpy(dst, data_.data() + offset, to_copy);
+    return to_copy;
+  }
+
+  [[nodiscard]] bool supports_direct_write_at() const override {
+    return true;
+  }
+
+  [[nodiscard]] bool supports_batched_direct_write_at() const override {
+    return true;
+  }
+
+  absl::StatusOr<size_t> read_into_at(
+      uint64_t src_offset,
+      uint64_t dest_va_offset,
+      size_t bytes,
+      const tensorcast::store::DirectWriteGrant& grant) override {
+    if (src_offset > data_.size() || bytes > data_.size() - src_offset) {
+      return absl::OutOfRangeError("source read exceeds source data");
+    }
+    size_t copied = 0;
+    uint64_t cursor = dest_va_offset;
+    while (copied < bytes) {
+      bool matched = false;
+      for (const auto& window : grant.windows) {
+        if (cursor < window.va_offset || cursor >= window.va_offset + window.length) {
+          continue;
+        }
+        const uint64_t window_offset = cursor - window.va_offset;
+        const size_t take = static_cast<size_t>(std::min<uint64_t>(bytes - copied, window.length - window_offset));
+        std::memcpy(
+            reinterpret_cast<void*>(window.local_addr + window_offset), data_.data() + src_offset + copied, take);
+        copied += take;
+        cursor += take;
+        matched = true;
+        break;
+      }
+      if (!matched) {
+        return absl::OutOfRangeError("direct write grant does not cover destination range");
+      }
+    }
+    return copied;
+  }
+
+  absl::StatusOr<size_t> readv_into_at(
+      absl::Span<const tensorcast::store::loader::DirectWriteOp> ops,
+      const tensorcast::store::DirectWriteGrant& grant) override {
+    ++readv_calls_;
+    size_t total = 0;
+    for (const auto& op : ops) {
+      auto wrote_or = read_into_at(op.src_offset, op.dest_va_offset, op.bytes, grant);
+      if (!wrote_or.ok()) {
+        return wrote_or.status();
+      }
+      total += *wrote_or;
+    }
+    return total;
+  }
+
+  [[nodiscard]] int readv_calls() const {
+    return readv_calls_;
+  }
+
+ private:
+  std::string data_;
+  uint64_t cursor_{0};
+  int readv_calls_{0};
+};
+
+TEST_CASE(
+    "BodyBackingManager composite staging writes one source into multiple final bodies",
+    "[daemon][body_backing][composite]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  tensorcast::daemon::BodyBackingManager manager(*engine);
+
+  const std::string payload_a = "composite-body-alpha";
+  const std::string payload_b = "composite-body-beta-longer";
+  const std::string prefix = "source-prefix:";
+  const std::string gap = ":gap:";
+  const std::string slab = prefix + payload_a + gap + payload_b;
+  const std::uint64_t offset_a = prefix.size();
+  const std::uint64_t offset_b = prefix.size() + payload_a.size() + gap.size();
+  const auto source = std::make_shared<RecordingCompositeSource>(slab);
+
+  const std::string artifact_id_a = make_test_byte_artifact_id("composite-stage-a:blk-4");
+  const std::string artifact_id_b = make_test_byte_artifact_id("composite-stage-b:blk-4");
+  tensorcast::daemon::v2::PutIfAbsentInvariant invariant_a;
+  tensorcast::daemon::v2::PutIfAbsentInvariant invariant_b;
+  set_invariant(&invariant_a, "layout_v1", payload_a);
+  set_invariant(&invariant_b, "layout_v1", payload_b);
+  invariant_a.set_verification_mode(tensorcast::daemon::v2::BYTE_ARTIFACT_VERIFICATION_MODE_LAYOUT_AND_SIZE_ONLY);
+  invariant_b.set_verification_mode(tensorcast::daemon::v2::BYTE_ARTIFACT_VERIFICATION_MODE_LAYOUT_AND_SIZE_ONLY);
+
+  auto staged_or = manager.stage_bodies_composite(
+      tensorcast::daemon::BodyBackingManager::StageBodiesCompositeRequest{
+          .source = source,
+          .items =
+              {
+                  tensorcast::daemon::BodyBackingManager::CompositeStageItem{
+                      .artifact_id = artifact_id_a,
+                      .invariant = invariant_a,
+                      .source_offset = offset_a,
+                      .length = payload_a.size(),
+                  },
+                  tensorcast::daemon::BodyBackingManager::CompositeStageItem{
+                      .artifact_id = artifact_id_b,
+                      .invariant = invariant_b,
+                      .source_offset = offset_b,
+                      .length = payload_b.size(),
+                  },
+              },
+          .source_kind = tensorcast::store::loading::MaterializationSource::kP2P,
+          .operation_id = "op-body-composite-stage",
+          .transport_id = "transport-body-composite-stage",
+      });
+  REQUIRE(staged_or.ok());
+  REQUIRE(staged_or->staged_bodies.size() == 2);
+  CHECK(source->readv_calls() > 0);
+  CHECK(staged_or->materialize_result.direct_write_supported);
+
+  auto read_a_or = staged_or->staged_bodies[0].body_handle.read_all_bytes();
+  auto read_b_or = staged_or->staged_bodies[1].body_handle.read_all_bytes();
+  REQUIRE(read_a_or.ok());
+  REQUIRE(read_b_or.ok());
+  CHECK(*read_a_or == payload_a);
+  CHECK(*read_b_or == payload_b);
+  CHECK(staged_or->staged_bodies[0].descriptor.payload_digest_alg.empty());
+  CHECK(staged_or->staged_bodies[0].descriptor.payload_digest_hex.empty());
+  CHECK(
+      staged_or->staged_bodies[0].verification_record.verification_method ==
+      tensorcast::store::runtime::ingestion::VerificationMethod::kLayoutAndSizeContract);
+
+  REQUIRE(staged_or->staged_bodies[0].body_handle.retire().ok());
+  REQUIRE(staged_or->staged_bodies[1].body_handle.retire().ok());
+}
+
 TEST_CASE("HomeBatchTouchTtl keeps immortal entries immortal", "[daemon][batch][ttl]") {
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   auto harness = make_harness(engine, make_daemon_options());

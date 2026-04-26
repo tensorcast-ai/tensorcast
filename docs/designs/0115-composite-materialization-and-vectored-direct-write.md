@@ -4,12 +4,14 @@ title: Composite Materialization and Vectored Direct-Write
 status: implemented
 areas: ["core", "daemon", "docs", "benchmarks", "integrations"]
 created: 2026-04-19
-last_updated: 2026-04-25
+last_updated: 2026-04-26
 related_code:
   - docs/designs/0088-unified-artifact-profiles-with-shared-dataplane.md
   - docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
   - docs/designs/0089-core-backed-body-handles-and-backing-policy.md
   - docs/designs/0108-tensor-aware-materialization-strategy-plane.md
+  - daemon/service/body_backing_manager.h
+  - daemon/service/body_backing_manager.cc
   - core/store/materialization/contracts/loading_spec.h
   - core/store/materialization/dataplane/contracts/source.h
   - core/store/materialization/dataplane/contracts/sink.h
@@ -56,8 +58,8 @@ byte-artifact-specific optimization. Instead:
   semantics,
 - communicator owns efficient execution of a vectored pull plan,
 - RDMA transport owns chained WR realization,
-- and byte-artifact batch-get becomes only one consumer of that shared
-  capability.
+- and byte-artifact batch-get plus the accepted put-side final-body staging
+  follow-on become consumers of that shared capability.
 
 This design keeps the repository's current architectural boundaries:
 
@@ -68,10 +70,16 @@ This design keeps the repository's current architectural boundaries:
   lifetimes,
 - and `0115` owns the new common execution contract below that seam.
 
-One boundary matters for the next RDMA optimization step: `0115` owns the sink-
-side composite execution contract and the routed vectored pull API, but it does
-not by itself remove producer-side staged response windows for CPU sources.
-That direct-readable source-side follow-on remains owned by `0087-01`.
+Two boundaries matter for the next RDMA optimization steps:
+
+1. `0115` owns the sink-side composite execution contract and the routed
+   vectored pull API, but it does not by itself remove producer-side staged
+   response windows for CPU sources. That direct-readable source-side follow-on
+   remains owned by `0087-01`.
+2. `0115` also does not own byte-artifact authority, final body backing
+   allocation, or `BodyHandle` cleanup. Put-side composite final-body staging
+   may use the `0115` execution contract only after `0087`/`0089` code has
+   prepared unpublished target backings and a valid `IntoTargetLayout`.
 
 # Implementation Status
 
@@ -105,6 +113,13 @@ Landed outcomes:
   `materialize_mode=single_source_composite batched_direct_write=true`,
   confirming that the consumer uses the shared `0115` seams rather than a
   byte-artifact-private communicator API.
+- put-side byte-artifact composite final-body staging now consumes the same
+  capability for eligible `LAYOUT_AND_SIZE_ONLY` remote put transports. Its
+  profile-specific work remains target acquisition and authority cleanup:
+  `BodyBackingManager` prepares unpublished final body backings, builds the
+  composite target layout, and finalizes per-item `StageResult` values around
+  the shared materialization call. `0115` does not gain a put-specific
+  communicator API.
 
 Remaining follow-on work outside `0115`:
 
@@ -330,6 +345,34 @@ Rules:
    they block internal composite execution.
 4. `ByteRangeMappedSource` remains the generic composite-source executor and
    fallback surface.
+
+### Put-side final-body staging consumer
+
+Routed byte-artifact put-side staging may consume this internal helper once the
+profile-specific body-backing layer has prepared a target layout. The contract
+is intentionally the same as batch-get composite consume:
+
+1. The source vector contains the opened remote pack source, usually one
+   `RemoteKeySource` reached through `BatchPayloadCommunicatorSource`.
+2. The target layout is a synthetic concatenation of unpublished final body
+   backing writable spans. `0115` treats those spans as ordinary target
+   storage; it does not know whether a span will later become routed byte truth.
+3. The `ByteRangeMap` maps source pack offsets to target-layout offsets.
+   `mapping.total_bytes` is the target composite byte count, and
+   `mapping.num_sources` names the source vector size.
+4. Successful materialization reports committed bytes and execution mode only.
+   The caller remains responsible for per-item descriptor construction,
+   verification records, `BodyHandle` creation, authority join, conflict
+   cleanup, and unpublished backing retirement.
+5. In the first accepted put-side consumer, only
+   `LAYOUT_AND_SIZE_ONLY` items should enter the composite path. Strict digest
+   modes remain a profile-level fallback until the caller can compute or
+   validate payload digests over the composite write without weakening the
+   `0115` issue/failure model.
+6. The generic post-issue failure rule applies unchanged: after a composite
+   direct-write batch is issued, `0115` will not silently fall back to staged
+   per-item writes. The byte-artifact caller must mark the affected unpublished
+   targets failed and retire them.
 
 ## 4. `ByteRangeMappedSource` and `RemoteKeySource`
 
@@ -1390,11 +1433,15 @@ Compatibility rules:
 2. `ByteRangeMap` remains the exact fallback IR.
 3. `DirectWriteGrant` stays transport-neutral in the first cut.
 4. MTCP and staged paths remain valid fallbacks.
-5. `0087` byte-artifact batch-get may consume this capability later but may not
+5. `0087` byte-artifact batch-get consumes this capability, but may not
    redefine it.
-6. Stronger profile-level retry policy, if ever added, must layer above this
+6. `0087` byte-artifact batch-set may consume this capability for put-side
+   final-body staging only after unpublished target backing and authority
+   cleanup semantics are owned above this seam; it may not redefine the
+   communicator or direct-write API.
+7. Stronger profile-level retry policy, if ever added, must layer above this
    contract rather than weaken the generic failure model.
-7. Stable local backing metadata remains local placement state and must not be
+8. Stable local backing metadata remains local placement state and must not be
    promoted into routed identity or remote destination capability.
 
 Acceptance criteria:
