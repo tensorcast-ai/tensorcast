@@ -9,6 +9,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -366,8 +367,15 @@ HomeBatchGetResponseShape inspect_home_batch_get_response_shape(const v2::HomeBa
 
 class SourceSlice final : public store::loader::SeekableSource {
  public:
-  SourceSlice(std::shared_ptr<store::loader::SeekableSource> source, std::uint64_t base_offset, std::uint64_t length)
-      : source_(std::move(source)), base_offset_(base_offset), length_(length) {}
+  SourceSlice(
+      std::shared_ptr<store::loader::SeekableSource> source,
+      std::uint64_t base_offset,
+      std::uint64_t length,
+      std::shared_ptr<std::mutex> source_mutex = nullptr)
+      : source_(std::move(source)),
+        source_mutex_(std::move(source_mutex)),
+        base_offset_(base_offset),
+        length_(length) {}
 
   [[nodiscard]] uint64_t total_bytes() const override {
     return length_;
@@ -386,8 +394,12 @@ class SourceSlice final : public store::loader::SeekableSource {
     if (offset >= length_ || bytes == 0) {
       return static_cast<size_t>(0);
     }
-    return source_->read_at(
-        base_offset_ + offset, dst, static_cast<size_t>(std::min<uint64_t>(bytes, length_ - offset)));
+    const size_t bounded_bytes = static_cast<size_t>(std::min<uint64_t>(bytes, length_ - offset));
+    if (source_mutex_ != nullptr) {
+      std::lock_guard<std::mutex> lock(*source_mutex_);
+      return source_->read_at(base_offset_ + offset, dst, bounded_bytes);
+    }
+    return source_->read_at(base_offset_ + offset, dst, bounded_bytes);
   }
 
   [[nodiscard]] bool supports_direct_write_at() const override {
@@ -402,15 +414,17 @@ class SourceSlice final : public store::loader::SeekableSource {
     if (src_offset >= length_ || bytes == 0) {
       return static_cast<size_t>(0);
     }
-    return source_->read_into_at(
-        base_offset_ + src_offset,
-        dest_va_offset,
-        static_cast<size_t>(std::min<uint64_t>(bytes, length_ - src_offset)),
-        grant);
+    const size_t bounded_bytes = static_cast<size_t>(std::min<uint64_t>(bytes, length_ - src_offset));
+    if (source_mutex_ != nullptr) {
+      std::lock_guard<std::mutex> lock(*source_mutex_);
+      return source_->read_into_at(base_offset_ + src_offset, dest_va_offset, bounded_bytes, grant);
+    }
+    return source_->read_into_at(base_offset_ + src_offset, dest_va_offset, bounded_bytes, grant);
   }
 
  private:
   std::shared_ptr<store::loader::SeekableSource> source_;
+  std::shared_ptr<std::mutex> source_mutex_;
   std::uint64_t base_offset_{0};
   std::uint64_t length_{0};
   std::uint64_t cursor_{0};
@@ -429,9 +443,28 @@ std::unique_ptr<store::IArtifactLoader> make_loader_from_payload_slice(
 std::unique_ptr<store::IArtifactLoader> make_loader_from_source_slice(
     std::shared_ptr<store::loader::SeekableSource> source,
     std::uint64_t offset,
-    std::uint64_t length) {
+    std::uint64_t length,
+    std::shared_ptr<std::mutex> source_mutex = nullptr) {
   return std::make_unique<SeekableSourceLoader>(
-      std::make_shared<SourceSlice>(std::move(source), offset, length), length);
+      std::make_shared<SourceSlice>(std::move(source), offset, length, std::move(source_mutex)), length);
+}
+
+struct PutRemoteCommunicatorSourceEligibility {
+  bool remote{false};
+  bool source_supports_direct_write{false};
+  bool source_supports_batched_direct_write{false};
+  bool direct_remote_slice{false};
+};
+
+PutRemoteCommunicatorSourceEligibility classify_put_remote_communicator_source(
+    const PayloadTransportBroker::BatchPayloadSource& source) {
+  PutRemoteCommunicatorSourceEligibility eligibility;
+  eligibility.remote = source.remote;
+  eligibility.source_supports_direct_write = source.source != nullptr && source.source->supports_direct_write_at();
+  eligibility.source_supports_batched_direct_write =
+      source.source != nullptr && source.source->supports_batched_direct_write_at();
+  eligibility.direct_remote_slice = eligibility.remote && eligibility.source_supports_direct_write;
+  return eligibility;
 }
 
 absl::StatusOr<std::shared_ptr<const std::string>> mirror_seekable_source_payload(
@@ -1735,6 +1768,9 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
     std::size_t remote_communicator_source_count{0};
     std::size_t remote_communicator_source_direct_write_count{0};
     std::size_t remote_communicator_source_batched_direct_write_count{0};
+    std::size_t remote_direct_slice_transport_count{0};
+    std::size_t remote_direct_slice_items{0};
+    std::uint64_t remote_direct_slice_bytes{0};
     std::size_t remote_full_pack_mirror_items{0};
     std::size_t stage_body_count{0};
     std::size_t fast_cpu_stage_count{0};
@@ -1788,6 +1824,8 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
   absl::flat_hash_map<std::string, PayloadTransportBroker::ResolvedBatchPayload> resolved_batch_payloads;
   absl::flat_hash_map<std::string, PayloadTransportBroker::BatchPayloadSource> resolved_batch_sources;
   absl::flat_hash_map<std::string, std::shared_ptr<const std::string>> mirrored_remote_batch_payloads;
+  absl::flat_hash_map<std::string, std::shared_ptr<std::mutex>> remote_direct_source_mutexes;
+  absl::flat_hash_set<std::string> direct_remote_batch_payloads;
 
   struct PreparedHomeBatchPutItem {
     const v2::HomeBatchPutIfAbsentItem* item{nullptr};
@@ -1895,79 +1933,103 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
           timing_stats.communicator_open_elapsed += absl::Now() - resolve_started_at;
           ++timing_stats.communicator_open_count;
           resolved_it = resolved_batch_sources.emplace(transport_id, std::move(*resolved_or)).first;
-          const bool source_supports_direct_write =
-              resolved_it->second.source != nullptr && resolved_it->second.source->supports_direct_write_at();
-          const bool source_supports_batched_direct_write =
-              resolved_it->second.source != nullptr && resolved_it->second.source->supports_batched_direct_write_at();
-          if (resolved_it->second.remote) {
+          const auto eligibility = classify_put_remote_communicator_source(resolved_it->second);
+          if (eligibility.remote) {
             ++timing_stats.remote_communicator_source_count;
-            if (source_supports_direct_write) {
+            if (eligibility.source_supports_direct_write) {
               ++timing_stats.remote_communicator_source_direct_write_count;
             }
-            if (source_supports_batched_direct_write) {
+            if (eligibility.source_supports_batched_direct_write) {
               ++timing_stats.remote_communicator_source_batched_direct_write_count;
             }
           }
           LOG(INFO) << "byte_artifact.home_batch_put_if_absent_transport_open"
                     << " operation_id=" << operation_id << " transport_id=" << transport_id
                     << " kind=communicator_source"
-                    << " remote=" << resolved_it->second.remote
+                    << " remote=" << eligibility.remote
                     << " item_count=" << transport_it->second->manifest().entries_size()
                     << " payload_bytes=" << transport_it->second->manifest().total_size()
-                    << " source_direct_write_at=" << source_supports_direct_write
-                    << " source_batched_direct_write_at=" << source_supports_batched_direct_write
+                    << " source_direct_write_at=" << eligibility.source_supports_direct_write
+                    << " source_batched_direct_write_at=" << eligibility.source_supports_batched_direct_write
                     << " resolve_ms=" << absl::ToDoubleMilliseconds(absl::Now() - resolve_started_at);
         }
         source_kind = resolved_it->second.remote ? store::loading::MaterializationSource::kP2P
                                                  : store::loading::MaterializationSource::kLocalReplica;
         if (resolved_it->second.remote) {
-          auto mirrored_it = mirrored_remote_batch_payloads.find(transport_id);
-          if (mirrored_it == mirrored_remote_batch_payloads.end()) {
-            const absl::Time mirror_started_at = absl::Now();
-            auto mirrored_or = mirror_seekable_source_payload(
-                resolved_it->second.source, transport_it->second->manifest().total_size());
-            if (!mirrored_or.ok()) {
+          const auto eligibility = classify_put_remote_communicator_source(resolved_it->second);
+          if (eligibility.direct_remote_slice) {
+            if (direct_remote_batch_payloads.emplace(transport_id).second) {
+              ++timing_stats.remote_direct_slice_transport_count;
+              timing_stats.remote_direct_slice_bytes += transport_it->second->manifest().total_size();
+              timing_stats.remote_direct_slice_items += transport_it->second->manifest().entries_size();
+              LOG(INFO) << "byte_artifact.home_batch_put_if_absent_transport_read_mode"
+                        << " operation_id=" << operation_id << " transport_id=" << transport_id
+                        << " kind=communicator_source"
+                        << " remote=true"
+                        << " read_mode=direct_remote_slice"
+                        << " realization=source_slice_loader"
+                        << " payload_bytes=" << transport_it->second->manifest().total_size()
+                        << " item_count=" << transport_it->second->manifest().entries_size()
+                        << " source_direct_write_at=" << eligibility.source_supports_direct_write
+                        << " source_batched_direct_write_at=" << eligibility.source_supports_batched_direct_write
+                        << " mirror_ms=0"
+                        << " subsequent_item_slices_local=false";
+            }
+            auto& source_mutex = remote_direct_source_mutexes[transport_id];
+            if (source_mutex == nullptr) {
+              source_mutex = std::make_shared<std::mutex>();
+            }
+            loader = make_loader_from_source_slice(
+                resolved_it->second.source,
+                item.batch_payload_slice().offset(),
+                item.batch_payload_slice().length(),
+                source_mutex);
+          } else {
+            auto mirrored_it = mirrored_remote_batch_payloads.find(transport_id);
+            if (mirrored_it == mirrored_remote_batch_payloads.end()) {
+              const absl::Time mirror_started_at = absl::Now();
+              auto mirrored_or = mirror_seekable_source_payload(
+                  resolved_it->second.source, transport_it->second->manifest().total_size());
+              if (!mirrored_or.ok()) {
+                deferred_outcomes[index] = make_outcome(
+                    artifact_id,
+                    batch_item_status_from_absl_status(mirrored_or.status()),
+                    std::string(mirrored_or.status().message()));
+                continue;
+              }
+              const absl::Duration mirror_elapsed = absl::Now() - mirror_started_at;
+              timing_stats.remote_mirror_elapsed += mirror_elapsed;
+              ++timing_stats.remote_mirror_count;
+              timing_stats.remote_mirror_bytes += transport_it->second->manifest().total_size();
+              timing_stats.remote_full_pack_mirror_items += transport_it->second->manifest().entries_size();
+              mirrored_it = mirrored_remote_batch_payloads.emplace(transport_id, std::move(*mirrored_or)).first;
+              LOG(INFO) << "byte_artifact.home_batch_put_if_absent_transport_mirror"
+                        << " operation_id=" << operation_id << " transport_id=" << transport_id
+                        << " kind=communicator_source"
+                        << " remote=true"
+                        << " read_mode=full_pack"
+                        << " realization=full_pack_mirror"
+                        << " payload_bytes=" << transport_it->second->manifest().total_size()
+                        << " item_count=" << transport_it->second->manifest().entries_size()
+                        << " source_direct_write_at=" << eligibility.source_supports_direct_write
+                        << " source_batched_direct_write_at=" << eligibility.source_supports_batched_direct_write
+                        << " mirror_ms=" << absl::ToDoubleMilliseconds(mirror_elapsed)
+                        << " subsequent_item_slices_local=true";
+            }
+            if (item.batch_payload_slice().offset() + item.batch_payload_slice().length() >
+                mirrored_it->second->size()) {
               deferred_outcomes[index] = make_outcome(
-                  artifact_id,
-                  batch_item_status_from_absl_status(mirrored_or.status()),
-                  std::string(mirrored_or.status().message()));
+                  artifact_id, v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION, "batch transport payload is truncated");
               continue;
             }
-            const absl::Duration mirror_elapsed = absl::Now() - mirror_started_at;
-            timing_stats.remote_mirror_elapsed += mirror_elapsed;
-            ++timing_stats.remote_mirror_count;
-            timing_stats.remote_mirror_bytes += transport_it->second->manifest().total_size();
-            timing_stats.remote_full_pack_mirror_items += transport_it->second->manifest().entries_size();
-            mirrored_it = mirrored_remote_batch_payloads.emplace(transport_id, std::move(*mirrored_or)).first;
-            const bool source_supports_direct_write =
-                resolved_it->second.source != nullptr && resolved_it->second.source->supports_direct_write_at();
-            const bool source_supports_batched_direct_write =
-                resolved_it->second.source != nullptr && resolved_it->second.source->supports_batched_direct_write_at();
-            LOG(INFO) << "byte_artifact.home_batch_put_if_absent_transport_mirror"
-                      << " operation_id=" << operation_id << " transport_id=" << transport_id
-                      << " kind=communicator_source"
-                      << " remote=true"
-                      << " read_mode=full_pack"
-                      << " realization=full_pack_mirror"
-                      << " payload_bytes=" << transport_it->second->manifest().total_size()
-                      << " item_count=" << transport_it->second->manifest().entries_size()
-                      << " source_direct_write_at=" << source_supports_direct_write
-                      << " source_batched_direct_write_at=" << source_supports_batched_direct_write
-                      << " mirror_ms=" << absl::ToDoubleMilliseconds(mirror_elapsed)
-                      << " subsequent_item_slices_local=true";
+            local_source = BodyBackingManager::LocalByteSpan{
+                .owner = std::shared_ptr<const void>(
+                    mirrored_it->second, static_cast<const void*>(mirrored_it->second->data())),
+                .data = reinterpret_cast<const std::uint8_t*>(mirrored_it->second->data()) +
+                    item.batch_payload_slice().offset(),
+                .size_bytes = item.batch_payload_slice().length(),
+            };
           }
-          if (item.batch_payload_slice().offset() + item.batch_payload_slice().length() > mirrored_it->second->size()) {
-            deferred_outcomes[index] = make_outcome(
-                artifact_id, v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION, "batch transport payload is truncated");
-            continue;
-          }
-          local_source = BodyBackingManager::LocalByteSpan{
-              .owner = std::shared_ptr<const void>(
-                  mirrored_it->second, static_cast<const void*>(mirrored_it->second->data())),
-              .data = reinterpret_cast<const std::uint8_t*>(mirrored_it->second->data()) +
-                  item.batch_payload_slice().offset(),
-              .size_bytes = item.batch_payload_slice().length(),
-          };
         } else {
           loader = make_loader_from_source_slice(
               resolved_it->second.source, item.batch_payload_slice().offset(), item.batch_payload_slice().length());
@@ -2337,6 +2399,9 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
           << timing_stats.remote_communicator_source_direct_write_count
           << " remote_communicator_source_batched_direct_write_count="
           << timing_stats.remote_communicator_source_batched_direct_write_count
+          << " remote_direct_slice_transport_count=" << timing_stats.remote_direct_slice_transport_count
+          << " remote_direct_slice_items=" << timing_stats.remote_direct_slice_items
+          << " remote_direct_slice_bytes=" << timing_stats.remote_direct_slice_bytes
           << " remote_mirror_count=" << timing_stats.remote_mirror_count
           << " remote_mirror_bytes=" << timing_stats.remote_mirror_bytes
           << " remote_full_pack_mirror_items=" << timing_stats.remote_full_pack_mirror_items

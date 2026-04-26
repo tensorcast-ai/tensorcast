@@ -4,7 +4,7 @@ title: Unified Artifact Runtime and Routed Byte Artifact Architecture
 status: implemented
 areas: ["daemon", "sdk", "global_store", "proto", "core", "integrations", "docs"]
 created: 2026-03-08
-last_updated: 2026-04-23
+last_updated: 2026-04-26
 related_code:
   - docs/designs/0017-client-generated-artifact-id.md
   - docs/designs/0056-programmable-framework-adv.md
@@ -90,8 +90,8 @@ authoritative for the artifact value model and routed byte-artifact runtime itse
 
 # Current Implementation Snapshot
 
-As of 2026-04-23, the live implementation matches this design, with one
-narrower RDMA source-side follow-on still in progress:
+As of 2026-04-26, the live implementation matches this design, with narrower
+RDMA realization follow-ons still in progress:
 
 - `StoreDaemonServiceImpl` delegates `Batch*`, `HomeBatch*`, `FetchPayloadRefChunk`, and `FetchBatchPayloadRefChunk`
   through controller entrypoints.
@@ -114,10 +114,16 @@ narrower RDMA source-side follow-on still in progress:
   or as a segmented `communicator_source` over retained-body export views for
   eligible RDMA packs.
 - Remote `communicator_source` consume paths now diverge by transport
-  realization: RDMA lowers the remote pack into the shared batched
-  direct-write path without a mandatory full-pack local mirror, while MTCP and
-  staged fallback paths still materialize one full local pack payload per
-  `transport_id` before per-item slicing.
+  realization on both get and put paths: eligible RDMA lowers remote pack
+  slices directly from the opened source without a mandatory full-pack local
+  mirror, while MTCP and staged fallback paths still materialize one full local
+  pack payload per `transport_id` before per-item slicing.
+- `HomeBatchPutIfAbsent` accepts batch transports on the put path and consumes
+  eligible remote RDMA `communicator_source` transports through per-item
+  `SourceSlice` loaders staged by `BodyBackingManager::stage_body(...)`. The
+  first put-side cut intentionally keeps source-side staged-slab pack
+  construction and per-item home staging in place; it only removes the home
+  daemon's mandatory remote full-pack mirror.
 - `BodyHandle` now exposes the export-view API used by source-side segmented
   communicator export.
 - The remaining RDMA follow-on is producer-side read-plan servicing:
@@ -538,10 +544,13 @@ Normative rules:
    digest}` tuple.
 4. A response or request may carry multiple transports. Batching is per remote-home bucket, and segmentation is still
    allowed by size, item count, or staging constraints.
-5. Current realizations still differ by transport:
+5. Current realizations still differ by direction and transport:
    - `v1 grpc_chunk_ref` materializes one local payload buffer per transport,
-   - RDMA `v2 communicator_source` already provides a reusable remote slice
-     loader over one open remote pack through the shared direct-write path,
+   - get-side RDMA `v2 communicator_source` already provides a reusable
+     remote slice loader over one open remote pack through the shared
+     direct-write path,
+   - put-side RDMA `v2 communicator_source` uses the same no-mirror
+     remote-slice consume shape for eligible direct-write-capable sources,
    - MTCP or staged-fallback `v2 communicator_source` paths still mirror one
      full pack into local host memory before serving subsequent item slices
      from that local mirror.
@@ -631,8 +640,12 @@ Normative rules:
 - `BatchPayloadCommunicatorSource` is the serializable control-plane descriptor. The broker lowers it into a runtime
   `RemoteKeySource` backed by the shared communicator rather than using `P2PSource` itself as the wire schema.
 - The current remote consume path is also transport-dependent:
-  - RDMA lowers item slices directly from the remote source into the shared
-    batched direct-write path without a mandatory full-pack local mirror,
+  - RDMA get lowers item slices directly from the remote source into the
+    shared batched direct-write path without a mandatory full-pack local
+    mirror,
+  - RDMA put lowers item slices directly from the remote source into per-item
+    `SourceSlice` loaders and home staging without a mandatory full-pack local
+    mirror,
   - MTCP and staged fallback paths still mirror one full pack into local host
     memory before per-item slicing.
 - The remaining accepted RDMA follow-on below is producer-side servicing:
@@ -717,8 +730,12 @@ Put-path rules:
 4. The current implementation realizes transport state as one contiguous staged slab per pack. The wire contract does
    not depend on that choice, but the live controller and broker paths do.
 5. The home daemon still verifies each item's invariant and still installs routed join truth per artifact.
-6. The current home-daemon consume path reads one full pack per transport, then stages or reuses per-item slices from
-   that local pack payload before join installation.
+6. The home-daemon consume path is transport-dependent. Eligible remote RDMA
+   `communicator_source` sources are consumed as per-item remote `SourceSlice`
+   loaders without a local full-pack mirror; non-direct communicator sources
+   and `grpc_chunk_ref` fallbacks still read one full pack per transport, then
+   stage or reuse per-item slices from that local pack payload before join
+   installation.
 7. When the consumed pack slice is already available as local host bytes, the home daemon currently prefers a
    one-pass fast CPU staging path that copies into final backing while computing the required content digest, instead
    of rereading the bytes through the generic loader pipeline.
@@ -727,6 +744,98 @@ Put-path rules:
    request as soon as that shard is ready; there is no global "all shards must be packed before any dispatch" barrier.
 9. Partial success remains legal. One failed item in a pack must not force unrelated items in the same pack to be
    reported as semantic failure if their bytes verified and their join succeeded.
+
+#### 5.5.6a Implemented put-side no-mirror consume
+
+The put path is directionally symmetric with get after authority routing has
+selected a remote home: the source daemon owns a logical pack byte space, while
+the home daemon is the consumer that stages each successful item into retained
+home backing before installing `PUT_IF_ABSENT_JOIN` truth. The first put-side
+realization step removes only the home daemon's mandatory remote full-pack
+mirror. It does not change source-side pack construction, manifest semantics,
+home authority, or per-item join behavior.
+
+Eligibility rules:
+
+1. The candidate is a `HomeBatchPutIfAbsent` item with
+   `batch_payload_slice.transport_id` referring to a `v2 communicator_source`
+   transport opened with `PAYLOAD_REF_DIRECTION_PUT`.
+2. The opened source is remote from the home daemon and resolves to a
+   non-null `SeekableSource`.
+3. First-cut executable eligibility requires
+   `SeekableSource::supports_direct_write_at() == true`. The
+   `supports_batched_direct_write_at()` bit is logged for parity with get-side
+   composite execution and future put-side vectored work, but by itself is not
+   the first-cut per-item `SourceSlice` eligibility signal unless the source
+   also advertises scalar `read_into_at(...)` support.
+4. Manifest lookup must prove that the item slice exactly matches one
+   `{artifact_id, offset, length}` entry in the transport manifest before any
+   loader is constructed.
+
+Direct consume realization:
+
+1. The home daemon must not call `mirror_seekable_source_payload(...)` for an
+   eligible remote source.
+2. The home daemon builds a per-item `SourceSlice` over the opened remote
+   source and wraps it in `SeekableSourceLoader`.
+3. The item keeps `source_kind = kP2P` and is staged through
+   `BodyBackingManager::stage_body(...)`, preserving the existing body
+   placement, invariant validation, digest, and verified-content output
+   semantics.
+4. The direct-slice loader holds the resolved source through shared ownership
+   until item staging completes; there is no local full-pack owner buffer and
+   no `LocalByteSpan` pointing into a mirrored pack.
+5. This first cut may still execute one home staging operation per item. It is
+   not the put-side composite or vectored direct-write phase, and it is not
+   required to remove all per-item lowering, `StreamingPinnedBuffer`, or
+   final-backing copy costs.
+
+Fallback rules:
+
+1. Remote `communicator_source` paths that do not advertise scalar direct-write
+   support keep the current `full_pack_mirror` realization.
+2. `grpc_chunk_ref` keeps the current full-pack fetch realization.
+3. Same-daemon or otherwise local `communicator_source` paths keep local source
+   slicing and do not count as remote no-mirror RDMA validation.
+4. Fallback must be pre-issue. After a direct-slice staging attempt has begun,
+   the controller must not silently retry the same item through full-pack
+   mirror because the staging path may already have performed partial writes
+   into transient backing. Such failures remain current-operation item
+   failures and must not rewrite routed truth.
+
+Correctness and authority rules:
+
+1. `HomeBatchPutIfAbsent` remains the only authority point that installs
+   first-writer routed truth. Direct-slice consumption is only a byte-movement
+   realization.
+2. A failed transport open or manifest validation failure affects only items
+   that reference the invalid transport or slice, subject to existing
+   batch-scoped capability validation rules.
+3. If direct-slice staging fails for one item, the item must not be passed to
+   `ByteArtifactAuthorityService::batch_put_if_absent(...)`; unrelated items
+   in the same request or different transports may still complete.
+4. Digest and verification behavior remains item-scoped. The home daemon still
+   validates the item invariant against the staged body descriptor before join
+   installation.
+5. Implementation may serialize or parallelize direct-slice staging per
+   transport. The semantic contract requires explicit-offset reads and correct
+   lifetime ownership, not a particular scheduling order.
+
+Observability rules:
+
+1. Opening a put-side remote `communicator_source` must continue to log
+   source direct-write and batched direct-write capability.
+2. Eligible direct-slice consumption must emit a read-mode log such as
+   `byte_artifact.home_batch_put_if_absent_transport_read_mode` with
+   `read_mode=direct_remote_slice`, `realization=source_slice_loader`,
+   `mirror_ms=0`, and `subsequent_item_slices_local=false`.
+3. Fallback mirror consumption must continue to emit
+   `byte_artifact.home_batch_put_if_absent_transport_mirror` with
+   `realization=full_pack_mirror`.
+4. The home summary must distinguish remote direct-slice transports and items
+   from remote full-pack mirror transports and bytes so benchmark analysis can
+   prove that `remote_mirror_count` and `remote_mirror_bytes` collapse to zero
+   on the intended RDMA put path.
 
 #### 5.5.7 Implemented v2 communicator-backed realization
 
@@ -761,15 +870,17 @@ Rules:
    - eligible RDMA get paths may export one logical pack as segmented retained
      body views,
    - MTCP-compatible and fallback paths may still realize one staged host pack.
-6. Current remote `v2` consume paths open one communicator source per
+6. Current get-side remote `v2` consume paths open one communicator source per
    `transport_id`:
-   - on RDMA, item slices lower directly from that remote source into the
+   - on RDMA get, item slices lower directly from that remote source into the
      shared `0115` batched direct-write path without a mandatory full-pack
      local mirror,
    - on MTCP or staged fallback paths, the consumer still mirrors one full
      pack into local host memory before per-item slicing,
    - local same-daemon communicator packs can still serve source slices
      directly.
+   Put-side home consume matches this no-mirror RDMA shape for eligible
+   direct-write-capable sources as described in 5.5.6a.
 7. Semantic success remains item-scoped and whole-artifact-scoped. `v2` does not introduce sub-artifact success,
    partial artifact visibility, or sub-artifact digest semantics.
 8. `v2` does not require per-pack Global Store transport sessions. Peer addressability and export descriptors come from
@@ -850,6 +961,9 @@ Design intent:
   direct source-to-target writes,
 - current RDMA get paths already remove the daemon-owned pack slab and the old
   mandatory sink full-pack mirror on eligible paths,
+- put-side `HomeBatchPutIfAbsent` now removes the same mandatory home-daemon
+  full-pack mirror for eligible RDMA `communicator_source` transports while
+  keeping source-side staged-slab pack construction in place,
 - the remaining RDMA bottleneck is producer-side servicing: CPU source slices
   are still copied from retained backing into pinned staged response buffers
   before remote reads,
@@ -878,66 +992,72 @@ Normative rules:
 3. `v1 grpc_chunk_ref` keeps the staged contiguous pack realization. This remains the preferred realization for MTCP or
    other non-direct-write transports, and it remains a valid per-pack fallback even when protocol version `2` is
    available.
-4. Sink-side RDMA consume paths must not unconditionally mirror a full remote pack into local host memory. When a
-   remote `communicator_source` lowers to a `SeekableSource` that supports `read_into_at(...)`, the consumer should
-   lower per-item `SourceSlice` loaders directly from that remote source and let the shared materialization dataplane
-   choose direct-write execution.
-5. Source-side RDMA communicator export should continue to prefer no-pack-copy
+4. Sink-side RDMA consume paths must not unconditionally mirror a full remote pack into local host memory. On the get
+   path, when a remote `communicator_source` lowers to a `SeekableSource` that supports `read_into_at(...)`, the
+   consumer should lower per-item `SourceSlice` loaders directly from that remote source and let the shared
+   materialization dataplane choose direct-write execution.
+5. Put-side home consume must follow the same no-mirror rule for eligible
+   remote `communicator_source` sources: `HomeBatchPutIfAbsent` should build
+   per-item `SourceSlice` loaders over the remote pack and stage those items
+   through `BodyBackingManager::stage_body(...)` instead of first materializing
+   a full local pack mirror.
+6. Source-side RDMA communicator export should continue to prefer no-pack-copy
    segmented export over daemon-owned pack slab realization. The producer may
    expose one logical pack byte space by concatenating per-entry or per-backing
    exported segments through `remote_memory_keys[]`, `buffer_sizes[]`, and
    `total_payload_bytes`; it does not need to copy those bytes into one
    daemon-owned slab first.
-6. The next RDMA follow-on is source servicing, not a new sink API. Eligible
+7. The next RDMA get-side follow-on is source servicing, not a new sink API. Eligible
    retained CPU backings should be served as direct-readable source segments in
    the read-plan response instead of first being copied into pinned staged
    buffers.
-7. The accepted source-side realization seam is `BodyHandle`, as further
+8. The accepted source-side realization seam is `BodyHandle`, as further
    specified by `0089`. `BodyHandle` provides the transport-neutral export-view
    acquisition API that `PayloadTransportBroker` uses to obtain exportable
    backing views and keepalive state without reimplementing replica-runtime
    inspection or export logic.
-8. Direct-source RDMA response windows are descriptor-driven, not
+9. Direct-source RDMA response windows are descriptor-driven, not
    staging-driven. They must not consume `FlowCreditLedger`, `StageLease`, or
    staged ACK-release semantics, and they must not be split merely because
    staged `buffers_per_flow` credit is exhausted.
-9. Direct-source window sizing should instead be bounded by descriptor/control
+10. Direct-source window sizing should instead be bounded by descriptor/control
    limits such as segment count, control payload bytes, and request budgeting.
    The accepted benchmark target is that one routed transport's `32` source
    segments fit in one direct-source response window and one sink
    `read_multi()` call, even if transport realization still posts many RDMA
    WRs internally.
-10. RDMA producer hot paths may optionally retain a publish-time export-view
+11. RDMA producer hot paths may optionally retain a publish-time export-view
     keepalive keyed by backing identity as an optimization hint for later
     direct-source servicing. This cache is RDMA-only, best-effort, and advisory:
     missing, expired, or invalidated retained exports must never change
     authority truth or manifest semantics, and they must not disable request-
     time export acquisition or staged fallback.
-11. Publish-time retained exports must live outside `BackingRecord` snapshots.
+12. Publish-time retained exports must live outside `BackingRecord` snapshots.
     Snapshot copies of backing metadata must not silently extend export
     lifetime; source-side preregistration is a separate bounded cache over
     previously acquired `BodyHandle` export views.
-12. Publish-time retained-export cache lifetime must be explicitly bounded by
+13. Publish-time retained-export cache lifetime must be explicitly bounded by
     TTL and live-entry/live-byte budgets, and it must be invalidated on backing
     lifecycle changes such as invalidation, rebind, prune, or replacement.
-13. RDMA zero-copy in this design means "no mandatory pack copy, no mandatory
+14. RDMA zero-copy in this design means "no mandatory pack copy, no mandatory
     source-side staging copy, and no mandatory full-pack mirror" when direct-
     write source and target paths exist. It does not remove item-scoped
     digests, item-scoped lowering, or per-item success and failure outcomes.
-14. If a candidate pack or item cannot produce the required export view, cannot satisfy lifetime requirements, or
+15. If a candidate pack or item cannot produce the required export view, cannot satisfy lifetime requirements, or
    resolves to a non-direct-write transport, the daemon may fall back per pack to the staged contiguous realization and
    the existing `grpc_chunk_ref` or staged `communicator_source` paths. MTCP-validated behavior must remain available.
-15. The intended implementation order is:
+16. The intended implementation order is:
     - sink-side no-mirror consume path first, because the lower dataplane
       already supports direct-write remote sources,
     - `BodyHandle` export-view API second,
     - source-side no-pack segmented communicator export third,
     - source-side direct-readable RDMA servicing fourth,
+    - put-side home no-mirror consume as the first batch-set parity step,
     - and source-side publish-time retained-export warming as an optional
       follow-on optimization on top of the same `BodyHandle` seam.
-16. Session-scoped staging reuse remains complementary follow-on work after this transport-specific split. It must not
+17. Session-scoped staging reuse remains complementary follow-on work after this transport-specific split. It must not
     be used as a reason to keep RDMA on the forced pack-plus-mirror path.
-17. Shared composite direct-write and routed vectored pull semantics are
+18. Shared composite direct-write and routed vectored pull semantics are
     defined by `0115`. `0087` owns byte-artifact authority plus the consumer-
     side and producer-side realization rules that decide whether a routed pack
     is staged or direct-readable; it does not own a transport-private RDMA sink
@@ -1019,10 +1139,15 @@ Rules:
    - `byte_artifact.batch_get_into_region_apply_plan`
    - `byte_artifact.batch_get_into_region_transport_apply_summary`
    - `byte_artifact.batch_get_into_region_summary`
+   - `byte_artifact.home_batch_put_if_absent_transport_open`
+   - `byte_artifact.home_batch_put_if_absent_transport_read_mode`
    - `byte_artifact.home_batch_put_if_absent_transport_mirror`
    - `byte_artifact.home_batch_put_if_absent_stage_plan`
+   - `byte_artifact.home_batch_put_if_absent_summary`
+   - `byte_artifact.batch_put_if_absent_from_region_pack_realization`
    - `byte_artifact.batch_put_if_absent_from_region_transport_emit`
    - `byte_artifact.batch_put_if_absent_from_region_home_rpc_result`
+   - `byte_artifact.put_shard_task_summary`
    - `byte_artifact.batch_put_if_absent_from_region_summary`
    - `batch_payload_ref.communicator_export_summary`
    - `batch_payload_ref.communicator_open_summary`
@@ -1345,9 +1470,10 @@ design delta.
 - `HomeBatch*`, `FetchPayloadRefChunk`, and `FetchBatchPayloadRefChunk` assume a trusted intra-cluster network unless a
   separate peer-auth layer is introduced,
 - batch-native transport is now implemented, but the remaining RDMA cost is no
-  longer daemon-owned pack slabs or mandatory sink full-pack mirrors on the get
-  path; it is producer-side servicing that still stages retained CPU backing
-  bytes into pinned response buffers before remote reads,
+  longer daemon-owned pack slabs or mandatory sink/home full-pack mirrors on
+  eligible RDMA get/put consume paths; it is producer-side servicing that still
+  stages retained CPU backing bytes into pinned response buffers before remote
+  reads,
 - `v1 grpc_chunk_ref` improves transport shape but still inherits gRPC chunk framing and server or client memory-copy
   costs; it should be treated as an incremental step rather than the final cross-host performance target,
 - `v2 communicator_source` reduces that gap but the current realization still pays unnecessary RDMA copy costs on both
@@ -1384,6 +1510,9 @@ design delta.
   repack, source-side staged response copy, or full-pack mirror when the same
   manifest and per-item semantics can be preserved through direct-write and
   `BodyHandle`-backed export views.
+- Put-side `HomeBatchPutIfAbsent` RDMA `communicator_source` consumption now
+  follows the same no-mirror remote-slice rule before any larger batch-set
+  composite or vectored optimization is considered accepted.
 - `PayloadTransportBroker` remains the transport boundary, but source-side no-copy export must consume the `BodyHandle`
   export-view seam described by `0089` rather than growing broker-private `StoreEngine` inspection logic.
 - `GetServerConfig` is the peer-discovery surface for batch-transport protocol version and realization support.
