@@ -1732,8 +1732,16 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
     std::size_t grpc_fetch_count{0};
     std::size_t remote_mirror_count{0};
     std::uint64_t remote_mirror_bytes{0};
+    std::size_t remote_communicator_source_count{0};
+    std::size_t remote_communicator_source_direct_write_count{0};
+    std::size_t remote_communicator_source_batched_direct_write_count{0};
+    std::size_t remote_full_pack_mirror_items{0};
     std::size_t stage_body_count{0};
     std::size_t fast_cpu_stage_count{0};
+    std::size_t stage_loader_count{0};
+    std::size_t stage_local_source_count{0};
+    std::size_t stage_p2p_count{0};
+    std::size_t stage_local_replica_count{0};
     std::size_t reuse_attempt_count{0};
     std::size_t reuse_hit_count{0};
     std::size_t authority_item_count{0};
@@ -1887,6 +1895,28 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
           timing_stats.communicator_open_elapsed += absl::Now() - resolve_started_at;
           ++timing_stats.communicator_open_count;
           resolved_it = resolved_batch_sources.emplace(transport_id, std::move(*resolved_or)).first;
+          const bool source_supports_direct_write =
+              resolved_it->second.source != nullptr && resolved_it->second.source->supports_direct_write_at();
+          const bool source_supports_batched_direct_write =
+              resolved_it->second.source != nullptr && resolved_it->second.source->supports_batched_direct_write_at();
+          if (resolved_it->second.remote) {
+            ++timing_stats.remote_communicator_source_count;
+            if (source_supports_direct_write) {
+              ++timing_stats.remote_communicator_source_direct_write_count;
+            }
+            if (source_supports_batched_direct_write) {
+              ++timing_stats.remote_communicator_source_batched_direct_write_count;
+            }
+          }
+          LOG(INFO) << "byte_artifact.home_batch_put_if_absent_transport_open"
+                    << " operation_id=" << operation_id << " transport_id=" << transport_id
+                    << " kind=communicator_source"
+                    << " remote=" << resolved_it->second.remote
+                    << " item_count=" << transport_it->second->manifest().entries_size()
+                    << " payload_bytes=" << transport_it->second->manifest().total_size()
+                    << " source_direct_write_at=" << source_supports_direct_write
+                    << " source_batched_direct_write_at=" << source_supports_batched_direct_write
+                    << " resolve_ms=" << absl::ToDoubleMilliseconds(absl::Now() - resolve_started_at);
         }
         source_kind = resolved_it->second.remote ? store::loading::MaterializationSource::kP2P
                                                  : store::loading::MaterializationSource::kLocalReplica;
@@ -1907,14 +1937,22 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
             timing_stats.remote_mirror_elapsed += mirror_elapsed;
             ++timing_stats.remote_mirror_count;
             timing_stats.remote_mirror_bytes += transport_it->second->manifest().total_size();
+            timing_stats.remote_full_pack_mirror_items += transport_it->second->manifest().entries_size();
             mirrored_it = mirrored_remote_batch_payloads.emplace(transport_id, std::move(*mirrored_or)).first;
+            const bool source_supports_direct_write =
+                resolved_it->second.source != nullptr && resolved_it->second.source->supports_direct_write_at();
+            const bool source_supports_batched_direct_write =
+                resolved_it->second.source != nullptr && resolved_it->second.source->supports_batched_direct_write_at();
             LOG(INFO) << "byte_artifact.home_batch_put_if_absent_transport_mirror"
                       << " operation_id=" << operation_id << " transport_id=" << transport_id
                       << " kind=communicator_source"
                       << " remote=true"
                       << " read_mode=full_pack"
+                      << " realization=full_pack_mirror"
                       << " payload_bytes=" << transport_it->second->manifest().total_size()
                       << " item_count=" << transport_it->second->manifest().entries_size()
+                      << " source_direct_write_at=" << source_supports_direct_write
+                      << " source_batched_direct_write_at=" << source_supports_batched_direct_write
                       << " mirror_ms=" << absl::ToDoubleMilliseconds(mirror_elapsed)
                       << " subsequent_item_slices_local=true";
           }
@@ -2092,6 +2130,16 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
             .local_source = std::move(prepared_item.local_source),
             .source_kind = prepared_item.source_kind,
         });
+    if (stage_work_items.back().local_source.has_value()) {
+      ++timing_stats.stage_local_source_count;
+    } else {
+      ++timing_stats.stage_loader_count;
+    }
+    if (stage_work_items.back().source_kind == store::loading::MaterializationSource::kP2P) {
+      ++timing_stats.stage_p2p_count;
+    } else {
+      ++timing_stats.stage_local_replica_count;
+    }
   }
 
   const auto run_stage_work_item = [&](StageWorkItem stage_work_item) -> StageWorkItemResult {
@@ -2284,10 +2332,20 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
           << " payload_ref_items=" << timing_stats.payload_ref_items
           << " communicator_open_count=" << timing_stats.communicator_open_count
           << " grpc_fetch_count=" << timing_stats.grpc_fetch_count
+          << " remote_communicator_source_count=" << timing_stats.remote_communicator_source_count
+          << " remote_communicator_source_direct_write_count="
+          << timing_stats.remote_communicator_source_direct_write_count
+          << " remote_communicator_source_batched_direct_write_count="
+          << timing_stats.remote_communicator_source_batched_direct_write_count
           << " remote_mirror_count=" << timing_stats.remote_mirror_count
           << " remote_mirror_bytes=" << timing_stats.remote_mirror_bytes
+          << " remote_full_pack_mirror_items=" << timing_stats.remote_full_pack_mirror_items
           << " stage_body_count=" << timing_stats.stage_body_count
           << " fast_cpu_stage_count=" << timing_stats.fast_cpu_stage_count
+          << " stage_loader_count=" << timing_stats.stage_loader_count
+          << " stage_local_source_count=" << timing_stats.stage_local_source_count
+          << " stage_p2p_count=" << timing_stats.stage_p2p_count
+          << " stage_local_replica_count=" << timing_stats.stage_local_replica_count
           << " stage_body_wall_ms=" << absl::ToDoubleMilliseconds(stage_wall_elapsed)
           << " reuse_attempt_count=" << timing_stats.reuse_attempt_count
           << " reuse_hit_count=" << timing_stats.reuse_hit_count
@@ -4451,8 +4509,12 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
     std::size_t remote_batch_transport_grpc_count{0};
     std::size_t remote_batch_transport_item_count{0};
     std::uint64_t remote_batch_transport_bytes{0};
+    std::size_t remote_batch_pack_count{0};
+    std::size_t remote_batch_pack_item_count{0};
+    std::uint64_t remote_batch_pack_bytes{0};
     absl::Duration local_stage_elapsed{absl::ZeroDuration()};
     absl::Duration remote_stage_elapsed{absl::ZeroDuration()};
+    absl::Duration remote_batch_pack_elapsed{absl::ZeroDuration()};
     absl::Duration local_home_apply_elapsed{absl::ZeroDuration()};
     absl::Duration remote_home_rpc_elapsed{absl::ZeroDuration()};
   } stats;
@@ -4961,6 +5023,10 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
               << " requested_items=" << task.batch.items.size()
               << " local_stage_ms=" << absl::ToDoubleMilliseconds(task_stats.local_stage_elapsed)
               << " remote_stage_ms=" << absl::ToDoubleMilliseconds(task_stats.remote_stage_elapsed)
+              << " remote_batch_pack_count=" << task_stats.remote_batch_pack_count
+              << " remote_batch_pack_items=" << task_stats.remote_batch_pack_item_count
+              << " remote_batch_pack_bytes=" << task_stats.remote_batch_pack_bytes
+              << " remote_batch_pack_ms=" << absl::ToDoubleMilliseconds(task_stats.remote_batch_pack_elapsed)
               << " local_home_apply_ms=" << absl::ToDoubleMilliseconds(task_stats.local_home_apply_elapsed)
               << " remote_home_rpc_ms=" << absl::ToDoubleMilliseconds(task_stats.remote_home_rpc_elapsed)
               << " total_ms=" << absl::ToDoubleMilliseconds(task_result.total_elapsed);
@@ -5021,14 +5087,32 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
         batch_entry_outcome_indices.push_back(pending.outcome_index);
       }
       if (!batch_entries.empty()) {
+        const absl::Time pack_started_at = absl::Now();
         auto packs_or = pack_batch_payload_entries(
             batch_entries,
             d_.payload_transport_broker.max_batch_payload_bytes(),
             d_.payload_transport_broker.max_batch_items());
+        const absl::Duration pack_elapsed = absl::Now() - pack_started_at;
+        task_stats.remote_batch_pack_elapsed += pack_elapsed;
         if (!packs_or.ok()) {
           LOG(WARNING) << "batch_put_if_absent_from_region batch transport fallback to payload_ref: "
                        << packs_or.status();
         } else {
+          std::uint64_t packed_bytes = 0;
+          std::size_t packed_items = 0;
+          for (const auto& pack : *packs_or) {
+            packed_bytes += pack.manifest.total_size();
+            packed_items += pack.source_indices.size();
+          }
+          task_stats.remote_batch_pack_count += packs_or->size();
+          task_stats.remote_batch_pack_item_count += packed_items;
+          task_stats.remote_batch_pack_bytes += packed_bytes;
+          LOG(INFO) << "byte_artifact.batch_put_if_absent_from_region_pack_realization"
+                    << " operation_id=" << operation_id << " shard_id=" << task.shard_id
+                    << " holder_daemon_id=" << task.route.holder_daemon_id << " remote=true"
+                    << " mode=staged_slab"
+                    << " pack_count=" << packs_or->size() << " item_count=" << packed_items
+                    << " payload_bytes=" << packed_bytes << " pack_ms=" << absl::ToDoubleMilliseconds(pack_elapsed);
           for (auto& pack : *packs_or) {
             const bool use_communicator_transport = peer_transport_support.supports_v2() &&
                 d_.payload_transport_broker.batch_transport_communicator_enabled();
@@ -5129,6 +5213,7 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
                       << " operation_id=" << operation_id << " shard_id=" << task.shard_id
                       << " holder_daemon_id=" << task.route.holder_daemon_id << " transport_id=" << transport_id
                       << " kind=" << (emitted_communicator_transport ? "communicator_source" : "grpc_chunk_ref")
+                      << " source_realization_mode=staged_slab"
                       << " item_count=" << pack.source_indices.size()
                       << " payload_bytes=" << pack.manifest.total_size();
 
@@ -5363,8 +5448,12 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
     stats.remote_batch_transport_grpc_count += delta.remote_batch_transport_grpc_count;
     stats.remote_batch_transport_item_count += delta.remote_batch_transport_item_count;
     stats.remote_batch_transport_bytes += delta.remote_batch_transport_bytes;
+    stats.remote_batch_pack_count += delta.remote_batch_pack_count;
+    stats.remote_batch_pack_item_count += delta.remote_batch_pack_item_count;
+    stats.remote_batch_pack_bytes += delta.remote_batch_pack_bytes;
     stats.local_stage_elapsed += delta.local_stage_elapsed;
     stats.remote_stage_elapsed += delta.remote_stage_elapsed;
+    stats.remote_batch_pack_elapsed += delta.remote_batch_pack_elapsed;
     stats.local_home_apply_elapsed += delta.local_home_apply_elapsed;
     stats.remote_home_rpc_elapsed += delta.remote_home_rpc_elapsed;
   };
@@ -5427,8 +5516,12 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
           << " remote_batch_transport_grpc=" << stats.remote_batch_transport_grpc_count
           << " remote_batch_transport_items=" << stats.remote_batch_transport_item_count
           << " remote_batch_transport_bytes=" << stats.remote_batch_transport_bytes
+          << " remote_batch_pack_count=" << stats.remote_batch_pack_count
+          << " remote_batch_pack_items=" << stats.remote_batch_pack_item_count
+          << " remote_batch_pack_bytes=" << stats.remote_batch_pack_bytes
           << " local_stage_ms=" << absl::ToDoubleMilliseconds(stats.local_stage_elapsed)
           << " remote_stage_ms=" << absl::ToDoubleMilliseconds(stats.remote_stage_elapsed)
+          << " remote_batch_pack_ms=" << absl::ToDoubleMilliseconds(stats.remote_batch_pack_elapsed)
           << " local_home_apply_ms=" << absl::ToDoubleMilliseconds(stats.local_home_apply_elapsed)
           << " remote_home_rpc_ms=" << absl::ToDoubleMilliseconds(stats.remote_home_rpc_elapsed);
   rctx.mark_success();
