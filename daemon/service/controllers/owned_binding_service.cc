@@ -938,7 +938,7 @@ std::string mint_binding_value_id() {
   return mint_random_id(16);
 }
 
-constexpr std::string_view kCollectiveFailureClassMarker = "tc.collective_failure_class=";
+constexpr std::string_view kCollectiveFailureClassMetadataKey = "tc.collective_failure_class";
 
 std::string collective_failure_class_name(v2::CollectiveFailureClass failure_class) {
   switch (failure_class) {
@@ -952,8 +952,24 @@ std::string collective_failure_class_name(v2::CollectiveFailureClass failure_cla
   }
 }
 
-std::string annotate_collective_failure_message(std::string_view message, v2::CollectiveFailureClass failure_class) {
-  return absl::StrCat(message, " [", kCollectiveFailureClassMarker, collective_failure_class_name(failure_class), "]");
+void attach_collective_failure_metadata(RpcContext* rctx, v2::CollectiveFailureClass failure_class) {
+  if (rctx == nullptr) {
+    return;
+  }
+  const std::string failure_class_value = collective_failure_class_name(failure_class);
+  if (failure_class_value == "unspecified") {
+    return;
+  }
+  rctx->server_context().AddTrailingMetadata(std::string(kCollectiveFailureClassMetadataKey), failure_class_value);
+}
+
+grpc::Status make_collective_failure_status(
+    RpcContext* rctx,
+    grpc::StatusCode code,
+    std::string_view message,
+    v2::CollectiveFailureClass failure_class) {
+  attach_collective_failure_metadata(rctx, failure_class);
+  return {code, std::string(message)};
 }
 
 bool is_collective_execution_failure(const absl::Status& status) {
@@ -1775,18 +1791,19 @@ store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary summarize_s
 }
 
 grpc::Status evaluate_strict_collective_preflight_for_testing(
+    RpcContext* rctx,
     const store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary* plan_summary,
     v2::CollectivePolicy collective_policy) {
   if (collective_policy != v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE || plan_summary == nullptr ||
       plan_summary->strict_pure_collective_eligible) {
     return Status::OK;
   }
-  return {
+  return make_collective_failure_status(
+      rctx,
       StatusCode::FAILED_PRECONDITION,
-      annotate_collective_failure_message(
-          append_pure_collective_blockers(
-              "collective requested but the source-bound plan is not pure-collective eligible", *plan_summary),
-          v2::CollectiveFailureClass::COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE)};
+      append_pure_collective_blockers(
+          "collective requested but the source-bound plan is not pure-collective eligible", *plan_summary),
+      v2::CollectiveFailureClass::COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE);
 }
 
 OwnedBindingService::OwnedBindingService(Dep d)
@@ -2967,6 +2984,7 @@ grpc::Status OwnedBindingService::refill_owned_binding(
     return execution_status;
   }
   if (auto strict_preflight_status = evaluate_strict_collective_preflight_for_testing(
+          &rctx,
           prepared_execution.prepared_execution_plan.has_value() &&
                   prepared_execution.prepared_execution_plan->strategy_plan.has_value()
               ? &prepared_execution.prepared_execution_plan->strategy_plan->summary
@@ -2989,10 +3007,11 @@ grpc::Status OwnedBindingService::refill_owned_binding(
   if (!result_or.ok()) {
     if (prepared_plan.collective_policy == v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE &&
         absl::IsFailedPrecondition(result_or.status()) && !is_collective_execution_failure(result_or.status())) {
-      return {
+      return make_collective_failure_status(
+          &rctx,
           StatusCode::FAILED_PRECONDITION,
-          annotate_collective_failure_message(
-              result_or.status().message(), v2::CollectiveFailureClass::COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE)};
+          result_or.status().message(),
+          v2::CollectiveFailureClass::COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE);
     }
     {
       absl::MutexLock lock(&record->mu);
@@ -3000,10 +3019,11 @@ grpc::Status OwnedBindingService::refill_owned_binding(
     }
     if (collective_policy_requests_collective(prepared_plan.collective_policy) &&
         is_collective_execution_failure(result_or.status())) {
-      return {
+      return make_collective_failure_status(
+          &rctx,
           StatusCode::FAILED_PRECONDITION,
-          annotate_collective_failure_message(
-              result_or.status().message(), v2::CollectiveFailureClass::COLLECTIVE_FAILURE_CLASS_EXECUTION_FAILED)};
+          result_or.status().message(),
+          v2::CollectiveFailureClass::COLLECTIVE_FAILURE_CLASS_EXECUTION_FAILED);
     }
     return to_grpc_status(result_or.status());
   }
@@ -3021,11 +3041,11 @@ grpc::Status OwnedBindingService::refill_owned_binding(
       absl::MutexLock lock(&record->mu);
       mark_dirty(record.get());
     }
-    return {
+    return make_collective_failure_status(
+        &rctx,
         StatusCode::FAILED_PRECONDITION,
-        annotate_collective_failure_message(
-            "collective requested but the source-bound path was not eligible",
-            v2::CollectiveFailureClass::COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE)};
+        "collective requested but the source-bound path was not eligible",
+        v2::CollectiveFailureClass::COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE);
   }
   if (prepared_plan.execution_only_mutable) {
     std::string update_epoch;

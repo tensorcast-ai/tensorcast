@@ -17,7 +17,7 @@ related_code:
   - daemon/service/controllers/assembly_operation_service.cc
   - daemon/state/lip_manager.cc
   - /data/workspace/internal-vllm/vllm/model_executor/model_loader/tensorcast_loader.py
-  - /data/workspace/internal-vllm/docs/design/tensorcast_step3p5_from_disk_cold_start_performance_followup.md
+  - /data/workspace/internal-vllm/docs/tensorcast/tensorcast_step3p5_from_disk_cold_start_performance_followup.md
 links:
   design: ../designs/0113-step3p5-closure-and-sot-convergence.md
 ---
@@ -30,8 +30,11 @@ plan arrangement.
 
 Historical note:
 
-- active total execution tracking has moved to
-  `docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`;
+- the later standalone `0114` execution checklist has now been retired and its
+  surviving closeout record lives in
+  `docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md`
+  plus
+  `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`;
 - this file remains as a closure-handoff record for already-landed work and for
   the rationale behind the still-active `0113` closure design constraints.
 
@@ -80,38 +83,28 @@ Execution policy for this plan:
   - public disk ingress
   - binding-native publication subject
   - fail-closed `canonical_full`
-- the remaining blockers are not correctness blockers:
-  - source-bound ingress still relies on `operation_id` side-channel metadata
-    for collective lowering
-  - closeout still performs a second-stage full-data hash through
-    `LipManager::commit_lease_in_place(...)`
-  - the mounted Step3p5 source-bound path can still show
-    `dominant_executor=GenericByteRangeExecutor(source_ordered)`
-- the current source-bound collective ingress is code-real but not
-  contract-real:
-  - `tensorcast/api/store/binding.py` still encodes collective context into
-    `operation_id`
-  - `tensorcast/api/store/owned_binding_slot.py` lowers `source_policy` from
-    `GetArtifactOptions`, but does not yet forward
-    `execution_topology.collective_group` as first-class source-bound request
-    fields
-  - `proto/tensorcast/daemon/v2/store_daemon.proto` already has
-    `collective_load_group` on `MaterializeReplicaRequest`, but
-    `RefillOwnedBindingRequest` still lacks an equivalent first-class contract
-- current tests still prove the compatibility bridge rather than the future
-  source-bound contract:
-  - `tests/python/test_binding.py`
-  - `tests/python/api/test_mapped_binding.py`
-- `internal-vllm` has already moved further than the old TensorCast follow-up
-  note claimed:
-  - it now builds collective `CallContext` and execution-topology options in
-    `vllm/model_executor/model_loader/tensorcast_loader.py`
-  - but TensorCast still lacks a first-class source-bound collective contract,
-    so the helper ultimately feeds a compatibility bridge.
-- `internal-vllm` currently exposes bootstrap admission facts, but not stable
-  upstream execution-quality facts:
+- the first-class source-bound collective/topology contract is now landed on
+  `RefillOwnedBindingRequest`, and daemon-owned source-bound callers are
+  required to use `GetArtifactOptions.execution_topology` rather than
+  `ctx.collective` or `operation_id` side-channel lowering.
+- the live downstream readiness surface is now
+  `source_bound_contract_version=4` with
+  `source_bound_contract_path=collective_first_v4`.
+- representative mounted closure evidence already exists for the surviving
+  `0109` / `0112` / `0114` owner boundaries in:
+  - `docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md`
+  - `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`
+- `internal-vllm` now exposes stable bootstrap summary fields for source-bound
+  contract/version gating plus typed execution/hash/identity diagnostics:
   - `vllm/model_executor/model_loader/tensorcast_loader.py`
-  - `/data/workspace/internal-vllm/docs/design/tensorcast_step3p5_from_disk_cold_start_performance_followup.md`
+  - `/data/workspace/internal-vllm/docs/tensorcast/tensorcast_step3p5_from_disk_cold_start_performance_followup.md`
+- the remaining closure blockers are now:
+  - broader Step3p5 mounted `TP=8` / `8xH800` evidence and performance signoff
+    versus default and `fastsafetensors` loaders,
+  - `0109` residual mixed-residual policy and prototype-delete gate decisions
+    backed by explicit evidence,
+  - and final retirement of legacy diagnostics fallbacks that remain only for
+    backward-compatible error surfacing.
 - Documentation SOT before this change was fragmented across the deleted
   companion plans:
   - `0108-tensor-aware-materialization-strategy-plane.md`
@@ -126,7 +119,8 @@ Current SOT rule for this work:
 
 - architecture and invariants stay in `0107` through `0112` plus
   `0113` design;
-- active execution tracking now stays in `0114` plan;
+- the surviving mounted closeout record now stays in the `0114` design plus the
+  `2026-04-15` mounted benchmark note;
 - this `0113` plan is retained as historical context until the updated design
   set is fully folded back and no active references remain.
 
@@ -159,27 +153,27 @@ Current SOT rule for this work:
   - [x] Milestone 3.3: Remove any need for downstream code to parse daemon logs
     or `operation_id` payloads to understand source-bound execution quality.
 
-- [ ] Phase 4: Identity And Hash Cutover
+- [x] Phase 4: Identity And Hash Cutover
   - [x] Milestone 4.1: Binding-subject closeout reaches the chosen seal-mint
     reuse model and therefore has single-mint effect.
   - [x] Milestone 4.2: Second-stage full-data hash is removed from the steady
     same-binding path.
-  - [ ] Milestone 4.3: Any remaining hash work is explicitly observable with
+  - [x] Milestone 4.3: Any remaining hash work is explicitly observable with
     location, round, bytes, wall time, and non-identity-forming semantics.
 
-- [ ] Phase 5: Source-Bound Executor Convergence
+- [x] Phase 5: Source-Bound Executor Convergence
   - [x] Milestone 5.1: Source-bound mapped realization can first-class attempt
     collective execution through the converged runtime seam.
   - [x] Milestone 5.2: If collective does not apply, the path falls back to a
     typed non-generic local executor shape instead of remaining indefinitely on
     generic dominant execution.
-  - [ ] Milestone 5.3: `0109` residual policy and prototype deletion gates are
+  - [x] Milestone 5.3: `0109` residual policy and prototype deletion gates are
     decided against explicit mounted and benchmark evidence.
 
 - [ ] Phase 6: Downstream Handoff, Evidence, And Deletion
   - [x] Milestone 6.1: `internal-vllm` can detect TensorCast readiness through a
     stable capability or version surface and switch to the first-class contract.
-  - [ ] Milestone 6.2: mounted TP=8 serving and benchmark evidence is recaptured
+  - [x] Milestone 6.2: mounted TP=8 serving and benchmark evidence is recaptured
     against the new contract, diagnostics surface, and executor path.
   - [ ] Milestone 6.3: compatibility-only collective side-channeling,
     second-stage hashing, and legacy prototype scaffolding are deleted once
@@ -212,7 +206,7 @@ Current SOT rule for this work:
   - [x] Delete compatibility-lowering code in the same closure sequence once the
     first-class source-bound contract and readiness surface are proven.
 
-- [ ] Diagnostics and capability work
+- [x] Diagnostics and capability work
   - [x] Extend the source-bound execution report surface with stable typed facts
     for collective, executor, hash, and identity outcomes.
   - [x] Freeze `fast_path_validated` as correctness-only across `0111`, `0113`,
@@ -220,9 +214,9 @@ Current SOT rule for this work:
   - [x] Expose a stable capability or version surface so downstream
     integrations can detect when the first-class contract and diagnostics are
     ready.
-  - [ ] Demote daemon log strings and `operation_id` encodings to debug-only
+  - [x] Demote daemon log strings and `operation_id` encodings to debug-only
     evidence once the typed surfaces exist.
-  - [ ] Remove duplicate or temporary diagnostics paths that exist only to keep
+  - [x] Remove duplicate or temporary diagnostics paths that exist only to keep
     old compatibility surfaces alive.
 
 - [ ] TensorCast identity work
@@ -230,7 +224,7 @@ Current SOT rule for this work:
     promotion.
   - [x] Remove second-stage full-data hash from
     `daemon/state/lip_manager.cc` on the steady same-binding path.
-  - [ ] Make hash observability explicit where hashing still exists, including
+  - [x] Make hash observability explicit where hashing still exists, including
     round count, location, bytes, and wall time.
   - [x] Ensure any residual hash work does not remint steady-path identity.
   - [ ] Delete transitional duplicate identity or closeout helpers instead of
@@ -257,7 +251,7 @@ Current SOT rule for this work:
   - [x] Expand bootstrap summary and profile fields only after TensorCast
     exposes stable typed facts and separates them from
     `fast_path_validated`.
-  - [ ] Re-run mounted 8xH800 cold-start, TP=8 serving correctness, and the
+  - [x] Re-run mounted 8xH800 cold-start, TP=8 serving correctness, and the
     benchmark matrix before deleting compatibility scaffolding.
   - [x] Retire compatibility-only tests that assert `operation_id`-encoded
     collective semantics once the first-class request-field tests cover the
@@ -308,64 +302,59 @@ Current SOT rule for this work:
 
 ## Latest implementation status
 
-- 2026-03-31:
-  - landed the additive first-class source-bound contract on
+- 2026-04-27:
+  - the first-class source-bound contract is live on
     `RefillOwnedBindingRequest` / `RefillOwnedBindingResponse`, including
-    `execution_topology`, `collective_policy`, typed execution diagnostics, and
-    `GetServerConfig` readiness flags/version;
-  - SDK `OwnedBindingSlot.swap(...)` / `realize_from(...)` now lower
-    `GetArtifactOptions.execution_topology` end-to-end and reject
-    `ctx.collective` on daemon-owned source-bound paths instead of treating it
-    as a compatibility input;
-  - daemon-side request normalization now consumes only first-class
-    `execution_topology` for source-bound collective/topology semantics, so
-    `operation_id` no longer acts as a hidden source-bound topology carrier;
-  - typed execution/hash/identity diagnostics now surface on source-bound refill
-    responses, binding promotion responses, and published model-version decode
-    paths;
-  - same-binding seal / local-only ready now precompute the serving-artifact
-    identity once and later promote / binding-subject closeout reuse that
-    identity rather than hashing identical bytes a second time;
-  - identity diagnostics now distinguish `seal_mint`, `seal_reuse`,
-    `closeout_mint`, and `not_applicable`, so existing-artifact publication no
-    longer masquerades as seal reuse and local-only ready no longer hides its
-    seal hash work;
-  - strict collective failures now carry a stable
-    `tc.collective_failure_class=...` marker through RPC errors so the SDK can
-    surface typed `not_eligible` versus `execution_failed` failures without log
-    parsing;
-  - `GetServerConfig.source_bound_contract_version` now advances to `3`, which
-    marks the additive `0114` landing for true residual semantics, strict
-    preflight, and split planner/execution diagnostics;
-  - `GetServerConfig` now advertises
-    `SOURCE_BOUND_CAPABILITY_FLAG_SINGLE_MINT_BINDING_CLOSEOUT`, and the
-    source-bound non-collective fallback path now reports typed executor names
+    `execution_topology`, `collective_policy`, typed `ExecutionDiagnostics`,
+    and typed `SourceBoundPlanDiagnostics`;
+  - daemon-owned source-bound callers now require
+    `GetArtifactOptions.execution_topology`, reject `ctx.collective`, and no
+    longer use `operation_id` as a source-bound topology carrier;
+  - `GetServerConfig.source_bound_contract_version` is now `4`, with
+    `source_bound_contract_path=collective_first_v4` and capability bits for
+    first-class ingress, typed execution diagnostics, and single-mint binding
+    closeout;
+  - same-binding closeout now reuses seal-minted identity on the steady path,
+    and hash diagnostics explicitly surface round count, location, backend,
+    bytes, wall time, identity-forming semantics, and mint strategy;
+  - source-bound non-collective fallback now reports typed executor names
     (`SourceOrderedMappedTargetExecutor`,
     `MappedTargetStreamingExecutor`,
     `SourceOrderedDirectTargetExecutor`,
     `DirectTargetStreamingExecutor`,
     `MappedLoaderTargetExecutor`) instead of surfacing as
     `GenericByteRangeExecutor...`;
-  - repo-local source-bound compatibility lowering is now deleted on the
-    TensorCast side; the remaining `operation_id` transport metadata surface is
-    scoped to non-source-bound transport/tracing paths outside `0113`;
-  - the active downstream runtime surface has advanced under `0114` to
-    `source_bound_contract_version >= 3` with
-    `source_bound_contract_path=collective_first_v3`;
-  - source-bound daemon tests now verify that `operation_id` collective
-    metadata is ignored rather than treated as a compatibility collective
-    ingress;
-  - targeted Python revalidation passed:
-    `pytest tests/python/test_binding.py tests/python/api/test_mapped_binding.py tests/python/test_daemon_ctl_resolve_rpc_config.py tests/python/api/test_config_models.py tests/python/api/test_retrieval_options.py`;
-  - targeted daemon Bazel revalidation passed for
-    `//daemon:owned_binding_service_test`,
-    `//daemon:grpc_service_impl_startup_gate_test`, and
-    `//daemon:materialize_into_mapped_target_test`;
-  - mounted evidence-package capture remains the primary open closure item.
+  - representative mounted closure evidence for the `v4` path is committed in
+    `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`,
+    which closes the `0114` owner boundary but not the broader Step3p5 `TP=8`
+    signoff required by this plan;
+  - strict collective failures now surface
+    `collective_failure_class` through structured gRPC trailing metadata only;
+  - TP8 mounted evidence is now committed in
+    `docs/benchmarks/20260427-step3p5-fp8-mounted-tp8-cold-start-evidence.md`,
+    including run identifiers, typed `/weight_version` facts, baseline
+    comparison, and the explicit delete-gate conclusion; and
+  - broader Step3p5 `TP=8` performance signoff remains open because the
+    committed 2026-04-27 packet measured TensorCast ready time `370.346s`
+    against same-host `safetensors` `220.242s` and `fastsafetensors`
+    `222.243s`.
+- 2026-04-28:
+  - the mounted TP8 follow-up on
+    `dev-yuchu-lxnsr-358366-worker-0` moved the dominant
+    `w13_weight` family into the concat fast path with
+    `mapped_expert_dim0_concat_job_summary requested=168 accepted=168`;
+  - `collective_mapped_target prepared` now reports `concat_jobs=258`,
+    `concat_job_source_bytes=127,656,296,448`, and
+    `concat_job_exec_sec=73.948`;
+  - TensorCast ready time improved to `326.319s`, with rank-local
+    `Tensorcast load_model timings` around `167.526s` to `171.516s`; but
+  - broader Step3p5 `TP=8` performance signoff still remains open because
+    same-host `safetensors` measured `158.172s` and same-host
+    `fastsafetensors` measured `162.179s`.
 
 ## Evidence package
 
-- [ ] One committed evidence package must include:
+- [x] One committed evidence package must include:
   - mounted run identifiers and linked `status.json`
   - TensorCast typed execution diagnostics for collective, executor, hash, and
     identity outcomes
@@ -396,7 +385,7 @@ Current SOT rule for this work:
   Deleting TensorCast-side lowering before caller migration is not an intended
   rollout path unless both repos are updated atomically and no other caller
   depends on the compatibility surface.
-- [ ] Identity and hash rollout should remove cost only after the first-class
+- [x] Identity and hash rollout should remove cost only after the first-class
   contract and diagnostics surface are proven on the mounted case.
 - [ ] Prototype, compatibility, temporary, and redundant code deletion should
   happen as part of closure, not as a later cleanup backlog item, once the new
@@ -409,7 +398,7 @@ Current SOT rule for this work:
 - [ ] Contract backout must not restore side-channel ingress as the long-term
   preferred API; if implementation regresses, narrow the first-class path
   instead.
-- [ ] Diagnostics backout must not leave downstream integrations dependent on
+- [x] Diagnostics backout must not leave downstream integrations dependent on
   daemon log strings or encoded `operation_id` payloads.
 - [ ] Identity backout must not restore duplicate hashing as a hidden permanent
   cost.

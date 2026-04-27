@@ -16,6 +16,8 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -1825,6 +1827,113 @@ bool mapped_tensor_job_sources_match(const RepresentationWorkItem& lhs, const Re
   return lhs.partition_kind == rhs.partition_kind && lhs.dst_spec == rhs.dst_spec && lhs.sources == rhs.sources;
 }
 
+struct MappedExpertDim0Pattern {
+  TensorAxisRange source_axis;
+  TensorAxisRange dst_expert_axis;
+  TensorAxisRange dst_value_axis;
+};
+
+struct MappedExpertDim0GroupKey {
+  std::string dst_name;
+  std::string ckpt_name;
+  int dst_value_dim{-1};
+  int64_t dst_value_start{0};
+  int64_t dst_value_end{0};
+
+  bool operator==(const MappedExpertDim0GroupKey&) const = default;
+};
+
+struct MappedExpertDim0GroupKeyHash {
+  size_t operator()(const MappedExpertDim0GroupKey& key) const {
+    return absl::HashOf(key.dst_name, key.ckpt_name, key.dst_value_dim, key.dst_value_start, key.dst_value_end);
+  }
+};
+
+std::optional<TensorAxisRange> find_axis_by_dim(const TensorCoordinateSpec& spec, int dim) {
+  if (spec.selects_scalar) {
+    return std::nullopt;
+  }
+  for (const auto& axis : spec.axes) {
+    if (axis.dim == dim) {
+      return axis;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<MappedExpertDim0Pattern> detect_mapped_expert_dim0_pattern(const RepresentationWorkItem& item) {
+  if (item.kind != RepresentationWorkItemKind::kTensorCopy || item.sources.size() != 1 ||
+      item.partition_kind != WorkPartitionKind::kUnknown) {
+    return std::nullopt;
+  }
+  const auto& fragment = item.sources.front().fragment;
+  const auto source_axis = single_axis_range(fragment.source_range);
+  if (!source_axis.has_value() || source_axis->dim != 0 || source_axis->end <= source_axis->start) {
+    return std::nullopt;
+  }
+  if (fragment.destination_range.selects_scalar || fragment.destination_range.axes.size() != 2) {
+    return std::nullopt;
+  }
+  const auto dst_expert_axis = find_axis_by_dim(fragment.destination_range, source_axis->dim);
+  if (!dst_expert_axis.has_value() || dst_expert_axis->end <= dst_expert_axis->start) {
+    return std::nullopt;
+  }
+  if ((dst_expert_axis->end - dst_expert_axis->start) != (source_axis->end - source_axis->start)) {
+    return std::nullopt;
+  }
+  std::optional<TensorAxisRange> dst_value_axis;
+  for (const auto& axis : fragment.destination_range.axes) {
+    if (axis.dim == dst_expert_axis->dim) {
+      continue;
+    }
+    dst_value_axis = axis;
+    break;
+  }
+  if (!dst_value_axis.has_value() || dst_value_axis->end <= dst_value_axis->start) {
+    return std::nullopt;
+  }
+  return MappedExpertDim0Pattern{
+      .source_axis = *source_axis,
+      .dst_expert_axis = *dst_expert_axis,
+      .dst_value_axis = *dst_value_axis,
+  };
+}
+
+MappedExpertDim0GroupKey build_mapped_expert_dim0_group_key(
+    const RepresentationWorkItem& item,
+    const MappedExpertDim0Pattern& pattern) {
+  return MappedExpertDim0GroupKey{
+      .dst_name = item.dst_name,
+      .ckpt_name = item.sources.front().fragment.source_spec.name,
+      .dst_value_dim = pattern.dst_value_axis.dim,
+      .dst_value_start = pattern.dst_value_axis.start,
+      .dst_value_end = pattern.dst_value_axis.end,
+  };
+}
+
+std::uint8_t* find_tensor_base_ptr(
+    const ParsedMappedParticipant& participant,
+    uint64_t logical_offset,
+    uint64_t length_bytes);
+
+absl::StatusOr<std::vector<std::vector<ConcatBlockPieceRuntime>>> resolve_concat_block_pieces(
+    const ParsedMappedParticipant& participant,
+    uint64_t logical_begin,
+    uint64_t dst_block_bytes,
+    uint64_t dst_block_stride_bytes,
+    uint64_t prefix_count);
+
+absl::StatusOr<uint64_t> product_dims_from(const std::vector<int64_t>& shape, size_t start_dim) {
+  uint64_t out = 1;
+  for (size_t dim = start_dim; dim < shape.size(); ++dim) {
+    if (shape[dim] <= 0) {
+      return absl::InvalidArgumentError("tensor shape must be positive");
+    }
+    out *= static_cast<uint64_t>(shape[dim]);
+  }
+  return out;
+}
+
 absl::StatusOr<MappedTensorJobBuildResult> build_mapped_tensor_jobs(
     const std::vector<ParsedMappedParticipant>& participants) {
   MappedTensorJobBuildResult result;
@@ -1996,6 +2105,250 @@ absl::StatusOr<MappedTensorJobBuildResult> build_mapped_tensor_jobs(
     result.jobs.push_back(std::move(runtime_job));
   }
 
+  for (auto& ranges : result.handled_dst_ranges_by_rank) {
+    merge_byte_ranges(&ranges);
+  }
+  return result;
+}
+
+absl::StatusOr<MappedConcatJobBuildResult> build_mapped_expert_dim0_concat_jobs(
+    const std::vector<ParsedMappedParticipant>& participants) {
+  MappedConcatJobBuildResult result;
+  result.handled_dst_ranges_by_rank.resize(participants.size());
+  if (participants.empty()) {
+    return result;
+  }
+
+  std::vector<std::unordered_map<
+      MappedExpertDim0GroupKey,
+      std::vector<const RepresentationWorkItem*>,
+      MappedExpertDim0GroupKeyHash>>
+      expert_items_by_rank;
+  expert_items_by_rank.reserve(participants.size());
+  std::vector<MappedExpertDim0GroupKey> ordered_expert_keys;
+  std::unordered_set<MappedExpertDim0GroupKey, MappedExpertDim0GroupKeyHash> seen_expert_keys;
+  for (size_t rank = 0; rank < participants.size(); ++rank) {
+    std::unordered_map<
+        MappedExpertDim0GroupKey,
+        std::vector<const RepresentationWorkItem*>,
+        MappedExpertDim0GroupKeyHash>
+        by_key;
+    by_key.reserve(participants[rank].work_plan.items.size());
+    for (const auto& item : participants[rank].work_plan.items) {
+      const auto pattern = detect_mapped_expert_dim0_pattern(item);
+      if (!pattern.has_value()) {
+        continue;
+      }
+      const auto key = build_mapped_expert_dim0_group_key(item, *pattern);
+      by_key[key].push_back(&item);
+      if (rank == 0 && seen_expert_keys.insert(key).second) {
+        ordered_expert_keys.push_back(key);
+      }
+    }
+    expert_items_by_rank.push_back(std::move(by_key));
+  }
+
+  size_t accepted_jobs = 0;
+  for (const auto& key : ordered_expert_keys) {
+    const auto first_rank_it = expert_items_by_rank.front().find(key);
+    if (first_rank_it == expert_items_by_rank.front().end() || first_rank_it->second.empty()) {
+      continue;
+    }
+    const auto* first = first_rank_it->second.front();
+    if (first == nullptr || first->sources.size() != 1 ||
+        !is_row_major_contiguous(first->dst_spec.shape, first->dst_spec.stride)) {
+      continue;
+    }
+    const auto first_pattern = detect_mapped_expert_dim0_pattern(*first);
+    if (!first_pattern.has_value() || first_pattern->dst_expert_axis.dim != 0 ||
+        first_pattern->dst_value_axis.dim != 1 ||
+        (first_pattern->source_axis.end - first_pattern->source_axis.start) != 1 ||
+        (first_pattern->dst_expert_axis.end - first_pattern->dst_expert_axis.start) != 1) {
+      continue;
+    }
+    const auto& first_source_spec = first->sources.front().fragment.source_spec;
+    if (!is_row_major_contiguous(first_source_spec.shape, first_source_spec.stride) ||
+        first->dst_spec.shape.size() < 2) {
+      continue;
+    }
+
+    const auto source_block_bytes_or =
+        contiguous_dim0_slice_bytes(first_source_spec.shape, first_source_spec.element_size, 0, 1);
+    if (!source_block_bytes_or.ok()) {
+      return source_block_bytes_or.status();
+    }
+    const auto dst_expert_stride_bytes_or =
+        contiguous_dim0_slice_bytes(first->dst_spec.shape, first->dst_spec.element_size, 0, 1);
+    if (!dst_expert_stride_bytes_or.ok()) {
+      return dst_expert_stride_bytes_or.status();
+    }
+    const auto dst_tail_elems_or = product_dims_from(first->dst_spec.shape, /*start_dim=*/2);
+    if (!dst_tail_elems_or.ok()) {
+      return dst_tail_elems_or.status();
+    }
+    const uint64_t source_block_bytes = *source_block_bytes_or;
+    const uint64_t dst_expert_stride_bytes = *dst_expert_stride_bytes_or;
+    const uint64_t dst_value_tail_bytes = (*dst_tail_elems_or) * first->dst_spec.element_size;
+    const uint64_t dst_block_bytes =
+        static_cast<uint64_t>(first_pattern->dst_value_axis.end - first_pattern->dst_value_axis.start) *
+        dst_value_tail_bytes;
+    const uint64_t dst_value_offset_bytes =
+        static_cast<uint64_t>(first_pattern->dst_value_axis.start) * dst_value_tail_bytes;
+    if (dst_block_bytes != source_block_bytes) {
+      continue;
+    }
+
+    MappedConcatJobRuntime job;
+    job.name = absl::StrCat(first->dst_name, "::", key.ckpt_name, "::expert_dim0_concat");
+    job.prefix_count = first_rank_it->second.size();
+    job.destinations.resize(participants.size());
+
+    MappedConcatFragmentRuntime fragment;
+    fragment.source = TensorMeta{
+        .offset = first_source_spec.logical_offset,
+        .size_bytes = first_source_spec.logical_length,
+        .shape = first_source_spec.shape,
+        .stride = first_source_spec.stride,
+        .dtype = first_source_spec.dtype,
+        .storage_offset = first_source_spec.storage_offset,
+        .elem_size = first_source_spec.element_size,
+    };
+    fragment.prefix_count = first_rank_it->second.size();
+    fragment.src_block_bytes = source_block_bytes;
+    fragment.dst_block_offset_bytes = 0;
+    fragment.dst_block_stride_bytes = dst_expert_stride_bytes;
+    fragment.dst_block_bytes = dst_block_bytes;
+    fragment.dst_ptrs.resize(participants.size(), nullptr);
+    fragment.dst_block_pieces_by_rank.resize(participants.size());
+    fragment.src_starts_by_rank.resize(participants.size(), 0);
+    fragment.src_ends_by_rank.resize(participants.size(), 0);
+
+    int64_t global_src_start = std::numeric_limits<int64_t>::max();
+    int64_t global_src_end = std::numeric_limits<int64_t>::min();
+    bool compatible = true;
+    std::vector<std::vector<ByteRange>> pending_ranges_by_rank(participants.size());
+    for (size_t rank = 0; rank < participants.size(); ++rank) {
+      auto rank_it = expert_items_by_rank[rank].find(key);
+      if (rank_it == expert_items_by_rank[rank].end() || rank_it->second.empty() ||
+          rank_it->second.size() != first_rank_it->second.size()) {
+        compatible = false;
+        break;
+      }
+      auto rank_items = rank_it->second;
+      std::sort(rank_items.begin(), rank_items.end(), [](const auto* lhs, const auto* rhs) {
+        if (lhs == nullptr || rhs == nullptr) {
+          return lhs < rhs;
+        }
+        const auto lhs_pattern = detect_mapped_expert_dim0_pattern(*lhs);
+        const auto rhs_pattern = detect_mapped_expert_dim0_pattern(*rhs);
+        if (!lhs_pattern.has_value() || !rhs_pattern.has_value()) {
+          return lhs < rhs;
+        }
+        if (lhs_pattern->dst_expert_axis.start != rhs_pattern->dst_expert_axis.start) {
+          return lhs_pattern->dst_expert_axis.start < rhs_pattern->dst_expert_axis.start;
+        }
+        return lhs_pattern->source_axis.start < rhs_pattern->source_axis.start;
+      });
+
+      const auto* first_rank_item = rank_items.front();
+      const auto first_rank_pattern =
+          first_rank_item != nullptr ? detect_mapped_expert_dim0_pattern(*first_rank_item) : std::nullopt;
+      if (first_rank_item == nullptr || !first_rank_pattern.has_value()) {
+        compatible = false;
+        break;
+      }
+      if (!is_row_major_contiguous(first_rank_item->dst_spec.shape, first_rank_item->dst_spec.stride) ||
+          first_rank_item->dst_spec.shape != first->dst_spec.shape ||
+          first_rank_item->dst_spec.stride != first->dst_spec.stride ||
+          first_rank_item->dst_spec.dtype != first->dst_spec.dtype ||
+          first_rank_item->dst_spec.element_size != first->dst_spec.element_size) {
+        compatible = false;
+        break;
+      }
+
+      const uint64_t rank_logical_begin = first_rank_item->dst_spec.logical_offset +
+          static_cast<uint64_t>(first_rank_pattern->dst_expert_axis.start) * dst_expert_stride_bytes +
+          dst_value_offset_bytes;
+      int64_t expected_source_cursor = first_rank_pattern->source_axis.start;
+      int64_t expected_dst_expert_cursor = first_rank_pattern->dst_expert_axis.start;
+      int64_t source_start = first_rank_pattern->source_axis.start;
+      int64_t source_end = first_rank_pattern->source_axis.start;
+      for (size_t item_index = 0; item_index < rank_items.size(); ++item_index) {
+        const auto* item = rank_items[item_index];
+        const auto pattern = item != nullptr ? detect_mapped_expert_dim0_pattern(*item) : std::nullopt;
+        if (item == nullptr || !pattern.has_value() || item->sources.size() != 1 ||
+            item->sources.front().fragment.source_spec != first_source_spec ||
+            pattern->dst_expert_axis !=
+                TensorAxisRange{.dim = 0, .start = expected_dst_expert_cursor, .end = expected_dst_expert_cursor + 1} ||
+            pattern->dst_value_axis != first_pattern->dst_value_axis ||
+            pattern->source_axis.start != expected_source_cursor ||
+            pattern->source_axis.end != expected_source_cursor + 1) {
+          compatible = false;
+          break;
+        }
+        const uint64_t actual_logical_begin = item->dst_spec.logical_offset +
+            static_cast<uint64_t>(pattern->dst_expert_axis.start) * dst_expert_stride_bytes + dst_value_offset_bytes;
+        const uint64_t expected_logical_begin = rank_logical_begin + item_index * dst_expert_stride_bytes;
+        if (actual_logical_begin != expected_logical_begin) {
+          compatible = false;
+          break;
+        }
+        pending_ranges_by_rank[rank].push_back(
+            ByteRange{
+                .begin = actual_logical_begin,
+                .end = actual_logical_begin + dst_block_bytes,
+            });
+        expected_source_cursor = pattern->source_axis.end;
+        expected_dst_expert_cursor = pattern->dst_expert_axis.end;
+        source_end = pattern->source_axis.end;
+      }
+      if (!compatible || source_end <= source_start) {
+        compatible = false;
+        break;
+      }
+
+      auto* dst_base_ptr = find_tensor_base_ptr(
+          participants[rank], rank_logical_begin, dst_block_bytes + (rank_items.size() - 1) * dst_expert_stride_bytes);
+      if (dst_base_ptr != nullptr) {
+        fragment.dst_ptrs[rank] = dst_base_ptr;
+      } else {
+        auto pieces_or = resolve_concat_block_pieces(
+            participants[rank], rank_logical_begin, dst_block_bytes, dst_expert_stride_bytes, rank_items.size());
+        if (!pieces_or.ok()) {
+          compatible = false;
+          break;
+        }
+        fragment.dst_block_pieces_by_rank[rank] = std::move(*pieces_or);
+      }
+      fragment.src_starts_by_rank[rank] = source_start;
+      fragment.src_ends_by_rank[rank] = source_end;
+      global_src_start = std::min(global_src_start, source_start);
+      global_src_end = std::max(global_src_end, source_end);
+      job.destinations[rank].rank = participants[rank].rank;
+      job.destinations[rank].device_id = participants[rank].device_id;
+    }
+
+    if (!compatible || global_src_end <= global_src_start) {
+      continue;
+    }
+
+    job.fragments.push_back(std::move(fragment));
+    for (size_t rank = 0; rank < participants.size(); ++rank) {
+      result.handled_dst_ranges_by_rank[rank].insert(
+          result.handled_dst_ranges_by_rank[rank].end(),
+          pending_ranges_by_rank[rank].begin(),
+          pending_ranges_by_rank[rank].end());
+    }
+    result.handled_source_bytes += static_cast<uint64_t>(global_src_end - global_src_start) * source_block_bytes;
+    result.handled_root_dst_bytes += static_cast<uint64_t>(pending_ranges_by_rank.front().size()) * dst_block_bytes;
+    result.jobs.push_back(std::move(job));
+    accepted_jobs += 1;
+  }
+
+  LOG(INFO) << "mapped_expert_dim0_concat_job_summary"
+            << " requested=" << ordered_expert_keys.size() << " accepted=" << accepted_jobs
+            << " handled_source_bytes=" << result.handled_source_bytes
+            << " handled_root_dst_bytes=" << result.handled_root_dst_bytes;
   for (auto& ranges : result.handled_dst_ranges_by_rank) {
     merge_byte_ranges(&ranges);
   }
@@ -2281,6 +2634,24 @@ absl::StatusOr<MappedConcatJobBuildResult> build_mapped_concat_jobs(
             << " handled_source_bytes=" << result.handled_source_bytes
             << " handled_root_dst_bytes=" << result.handled_root_dst_bytes;
 
+  auto expert_concat_jobs_or = build_mapped_expert_dim0_concat_jobs(participants);
+  if (!expert_concat_jobs_or.ok()) {
+    return expert_concat_jobs_or.status();
+  }
+  auto expert_concat_jobs = std::move(*expert_concat_jobs_or);
+  result.handled_source_bytes += expert_concat_jobs.handled_source_bytes;
+  result.handled_root_dst_bytes += expert_concat_jobs.handled_root_dst_bytes;
+  result.jobs.insert(
+      result.jobs.end(),
+      std::make_move_iterator(expert_concat_jobs.jobs.begin()),
+      std::make_move_iterator(expert_concat_jobs.jobs.end()));
+  for (size_t rank = 0; rank < participants.size(); ++rank) {
+    result.handled_dst_ranges_by_rank[rank].insert(
+        result.handled_dst_ranges_by_rank[rank].end(),
+        expert_concat_jobs.handled_dst_ranges_by_rank[rank].begin(),
+        expert_concat_jobs.handled_dst_ranges_by_rank[rank].end());
+  }
+
   for (auto& ranges : result.handled_dst_ranges_by_rank) {
     merge_byte_ranges(&ranges);
   }
@@ -2288,12 +2659,19 @@ absl::StatusOr<MappedConcatJobBuildResult> build_mapped_concat_jobs(
 }
 
 absl::StatusOr<std::vector<MappedSegmentRef>> build_mapped_segment_refs(
-    const std::vector<ParsedMappedParticipant>& participants) {
+    const std::vector<ParsedMappedParticipant>& participants,
+    const std::vector<std::vector<ByteRange>>& handled_dst_ranges_by_rank) {
   std::vector<MappedSegmentRef> segments;
-  for (const auto& participant : participants) {
+  for (size_t participant_index = 0; participant_index < participants.size(); ++participant_index) {
+    const auto& participant = participants[participant_index];
     if (participant.collective_lane_map.num_sources != 1) {
       return absl::InvalidArgumentError("mapped collective load requires mapping.num_sources == 1");
     }
+    const std::vector<ByteRange> empty_ranges;
+    const auto& handled_ranges = participant_index < handled_dst_ranges_by_rank.size()
+        ? handled_dst_ranges_by_rank[participant_index]
+        : empty_ranges;
+    size_t handled_index = 0;
     for (const auto& segment : participant.collective_lane_map.segments) {
       if (segment.kind != loader::ByteRangeSegment::Kind::kData) {
         return absl::InvalidArgumentError("mapped collective load requires data-only collective lane map");
@@ -2304,13 +2682,39 @@ absl::StatusOr<std::vector<MappedSegmentRef>> build_mapped_segment_refs(
       if (segment.length == 0) {
         continue;
       }
-      segments.push_back(
-          MappedSegmentRef{
-              .rank = participant.rank,
-              .src_offset = segment.src_offset,
-              .dst_offset = segment.dst_offset,
-              .length = segment.length,
-          });
+      uint64_t cursor = segment.dst_offset;
+      const uint64_t segment_end = segment.dst_offset + segment.length;
+      while (handled_index < handled_ranges.size() && handled_ranges[handled_index].end <= cursor) {
+        ++handled_index;
+      }
+      size_t current_handled = handled_index;
+      while (current_handled < handled_ranges.size()) {
+        const auto& handled = handled_ranges[current_handled];
+        if (handled.begin >= segment_end) {
+          break;
+        }
+        if (handled.begin > cursor) {
+          segments.push_back(
+              MappedSegmentRef{
+                  .rank = participant.rank,
+                  .src_offset = segment.src_offset + (cursor - segment.dst_offset),
+                  .dst_offset = cursor,
+                  .length = handled.begin - cursor,
+              });
+        }
+        cursor = std::max<uint64_t>(cursor, handled.end);
+        current_handled += 1;
+      }
+      if (cursor < segment_end) {
+        segments.push_back(
+            MappedSegmentRef{
+                .rank = participant.rank,
+                .src_offset = segment.src_offset + (cursor - segment.dst_offset),
+                .dst_offset = cursor,
+                .length = segment_end - cursor,
+            });
+      }
+      handled_index = current_handled;
     }
   }
   std::sort(segments.begin(), segments.end(), [](const MappedSegmentRef& a, const MappedSegmentRef& b) {
@@ -4197,8 +4601,18 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
     }
   }
 
+  std::vector<std::vector<ByteRange>> handled_dst_ranges_by_rank(participants.size());
+  for (size_t rank = 0; rank < participants.size(); ++rank) {
+    handled_dst_ranges_by_rank[rank] = tensor_job_build.handled_dst_ranges_by_rank[rank];
+    handled_dst_ranges_by_rank[rank].insert(
+        handled_dst_ranges_by_rank[rank].end(),
+        concat_job_build.handled_dst_ranges_by_rank[rank].begin(),
+        concat_job_build.handled_dst_ranges_by_rank[rank].end());
+    merge_byte_ranges(&handled_dst_ranges_by_rank[rank]);
+  }
+
   const auto segments_start = std::chrono::steady_clock::now();
-  auto segment_refs_or = build_mapped_segment_refs(participants);
+  auto segment_refs_or = build_mapped_segment_refs(participants, handled_dst_ranges_by_rank);
   if (!segment_refs_or.ok()) {
     return segment_refs_or.status();
   }

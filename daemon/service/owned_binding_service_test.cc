@@ -425,7 +425,7 @@ TEST_CASE("RefillOwnedBinding strict preflight rejection preserves ready artifac
   };
 
   const auto status = tensorcast::daemon::evaluate_strict_collective_preflight_for_testing(
-      &plan_summary, v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE);
+      /*rctx=*/nullptr, &plan_summary, v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE);
 
   REQUIRE_FALSE(status.ok());
   REQUIRE(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);

@@ -106,6 +106,7 @@ class OwnedBindingService {
 };
 
 grpc::Status evaluate_strict_collective_preflight_for_testing(
+    RpcContext* rctx,
     const store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary* plan_summary,
     v2::CollectivePolicy collective_policy);
 

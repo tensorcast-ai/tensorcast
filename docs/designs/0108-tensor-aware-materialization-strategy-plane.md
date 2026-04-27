@@ -4,7 +4,7 @@ title: Tensor-Aware Materialization Strategy Plane
 status: accepted
 areas: ["core", "daemon", "sdk", "integrations", "proto", "docs"]
 created: 2026-03-23
-last_updated: 2026-03-31
+last_updated: 2026-04-15
 related_code:
   - core/store/runtime/ingestion/materialization_facade.cc
   - core/store/runtime/ingestion/materialization_service.cc
@@ -17,6 +17,7 @@ related_code:
   - core/store/replica/replica.cc
   - core/store/replica/replica_load_controller.cc
   - core/store/store_engine_options.h
+  - tools/trace_plan_to_load_plan.py
   - daemon/service/controllers/materialization_target_plan_utils.cc
   - daemon/service/controllers/replica_materialization_service.cc
   - daemon/service/controllers/owned_binding_service.cc
@@ -34,6 +35,7 @@ related_code:
   - docs/internals/byte-range-mapping-and-execution.md
   - docs/internals/model-loading.md
   - docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md
+  - docs/benchmarks/20260415-qwen2.5-32b-host-local-trace-backed-loading-evidence.md
   - ../architecture/api/materialization-flow.md
   - ../architecture/api/region-backed.md
 links:
@@ -41,9 +43,8 @@ links:
     - ./0107-retrieval-policy-plane-cleanup.md
     - ./0109-batched-owner-file-collective-executor.md
     - ./0112-binding-native-serving-realization-and-publication.md
-    - ../plans/0108-tensor-aware-materialization-strategy-plane.md
-    - ../plans/0109-01-batched-owner-file-collective-rollout-and-residual-policy.md
-    - ../plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md
+    - ../benchmarks/20260415-qwen2.5-32b-host-local-trace-backed-loading-evidence.md
+    - ../benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md
   dependencies:
     - ./0004-unified-runtime-config.md
     - ./0107-retrieval-policy-plane-cleanup.md
@@ -123,16 +124,16 @@ plane, but execution is now intentionally split:
   - explicit lane plans,
   - semantic-only `ResolvedMaterializationPlan`,
   - and the "no implicit fallback" rule are normative `0108` ownership now;
-- the active `0108` execution scope is tracked only in
-  `docs/plans/0108-tensor-aware-materialization-strategy-plane.md`, and it is
-  intentionally limited to host-local local-executor convergence and ordinary
-  shared-runtime cleanup;
+- the former standalone `0108` execution plan has been retired after closure;
+  its final acceptance evidence and closeout record now live directly in this
+  design plus
+  `docs/benchmarks/20260415-qwen2.5-32b-host-local-trace-backed-loading-evidence.md`;
 - owner-file collective executor rollout, mixed-residual policy, and
-  executor-specific delete gates now live under
-  `docs/plans/0109-01-batched-owner-file-collective-rollout-and-residual-policy.md`;
+  executor-specific delete gates now live under `0109` plus
+  `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`;
 - same-binding serving-path closure, mounted operator evidence, and delete-gate
   cleanup now live under `0112` plus
-  `docs/plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md`;
+  `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`;
 - no separate long-term design owner remains for `0113`, `0114`, `0115`, or
   `0117`; their still-relevant normative content must live in the surviving
   owners named above.
@@ -189,6 +190,31 @@ Partially implemented in this repository:
   owns the follow-on batch-level owner-file executor semantics.
 - public SDK retrieval APIs remain unchanged.
 
+`2026-04-15` local closure evidence now exists for the remaining ordinary
+host-local `0108` scope:
+
+- source model:
+  `/mnt/step3-alignment/inference/Qwen2.5-32B-Instruct`
+- current `internal-vllm` TP4 trace output now yields:
+  - `773` trace entries / rank,
+  - `771` source-backed copy ops / rank,
+  - and `2` fill ops / rank;
+- that trace output is now lowered into the benchmark contract through
+  `tools/trace_plan_to_load_plan.py`;
+- current host-local benchmark results on the exact lowered trace workload:
+  - generic-like `B_lazy_commit` rank0:
+    `T(total_ready)=23.929s`
+  - tensor-aware local `C_batched_optimal`:
+    - rank0 `T(total_ready)=3.997s`
+    - rank1 `T(total_ready)=3.835s`;
+- same-machine local references:
+  - `internal-vllm` TP4 `safetensors` per-rank weight-loading:
+    `15.3918 GiB` in about `6.907s`
+  - stable local `fastsafetensors` no-GDS iterator reference:
+    full-model `61.027 GiB` in about `14.926s`;
+- this packet is recorded in
+  `docs/benchmarks/20260415-qwen2.5-32b-host-local-trace-backed-loading-evidence.md`.
+
 Remaining `0108`-owned work after this implementation is now intentionally
 narrow:
 
@@ -200,6 +226,15 @@ narrow:
   strategy trunk already absorbed here,
 - and extend source-bound local execution only if later evidence shows a real
   remaining gap and only through the same explicit lane-plan model.
+
+`0108` now closes that remaining source-bound-local question with an explicit
+no-new-work decision:
+
+- no additional dedicated source-bound local executor is needed beyond the
+  current explicit lane-plan trunk,
+- any future source-bound local optimization must extend that explicit
+  strategy-owned trunk,
+- and mounted serving-ready closure remains outside `0108` ownership.
 
 This design no longer owns:
 
@@ -1076,8 +1111,12 @@ Mitigations:
   - decision and residual coverage diagnostics are emitted through the existing
     runtime observability model.
 - Performance:
-  - host-local first-load end-to-end TensorCast must reach parity with
-    `fastsafetensors` for the same workload,
+  - after the owner split, `0108` host-local graduation is demonstrated on the
+    current ordinary trace-backed workload family rather than on mounted
+    serving-ready paths owned by `0112`,
+  - the ordinary host-local tensor-aware local path must reach parity with or
+    better than the current local baseline envelope for the same current
+    workload family,
   - JFS end-to-end TensorCast must not regress relative to the current best
     common-path behavior.
 
@@ -1091,9 +1130,8 @@ Mitigations:
 - [`docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md`](/data/workspace/tensorcast-280/docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md)
 - [`docs/designs/0109-batched-owner-file-collective-executor.md`](/data/workspace/tensorcast-280/docs/designs/0109-batched-owner-file-collective-executor.md)
 - [`docs/designs/0112-binding-native-serving-realization-and-publication.md`](/data/workspace/tensorcast-280/docs/designs/0112-binding-native-serving-realization-and-publication.md)
-- [`docs/plans/0108-tensor-aware-materialization-strategy-plane.md`](/data/workspace/tensorcast-280/docs/plans/0108-tensor-aware-materialization-strategy-plane.md)
-- [`docs/plans/0109-01-batched-owner-file-collective-rollout-and-residual-policy.md`](/data/workspace/tensorcast-280/docs/plans/0109-01-batched-owner-file-collective-rollout-and-residual-policy.md)
-- [`docs/plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md`](/data/workspace/tensorcast-280/docs/plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md)
+- [`docs/benchmarks/20260415-qwen2.5-32b-host-local-trace-backed-loading-evidence.md`](/data/workspace/tensorcast-280/docs/benchmarks/20260415-qwen2.5-32b-host-local-trace-backed-loading-evidence.md)
+- [`docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`](/data/workspace/tensorcast-280/docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md)
 - [`docs/architecture/api/materialization-flow.md`](/data/workspace/tensorcast-280/docs/architecture/api/materialization-flow.md)
 - [`docs/architecture/api/region-backed.md`](/data/workspace/tensorcast-280/docs/architecture/api/region-backed.md)
 - [`docs/internals/byte-range-mapping-and-execution.md`](/data/workspace/tensorcast-280/docs/internals/byte-range-mapping-and-execution.md)
@@ -1102,3 +1140,4 @@ Mitigations:
 - [`core/store/runtime/ingestion/materialization_service.cc`](/data/workspace/tensorcast-280/core/store/runtime/ingestion/materialization_service.cc)
 - [`daemon/service/controllers/materialization_target_plan_utils.cc`](/data/workspace/tensorcast-280/daemon/service/controllers/materialization_target_plan_utils.cc)
 - [`daemon/service/controllers/representation_transform_builder.cc`](/data/workspace/tensorcast-280/daemon/service/controllers/representation_transform_builder.cc)
+- [`tools/trace_plan_to_load_plan.py`](/data/workspace/tensorcast-280/tools/trace_plan_to_load_plan.py)

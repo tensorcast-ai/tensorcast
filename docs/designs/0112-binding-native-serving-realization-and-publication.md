@@ -4,7 +4,7 @@ title: Binding-Native Serving Realization and Publication
 status: implemented
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests", "proto"]
 created: 2026-03-27
-last_updated: 2026-04-14
+last_updated: 2026-04-15
 related_code:
   - docs/designs/0084-binding-unified-model-and-contract.md
   - docs/designs/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
@@ -33,7 +33,7 @@ related_code:
 links:
   related:
     - ./0108-tensor-aware-materialization-strategy-plane.md
-    - ../plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md
+    - ../benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md
   dependencies:
     - ./0084-binding-unified-model-and-contract.md
     - ./0085-distributed-binding-assembly-and-coordinator.md
@@ -84,8 +84,8 @@ Execution-policy note:
 - `0115` now owns the long-term mounted-source artifact attestation contract,
   including format-aware mounted-source resolve, `msa1:` identity, and typed
   trusted policy,
-- and the remaining mounted rollout and delete-gate cleanup now track through
-  `docs/plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md`.
+- and the mounted closure evidence now tracks directly through this design plus
+  `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`.
 
 # Implementation Status
 
@@ -144,8 +144,8 @@ blocker work. It is:
 
 - shared strategy-plane follow-up owned by `0108`,
 - owner-file collective executor rollout owned by `0109`,
-- and mounted rollout plus delete-gate cleanup tracked by the `0112-01`
-  companion plan.
+- and retained mounted evidence recorded directly in this design plus
+  `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`.
 
 In particular:
 
@@ -153,8 +153,39 @@ In particular:
   startup and now also records the audited Step3p5 same-binding closure result,
 - while the shared runtime strategy trunk that feeds that path is owned by
   `0108`,
-- and the remaining path-level rollout and delete-gate work is tracked by
-  `0112-01`.
+- and the remaining mounted operator evidence is now captured directly in the
+  surviving design and benchmark record rather than in a standalone companion
+  plan.
+
+## Additional mounted closure evidence
+
+The `2026-04-15` local qwen2.5 TP4 mounted rerun on the current public operator
+path adds the second representative `BINDING_FINALIZE` family that was still
+missing when this design first narrowed its scope.
+
+The current `/weight_version` packet shows:
+
+- `bootstrap_source_bound_contract_version=4`
+- `bootstrap_source_bound_contract_path=collective_first_v4`
+- `bootstrap_realize_collective_policy=collective_first`
+- `bootstrap_realize_collective_used=true`
+- `bootstrap_realize_actual_collective_committed_bytes=16382928896`
+- `bootstrap_realize_actual_generic_backend_bytes=0`
+- `bootstrap_realize_dominant_executor=OwnerFileCollectiveExecutor`
+- `bootstrap_publish_hash_rounds=0`
+- `bootstrap_publish_hash_location=seal`
+- `bootstrap_publish_hash_backend=gpu`
+- `bootstrap_publish_hash_identity_forming=true`
+
+The same live run also reached:
+
+- `GET /health = 200`
+- `GET /v1/models = 200`
+- `POST /v1/completions = 200`
+
+This means the second-family `BINDING_FINALIZE` packet is no longer deferred.
+What remains outside `0112` scope is performance interpretation and broader
+defaulting policy, not same-binding correctness or missing operator evidence.
 
 # Closure Summary
 
@@ -248,8 +279,7 @@ baseline" is no longer the current state. The closure packet now shows:
 What remains after that audited closure is not new `0112` architecture work.
 The remaining work is:
 
-- broader mounted evidence hardening and delete-gate cleanup under the
-  `0112-01` companion plan,
+- retained mounted evidence in the benchmark note cited above,
 - shared strategy or local-executor follow-up under `0108`,
 - and owner-file collective executor rollout under `0109`.
 

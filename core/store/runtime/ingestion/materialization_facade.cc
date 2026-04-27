@@ -1419,6 +1419,35 @@ absl::StatusOr<std::pair<std::string, std::string>> parse_mi2_multihashes(std::s
   return std::make_pair(std::string(index_mh), std::string(data_mh));
 }
 
+absl::Status publish_sealed_artifact_metadata(
+    components::IGlobalStoreClient& global_store_client,
+    std::string_view sealed_artifact_id,
+    std::string_view schema_version,
+    std::string_view encoding,
+    uint64_t total_size,
+    std::string_view canonical_index_json) {
+  if (sealed_artifact_id.empty()) {
+    return absl::InvalidArgumentError("publish_sealed_artifact_metadata requires sealed_artifact_id");
+  }
+  if (canonical_index_json.empty()) {
+    return absl::InvalidArgumentError("publish_sealed_artifact_metadata requires canonical_index_json");
+  }
+  auto multihashes_or = parse_mi2_multihashes(sealed_artifact_id);
+  if (!multihashes_or.ok()) {
+    return multihashes_or.status();
+  }
+
+  common::v1::ArtifactDescriptor descriptor;
+  descriptor.set_artifact_id(std::string(sealed_artifact_id));
+  descriptor.set_index_multihash(multihashes_or->first);
+  descriptor.set_data_multihash(multihashes_or->second);
+  descriptor.set_schema_version(std::string(schema_version));
+  descriptor.set_encoding(std::string(encoding));
+  descriptor.set_total_size(total_size);
+  descriptor.set_id_kind(tensorcast::common::v1::ArtifactIdKind::ARTIFACT_ID_KIND_MI2);
+  return global_store_client.upsert_artifact_metadata(descriptor, canonical_index_json);
+}
+
 absl::StatusOr<DeviceKey> select_seal_target_device(components::DeviceManager& device_manager) {
   if (device_manager.get_num_gpus() <= 0) {
     return absl::FailedPreconditionError("seal_assembly requires at least one GPU device");
@@ -5815,6 +5844,21 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
       result.index_multihash, result.data_multihash, result.total_size);
   result.verification_record = build_seal_verification_record(result.index_multihash);
 
+  // Seal creates a new canonical mi2 identity. Publish the canonical index for
+  // that sealed identity immediately so follow-on layout/proof flows can
+  // resolve GetArtifactIndexById(sealed_artifact_id) without depending on a
+  // later replica registration side effect.
+  absl::Status metadata_status = publish_sealed_artifact_metadata(
+      *gs_client,
+      result.sealed_artifact_id,
+      result.schema_version,
+      result.encoding,
+      result.total_size,
+      canonical_index_json);
+  if (!metadata_status.ok()) {
+    return metadata_status;
+  }
+
   if (!publish_canonical) {
     return result;
   }
@@ -6294,6 +6338,17 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
   result.verified_content_descriptor = build_sealed_artifact_verified_content_descriptor(
       result.index_multihash, result.data_multihash, result.total_size);
   result.verification_record = build_seal_verification_record(result.index_multihash);
+
+  absl::Status metadata_status = publish_sealed_artifact_metadata(
+      *gs_client,
+      result.sealed_artifact_id,
+      result.schema_version,
+      result.encoding,
+      result.total_size,
+      canonical_index_json);
+  if (!metadata_status.ok()) {
+    return metadata_status;
+  }
 
   if (!publish_canonical) {
     return result;

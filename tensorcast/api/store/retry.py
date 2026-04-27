@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import random
-import re
 import threading
 import time
 from concurrent.futures import CancelledError
@@ -46,10 +45,7 @@ _TRANSIENT_MESSAGE_TOKENS = (
     "connection refused",
     "broken pipe",
 )
-_COLLECTIVE_FAILURE_CLASS_PATTERN = re.compile(
-    r"\s*\[tc\.collective_failure_class=(not_eligible|execution_failed)\]\s*",
-    re.IGNORECASE,
-)
+_COLLECTIVE_FAILURE_CLASS_METADATA_KEY = "tc.collective_failure_class"
 
 
 def _looks_transient_message(message: str) -> bool:
@@ -67,12 +63,20 @@ def _append_hint(message: str, hint: str) -> str:
     return _append_debug_hint(f"{message}\nHint: {hint}")
 
 
-def _extract_collective_failure_class(message: str) -> tuple[str, str | None]:
-    match = _COLLECTIVE_FAILURE_CLASS_PATTERN.search(message)
-    if match is None:
-        return message, None
-    cleaned = _COLLECTIVE_FAILURE_CLASS_PATTERN.sub(" ", message, count=1)
-    return cleaned.strip(), match.group(1).lower()
+def _extract_collective_failure_class_metadata(exc: grpc.RpcError) -> str | None:
+    try:
+        metadata = exc.trailing_metadata()
+    except Exception:  # noqa: BLE001
+        return None
+    if metadata is None:
+        return None
+    for key, value in metadata:
+        if str(key).lower() != _COLLECTIVE_FAILURE_CLASS_METADATA_KEY:
+            continue
+        normalized = str(value).strip().lower()
+        if normalized in {"not_eligible", "execution_failed"}:
+            return normalized
+    return None
 
 
 def _global_store_not_connected_hint() -> str:
@@ -218,7 +222,7 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
         details = _grpc_details(exc)
         status_name = status_code.name if status_code is not None else "UNKNOWN"
         mapped = details or "retrieval failed"
-        mapped, collective_failure_class = _extract_collective_failure_class(mapped)
+        collective_failure_class = _extract_collective_failure_class_metadata(exc)
         lowered = mapped.lower()
         if "selection.logical_layout_hash does not match resolved selection" in mapped:
             return ArtifactError(
@@ -268,7 +272,7 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
             retryable=retryable,
             collective_failure_class=collective_failure_class,
         )
-    message, collective_failure_class = _extract_collective_failure_class(message)
+    collective_failure_class = None
     lowered = message.lower()
     if "selection.logical_layout_hash does not match resolved selection" in message:
         return ArtifactError(
