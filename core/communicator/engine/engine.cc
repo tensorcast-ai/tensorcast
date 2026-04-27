@@ -2011,12 +2011,12 @@ absl::StatusOr<Communicator::StableSourceViewMrEnsureResult> Communicator::ensur
   if (chunk_or->mr == nullptr) {
     return absl::InternalError("stable-backed source view chunk MR is null");
   }
-  LOG(INFO) << "communicator.read_plan_stable_source_prepare"
-            << " tensor_key=" << tensor_key << " backing_id=" << view->backing.backing_id
-            << " rail_id=" << chunk_or->rail_id << " nic=" << chunk_or->nic_name
-            << " chunk_index=" << chunk_or->chunk_index << " cache_hit=" << chunk_or->cache_hit
-            << " waited_on_inflight=" << chunk_or->waited_on_inflight << " registered_now=" << chunk_or->registered_now
-            << " prewarm_requested=" << prewarm_requested << " prewarm_complete=" << prewarm_complete;
+  VLOG(2) << "communicator.read_plan_stable_source_prepare"
+          << " tensor_key=" << tensor_key << " backing_id=" << view->backing.backing_id
+          << " rail_id=" << chunk_or->rail_id << " nic=" << chunk_or->nic_name
+          << " chunk_index=" << chunk_or->chunk_index << " cache_hit=" << chunk_or->cache_hit
+          << " waited_on_inflight=" << chunk_or->waited_on_inflight << " registered_now=" << chunk_or->registered_now
+          << " prewarm_requested=" << prewarm_requested << " prewarm_complete=" << prewarm_complete;
   return StableSourceViewMrEnsureResult{
       .mr = chunk_or->mr,
       .backing_use = stable_use,

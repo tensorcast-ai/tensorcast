@@ -2146,6 +2146,7 @@ cc_test(
         "//core/store:testing_recording_global_store_client",
         "//core/testing:test_helpers",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/log:globals",
         "@abseil-cpp//absl/log:log_entry",
         "@abseil-cpp//absl/log:log_sink",
         "@abseil-cpp//absl/log:log_sink_registry",

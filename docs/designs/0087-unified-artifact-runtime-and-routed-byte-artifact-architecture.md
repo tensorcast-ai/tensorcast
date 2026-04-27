@@ -1614,7 +1614,8 @@ Rules:
    exportable producer memory instead of RPC payload slicing, but logical pack shape still remains bounded by
    `max_batch_payload_bytes` and `max_batch_items`.
 3. Current observability is log-first rather than metrics-first. The live implementation emits structured
-   `INFO` or `VLOG(1)` summaries such as:
+   `INFO` or `VLOG(1/2)` summaries; high-frequency put-side RDMA transport probes are `VLOG(2)` so production
+   runs do not print them unless verbose logging is explicitly enabled. Examples include:
    - `byte_artifact.home_batch_get_timing_summary`
    - `byte_artifact.home_batch_get_response_shape`
    - `byte_artifact.batch_get_into_region_home_rpc_result`

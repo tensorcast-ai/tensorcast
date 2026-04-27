@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include "absl/log/globals.h"
 #include "absl/log/log_entry.h"
 #include "absl/log/log_sink.h"
 #include "absl/log/log_sink_registry.h"
@@ -208,6 +209,21 @@ class ScopedCollectingLogSink {
 
  private:
   CollectingLogSink& sink_;
+};
+
+class ScopedVLogLevel {
+ public:
+  explicit ScopedVLogLevel(int level) : previous_level_(absl::SetGlobalVLogLevel(level)) {}
+
+  ~ScopedVLogLevel() {
+    absl::SetGlobalVLogLevel(previous_level_);
+  }
+
+  ScopedVLogLevel(const ScopedVLogLevel&) = delete;
+  ScopedVLogLevel& operator=(const ScopedVLogLevel&) = delete;
+
+ private:
+  int previous_level_;
 };
 
 static Topology make_pcie_batch_payload_topology(
@@ -1922,6 +1938,7 @@ TEST_CASE(
   HomeBatchPutIfAbsentResponse put_resp;
   grpc::ServerContext put_ctx;
   {
+    ScopedVLogLevel scoped_vlog(/*level=*/2);
     ScopedCollectingLogSink scoped_sink(sink);
     REQUIRE(home->service().HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
   }
@@ -2039,6 +2056,7 @@ TEST_CASE(
   HomeBatchPutIfAbsentResponse put_resp;
   grpc::ServerContext put_ctx;
   {
+    ScopedVLogLevel scoped_vlog(/*level=*/2);
     ScopedCollectingLogSink scoped_sink(sink);
     REQUIRE(home->service().HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
   }

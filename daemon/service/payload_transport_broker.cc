@@ -2010,10 +2010,10 @@ absl::StatusOr<PayloadTransportBroker::BatchCommunicatorExport> PayloadTransport
     stable_backing_status = registration_or.ok() ? absl::OkStatus() : registration_or.status();
     stable_backing_export = registration_or.ok();
     if (!registration_or.ok()) {
-      LOG(INFO) << "batch_payload_ref.stable_backing_source_view_fallback"
-                << " direction=" << payload_direction_label(direction) << " operation_id=" << operation_id
-                << " source_segments=" << source_segments.size() << " payload_bytes=" << manifest.total_size()
-                << " status=" << registration_or.status();
+      VLOG(2) << "batch_payload_ref.stable_backing_source_view_fallback"
+              << " direction=" << payload_direction_label(direction) << " operation_id=" << operation_id
+              << " source_segments=" << source_segments.size() << " payload_bytes=" << manifest.total_size()
+              << " status=" << registration_or.status();
     }
   }
   if (!registration_or.ok()) {

@@ -2114,15 +2114,14 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
               ++timing_stats.remote_communicator_source_batched_direct_write_count;
             }
           }
-          LOG(INFO) << "byte_artifact.home_batch_put_if_absent_transport_open"
-                    << " operation_id=" << operation_id << " transport_id=" << transport_id
-                    << " kind=communicator_source"
-                    << " remote=" << eligibility.remote
-                    << " item_count=" << transport_it->second->manifest().entries_size()
-                    << " payload_bytes=" << transport_it->second->manifest().total_size()
-                    << " source_direct_write_at=" << eligibility.source_supports_direct_write
-                    << " source_batched_direct_write_at=" << eligibility.source_supports_batched_direct_write
-                    << " resolve_ms=" << absl::ToDoubleMilliseconds(absl::Now() - resolve_started_at);
+          VLOG(2) << "byte_artifact.home_batch_put_if_absent_transport_open"
+                  << " operation_id=" << operation_id << " transport_id=" << transport_id << " kind=communicator_source"
+                  << " remote=" << eligibility.remote
+                  << " item_count=" << transport_it->second->manifest().entries_size()
+                  << " payload_bytes=" << transport_it->second->manifest().total_size()
+                  << " source_direct_write_at=" << eligibility.source_supports_direct_write
+                  << " source_batched_direct_write_at=" << eligibility.source_supports_batched_direct_write
+                  << " resolve_ms=" << absl::ToDoubleMilliseconds(absl::Now() - resolve_started_at);
         }
         source_kind = resolved_it->second.remote ? store::loading::MaterializationSource::kP2P
                                                  : store::loading::MaterializationSource::kLocalReplica;
@@ -2142,18 +2141,18 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
               ++timing_stats.remote_direct_slice_transport_count;
               timing_stats.remote_direct_slice_bytes += transport_it->second->manifest().total_size();
               timing_stats.remote_direct_slice_items += transport_it->second->manifest().entries_size();
-              LOG(INFO) << "byte_artifact.home_batch_put_if_absent_transport_read_mode"
-                        << " operation_id=" << operation_id << " transport_id=" << transport_id
-                        << " kind=communicator_source"
-                        << " remote=true"
-                        << " read_mode=direct_remote_slice"
-                        << " realization=source_slice_loader"
-                        << " payload_bytes=" << transport_it->second->manifest().total_size()
-                        << " item_count=" << transport_it->second->manifest().entries_size()
-                        << " source_direct_write_at=" << eligibility.source_supports_direct_write
-                        << " source_batched_direct_write_at=" << eligibility.source_supports_batched_direct_write
-                        << " mirror_ms=0"
-                        << " subsequent_item_slices_local=false";
+              VLOG(2) << "byte_artifact.home_batch_put_if_absent_transport_read_mode"
+                      << " operation_id=" << operation_id << " transport_id=" << transport_id
+                      << " kind=communicator_source"
+                      << " remote=true"
+                      << " read_mode=direct_remote_slice"
+                      << " realization=source_slice_loader"
+                      << " payload_bytes=" << transport_it->second->manifest().total_size()
+                      << " item_count=" << transport_it->second->manifest().entries_size()
+                      << " source_direct_write_at=" << eligibility.source_supports_direct_write
+                      << " source_batched_direct_write_at=" << eligibility.source_supports_batched_direct_write
+                      << " mirror_ms=0"
+                      << " subsequent_item_slices_local=false";
             }
             auto& source_mutex = remote_direct_source_mutexes[transport_id];
             if (source_mutex == nullptr) {
@@ -2183,18 +2182,18 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
               timing_stats.remote_mirror_bytes += transport_it->second->manifest().total_size();
               timing_stats.remote_full_pack_mirror_items += transport_it->second->manifest().entries_size();
               mirrored_it = mirrored_remote_batch_payloads.emplace(transport_id, std::move(*mirrored_or)).first;
-              LOG(INFO) << "byte_artifact.home_batch_put_if_absent_transport_mirror"
-                        << " operation_id=" << operation_id << " transport_id=" << transport_id
-                        << " kind=communicator_source"
-                        << " remote=true"
-                        << " read_mode=full_pack"
-                        << " realization=full_pack_mirror"
-                        << " payload_bytes=" << transport_it->second->manifest().total_size()
-                        << " item_count=" << transport_it->second->manifest().entries_size()
-                        << " source_direct_write_at=" << eligibility.source_supports_direct_write
-                        << " source_batched_direct_write_at=" << eligibility.source_supports_batched_direct_write
-                        << " mirror_ms=" << absl::ToDoubleMilliseconds(mirror_elapsed)
-                        << " subsequent_item_slices_local=true";
+              VLOG(2) << "byte_artifact.home_batch_put_if_absent_transport_mirror"
+                      << " operation_id=" << operation_id << " transport_id=" << transport_id
+                      << " kind=communicator_source"
+                      << " remote=true"
+                      << " read_mode=full_pack"
+                      << " realization=full_pack_mirror"
+                      << " payload_bytes=" << transport_it->second->manifest().total_size()
+                      << " item_count=" << transport_it->second->manifest().entries_size()
+                      << " source_direct_write_at=" << eligibility.source_supports_direct_write
+                      << " source_batched_direct_write_at=" << eligibility.source_supports_batched_direct_write
+                      << " mirror_ms=" << absl::ToDoubleMilliseconds(mirror_elapsed)
+                      << " subsequent_item_slices_local=true";
             }
             if (item.batch_payload_slice().offset() + item.batch_payload_slice().length() >
                 mirrored_it->second->size()) {
@@ -2367,34 +2366,33 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
           return;
         }
         const auto eligibility = classify_put_remote_communicator_source(resolved_it->second);
-        LOG(INFO) << "byte_artifact.home_batch_put_if_absent_transport_apply_summary"
-                  << " operation_id=" << operation_id << " transport_id=" << transport_id << " kind=communicator_source"
-                  << " remote=true"
-                  << " read_mode=direct_remote_slice"
-                  << " materialize_mode=per_item"
-                  << " stage_mode=source_slice_loader"
-                  << " batched_direct_write=false"
-                  << " source_count=1"
-                  << " mapping_segments=0"
-                  << " item_count=" << indices.size() << " item_bytes=0"
-                  << " transport_payload_bytes=" << transport_it->second->manifest().total_size() << " mirror_ms=0"
-                  << " fallback_reason=" << reason;
+        VLOG(2) << "byte_artifact.home_batch_put_if_absent_transport_apply_summary"
+                << " operation_id=" << operation_id << " transport_id=" << transport_id << " kind=communicator_source"
+                << " remote=true"
+                << " read_mode=direct_remote_slice"
+                << " materialize_mode=per_item"
+                << " stage_mode=source_slice_loader"
+                << " batched_direct_write=false"
+                << " source_count=1"
+                << " mapping_segments=0"
+                << " item_count=" << indices.size() << " item_bytes=0"
+                << " transport_payload_bytes=" << transport_it->second->manifest().total_size() << " mirror_ms=0"
+                << " fallback_reason=" << reason;
         if (direct_remote_batch_payloads.emplace(transport_id).second) {
           ++timing_stats.remote_direct_slice_transport_count;
           timing_stats.remote_direct_slice_bytes += transport_it->second->manifest().total_size();
           timing_stats.remote_direct_slice_items += transport_it->second->manifest().entries_size();
-          LOG(INFO) << "byte_artifact.home_batch_put_if_absent_transport_read_mode"
-                    << " operation_id=" << operation_id << " transport_id=" << transport_id
-                    << " kind=communicator_source"
-                    << " remote=true"
-                    << " read_mode=direct_remote_slice"
-                    << " realization=source_slice_loader"
-                    << " payload_bytes=" << transport_it->second->manifest().total_size()
-                    << " item_count=" << transport_it->second->manifest().entries_size()
-                    << " source_direct_write_at=" << eligibility.source_supports_direct_write
-                    << " source_batched_direct_write_at=" << eligibility.source_supports_batched_direct_write
-                    << " mirror_ms=0"
-                    << " subsequent_item_slices_local=false";
+          VLOG(2) << "byte_artifact.home_batch_put_if_absent_transport_read_mode"
+                  << " operation_id=" << operation_id << " transport_id=" << transport_id << " kind=communicator_source"
+                  << " remote=true"
+                  << " read_mode=direct_remote_slice"
+                  << " realization=source_slice_loader"
+                  << " payload_bytes=" << transport_it->second->manifest().total_size()
+                  << " item_count=" << transport_it->second->manifest().entries_size()
+                  << " source_direct_write_at=" << eligibility.source_supports_direct_write
+                  << " source_batched_direct_write_at=" << eligibility.source_supports_batched_direct_write
+                  << " mirror_ms=0"
+                  << " subsequent_item_slices_local=false";
         }
         auto& source_mutex = remote_direct_source_mutexes[transport_id];
         if (source_mutex == nullptr) {
@@ -2498,19 +2496,19 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
     const absl::Duration composite_elapsed = absl::Now() - composite_started_at;
     timing_stats.remote_composite_stage_elapsed += composite_elapsed;
     if (!composite_or.ok()) {
-      LOG(INFO) << "byte_artifact.home_batch_put_if_absent_transport_apply_summary"
-                << " operation_id=" << operation_id << " transport_id=" << transport_id << " kind=communicator_source"
-                << " remote=true"
-                << " read_mode=batched_direct_write"
-                << " materialize_mode=single_source_composite"
-                << " stage_mode=composite_final_body"
-                << " batched_direct_write=true"
-                << " source_count=1"
-                << " mapping_segments=" << indices.size() << " item_count=" << indices.size()
-                << " item_bytes=" << item_bytes
-                << " transport_payload_bytes=" << transport_it->second->manifest().total_size() << " mirror_ms=0"
-                << " materialize_ms=" << absl::ToDoubleMilliseconds(composite_elapsed) << " outcome=failed"
-                << " status=" << composite_or.status();
+      VLOG(2) << "byte_artifact.home_batch_put_if_absent_transport_apply_summary"
+              << " operation_id=" << operation_id << " transport_id=" << transport_id << " kind=communicator_source"
+              << " remote=true"
+              << " read_mode=batched_direct_write"
+              << " materialize_mode=single_source_composite"
+              << " stage_mode=composite_final_body"
+              << " batched_direct_write=true"
+              << " source_count=1"
+              << " mapping_segments=" << indices.size() << " item_count=" << indices.size()
+              << " item_bytes=" << item_bytes
+              << " transport_payload_bytes=" << transport_it->second->manifest().total_size() << " mirror_ms=0"
+              << " materialize_ms=" << absl::ToDoubleMilliseconds(composite_elapsed) << " outcome=failed"
+              << " status=" << composite_or.status();
       for (const int index : indices) {
         deferred_outcomes[index] = make_outcome(
             prepared_items[static_cast<std::size_t>(index)].artifact_id,
@@ -2538,20 +2536,20 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
     if (composite_or->materialize_result.direct_write_supported) {
       ++timing_stats.remote_composite_batched_direct_write_count;
     }
-    LOG(INFO) << "byte_artifact.home_batch_put_if_absent_transport_apply_summary"
-              << " operation_id=" << operation_id << " transport_id=" << transport_id << " kind=communicator_source"
-              << " remote=true"
-              << " read_mode=batched_direct_write"
-              << " materialize_mode=single_source_composite"
-              << " stage_mode=composite_final_body"
-              << " batched_direct_write=true"
-              << " source_count=1"
-              << " mapping_segments=" << indices.size() << " item_count=" << indices.size()
-              << " item_bytes=" << item_bytes
-              << " transport_payload_bytes=" << transport_it->second->manifest().total_size() << " mirror_ms=0"
-              << " materialize_ms=" << absl::ToDoubleMilliseconds(composite_elapsed)
-              << " direct_write_supported=" << composite_or->materialize_result.direct_write_supported
-              << " fallback_reason=none";
+    VLOG(2) << "byte_artifact.home_batch_put_if_absent_transport_apply_summary"
+            << " operation_id=" << operation_id << " transport_id=" << transport_id << " kind=communicator_source"
+            << " remote=true"
+            << " read_mode=batched_direct_write"
+            << " materialize_mode=single_source_composite"
+            << " stage_mode=composite_final_body"
+            << " batched_direct_write=true"
+            << " source_count=1"
+            << " mapping_segments=" << indices.size() << " item_count=" << indices.size()
+            << " item_bytes=" << item_bytes
+            << " transport_payload_bytes=" << transport_it->second->manifest().total_size() << " mirror_ms=0"
+            << " materialize_ms=" << absl::ToDoubleMilliseconds(composite_elapsed)
+            << " direct_write_supported=" << composite_or->materialize_result.direct_write_supported
+            << " fallback_reason=none";
     for (std::size_t local_index = 0; local_index < indices.size(); ++local_index) {
       auto& prepared_item = prepared_items[static_cast<std::size_t>(indices[local_index])];
       prepared_item.staged_body = std::move(composite_or->staged_bodies[local_index]);
@@ -5692,28 +5690,28 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
           task_stats.remote_batch_segmented_region_export_item_count += pack.source_indices.size();
           task_stats.remote_batch_segmented_region_export_bytes += pack.manifest.total_size();
 
-          LOG(INFO) << "byte_artifact.batch_put_if_absent_from_region_pack_realization"
-                    << " operation_id=" << operation_id << " shard_id=" << task.shard_id
-                    << " holder_daemon_id=" << task.route.holder_daemon_id << " remote=true"
-                    << " mode=segmented_region_export"
-                    << " staged_slab=false"
-                    << " source_realization_mode="
-                    << (communicator_export_or->broker_owned_register ? "source_layout_host_shared"
-                                                                      : "source_layout_host_shared_stable_backing")
-                    << " host_region_class=" << host_region_class << " pack_count=1"
-                    << " item_count=" << pack.source_indices.size() << " payload_bytes=" << pack.manifest.total_size()
-                    << " source_segments=" << source_segments_or->size()
-                    << " remote_keys=" << communicator_export_or->export_registration.remote_memory_keys.size()
-                    << " registration_ownership=" << communicator_export_or->registration_ownership
-                    << " mr_ownership=" << communicator_export_or->mr_ownership
-                    << " broker_owned_register=" << communicator_export_or->broker_owned_register;
+          VLOG(2) << "byte_artifact.batch_put_if_absent_from_region_pack_realization"
+                  << " operation_id=" << operation_id << " shard_id=" << task.shard_id
+                  << " holder_daemon_id=" << task.route.holder_daemon_id << " remote=true"
+                  << " mode=segmented_region_export"
+                  << " staged_slab=false"
+                  << " source_realization_mode="
+                  << (communicator_export_or->broker_owned_register ? "source_layout_host_shared"
+                                                                    : "source_layout_host_shared_stable_backing")
+                  << " host_region_class=" << host_region_class << " pack_count=1"
+                  << " item_count=" << pack.source_indices.size() << " payload_bytes=" << pack.manifest.total_size()
+                  << " source_segments=" << source_segments_or->size()
+                  << " remote_keys=" << communicator_export_or->export_registration.remote_memory_keys.size()
+                  << " registration_ownership=" << communicator_export_or->registration_ownership
+                  << " mr_ownership=" << communicator_export_or->mr_ownership
+                  << " broker_owned_register=" << communicator_export_or->broker_owned_register;
 
-          LOG(INFO) << "byte_artifact.batch_put_if_absent_from_region_transport_emit"
-                    << " operation_id=" << operation_id << " shard_id=" << task.shard_id
-                    << " holder_daemon_id=" << task.route.holder_daemon_id << " transport_id=" << transport_id
-                    << " kind=communicator_source"
-                    << " source_realization_mode=segmented_region_export"
-                    << " item_count=" << pack.source_indices.size() << " payload_bytes=" << pack.manifest.total_size();
+          VLOG(2) << "byte_artifact.batch_put_if_absent_from_region_transport_emit"
+                  << " operation_id=" << operation_id << " shard_id=" << task.shard_id
+                  << " holder_daemon_id=" << task.route.holder_daemon_id << " transport_id=" << transport_id
+                  << " kind=communicator_source"
+                  << " source_realization_mode=segmented_region_export"
+                  << " item_count=" << pack.source_indices.size() << " payload_bytes=" << pack.manifest.total_size();
 
           for (std::size_t pack_index = 0; pack_index < pack.source_indices.size(); ++pack_index) {
             auto slice = pack.slices[pack_index];
@@ -5771,12 +5769,12 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
           task_stats.remote_batch_pack_count += packs_or->size();
           task_stats.remote_batch_pack_item_count += packed_items;
           task_stats.remote_batch_pack_bytes += packed_bytes;
-          LOG(INFO) << "byte_artifact.batch_put_if_absent_from_region_pack_realization"
-                    << " operation_id=" << operation_id << " shard_id=" << task.shard_id
-                    << " holder_daemon_id=" << task.route.holder_daemon_id << " remote=true"
-                    << " mode=staged_slab"
-                    << " pack_count=" << packs_or->size() << " item_count=" << packed_items
-                    << " payload_bytes=" << packed_bytes << " pack_ms=" << absl::ToDoubleMilliseconds(pack_elapsed);
+          VLOG(2) << "byte_artifact.batch_put_if_absent_from_region_pack_realization"
+                  << " operation_id=" << operation_id << " shard_id=" << task.shard_id
+                  << " holder_daemon_id=" << task.route.holder_daemon_id << " remote=true"
+                  << " mode=staged_slab"
+                  << " pack_count=" << packs_or->size() << " item_count=" << packed_items
+                  << " payload_bytes=" << packed_bytes << " pack_ms=" << absl::ToDoubleMilliseconds(pack_elapsed);
           for (auto& pack : *packs_or) {
             const bool use_communicator_transport = peer_transport_support.supports_v2() &&
                 d_.payload_transport_broker.batch_transport_communicator_enabled();
@@ -5873,13 +5871,12 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
             task_stats.remote_batch_transport_item_count += pack.source_indices.size();
             task_stats.remote_batch_transport_bytes += pack.manifest.total_size();
 
-            LOG(INFO) << "byte_artifact.batch_put_if_absent_from_region_transport_emit"
-                      << " operation_id=" << operation_id << " shard_id=" << task.shard_id
-                      << " holder_daemon_id=" << task.route.holder_daemon_id << " transport_id=" << transport_id
-                      << " kind=" << (emitted_communicator_transport ? "communicator_source" : "grpc_chunk_ref")
-                      << " source_realization_mode=staged_slab"
-                      << " item_count=" << pack.source_indices.size()
-                      << " payload_bytes=" << pack.manifest.total_size();
+            VLOG(2) << "byte_artifact.batch_put_if_absent_from_region_transport_emit"
+                    << " operation_id=" << operation_id << " shard_id=" << task.shard_id
+                    << " holder_daemon_id=" << task.route.holder_daemon_id << " transport_id=" << transport_id
+                    << " kind=" << (emitted_communicator_transport ? "communicator_source" : "grpc_chunk_ref")
+                    << " source_realization_mode=staged_slab"
+                    << " item_count=" << pack.source_indices.size() << " payload_bytes=" << pack.manifest.total_size();
 
             for (std::size_t pack_index = 0; pack_index < pack.source_indices.size(); ++pack_index) {
               auto slice = pack.slices[pack_index];
@@ -6025,14 +6022,14 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
     for (;;) {
       auto rpc_result = dispatch_remote_home_batch(std::move(prepared_remote_batch));
       task_stats.remote_home_rpc_elapsed += rpc_result.rpc_elapsed;
-      LOG(INFO) << "byte_artifact.batch_put_if_absent_from_region_home_rpc_result"
-                << " operation_id=" << operation_id << " shard_id=" << rpc_result.request.shard_id
-                << " holder_daemon_id=" << rpc_result.request.holder_daemon_id
-                << " requested_items=" << rpc_result.request.home_req.items_size()
-                << " attempt=" << rpc_result.request.attempt
-                << " rpc_ms=" << absl::ToDoubleMilliseconds(rpc_result.rpc_elapsed)
-                << " status_ok=" << rpc_result.status.ok() << " status_code=" << rpc_result.status.error_code()
-                << " status_message=" << rpc_result.status.error_message();
+      VLOG(2) << "byte_artifact.batch_put_if_absent_from_region_home_rpc_result"
+              << " operation_id=" << operation_id << " shard_id=" << rpc_result.request.shard_id
+              << " holder_daemon_id=" << rpc_result.request.holder_daemon_id
+              << " requested_items=" << rpc_result.request.home_req.items_size()
+              << " attempt=" << rpc_result.request.attempt
+              << " rpc_ms=" << absl::ToDoubleMilliseconds(rpc_result.rpc_elapsed)
+              << " status_ok=" << rpc_result.status.ok() << " status_code=" << rpc_result.status.error_code()
+              << " status_message=" << rpc_result.status.error_message();
 
       if (!rpc_result.status.ok()) {
         for (const auto& slot : rpc_result.request.outcome_slots) {
