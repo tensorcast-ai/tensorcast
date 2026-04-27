@@ -187,6 +187,69 @@ absl::StatusOr<ExportRegistration> CommunicationManager::register_memory(
   return info;
 }
 
+absl::StatusOr<ExportRegistration> CommunicationManager::register_stable_local_backing_source_views(
+    const std::vector<StableLocalBackingSourceView>& views) {
+  if (!is_enabled()) {
+    return absl::FailedPreconditionError("Communication engine not initialized");
+  }
+  if (views.empty()) {
+    return absl::InvalidArgumentError("stable-backed source view registration requires at least one view");
+  }
+
+  const uint64_t registration_id = next_registration_id_.fetch_add(1, std::memory_order_relaxed);
+  ExportRegistration info;
+  info.location = common::memory::MemoryLocation::CPU;
+  info.device_id = -1;
+  info.comm_dev_type = communicator::base::COMMUNICATE_ENGINE_DEV_CPU;
+  info.buffer_addresses.reserve(views.size());
+  info.buffer_sizes.reserve(views.size());
+  info.remote_memory_keys.reserve(views.size());
+
+  std::vector<std::string> registered_keys;
+  registered_keys.reserve(views.size());
+  const auto cleanup_registered_keys = [&]() {
+    for (const auto& key : registered_keys) {
+      auto status = comm_engine_->unregister_tensor(key);
+      if (!status.ok()) {
+        LOG(WARNING) << "stable-backed source view cleanup failed"
+                     << " key=" << key << " status=" << status;
+      }
+    }
+  };
+  for (size_t index = 0; index < views.size(); ++index) {
+    const auto& view = views[index];
+    if (view.address == 0 || view.size_bytes == 0) {
+      cleanup_registered_keys();
+      return absl::InvalidArgumentError("stable-backed source view requires non-empty address range");
+    }
+    if (view.keepalive == nullptr) {
+      cleanup_registered_keys();
+      return absl::InvalidArgumentError("stable-backed source view requires keepalive");
+    }
+
+    const std::string key = absl::StrCat("stable_backing_view_", registration_id, "_", index, "_", view.address);
+    communicator::engine::Communicator::StableLocalBackingSourceView engine_view{
+        .tensor_key = key,
+        .addr = view.address,
+        .bytes = static_cast<uint64_t>(view.size_bytes),
+        .backing = view.backing,
+        .keepalive = view.keepalive,
+    };
+    auto status = comm_engine_->register_stable_local_backing_source_view(engine_view);
+    if (!status.ok()) {
+      cleanup_registered_keys();
+      return status;
+    }
+    registered_keys.push_back(key);
+    info.buffer_addresses.push_back(view.address);
+    info.buffer_sizes.push_back(view.size_bytes);
+    info.remote_memory_keys.push_back(key);
+    info.artifact_size += view.size_bytes;
+  }
+
+  return info;
+}
+
 absl::Status CommunicationManager::activate_stable_local_backing(
     const store::StableLocalBackingRef& backing,
     std::shared_ptr<void> keepalive) {

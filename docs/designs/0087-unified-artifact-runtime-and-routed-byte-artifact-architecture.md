@@ -4,7 +4,7 @@ title: Unified Artifact Runtime and Routed Byte Artifact Architecture
 status: implemented
 areas: ["daemon", "sdk", "global_store", "proto", "core", "integrations", "docs"]
 created: 2026-03-08
-last_updated: 2026-04-26
+last_updated: 2026-04-27
 related_code:
   - docs/designs/0017-client-generated-artifact-id.md
   - docs/designs/0056-programmable-framework-adv.md
@@ -37,9 +37,12 @@ related_code:
   - daemon/state/ipc_region_registry.h
   - daemon/state/ipc_region_registry.cc
   - daemon/service/payload_transport_broker.h
+  - daemon/service/payload_transport_broker.cc
   - daemon/state/daemon_kernel.cc
   - core/store/communication_types.h
   - core/store/components/communication_manager.h
+  - core/store/components/communication_manager.cc
+  - core/store/materialization/contracts/stable_local_backing.h
   - core/store/materialization/dataplane/sinks/target_layout_host_sink.h
   - core/store/materialization/dataplane/sinks/target_layout_host_sink.cc
   - core/store/materialization/dataplane/loaders/p2p_loader.cc
@@ -133,6 +136,10 @@ RDMA realization follow-ons still in progress:
   segmented `communicator_source` exports over the original source spans. The
   contiguous staged-slab realization remains the fallback for strict digest,
   non-`HOST_SHARED`, capability-miss, and lifetime-gap cases.
+- The next accepted put-side source optimization keeps that no-pack shape but
+  changes source MR ownership from per-batch broker-owned raw registrations to
+  stable-backed `HOST_SHARED` source-view keys whose chunk MRs are owned by
+  the activated stable backing and resolved on the requested RDMA rail.
 - `BodyHandle` now exposes the export-view API used by source-side segmented
   communicator export.
 - The remaining get-side RDMA follow-on is producer-side read-plan servicing:
@@ -1148,6 +1155,146 @@ Phase-10 implementation status, first cut accepted on 2026-04-27:
    `read_mode=batched_direct_write`,
    `materialize_mode=single_source_composite`, and no full-pack mirror.
 
+#### 5.5.6d Accepted put-side source stable-backed MR reuse
+
+Phase 10 removes the put-side full-pack slab, but the first-cut source-region
+export still creates broker-owned raw registrations for each batch segment.
+The accepted Phase 11 optimization keeps the same logical manifest and
+segmented `communicator_source` wire shape while changing MR ownership to the
+source daemon's activated `HOST_SHARED` stable backing. This is an MR reuse
+optimization, not a new batch-set authority or digest semantic.
+
+Scope:
+
+1. This applies only to eligible remote-home
+   `BatchPutIfAbsentFromRegion` no-pack source-layout items whose bytes live
+   in daemon-managed CPU `HOST_SHARED` regions with a stable backing.
+2. It does not change `HomeBatchPutIfAbsent`, shard routing, manifest
+   offsets, per-item outcomes, Phase-9 composite final-body staging, or
+   Phase-10 staged-slab fallback semantics.
+3. The first accepted fallback order is:
+   stable-backed source-view export, then Phase-10 broker-owned raw segmented
+   region export when the miss is known before transport issue, then the
+   staged full-pack realization for non-exportable source layouts.
+4. Once a stable-backed transport has been issued, the source daemon must not
+   silently fall back to raw per-view registration in read-plan admission. A
+   requested-rail stable-backed ensure failure is a transport failure for the
+   current operation.
+
+Stable backing exposure on source spans:
+
+1. `ByteArtifactRegionLayout::HostSharedSourceSpan` must carry the source
+   backing metadata needed to prove stable-backed export eligibility:
+   `StableLocalBackingRef`, stable-backing keepalive, region id, host-region
+   class, source address, length, and backing-local offset or enough
+   information to derive it from `backing_base_addr`.
+2. Source-layout validation already activates local stable backings through
+   `ExternalTargetAccessService::validate_local_source_layout(...)`; Phase 11
+   consumes that activated backing instead of adding a second preregistration
+   surface.
+3. The accepted eligible backing shape is
+   `StableLocalBackingKind::kHostSharedRegion` over CPU memory, with the span
+   fully contained in the backing. For allocator-backed slots, `slot_bytes`
+   must match the item length used for chunk geometry, and the source span
+   still requires `slot_index` and `slot_generation`.
+4. Missing stable backing, missing stable-backing keepalive, cross-backing
+   groups, invalid geometry, strict digest requirements, or source lifetime
+   gaps remain pre-issue fallback reasons.
+
+Stable-backed export API:
+
+1. The communicator boundary should expose a stable-backed source-view API
+   such as `export_stable_local_backing_views(...)` or an equivalent
+   `prepare_stable_local_backing_source_views(...)` seam. The API accepts the
+   manifest-aligned source spans and returns an `ExportRegistration`-compatible
+   view with `remote_memory_keys[]`, `buffer_sizes[]`, memory location, and
+   transport keepalives.
+2. The API must not call the generic broker-owned
+   `register_memory(span_addr, span_bytes)` path for eligible spans. It uses
+   `StableLocalBackingState` chunk records keyed by
+   `stable_backing_id + rail_id + chunk_index`.
+3. Stable-backed lazy chunk registration is allowed only as a stable backing
+   cache fill: the resulting MR is owned by `StableLocalBackingState`, is
+   reusable by later batch get/set operations that touch the same backing
+   chunk and rail, and is deregistered only when the backing is deactivated.
+4. The batch transport record may own source-view key cleanup, but it must not
+   own or deregister the stable chunk MR. The implementation should make this
+   split explicit rather than overloading one "registration owned" boolean.
+
+Remote key representation:
+
+1. The first implementation should keep the existing
+   `BatchPayloadCommunicatorSource` schema. Each source item is advertised as
+   a lightweight remote key whose `buffer_sizes[]` entry is exactly the item
+   length; `RemoteKeySource` continues to see one concatenated logical pack.
+2. A lightweight source-view key is a transport-scoped communicator tensor or
+   equivalent lookup record over the item span. Its base address and length
+   are item-local, but its RDMA MR is borrowed from the stable backing chunk.
+3. Unregistering the view key on transport expiry removes only the lookup
+   record and releases keepalives. It must not deregister the borrowed chunk
+   MR; the borrowed MR must be installed with non-owning semantics.
+4. A future protocol could advertise backing id plus chunk offset directly,
+   but Phase 11 intentionally avoids proto changes and preserves the existing
+   `remote_memory_keys[]` / `buffer_sizes[]` lowering.
+
+Requested-rail RDMA behavior:
+
+1. The stable backing cache is already per rail: prewarm and lazy ensure store
+   chunk MRs under `stable_backing_id + rail_id + chunk_index`.
+2. Phase 11 should use the requested-rail design. Export time creates
+   stable-backed view metadata; it does not have to eagerly `ensure_chunk(...)`
+   for every visible rail.
+3. Source-side `READ_PLAN_REQUEST` admission already receives the requested
+   or selected `rail_id`. When the advertised remote key resolves to a
+   stable-backed source view, admission resolves only that rail by calling the
+   stable backing chunk ensure path and uses the returned chunk MR for the
+   direct-source response.
+4. Admission must not route stable-backed views through the ordinary
+   `ensure_tensor_registered_on_dev(...)` raw tensor path, because that would
+   recreate per-batch/per-segment MR registrations.
+5. If prewarm has completed, requested-rail resolution should be a chunk-cache
+   hit. If not, the allowed fallback is a stable-backed lazy chunk registration
+   owned by the backing cache, not a broker-owned view registration.
+
+Controller integration and observability:
+
+1. Remote-home `BatchPutIfAbsentFromRegion` should prefer stable-backed
+   source-view export for admitted Phase-10 source-layout packs. The raw
+   broker-owned segmented region export remains a pre-issue compatibility
+   fallback for non-stable-backed sources, and staged slabs remain the final
+   compatibility fallback.
+2. The intended SGLang KV path should be fully stable-backed: source logs
+   should keep `mode=segmented_region_export` and `staged_slab=false`, but
+   change `source_realization_mode` to a stable-backed value and report
+   `mr_ownership=stable_backing` or equivalent.
+3. New counters should distinguish source-view key count from stable chunk MR
+   ownership, requested-rail chunk-cache hits, stable-backed lazy chunk
+   registrations, raw-register fallback count, and staged-slab fallback count.
+4. Path validation should prove that the source side no longer emits
+   broker-owned raw region registrations for intended SGLang `HOST_SHARED`
+   batch-set transports while home-side `read_mode=batched_direct_write` and
+   `materialize_mode=single_source_composite` remain unchanged.
+
+Phase-11 implementation status, first cut accepted on 2026-04-27:
+
+1. `HOST_SHARED` source spans now carry the activated
+   `StableLocalBackingRef` plus stable-backing keepalive into the put-side
+   segmented region export path.
+2. The communicator exposes stable-backed lightweight source-view keys. Those
+   keys are unregistered with the batch transport record, while borrowed chunk
+   MRs remain owned by `StableLocalBackingState`.
+3. Source-side `READ_PLAN_REQUEST` admission detects stable-backed view keys,
+   resolves only the requested rail through `ensure_chunk(...)`, and bypasses
+   the ordinary raw tensor lazy-registration path.
+4. The SGLang share-remote Phase-11 replay showed all intended remote-home
+   batch-set packs using
+   `source_realization_mode=source_layout_host_shared_stable_backing`,
+   `registration_ownership=stable_backing_view`, and
+   `mr_ownership=stable_backing`, with no broker-owned raw registrations for
+   those packs and with home consume still on
+   `read_mode=batched_direct_write` /
+   `materialize_mode=single_source_composite`.
+
 #### 5.5.7 Implemented v2 communicator-backed realization
 
 `v2 communicator_source` is the current communicator-backed realization. It moves routed byte-artifact remote transport
@@ -1181,8 +1328,10 @@ Rules:
    - eligible RDMA get paths may export one logical pack as segmented retained
      body views,
    - eligible RDMA put paths may export one logical pack as segmented
-     `HOST_SHARED` source-layout views once the no-pack source realization in
-     5.5.6c is implemented,
+     `HOST_SHARED` source-layout views; Phase 10 first realizes those views
+     through broker-owned raw registrations, while Phase 11 upgrades eligible
+     stable-backed spans to source-view keys that borrow chunk MRs from the
+     `HOST_SHARED` stable backing,
    - MTCP-compatible and fallback paths may still realize one staged host pack.
 6. Current get-side remote `v2` consume paths open one communicator source per
    `transport_id`:
@@ -1385,6 +1534,8 @@ Normative rules:
     - put-side composite final-body staging as the second batch-set parity
       step,
     - put-side source-layout no-pack segmented export as the third batch-set
+      parity step,
+    - put-side source-layout stable-backed MR reuse as the fourth batch-set
       parity step,
     - and source-side publish-time retained-export warming as an optional
       follow-on optimization on top of the same `BodyHandle` seam.

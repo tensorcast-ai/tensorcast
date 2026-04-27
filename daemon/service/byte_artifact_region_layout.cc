@@ -404,6 +404,10 @@ absl::StatusOr<ByteArtifactRegionLayout::HostSharedSourceSpan> ByteArtifactRegio
     return absl::FailedPreconditionError("HOST_SHARED source span requires region keepalive");
   }
   const void* item_base_ptr = static_cast<const std::uint8_t*>(storage.base_ptr) + range.storage_local_offset;
+  std::optional<store::StableLocalBackingRef> stable_backing = storage.stable_backing;
+  if (stable_backing.has_value() && range.slot_token.has_value() && range.logical_length > 0) {
+    stable_backing->slot_bytes = range.logical_length;
+  }
   return HostSharedSourceSpan{
       .data = item_base_ptr,
       .length = range.logical_length,
@@ -411,6 +415,8 @@ absl::StatusOr<ByteArtifactRegionLayout::HostSharedSourceSpan> ByteArtifactRegio
       .host_region_class = storage.host_region_class,
       .daemon_managed = storage.daemon_managed,
       .slot_token = range.slot_token,
+      .stable_backing = stable_backing,
+      .stable_backing_keepalive = storage.stable_backing_keepalive,
       .keepalive = storage.keepalive,
   };
 }

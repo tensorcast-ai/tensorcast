@@ -99,6 +99,9 @@ class PayloadTransportBroker {
     BatchRefMetadata metadata;
     std::string batch_payload_ref;
     store::ExportRegistration export_registration;
+    std::string registration_ownership;
+    std::string mr_ownership;
+    bool broker_owned_register{false};
   };
 
   struct BatchCommunicatorSourceSegment {
@@ -108,6 +111,8 @@ class PayloadTransportBroker {
   struct BatchCommunicatorRegionSourceSegment {
     const void* data{nullptr};
     std::uint64_t size_bytes{0};
+    std::optional<store::StableLocalBackingRef> stable_backing;
+    std::shared_ptr<void> stable_backing_keepalive;
     std::shared_ptr<void> keepalive;
   };
 

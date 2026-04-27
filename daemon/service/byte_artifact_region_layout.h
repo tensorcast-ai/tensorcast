@@ -35,6 +35,8 @@ class ByteArtifactRegionLayout {
     IpcRegionRegistry::HostRegionClass host_region_class{IpcRegionRegistry::HostRegionClass::kNone};
     bool daemon_managed{false};
     std::optional<SlotToken> slot_token;
+    std::optional<store::StableLocalBackingRef> stable_backing;
+    std::shared_ptr<void> stable_backing_keepalive;
     std::shared_ptr<void> keepalive;
   };
 

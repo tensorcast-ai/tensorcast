@@ -920,6 +920,8 @@ acquire_segmented_region_source_segments(
         PayloadTransportBroker::BatchCommunicatorRegionSourceSegment{
             .data = entry.source_span.data,
             .size_bytes = entry.source_span.length,
+            .stable_backing = entry.source_span.stable_backing,
+            .stable_backing_keepalive = entry.source_span.stable_backing_keepalive,
             .keepalive = entry.source_span.keepalive,
         });
   }
@@ -5695,12 +5697,16 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
                     << " holder_daemon_id=" << task.route.holder_daemon_id << " remote=true"
                     << " mode=segmented_region_export"
                     << " staged_slab=false"
-                    << " source_realization_mode=source_layout_host_shared"
+                    << " source_realization_mode="
+                    << (communicator_export_or->broker_owned_register ? "source_layout_host_shared"
+                                                                      : "source_layout_host_shared_stable_backing")
                     << " host_region_class=" << host_region_class << " pack_count=1"
                     << " item_count=" << pack.source_indices.size() << " payload_bytes=" << pack.manifest.total_size()
                     << " source_segments=" << source_segments_or->size()
                     << " remote_keys=" << communicator_export_or->export_registration.remote_memory_keys.size()
-                    << " registration_ownership=broker_owned";
+                    << " registration_ownership=" << communicator_export_or->registration_ownership
+                    << " mr_ownership=" << communicator_export_or->mr_ownership
+                    << " broker_owned_register=" << communicator_export_or->broker_owned_register;
 
           LOG(INFO) << "byte_artifact.batch_put_if_absent_from_region_transport_emit"
                     << " operation_id=" << operation_id << " shard_id=" << task.shard_id

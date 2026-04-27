@@ -1946,9 +1946,14 @@ absl::StatusOr<PayloadTransportBroker::BatchCommunicatorExport> PayloadTransport
   std::vector<void*> buffer_addresses;
   std::vector<size_t> buffer_sizes;
   std::vector<std::shared_ptr<void>> keepalives;
+  std::vector<store::components::CommunicationManager::StableLocalBackingSourceView> stable_source_views;
+  std::vector<std::shared_ptr<void>> stable_keepalives;
+  bool stable_backing_candidate = true;
   buffer_addresses.reserve(source_segments.size());
   buffer_sizes.reserve(source_segments.size());
   keepalives.reserve(source_segments.size());
+  stable_source_views.reserve(source_segments.size());
+  stable_keepalives.reserve(source_segments.size());
 
   std::uint64_t total_payload_bytes = 0;
   for (int entry_index = 0; entry_index < manifest.entries_size(); ++entry_index) {
@@ -1975,6 +1980,20 @@ absl::StatusOr<PayloadTransportBroker::BatchCommunicatorExport> PayloadTransport
     buffer_addresses.push_back(const_cast<void*>(segment.data));
     buffer_sizes.push_back(static_cast<size_t>(segment.size_bytes));
     keepalives.push_back(segment.keepalive);
+    if (segment.stable_backing.has_value() && segment.stable_backing_keepalive != nullptr) {
+      auto combined_keepalive = std::make_shared<std::vector<std::shared_ptr<void>>>(
+          std::vector<std::shared_ptr<void>>{segment.keepalive, segment.stable_backing_keepalive});
+      stable_keepalives.push_back(combined_keepalive);
+      stable_source_views.push_back(
+          store::components::CommunicationManager::StableLocalBackingSourceView{
+              .address = reinterpret_cast<uint64_t>(segment.data),
+              .size_bytes = static_cast<size_t>(segment.size_bytes),
+              .backing = *segment.stable_backing,
+              .keepalive = combined_keepalive,
+          });
+    } else {
+      stable_backing_candidate = false;
+    }
   }
   if (total_payload_bytes != manifest.total_size()) {
     return absl::FailedPreconditionError("segmented region source payload size mismatch");
@@ -1982,7 +2001,24 @@ absl::StatusOr<PayloadTransportBroker::BatchCommunicatorExport> PayloadTransport
 
   const absl::Time export_started_at = absl::Now();
   const absl::Time register_started_at = absl::Now();
-  auto registration_or = options_.comm_manager->register_memory(buffer_addresses, buffer_sizes, /*device_id=*/-1);
+  absl::StatusOr<store::ExportRegistration> registration_or =
+      absl::FailedPreconditionError("stable-backed source view export was not attempted");
+  bool stable_backing_export = false;
+  absl::Status stable_backing_status = absl::FailedPreconditionError("stable-backed source view export not eligible");
+  if (stable_backing_candidate && stable_source_views.size() == source_segments.size()) {
+    registration_or = options_.comm_manager->register_stable_local_backing_source_views(stable_source_views);
+    stable_backing_status = registration_or.ok() ? absl::OkStatus() : registration_or.status();
+    stable_backing_export = registration_or.ok();
+    if (!registration_or.ok()) {
+      LOG(INFO) << "batch_payload_ref.stable_backing_source_view_fallback"
+                << " direction=" << payload_direction_label(direction) << " operation_id=" << operation_id
+                << " source_segments=" << source_segments.size() << " payload_bytes=" << manifest.total_size()
+                << " status=" << registration_or.status();
+    }
+  }
+  if (!registration_or.ok()) {
+    registration_or = options_.comm_manager->register_memory(buffer_addresses, buffer_sizes, /*device_id=*/-1);
+  }
   const absl::Duration register_elapsed = absl::Now() - register_started_at;
   if (!registration_or.ok()) {
     return registration_or.status();
@@ -1993,7 +2029,11 @@ absl::StatusOr<PayloadTransportBroker::BatchCommunicatorExport> PayloadTransport
 
   const auto unregister_registered = [&]() {
     for (const auto& tensor_key : registration_or->remote_memory_keys) {
-      (void)options_.comm_manager->get_engine().unregister_tensor(tensor_key);
+      auto status = options_.comm_manager->get_engine().unregister_tensor(tensor_key);
+      if (!status.ok()) {
+        LOG(WARNING) << "batch_payload_ref.segmented_region_source_unregister_failed"
+                     << " tensor_key=" << tensor_key << " status=" << status;
+      }
     }
   };
 
@@ -2019,16 +2059,23 @@ absl::StatusOr<PayloadTransportBroker::BatchCommunicatorExport> PayloadTransport
       return absl::NotFoundError("segmented region source transport record is missing");
     }
     it->second.communicator_export = *registration_or;
-    it->second.communicator_export_keepalives = std::move(keepalives);
+    it->second.communicator_export_keepalives =
+        stable_backing_export ? std::move(stable_keepalives) : std::move(keepalives);
     it->second.communicator_export_requires_unregister = true;
   }
+  const std::string_view registration_ownership =
+      stable_backing_export ? std::string_view("stable_backing_view") : std::string_view("broker_owned");
+  const std::string_view mr_ownership =
+      stable_backing_export ? std::string_view("stable_backing") : std::string_view("broker_owned");
   VLOG(2) << "batch_payload_ref.communicator_export_summary"
-          << " direction=" << payload_direction_label(direction) << " operation_id=" << operation_id
-          << " realization=segmented_region_source"
+          << " direction=" << payload_direction_label(direction) << " operation_id=" << operation_id << " realization="
+          << (stable_backing_export ? "segmented_region_source_stable_backing" : "segmented_region_source")
           << " transport_id=" << batch_payload_ref_or->metadata.transport_id
           << " payload_bytes=" << batch_payload_ref_or->metadata.payload_size
           << " remote_keys=" << registration_or->remote_memory_keys.size()
-          << " source_segments=" << source_segments.size()
+          << " source_segments=" << source_segments.size() << " registration_ownership=" << registration_ownership
+          << " mr_ownership=" << mr_ownership << " stable_backing_candidate=" << stable_backing_candidate
+          << " stable_backing_status=" << stable_backing_status
           << " register_ms=" << absl::ToDoubleMilliseconds(register_elapsed)
           << " issue_ref_ms=" << absl::ToDoubleMilliseconds(issue_ref_elapsed)
           << " total_ms=" << absl::ToDoubleMilliseconds(absl::Now() - export_started_at);
@@ -2036,6 +2083,9 @@ absl::StatusOr<PayloadTransportBroker::BatchCommunicatorExport> PayloadTransport
       .metadata = batch_payload_ref_or->metadata,
       .batch_payload_ref = batch_payload_ref_or->batch_payload_ref,
       .export_registration = *registration_or,
+      .registration_ownership = std::string(registration_ownership),
+      .mr_ownership = std::string(mr_ownership),
+      .broker_owned_register = !stable_backing_export,
   };
 }
 

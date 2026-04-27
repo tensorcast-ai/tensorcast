@@ -99,6 +99,16 @@ class CommunicationManager {
       const std::vector<size_t>& buffer_sizes,
       int device_id);
 
+  struct StableLocalBackingSourceView {
+    uint64_t address = 0;
+    size_t size_bytes = 0;
+    store::StableLocalBackingRef backing;
+    std::shared_ptr<void> keepalive;
+  };
+
+  absl::StatusOr<ExportRegistration> register_stable_local_backing_source_views(
+      const std::vector<StableLocalBackingSourceView>& views);
+
   absl::Status activate_stable_local_backing(
       const store::StableLocalBackingRef& backing,
       std::shared_ptr<void> keepalive = nullptr);

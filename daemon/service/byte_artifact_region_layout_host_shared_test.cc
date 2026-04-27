@@ -125,6 +125,12 @@ TEST_CASE(
   REQUIRE(source_span_or->slot_token->slot_generation.has_value());
   REQUIRE(*source_span_or->slot_token->slot_index == 7);
   REQUIRE(*source_span_or->slot_token->slot_generation == 11);
+  REQUIRE(source_span_or->stable_backing.has_value());
+  CHECK(source_span_or->stable_backing->backing_id == desc_or->region_id);
+  CHECK(source_span_or->stable_backing->backing_base_addr == reinterpret_cast<std::uint64_t>(mapping_or->base_ptr));
+  CHECK(source_span_or->stable_backing->backing_bytes == kStorageBytes);
+  CHECK(source_span_or->stable_backing->slot_bytes == kItemBytes);
+  REQUIRE(source_span_or->stable_backing_keepalive != nullptr);
   REQUIRE(source_span_or->keepalive != nullptr);
   REQUIRE(std::memcmp(source_span_or->data, buffer, sizeof(buffer)) == 0);
 }
