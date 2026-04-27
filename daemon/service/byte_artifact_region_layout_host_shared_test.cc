@@ -112,6 +112,21 @@ TEST_CASE(
   REQUIRE(item_layout_or->storages.size() == 1);
   auto* region_bytes = static_cast<const char*>(item_layout_or->storages[0].base_ptr.get());
   REQUIRE(std::memcmp(region_bytes, buffer, sizeof(buffer)) == 0);
+
+  auto source_span_or = validated_or->layout.open_host_shared_source_span("artifact-a");
+  REQUIRE(source_span_or.ok());
+  REQUIRE(source_span_or->data != nullptr);
+  REQUIRE(source_span_or->length == kItemBytes);
+  REQUIRE(source_span_or->region_id == desc_or->region_id);
+  REQUIRE(source_span_or->host_region_class == tensorcast::daemon::IpcRegionRegistry::HostRegionClass::kAllocator);
+  REQUIRE(source_span_or->daemon_managed);
+  REQUIRE(source_span_or->slot_token.has_value());
+  REQUIRE(source_span_or->slot_token->slot_index.has_value());
+  REQUIRE(source_span_or->slot_token->slot_generation.has_value());
+  REQUIRE(*source_span_or->slot_token->slot_index == 7);
+  REQUIRE(*source_span_or->slot_token->slot_generation == 11);
+  REQUIRE(source_span_or->keepalive != nullptr);
+  REQUIRE(std::memcmp(source_span_or->data, buffer, sizeof(buffer)) == 0);
 }
 
 TEST_CASE(

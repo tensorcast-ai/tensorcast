@@ -399,6 +399,15 @@ void set_invariant(
   invariant->set_payload_digest_hex(sha256_hex(payload));
 }
 
+void set_layout_only_invariant(
+    tensorcast::daemon::v2::PutIfAbsentInvariant* invariant,
+    std::string_view layout_id,
+    std::string_view payload) {
+  invariant->set_layout_id(std::string(layout_id));
+  invariant->set_byte_length(payload.size());
+  invariant->set_verification_mode(tensorcast::daemon::v2::BYTE_ARTIFACT_VERIFICATION_MODE_LAYOUT_AND_SIZE_ONLY);
+}
+
 struct LeaseState {
   uint64_t shard_id{0};
   std::string holder_daemon_id;
@@ -1572,6 +1581,132 @@ TEST_CASE(
     CHECK(sink.Contains("read_mode=full_pack_mirror"));
   }
 
+  release_test_host_shared_region(*front.harness, target_region);
+}
+
+TEST_CASE(
+    "BatchPutIfAbsentFromRegion exports remote HOST_SHARED source layouts without staged slab",
+    "[daemon][batch][redirect][transport][communicator][host_shared][put]") {
+  auto gs = std::make_shared<InMemoryShardHomeGlobalStore>();
+  gs->connected = true;
+
+  const auto root_front = make_tmp_dir("front_put_segmented_region");
+  const auto root_home = make_tmp_dir("home_put_segmented_region");
+
+  const auto lease_ttl = std::chrono::seconds(5);
+  const auto route_budget = std::chrono::seconds(10);
+  const auto worker_budget = std::chrono::seconds(10);
+  const auto keepalive_interval = std::chrono::hours(1);
+  auto engine_front = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_front));
+  auto engine_home = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root_home));
+
+  GrpcDaemon home(
+      kHomeDaemonId,
+      root_home,
+      engine_home,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/true,
+      /*inline_payload_threshold_bytes=*/8);
+  const uint16_t home_p2p_port = engine_home->get_shared_comm_manager()->listen_port();
+  gs->upsert_worker(
+      kHomeDaemonId, "127.0.0.1", grpc_port_from_address(home.address), kShardHomeEligibleFlag, home_p2p_port);
+
+  GrpcDaemon front(
+      kFrontDaemonId,
+      root_front,
+      engine_front,
+      gs,
+      lease_ttl,
+      route_budget,
+      worker_budget,
+      keepalive_interval,
+      /*shard_home_eligible=*/true,
+      /*routing_epoch=*/1,
+      /*start_server=*/true,
+      /*inline_payload_threshold_bytes=*/8);
+  const uint16_t front_p2p_port = engine_front->get_shared_comm_manager()->listen_port();
+  gs->upsert_worker(
+      kFrontDaemonId, "127.0.0.1", grpc_port_from_address(front.address), kShardHomeEligibleFlag, front_p2p_port);
+
+  const std::vector<std::string> daemon_ids{std::string(kFrontDaemonId), std::string(kHomeDaemonId)};
+  const std::string artifact_id_a = find_artifact_id_for_expected_home(kHomeDaemonId, daemon_ids);
+  const std::string artifact_id_b = artifact_on_same_shard(artifact_id_a, "put-segmented-region");
+  const std::string payload_a(64, 'x');
+  const std::string payload_b(96, 'y');
+  const std::string slab = payload_a + payload_b;
+  const std::uint64_t shard_id = shard_for_artifact(artifact_id_a, /*shard_count=*/4096ULL);
+  gs->seed_lease(shard_id, kHomeDaemonId, /*lease_generation=*/1);
+
+  auto source_region = register_test_host_shared_region(
+      *front.harness, slab.size(), tensorcast::daemon::IpcRegionRegistry::HostRegionClass::kAllocator);
+  std::memcpy(source_region.base_ptr, slab.data(), slab.size());
+
+  BatchPutIfAbsentFromRegionRequest put_req;
+  auto* put_item_a = put_req.add_items();
+  put_item_a->mutable_selection()->set_artifact_id(artifact_id_a);
+  set_layout_only_invariant(put_item_a->mutable_invariant(), "layout_v1", payload_a);
+  auto* put_item_b = put_req.add_items();
+  put_item_b->mutable_selection()->set_artifact_id(artifact_id_b);
+  set_layout_only_invariant(put_item_b->mutable_invariant(), "layout_v1", payload_b);
+  populate_two_item_host_shared_region_layout(
+      put_req.mutable_source_layout(), source_region, artifact_id_a, payload_a.size(), artifact_id_b, payload_b.size());
+  put_req.mutable_source_layout()->mutable_offsets(0)->set_slot_index(7);
+  put_req.mutable_source_layout()->mutable_offsets(0)->set_slot_generation(17);
+  put_req.mutable_source_layout()->mutable_offsets(1)->set_slot_index(8);
+  put_req.mutable_source_layout()->mutable_offsets(1)->set_slot_generation(18);
+  put_req.set_pid(source_region.owner_pid);
+  put_req.set_operation_id("op-put-segmented-region");
+
+  CollectingLogSink sink;
+  absl::AddLogSink(&sink);
+  BatchPutIfAbsentFromRegionResponse put_resp;
+  grpc::ServerContext put_ctx;
+  const auto put_st = front.harness->service().BatchPutIfAbsentFromRegion(&put_ctx, &put_req, &put_resp);
+  absl::RemoveLogSink(&sink);
+
+  REQUIRE(put_st.ok());
+  REQUIRE(put_resp.outcomes_size() == 2);
+  CAPTURE(put_resp.outcomes(0).message());
+  CAPTURE(put_resp.outcomes(1).message());
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(put_resp.outcomes(1).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  CHECK(put_resp.outcomes(0).slot_index() == 7);
+  CHECK(put_resp.outcomes(0).slot_generation() == 17);
+  CHECK(put_resp.outcomes(1).slot_index() == 8);
+  CHECK(put_resp.outcomes(1).slot_generation() == 18);
+  CHECK(sink.Contains("mode=segmented_region_export"));
+  CHECK(sink.Contains("source_realization_mode=source_layout_host_shared"));
+  CHECK_FALSE(sink.Contains("mode=staged_slab"));
+
+  auto target_region = register_test_host_shared_region(*front.harness, slab.size());
+  std::memset(target_region.base_ptr, 0, static_cast<std::size_t>(target_region.size_bytes));
+
+  BatchGetIntoRegionRequest get_req;
+  get_req.add_selections()->set_artifact_id(artifact_id_a);
+  get_req.add_selections()->set_artifact_id(artifact_id_b);
+  populate_two_item_host_shared_region_layout(
+      get_req.mutable_target_layout(), target_region, artifact_id_a, payload_a.size(), artifact_id_b, payload_b.size());
+  get_req.set_pid(target_region.owner_pid);
+  get_req.set_operation_id("op-put-segmented-region");
+
+  BatchGetIntoRegionResponse get_resp;
+  grpc::ServerContext get_ctx;
+  const auto get_st = front.harness->service().BatchGetIntoRegion(&get_ctx, &get_req, &get_resp);
+  REQUIRE(get_st.ok());
+  REQUIRE(get_resp.outcomes_size() == 2);
+  REQUIRE(get_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(get_resp.outcomes(1).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(std::string(static_cast<const char*>(target_region.base_ptr), payload_a.size()) == payload_a);
+  REQUIRE(
+      std::string(static_cast<const char*>(target_region.base_ptr) + payload_a.size(), payload_b.size()) == payload_b);
+
+  release_test_host_shared_region(*front.harness, source_region);
   release_test_host_shared_region(*front.harness, target_region);
 }
 

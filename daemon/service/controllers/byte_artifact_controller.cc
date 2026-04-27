@@ -100,6 +100,18 @@ void attach_slot_tokens_to_outcomes(
   }
 }
 
+std::string_view host_region_class_label(IpcRegionRegistry::HostRegionClass host_region_class) {
+  switch (host_region_class) {
+    case IpcRegionRegistry::HostRegionClass::kScratch:
+      return "scratch";
+    case IpcRegionRegistry::HostRegionClass::kAllocator:
+      return "allocator";
+    case IpcRegionRegistry::HostRegionClass::kNone:
+    default:
+      return "none";
+  }
+}
+
 v2::BatchItemOutcome make_outcome(
     std::string_view artifact_id,
     v2::BatchItemStatus status,
@@ -306,6 +318,15 @@ struct BatchPayloadPackEntry {
   std::optional<BodyDescriptor> body_descriptor;
   std::optional<store::runtime::ingestion::BackingIdentity> backing_identity;
   std::uint64_t backing_instance_generation{0};
+  std::string digest_alg;
+  std::string digest_hex;
+  absl::Time capability_expires_at{absl::InfiniteFuture()};
+};
+
+struct SourceLayoutBatchPayloadEntry {
+  std::string artifact_id;
+  std::uint64_t payload_size_bytes{0};
+  ByteArtifactRegionLayout::HostSharedSourceSpan source_span;
   std::string digest_alg;
   std::string digest_hex;
   absl::Time capability_expires_at{absl::InfiniteFuture()};
@@ -519,6 +540,28 @@ absl::Status validate_batch_payload_pack_entry(const BatchPayloadPackEntry& entr
   return absl::OkStatus();
 }
 
+absl::Status validate_source_layout_batch_payload_entry(const SourceLayoutBatchPayloadEntry& entry) {
+  if (entry.artifact_id.empty()) {
+    return absl::InvalidArgumentError("source-layout batch payload entry requires artifact_id");
+  }
+  if (entry.payload_size_bytes == 0) {
+    return absl::InvalidArgumentError("source-layout batch payload entry payload_size_bytes must be > 0");
+  }
+  if (entry.source_span.data == nullptr) {
+    return absl::InvalidArgumentError("source-layout batch payload entry requires source span data");
+  }
+  if (entry.source_span.length != entry.payload_size_bytes) {
+    return absl::InvalidArgumentError("source-layout batch payload entry source span size mismatch");
+  }
+  if (entry.source_span.keepalive == nullptr) {
+    return absl::InvalidArgumentError("source-layout batch payload entry requires source span keepalive");
+  }
+  if (entry.digest_alg.empty() != entry.digest_hex.empty()) {
+    return absl::InvalidArgumentError("source-layout batch payload entry digest_alg and digest_hex must both be set");
+  }
+  return absl::OkStatus();
+}
+
 absl::Status fill_batch_payload_pack_entry(const BatchPayloadPackEntry& entry, char* dst) {
   auto validate_status = validate_batch_payload_pack_entry(entry);
   if (!validate_status.ok()) {
@@ -674,6 +717,90 @@ absl::StatusOr<std::vector<PlannedBatchPayload>> plan_batch_payload_entries(
   return packs;
 }
 
+absl::StatusOr<std::vector<PlannedBatchPayload>> plan_source_layout_batch_payload_entries(
+    const std::vector<SourceLayoutBatchPayloadEntry>& entries,
+    std::uint64_t max_payload_bytes,
+    std::uint32_t max_items) {
+  std::vector<PlannedBatchPayload> packs;
+  if (entries.empty()) {
+    return packs;
+  }
+
+  struct PendingPack {
+    std::vector<std::size_t> entry_indices;
+    std::uint64_t total_bytes{0};
+    absl::Time capability_expires_at{absl::InfiniteFuture()};
+  };
+
+  const auto flush_pack = [&](const PendingPack& pending) -> absl::StatusOr<PlannedBatchPayload> {
+    PlannedBatchPayload packed;
+    packed.source_indices = pending.entry_indices;
+    packed.capability_expires_at = pending.capability_expires_at;
+
+    std::uint64_t offset = 0;
+    for (const auto entry_index : pending.entry_indices) {
+      const auto& entry = entries[entry_index];
+      auto validate_status = validate_source_layout_batch_payload_entry(entry);
+      if (!validate_status.ok()) {
+        return validate_status;
+      }
+
+      auto* manifest_entry = packed.manifest.add_entries();
+      manifest_entry->set_artifact_id(entry.artifact_id);
+      manifest_entry->set_offset(offset);
+      manifest_entry->set_length(entry.payload_size_bytes);
+      manifest_entry->set_digest_alg(entry.digest_alg);
+      manifest_entry->set_digest_hex(entry.digest_hex);
+
+      v2::BatchPayloadSlice slice;
+      slice.set_offset(offset);
+      slice.set_length(entry.payload_size_bytes);
+      packed.slices.push_back(std::move(slice));
+      offset += entry.payload_size_bytes;
+    }
+    packed.manifest.set_total_size(offset);
+    return packed;
+  };
+
+  PendingPack pending;
+  for (std::size_t entry_index = 0; entry_index < entries.size(); ++entry_index) {
+    const auto& entry = entries[entry_index];
+    auto validate_status = validate_source_layout_batch_payload_entry(entry);
+    if (!validate_status.ok()) {
+      return validate_status;
+    }
+    const std::uint64_t entry_bytes = entry.payload_size_bytes;
+    if (max_payload_bytes != 0 && entry_bytes > max_payload_bytes) {
+      return absl::InvalidArgumentError("source-layout batch payload entry exceeds max_payload_bytes");
+    }
+
+    const bool reaches_item_limit = max_items != 0 && pending.entry_indices.size() >= max_items;
+    const bool reaches_byte_limit =
+        max_payload_bytes != 0 && pending.total_bytes != 0 && pending.total_bytes + entry_bytes > max_payload_bytes;
+    if (!pending.entry_indices.empty() && (reaches_item_limit || reaches_byte_limit)) {
+      auto packed_or = flush_pack(pending);
+      if (!packed_or.ok()) {
+        return packed_or.status();
+      }
+      packs.push_back(std::move(*packed_or));
+      pending = PendingPack{};
+    }
+
+    pending.entry_indices.push_back(entry_index);
+    pending.total_bytes += entry_bytes;
+    pending.capability_expires_at = std::min(pending.capability_expires_at, entry.capability_expires_at);
+  }
+
+  if (!pending.entry_indices.empty()) {
+    auto packed_or = flush_pack(pending);
+    if (!packed_or.ok()) {
+      return packed_or.status();
+    }
+    packs.push_back(std::move(*packed_or));
+  }
+  return packs;
+}
+
 absl::StatusOr<std::shared_ptr<const std::string>> realize_staged_batch_payload(
     const std::vector<BatchPayloadPackEntry>& entries,
     const PlannedBatchPayload& plan) {
@@ -768,6 +895,32 @@ acquire_segmented_batch_payload_source_segments(
     source_segments.push_back(
         PayloadTransportBroker::BatchCommunicatorSourceSegment{
             .export_view = std::move(*export_view_or),
+        });
+  }
+  return source_segments;
+}
+
+absl::StatusOr<std::vector<PayloadTransportBroker::BatchCommunicatorRegionSourceSegment>>
+acquire_segmented_region_source_segments(
+    const std::vector<SourceLayoutBatchPayloadEntry>& entries,
+    const PlannedBatchPayload& plan) {
+  std::vector<PayloadTransportBroker::BatchCommunicatorRegionSourceSegment> source_segments;
+  source_segments.reserve(plan.source_indices.size());
+  for (std::size_t plan_index = 0; plan_index < plan.source_indices.size(); ++plan_index) {
+    const auto entry_index = plan.source_indices[plan_index];
+    const auto& entry = entries[entry_index];
+    auto validate_status = validate_source_layout_batch_payload_entry(entry);
+    if (!validate_status.ok()) {
+      return validate_status;
+    }
+    if (entry.payload_size_bytes != plan.slices[plan_index].length()) {
+      return absl::FailedPreconditionError("segmented region source size mismatch");
+    }
+    source_segments.push_back(
+        PayloadTransportBroker::BatchCommunicatorRegionSourceSegment{
+            .data = entry.source_span.data,
+            .size_bytes = entry.source_span.length,
+            .keepalive = entry.source_span.keepalive,
         });
   }
   return source_segments;
@@ -4822,9 +4975,13 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
     std::size_t remote_batch_pack_count{0};
     std::size_t remote_batch_pack_item_count{0};
     std::uint64_t remote_batch_pack_bytes{0};
+    std::size_t remote_batch_segmented_region_export_count{0};
+    std::size_t remote_batch_segmented_region_export_item_count{0};
+    std::uint64_t remote_batch_segmented_region_export_bytes{0};
     absl::Duration local_stage_elapsed{absl::ZeroDuration()};
     absl::Duration remote_stage_elapsed{absl::ZeroDuration()};
     absl::Duration remote_batch_pack_elapsed{absl::ZeroDuration()};
+    absl::Duration remote_batch_segmented_region_export_elapsed{absl::ZeroDuration()};
     absl::Duration local_home_apply_elapsed{absl::ZeroDuration()};
     absl::Duration remote_home_rpc_elapsed{absl::ZeroDuration()};
   } stats;
@@ -5337,6 +5494,12 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
               << " remote_batch_pack_items=" << task_stats.remote_batch_pack_item_count
               << " remote_batch_pack_bytes=" << task_stats.remote_batch_pack_bytes
               << " remote_batch_pack_ms=" << absl::ToDoubleMilliseconds(task_stats.remote_batch_pack_elapsed)
+              << " remote_batch_segmented_region_export_count=" << task_stats.remote_batch_segmented_region_export_count
+              << " remote_batch_segmented_region_export_items="
+              << task_stats.remote_batch_segmented_region_export_item_count
+              << " remote_batch_segmented_region_export_bytes=" << task_stats.remote_batch_segmented_region_export_bytes
+              << " remote_batch_segmented_region_export_ms="
+              << absl::ToDoubleMilliseconds(task_stats.remote_batch_segmented_region_export_elapsed)
               << " local_home_apply_ms=" << absl::ToDoubleMilliseconds(task_stats.local_home_apply_elapsed)
               << " remote_home_rpc_ms=" << absl::ToDoubleMilliseconds(task_stats.remote_home_rpc_elapsed)
               << " total_ms=" << absl::ToDoubleMilliseconds(task_result.total_elapsed);
@@ -5365,14 +5528,199 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
 
     ++task_stats.remote_home_batch_count;
     task_stats.remote_home_item_count += task.batch.items.size();
-    for (auto& pending : task.batch.items) {
-      stage_pending_body(&pending, BodyAccessClass::kTransientForward);
-    }
-
     const PeerBatchTransportSupport peer_transport_support =
         resolve_peer_batch_transport_support_for_task(task.route.holder_daemon_id);
     std::vector<v2::BatchPayloadTransport> batch_transports;
     absl::flat_hash_map<int, v2::BatchPayloadSlice> batch_slice_by_outcome_index;
+
+    const auto log_source_no_pack_fallback =
+        [&](const PendingPut& pending, std::string_view reason, std::string_view message = "") {
+          VLOG(2) << "byte_artifact.batch_put_if_absent_from_region_segmented_export_fallback"
+                  << " operation_id=" << operation_id << " shard_id=" << task.shard_id
+                  << " holder_daemon_id=" << task.route.holder_daemon_id << " artifact_id=" << pending.artifact_id
+                  << " reason=" << reason << " message=" << message;
+        };
+
+    const auto stage_source_layout_fallback_entries =
+        [&](absl::Span<PendingPut*> pending_items, std::string_view reason, std::string_view message = "") {
+          for (PendingPut* pending : pending_items) {
+            if (pending == nullptr || has_outcome(pending->outcome_index) || pending->body_handle.has_value()) {
+              continue;
+            }
+            log_source_no_pack_fallback(*pending, reason, message);
+            stage_pending_body(pending, BodyAccessClass::kTransientForward);
+          }
+        };
+
+    const bool source_layout_no_pack_possible = peer_transport_support.supports_segmented_communicator_export() &&
+        d_.payload_transport_broker.batch_transport_segmented_communicator_export_enabled() &&
+        local_producer_endpoint.available && local_producer_endpoint.p2p_port != 0;
+
+    std::vector<SourceLayoutBatchPayloadEntry> source_layout_entries;
+    std::vector<PendingPut*> source_layout_pending;
+    source_layout_entries.reserve(task.batch.items.size());
+    source_layout_pending.reserve(task.batch.items.size());
+    for (auto& pending : task.batch.items) {
+      if (has_outcome(pending.outcome_index)) {
+        continue;
+      }
+      bool admitted_source_layout_no_pack = false;
+      if (pending.needs_source_layout) {
+        if (!source_layout_no_pack_possible) {
+          std::string_view reason = "peer_lacks_segmented_export";
+          if (peer_transport_support.supports_segmented_communicator_export() &&
+              !d_.payload_transport_broker.batch_transport_segmented_communicator_export_enabled()) {
+            reason = "local_segmented_export_disabled";
+          } else if (peer_transport_support.supports_segmented_communicator_export()) {
+            reason = "producer_endpoint_unavailable";
+          }
+          log_source_no_pack_fallback(pending, reason);
+        } else if (!source_layout.has_value()) {
+          log_source_no_pack_fallback(pending, "source_layout_missing");
+        } else if (verification_mode_requires_payload_digest(invariant_verification_mode(pending.invariant))) {
+          log_source_no_pack_fallback(pending, "strict_digest");
+        } else {
+          auto source_span_or = source_layout->open_host_shared_source_span(pending.artifact_id);
+          if (!source_span_or.ok()) {
+            log_source_no_pack_fallback(pending, "not_host_shared", std::string(source_span_or.status().message()));
+          } else if (source_span_or->length != pending.invariant.byte_length()) {
+            log_source_no_pack_fallback(pending, "source_span_length_mismatch");
+          } else {
+            source_layout_entries.push_back(
+                SourceLayoutBatchPayloadEntry{
+                    .artifact_id = pending.artifact_id,
+                    .payload_size_bytes = source_span_or->length,
+                    .source_span = std::move(*source_span_or),
+                    .digest_alg = normalize_body_digest_value(pending.invariant.payload_digest_alg()),
+                    .digest_hex = normalize_body_digest_value(pending.invariant.payload_digest_hex()),
+                    .capability_expires_at = absl::InfiniteFuture(),
+                });
+            source_layout_pending.push_back(&pending);
+            admitted_source_layout_no_pack = true;
+          }
+        }
+      }
+      if (!admitted_source_layout_no_pack) {
+        stage_pending_body(&pending, BodyAccessClass::kTransientForward);
+      }
+    }
+
+    if (!source_layout_entries.empty()) {
+      const absl::Time export_started_at = absl::Now();
+      auto plans_or = plan_source_layout_batch_payload_entries(
+          source_layout_entries,
+          d_.payload_transport_broker.max_batch_payload_bytes(),
+          d_.payload_transport_broker.max_batch_items());
+      if (!plans_or.ok()) {
+        stage_source_layout_fallback_entries(
+            absl::MakeSpan(source_layout_pending), "segment_budget_exceeded", std::string(plans_or.status().message()));
+      } else {
+        for (const auto& pack : *plans_or) {
+          std::vector<PendingPut*> pack_pending;
+          pack_pending.reserve(pack.source_indices.size());
+          std::string host_region_class = "mixed";
+          for (const auto entry_index : pack.source_indices) {
+            pack_pending.push_back(source_layout_pending[entry_index]);
+            const auto current_label =
+                host_region_class_label(source_layout_entries[entry_index].source_span.host_region_class);
+            if (host_region_class == "mixed") {
+              host_region_class = std::string(current_label);
+            } else if (host_region_class != current_label) {
+              host_region_class = "mixed";
+            }
+          }
+
+          auto source_segments_or = acquire_segmented_region_source_segments(source_layout_entries, pack);
+          if (!source_segments_or.ok()) {
+            stage_source_layout_fallback_entries(
+                absl::MakeSpan(pack_pending),
+                "export_registration_failed",
+                std::string(source_segments_or.status().message()));
+            continue;
+          }
+          auto communicator_export_or = d_.payload_transport_broker.issue_batch_payload_communicator_export(
+              pack.manifest,
+              absl::MakeSpan(*source_segments_or),
+              tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
+              operation_id,
+              pack.capability_expires_at,
+              task.route.holder_daemon_id);
+          if (!communicator_export_or.ok()) {
+            stage_source_layout_fallback_entries(
+                absl::MakeSpan(pack_pending),
+                "export_registration_failed",
+                std::string(communicator_export_or.status().message()));
+            continue;
+          }
+
+          v2::BatchPayloadTransport transport;
+          const std::string transport_id = absl::StrCat("batch-transport-", batch_transports.size() + 1);
+          transport.set_transport_id(transport_id);
+          transport.mutable_manifest()->CopyFrom(pack.manifest);
+          auto* communicator_source = transport.mutable_communicator_source();
+          communicator_source->set_batch_payload_ref(communicator_export_or->batch_payload_ref);
+          communicator_source->set_protocol_version(d_.payload_transport_broker.batch_transport_protocol_version());
+          communicator_source->set_producer_daemon_id(local_daemon_id);
+          communicator_source->set_consumer_daemon_id(task.route.holder_daemon_id);
+          communicator_source->set_producer_host(local_producer_endpoint.node_address);
+          communicator_source->set_producer_port(local_producer_endpoint.p2p_port);
+          for (const auto& remote_memory_key : communicator_export_or->export_registration.remote_memory_keys) {
+            communicator_source->add_remote_memory_keys(remote_memory_key);
+          }
+          for (const auto buffer_size : communicator_export_or->export_registration.buffer_sizes) {
+            communicator_source->add_buffer_sizes(buffer_size);
+          }
+          if (!local_producer_endpoint.node_id.empty()) {
+            communicator_source->set_remote_endpoint_id(
+                store::components::derive_endpoint_id(
+                    local_producer_endpoint.node_id, common::memory::MemoryLocation::CPU, /*device_id=*/0));
+          }
+          const auto consumer_endpoint_it = prebuilt_remote_cpu_endpoint_ids.find(task.route.holder_daemon_id);
+          if (consumer_endpoint_it != prebuilt_remote_cpu_endpoint_ids.end()) {
+            communicator_source->set_local_endpoint_id_hint(consumer_endpoint_it->second);
+          }
+          communicator_source->set_memory_location(v2::BATCH_PAYLOAD_MEMORY_LOCATION_HOST);
+          communicator_source->set_total_payload_bytes(pack.manifest.total_size());
+
+          ++task_stats.remote_batch_transport_count;
+          ++task_stats.remote_batch_transport_communicator_count;
+          task_stats.remote_batch_transport_item_count += pack.source_indices.size();
+          task_stats.remote_batch_transport_bytes += pack.manifest.total_size();
+          ++task_stats.remote_batch_segmented_region_export_count;
+          task_stats.remote_batch_segmented_region_export_item_count += pack.source_indices.size();
+          task_stats.remote_batch_segmented_region_export_bytes += pack.manifest.total_size();
+
+          LOG(INFO) << "byte_artifact.batch_put_if_absent_from_region_pack_realization"
+                    << " operation_id=" << operation_id << " shard_id=" << task.shard_id
+                    << " holder_daemon_id=" << task.route.holder_daemon_id << " remote=true"
+                    << " mode=segmented_region_export"
+                    << " staged_slab=false"
+                    << " source_realization_mode=source_layout_host_shared"
+                    << " host_region_class=" << host_region_class << " pack_count=1"
+                    << " item_count=" << pack.source_indices.size() << " payload_bytes=" << pack.manifest.total_size()
+                    << " source_segments=" << source_segments_or->size()
+                    << " remote_keys=" << communicator_export_or->export_registration.remote_memory_keys.size()
+                    << " registration_ownership=broker_owned";
+
+          LOG(INFO) << "byte_artifact.batch_put_if_absent_from_region_transport_emit"
+                    << " operation_id=" << operation_id << " shard_id=" << task.shard_id
+                    << " holder_daemon_id=" << task.route.holder_daemon_id << " transport_id=" << transport_id
+                    << " kind=communicator_source"
+                    << " source_realization_mode=segmented_region_export"
+                    << " item_count=" << pack.source_indices.size() << " payload_bytes=" << pack.manifest.total_size();
+
+          for (std::size_t pack_index = 0; pack_index < pack.source_indices.size(); ++pack_index) {
+            auto slice = pack.slices[pack_index];
+            slice.set_transport_id(transport_id);
+            batch_slice_by_outcome_index.emplace(
+                source_layout_pending[pack.source_indices[pack_index]]->outcome_index, std::move(slice));
+          }
+          batch_transports.push_back(std::move(transport));
+        }
+      }
+      task_stats.remote_batch_segmented_region_export_elapsed += absl::Now() - export_started_at;
+    }
+
     if (peer_transport_support.supports_v1()) {
       std::vector<BatchPayloadPackEntry> batch_entries;
       std::vector<int> batch_entry_outcome_indices;
@@ -5617,21 +5965,24 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
     prepared_remote_batch.outcome_slots.reserve(task.batch.items.size());
     prepared_remote_batch.retire_handles.reserve(task.batch.items.size());
     for (const auto& pending : task.batch.items) {
-      if (!pending.body_handle.has_value()) {
+      const auto batch_slice_it = batch_slice_by_outcome_index.find(pending.outcome_index);
+      const bool has_batch_slice = batch_slice_it != batch_slice_by_outcome_index.end();
+      if (!pending.body_handle.has_value() && !has_batch_slice) {
         continue;
       }
-      prepared_remote_batch.retire_handles.push_back(*pending.body_handle);
+      if (pending.body_handle.has_value()) {
+        prepared_remote_batch.retire_handles.push_back(*pending.body_handle);
+      }
       auto* dst = prepared_remote_batch.home_req.add_items();
       dst->set_artifact_id(pending.artifact_id);
       dst->mutable_invariant()->CopyFrom(pending.invariant);
-      const auto batch_slice_it = batch_slice_by_outcome_index.find(pending.outcome_index);
-      if (batch_slice_it != batch_slice_by_outcome_index.end()) {
+      if (has_batch_slice) {
         dst->mutable_batch_payload_slice()->CopyFrom(batch_slice_it->second);
       }
       const auto payload_ref_it = payload_ref_by_artifact.find(pending.artifact_id);
       if (payload_ref_it != payload_ref_by_artifact.end()) {
         dst->set_payload_ref(payload_ref_it->second);
-      } else if (batch_slice_it == batch_slice_by_outcome_index.end()) {
+      } else if (!has_batch_slice) {
         prepared_remote_batch.home_req.mutable_items()->RemoveLast();
         continue;
       }
@@ -5761,9 +6112,13 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
     stats.remote_batch_pack_count += delta.remote_batch_pack_count;
     stats.remote_batch_pack_item_count += delta.remote_batch_pack_item_count;
     stats.remote_batch_pack_bytes += delta.remote_batch_pack_bytes;
+    stats.remote_batch_segmented_region_export_count += delta.remote_batch_segmented_region_export_count;
+    stats.remote_batch_segmented_region_export_item_count += delta.remote_batch_segmented_region_export_item_count;
+    stats.remote_batch_segmented_region_export_bytes += delta.remote_batch_segmented_region_export_bytes;
     stats.local_stage_elapsed += delta.local_stage_elapsed;
     stats.remote_stage_elapsed += delta.remote_stage_elapsed;
     stats.remote_batch_pack_elapsed += delta.remote_batch_pack_elapsed;
+    stats.remote_batch_segmented_region_export_elapsed += delta.remote_batch_segmented_region_export_elapsed;
     stats.local_home_apply_elapsed += delta.local_home_apply_elapsed;
     stats.remote_home_rpc_elapsed += delta.remote_home_rpc_elapsed;
   };
@@ -5829,9 +6184,14 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
           << " remote_batch_pack_count=" << stats.remote_batch_pack_count
           << " remote_batch_pack_items=" << stats.remote_batch_pack_item_count
           << " remote_batch_pack_bytes=" << stats.remote_batch_pack_bytes
+          << " remote_batch_segmented_region_export_count=" << stats.remote_batch_segmented_region_export_count
+          << " remote_batch_segmented_region_export_items=" << stats.remote_batch_segmented_region_export_item_count
+          << " remote_batch_segmented_region_export_bytes=" << stats.remote_batch_segmented_region_export_bytes
           << " local_stage_ms=" << absl::ToDoubleMilliseconds(stats.local_stage_elapsed)
           << " remote_stage_ms=" << absl::ToDoubleMilliseconds(stats.remote_stage_elapsed)
           << " remote_batch_pack_ms=" << absl::ToDoubleMilliseconds(stats.remote_batch_pack_elapsed)
+          << " remote_batch_segmented_region_export_ms="
+          << absl::ToDoubleMilliseconds(stats.remote_batch_segmented_region_export_elapsed)
           << " local_home_apply_ms=" << absl::ToDoubleMilliseconds(stats.local_home_apply_elapsed)
           << " remote_home_rpc_ms=" << absl::ToDoubleMilliseconds(stats.remote_home_rpc_elapsed);
   rctx.mark_success();

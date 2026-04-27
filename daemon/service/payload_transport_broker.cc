@@ -1912,6 +1912,133 @@ absl::StatusOr<PayloadTransportBroker::BatchCommunicatorExport> PayloadTransport
   };
 }
 
+absl::StatusOr<PayloadTransportBroker::BatchCommunicatorExport> PayloadTransportBroker::
+    issue_batch_payload_communicator_export(
+        const v2::BatchPayloadManifest& manifest,
+        absl::Span<const BatchCommunicatorRegionSourceSegment> source_segments,
+        tensorcast::common::v1::PayloadRefDirection direction,
+        std::string_view operation_id,
+        absl::Time capability_expires_at,
+        std::string_view consumer_daemon_id) {
+  if (!batch_transport_segmented_communicator_export_enabled()) {
+    return absl::FailedPreconditionError("segmented batch communicator transport is disabled");
+  }
+  if (options_.comm_manager == nullptr || !options_.comm_manager->is_enabled()) {
+    return absl::FailedPreconditionError("communication manager is unavailable for region source export");
+  }
+  auto manifest_status = validate_batch_payload_manifest(manifest);
+  if (!manifest_status.ok()) {
+    return manifest_status;
+  }
+  if (static_cast<int>(source_segments.size()) != manifest.entries_size()) {
+    return absl::InvalidArgumentError("segmented region source count mismatch");
+  }
+  const absl::Time now = absl::Now();
+  auto expires_at_or = resolve_payload_ref_expiry(now, options_.ttl, capability_expires_at);
+  if (!expires_at_or.ok()) {
+    return expires_at_or.status();
+  }
+  const absl::Time expires_at = *expires_at_or;
+  if (expires_at - now < options_.minimum_batch_transport_ttl) {
+    return absl::FailedPreconditionError("batch communicator transport ttl below minimum");
+  }
+
+  std::vector<void*> buffer_addresses;
+  std::vector<size_t> buffer_sizes;
+  std::vector<std::shared_ptr<void>> keepalives;
+  buffer_addresses.reserve(source_segments.size());
+  buffer_sizes.reserve(source_segments.size());
+  keepalives.reserve(source_segments.size());
+
+  std::uint64_t total_payload_bytes = 0;
+  for (int entry_index = 0; entry_index < manifest.entries_size(); ++entry_index) {
+    const auto& segment = source_segments[entry_index];
+    if (segment.data == nullptr) {
+      return absl::FailedPreconditionError("segmented region source requires data pointer");
+    }
+    if (segment.size_bytes == 0) {
+      return absl::FailedPreconditionError("segmented region source requires non-empty segment");
+    }
+    if (segment.keepalive == nullptr) {
+      return absl::FailedPreconditionError("segmented region source requires keepalive");
+    }
+    if (segment.size_bytes != manifest.entries(entry_index).length()) {
+      return absl::FailedPreconditionError("segmented region source length mismatch");
+    }
+    if (segment.size_bytes > std::numeric_limits<size_t>::max()) {
+      return absl::OutOfRangeError("segmented region source exceeds host memory limits");
+    }
+    if (total_payload_bytes > std::numeric_limits<std::uint64_t>::max() - segment.size_bytes) {
+      return absl::OutOfRangeError("segmented region source payload exceeds uint64 range");
+    }
+    total_payload_bytes += segment.size_bytes;
+    buffer_addresses.push_back(const_cast<void*>(segment.data));
+    buffer_sizes.push_back(static_cast<size_t>(segment.size_bytes));
+    keepalives.push_back(segment.keepalive);
+  }
+  if (total_payload_bytes != manifest.total_size()) {
+    return absl::FailedPreconditionError("segmented region source payload size mismatch");
+  }
+
+  const absl::Time export_started_at = absl::Now();
+  const absl::Time register_started_at = absl::Now();
+  auto registration_or = options_.comm_manager->register_memory(buffer_addresses, buffer_sizes, /*device_id=*/-1);
+  const absl::Duration register_elapsed = absl::Now() - register_started_at;
+  if (!registration_or.ok()) {
+    return registration_or.status();
+  }
+  registration_or->location = common::memory::MemoryLocation::CPU;
+  registration_or->device_id = -1;
+  registration_or->artifact_size = manifest.total_size();
+
+  const auto unregister_registered = [&]() {
+    for (const auto& tensor_key : registration_or->remote_memory_keys) {
+      (void)options_.comm_manager->get_engine().unregister_tensor(tensor_key);
+    }
+  };
+
+  const absl::Time issue_ref_started_at = absl::Now();
+  auto batch_payload_ref_or = issue_batch_payload_ref_record(
+      manifest,
+      /*payload=*/nullptr,
+      direction,
+      operation_id,
+      capability_expires_at,
+      consumer_daemon_id);
+  const absl::Duration issue_ref_elapsed = absl::Now() - issue_ref_started_at;
+  if (!batch_payload_ref_or.ok()) {
+    unregister_registered();
+    return batch_payload_ref_or.status();
+  }
+  {
+    absl::MutexLock lock(&mu_);
+    const auto it = batch_records_.find(batch_payload_ref_or->metadata.transport_id);
+    if (it == batch_records_.end()) {
+      unregister_registered();
+      lifecycle_manager_->release_lease(batch_payload_ref_or->lease_id);
+      return absl::NotFoundError("segmented region source transport record is missing");
+    }
+    it->second.communicator_export = *registration_or;
+    it->second.communicator_export_keepalives = std::move(keepalives);
+    it->second.communicator_export_requires_unregister = true;
+  }
+  VLOG(2) << "batch_payload_ref.communicator_export_summary"
+          << " direction=" << payload_direction_label(direction) << " operation_id=" << operation_id
+          << " realization=segmented_region_source"
+          << " transport_id=" << batch_payload_ref_or->metadata.transport_id
+          << " payload_bytes=" << batch_payload_ref_or->metadata.payload_size
+          << " remote_keys=" << registration_or->remote_memory_keys.size()
+          << " source_segments=" << source_segments.size()
+          << " register_ms=" << absl::ToDoubleMilliseconds(register_elapsed)
+          << " issue_ref_ms=" << absl::ToDoubleMilliseconds(issue_ref_elapsed)
+          << " total_ms=" << absl::ToDoubleMilliseconds(absl::Now() - export_started_at);
+  return BatchCommunicatorExport{
+      .metadata = batch_payload_ref_or->metadata,
+      .batch_payload_ref = batch_payload_ref_or->batch_payload_ref,
+      .export_registration = *registration_or,
+  };
+}
+
 absl::StatusOr<PayloadTransportBroker::RefMetadata> PayloadTransportBroker::inspect_payload_ref(
     std::string_view payload_ref,
     absl::Time now,

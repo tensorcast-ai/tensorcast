@@ -121,21 +121,24 @@ RDMA realization follow-ons still in progress:
   mirror, while MTCP and staged fallback paths still materialize one full local
   pack payload per `transport_id` before per-item slicing.
 - `HomeBatchPutIfAbsent` accepts batch transports on the put path and consumes
-  eligible remote RDMA `communicator_source` transports through per-item
-  `SourceSlice` loaders staged by `BodyBackingManager::stage_body(...)`. The
-  first put-side cut intentionally keeps source-side staged-slab pack
-  construction and per-item home staging in place; it only removes the home
-  daemon's mandatory remote full-pack mirror.
+  eligible remote RDMA `communicator_source` transports without a home-daemon
+  full-pack mirror.
 - The put-side composite final-body staging cut is implemented for eligible
   `LAYOUT_AND_SIZE_ONLY` byte artifacts: the home daemon prepares unpublished
   retained body backings, lowers one remote pack source into a composite target
   layout, and lets the shared `0115` dataplane execute one batched direct-write
   materialization before authority join installation.
+- The put-side source daemon now realizes eligible remote-home
+  `HOST_SHARED`/`LAYOUT_AND_SIZE_ONLY` source-layout batch-set transports as
+  segmented `communicator_source` exports over the original source spans. The
+  contiguous staged-slab realization remains the fallback for strict digest,
+  non-`HOST_SHARED`, capability-miss, and lifetime-gap cases.
 - `BodyHandle` now exposes the export-view API used by source-side segmented
   communicator export.
-- The remaining RDMA follow-on is producer-side read-plan servicing:
-  source-side CPU byte-artifact slices are still copied from retained backing
-  into pinned staged response buffers before the remote RDMA reads them.
+- The remaining get-side RDMA follow-on is producer-side read-plan servicing:
+  source-side CPU byte-artifact slices may still be copied from retained
+  backing into pinned staged response buffers before the remote RDMA reads
+  them.
 - NodeAgent preserves structured `manifest`, `publish`, `hydrate`, and `evict_local` artifact results over
   `ExecutePlan`.
 
@@ -730,12 +733,19 @@ sequenceDiagram
 Put-path rules:
 
 1. Source-side batching is grouped by remote home bucket first; a transport pack must not mix different home daemons.
-2. The source daemon must not expose caller-accessible local regions directly as a remote fetch source after the local ingress RPC
-   returns.
-3. Before issuing a batch capability on the put path, the source daemon must adopt or stage the bytes into daemon-owned
-   transport state.
-4. The current implementation realizes transport state as one contiguous staged slab per pack. The wire contract does
-   not depend on that choice, but the live controller and broker paths do.
+2. The source daemon must not expose caller-accessible local regions as a
+   remote fetch source unless it owns a transport-lifetime lease, pin, or
+   equivalent keepalive that survives the local ingress RPC and prevents the
+   exported bytes from being recycled before transport release.
+3. Before issuing a batch capability on the put path, the source daemon must
+   adopt the bytes into daemon-owned transport-lifetime state. That state may
+   be a staged copy, or for an eligible `HOST_SHARED` no-pack path it may be
+   the original region span plus region lease, slot pin or generation token,
+   communicator export registration, and cleanup ownership.
+4. The current implementation realizes eligible `HOST_SHARED` source-layout
+   packs as segmented communicator exports and keeps the contiguous staged slab
+   as the fallback realization. The wire contract does not depend on either
+   physical choice.
 5. The home daemon still verifies each item's invariant and still installs routed join truth per artifact.
 6. The home-daemon consume path is transport-dependent. Eligible remote RDMA
    `communicator_source` sources are consumed as per-item remote `SourceSlice`
@@ -970,6 +980,174 @@ Observability rules:
    layout-and-size items drops toward zero because per-item
    `SeekableSourceLoader` staging is bypassed.
 
+#### 5.5.6c Accepted put-side source no-pack segmented export
+
+After composite final-body staging, the remaining batch-set transport copy is
+on the requester/source daemon: `BatchPutIfAbsentFromRegion` stages each
+remote-home source-layout item into a transient forwarding body and then packs
+those bodies into one contiguous host slab before issuing the
+`communicator_source`. The accepted Step-3 realization removes that put-side
+full-pack slab for eligible `HOST_SHARED` source-layout batches.
+
+Scope:
+
+1. This is a source-daemon optimization for remote-home
+   `BatchPutIfAbsentFromRegion`. It does not change `HomeBatchPutIfAbsent`,
+   routed authority, shard fencing, per-item outcomes, or the Phase-9
+   composite final-body target path.
+2. The home daemon still receives the same `BatchPayloadTransport` shape: a
+   manifest plus a `v2 communicator_source` opened with
+   `PAYLOAD_REF_DIRECTION_PUT`. The physical source may be a segmented export
+   over original source-layout spans rather than a staged slab.
+3. Same-home puts, inline payloads, per-item `payload_ref` inputs, VRAM source
+   layouts, and transports that cannot prove source lifetime keep the existing
+   staging and fallback behavior.
+
+Logical planning semantics:
+
+1. Logical pack planning remains manifest-first. Each admitted item contributes
+   exactly one `BatchPayloadManifest` entry with the same `{artifact_id,
+   offset, length, digest}` contract used by staged packs.
+2. Manifest offsets define a concatenated logical pack byte space. They do not
+   require the source daemon to allocate one contiguous physical slab.
+3. The first no-pack cut should admit `LAYOUT_AND_SIZE_ONLY` source-layout
+   items. Modes that require the source daemon to compute or prove a payload
+   digest before home publication remain on the staged path until streaming or
+   post-write digest support is designed.
+4. Pack grouping remains per remote home daemon and per shard task. A no-pack
+   pack must not mix different home daemons, mixed source kinds, or items whose
+   lifetime cannot be held by the same transport-lifetime contract.
+
+Eligibility:
+
+1. The target home is remote from the source daemon.
+2. The peer advertises `v2` batch transport and segmented communicator export;
+   the local `PayloadTransportBroker` has segmented communicator export
+   enabled; and the local producer endpoint has a usable P2P port.
+3. Every admitted entry comes directly from the validated `source_layout`.
+   Entries that already require inline bytes, per-item `payload_ref`, or a
+   transient `BodyHandle` are excluded from the no-pack group.
+4. The source layout is pure CPU `HOST_SHARED`. `VRAM`, mixed memory kinds, and
+   non-exportable host mappings fall back before transport issue.
+5. Each source-layout item resolves to a bounded exportable span whose length
+   exactly matches the manifest entry and the put invariant byte length.
+6. Allocator-backed `HOST_SHARED` regions require `slot_index` and
+   `slot_generation` on every admitted offset, plus a successful slot pin or
+   equivalent generation-validated keepalive that prevents slot reuse until the
+   batch transport is safe to release. Missing, stale, or unpinnable tokens are
+   pre-issue fallback reasons.
+7. Scratch-slab `HOST_SHARED` regions require a daemon-managed region lease
+   and an ownership or immutability proof that the source bytes cannot be
+   rewritten before transport release. If the current caller contract cannot
+   prove that lifetime, the controller must use the staged path.
+8. Segment count, payload bytes, control-plane size, and remote-key count must
+   stay within the existing batch payload limits and any communicator-specific
+   descriptor budget.
+
+Source export seam:
+
+1. `ByteArtifactRegionLayout` should expose a region-source export view, or an
+   equivalent `SegmentExportView` abstraction shared with `BodyExportView`,
+   rather than forcing `BatchPutIfAbsentFromRegion` to create transient
+   forwarding bodies.
+2. A region-source export view must carry the CPU address range, length,
+   `HOST_SHARED` class, region lease or attach keepalive, slot token and pin
+   when applicable, memory location, communicator export registration or a
+   registration request, and explicit unregister ownership.
+3. `PayloadTransportBroker` should accept segmented source entries from either
+   retained-body export views or region-source export views and concatenate
+   their remote keys and buffer sizes into one logical
+   `BatchPayloadCommunicatorSource`.
+4. If the broker registers raw `HOST_SHARED` region spans for this transport,
+   the batch record owns those registrations and must unregister them on issue
+   failure or transport expiry. If a future region export view reuses a
+   pre-existing export lease, that lease owns unregister and the batch record
+   must hold only the keepalive. A first implementation should avoid mixing
+   owned and externally owned registrations inside one batch record.
+
+Home consume compatibility:
+
+1. `RemoteKeySource` already interprets `remote_memory_keys[]` and
+   `buffer_sizes[]` as a segmented logical byte space. A manifest offset maps
+   through that concatenation in the same way whether the source is a staged
+   slab or original `HOST_SHARED` segments.
+2. Phase-9 home composite staging therefore does not need a new mapping model:
+   it still maps manifest pack offsets into unpublished final body backing
+   offsets and delegates materialization to the shared `0115` dataplane.
+3. Same-daemon local slicing remains an implementation detail and is not the
+   validation target for this RDMA no-pack path.
+
+Fallback and failure rules:
+
+1. Fallback to the current staged path must happen before issuing the segmented
+   transport. The fallback path remains
+   `stage_pending_body(kTransientForward)` plus `pack_batch_payload_entries`.
+2. Pre-issue fallback covers peer capability misses, local config misses,
+   missing P2P endpoint, non-`HOST_SHARED` source layout, mixed source kinds,
+   strict digest, missing or unpinnable allocator slot tokens, scratch lifetime
+   uncertainty, segment-budget overflow, and export-registration failure.
+3. After a segmented no-pack transport has been issued, the controller must not
+   silently retry the same operation through a staged slab using the same
+   possibly mutable source bytes. The current operation should fail affected
+   items using existing transport or RPC failure semantics; an upper-layer
+   retry may submit a fresh request.
+4. Transport keepalives must outlive remote reads and be released only through
+   the broker's batch-record expiry or an equivalent explicit release path.
+
+Observability rules:
+
+1. Eligible no-pack source realization should log
+   `byte_artifact.batch_put_if_absent_from_region_pack_realization` with a
+   distinct mode such as `mode=segmented_region_export`, `staged_slab=false`,
+   `source_realization_mode=source_layout_host_shared`, `host_region_class`,
+   `pack_count`, `item_count`, `payload_bytes`, `source_segments`,
+   `remote_keys`, and registration ownership.
+2. Pre-issue fallback should log a bounded reason such as
+   `peer_lacks_segmented_export`, `local_segmented_export_disabled`,
+   `producer_endpoint_unavailable`, `not_source_layout`, `not_host_shared`,
+   `vram_source`, `slot_token_missing`, `slot_pin_unavailable`,
+   `slot_generation_mismatch`, `scratch_lifetime_unproven`,
+   `segment_budget_exceeded`, `export_registration_failed`, or
+   `mixed_source_kind`.
+3. The put summary should separately report staged-slab pack counts and bytes
+   versus segmented no-pack export counts and bytes. On the intended SGLang KV
+   path, staged batch-set pack bytes should collapse to zero while Phase-9 home
+   composite logs remain present.
+
+Phase-10 implementation status, first cut accepted on 2026-04-27:
+
+1. `ByteArtifactRegionLayout::open_host_shared_source_span(...)` is the
+   source-layout export seam. It admits only daemon-managed `HOST_SHARED`
+   items with a live region keepalive, rejects zero-length or non-host spans,
+   and requires allocator-backed offsets to carry both `slot_index` and
+   `slot_generation`. There is still no separate allocator slot-pin API; the
+   accepted first cut relies on the validated source-layout token plus the
+   daemon-managed region keepalive while the synchronous put RPC is in flight.
+2. `PayloadTransportBroker::issue_batch_payload_communicator_export(...)` now
+   accepts raw `HOST_SHARED` region-source segments, registers those CPU spans
+   with the communicator, stores the region keepalives in the batch transport
+   record, and marks the remote keys as broker-owned so expiry and failure
+   cleanup unregister them.
+3. Remote-home `BatchPutIfAbsentFromRegion` admits `LAYOUT_AND_SIZE_ONLY`
+   source-layout items into this no-pack path when the peer advertises v2
+   segmented communicator export and the local P2P endpoint is usable. Strict
+   digest modes, non-`HOST_SHARED` sources, missing tokens, capability misses,
+   and export failures still fall back before issue to
+   `stage_pending_body(kTransientForward)` plus `pack_batch_payload_entries`.
+4. The home daemon path is unchanged from Phase 9: the segmented source-layout
+   export still appears as one logical `RemoteKeySource` pack, and
+   `HomeBatchPutIfAbsent` applies it through composite final-body staging and
+   batched direct-write.
+5. Validation run
+   `20260427-132749_tensorcast_tp2_workers2_prompts10` showed source worker
+   `worker_00` emitted `364` `mode=segmented_region_export` pack realization
+   records for `5145` items / `21579694080` bytes, with
+   `remote_batch_pack_count=0` and `remote_batch_pack_bytes=0`; home worker
+   `worker_01` still emitted `364`
+   `home_batch_put_if_absent_transport_apply_summary` records with
+   `read_mode=batched_direct_write`,
+   `materialize_mode=single_source_composite`, and no full-pack mirror.
+
 #### 5.5.7 Implemented v2 communicator-backed realization
 
 `v2 communicator_source` is the current communicator-backed realization. It moves routed byte-artifact remote transport
@@ -1002,6 +1180,9 @@ Rules:
 5. Current producer `v2` realizations are transport-dependent:
    - eligible RDMA get paths may export one logical pack as segmented retained
      body views,
+   - eligible RDMA put paths may export one logical pack as segmented
+     `HOST_SHARED` source-layout views once the no-pack source realization in
+     5.5.6c is implemented,
    - MTCP-compatible and fallback paths may still realize one staged host pack.
 6. Current get-side remote `v2` consume paths open one communicator source per
    `transport_id`:
@@ -1096,14 +1277,17 @@ Design intent:
   mandatory sink full-pack mirror on eligible paths,
 - put-side `HomeBatchPutIfAbsent` now removes the same mandatory home-daemon
   full-pack mirror for eligible RDMA `communicator_source` transports while
-  keeping source-side staged-slab pack construction in place,
-- put-side `HomeBatchPutIfAbsent` may next consume the same shared `0115`
-  composite execution contract to batch-stage one remote pack into unpublished
-  final body backings for `LAYOUT_AND_SIZE_ONLY` items, while preserving
-  first-writer authority semantics,
-- the remaining RDMA bottleneck is producer-side servicing: CPU source slices
-  are still copied from retained backing into pinned staged response buffers
-  before remote reads,
+  preserving source-side staged-slab pack construction,
+- put-side `HomeBatchPutIfAbsent` now consumes the same shared `0115`
+  composite execution contract to batch-stage eligible remote packs into
+  unpublished final body backings for `LAYOUT_AND_SIZE_ONLY` items, while
+  preserving first-writer authority semantics,
+- after put-side composite staging, the remaining put-side copy is the
+  requester/source daemon's staged full-pack slab for remote-home
+  source-layout batch-set transports,
+- the remaining get-side RDMA bottleneck is producer-side servicing: CPU
+  source slices may still be copied from retained backing into pinned staged
+  response buffers before remote reads,
 - RDMA should therefore converge toward direct-readable source servicing for
   eligible retained CPU backings while keeping the existing shared `0115` sink
   and transport execution path,
@@ -1146,10 +1330,12 @@ Normative rules:
    dataplane before authority join installation.
 7. Source-side RDMA communicator export should continue to prefer no-pack-copy
    segmented export over daemon-owned pack slab realization. The producer may
-   expose one logical pack byte space by concatenating per-entry or per-backing
-   exported segments through `remote_memory_keys[]`, `buffer_sizes[]`, and
-   `total_payload_bytes`; it does not need to copy those bytes into one
-   daemon-owned slab first.
+   expose one logical pack byte space by concatenating per-entry or
+   per-backing exported segments through `remote_memory_keys[]`,
+   `buffer_sizes[]`, and `total_payload_bytes`; it does not need to copy those
+   bytes into one daemon-owned slab first. On the put path, this rule applies
+   only when the source daemon can hold the original `HOST_SHARED`
+   source-layout bytes with transport-lifetime leases or pins.
 8. The next RDMA get-side follow-on is source servicing, not a new sink API. Eligible
    retained CPU backings should be served as direct-readable source segments in
    the read-plan response instead of first being copied into pinned staged
@@ -1163,44 +1349,48 @@ Normative rules:
    staging-driven. They must not consume `FlowCreditLedger`, `StageLease`, or
    staged ACK-release semantics, and they must not be split merely because
    staged `buffers_per_flow` credit is exhausted.
-10. Direct-source window sizing should instead be bounded by descriptor/control
+11. Direct-source window sizing should instead be bounded by descriptor/control
    limits such as segment count, control payload bytes, and request budgeting.
    The accepted benchmark target is that one routed transport's `32` source
    segments fit in one direct-source response window and one sink
    `read_multi()` call, even if transport realization still posts many RDMA
    WRs internally.
-11. RDMA producer hot paths may optionally retain a publish-time export-view
+12. RDMA producer hot paths may optionally retain a publish-time export-view
     keepalive keyed by backing identity as an optimization hint for later
     direct-source servicing. This cache is RDMA-only, best-effort, and advisory:
     missing, expired, or invalidated retained exports must never change
     authority truth or manifest semantics, and they must not disable request-
     time export acquisition or staged fallback.
-12. Publish-time retained exports must live outside `BackingRecord` snapshots.
+13. Publish-time retained exports must live outside `BackingRecord` snapshots.
     Snapshot copies of backing metadata must not silently extend export
     lifetime; source-side preregistration is a separate bounded cache over
     previously acquired `BodyHandle` export views.
-13. Publish-time retained-export cache lifetime must be explicitly bounded by
+14. Publish-time retained-export cache lifetime must be explicitly bounded by
     TTL and live-entry/live-byte budgets, and it must be invalidated on backing
     lifecycle changes such as invalidation, rebind, prune, or replacement.
-14. RDMA zero-copy in this design means "no mandatory pack copy, no mandatory
+15. RDMA zero-copy in this design means "no mandatory pack copy, no mandatory
     source-side staging copy, and no mandatory full-pack mirror" when direct-
     write source and target paths exist. It does not remove item-scoped
     digests, item-scoped lowering, or per-item success and failure outcomes.
-15. If a candidate pack or item cannot produce the required export view, cannot satisfy lifetime requirements, or
+16. If a candidate pack or item cannot produce the required export view, cannot satisfy lifetime requirements, or
    resolves to a non-direct-write transport, the daemon may fall back per pack to the staged contiguous realization and
    the existing `grpc_chunk_ref` or staged `communicator_source` paths. MTCP-validated behavior must remain available.
-16. The intended implementation order is:
+17. The intended implementation order is:
     - sink-side no-mirror consume path first, because the lower dataplane
       already supports direct-write remote sources,
     - `BodyHandle` export-view API second,
     - source-side no-pack segmented communicator export third,
     - source-side direct-readable RDMA servicing fourth,
     - put-side home no-mirror consume as the first batch-set parity step,
+    - put-side composite final-body staging as the second batch-set parity
+      step,
+    - put-side source-layout no-pack segmented export as the third batch-set
+      parity step,
     - and source-side publish-time retained-export warming as an optional
       follow-on optimization on top of the same `BodyHandle` seam.
-17. Session-scoped staging reuse remains complementary follow-on work after this transport-specific split. It must not
+18. Session-scoped staging reuse remains complementary follow-on work after this transport-specific split. It must not
     be used as a reason to keep RDMA on the forced pack-plus-mirror path.
-18. Shared composite direct-write and routed vectored pull semantics are
+19. Shared composite direct-write and routed vectored pull semantics are
     defined by `0115`. `0087` owns byte-artifact authority plus the consumer-
     side and producer-side realization rules that decide whether a routed pack
     is staged or direct-readable; it does not own a transport-private RDMA sink
@@ -1373,8 +1563,13 @@ Normative rules:
 10. Slot tokens are caller-owned lifetime labels. TensorCast validates their
     presence and echoes them in per-item outcomes, but slot allocation,
     recycling, and stale-completion filtering remain caller responsibilities.
-11. Host pinning is an optional performance policy on the caller mapping. It is
-    not part of `HOST_SHARED` correctness.
+    A remote no-pack put export is stricter: the source daemon must also hold a
+    transport-lifetime slot pin or equivalent generation-validated keepalive,
+    otherwise it must stage the bytes before export.
+11. Host pinning is an optional performance policy for ordinary local
+    `HOST_SHARED` access. RDMA no-pack export still needs an explicit
+    communicator registration or reusable export lease for the exported span,
+    and that registration must have clear cleanup ownership.
 12. `MaterializeIntoMappedTarget` remains a separate mapped-target path and
     currently rejects `HOST_SHARED` target layouts. `HOST_SHARED` direct-write
     is currently defined for byte-artifact batch ingress, not the generic
