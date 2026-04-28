@@ -152,6 +152,11 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> P2PLoader::open_source()
       return inner_->read_into_at(src_offset, dest_va_offset, bytes, grant);
     }
 
+    absl::StatusOr<size_t> readv_into_at(absl::Span<const loader::DirectWriteOp> ops, const DirectWriteGrant& grant)
+        override {
+      return inner_->readv_into_at(ops, grant);
+    }
+
    private:
     std::shared_ptr<loader::SeekableSource> inner_;
   };

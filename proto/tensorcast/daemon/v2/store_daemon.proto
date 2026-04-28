@@ -17,6 +17,7 @@ service StoreDaemonService {
   rpc ExecutePlan(ExecutePlanRequest) returns (ExecutePlanResponse) {}
   rpc MaterializeReplica(MaterializeReplicaRequest) returns (MaterializeReplicaResponse) {}
   rpc MaterializeIntoTarget(MaterializeIntoTargetRequest) returns (MaterializeIntoTargetResponse) {}
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
   rpc MaterializeIntoMappedTarget(MaterializeIntoMappedTargetRequest) returns (MaterializeIntoTargetResponse) {}
   rpc CreateBinding(CreateBindingRequest) returns (CreateBindingResponse) {}
   rpc CreateOwnedBinding(CreateOwnedBindingRequest) returns (CreateOwnedBindingResponse) {}
@@ -74,9 +75,11 @@ service StoreDaemonService {
   rpc RevokeRegisteredArtifact(RevokeRegisteredArtifactRequest) returns (RevokeRegisteredArtifactResponse) {}
   rpc RegisterRegion(RegisterRegionRequest) returns (RegisterRegionResponse) {}
   rpc UnregisterRegion(UnregisterRegionRequest) returns (UnregisterRegionResponse) {}
+  rpc ActivateStableLocalBacking(ActivateStableLocalBackingRequest) returns (ActivateStableLocalBackingResponse) {}
   rpc RegisterVramRegion(RegisterVramRegionRequest) returns (RegisterVramRegionResponse) {}
   rpc UnregisterVramRegion(UnregisterVramRegionRequest) returns (UnregisterVramRegionResponse) {}
   rpc DeregisterArtifact(DeregisterArtifactRequest) returns (DeregisterArtifactResponse) {}
+  // buf:lint:ignore RPC_REQUEST_STANDARD_NAME
   rpc StartPublishTargetReplica(PublishTargetReplicaRequest) returns (StartPublishTargetReplicaResponse) {}
   rpc PublishTargetReplica(PublishTargetReplicaRequest) returns (PublishTargetReplicaResponse) {}
   rpc RetirePublishedReplica(RetirePublishedReplicaRequest) returns (RetirePublishedReplicaResponse) {}
@@ -94,6 +97,8 @@ service StoreDaemonService {
 
   // ========== Key mapping and publish ==========
   rpc ImportArtifactFromPath(ImportArtifactFromPathRequest) returns (ImportArtifactFromPathResponse) {}
+  // buf:lint:ignore RPC_REQUEST_STANDARD_NAME
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
   rpc ImportArtifactFromPathStream(ImportArtifactFromPathRequest) returns (stream ImportArtifactFromPathStreamEvent) {}
   rpc ResolvePublicDiskSource(ResolvePublicDiskSourceRequest) returns (ResolvePublicDiskSourceResponse) {}
   rpc PromoteMountedSourceArtifact(PromoteMountedSourceArtifactRequest) returns (PromoteMountedSourceArtifactResponse) {}
@@ -206,6 +211,9 @@ message GetServerConfigResponse {
   bool batch_payload_communicator_source_enabled = 14;
   // True when host-memory export is enabled for communicator_source packs.
   bool batch_payload_host_memory_export_enabled = 15;
+  // Producer policy bit used by peers to choose segmented communicator export
+  // instead of staged slab realization for communicator_source.
+  bool batch_payload_segmented_communicator_export_enabled = 16;
 }
 
 message RegisterRequest {
@@ -1962,6 +1970,15 @@ message UnregisterRegionRequest {
 message UnregisterRegionResponse {
   bool released = 1;
 }
+
+message ActivateStableLocalBackingRequest {
+  optional string session_id = 1;
+  string region_id = 2;
+  int32 owner_pid = 3;
+  uint64 slot_bytes = 4;
+}
+
+message ActivateStableLocalBackingResponse {}
 
 message RegisterVramRegionRequest {
   // Client session identifier (best-effort) used for diagnostics and ownership.

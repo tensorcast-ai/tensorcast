@@ -685,6 +685,13 @@ absl::Status ensure_local_readable_source_artifact(store::StoreEngine& engine, s
   return absl::OkStatus();
 }
 
+absl::Status await_state_sync_barrier(const std::function<absl::Status()>& barrier) {
+  if (!barrier) {
+    return absl::OkStatus();
+  }
+  return barrier();
+}
+
 absl::Status finalize_assembly_slot_occupancies(
     const std::shared_ptr<store::components::IGlobalStoreClient>& client,
     std::string_view attempt_id,
@@ -1175,6 +1182,7 @@ absl::StatusOr<RepresentationPublishValidationResult> validate_representation_pu
 }
 
 absl::StatusOr<RepresentationPublishValidationResult> finalize_binding_subject_closeout(
+    const std::function<absl::Status()>& state_sync_barrier,
     BindingRegistry* bindings,
     LipManager* lip_manager,
     SessionLifecycleManager* lifecycle,
@@ -1297,9 +1305,11 @@ absl::StatusOr<RepresentationPublishValidationResult> finalize_binding_subject_c
 
   std::string worker_id = identity != nullptr ? identity->worker_id() : std::string();
   if (worker_id.empty()) {
-    LOG(WARNING) << "worker_id is empty while finalizing binding closeout for artifact_id=" << out_or->artifact_id
-                 << "; using fallback worker_id='local'";
-    worker_id = "local";
+    return absl::UnavailableError(
+        absl::StrCat(
+            "worker identity unavailable while finalizing binding closeout for artifact_id=",
+            out_or->artifact_id,
+            "; routable replicas require completed worker lifecycle registration"));
   }
 
   const store::DeviceKey device = store::DeviceRegistry::instance().gpu_key(snapshot.device_id);
@@ -1325,6 +1335,11 @@ absl::StatusOr<RepresentationPublishValidationResult> finalize_binding_subject_c
     return replica_id_or.status();
   }
   lip_manager->attach_replica_id(registration_id, *replica_id_or);
+
+  auto barrier_status = await_state_sync_barrier(state_sync_barrier);
+  if (!barrier_status.ok()) {
+    return barrier_status;
+  }
 
   if (!layout_id.empty()) {
     SC_TRACE_SCOPE("assembly_attempt.attach_layout_to_serving_artifact");
@@ -1404,6 +1419,7 @@ void populate_artifact_descriptor_from_seal_result(
 }
 
 absl::Status finalize_dependency_ready_closeout(
+    const std::function<absl::Status()>& state_sync_barrier,
     store::StoreEngine* engine,
     BindingRegistry* bindings,
     LipManager* lip_manager,
@@ -1448,6 +1464,7 @@ absl::Status finalize_dependency_ready_closeout(
           : pubv1::ServingPublicationSubject{};
       if (representation_publish_or.ok() && subject.ref_case() == pubv1::ServingPublicationSubject::kBindingValue) {
         representation_publish_or = finalize_binding_subject_closeout(
+            state_sync_barrier,
             bindings,
             lip_manager,
             lifecycle,
@@ -1831,6 +1848,7 @@ grpc::Status AssemblyOperationService::seal_assembly_attempt(
     auto* lip_manager = d_.lip_manager;
     auto* lifecycle = d_.lifecycle;
     auto* identity = &d_.identity;
+    auto await_state_sync_barrier_fn = d_.await_state_sync_barrier;
     const google::protobuf::Any snapshot_any = pack_operation_continuation_metadata(*out_ref);
     executor->add(
         [seal_tracker,
@@ -1841,6 +1859,7 @@ grpc::Status AssemblyOperationService::seal_assembly_attempt(
          lip_manager,
          lifecycle,
          identity,
+         await_state_sync_barrier_fn,
          operation_id,
          attempt_id,
          workspace_assembly_id,
@@ -2034,6 +2053,7 @@ grpc::Status AssemblyOperationService::seal_assembly_attempt(
             if (final_status.ok()) {
               SC_TRACE_SCOPE("assembly_attempt.finalize_dependency_ready_closeout");
               final_status = finalize_dependency_ready_closeout(
+                  await_state_sync_barrier_fn,
                   engine,
                   bindings,
                   lip_manager,

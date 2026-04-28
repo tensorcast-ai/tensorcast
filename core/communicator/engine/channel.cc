@@ -26,10 +26,12 @@ Channel::~Channel() {
 }
 
 communicator::transport::tcp_transport_t Channel::get_control() {
+  absl::MutexLock lock(&state_mu_);
   return control_;
 }
 
 communicator::transport::mtcp_transport_t Channel::get_mtcp() {
+  absl::MutexLock lock(&state_mu_);
   return mtcp_;
 }
 
@@ -47,6 +49,7 @@ communicator::transport::rdma_transport_t Channel::get_rdma(
 }
 
 void Channel::set_channel_type(int type) {
+  absl::MutexLock lock(&state_mu_);
   type_ = type;
 }
 
@@ -55,7 +58,10 @@ void Channel::set_transport(
     const std::string& remote_dev_name,
     transport::rdma_transport_t t,
     HandshakeState initial_state) {
-  ABSL_CHECK(type_ == base::CHANNEL_RDMA) << "cannot set rdma transport for tcp channel";
+  {
+    absl::MutexLock lock(&state_mu_);
+    ABSL_CHECK(type_ == base::CHANNEL_RDMA) << "cannot set rdma transport for tcp channel";
+  }
   std::stringstream key;
   key << local_dev_name << ":" << remote_dev_name;
   auto endpoint = ensure_rdma_endpoint(local_dev_name, remote_dev_name);
@@ -74,17 +80,22 @@ void Channel::set_transport(
 }
 
 void Channel::set_transport(communicator::transport::mtcp_transport_t t) {
+  absl::MutexLock lock(&state_mu_);
   ABSL_CHECK(type_ == base::CHANNEL_MTCP) << "cannot set rdma transport for tcp channel";
   ABSL_CHECK(mtcp_ == nullptr) << "cannot set rdma transport for tcp channel";
   mtcp_ = std::move(t);
 }
 
 void Channel::set_gpu_slot_handle(std::shared_ptr<void> handle) {
+  absl::MutexLock lock(&state_mu_);
   gpu_slot_handle_ = std::move(handle);
 }
 
 void Channel::del_transport(const std::string& local_dev_name, const std::string& remote_dev_name) {
-  ABSL_CHECK(type_ == base::CHANNEL_RDMA) << "cannot set rdma transport for tcp channel";
+  {
+    absl::MutexLock lock(&state_mu_);
+    ABSL_CHECK(type_ == base::CHANNEL_RDMA) << "cannot set rdma transport for tcp channel";
+  }
   std::stringstream key;
   key << local_dev_name << ":" << remote_dev_name;
   absl::MutexLock lock(&rdma_mu_);
@@ -104,8 +115,13 @@ void Channel::mtcp_request_finished() {
   }
   if (previous == 1) {
     VLOG(1) << "[Channel] Last MTCP request completed; releasing receive buffers";
-    if (mtcp_ != nullptr) {
-      mtcp_->release_receive_resources();
+    transport::mtcp_transport_t mtcp;
+    {
+      absl::MutexLock lock(&state_mu_);
+      mtcp = mtcp_;
+    }
+    if (mtcp != nullptr) {
+      mtcp->release_receive_resources();
     }
   }
 }
@@ -115,15 +131,20 @@ int Channel::mtcp_active_requests() const {
 }
 
 misc::result_t Channel::close() {
-  if (control_ != nullptr) {
-    control_->close();
-    control_.reset();
+  transport::tcp_transport_t control;
+  transport::mtcp_transport_t mtcp;
+  {
+    absl::MutexLock lock(&state_mu_);
+    control = std::move(control_);
+    mtcp = std::move(mtcp_);
+    gpu_slot_handle_.reset();
+  }
+  if (control != nullptr) {
+    control->close();
   }
   mtcp_active_requests_.store(0, std::memory_order_relaxed);
-  gpu_slot_handle_.reset();
-  if (mtcp_ != nullptr) {
-    mtcp_->release_receive_resources();
-    mtcp_.reset();
+  if (mtcp != nullptr) {
+    mtcp->release_receive_resources();
   }
   {
     absl::MutexLock lock(&rdma_mu_);
@@ -169,13 +190,15 @@ std::shared_ptr<Channel::RdmaEndpoint> Channel::get_rdma_endpoint(
 std::shared_ptr<Channel::RdmaEndpoint> Channel::ensure_rdma_endpoint(
     const std::string& local_dev_name,
     const std::string& remote_dev_name) {
-  std::stringstream key;
-  key << local_dev_name << ":" << remote_dev_name;
+  const std::string key = local_dev_name + ":" + remote_dev_name;
   absl::MutexLock lock(&rdma_mu_);
-  auto endpoint = find_rdma_endpoint_locked(key.str());
+  auto endpoint = find_rdma_endpoint_locked(key);
   if (endpoint == nullptr) {
     endpoint = std::make_shared<RdmaEndpoint>();
-    rdma_.insert({key.str(), endpoint});
+    auto [it, inserted] = rdma_.try_emplace(key, endpoint);
+    if (!inserted) {
+      endpoint = it->second;
+    }
   }
   return endpoint;
 }

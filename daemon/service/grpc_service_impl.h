@@ -186,6 +186,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::UnregisterRegionRequest* req,
       v2::UnregisterRegionResponse* resp) override;
 
+  grpc::Status ActivateStableLocalBacking(
+      grpc::ServerContext* ctx,
+      const v2::ActivateStableLocalBackingRequest* req,
+      v2::ActivateStableLocalBackingResponse* resp) override;
+
   grpc::Status RegisterVramRegion(
       grpc::ServerContext* ctx,
       const v2::RegisterVramRegionRequest* req,

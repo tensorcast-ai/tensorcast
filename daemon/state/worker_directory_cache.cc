@@ -3,6 +3,7 @@
 #include "daemon/state/worker_directory_cache.h"
 
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -22,8 +23,7 @@ absl::Duration rpc_timeout(absl::Duration staleness_budget) {
   return std::max(absl::Milliseconds(1), staleness_budget);
 }
 
-std::string canonicalize_same_host_address(std::string_view address) {
-  const std::string local_default_ip = communicator::misc::get_default_ip();
+std::string canonicalize_same_host_address(std::string_view address, std::string_view local_default_ip) {
   if (local_default_ip.empty()) {
     return std::string(address);
   }
@@ -38,22 +38,23 @@ std::string canonicalize_same_host_address(std::string_view address) {
   return absl::StrCat("127.0.0.1", address.substr(port_sep));
 }
 
-WorkerDirectoryCache::Entry canonicalize_entry(WorkerDirectoryCache::Entry entry) {
-  entry.address = canonicalize_same_host_address(entry.address);
-  if (!entry.node_address.empty() && entry.p2p_port != 0) {
-    entry.node_address = canonicalize_same_host_address(absl::StrCat(entry.node_address, ":", entry.p2p_port));
-    const std::size_t port_sep = entry.node_address.rfind(':');
-    if (port_sep != std::string::npos) {
-      entry.node_address = entry.node_address.substr(0, port_sep);
-    }
-  }
-  return entry;
-}
-
 } // namespace
 
 WorkerDirectoryCache::WorkerDirectoryCache(std::shared_ptr<store::components::IGlobalStoreClient> global_store_client)
     : global_store_client_(std::move(global_store_client)) {}
+
+void WorkerDirectoryCache::update_local_entry(Entry entry) {
+  const std::string local_default_ip = communicator::misc::get_default_ip();
+  if (entry.address.empty() && !entry.node_address.empty() && entry.grpc_port != 0) {
+    entry.address = absl::StrCat(entry.node_address, ":", entry.grpc_port);
+  }
+  entry.address = canonicalize_same_host_address(entry.address, local_default_ip);
+
+  absl::MutexLock lock(&mu_);
+  local_entry_ = std::move(entry);
+  overlay_local_entry(active_state_);
+  overlay_local_entry(include_unavailable_state_);
+}
 
 bool WorkerDirectoryCache::is_state_fresh(const CacheState& state, absl::Time now, absl::Duration staleness_budget) {
   return state.refreshed_at != absl::UnixEpoch() && now - state.refreshed_at <= staleness_budget;
@@ -83,8 +84,31 @@ const WorkerDirectoryCache::CacheState& WorkerDirectoryCache::state_for(bool inc
   return include_unavailable ? include_unavailable_state_ : active_state_;
 }
 
+std::optional<WorkerDirectoryCache::Entry> WorkerDirectoryCache::local_entry_for(std::string_view daemon_id) const {
+  if (!local_entry_.has_value() || local_entry_->daemon_id != daemon_id || local_entry_->address.empty()) {
+    return std::nullopt;
+  }
+  return *local_entry_;
+}
+
+void WorkerDirectoryCache::overlay_local_entry(CacheState& state) {
+  if (!local_entry_.has_value() || local_entry_->daemon_id.empty() || local_entry_->address.empty()) {
+    return;
+  }
+  const auto it = state.index_by_daemon_id.find(local_entry_->daemon_id);
+  if (it != state.index_by_daemon_id.end()) {
+    state.entries[it->second] = *local_entry_;
+    return;
+  }
+  state.index_by_daemon_id.emplace(local_entry_->daemon_id, state.entries.size());
+  state.entries.push_back(*local_entry_);
+}
+
 bool WorkerDirectoryCache::is_fresh(std::string_view daemon_id, absl::Time now, absl::Duration staleness_budget) const {
   absl::MutexLock lock(&mu_);
+  if (local_entry_for(daemon_id).has_value()) {
+    return true;
+  }
   const auto& state = state_for(/*include_unavailable=*/false);
   if (!is_state_fresh(state, now, staleness_budget)) {
     return false;
@@ -102,10 +126,20 @@ absl::Status WorkerDirectoryCache::warm_for_daemons(
     absl::MutexLock lock(&mu_);
     const auto& state = state_for(/*include_unavailable=*/false);
     if (!is_state_fresh(state, now, staleness_budget)) {
-      needs_refresh = true;
+      bool has_remote_daemon = false;
+      for (const auto& daemon_id : daemon_ids) {
+        if (daemon_id.empty() || local_entry_for(daemon_id).has_value()) {
+          continue;
+        }
+        has_remote_daemon = true;
+        break;
+      }
+      if (has_remote_daemon) {
+        needs_refresh = true;
+      }
     }
     for (const auto& daemon_id : daemon_ids) {
-      if (daemon_id.empty()) {
+      if (daemon_id.empty() || local_entry_for(daemon_id).has_value()) {
         continue;
       }
       const auto it = state.index_by_daemon_id.find(daemon_id);
@@ -129,9 +163,10 @@ absl::Status WorkerDirectoryCache::warm_for_daemons(
   if (!workers_or.ok()) {
     return workers_or.status();
   }
+  const std::string local_default_ip = communicator::misc::get_default_ip();
 
   absl::MutexLock lock(&mu_);
-  update_from_workers(*workers_or, active_state_, now);
+  update_from_workers(*workers_or, active_state_, now, local_default_ip);
   return absl::OkStatus();
 }
 
@@ -161,10 +196,11 @@ absl::StatusOr<WorkerDirectoryCache::Snapshot> WorkerDirectoryCache::list_worker
   if (!workers_or.ok()) {
     return workers_or.status();
   }
+  const std::string local_default_ip = communicator::misc::get_default_ip();
 
   absl::MutexLock lock(&mu_);
   auto& state = state_for(include_unavailable);
-  update_from_workers(*workers_or, state, now);
+  update_from_workers(*workers_or, state, now, local_default_ip);
   return filtered_snapshot(state, required_capability_flags);
 }
 
@@ -185,22 +221,32 @@ absl::StatusOr<WorkerDirectoryCache::Entry> WorkerDirectoryCache::resolve_daemon
     absl::Duration staleness_budget) {
   const absl::Time resolve_started_at = absl::Now();
   bool cache_hit_before_refresh = false;
+  bool local_fast_path = false;
+  std::optional<Entry> resolved_entry;
   {
     absl::MutexLock lock(&mu_);
-    const auto& state = state_for(/*include_unavailable=*/false);
-    if (is_state_fresh(state, now, staleness_budget)) {
-      const auto it = state.index_by_daemon_id.find(std::string(daemon_id));
-      if (it != state.index_by_daemon_id.end() && !state.entries[it->second].address.empty()) {
-        cache_hit_before_refresh = true;
-        const auto entry = canonicalize_entry(state.entries[it->second]);
-        LOG(INFO) << "worker_directory_cache.resolve_daemon_entry_summary"
-                  << " daemon_id=" << daemon_id << " cache_hit=true"
-                  << " refreshed=false"
-                  << " refresh_ms=0"
-                  << " total_ms=" << absl::ToDoubleMilliseconds(absl::Now() - resolve_started_at);
-        return entry;
+    resolved_entry = local_entry_for(daemon_id);
+    if (resolved_entry.has_value()) {
+      cache_hit_before_refresh = true;
+      local_fast_path = true;
+    } else {
+      const auto& state = state_for(/*include_unavailable=*/false);
+      if (is_state_fresh(state, now, staleness_budget)) {
+        const auto it = state.index_by_daemon_id.find(std::string(daemon_id));
+        if (it != state.index_by_daemon_id.end() && !state.entries[it->second].address.empty()) {
+          cache_hit_before_refresh = true;
+          resolved_entry = state.entries[it->second];
+        }
       }
     }
+  }
+  if (resolved_entry.has_value()) {
+    LOG(INFO) << "worker_directory_cache.resolve_daemon_entry_summary"
+              << " daemon_id=" << daemon_id << " cache_hit=true"
+              << " refreshed=false"
+              << " local_fast_path=" << local_fast_path << " refresh_ms=0"
+              << " total_ms=" << absl::ToDoubleMilliseconds(absl::Now() - resolve_started_at);
+    return *resolved_entry;
   }
 
   const absl::Time refresh_started_at = absl::Now();
@@ -211,35 +257,45 @@ absl::StatusOr<WorkerDirectoryCache::Entry> WorkerDirectoryCache::resolve_daemon
   if (!warm_status.ok()) {
     LOG(INFO) << "worker_directory_cache.resolve_daemon_entry_summary"
               << " daemon_id=" << daemon_id << " cache_hit=" << cache_hit_before_refresh << " refreshed=true"
+              << " local_fast_path=false"
               << " refresh_ms=" << absl::ToDoubleMilliseconds(refresh_elapsed)
               << " total_ms=" << absl::ToDoubleMilliseconds(absl::Now() - resolve_started_at)
               << " status=" << warm_status;
     return warm_status;
   }
 
-  absl::MutexLock lock(&mu_);
-  const auto& state = state_for(/*include_unavailable=*/false);
-  const auto it = state.index_by_daemon_id.find(std::string(daemon_id));
-  if (!is_state_fresh(state, now, staleness_budget) || it == state.index_by_daemon_id.end() ||
-      state.entries[it->second].address.empty()) {
-    LOG(INFO) << "worker_directory_cache.resolve_daemon_entry_summary"
-              << " daemon_id=" << daemon_id << " cache_hit=" << cache_hit_before_refresh << " refreshed=true"
-              << " refresh_ms=" << absl::ToDoubleMilliseconds(refresh_elapsed)
-              << " total_ms=" << absl::ToDoubleMilliseconds(absl::Now() - resolve_started_at) << " status=NOT_FOUND";
-    return absl::NotFoundError("daemon endpoint not found");
+  {
+    absl::MutexLock lock(&mu_);
+    resolved_entry = local_entry_for(daemon_id);
+    if (!resolved_entry.has_value()) {
+      const auto& state = state_for(/*include_unavailable=*/false);
+      const auto it = state.index_by_daemon_id.find(std::string(daemon_id));
+      if (!is_state_fresh(state, now, staleness_budget) || it == state.index_by_daemon_id.end() ||
+          state.entries[it->second].address.empty()) {
+        LOG(INFO) << "worker_directory_cache.resolve_daemon_entry_summary"
+                  << " daemon_id=" << daemon_id << " cache_hit=" << cache_hit_before_refresh << " refreshed=true"
+                  << " local_fast_path=false"
+                  << " refresh_ms=" << absl::ToDoubleMilliseconds(refresh_elapsed)
+                  << " total_ms=" << absl::ToDoubleMilliseconds(absl::Now() - resolve_started_at)
+                  << " status=NOT_FOUND";
+        return absl::NotFoundError("daemon endpoint not found");
+      }
+      resolved_entry = state.entries[it->second];
+    }
   }
-  const auto entry = canonicalize_entry(state.entries[it->second]);
   LOG(INFO) << "worker_directory_cache.resolve_daemon_entry_summary"
             << " daemon_id=" << daemon_id << " cache_hit=" << cache_hit_before_refresh << " refreshed=true"
+            << " local_fast_path=false"
             << " refresh_ms=" << absl::ToDoubleMilliseconds(refresh_elapsed)
             << " total_ms=" << absl::ToDoubleMilliseconds(absl::Now() - resolve_started_at);
-  return entry;
+  return *resolved_entry;
 }
 
 void WorkerDirectoryCache::update_from_workers(
     const std::vector<store::components::ActiveWorkerInfo>& workers,
     CacheState& state,
-    absl::Time now) {
+    absl::Time now,
+    std::string_view local_default_ip) {
   state.entries.clear();
   state.index_by_daemon_id.clear();
   state.entries.reserve(workers.size());
@@ -254,7 +310,8 @@ void WorkerDirectoryCache::update_from_workers(
         .node_address = worker.node_address,
         .grpc_port = worker.grpc_port,
         .p2p_port = worker.p2p_port,
-        .address = absl::StrCat(worker.node_address, ":", worker.grpc_port),
+        .address =
+            canonicalize_same_host_address(absl::StrCat(worker.node_address, ":", worker.grpc_port), local_default_ip),
         .capability_flags = worker.capability_flags,
     };
     const auto it = state.index_by_daemon_id.find(worker.daemon_id);
@@ -265,6 +322,7 @@ void WorkerDirectoryCache::update_from_workers(
     state.index_by_daemon_id.emplace(worker.daemon_id, state.entries.size());
     state.entries.push_back(std::move(entry));
   }
+  overlay_local_entry(state);
   state.refreshed_at = now;
   state.cache_epoch += 1;
 }

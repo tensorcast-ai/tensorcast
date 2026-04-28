@@ -5,9 +5,11 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
 #include "core/common/async_runtime.h"
@@ -70,6 +72,7 @@ class MaterializationController {
     std::filesystem::path storage_path;
     DaemonOptions::PublicDiskSourcePolicy public_disk_source_policy{};
     DaemonOptions::PostSealPolicy post_seal_policy{};
+    std::function<absl::Status()> await_state_sync_barrier;
   };
 
   explicit MaterializationController(Dep d);

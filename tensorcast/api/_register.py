@@ -19,7 +19,7 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 import torch
 from opentelemetry import trace
@@ -1258,6 +1258,11 @@ class _StableDramUploader:
                     )
                 return int(payload_view.nbytes)
 
+            def _tensor_payload_view(local_tensor: torch.Tensor) -> memoryview:
+                payload_array = local_tensor.view(torch.uint8).numpy()
+                return cast(memoryview, payload_array.data).cast("B")
+
+            upload_spans: list[tuple[int, memoryview]] = []
             if upload_workers <= 1:
 
                 def _iter_tensor_spans():
@@ -1269,9 +1274,7 @@ class _StableDramUploader:
                             local_tensor,
                             prepare_elapsed_s,
                         ) = _prepare_tensor_payload(name)
-                        payload_view = memoryview(
-                            local_tensor.view(torch.uint8).numpy()
-                        ).cast("B")
+                        payload_view = _tensor_payload_view(local_tensor)
                         logger.info(
                             "stable_dram upload tensor_ready "
                             "registration_id=%s tensor=%s bytes=%d prepare_s=%.3f",
@@ -1303,7 +1306,6 @@ class _StableDramUploader:
                         "FeedRegisterArtifactStream(stable_dram_cpu) failed during tensor upload"
                     )
             else:
-                upload_spans: list[tuple[int, memoryview]] = []
                 for name in ordered_names:
                     (
                         canonical_offset,
@@ -1311,9 +1313,7 @@ class _StableDramUploader:
                         local_tensor,
                         prepare_elapsed_s,
                     ) = _prepare_tensor_payload(name)
-                    payload_view = memoryview(
-                        local_tensor.view(torch.uint8).numpy()
-                    ).cast("B")
+                    payload_view = _tensor_payload_view(local_tensor)
                     logger.info(
                         "stable_dram upload tensor_ready "
                         "registration_id=%s tensor=%s bytes=%d prepare_s=%.3f",
@@ -1759,6 +1759,7 @@ def _register_artifact_core(
             try:
                 # Upload per plan
                 if isinstance(registrar, (_CoalescedUploader, _StableDramUploader)):
+                    state_dict: dict[str, torch.Tensor] | None
                     upload_kwargs = {
                         "artifact": artifact,
                         "ctx": ctx,

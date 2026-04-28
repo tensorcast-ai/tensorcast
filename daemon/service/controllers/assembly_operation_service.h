@@ -3,12 +3,14 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
 #include "core/common/async_runtime.h"
 #include "core/store/components/global_store_client.h"
@@ -38,6 +40,7 @@ class AssemblyOperationService {
     LipManager* lip_manager{nullptr};
     SessionLifecycleManager* lifecycle{nullptr};
     DaemonOptions::PostSealPolicy post_seal_policy{};
+    std::function<absl::Status()> await_state_sync_barrier;
   };
 
   explicit AssemblyOperationService(Dep d);

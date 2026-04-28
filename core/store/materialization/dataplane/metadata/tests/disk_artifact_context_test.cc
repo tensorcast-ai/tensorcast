@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include "core/checkpoint/tensor_writer.h"
 
 namespace {
 
@@ -40,6 +41,21 @@ void create_st_file(
   out.write(header_json.data(), static_cast<std::streamsize>(header_json.size()));
   if (!payload.empty()) {
     out.write(reinterpret_cast<const char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
+  }
+}
+
+void write_text(const std::filesystem::path& path, const std::string& content) {
+  std::ofstream out(path, std::ios::trunc);
+  REQUIRE(out.is_open());
+  out << content;
+}
+
+void create_sparse_file(const std::filesystem::path& path, uint64_t size) {
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  REQUIRE(out.is_open());
+  if (size > 0) {
+    out.seekp(static_cast<std::streamoff>(size - 1));
+    out.put('\0');
   }
 }
 
@@ -119,6 +135,29 @@ TEST_CASE("DiskArtifactContext orders multipart partitions numerically", "[disk_
 }
 
 TEST_CASE(
+    "DiskArtifactContext uses logical standard-partition sizes from tensor_index",
+    "[disk_artifact_context][standard]") {
+  using tensorcast::store::loader::get_disk_artifact_context;
+  using tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing;
+
+  reset_disk_artifact_context_cache_for_testing();
+
+  auto dir = make_temp_dir("disk-artifact-context-standard");
+  create_sparse_file(dir / "tensor.data_0", /*size=*/4096);
+  write_text(dir / "tensor_index.json", R"({"weights":[0,128,[32],[1],"torch.float32",0]})");
+
+  auto ctx_or = get_disk_artifact_context(dir);
+  REQUIRE(ctx_or.ok());
+
+  CHECK((*ctx_or)->partition_sizes().size() == 1);
+  CHECK((*ctx_or)->partition_sizes()[0] == 128);
+  CHECK((*ctx_or)->total_size() == 128);
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE(
     "DiskArtifactContext orders safetensors lexicographically and ignores nested files",
     "[disk_artifact_context][safetensors][scope]") {
   using tensorcast::store::loader::get_disk_artifact_context;
@@ -159,6 +198,40 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "DiskArtifactContext reconstructs multipart logical layout despite physical tail padding",
+    "[disk_artifact_context][standard][multipart]") {
+  using tensorcast::store::loader::get_disk_artifact_context;
+  using tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing;
+
+  reset_disk_artifact_context_cache_for_testing();
+
+  auto dir = make_temp_dir("disk-artifact-context-multipart");
+  constexpr uint64_t kFirstTensorSize = tensorcast::checkpoint::kPartitionMaxSize - 4092;
+  constexpr uint64_t kSecondTensorOffset =
+      tensorcast::checkpoint::TensorWriter::aligned_size(static_cast<size_t>(kFirstTensorSize));
+  constexpr uint64_t kSecondTensorSize = 4096;
+
+  create_sparse_file(dir / "tensor.data_0", /*size=*/tensorcast::checkpoint::kPartitionMaxSize);
+  create_sparse_file(dir / "tensor.data_1", /*size=*/kSecondTensorSize);
+  write_text(
+      dir / "tensor_index.json",
+      std::string("{") + "\"weights\":[" + std::to_string(0) + "," + std::to_string(kFirstTensorSize) +
+          ",[1],[1],\"torch.uint8\",0]," + "\"bias\":[" + std::to_string(kSecondTensorOffset) + "," +
+          std::to_string(kSecondTensorSize) + ",[1],[1],\"torch.uint8\",0]}");
+
+  auto ctx_or = get_disk_artifact_context(dir);
+  REQUIRE(ctx_or.ok());
+
+  REQUIRE((*ctx_or)->partition_sizes().size() == 2);
+  CHECK((*ctx_or)->partition_sizes()[0] == kSecondTensorOffset);
+  CHECK((*ctx_or)->partition_sizes()[1] == kSecondTensorSize);
+  CHECK((*ctx_or)->total_size() == kSecondTensorOffset + kSecondTensorSize);
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE(
     "DiskArtifactContext prefers partitioned layout over safetensors when mixed",
     "[disk_artifact_context][mixed]") {
   using tensorcast::store::loader::get_disk_artifact_context;
@@ -183,6 +256,56 @@ TEST_CASE(
   REQUIRE((*ctx_or)->partition_paths().size() == 1);
   CHECK((*ctx_or)->partition_paths()[0].filename() == std::filesystem::path("tensor.data"));
   CHECK((*ctx_or)->total_size() == 7);
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE(
+    "DiskArtifactContext preserves multipart numeric concatenation when index lacks per-part boundaries",
+    "[disk_artifact_context][standard][multipart]") {
+  using tensorcast::store::loader::get_disk_artifact_context;
+  using tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing;
+
+  reset_disk_artifact_context_cache_for_testing();
+
+  auto dir = make_temp_dir("disk-artifact-context-multipart-fallback");
+  create_sparse_file(dir / "tensor.data_0", /*size=*/16);
+  create_sparse_file(dir / "tensor.data_1", /*size=*/8);
+  write_text(dir / "tensor_index.json", R"({"payload":[0,24,[24],[1],"torch.uint8",0]})");
+
+  auto ctx_or = get_disk_artifact_context(dir);
+  REQUIRE(ctx_or.ok());
+
+  REQUIRE((*ctx_or)->partition_sizes().size() == 2);
+  CHECK((*ctx_or)->partition_sizes()[0] == 16);
+  CHECK((*ctx_or)->partition_sizes()[1] == 8);
+  CHECK((*ctx_or)->total_size() == 24);
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE(
+    "DiskArtifactContext trims only the final multipart tail padding under numeric concatenation",
+    "[disk_artifact_context][standard][multipart]") {
+  using tensorcast::store::loader::get_disk_artifact_context;
+  using tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing;
+
+  reset_disk_artifact_context_cache_for_testing();
+
+  auto dir = make_temp_dir("disk-artifact-context-multipart-tail");
+  create_sparse_file(dir / "tensor.data_0", /*size=*/16);
+  create_sparse_file(dir / "tensor.data_1", /*size=*/4096);
+  write_text(dir / "tensor_index.json", R"({"payload":[0,24,[24],[1],"torch.uint8",0]})");
+
+  auto ctx_or = get_disk_artifact_context(dir);
+  REQUIRE(ctx_or.ok());
+
+  REQUIRE((*ctx_or)->partition_sizes().size() == 2);
+  CHECK((*ctx_or)->partition_sizes()[0] == 16);
+  CHECK((*ctx_or)->partition_sizes()[1] == 8);
+  CHECK((*ctx_or)->total_size() == 24);
 
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);

@@ -9,6 +9,7 @@
 #include <deque>
 #include <functional>
 #include <future>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -18,7 +19,9 @@
 #include "absl/synchronization/mutex.h"
 
 #include "core/communicator/misc/metric.h"
+#include "core/communicator/routing/types.h"
 #include "core/communicator/transport/partition_tensor.h"
+#include "core/store/materialization/contracts/stable_local_backing.h"
 
 namespace tensorcast::communicator::transport {
 
@@ -64,8 +67,78 @@ static inline std::string get_request_instance_key(std::string key, uint64_t off
   return url.str();
 }
 
+static inline std::string get_read_plan_request_key(uint64_t request_id) {
+  std::stringstream url;
+  url << "read_plan#" << request_id;
+  return url.str();
+}
+
+struct PreparedSourcePlacement {
+  uint32_t local_region_index = 0;
+  uint64_t local_region_offset = 0;
+  uint64_t source_slice_offset = 0;
+  uint64_t bytes = 0;
+};
+
+struct PreparedLocalRegion {
+  struct ChunkPlacement {
+    uint64_t local_region_offset = 0;
+    uint64_t bytes = 0;
+    struct ibv_mr* mr = nullptr;
+  };
+
+  routing::LocalRegion logical_region;
+  int16_t rail_id = -1;
+  std::string nic_name;
+  tensor_t tensor;
+  struct ibv_mr* mr = nullptr;
+  std::shared_ptr<void> keepalive;
+  std::vector<ChunkPlacement> chunk_placements;
+};
+
+struct PreparedReadPlan {
+  routing::ReadPlan logical_plan;
+  std::string remote_endpoint_id;
+  routing::ConnectionProtocol protocol = routing::ConnectionProtocol::kAuto;
+  int16_t rail_id = -1;
+  std::string local_nic;
+  uint64_t total_bytes = 0;
+  std::string local_registration_mode = "request_scoped";
+  std::string local_registration_fallback_reason;
+  std::string stable_backing_id;
+  uint64_t stable_backing_chunk_bytes = 0;
+  uint32_t stable_backing_chunk_count = 0;
+  uint32_t stable_backing_chunk_cache_hits = 0;
+  uint32_t stable_backing_chunk_cache_misses = 0;
+  uint32_t stable_backing_chunk_waits = 0;
+  uint32_t stable_backing_chunk_lazy_registrations = 0;
+  bool stable_backing_prewarm_requested = false;
+  bool stable_backing_prewarm_complete = false;
+  std::vector<PreparedLocalRegion> local_regions;
+  std::vector<std::vector<PreparedSourcePlacement>> placements_by_source_slice;
+};
+
 class ReadRequest {
  public:
+  enum class Kind {
+    kTensor = 0,
+    kReadPlan = 1,
+  };
+
+  enum class AckKind {
+    kOffsets = 0,
+    kSegmentCount = 1,
+  };
+
+  struct PendingAckWindow {
+    uint32_t window_seq = 0;
+    bool final_window = false;
+    std::vector<uint64_t> offsets;
+    uint32_t num_segments = 0;
+    AckKind ack_kind = AckKind::kOffsets;
+    int remaining = 0;
+  };
+
   static bool rdma_profile_enabled_for_process();
   static void set_rdma_profile_enabled_for_process(bool enabled);
 
@@ -77,15 +150,31 @@ class ReadRequest {
       uint64_t remote_offset,
       uint64_t request_id,
       int rail_id = -1);
+  ReadRequest(
+      std::string display_key,
+      std::string dst_ip,
+      uint16_t dst_port,
+      std::shared_ptr<PreparedReadPlan> prepared_plan,
+      uint64_t request_id,
+      int rail_id = -1);
   ~ReadRequest() = default;
 
   [[nodiscard]] tensor_t get_local_tensor() const;
   [[nodiscard]] remote_tensor_t get_remote_tensor() const;
   void set_remote_tensor(remote_tensor_t tensor);
+  [[nodiscard]] std::shared_ptr<PreparedReadPlan> get_prepared_read_plan() const;
   future_read_result_t get_future();
   void set_result(absl::Status result);
   void set_on_result(std::function<void()> callback);
   bool is_result_set();
+
+  [[nodiscard]] Kind kind() const {
+    return kind_;
+  }
+
+  [[nodiscard]] bool is_read_plan() const {
+    return kind_ == Kind::kReadPlan;
+  }
 
   [[nodiscard]] uint64_t request_id() const {
     return request_id_;
@@ -97,6 +186,10 @@ class ReadRequest {
 
   int16_t get_rail_id() const {
     return rail_id_;
+  }
+
+  [[nodiscard]] uint64_t total_bytes() const {
+    return total_bytes_;
   }
 
   [[nodiscard]] bool rdma_profile_enabled() const {
@@ -153,7 +246,7 @@ class ReadRequest {
     uint64_t bytes_to_report = completion_bytes;
 
     std::vector<PendingAckWindow> ready;
-    std::function<void(uint32_t, const std::vector<uint64_t>&, bool)> sender;
+    std::function<void(const PendingAckWindow&)> sender;
     {
       absl::MutexLock lk(&ack_mu_);
       if (bytes_to_report == 0 && !completion_bytes_queue_.empty()) {
@@ -187,25 +280,49 @@ class ReadRequest {
     }
     for (auto& window : ready) {
       if (sender) {
-        sender(window.window_seq, window.offsets, window.final_window);
+        sender(window);
       }
     }
     return rdma_final_window_received_.load(std::memory_order_acquire) &&
         done >= expected_completions_.load(std::memory_order_acquire);
   }
 
-  void set_ack_sender(std::function<void(uint32_t, const std::vector<uint64_t>&, bool)> fn) {
+  void set_ack_sender(std::function<void(const PendingAckWindow&)> fn) {
     absl::MutexLock lk(&ack_mu_);
     ack_sender_ = std::move(fn);
   }
 
-  void enqueue_window_ack(uint32_t window_seq, std::vector<uint64_t> offsets, bool final_window) {
+  void enqueue_window_ack(
+      uint32_t window_seq,
+      std::vector<uint64_t> offsets,
+      bool final_window,
+      uint32_t completion_count = 0) {
     absl::MutexLock lk(&ack_mu_);
     PendingAckWindow window;
     window.window_seq = window_seq;
     window.final_window = final_window;
-    window.remaining = static_cast<int>(offsets.size());
+    window.num_segments = static_cast<uint32_t>(offsets.size());
+    window.ack_kind = AckKind::kOffsets;
+    window.remaining = static_cast<int>(completion_count == 0 ? offsets.size() : completion_count);
     window.offsets = std::move(offsets);
+    pending_ack_windows_.push_back(std::move(window));
+    for (int i = 0; i < pending_ack_windows_.back().remaining; ++i) {
+      segment_window_queue_.push_back(window_seq);
+    }
+  }
+
+  void enqueue_plan_window_ack(
+      uint32_t window_seq,
+      uint32_t num_segments,
+      uint32_t completion_count,
+      bool final_window) {
+    absl::MutexLock lk(&ack_mu_);
+    PendingAckWindow window;
+    window.window_seq = window_seq;
+    window.final_window = final_window;
+    window.num_segments = num_segments;
+    window.ack_kind = AckKind::kSegmentCount;
+    window.remaining = static_cast<int>(completion_count);
     pending_ack_windows_.push_back(std::move(window));
     for (int i = 0; i < pending_ack_windows_.back().remaining; ++i) {
       segment_window_queue_.push_back(window_seq);
@@ -215,8 +332,10 @@ class ReadRequest {
   static std::future<read_result_t> get_read_result_future(std::string error_message);
 
   tensor_t local_tensor_;
+  std::shared_ptr<PreparedReadPlan> prepared_plan_;
   remote_tensor_t remote_tensor_;
   std::string tensor_key_;
+  std::string request_key_;
   std::string dst_ip_;
   uint16_t dst_port_;
   std::promise<read_result_t> result_;
@@ -241,6 +360,8 @@ class ReadRequest {
   uint64_t remote_offset_;
   uint64_t request_id_;
   int16_t rail_id_;
+  uint64_t total_bytes_ = 0;
+  Kind kind_ = Kind::kTensor;
   bool rdma_profile_enabled_ = false;
   std::atomic<uint64_t> mtcp_stage_unit_hint_bytes_{0};
 
@@ -249,18 +370,11 @@ class ReadRequest {
   std::atomic<int> completed_{0};
   std::atomic_bool rdma_final_window_received_{false};
 
-  struct PendingAckWindow {
-    uint32_t window_seq = 0;
-    bool final_window = false;
-    std::vector<uint64_t> offsets;
-    int remaining = 0;
-  };
-
   absl::Mutex ack_mu_;
   std::deque<PendingAckWindow> pending_ack_windows_ ABSL_GUARDED_BY(ack_mu_);
   std::deque<uint32_t> segment_window_queue_ ABSL_GUARDED_BY(ack_mu_);
   std::deque<uint32_t> completion_bytes_queue_ ABSL_GUARDED_BY(ack_mu_);
-  std::function<void(uint32_t, const std::vector<uint64_t>&, bool)> ack_sender_ ABSL_GUARDED_BY(ack_mu_);
+  std::function<void(const PendingAckWindow&)> ack_sender_ ABSL_GUARDED_BY(ack_mu_);
 
   void notify_bytes_progress(uint64_t bytes_delta);
   void notify_completion(const absl::Status& status);

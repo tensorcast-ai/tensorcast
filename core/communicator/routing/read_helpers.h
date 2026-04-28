@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "absl/status/status.h"
+#include "core/communicator/routing/types.h"
 #include "core/communicator/transport/request.h"
 
 namespace tensorcast::communicator::routing {
@@ -20,6 +21,13 @@ inline transport::future_read_result_t make_failed_read_future(absl::Status stat
   result.tensor_key = std::move(tensor_key);
   promise.set_value(std::move(result));
   return future;
+}
+
+inline std::string read_plan_tensor_key(const ReadPlan& plan) {
+  if (plan.source_slices.empty()) {
+    return {};
+  }
+  return plan.source_slices.front().tensor_key;
 }
 
 } // namespace tensorcast::communicator::routing

@@ -4,11 +4,13 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <utility>
 #include <vector>
 
 #include <gsl/pointers>
+#include "absl/status/status.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/rpc_context.h"
@@ -37,6 +39,7 @@ class RegistrationController {
     HandleLeaseRegistry* handle_leases{nullptr};
     IpcRegionRegistry& regions;
     uint32_t max_concurrency{4};
+    std::function<absl::Status()> await_state_sync_barrier;
   };
 
   explicit RegistrationController(Dep d) : d_(std::move(d)) {}

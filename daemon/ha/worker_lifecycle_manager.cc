@@ -32,6 +32,8 @@
 #include "core/communicator/misc/utils.h"
 #include "core/store/device_registry.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "daemon/state/lip_manager.h"
+#include "daemon/state/worker_directory_cache.h"
 #include "daemon/util/identity_utils.h"
 #include "folly/futures/Future.h"
 #include "opentelemetry/metrics/provider.h"
@@ -420,6 +422,47 @@ WorkerLifecycleManager::WorkerLifecycleManager(
   }
 }
 
+std::vector<store::StoreEngine::ReplicaInventoryEntry> WorkerLifecycleManager::collect_ha_inventory() const {
+  std::vector<store::StoreEngine::ReplicaInventoryEntry> inventory = engine_->get_ha_inventory();
+  const auto routable_inventory = ports_.lip_manager.list_active_routable_inventory();
+  if (routable_inventory.empty()) {
+    return inventory;
+  }
+
+  absl::flat_hash_set<store::loading::ReplicaKey, store::loading::ReplicaKeyHash> seen_keys;
+  seen_keys.reserve(inventory.size() + routable_inventory.size());
+  for (const auto& entry : inventory) {
+    seen_keys.insert(entry.key);
+  }
+
+  inventory.reserve(inventory.size() + routable_inventory.size());
+  for (const auto& routable_entry : routable_inventory) {
+    store::loading::ReplicaKey key;
+    key.artifact_id = routable_entry.key.artifact_id;
+    if (!routable_entry.key.view_id.empty()) {
+      key.view_id = routable_entry.key.view_id;
+    }
+    key.device = store::DeviceRegistry::instance().gpu_key(routable_entry.key.device_id);
+    if (!seen_keys.insert(key).second) {
+      continue;
+    }
+
+    store::StoreEngine::ReplicaInventoryEntry inventory_entry;
+    inventory_entry.key = std::move(key);
+    inventory_entry.size_bytes = routable_entry.total_size;
+    inventory_entry.memory_location = common::memory::MemoryLocation::GPU;
+    inventory_entry.is_available = !routable_entry.remote_memory_keys.empty();
+    inventory_entry.publish_state = store::StoreEngine::ReplicaPublishState::kPublished;
+    inventory_entry.remote_memory_keys = routable_entry.remote_memory_keys;
+    inventory_entry.buffer_sizes = routable_entry.buffer_sizes;
+    inventory_entry.export_state = inventory_entry.is_available ? store::runtime::ReplicaExportState::kExportable
+                                                                : store::runtime::ReplicaExportState::kPresenceOnly;
+    inventory.push_back(std::move(inventory_entry));
+  }
+
+  return inventory;
+}
+
 gsl::not_null<std::shared_ptr<store::components::IGlobalStoreClient>> WorkerLifecycleManager::make_global_store_client(
     const Options& opts) {
   if (opts.global_store_client) {
@@ -533,6 +576,17 @@ absl::Status WorkerLifecycleManager::start() {
   // Propagate worker identity into the engine so subsequent GS registrations
   // use the real worker_id instead of a placeholder.
   engine_->set_worker_identity(reg_or->worker_id, node_id_, node_addr, grpc_port, opts_.p2p_port);
+  ports_.worker_directory_cache.update_local_entry(
+      WorkerDirectoryCache::Entry{
+          .daemon_id = daemon_id_,
+          .worker_id = reg_or->worker_id,
+          .node_id = node_id_,
+          .node_address = node_addr,
+          .grpc_port = grpc_port,
+          .p2p_port = opts_.p2p_port,
+          .address = absl::StrCat(node_addr, ":", grpc_port),
+          .capability_flags = opts_.capability_flags,
+      });
   const uint64_t epoch_seed = static_cast<uint64_t>(absl::ToUnixNanos(absl::Now()));
   state_sync_epoch_.store(epoch_seed);
   state_sync_request_id_.store(0);
@@ -598,6 +652,16 @@ absl::Status WorkerLifecycleManager::start() {
   const auto bootstrap_timeout = state_sync_stall_budget().value_or(std::chrono::seconds(10));
   if (!wait_for_state_sync_success(baseline, bootstrap_timeout)) {
     LOG(WARNING) << "Bootstrap reconcile did not complete before timeout";
+  }
+  return absl::OkStatus();
+}
+
+absl::Status WorkerLifecycleManager::wait_for_state_sync_barrier() {
+  const uint64_t baseline = sync_success_.load();
+  request_state_sync();
+  const auto timeout = state_sync_stall_budget().value_or(std::chrono::seconds(10));
+  if (!wait_for_state_sync_success(baseline, timeout)) {
+    return absl::DeadlineExceededError("state sync barrier timed out");
   }
   return absl::OkStatus();
 }
@@ -781,7 +845,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
     while (!stop_.load() && hb_epoch_.load() == epoch) {
       // Prepare enhanced heartbeat fields
       const bool accepting = !ports_.shutdown_signal.is_shutting_down();
-      const auto inventory = engine_->get_ha_inventory();
+      const auto inventory = collect_ha_inventory();
       absl::flat_hash_set<std::string> registered_set;
       registered_set.reserve(inventory.size());
       for (const auto& entry : inventory) {
@@ -1039,7 +1103,7 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
       }
     }
   }
-  const auto inventory = engine_->get_ha_inventory();
+  const auto inventory = collect_ha_inventory();
   std::string worker_id;
   std::string node_address;
   {
@@ -1508,6 +1572,17 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
   last_reconnect_latency_ms_.store(0);
   ports_.identity_store.set_registered(new_worker_id, node_id_);
   engine_->set_worker_identity(new_worker_id, node_id_, node_addr, grpc_port, opts_.p2p_port);
+  ports_.worker_directory_cache.update_local_entry(
+      WorkerDirectoryCache::Entry{
+          .daemon_id = daemon_id_,
+          .worker_id = new_worker_id,
+          .node_id = node_id_,
+          .node_address = node_addr,
+          .grpc_port = grpc_port,
+          .p2p_port = opts_.p2p_port,
+          .address = absl::StrCat(node_addr, ":", grpc_port),
+          .capability_flags = opts_.capability_flags,
+      });
   // Bootstrap reconcile once after re-registration.
   const uint64_t baseline = sync_success_.load();
   request_state_sync();

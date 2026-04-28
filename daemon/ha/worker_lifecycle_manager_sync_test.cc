@@ -73,6 +73,8 @@ struct HaFixture {
         kernel(make_kernel(engine, storage_root)),
         ports{
             kernel->worker_identity_store(),
+            kernel->lip_manager(),
+            kernel->worker_directory_cache(),
             kernel->retire_gates(),
             kernel->shutdown_signal(),
             kernel->async_runtime()} {}

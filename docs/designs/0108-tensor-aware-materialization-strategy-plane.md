@@ -4,7 +4,7 @@ title: Tensor-Aware Materialization Strategy Plane
 status: accepted
 areas: ["core", "daemon", "sdk", "integrations", "proto", "docs"]
 created: 2026-03-23
-last_updated: 2026-04-15
+last_updated: 2026-04-19
 related_code:
   - core/store/runtime/ingestion/materialization_facade.cc
   - core/store/runtime/ingestion/materialization_service.cc
@@ -108,6 +108,28 @@ This design is driven by actual loader experiments on the Step3p5 weight set
 and exists to close the remaining host-local gap against `fastsafetensors`
 while preserving TensorCast's selection-first, artifact-first, and
 binding-aware architecture.
+
+## Follow-on Execution Contract Below the Strategy Plane
+
+`0108` remains the owner of:
+
+- semantic truth,
+- source acquisition,
+- execution-environment facts,
+- and strategy placement inside `MaterializationFacade`.
+
+The generic execution contract below that seam is now explicitly delegated to
+`0115`.
+
+That means:
+
+1. `0108` may choose a composite execution path, but it does not define the
+   transport-level or direct-write batching contract.
+2. `0115` owns the shared dataplane extension for composite source -> composite
+   target execution and the routed vectored pull fast path.
+3. Any consumer, including routed byte-artifact batch-get, must consume that
+   shared execution capability through the `0108` strategy seam rather than
+   bypassing it with a controller-private RDMA batch API.
 
 # Plan Ownership
 

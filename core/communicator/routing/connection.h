@@ -77,12 +77,20 @@ class Connection : public std::enable_shared_from_this<Connection> {
   }
 
   transport::future_read_result_t read_tensor(const ReadRequest& request);
+  transport::future_read_result_t read_plan(const ReadPlan& plan);
   absl::Status close();
 
   ConnectionStats snapshot() const;
   HealthState health() const;
 
  private:
+  static transport::future_read_result_t schedule_read_result(
+      const std::shared_ptr<Connection>& self,
+      std::shared_ptr<common::AsyncRuntime> async_runtime,
+      transport::future_read_result_t inner_future,
+      std::string tensor_key,
+      absl::Time start_time);
+
   void record_success(absl::Duration latency);
   void record_failure(const absl::Status& status);
 

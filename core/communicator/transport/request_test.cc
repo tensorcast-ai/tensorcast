@@ -1,5 +1,6 @@
 // Copyright (c) 2025-2026, TensorCast Team.
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <thread>
@@ -43,8 +44,8 @@ TEST_CASE("ReadRequest emits window ACKs as segments complete", "[request]") {
   ReadRequest req("key", "127.0.0.1", 12345, local, /*remote_offset*/ 0, /*request_id=*/1);
 
   std::vector<std::tuple<uint32_t, std::vector<uint64_t>, bool>> acks;
-  req.set_ack_sender([&acks](uint32_t window_seq, const std::vector<uint64_t>& offsets, bool final_window) {
-    acks.emplace_back(window_seq, offsets, final_window);
+  req.set_ack_sender([&acks](const ReadRequest::PendingAckWindow& window) {
+    acks.emplace_back(window.window_seq, window.offsets, window.final_window);
   });
 
   req.enqueue_window_ack(0, {0, 64}, /*final_window=*/false);
@@ -183,9 +184,9 @@ TEST_CASE("ReadRequest completion path is concurrency-safe", "[request][concurre
   std::atomic<uint64_t> max_done{0};
   std::atomic<uint64_t> observed_total{0};
 
-  req.set_ack_sender([&](uint32_t window_seq, const std::vector<uint64_t>& offsets, bool final_window) {
+  req.set_ack_sender([&](const ReadRequest::PendingAckWindow& window) {
     std::lock_guard<std::mutex> lock(ack_mu);
-    acks.emplace_back(window_seq, offsets, final_window);
+    acks.emplace_back(window.window_seq, window.offsets, window.final_window);
   });
   req.set_progress_callbacks(
       [&](uint64_t done, uint64_t total_bytes) {
@@ -231,12 +232,14 @@ TEST_CASE("ReadRequest completion path is concurrency-safe", "[request][concurre
   {
     std::lock_guard<std::mutex> lock(ack_mu);
     REQUIRE(acks.size() == 2);
-    REQUIRE(std::get<0>(acks[0]) == 0);
-    REQUIRE(std::get<1>(acks[0]) == std::vector<uint64_t>({0, 64, 128, 192}));
-    REQUIRE_FALSE(std::get<2>(acks[0]));
-    REQUIRE(std::get<0>(acks[1]) == 1);
-    REQUIRE(std::get<1>(acks[1]) == std::vector<uint64_t>({256, 320, 384, 448}));
-    REQUIRE(std::get<2>(acks[1]));
+    const auto ack0 = std::find_if(acks.begin(), acks.end(), [](const auto& ack) { return std::get<0>(ack) == 0; });
+    const auto ack1 = std::find_if(acks.begin(), acks.end(), [](const auto& ack) { return std::get<0>(ack) == 1; });
+    REQUIRE(ack0 != acks.end());
+    REQUIRE(ack1 != acks.end());
+    REQUIRE(std::get<1>(*ack0) == std::vector<uint64_t>({0, 64, 128, 192}));
+    REQUIRE_FALSE(std::get<2>(*ack0));
+    REQUIRE(std::get<1>(*ack1) == std::vector<uint64_t>({256, 320, 384, 448}));
+    REQUIRE(std::get<2>(*ack1));
   }
 
   auto future = req.get_future();
@@ -253,4 +256,101 @@ TEST_CASE("ReadRequest completion path is concurrency-safe", "[request][concurre
   auto result = future.get();
   REQUIRE(result.status.ok());
   REQUIRE(completion_true_count.load() == 1);
+}
+
+TEST_CASE("ReadRequest read_plan mode reports progress and segment-count ACKs", "[request][read_plan]") {
+  auto prepared = std::make_shared<tensorcast::communicator::transport::PreparedReadPlan>();
+  prepared->total_bytes = 768;
+  prepared->local_nic = "mlx5_0";
+  prepared->rail_id = 3;
+
+  ReadRequest req("plan_display", "127.0.0.1", 22345, prepared, /*request_id=*/42, /*rail_id=*/3);
+  REQUIRE(req.is_read_plan());
+  REQUIRE(req.get_key() == tensorcast::communicator::transport::get_read_plan_request_key(42));
+  REQUIRE(req.total_bytes() == 768);
+
+  std::vector<std::tuple<uint32_t, uint32_t, bool>> acks;
+  req.set_ack_sender([&acks](const ReadRequest::PendingAckWindow& window) {
+    acks.emplace_back(window.window_seq, window.num_segments, window.final_window);
+  });
+
+  uint64_t last_done = 0;
+  uint64_t total = 0;
+  bool completed = false;
+  req.set_progress_callbacks(
+      [&](uint64_t done, uint64_t total_bytes) {
+        last_done = done;
+        total = total_bytes;
+      },
+      [&](const absl::Status& status) { completed = status.ok(); });
+
+  req.enqueue_plan_window_ack(/*window_seq=*/7, /*num_segments=*/2, /*completion_count=*/3, /*final_window=*/true);
+  req.enqueue_completion_bytes(256);
+  req.enqueue_completion_bytes(256);
+  req.enqueue_completion_bytes(256);
+  req.note_rdma_window(/*n=*/3, /*final_window=*/true);
+
+  REQUIRE_FALSE(req.mark_completion_and_is_done());
+  REQUIRE_FALSE(req.mark_completion_and_is_done());
+  REQUIRE(req.mark_completion_and_is_done());
+  REQUIRE(acks.size() == 1);
+  REQUIRE(std::get<0>(acks[0]) == 7);
+  REQUIRE(std::get<1>(acks[0]) == 2);
+  REQUIRE(std::get<2>(acks[0]) == true);
+  REQUIRE(last_done == 768);
+  REQUIRE(total == 768);
+
+  bool on_result_called = false;
+  req.set_on_result([&on_result_called]() { on_result_called = true; });
+  auto future = req.get_future();
+  req.set_result(absl::OkStatus());
+  const auto result = future.get();
+  REQUIRE(result.status.ok());
+  REQUIRE(result.local_nic == "mlx5_0");
+  REQUIRE(result.local_rail_id == 3);
+  REQUIRE(completed);
+  REQUIRE(on_result_called);
+}
+
+TEST_CASE("ReadRequest read_plan mode keeps prepared regions alive for request lifetime", "[request][read_plan]") {
+  std::weak_ptr<tensorcast::communicator::transport::PreparedReadPlan> prepared_weak;
+  std::weak_ptr<PartitionTensor> region_tensor_weak;
+
+  {
+    auto prepared = std::make_shared<tensorcast::communicator::transport::PreparedReadPlan>();
+    auto region_tensor = std::make_shared<PartitionTensor>(
+        "plan_region",
+        /*addr=*/0x1000,
+        /*bytes=*/256,
+        tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
+        nullptr);
+    prepared->local_regions.push_back(
+        tensorcast::communicator::transport::PreparedLocalRegion{
+            .logical_region =
+                tensorcast::communicator::routing::LocalRegion{
+                    .addr = 0x1000,
+                    .bytes = 256,
+                    .dev_type = tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
+                    .dev_id = 0,
+                },
+            .rail_id = 0,
+            .nic_name = "mlx5_0",
+            .tensor = region_tensor,
+        });
+    prepared->total_bytes = 256;
+    prepared_weak = prepared;
+    region_tensor_weak = region_tensor;
+
+    {
+      ReadRequest req("plan_display", "127.0.0.1", 22345, prepared, /*request_id=*/43, /*rail_id=*/0);
+      prepared.reset();
+      region_tensor.reset();
+      REQUIRE_FALSE(prepared_weak.expired());
+      REQUIRE_FALSE(region_tensor_weak.expired());
+      REQUIRE(req.get_prepared_read_plan() != nullptr);
+    }
+  }
+
+  REQUIRE(prepared_weak.expired());
+  REQUIRE(region_tensor_weak.expired());
 }

@@ -2,14 +2,18 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/synchronization/mutex.h"
 #include "core/communicator/engine/engine.h"
 #include "core/communicator/routing/routing_context.h"
 #include "core/store/communication_types.h"
+#include "core/store/materialization/contracts/stable_local_backing.h"
 #include "tensorcast/communicator/v1/communicator_config.pb.h"
 
 namespace tensorcast::store::components {
@@ -95,21 +99,31 @@ class CommunicationManager {
       const std::vector<size_t>& buffer_sizes,
       int device_id);
 
+  absl::Status activate_stable_local_backing(
+      const store::StableLocalBackingRef& backing,
+      std::shared_ptr<void> keepalive = nullptr);
+
+  absl::Status deactivate_stable_local_backing(std::string_view backing_id);
+
+  [[nodiscard]] bool stable_local_backing_supported_for_test() const;
+
+  [[nodiscard]] bool stable_local_backing_active_for_test(std::string_view backing_id) const;
+
   uint16_t listen_port() const {
     return listen_port_;
   }
 
   void set_routing_context(std::shared_ptr<communicator::routing::RoutingContext> routing_context);
 
-  [[nodiscard]] std::shared_ptr<communicator::routing::RoutingContext> routing_context() const {
-    return routing_context_;
-  }
+  [[nodiscard]] std::shared_ptr<communicator::routing::RoutingContext> routing_context() const;
 
  private:
   bool enabled_ = false;
   uint16_t listen_port_{0};
   std::shared_ptr<tensorcast::communicator::engine::Communicator> comm_engine_;
-  std::shared_ptr<communicator::routing::RoutingContext> routing_context_;
+  mutable absl::Mutex routing_context_mu_;
+  std::shared_ptr<communicator::routing::RoutingContext> routing_context_ ABSL_GUARDED_BY(routing_context_mu_);
+  std::atomic<uint64_t> next_registration_id_{1};
 };
 
 } // namespace tensorcast::store::components

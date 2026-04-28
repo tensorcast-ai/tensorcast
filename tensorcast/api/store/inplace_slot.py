@@ -664,6 +664,7 @@ class InplaceSlot:
             attempt = 0
             response = None
             region_layout = None
+            selection = None
             while attempt < 2:
                 region_layout = pipeline._build_mapped_region_backed_layout(
                     target=self._tensors,
@@ -725,7 +726,7 @@ class InplaceSlot:
                         retryable=False,
                     )
                 break
-            if response is None or region_layout is None:
+            if response is None or region_layout is None or selection is None:
                 self._enter_dirty_state()
                 raise ArtifactError(
                     "MaterializeIntoMappedTarget retry failed to produce a response",
@@ -785,6 +786,7 @@ class InplaceSlot:
         attempt = 0
         response = None
         region_layout = None
+        selection = None
         while attempt < 2:
             region_layout = pipeline._build_region_backed_layout(
                 canonical_index=canonical_index,
@@ -850,7 +852,7 @@ class InplaceSlot:
                     retryable=False,
                 )
             break
-        if response is None or region_layout is None:
+        if response is None or region_layout is None or selection is None:
             self._enter_dirty_state()
             raise ArtifactError(
                 "MaterializeIntoTarget retry failed to produce a response",

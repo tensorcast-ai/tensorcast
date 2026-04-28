@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Callable
 
 import grpc
@@ -20,7 +21,9 @@ class ShardHomeLeaseRpcHandler:
         self,
         *,
         shard_home_lease_service: ShardHomeLeaseService,
-        datetime_to_timestamp: Callable[[object], timestamp_pb2.Timestamp | None],
+        datetime_to_timestamp: Callable[
+            [datetime | None], timestamp_pb2.Timestamp | None
+        ],
         logger,
     ) -> None:
         self._svc = shard_home_lease_service

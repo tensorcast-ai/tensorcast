@@ -20,6 +20,7 @@ from tensorcast.proto.common.v1 import common_pb2
 _KEY_SET_DIGEST_PREFIX = "tensorcast.byte_artifact.keyset.v1\n"
 MANIFEST_ARTIFACT_SET_BRIDGE_SCHEMA = "tensorcast.manifest_artifact_set_bridge"
 MANIFEST_ARTIFACT_SET_BRIDGE_VERSION = 1
+PUBLISH_MANIFEST_SCHEMA = "tensorcast.publish_manifest.v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,11 +243,209 @@ class ManifestResult:
     def require_artifact_set_ref(self) -> ArtifactSetRef:
         return self.require_artifact_set_bridge().artifact_set_ref
 
+    def to_proto(self):  # noqa: ANN201
+        from tensorcast.proto.plan.v1 import plan_pb2
+
+        message = plan_pb2.ArtifactManifest(
+            engine_request_id=str(self.engine_request_id),
+            layout_id=str(self.layout_id),
+            artifact_ids=[str(item) for item in self.artifact_ids],
+            key_set_digest_alg=str(self.key_set_digest_alg),
+            key_set_digest_hex=str(self.key_set_digest_hex),
+        )
+        if self.artifact_set_bridge is not None:
+            message.manifest_bridge.CopyFrom(self.artifact_set_bridge.to_proto())
+        return message
+
+    @classmethod
+    def from_proto(cls, message) -> "ManifestResult":  # noqa: ANN206, ANN001
+        return cls(
+            engine_request_id=str(message.engine_request_id),
+            layout_id=str(message.layout_id),
+            artifact_ids=tuple(str(item) for item in message.artifact_ids),
+            key_set_digest_alg=str(message.key_set_digest_alg),
+            key_set_digest_hex=str(message.key_set_digest_hex),
+            artifact_set_bridge=(
+                ManifestArtifactSetBridge.from_proto(message.manifest_bridge)
+                if message.HasField("manifest_bridge")
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class EngineOwnedManifest:
+    engine: str
+    schema: str
+    version: int
+    encoding: str
+    created_at_ms: int
+    expires_at_ms: int | None
+    artifact_manifest_digest: str
+    payload_sha256: str | None
+    payload: bytes
+
+    def __post_init__(self) -> None:
+        if not str(self.engine).strip():
+            raise ArtifactError(
+                "EngineOwnedManifest.engine is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if not str(self.schema).strip():
+            raise ArtifactError(
+                "EngineOwnedManifest.schema is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        version = int(self.version)
+        if version <= 0:
+            raise ArtifactError(
+                "EngineOwnedManifest.version must be positive",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if not str(self.encoding).strip():
+            raise ArtifactError(
+                "EngineOwnedManifest.encoding is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        created_at_ms = int(self.created_at_ms)
+        if created_at_ms < 0:
+            raise ArtifactError(
+                "EngineOwnedManifest.created_at_ms must be non-negative",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        expires_at_ms = (
+            int(self.expires_at_ms) if self.expires_at_ms is not None else None
+        )
+        if expires_at_ms is not None and expires_at_ms < created_at_ms:
+            raise ArtifactError(
+                "EngineOwnedManifest.expires_at_ms must be >= created_at_ms",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if not str(self.artifact_manifest_digest).strip():
+            raise ArtifactError(
+                "EngineOwnedManifest.artifact_manifest_digest is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        payload_sha256 = (
+            str(self.payload_sha256).strip()
+            if self.payload_sha256 is not None
+            else None
+        )
+        if payload_sha256 == "":
+            raise ArtifactError(
+                "EngineOwnedManifest.payload_sha256 must be non-empty when provided",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        object.__setattr__(self, "engine", str(self.engine).strip())
+        object.__setattr__(self, "schema", str(self.schema).strip())
+        object.__setattr__(self, "version", version)
+        object.__setattr__(self, "encoding", str(self.encoding).strip())
+        object.__setattr__(self, "created_at_ms", created_at_ms)
+        object.__setattr__(self, "expires_at_ms", expires_at_ms)
+        object.__setattr__(
+            self, "artifact_manifest_digest", str(self.artifact_manifest_digest).strip()
+        )
+        object.__setattr__(self, "payload_sha256", payload_sha256)
+        object.__setattr__(self, "payload", bytes(self.payload))
+
+    def to_proto(self):  # noqa: ANN201
+        from tensorcast.proto.plan.v1 import plan_pb2
+
+        message = plan_pb2.EngineOwnedManifest(
+            engine=str(self.engine),
+            schema=str(self.schema),
+            version=int(self.version),
+            encoding=str(self.encoding),
+            created_at_ms=int(self.created_at_ms),
+            artifact_manifest_digest=str(self.artifact_manifest_digest),
+            payload=bytes(self.payload),
+        )
+        if self.expires_at_ms is not None:
+            message.expires_at_ms = int(self.expires_at_ms)
+        if self.payload_sha256 is not None:
+            message.payload_sha256 = str(self.payload_sha256)
+        return message
+
+    @classmethod
+    def from_proto(cls, message) -> "EngineOwnedManifest":  # noqa: ANN206, ANN001
+        return cls(
+            engine=str(message.engine),
+            schema=str(message.schema),
+            version=int(message.version),
+            encoding=str(message.encoding),
+            created_at_ms=int(message.created_at_ms),
+            expires_at_ms=(
+                int(message.expires_at_ms)
+                if message.HasField("expires_at_ms")
+                else None
+            ),
+            artifact_manifest_digest=str(message.artifact_manifest_digest),
+            payload_sha256=(
+                str(message.payload_sha256)
+                if message.HasField("payload_sha256")
+                else None
+            ),
+            payload=bytes(message.payload),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PublishManifest:
+    artifact_manifest: ManifestResult
+    engine_owned_manifest: EngineOwnedManifest
+    schema: str = PUBLISH_MANIFEST_SCHEMA
+
+    def __post_init__(self) -> None:
+        schema = str(self.schema).strip()
+        if not schema:
+            raise ArtifactError(
+                "PublishManifest.schema is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if (
+            self.engine_owned_manifest.artifact_manifest_digest
+            != self.artifact_manifest.key_set_digest_hex
+        ):
+            raise ArtifactError(
+                "PublishManifest engine_owned_manifest must bind the exact artifact manifest digest",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        object.__setattr__(self, "schema", schema)
+
+    def to_proto(self):  # noqa: ANN201
+        from tensorcast.proto.plan.v1 import plan_pb2
+
+        message = plan_pb2.PublishManifest(schema=str(self.schema))
+        message.artifact_manifest.CopyFrom(self.artifact_manifest.to_proto())
+        message.engine_owned_manifest.CopyFrom(self.engine_owned_manifest.to_proto())
+        return message
+
+    @classmethod
+    def from_proto(cls, message) -> "PublishManifest":  # noqa: ANN206, ANN001
+        return cls(
+            schema=str(message.schema),
+            artifact_manifest=ManifestResult.from_proto(message.artifact_manifest),
+            engine_owned_manifest=EngineOwnedManifest.from_proto(
+                message.engine_owned_manifest
+            ),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class PublishResult:
     manifest: ManifestResult
     put_outcomes: tuple[BatchOutcome, ...]
+    publish_manifest: PublishManifest | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,7 +481,8 @@ class EngineArtifactAdapter(Protocol):
     def hydrate(
         self,
         *,
-        engine_request_id: str,
+        engine_request_id: str | None = None,
+        publish_manifest: PublishManifest | None = None,
         ctx: CallContext | None = None,
     ) -> HydrateResult: ...
 
@@ -385,6 +585,7 @@ def _artifact_set_ref_matches(left: ArtifactSetRef, right: ArtifactSetRef) -> bo
 __all__ = [
     "BatchOutcome",
     "BatchResult",
+    "EngineOwnedManifest",
     "EngineArtifactAdapter",
     "HydrateResult",
     "MANIFEST_ARTIFACT_SET_BRIDGE_SCHEMA",
@@ -392,6 +593,8 @@ __all__ = [
     "ManifestArtifactSetBridge",
     "ManifestResult",
     "OpenByteArtifact",
+    "PUBLISH_MANIFEST_SCHEMA",
+    "PublishManifest",
     "PublishResult",
     "PutIfAbsentInvariant",
     "SealedByteArtifact",

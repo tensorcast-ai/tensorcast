@@ -37,6 +37,13 @@ class LipManager {
     std::vector<uint64_t> buffer_sizes;
   };
 
+  struct RoutableInventoryEntry {
+    ArtifactDeviceKey key;
+    uint64_t total_size{0};
+    std::vector<std::string> remote_memory_keys;
+    std::vector<uint64_t> buffer_sizes;
+  };
+
   LipManager(std::shared_ptr<store::StoreEngine> engine, IpcRegionRegistry* regions)
       : engine_(std::move(engine)), region_registry_(regions) {}
 
@@ -168,6 +175,10 @@ class LipManager {
 
   // Attach a Global Store replica_id to a committed LIP lease for best-effort cleanup.
   void attach_replica_id(const std::string& registration_id, std::string replica_id);
+
+  // Snapshot active routable exports so worker lifecycle state sync can report
+  // LIP-backed transportable replicas alongside replica-runtime inventory.
+  [[nodiscard]] std::vector<RoutableInventoryEntry> list_active_routable_inventory() const;
 
  private:
   std::shared_ptr<store::StoreEngine> engine_;

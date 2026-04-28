@@ -34,6 +34,7 @@ from tensorcast.global_store.grpc_service import (
 )
 from tensorcast.proto.daemon.v2 import store_daemon_pb2, store_daemon_pb2_grpc
 from tensorcast.proto.global_store.v1 import global_store_pb2
+from tests.python.utils.hardware import synchronize_cuda
 
 pytestmark = [pytest.mark.requires_cuda_or_fake, pytest.mark.integration]
 
@@ -374,7 +375,7 @@ def test_inplace_slot_swap_publish_e2e(
                 options=disk_only,
             )
 
-            torch.cuda.synchronize()
+            synchronize_cuda()
             torch.testing.assert_close(
                 binding.tensors["alpha"].cpu(),
                 torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float32),
@@ -392,7 +393,7 @@ def test_inplace_slot_swap_publish_e2e(
             )
 
             binding.swap(artifact_b, options=disk_only, publish=True)
-            torch.cuda.synchronize()
+            synchronize_cuda()
             new_replica_id = binding._slot.published_replica_id
             assert new_replica_id is not None
             assert new_replica_id != old_replica_id

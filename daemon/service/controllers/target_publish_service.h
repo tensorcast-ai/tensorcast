@@ -2,12 +2,14 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string_view>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
@@ -42,6 +44,7 @@ class TargetPublishService {
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     common::CapabilityTokenManager* capability_tokens{nullptr};
     uint32_t max_concurrency{4};
+    std::function<absl::Status()> await_state_sync_barrier;
   };
 
   explicit TargetPublishService(Dep d);

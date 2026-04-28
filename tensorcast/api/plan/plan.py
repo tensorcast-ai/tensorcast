@@ -9,7 +9,7 @@ import time
 import uuid
 import weakref
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, Mapping, Sequence, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Mapping, Sequence, TypeVar, cast
 
 from tensorcast.api._config import StorePolicy
 from tensorcast.api._device import CPU_DEVICE_ID
@@ -19,6 +19,7 @@ from tensorcast.api.errors import ArtifactError
 from tensorcast.api.operation import (
     Operation,
     OperationError,
+    OperationState,
     OperationStatus,
     OperationTimeoutError,
 )
@@ -46,6 +47,7 @@ from tensorcast.engine_adapter.artifact_api import (
     HydrateResult,
     ManifestArtifactSetBridge,
     ManifestResult,
+    PublishManifest,
     PublishResult,
 )
 from tensorcast.proto.common.v1 import common_pb2
@@ -53,6 +55,7 @@ from tensorcast.proto.node_agent.v1 import node_agent_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
 from tensorcast.types import (
     AssemblyCloseoutContract,
+    AssemblyContractFamily,
     AssemblyReadinessPolicy,
     AssemblyRequirementSetRef,
     RepresentationPublishContract,
@@ -263,7 +266,8 @@ class _PublishAction:
 
 @dataclass(frozen=True, slots=True)
 class _HydrateAction:
-    engine_request_id: str
+    engine_request_id: str | None
+    publish_manifest: PublishManifest | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,7 +329,7 @@ def _derive_action_idempotency_key(
     return f"tc.plan.action.v1:{digest.hexdigest()}"
 
 
-_NODE_AGENT_STATE_TO_OP_STATE = {
+_NODE_AGENT_STATE_TO_OP_STATE: dict[int, OperationState] = {
     node_agent_pb2.OPERATION_STATE_PENDING: "pending",
     node_agent_pb2.OPERATION_STATE_RUNNING: "running",
     node_agent_pb2.OPERATION_STATE_SUCCESS: "success",
@@ -354,20 +358,9 @@ def _batch_outcome_from_proto(
 
 
 def _manifest_result_from_proto(
-    result: node_agent_pb2.ArtifactManifestResult,
+    result: object,
 ) -> ManifestResult:
-    return ManifestResult(
-        engine_request_id=str(result.engine_request_id),
-        layout_id=str(result.layout_id),
-        artifact_ids=tuple(str(item) for item in result.artifact_ids),
-        key_set_digest_alg=str(result.key_set_digest_alg),
-        key_set_digest_hex=str(result.key_set_digest_hex),
-        artifact_set_bridge=(
-            ManifestArtifactSetBridge.from_proto(result.manifest_bridge)
-            if result.HasField("manifest_bridge")
-            else None
-        ),
-    )
+    return ManifestResult.from_proto(result)
 
 
 def _artifact_result_from_proto(
@@ -383,6 +376,11 @@ def _artifact_result_from_proto(
             manifest=_manifest_result_from_proto(result.publish.manifest),
             put_outcomes=tuple(
                 _batch_outcome_from_proto(item) for item in result.publish.put_outcomes
+            ),
+            publish_manifest=(
+                PublishManifest.from_proto(result.publish.publish_manifest)
+                if result.publish.HasField("publish_manifest")
+                else None
             ),
         )
     if kind == "hydrate":
@@ -429,10 +427,11 @@ def _artifact_result_from_proto(
                 if result.pure_transform_publication.HasField("source_artifact_ref")
                 else None
             ),
-            contract_family=(
+            contract_family=cast(
+                AssemblyContractFamily | None,
                 str(result.pure_transform_publication.contract_family)
                 if result.pure_transform_publication.HasField("contract_family")
-                else None
+                else None,
             ),
             structural_view_ids=tuple(
                 str(item)
@@ -887,6 +886,18 @@ class InstanceStepBuilder:
             )
         return value
 
+    @staticmethod
+    def _validated_publish_manifest(
+        publish_manifest: PublishManifest,
+    ) -> PublishManifest:
+        if not isinstance(publish_manifest, PublishManifest):
+            raise ArtifactError(
+                "publish_manifest must be a PublishManifest",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        return publish_manifest
+
     def transform_into(
         self,
         art: Artifact,
@@ -1003,12 +1014,15 @@ class InstanceStepBuilder:
             transform_args=transform_args,
             layout_hash=layout_hash,
         )
-        return self.transform_register(
-            art,
-            spec=spec,
-            out_key=out_key,
-            policy=policy,
-            depends_on=depends_on,
+        return cast(
+            PlanStepRef[RepresentationPublishSpec],
+            self.transform_register(
+                art,
+                spec=spec,
+                out_key=out_key,
+                policy=policy,
+                depends_on=depends_on,
+            ),
         )
 
     def manifest(
@@ -1037,10 +1051,15 @@ class InstanceStepBuilder:
     def hydrate(
         self,
         *,
-        engine_request_id: str,
+        engine_request_id: str | None = None,
+        publish_manifest: PublishManifest | None = None,
         depends_on: Sequence[PlanStepRef[Any]] | None = None,
     ) -> PlanStepRef[Any]:
-        return self._hydrate(engine_request_id=engine_request_id, depends_on=depends_on)
+        return self._hydrate(
+            engine_request_id=engine_request_id,
+            publish_manifest=publish_manifest,
+            depends_on=depends_on,
+        )
 
     def evict_local(
         self,
@@ -1091,13 +1110,31 @@ class InstanceStepBuilder:
     def _hydrate(
         self,
         *,
-        engine_request_id: str,
+        engine_request_id: str | None,
+        publish_manifest: PublishManifest | None,
         depends_on: Sequence[PlanStepRef[Any]] | None,
     ) -> PlanStepRef[Any]:
+        resolved_engine_request_id = (
+            self._validated_engine_request_id(engine_request_id)
+            if engine_request_id is not None
+            else None
+        )
+        resolved_publish_manifest = (
+            self._validated_publish_manifest(publish_manifest)
+            if publish_manifest is not None
+            else None
+        )
+        if (resolved_engine_request_id is None) == (resolved_publish_manifest is None):
+            raise ArtifactError(
+                "exactly one of engine_request_id or publish_manifest is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
         return self._plan._add_step(
             target=self._inst,
             action=_HydrateAction(
-                engine_request_id=self._validated_engine_request_id(engine_request_id),
+                engine_request_id=resolved_engine_request_id,
+                publish_manifest=resolved_publish_manifest,
             ),
             depends_on=depends_on,
         )
@@ -1306,7 +1343,14 @@ class Plan:
                     publish_action.ttl_ms = int(step.action.ttl_ms)
             elif isinstance(step.action, _HydrateAction):
                 hydrate_action = step_msg.action.hydrate
-                hydrate_action.engine_request_id = str(step.action.engine_request_id)
+                if step.action.engine_request_id is not None:
+                    hydrate_action.engine_request_id = str(
+                        step.action.engine_request_id
+                    )
+                elif step.action.publish_manifest is not None:
+                    hydrate_action.publish_manifest.CopyFrom(
+                        step.action.publish_manifest.to_proto()
+                    )
             elif isinstance(step.action, _EvictLocalAction):
                 evict_action = step_msg.action.evict_local
                 if step.action.engine_request_id:

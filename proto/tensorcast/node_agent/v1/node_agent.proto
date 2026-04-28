@@ -30,22 +30,14 @@ message ArtifactBatchOutcome {
   string message = 3;
 }
 
-message ArtifactManifestResult {
-  string engine_request_id = 1;
-  string layout_id = 2;
-  repeated string artifact_ids = 3;
-  string key_set_digest_alg = 4;
-  string key_set_digest_hex = 5;
-  tensorcast.plan.v1.ManifestArtifactSetBridge manifest_bridge = 6;
-}
-
 message ArtifactPublishResult {
-  ArtifactManifestResult manifest = 1;
+  tensorcast.plan.v1.ArtifactManifest manifest = 1;
   repeated ArtifactBatchOutcome put_outcomes = 2;
+  tensorcast.plan.v1.PublishManifest publish_manifest = 3;
 }
 
 message ArtifactHydrateResult {
-  ArtifactManifestResult manifest = 1;
+  tensorcast.plan.v1.ArtifactManifest manifest = 1;
   repeated ArtifactBatchOutcome get_outcomes = 2;
   repeated string missing_artifact_ids = 3;
 }
@@ -80,7 +72,7 @@ message ArtifactSetResult {
 
 message ArtifactActionResult {
   oneof result {
-    ArtifactManifestResult manifest = 1;
+    tensorcast.plan.v1.ArtifactManifest manifest = 1;
     ArtifactPublishResult publish = 2;
     ArtifactHydrateResult hydrate = 3;
     ArtifactBatchResult evict_local = 4;

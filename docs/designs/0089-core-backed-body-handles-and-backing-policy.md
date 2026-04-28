@@ -4,7 +4,7 @@ title: Core-Backed Body Handles and Backing Policy
 status: completed
 areas: ["core", "daemon", "sdk", "docs"]
 created: 2026-03-08
-last_updated: 2026-04-06
+last_updated: 2026-04-18
 related_code:
   - docs/designs/0034-stable-memory-tiers.md
   - docs/designs/0039-artifact-first-sdk.md
@@ -23,6 +23,7 @@ related_code:
   - daemon/service/byte_artifact_body_handle.cc
   - daemon/service/byte_artifact_body_store.h
   - daemon/service/byte_artifact_body_store.cc
+  - daemon/service/body_backing_manager.h
   - daemon/service/controllers/byte_artifact_controller.cc
   - daemon/service/payload_transport_broker.h
   - daemon/service/payload_transport_broker.cc
@@ -79,12 +80,14 @@ The latest `0088` code line is materially better than the pre-lowering controlle
 - `BatchGetIntoRegion` and `BatchPutIfAbsentFromRegion` lower through the shared core dataplane,
 - `payload_ref` issuance and chunk reads can operate on `BodyHandle` instead of forcing daemon heap strings.
 
-However, the current body-backing story is still incomplete in four important ways:
+However, the current body-backing story is still incomplete in five important ways:
 
 1. retained-body policy is still implicit and controller-local,
 2. body staging for `put` is still hard-coded to a CPU replica target,
 3. invariant validation still rereads the full body through `BodyHandle::compute_sha256_hex()`,
-4. the design vocabulary is still too close to a body-private backing taxonomy instead of the repository-wide
+4. batch communicator export still falls back to daemon-owned staged slabs because `BodyHandle` does not yet expose the
+   export-view API needed by routed batch transport,
+5. the design vocabulary is still too close to a body-private backing taxonomy instead of the repository-wide
    memory/export vocabulary.
 
 That last point is the architectural danger.
@@ -126,6 +129,8 @@ Current code baseline after `0088`:
   - `read_all_bytes()`,
   - `compute_sha256_hex()`,
   - `retire()`.
+- `BodyHandle` does not yet expose a transport-neutral export-view API for batch communicator realization, so routed
+  batch transport still has to stage daemon-owned slabs when it wants one exported pack.
 - `ByteArtifactController` stages incoming payload sources into a core-backed `BodyHandle` before authority commit.
 - `PayloadTransportBroker` can:
   - issue `payload_ref` from a `BodyHandle`,
@@ -182,6 +187,8 @@ Goals
   - stable retention admission,
   - communicator export,
   - P2P or chunked transfer fallback.
+- Let `BodyHandle` surface transport-neutral export views for shared local or remote source realization without turning
+  the handle itself into a transport owner.
 - Move invariant validation onto verified descriptor metadata so common-path correctness does not reread full bodies.
 - Make the long-term transfer direction explicit: `payload_ref` is capability first, shared source second, chunk fallback
   last.
@@ -473,6 +480,8 @@ Additional normative rule:
 Required responsibilities:
 
 - open a standard loader or source for shared dataplane reads,
+- surface a transport-neutral export-view acquisition path that returns core-backed exportability, backing identity, and
+  lifetime keepalive for shared source realization,
 - allow bounded debug reads when necessary,
 - retire the underlying core backing when authority no longer owns it.
 
@@ -497,6 +506,75 @@ Additional long-term rules:
 
 Authority-facing descriptor and observation live in `BodyStoreEntry` or an equivalent authority view, not in the handle
 itself.
+
+#### 4.6.1 Follow-on export-view API for routed batch transport
+
+Accepted follow-on work from `0087` requires source-side batch communicator export to acquire reusable backing views
+through `BodyHandle`, not by teaching `PayloadTransportBroker` to inspect `StoreEngine` or `ReplicaRuntime`
+internals directly.
+
+Accepted API direction:
+
+```c++
+struct BodyExportRequest {
+  common::memory::MemoryLocation preferred_location{
+      common::memory::MemoryLocation::CPU};
+  bool require_remote_source{false};
+  bool allow_segmented_export{true};
+};
+
+struct BodyExportCapability {
+  common::memory::MemoryLocation memory_location{
+      common::memory::MemoryLocation::NONE};
+  bool local_loader_available{false};
+  bool remote_source_eligible{false};
+  bool supports_segmented_export{false};
+};
+
+struct BodyExportView {
+  store::runtime::ingestion::BackingIdentity backing_identity;
+  std::uint64_t binding_generation{0};
+  common::memory::MemoryLocation memory_location{
+      common::memory::MemoryLocation::NONE};
+  std::optional<store::ExportRegistration> communicator_export;
+  std::shared_ptr<void> keepalive;
+};
+
+class BodyHandle {
+ public:
+  [[nodiscard]] absl::StatusOr<BodyExportCapability> inspect_export_capability() const;
+  [[nodiscard]] absl::StatusOr<BodyExportView> acquire_export_view(
+      const BodyExportRequest& request) const;
+};
+```
+
+The exact field set may still narrow during implementation, but the boundary is normative:
+
+- the handle API must return backing identity plus binding generation so transport code stays aligned with live-backing
+  capability semantics,
+- the returned view must carry an opaque keepalive that keeps both the retained backing and any active export valid for
+  the caller's use window,
+- the initial implementation may expose communicator registration through the view because communicator export is the
+  existing shared remote-source mechanism, but batch metadata such as `transport_id`, manifest offsets, TTL policy, or
+  consumer routing must stay out of `BodyHandle`,
+- callers that cannot obtain a compatible view must be able to fall back cleanly to staged slab or chunked transport
+  paths.
+
+Phase-2 implementation notes:
+
+- `acquire_export_view(...)` now caches one live communicator export lease per resolved memory location on the retained
+  backing and reuses that lease while callers hold the opaque keepalive,
+- the keepalive returned by `BodyExportView` covers both retained-backing lifetime and communicator export lifetime,
+- producer-side segmented communicator export negotiation is advertised separately through
+  `GetServerConfig.batch_payload_segmented_communicator_export_enabled` and the mirrored
+  `PeerBatchTransportSupport` bit; `BodyHandle` stays transport-neutral and does not encode peer policy or batch
+  routing metadata.
+
+Naming Compliance
+
+- `BodyExportRequest`, `BodyExportCapability`, `BodyExportView`, and `BodyHandle` are `PascalCase` types.
+- `inspect_export_capability` and `acquire_export_view` are `snake_case` methods.
+- This API proposal does not introduce new constant names; any future constants must remain `ALL_CAPS`.
 
 ### 4.7 `BodyStoreEntry`
 
@@ -784,6 +862,8 @@ Target rules:
   1. local `BodyHandle` -> standard loader,
   2. remote exportable retained body -> communicator-backed source such as `P2PSource`,
   3. chunk-RPC fallback when no shared remote source is available or when the object is intentionally tiny,
+- batch-native `HomeBatchGet` communicator exports must consume the same `BodyHandle` export-view seam rather than
+  introducing a broker-private retained-body export path,
 - large retained bodies must not remain permanently locked to chunk-RPC transport as their primary remote path.
 
 This is the key long-term convergence rule.

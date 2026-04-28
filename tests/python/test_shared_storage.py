@@ -21,9 +21,22 @@ from tensorcast.global_store.grpc_service import (
 from tensorcast.proto.global_store.v1 import global_store_pb2
 from tensorcast.testing.io_disk import save_dict
 from tests.python.utils.daemon import start_daemon_binary
+from tests.python.utils.hardware import synchronize_cuda
 from tests.python.utils.ports import get_free_port
 
 pytestmark = pytest.mark.requires_cuda_or_fake
+
+
+def _pad_standard_partitions_to_4k(artifact_dir: Path) -> None:
+    for partition in sorted(artifact_dir.glob("tensor.data*")):
+        if not partition.is_file():
+            continue
+        size = partition.stat().st_size
+        padded_size = ((size + 4095) // 4096) * 4096
+        if padded_size == size:
+            continue
+        with partition.open("ab") as handle:
+            handle.write(b"\0" * (padded_size - size))
 
 
 def test_shared_storage_roundtrip(tmp_path):
@@ -64,6 +77,7 @@ def test_shared_storage_roundtrip(tmp_path):
     save_path = storage_root / "artifact"
     # Save using the unified writer
     descriptor = save_dict(state_dict, str(save_path))
+    _pad_standard_partitions_to_4k(save_path)
 
     listen = f"127.0.0.1:{get_free_port()}"
     cpu_target = os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake"
@@ -152,7 +166,7 @@ def test_shared_storage_roundtrip(tmp_path):
     # -----------------------
     def assert_shared(names: Sequence[str]):
         """Assert tensors referenced by `names` share storage in `loaded_state_dict`."""
-        ptrs = {loaded_state_dict[n].storage().data_ptr() for n in names}
+        ptrs = {loaded_state_dict[n].untyped_storage().data_ptr() for n in names}
         assert len(ptrs) == 1, (
             f"Tensors {names} are expected to share storage after load but found {len(ptrs)} distinct storages"
         )
@@ -163,16 +177,16 @@ def test_shared_storage_roundtrip(tmp_path):
     assert_shared(["base2", "view2"])
 
     # Groups should not share with each other
-    ptr_group1 = loaded_state_dict["base1"].storage().data_ptr()
-    ptr_group2 = loaded_state_dict["base2"].storage().data_ptr()
+    ptr_group1 = loaded_state_dict["base1"].untyped_storage().data_ptr()
+    ptr_group2 = loaded_state_dict["base2"].untyped_storage().data_ptr()
     assert ptr_group1 != ptr_group2, (
         "Separate storage groups share the same backing storage unexpectedly"
     )
 
     # Independent tensors should each have unique storage
     indep_ptrs = {
-        loaded_state_dict["indep1"].storage().data_ptr(),
-        loaded_state_dict["indep2"].storage().data_ptr(),
+        loaded_state_dict["indep1"].untyped_storage().data_ptr(),
+        loaded_state_dict["indep2"].untyped_storage().data_ptr(),
     }
     assert len(indep_ptrs) == 2
     # And they should not collide with shared groups
@@ -186,6 +200,7 @@ def test_from_disk_tensor_dict_without_global_store(tmp_path):
     save_path = storage_root / "artifact"
     expected = {"weights": torch.arange(32, dtype=torch.float32)}
     save_dict(expected, str(save_path))
+    _pad_standard_partitions_to_4k(save_path)
 
     listen = f"127.0.0.1:{get_free_port()}"
     cpu_target = os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake"
@@ -283,7 +298,7 @@ def test_from_disk_bind_and_bind_into_respect_safetensors_source_layout(
             )
             try:
                 bound = dict(binding.tensors)["weights"]
-                torch.cuda.synchronize()
+                synchronize_cuda()
                 assert torch.equal(bound.cpu(), expected)
                 assert torch.equal(bound, ref)
             finally:
@@ -294,7 +309,7 @@ def test_from_disk_bind_and_bind_into_respect_safetensors_source_layout(
                 {"weights": target}, packing="byte_space"
             )
             try:
-                torch.cuda.synchronize()
+                synchronize_cuda()
                 assert torch.equal(target.cpu(), expected)
                 assert torch.equal(target, ref)
             finally:

@@ -14,6 +14,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
+#include "core/communicator/transport/request.h"
 #include "daemon/ha/worker_lifecycle_ports.h"
 
 namespace tensorcast::daemon {
@@ -161,15 +162,20 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   LOG(INFO) << "Import metadata root initialized at " << options.daemon_options.import_root.string();
 
   auto app = std::unique_ptr<DaemonApp>(new DaemonApp(std::move(options)));
+  communicator::transport::ReadRequest::set_rdma_profile_enabled_for_process(true);
+  LOG(INFO) << "Enabled communicator RDMA read profiling for daemon process";
   app->kernel_ = std::make_unique<DaemonKernel>(
       app->options_.engine,
       app->options_.async_runtime,
       app->options_.daemon_options,
       app->options_.global_store_client);
+  std::shared_ptr<store::components::CommunicationManager> comm_manager =
+      app->kernel_->engine().get_shared_comm_manager();
 
   app->external_target_access_service_ = std::make_unique<ExternalTargetAccessService>(ExternalTargetAccessService::Dep{
       .devices = app->kernel_->device_resolver(),
       .regions = app->kernel_->region_registry(),
+      .comm_manager = comm_manager.get(),
   });
   app->byte_artifact_controller_ = std::make_unique<ByteArtifactController>(
       ByteArtifactController::Dep{
@@ -198,6 +204,16 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
                       app->options_.daemon_options.byte_artifact_routing.worker_directory_staleness_budget,
                   .routing_epoch = app->options_.daemon_options.byte_artifact_routing.routing_epoch,
                   .shard_home_eligible = app->options_.daemon_options.byte_artifact_routing.shard_home_eligible,
+              },
+          .publish_prereg =
+              {
+                  .enabled = app->options_.daemon_options.byte_artifact_routing.payload_transport.source_publish_prereg
+                                 .enabled,
+                  .ttl = app->options_.daemon_options.byte_artifact_routing.payload_transport.source_publish_prereg.ttl,
+                  .max_live_entries = app->options_.daemon_options.byte_artifact_routing.payload_transport
+                                          .source_publish_prereg.max_live_entries,
+                  .max_live_bytes = app->options_.daemon_options.byte_artifact_routing.payload_transport
+                                        .source_publish_prereg.max_live_bytes,
               },
           .gateway_ingress_enabled = app->options_.daemon_options.gateway_ingress_enabled,
           .batch_get_apply_threads =
@@ -237,6 +253,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .storage_path = app->options_.daemon_options.storage_path,
       .public_disk_source_policy = app->options_.daemon_options.public_disk_source_policy,
       .post_seal_policy = app->options_.daemon_options.post_seal_policy,
+      .await_state_sync_barrier = [app_ptr = app.get()]() { return app_ptr->await_worker_state_sync_barrier(); },
   };
   app->materialization_controller_ = std::make_unique<MaterializationController>(mdep);
 
@@ -251,6 +268,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .handle_leases = app->kernel_->handle_leases(),
       .regions = app->kernel_->region_registry(),
       .max_concurrency = app->options_.daemon_options.max_concurrency,
+      .await_state_sync_barrier = [app_ptr = app.get()]() { return app_ptr->await_worker_state_sync_barrier(); },
   };
   app->registration_controller_ = std::make_unique<RegistrationController>(rdep);
 
@@ -280,6 +298,8 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .batch_payload_host_memory_export_enabled =
           app->options_.daemon_options.byte_artifact_routing.payload_transport.batch_transport_protocol_version >= 2 &&
           app->options_.daemon_options.byte_artifact_routing.payload_transport.host_memory_export_enabled,
+      .batch_payload_segmented_communicator_export_enabled =
+          app->kernel_->payload_transport_broker().batch_transport_segmented_communicator_export_enabled(),
       .max_batch_payload_bytes =
           app->options_.daemon_options.byte_artifact_routing.payload_transport.max_batch_payload_bytes,
       .startup_coordinator = app->options_.startup_coordinator,
@@ -372,6 +392,8 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   if (app->options_.worker_lifecycle.has_value()) {
     WorkerLifecyclePorts ports{
         .identity_store = app->kernel_->worker_identity_store(),
+        .lip_manager = app->kernel_->lip_manager(),
+        .worker_directory_cache = app->kernel_->worker_directory_cache(),
         .retire_gates = app->kernel_->retire_gates(),
         .shutdown_signal = app->kernel_->shutdown_signal(),
         .async_runtime = app->kernel_->async_runtime(),
@@ -398,9 +420,29 @@ absl::Status DaemonApp::start() {
     return grpc_st;
   }
 
+  if (options_.startup_coordinator) {
+    if (worker_lifecycle_manager_ && options_.deferred_startup_work) {
+      options_.startup_coordinator->begin_startup(
+          "daemon startup still in progress: registering worker lifecycle and prewarming GPU caches");
+    } else if (worker_lifecycle_manager_) {
+      options_.startup_coordinator->begin_startup("daemon startup still in progress: registering worker lifecycle");
+    } else if (options_.deferred_startup_work) {
+      options_.startup_coordinator->begin_startup(
+          "daemon startup still in progress: registering pinned pools and prewarming GPU caches");
+    }
+  }
+
+  if (worker_lifecycle_manager_) {
+    auto st = worker_lifecycle_manager_->start();
+    if (!st.ok()) {
+      if (options_.startup_coordinator) {
+        options_.startup_coordinator->mark_failed(st);
+      }
+      return st;
+    }
+  }
+
   if (options_.deferred_startup_work) {
-    options_.startup_coordinator->begin_startup(
-        "daemon startup still in progress: registering pinned pools and prewarming GPU caches");
     auto deferred_work = options_.deferred_startup_work;
     auto startup_coordinator = options_.startup_coordinator;
     auto startup_failure_is_fatal = startup_failure_is_fatal_;
@@ -424,14 +466,14 @@ absl::Status DaemonApp::start() {
     options_.startup_coordinator->mark_ready();
   }
 
-  if (worker_lifecycle_manager_) {
-    auto st = worker_lifecycle_manager_->start();
-    if (!st.ok()) {
-      LOG(WARNING) << "Worker lifecycle start failed: " << st.message();
-    }
-  }
-
   return absl::OkStatus();
+}
+
+absl::Status DaemonApp::await_worker_state_sync_barrier() const {
+  if (worker_lifecycle_manager_ == nullptr) {
+    return absl::OkStatus();
+  }
+  return worker_lifecycle_manager_->wait_for_state_sync_barrier();
 }
 
 void DaemonApp::wait() {
@@ -480,6 +522,16 @@ absl::Status DaemonApp::build_grpc_server_() {
   grpc::ServerBuilder builder;
   const auto creds = options_.grpc.credentials ? options_.grpc.credentials : grpc::InsecureServerCredentials();
   builder.AddListeningPort(options_.grpc.listen_addr, creds);
+  if (options_.grpc.sync_server_threads > 0) {
+    const int max_pollers = std::min(4, options_.grpc.sync_server_threads);
+    const int min_pollers = 1;
+    const int num_cqs = std::min(2, max_pollers);
+    builder.SetSyncServerOption(grpc::ServerBuilder::SyncServerOption::NUM_CQS, num_cqs);
+    builder.SetSyncServerOption(grpc::ServerBuilder::SyncServerOption::MIN_POLLERS, min_pollers);
+    builder.SetSyncServerOption(grpc::ServerBuilder::SyncServerOption::MAX_POLLERS, max_pollers);
+    LOG(INFO) << "Configuring sync gRPC server"
+              << " num_cqs=" << num_cqs << " min_pollers=" << min_pollers << " max_pollers=" << max_pollers;
+  }
 
   if (options_.grpc.max_concurrent_streams > 0) {
     builder.AddChannelArgument("grpc.max_concurrent_streams", options_.grpc.max_concurrent_streams);

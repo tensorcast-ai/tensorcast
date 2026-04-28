@@ -212,6 +212,128 @@ TEST_CASE("StageLeaseRegistry stores and retrieves leases") {
   taken.release();
 }
 
+TEST_CASE("StageLeaseRegistry keeps request-local window identity distinct") {
+  FlowCreditLedger ledger(/*total_credit=*/4);
+  DummyStage helper;
+  StageLeaseRegistry registry;
+  const std::string request_key = "plan:17";
+
+  auto acquire_window0 = ledger.acquire(1);
+  REQUIRE(acquire_window0.ok());
+  acquire_window0->mark_consumed();
+  StageLease lease_window0 = helper.make(reinterpret_cast<void*>(0x10), ledger, StageTransport::kRdma);
+  auto metadata_window0 = lease_window0.metadata();
+  metadata_window0.request_key = request_key;
+  metadata_window0.window_seq = 3;
+  metadata_window0.segment_idx = 0;
+  metadata_window0.offset = 0;
+  metadata_window0.bytes = 8;
+  lease_window0.set_metadata(metadata_window0);
+  registry.put(StageLeaseKey{.request_key = request_key, .window_seq = 3, .segment_idx = 0}, lease_window0);
+
+  auto acquire_window1 = ledger.acquire(1);
+  REQUIRE(acquire_window1.ok());
+  acquire_window1->mark_consumed();
+  StageLease lease_window1 = helper.make(reinterpret_cast<void*>(0x20), ledger, StageTransport::kRdma);
+  auto metadata_window1 = lease_window1.metadata();
+  metadata_window1.request_key = request_key;
+  metadata_window1.window_seq = 4;
+  metadata_window1.segment_idx = 0;
+  metadata_window1.offset = 0;
+  metadata_window1.bytes = 8;
+  lease_window1.set_metadata(metadata_window1);
+  registry.put(StageLeaseKey{.request_key = request_key, .window_seq = 4, .segment_idx = 0}, lease_window1);
+
+  CHECK(registry.size() == 2);
+  CHECK(ledger.outstanding_credit() == 2);
+
+  auto take_window1 = registry.take(StageLeaseKey{.request_key = request_key, .window_seq = 4, .segment_idx = 0});
+  REQUIRE(take_window1.ok());
+  CHECK(take_window1->metadata().offset == 0);
+  CHECK(take_window1->metadata().window_seq == 4);
+  CHECK(take_window1->metadata().segment_idx == 0);
+  take_window1->release();
+
+  CHECK(registry.size() == 1);
+  CHECK(ledger.outstanding_credit() == 1);
+  CHECK_FALSE(registry.take(StageLeaseKey{.request_key = request_key, .window_seq = 4, .segment_idx = 0}).ok());
+
+  auto take_window0 = registry.take(StageLeaseKey{.request_key = request_key, .window_seq = 3, .segment_idx = 0});
+  REQUIRE(take_window0.ok());
+  CHECK(take_window0->metadata().offset == 0);
+  CHECK(take_window0->metadata().window_seq == 3);
+  take_window0->release();
+
+  CHECK(registry.size() == 0);
+  CHECK(ledger.outstanding_credit() == 0);
+}
+
+TEST_CASE("StageLeaseRegistry restores credit one staged window at a time") {
+  FlowCreditLedger ledger(/*total_credit=*/4);
+  DummyStage helper;
+  StageLeaseRegistry registry;
+  const std::string request_key = "plan:23";
+
+  auto acquire_seg0 = ledger.acquire(1);
+  REQUIRE(acquire_seg0.ok());
+  acquire_seg0->mark_consumed();
+  StageLease lease_seg0 = helper.make(reinterpret_cast<void*>(0x30), ledger, StageTransport::kRdma);
+  auto metadata_seg0 = lease_seg0.metadata();
+  metadata_seg0.request_key = request_key;
+  metadata_seg0.window_seq = 7;
+  metadata_seg0.segment_idx = 0;
+  metadata_seg0.offset = 0;
+  metadata_seg0.bytes = 8;
+  lease_seg0.set_metadata(metadata_seg0);
+  registry.put(StageLeaseKey{.request_key = request_key, .window_seq = 7, .segment_idx = 0}, lease_seg0);
+
+  auto acquire_seg1 = ledger.acquire(1);
+  REQUIRE(acquire_seg1.ok());
+  acquire_seg1->mark_consumed();
+  StageLease lease_seg1 = helper.make(reinterpret_cast<void*>(0x31), ledger, StageTransport::kRdma);
+  auto metadata_seg1 = lease_seg1.metadata();
+  metadata_seg1.request_key = request_key;
+  metadata_seg1.window_seq = 7;
+  metadata_seg1.segment_idx = 1;
+  metadata_seg1.offset = 8;
+  metadata_seg1.bytes = 8;
+  lease_seg1.set_metadata(metadata_seg1);
+  registry.put(StageLeaseKey{.request_key = request_key, .window_seq = 7, .segment_idx = 1}, lease_seg1);
+
+  auto acquire_next_window = ledger.acquire(1);
+  REQUIRE(acquire_next_window.ok());
+  acquire_next_window->mark_consumed();
+  StageLease lease_next_window = helper.make(reinterpret_cast<void*>(0x40), ledger, StageTransport::kRdma);
+  auto metadata_next_window = lease_next_window.metadata();
+  metadata_next_window.request_key = request_key;
+  metadata_next_window.window_seq = 8;
+  metadata_next_window.segment_idx = 0;
+  metadata_next_window.offset = 0;
+  metadata_next_window.bytes = 8;
+  lease_next_window.set_metadata(metadata_next_window);
+  registry.put(StageLeaseKey{.request_key = request_key, .window_seq = 8, .segment_idx = 0}, lease_next_window);
+
+  CHECK(registry.size() == 3);
+  CHECK(ledger.outstanding_credit() == 3);
+
+  auto take_window0_seg0 = registry.take(StageLeaseKey{.request_key = request_key, .window_seq = 7, .segment_idx = 0});
+  REQUIRE(take_window0_seg0.ok());
+  take_window0_seg0->release();
+  auto take_window0_seg1 = registry.take(StageLeaseKey{.request_key = request_key, .window_seq = 7, .segment_idx = 1});
+  REQUIRE(take_window0_seg1.ok());
+  take_window0_seg1->release();
+
+  CHECK(registry.size() == 1);
+  CHECK(ledger.outstanding_credit() == 1);
+
+  auto take_window1_seg0 = registry.take(StageLeaseKey{.request_key = request_key, .window_seq = 8, .segment_idx = 0});
+  REQUIRE(take_window1_seg0.ok());
+  take_window1_seg0->release();
+
+  CHECK(registry.size() == 0);
+  CHECK(ledger.outstanding_credit() == 0);
+}
+
 TEST_CASE("StagingWindow stages windows respecting credit") {
   FlowCreditLedger ledger(/*total_credit=*/3);
   DummyStage helper;

@@ -45,6 +45,7 @@ from tensorcast.proto.daemon.v2 import store_daemon_pb2, store_daemon_pb2_grpc
 from tensorcast.proto.global_store.v1 import global_store_pb2
 from tensorcast.proto.layout.v1 import layout_pb2
 from tensorcast.proto.operation.v1 import operation_pb2
+from tests.python.utils.hardware import synchronize_cuda
 
 pytestmark = [pytest.mark.requires_cuda_or_fake, pytest.mark.integration]
 
@@ -73,6 +74,30 @@ def _wait_ready(addr: str, proc: subprocess.Popen, timeout_s: float = 15.0) -> N
             pass
         time.sleep(0.2)
     raise RuntimeError("daemon failed to start")
+
+
+def _require_registered_worker_after_ready(
+    *, gs_port: int, listen_port: int, daemon_id: str
+) -> None:
+    channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    stub = GlobalStoreCompositeStub(channel)
+    try:
+        resp = stub.ListActiveWorkers(
+            global_store_pb2.ListActiveWorkersRequest(include_unavailable=True)
+        )
+    finally:
+        channel.close()
+
+    for worker in resp.workers:
+        if worker.grpc_port != listen_port:
+            continue
+        assert worker.daemon_id == daemon_id
+        assert worker.worker_id
+        return
+
+    raise AssertionError(
+        f"daemon reported READY before registering worker: listen_port={listen_port} daemon_id={daemon_id}"
+    )
 
 
 def _wait_for_artifact_view_info(
@@ -397,6 +422,9 @@ def _spawn_daemon(
             )
             try:
                 _wait_ready(f"127.0.0.1:{listen_port}", proc)
+                _require_registered_worker_after_ready(
+                    gs_port=gs_port, listen_port=listen_port, daemon_id=daemon_id
+                )
                 return (f"127.0.0.1:{listen_port}", gs_port, proc)
             except Exception as exc:
                 last_error = exc
@@ -1081,8 +1109,12 @@ def test_complete_pure_transform_publication_structural_pp_publishes_serving_lin
         source_tensors = _artifact_tensor_dict(store, artifact_id=source_artifact_id)
         source_view_a = source_artifact.view(slices={"bias": (slice(0, 4),)})
         source_view_b = source_artifact.view(slices={"bias": (slice(4, 8),)})
-        view_id_a = source_view_a._ensure_view_metadata_cache(require_view_id=True).view_id
-        view_id_b = source_view_b._ensure_view_metadata_cache(require_view_id=True).view_id
+        view_id_a = source_view_a._ensure_view_metadata_cache(
+            require_view_id=True
+        ).view_id
+        view_id_b = source_view_b._ensure_view_metadata_cache(
+            require_view_id=True
+        ).view_id
         layout_id = _put_layout_for_source_artifact(
             gs_stub,
             artifact_id=source_artifact_id,
@@ -1229,20 +1261,26 @@ def test_complete_pure_transform_publication_serving_binding_swap(
         )
         torch.testing.assert_close(
             binding.tensors["bias"].cpu(),
-            torch.tensor([9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0], dtype=torch.float32),
+            torch.tensor(
+                [9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0], dtype=torch.float32
+            ),
         )
         binding.swap(
             store.artifact(artifact_id=str(result_v2.serving_artifact_id)),
             serving_runtime_policy=result_v2.require_serving_runtime_policy(),
         )
-        torch.cuda.synchronize()
+        synchronize_cuda()
         torch.testing.assert_close(
             binding.tensors["weights"].cpu(),
-            torch.tensor([21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0], dtype=torch.float32),
+            torch.tensor(
+                [21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0], dtype=torch.float32
+            ),
         )
         torch.testing.assert_close(
             binding.tensors["bias"].cpu(),
-            torch.tensor([29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0, 36.0], dtype=torch.float32),
+            torch.tensor(
+                [29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0, 36.0], dtype=torch.float32
+            ),
         )
     finally:
         with contextlib.suppress(Exception):

@@ -10,7 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tensorcast import runtime, startup
+import tensorcast.runtime as runtime_module
+from tensorcast import startup
 from tensorcast.cli_utils.errors import ServiceError
 from tensorcast.cli_utils.paths import session_paths
 from tensorcast.cli_utils.process import read_json_default
@@ -61,7 +62,7 @@ def test_auto_mode_multiprocess_singleflight_shares_one_daemon(
     def _fake_status(_session_id=None):
         if not daemon_ready.is_set():
             return None
-        return runtime.RuntimeSession(
+        return runtime_module.RuntimeSession(
             session_id="sess-multiprocess",
             daemon_pid=4242,
             daemon_address=daemon_address,
@@ -82,7 +83,7 @@ def test_auto_mode_multiprocess_singleflight_shares_one_daemon(
         )
         time.sleep(0.2)
         daemon_ready.set()
-        return runtime.RuntimeSession(
+        return runtime_module.RuntimeSession(
             session_id="sess-multiprocess",
             daemon_pid=4242,
             daemon_address=daemon_address,
@@ -150,7 +151,7 @@ def test_auto_mode_creates_daemon_when_missing(monkeypatch: pytest.MonkeyPatch) 
 
     def _fake_start(**kwargs):
         started.update(kwargs)
-        return runtime.RuntimeSession(
+        return runtime_module.RuntimeSession(
             session_id="sess-auto",
             daemon_pid=4242,
             daemon_address=daemon_address,
@@ -192,7 +193,7 @@ def test_auto_mode_recovers_from_stale_starting_owner_dead(
 
     def _fake_start(**kwargs):
         started.update(kwargs)
-        return runtime.RuntimeSession(
+        return runtime_module.RuntimeSession(
             session_id="sess-starting-recovered",
             daemon_pid=5454,
             daemon_address=daemon_address,
@@ -381,7 +382,7 @@ def test_auto_mode_recovers_from_stale_ready_owner_dead(
 
     def _fake_start(**kwargs):
         started.update(kwargs)
-        return runtime.RuntimeSession(
+        return runtime_module.RuntimeSession(
             session_id="sess-recovered",
             daemon_pid=5252,
             daemon_address=daemon_address,
@@ -454,7 +455,7 @@ def test_auto_mode_recovers_from_stale_failed_owner_dead(
     monkeypatch.setattr(
         startup.runtime,
         "start",
-        lambda **_kwargs: runtime.RuntimeSession(
+        lambda **_kwargs: runtime_module.RuntimeSession(
             session_id="sess-failed-recover",
             daemon_pid=5353,
             daemon_address=daemon_address,

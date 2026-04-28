@@ -155,6 +155,8 @@ struct StoreEngineOptions {
     bool use_dedicated_single_range_concat_stream{false};
     ExecutorPreference executor_preference{ExecutorPreference::kAuto};
     DiagnosticsVerbosity diagnostics_verbosity{DiagnosticsVerbosity::kBasic};
+    uint64_t direct_write_batch_bytes{0};
+    uint32_t direct_write_batch_ops{0};
     uint64_t owner_file_collective_peak_bytes_budget{8ULL * 1024ULL * 1024ULL * 1024ULL};
     uint64_t owner_file_collective_batch_bytes{512ULL * 1024ULL * 1024ULL};
     uint64_t owner_file_collective_dim1_staging_bytes{256ULL * 1024ULL * 1024ULL};

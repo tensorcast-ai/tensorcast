@@ -27,6 +27,11 @@ import torch
 
 import tensorcast as tc
 from tensorcast import GetArtifactOptions
+from tensorcast.api._config import (
+    RetrievalPolicy,
+    RetrievalPreference,
+    RetrievalPreset,
+)
 from tensorcast.api.store import CopyPlanEntry, Range
 from tensorcast.api.store import artifact as resolve_artifact
 from tensorcast.api.store.runtime import get_context as get_store_context
@@ -58,13 +63,17 @@ TP_BIND_PER_RANK_TIMEOUT_MIN_S = 20.0
 TP_BIND_PER_RANK_TIMEOUT_FLOOR_S = 8.0
 TP_BIND_PER_RANK_TIMEOUT_GIB_FACTOR = 12.0
 DEFAULT_RECEIVER_MATERIALIZE_OPTIONS = GetArtifactOptions(
-    source={
-        "preference": "prefer_p2p",
-        "allow_p2p": True,
-        "allow_disk": False,
-    },
+    source=RetrievalPolicy(
+        preference=RetrievalPreference.PREFER_P2P,
+        allow_p2p=True,
+        allow_disk=False,
+    ),
     verify_checksums=False,
 )
+
+
+def _monotonic() -> float:
+    return time.monotonic()
 
 
 def _is_not_found_error(exc: Exception) -> bool:
@@ -1052,9 +1061,9 @@ class WeightUpdatePublisher:
             publish_device=publish_device,
         )
         publish_payload_bytes = _estimate_tensor_payload_bytes(tensors)
-        publish_start = time.monotonic()
+        publish_start = _monotonic()
         artifact_id = self._publisher.publish(tensors, version=version)
-        publish_latency_s = time.monotonic() - publish_start
+        publish_latency_s = _monotonic() - publish_start
         publish_breakdown_s = self._publisher.last_publish_breakdown_s()
         put_s = float(publish_breakdown_s.get("put_s", 0.0))
         publish_throughput_gib_s = _bytes_throughput_gib_s(
@@ -1191,7 +1200,9 @@ class WeightUpdatePublisher:
             return False
 
     def _check_options(self) -> GetArtifactOptions:
-        return GetArtifactOptions(source="local_only")
+        return GetArtifactOptions(
+            source=RetrievalPolicy.from_preset(RetrievalPreset.LOCAL_ONLY)
+        )
 
     def _wait_materialization_state(
         self,
@@ -1884,23 +1895,29 @@ class WeightUpdateReceiver:
                         options=self._materialize_options,
                         ctx=materialize_ctx,
                     )
+                    binding = self._binding
+                    if binding is None:
+                        raise AssertionError("binding must be initialized after bind")
                     self._binding_ptrs = {
                         name: tensor.data_ptr()
-                        for name, tensor in self._binding.tensors.items()
+                        for name, tensor in binding.tensors.items()
                     }
                     pointer_stable = True
                     apply_operation = "bind"
                 else:
+                    binding = self._binding
+                    if binding is None:
+                        raise AssertionError("binding must be initialized before swap")
                     if self._binding_ptrs is None:
                         raise AssertionError("binding pointer baseline is missing")
-                    self._binding.swap(
+                    binding.swap(
                         artifact,
                         options=self._materialize_options,
                         ctx=materialize_ctx,
                     )
                     latest_ptrs = {
                         name: tensor.data_ptr()
-                        for name, tensor in self._binding.tensors.items()
+                        for name, tensor in binding.tensors.items()
                     }
                     if set(latest_ptrs) != set(self._binding_ptrs):
                         raise AssertionError(
@@ -1918,7 +1935,10 @@ class WeightUpdateReceiver:
                                 f"name={name}, before={expected_ptr}, after={actual_ptr}"
                             )
                 latency_s = time.monotonic() - start
-                active_tensors = dict(self._binding.tensors)
+                binding = self._binding
+                if binding is None:
+                    raise AssertionError("binding must be initialized before validation")
+                active_tensors = dict(binding.tensors)
                 _validate_payload(
                     version=version,
                     tensors=active_tensors,
@@ -1929,7 +1949,7 @@ class WeightUpdateReceiver:
                 return ReceiveEvent(
                     version=version,
                     key=key,
-                    artifact_id=str(self._binding.artifact_id),
+                    artifact_id=str(binding.artifact_id),
                     received_at_s=time.time(),
                     materialize_latency_s=latency_s,
                     apply_mode="binding_swap",
@@ -2424,7 +2444,7 @@ class WeightUpdateReceiver:
                     raise VersionDroppedError(
                         version=version,
                         key=key,
-                        artifact_id=artifact_id,
+                        artifact_id=str(artifact_id),
                         message=(
                             "non-retryable tp transport-group apply failure "
                             f"version={version}, key={key}, artifact_id={artifact_id}, "

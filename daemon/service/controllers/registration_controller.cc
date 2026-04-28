@@ -52,6 +52,18 @@ namespace {
 
 constexpr std::uint64_t kFeedStreamProgressLogIntervalBytes = 8ULL * 1024ULL * 1024ULL * 1024ULL;
 
+grpc::Status await_state_sync_barrier(const RegistrationController::Dep& dep) {
+  if (!dep.await_state_sync_barrier) {
+    return Status::OK;
+  }
+  const absl::Status barrier_status = dep.await_state_sync_barrier();
+  if (barrier_status.ok()) {
+    return Status::OK;
+  }
+  LOG(WARNING) << "Piece registration state sync barrier failed: " << barrier_status;
+  return to_grpc_status(barrier_status);
+}
+
 void EraseRegistrationRegionRefs(
     RegistrationManager& registration_manager,
     HandleLeaseRegistry* handle_leases,
@@ -717,10 +729,14 @@ grpc::Status commit_piece_view_registration(
 
   std::string worker_id = dep.identity->worker_id();
   if (worker_id.empty()) {
-    LOG(WARNING) << "worker_id is empty while registering memory replica for artifact_id=" << meta.client_artifact_id
-                 << " view_id=" << meta.view_id
-                 << "; using fallback worker_id='local' (transport eligibility may lag until worker lifecycle sync)";
-    worker_id = "local";
+    return {
+        StatusCode::UNAVAILABLE,
+        absl::StrCat(
+            "worker identity unavailable while registering memory replica for artifact_id=",
+            meta.client_artifact_id,
+            " view_id=",
+            meta.view_id,
+            "; routable replicas require completed worker lifecycle registration")};
   }
   const store::DeviceKey device = store::DeviceRegistry::instance().gpu_key(meta.device_id);
 
@@ -792,6 +808,11 @@ grpc::Status commit_piece_view_registration(
     }
   } replica_rollback{
       .client = dep.global_store_client.get(), .artifact_id = meta.client_artifact_id, .replica_id = replica_id};
+
+  const auto barrier_status = await_state_sync_barrier(dep);
+  if (!barrier_status.ok()) {
+    return barrier_status;
+  }
 
   // Publish response metadata.
   auto* desc = resp.mutable_artifact_descriptor();

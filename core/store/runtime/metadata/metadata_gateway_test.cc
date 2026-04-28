@@ -313,6 +313,13 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::UnimplementedError("list_active_workers not used in tests");
   }
 
+  absl::StatusOr<std::vector<tensorcast::store::components::ActiveInstanceInfo>> list_active_instances(
+      bool,
+      uint64_t,
+      const tensorcast::store::components::RpcOptions&) override {
+    return absl::UnimplementedError("list_active_instances not used in tests");
+  }
+
   absl::StatusOr<std::vector<std::string>> list_active_worker_identities(bool) override {
     return absl::UnimplementedError("list_active_worker_identities not used in tests");
   }

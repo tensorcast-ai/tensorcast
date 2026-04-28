@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import random
+import re
 import threading
 import time
 from concurrent.futures import CancelledError
-from typing import Mapping, NoReturn
+from typing import Mapping, NoReturn, cast
 
 import grpc
 
 from tensorcast.api._errors import DeviceMismatch, TensorCastError
+from tensorcast.api.errors import CollectiveFailureClassName
 from tensorcast.api.store.types import ArtifactError, RetryPolicy
 from tensorcast.error_reporting import debug_errors_enabled, debug_errors_hint
 
@@ -46,6 +48,10 @@ _TRANSIENT_MESSAGE_TOKENS = (
     "broken pipe",
 )
 _COLLECTIVE_FAILURE_CLASS_METADATA_KEY = "tc.collective_failure_class"
+_COLLECTIVE_FAILURE_CLASS_PATTERN = re.compile(
+    r"\s*\[tc\.collective_failure_class=(not_eligible|execution_failed)\]\s*",
+    re.IGNORECASE,
+)
 
 
 def _looks_transient_message(message: str) -> bool:
@@ -63,7 +69,18 @@ def _append_hint(message: str, hint: str) -> str:
     return _append_debug_hint(f"{message}\nHint: {hint}")
 
 
-def _extract_collective_failure_class_metadata(exc: grpc.RpcError) -> str | None:
+def _normalize_collective_failure_class(
+    value: object,
+) -> CollectiveFailureClassName | None:
+    normalized = str(value).strip().lower()
+    if normalized in {"not_eligible", "execution_failed"}:
+        return cast(CollectiveFailureClassName, normalized)
+    return None
+
+
+def _extract_collective_failure_class_metadata(
+    exc: grpc.RpcError,
+) -> CollectiveFailureClassName | None:
     try:
         metadata = exc.trailing_metadata()
     except Exception:  # noqa: BLE001
@@ -73,10 +90,20 @@ def _extract_collective_failure_class_metadata(exc: grpc.RpcError) -> str | None
     for key, value in metadata:
         if str(key).lower() != _COLLECTIVE_FAILURE_CLASS_METADATA_KEY:
             continue
-        normalized = str(value).strip().lower()
-        if normalized in {"not_eligible", "execution_failed"}:
+        normalized = _normalize_collective_failure_class(value)
+        if normalized is not None:
             return normalized
     return None
+
+
+def _extract_collective_failure_class(
+    message: str,
+) -> tuple[str, CollectiveFailureClassName | None]:
+    match = _COLLECTIVE_FAILURE_CLASS_PATTERN.search(message)
+    if match is None:
+        return message, None
+    cleaned = _COLLECTIVE_FAILURE_CLASS_PATTERN.sub(" ", message, count=1)
+    return cleaned.strip(), _normalize_collective_failure_class(match.group(1))
 
 
 def _global_store_not_connected_hint() -> str:
@@ -223,6 +250,9 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
         status_name = status_code.name if status_code is not None else "UNKNOWN"
         mapped = details or "retrieval failed"
         collective_failure_class = _extract_collective_failure_class_metadata(exc)
+        mapped, message_failure_class = _extract_collective_failure_class(mapped)
+        if collective_failure_class is None:
+            collective_failure_class = message_failure_class
         lowered = mapped.lower()
         if "selection.logical_layout_hash does not match resolved selection" in mapped:
             return ArtifactError(
@@ -272,7 +302,7 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
             retryable=retryable,
             collective_failure_class=collective_failure_class,
         )
-    collective_failure_class = None
+    message, collective_failure_class = _extract_collective_failure_class(message)
     lowered = message.lower()
     if "selection.logical_layout_hash does not match resolved selection" in message:
         return ArtifactError(

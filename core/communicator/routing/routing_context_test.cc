@@ -22,8 +22,13 @@ using tensorcast::communicator::routing::ConnectionType;
 using tensorcast::communicator::routing::EndpointBinding;
 using tensorcast::communicator::routing::HealthState;
 using tensorcast::communicator::routing::LinkState;
+using tensorcast::communicator::routing::LocalRegion;
+using tensorcast::communicator::routing::ReadPlan;
+using tensorcast::communicator::routing::ReadPlanSlice;
 using tensorcast::communicator::routing::ReadRequest;
+using tensorcast::communicator::routing::ReadRouteContext;
 using tensorcast::communicator::routing::RoutingContext;
+using tensorcast::communicator::routing::SourceSlice;
 using tensorcast::communicator::topology::Endpoint;
 using tensorcast::communicator::topology::EndpointKind;
 using tensorcast::communicator::topology::EndpointType;
@@ -47,6 +52,18 @@ class FakeAdapter final : public ConnectionAdapter {
 
   tensorcast::communicator::transport::future_read_result_t read_tensor(
       const ReadRequest&,
+      const EndpointBinding&,
+      const EndpointBinding&) override {
+    std::promise<tensorcast::communicator::transport::read_result_t> promise;
+    auto future = promise.get_future();
+    tensorcast::communicator::transport::read_result_t result;
+    result.status = status_;
+    promise.set_value(std::move(result));
+    return future;
+  }
+
+  tensorcast::communicator::transport::future_read_result_t read_plan(
+      const ReadPlan&,
       const EndpointBinding&,
       const EndpointBinding&) override {
     std::promise<tensorcast::communicator::transport::read_result_t> promise;
@@ -89,14 +106,75 @@ class ProtocolAdapterStub final : public ConnectionAdapter {
     return future;
   }
 
+  tensorcast::communicator::transport::future_read_result_t read_plan(
+      const ReadPlan& plan,
+      const EndpointBinding&,
+      const EndpointBinding&) override {
+    read_plan_calls_ += 1;
+    last_plan_ = plan;
+    std::promise<tensorcast::communicator::transport::read_result_t> promise;
+    auto future = promise.get_future();
+    tensorcast::communicator::transport::read_result_t result;
+    result.status = absl::OkStatus();
+    promise.set_value(std::move(result));
+    return future;
+  }
+
   absl::Status close(const EndpointBinding&) override {
     return absl::OkStatus();
+  }
+
+  int read_plan_calls() const {
+    return read_plan_calls_;
+  }
+
+  const ReadPlan& last_plan() const {
+    return last_plan_;
   }
 
  private:
   ConnectionProtocol protocol_;
   bool available_ = false;
+  int read_plan_calls_ = 0;
+  ReadPlan last_plan_;
 };
+
+ReadPlan make_single_slice_read_plan(
+    const std::string& local_endpoint_id,
+    const std::string& remote_endpoint_id,
+    ConnectionProtocol protocol) {
+  ReadPlan plan;
+  plan.local_regions = {
+      LocalRegion{
+          .addr = 0x1000,
+          .bytes = 256,
+      },
+  };
+  plan.source_slices = {
+      SourceSlice{
+          .authority_id = "authority-a",
+          .route =
+              ReadRouteContext{
+                  .local_endpoint_id = local_endpoint_id,
+                  .remote_endpoint_id = remote_endpoint_id,
+                  .protocol = protocol,
+                  .rail_id = -1,
+              },
+          .tensor_key = "tensor-a",
+          .remote_offset = 64,
+          .bytes = 128,
+      },
+  };
+  plan.slices = {
+      ReadPlanSlice{
+          .source_slice_index = 0,
+          .local_region_index = 0,
+          .local_region_offset = 32,
+          .bytes = 128,
+      },
+  };
+  return plan;
+}
 
 Topology build_minimal_topology() {
   std::vector<Pool> pools;
@@ -536,6 +614,61 @@ TEST_CASE(
   REQUIRE(channel_or.ok());
   REQUIRE(channel_or.value()->hops().size() == 1);
   CHECK(channel_or.value()->hops().front()->protocol() == ConnectionProtocol::kNvlink);
+}
+
+TEST_CASE("RoutingContext communicator forwards read_plan to the selected adapter", "[communicator][routing]") {
+  auto nvlink_adapter = std::make_shared<ProtocolAdapterStub>(ConnectionProtocol::kNvlink, true);
+  auto pcie_adapter = std::make_shared<ProtocolAdapterStub>(ConnectionProtocol::kPcie, true);
+
+  auto context = std::make_shared<RoutingContext>(
+      RoutingContext::Options{},
+      /*engine=*/nullptr,
+      nvlink_adapter,
+      pcie_adapter);
+  REQUIRE(context->set_topology(build_local_fabric_topology()).ok());
+  REQUIRE(context
+              ->set_endpoint_bindings({
+                  EndpointBinding{.endpoint_id = "nvlink0", .node_id = "node0"},
+                  EndpointBinding{.endpoint_id = "nvlink1", .node_id = "node0"},
+              })
+              .ok());
+
+  auto communicator_or = context->get_communicator("nvlink0", "nvlink1");
+  REQUIRE(communicator_or.ok());
+
+  const ReadPlan plan = make_single_slice_read_plan("nvlink0", "nvlink1", ConnectionProtocol::kNvlink);
+  auto result = communicator_or.value()->read_plan(plan).get();
+  REQUIRE(result.status.ok());
+  CHECK(nvlink_adapter->read_plan_calls() == 1);
+  CHECK(nvlink_adapter->last_plan().source_slices.size() == 1);
+  CHECK(nvlink_adapter->last_plan().source_slices.front().tensor_key == "tensor-a");
+}
+
+TEST_CASE("RoutingContext communicator rejects read_plan route mismatch before issue", "[communicator][routing]") {
+  auto nvlink_adapter = std::make_shared<ProtocolAdapterStub>(ConnectionProtocol::kNvlink, true);
+  auto pcie_adapter = std::make_shared<ProtocolAdapterStub>(ConnectionProtocol::kPcie, true);
+
+  auto context = std::make_shared<RoutingContext>(
+      RoutingContext::Options{},
+      /*engine=*/nullptr,
+      nvlink_adapter,
+      pcie_adapter);
+  REQUIRE(context->set_topology(build_local_fabric_topology()).ok());
+  REQUIRE(context
+              ->set_endpoint_bindings({
+                  EndpointBinding{.endpoint_id = "nvlink0", .node_id = "node0"},
+                  EndpointBinding{.endpoint_id = "nvlink1", .node_id = "node0"},
+              })
+              .ok());
+
+  auto communicator_or = context->get_communicator("nvlink0", "nvlink1");
+  REQUIRE(communicator_or.ok());
+
+  ReadPlan plan = make_single_slice_read_plan("nvlink0", "pcie1", ConnectionProtocol::kNvlink);
+  auto result = communicator_or.value()->read_plan(plan).get();
+  REQUIRE_FALSE(result.status.ok());
+  CHECK(result.status.code() == absl::StatusCode::kInvalidArgument);
+  CHECK(nvlink_adapter->read_plan_calls() == 0);
 }
 
 TEST_CASE("RoutingContext falls back to AUTO protocol when NVLINK adapter is unavailable", "[communicator][routing]") {

@@ -8,8 +8,11 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "core/cuda/cuda_ipc.h"
+#include "core/store/components/communication_manager.h"
 #include "core/store/store_engine.h"
 #include "daemon/state/ipc_region_registry.h"
 #include "google/protobuf/repeated_ptr_field.h"
@@ -27,6 +30,10 @@ enum class AcquireTargetStoragesError {
 };
 
 std::string_view acquire_error_reason(AcquireTargetStoragesError error);
+
+absl::Status activate_stable_local_backings(
+    store::components::CommunicationManager& comm_manager,
+    absl::Span<const store::loading::IntoTargetStorage> storages);
 
 class TargetStorageLease {
  public:
@@ -48,6 +55,13 @@ class TargetStorageLease {
       AcquireTargetStoragesError* error);
 
  private:
+  struct SharedState {
+    IpcRegionRegistry* registry{nullptr};
+    std::vector<std::string> acquired_region_ids;
+
+    ~SharedState();
+  };
+
   struct RegionMapping {
     IpcRegionRegistry::RegionDescriptor desc;
     void* base_ptr{nullptr};
@@ -56,8 +70,7 @@ class TargetStorageLease {
 
   void release_now();
 
-  IpcRegionRegistry* registry_{nullptr};
-  std::vector<std::string> acquired_region_ids_;
+  std::shared_ptr<SharedState> shared_state_;
   absl::flat_hash_map<std::string, RegionMapping> region_map_;
   std::vector<store::loading::IntoTargetStorage> storages_;
 };

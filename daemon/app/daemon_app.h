@@ -34,6 +34,7 @@ class DaemonApp {
   struct GrpcOptions {
     std::string listen_addr;
     std::shared_ptr<grpc::ServerCredentials> credentials;
+    int sync_server_threads{0};
     int max_concurrent_streams{0};
     int max_send_message_length{64 * 1024 * 1024};
     int max_receive_message_length{64 * 1024 * 1024};
@@ -59,6 +60,7 @@ class DaemonApp {
   static absl::StatusOr<std::unique_ptr<DaemonApp>> create(Options options);
 
   absl::Status start();
+  absl::Status await_worker_state_sync_barrier() const;
   void wait();
   absl::Status stop(absl::Time deadline);
 

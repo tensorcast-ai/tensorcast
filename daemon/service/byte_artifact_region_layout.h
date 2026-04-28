@@ -10,7 +10,9 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "core/store/components/communication_manager.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/contracts/source.h"
 #include "daemon/service/controllers/materialization_target_storage_utils.h"
@@ -48,15 +50,21 @@ class ByteArtifactRegionLayout {
       std::string_view artifact_id) const;
   [[nodiscard]] absl::StatusOr<std::shared_ptr<store::loader::SeekableSource>> open_item_source(
       std::string_view artifact_id) const;
+  [[nodiscard]] absl::Status activate_stable_local_backings(
+      store::components::CommunicationManager& comm_manager) const;
 
  private:
   struct StorageRange {
     std::string storage_id;
+    std::string region_id;
     std::uint64_t logical_base{0};
     std::uint64_t length{0};
     IpcRegionRegistry::MemoryKind memory_kind{IpcRegionRegistry::MemoryKind::kVram};
     void* base_ptr{nullptr};
     int device_id{-1};
+    std::optional<store::StableLocalBackingRef> stable_backing;
+    std::shared_ptr<void> stable_backing_keepalive;
+    std::shared_ptr<void> keepalive;
   };
 
   struct ItemRange {

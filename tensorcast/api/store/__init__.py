@@ -10,7 +10,7 @@ import threading
 import time
 import weakref
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import grpc
 import torch
@@ -163,10 +163,14 @@ from tensorcast.types import (
     FinalizeClass,
     HashBackend,
     HashLocation,
+    HostSharedRegionAttachment,
+    HostSharedRegionClass,
     IdentityMintStrategy,
+    LocalRegionHandle,
     PartialSealResult,
     PublicDiskSourceHandle,
     PublishedModelVersion,
+    RegionMemoryKind,
     RepresentationPublishContract,
     RepresentationPublishSpec,
     SealAssemblyResult,
@@ -412,7 +416,7 @@ def _resolve_representation_publish_layout_id(
         and publication.canonical_index is not None
     ):
         return _ensure_canonical_layout_for_index(
-            canonical_index=publication.canonical_index,
+            canonical_index=cast(CanonicalIndex, publication.canonical_index),
         )
     if (
         isinstance(publication, RepresentationPublishSpec)
@@ -1470,7 +1474,7 @@ class Store:
                 for region_id in region_ids:
                     self.unregister_vram_region(region_id)
             raise
-        slot = InplaceSlot(
+        inplace_slot = InplaceSlot(
             store=self,
             runtime=runtime,
             pipeline=self._materialization,
@@ -1490,7 +1494,7 @@ class Store:
             target_publication_token=None,
             copy_plan=normalized_mapping,
         )
-        return Binding(slot)
+        return Binding(inplace_slot)
 
     def query_persistence_status(
         self, *, task_id: str | None = None, artifact_id: str | None = None
@@ -1888,10 +1892,13 @@ class Store:
                 "contribution_artifact_count": len(contribution_artifacts),
             },
         ) as profile:
+            source_contribution_artifact = (
+                source_artifact if isinstance(source_artifact, Artifact) else None
+            )
             attempt = self.start_repo_owned_representation_publish_attempt(
                 publication=publication.publication,
                 contract_family=contract_family,
-                source_artifact=source_artifact,
+                source_artifact=source_contribution_artifact,
                 structural_view_ids=resolved_structural_view_ids or None,
                 layout_id=layout_id,
                 layout_artifact_id=layout_artifact_id,
@@ -2080,8 +2087,9 @@ class Store:
         ctx: CallContext | None = None,
     ) -> tuple[PartialSealResult, ...]:
         results: list[PartialSealResult] = []
+        binding_device = cast(torch.device | str, device)
         for source_artifact in source_artifacts:
-            binding = source_artifact.bind(device=device, packing="byte_space")
+            binding = source_artifact.bind(device=binding_device, packing="byte_space")
             try:
                 sealed = binding.seal_current(
                     update_epoch=binding.begin_update(ctx=ctx),
@@ -2102,9 +2110,13 @@ class Store:
         ctx: CallContext | None = None,
     ) -> tuple[Binding, ...]:
         live_bindings: list[Binding] = []
+        binding_device = cast(torch.device | str, device)
         try:
             for source_artifact in source_artifacts:
-                binding = source_artifact.bind(device=device, packing="byte_space")
+                binding = source_artifact.bind(
+                    device=binding_device,
+                    packing="byte_space",
+                )
                 try:
                     current_value = binding.current_value
                     if current_value is None:
@@ -2255,8 +2267,29 @@ class Store:
         ctx: CallContext | None = None,
     ) -> AssemblyAttemptRef:
         del ctx
+        client = self._runtime.ensure_client()
         if representation_publish_spec is not None:
-            return self._runtime.ensure_client().start_assembly_attempt(
+            if representation_publish_spec.readiness_policy is None:
+                if representation_publish_spec.closeout_contract is None:
+                    return client.start_assembly_attempt(
+                        layout_id=representation_publish_spec.layout_id,
+                        requirements=representation_publish_spec.requirements,
+                        representation_publish_spec=representation_publish_spec,
+                    )
+                return client.start_assembly_attempt(
+                    layout_id=representation_publish_spec.layout_id,
+                    requirements=representation_publish_spec.requirements,
+                    closeout_contract=representation_publish_spec.closeout_contract,
+                    representation_publish_spec=representation_publish_spec,
+                )
+            if representation_publish_spec.closeout_contract is None:
+                return client.start_assembly_attempt(
+                    layout_id=representation_publish_spec.layout_id,
+                    requirements=representation_publish_spec.requirements,
+                    readiness_policy=representation_publish_spec.readiness_policy,
+                    representation_publish_spec=representation_publish_spec,
+                )
+            return client.start_assembly_attempt(
                 layout_id=representation_publish_spec.layout_id,
                 requirements=representation_publish_spec.requirements,
                 readiness_policy=representation_publish_spec.readiness_policy,
@@ -2272,13 +2305,29 @@ class Store:
                 "AssemblyRequirementSetRef.ep_from_structural_views(...), "
                 "or AssemblyRequirementSetRef.canonical_full()"
             )
-        kwargs: dict[str, object] = {"layout_id": layout_id}
-        kwargs["requirements"] = requirements
-        if readiness_policy is not None:
-            kwargs["readiness_policy"] = readiness_policy
-        if closeout_contract is not None:
-            kwargs["closeout_contract"] = closeout_contract
-        return self._runtime.ensure_client().start_assembly_attempt(**kwargs)
+        if readiness_policy is None:
+            if closeout_contract is None:
+                return client.start_assembly_attempt(
+                    layout_id=layout_id,
+                    requirements=requirements,
+                )
+            return client.start_assembly_attempt(
+                layout_id=layout_id,
+                requirements=requirements,
+                closeout_contract=closeout_contract,
+            )
+        if closeout_contract is None:
+            return client.start_assembly_attempt(
+                layout_id=layout_id,
+                requirements=requirements,
+                readiness_policy=readiness_policy,
+            )
+        return client.start_assembly_attempt(
+            layout_id=layout_id,
+            requirements=requirements,
+            readiness_policy=readiness_policy,
+            closeout_contract=closeout_contract,
+        )
 
     def list_artifact_layouts(
         self,
@@ -2936,11 +2985,11 @@ class Store:
                         verify_checksums=bool(verify_checksums),
                     )
 
+                    event_count = 0
+                    processed_bytes = 0
+                    total_bytes = 0
+                    messages: list[str] = []
                     if profile is not None:
-                        event_count = 0
-                        processed_bytes = 0
-                        total_bytes = 0
-                        messages: list[str] = []
 
                         def _profiled_stream(
                             *,
@@ -3238,6 +3287,90 @@ class Store:
     # ------------------------------------------------------------------
     # Region-backed registration
     # ------------------------------------------------------------------
+    def register_region(
+        self,
+        *,
+        memory_kind: RegionMemoryKind,
+        size_bytes: int,
+        ttl_ms: int,
+        device_id: int | None = None,
+        cuda_ipc_handle: bytes | None = None,
+        host_shared_attach_token: bytes | None = None,
+        daemon_managed: bool = False,
+        host_shared_region_class: HostSharedRegionClass | None = None,
+        session_id: str | None = None,
+        name: str | None = None,
+        timeout_s: float = 10.0,
+    ) -> LocalRegionHandle:
+        client = self._runtime.ensure_client()
+        return client.register_region(
+            memory_kind=memory_kind,
+            size_bytes=int(size_bytes),
+            ttl_ms=int(ttl_ms),
+            device_id=device_id,
+            cuda_ipc_handle=cuda_ipc_handle,
+            host_shared_attach_token=host_shared_attach_token,
+            daemon_managed=bool(daemon_managed),
+            host_shared_region_class=host_shared_region_class,
+            session_id=session_id,
+            region_name=name,
+            timeout_s=float(timeout_s),
+        )
+
+    def unregister_region(
+        self,
+        region_id: str,
+        *,
+        session_id: str | None = None,
+        force: bool | None = None,
+        timeout_s: float = 10.0,
+    ) -> bool:
+        client = self._runtime.ensure_client()
+        released = client.unregister_region(
+            region_id,
+            session_id=session_id,
+            force=force,
+            timeout_s=float(timeout_s),
+        )
+        if released:
+            with contextlib.suppress(Exception):
+                _cache_unregister_region(region_id)
+        return released
+
+    def activate_stable_local_backing(
+        self,
+        region_id: str,
+        *,
+        slot_bytes: int,
+        session_id: str | None = None,
+        timeout_s: float = 180.0,
+    ) -> None:
+        client = self._runtime.ensure_client()
+        client.activate_stable_local_backing(
+            region_id,
+            slot_bytes=int(slot_bytes),
+            session_id=session_id,
+            timeout_s=float(timeout_s),
+        )
+
+    def attach_host_shared_region(
+        self,
+        handle: LocalRegionHandle,
+        *,
+        timeout_s: float = 5.0,
+    ) -> HostSharedRegionAttachment:
+        client = self._runtime.ensure_client()
+        return client.attach_host_shared_region(handle, timeout_s=float(timeout_s))
+
+    def release_host_shared_region(
+        self,
+        handle: LocalRegionHandle,
+        *,
+        timeout_s: float = 5.0,
+    ) -> bool:
+        client = self._runtime.ensure_client()
+        return client.release_host_shared_region(handle, timeout_s=float(timeout_s))
+
     def register_vram_region(
         self,
         *,
@@ -4233,7 +4366,10 @@ __all__ = [
     "CopyPlan",
     "CopyPlanEntry",
     "FinalizeClass",
+    "HostSharedRegionAttachment",
+    "HostSharedRegionClass",
     "LeaseHandle",
+    "LocalRegionHandle",
     "MaterializationPayload",
     "MaterializationDiagnostics",
     "MaterializationBatcher",
@@ -4243,6 +4379,7 @@ __all__ = [
     "PublicDiskSourceHandle",
     "PreparedServingRegistration",
     "PublishedModelVersion",
+    "RegionMemoryKind",
     "ExecutionDiagnostics",
     "SourceBoundPlanDiagnostics",
     "HashBackend",

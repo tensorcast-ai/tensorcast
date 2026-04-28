@@ -53,6 +53,7 @@
 #include "core/store/materialization/dataplane/view/view_transform_executor.h"
 #include "core/store/replica/collective_disk_loader.h"
 #include "core/store/replica/replica.h"
+#include "core/store/runtime/ingestion/materialization_pump_options.h"
 #include "core/store/view_utils.h"
 #include "nlohmann/json.hpp"
 
@@ -852,10 +853,6 @@ absl::StatusOr<EffectiveSourceMaps> derive_effective_source_maps(
     return generic_effective_data_map_or.status();
   }
 
-  if (executor_effective_map_or->num_sources != 1 || collective_effective_data_map_or->num_sources > 1) {
-    return absl::InvalidArgumentError("runtime source finalization requires single-source maps");
-  }
-
   return EffectiveSourceMaps{
       .executor_effective_map = std::move(*executor_effective_map_or),
       .executor_effective_data_map = std::move(*executor_effective_data_map_or),
@@ -1175,6 +1172,18 @@ namespace {
 
 constexpr uint32_t kDefaultTransportWaitTimeoutMs = 30000;
 constexpr uint32_t kViewTransportProbeTimeoutMs = 1000;
+
+size_t resolve_streaming_buffer_chunks_for_transfer(
+    uint64_t transfer_bytes,
+    size_t slice_bytes,
+    size_t configured_chunks) {
+  const size_t max_chunks = std::max<size_t>(1, configured_chunks);
+  if (transfer_bytes == 0 || slice_bytes == 0) {
+    return 1;
+  }
+  const uint64_t required_chunks = (transfer_bytes + static_cast<uint64_t>(slice_bytes) - 1) / slice_bytes;
+  return static_cast<size_t>(std::min<uint64_t>(required_chunks, max_chunks));
+}
 
 bool is_local_identity(const components::WorkerIdentity& local) {
   return !local.node_id.empty() || !local.node_address.empty();
@@ -3427,6 +3436,11 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   auto run_source =
       [&](std::unique_ptr<IArtifactLoader> loader,
           loading::MaterializationSource source_kind) -> absl::StatusOr<loading::MaterializeIntoTargetResult> {
+    const absl::Time total_started_at = absl::Now();
+    absl::Duration streaming_buffer_init_elapsed = absl::ZeroDuration();
+    absl::Duration pump_elapsed = absl::ZeroDuration();
+    absl::Duration sink_close_elapsed = absl::ZeroDuration();
+    bool sink_closed = false;
     auto init_status = loader->initialize();
     if (!init_status.ok()) {
       return init_status;
@@ -3483,6 +3497,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       }
       loader::ByteRangeMappedSource::Options map_opts{
           .path = "materialize_into_target",
+          .transport_request_id = std::string(hints.transport_request_id),
           .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
       };
       auto mapped_or =
@@ -3657,30 +3672,75 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
             absl::StrCat("materialize_into_target source-ordered execution failed: ", exec_status.message()));
       }
     } else {
-      const size_t num_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
+      const size_t num_chunks = resolve_streaming_buffer_chunks_for_transfer(
+          effective_map.total_bytes, slice_bytes, config_.runtime_context->options().streaming_buffer_chunks);
       auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
           /*num_chunks=*/num_chunks, slice_bytes, config_.runtime_context->pinned_buffer_pool());
+      const absl::Time streaming_buffer_init_started_at = absl::Now();
       auto init_spb_status = session_spb->initialize(
           timeout,
           make_materialize_into_target_pinned_wait_context(hints, target_device.ordinal, num_chunks, slice_bytes));
+      streaming_buffer_init_elapsed = absl::Now() - streaming_buffer_init_started_at;
       if (!init_spb_status.ok()) {
         return init_spb_status;
       }
       loader::StreamingBufferAdapter adapter(session_spb);
+      const absl::Time pump_started_at = absl::Now();
       auto pump_status = loader::pump_ranges(
           *plan_source,
           sink,
           adapter,
           absl::MakeSpan(ranges),
           concurrency,
-          config_.runtime_context->async_runtime()->blocking_executor());
+          config_.runtime_context->async_runtime()->blocking_executor(),
+          nullptr,
+          make_pump_direct_write_options(config_.options->materialization_strategy));
+      pump_elapsed = absl::Now() - pump_started_at;
       if (!pump_status.ok()) {
         return absl::DataLossError(absl::StrCat("materialize_into_target pump failed: ", pump_status.message()));
       }
+      const absl::Time sink_close_started_at = absl::Now();
+      auto close_status = sink.close();
+      sink_close_elapsed = absl::Now() - sink_close_started_at;
+      if (!close_status.ok()) {
+        return absl::DataLossError(absl::StrCat("materialize_into_target sink close failed: ", close_status.message()));
+      }
+      sink_closed = true;
+      const absl::Duration total_elapsed = absl::Now() - total_started_at;
+      if (!hints.transport_request_id.empty()) {
+        LOG(INFO) << "materialize_into_target.summary"
+                  << " request_id=" << (hints.transport_request_id.empty() ? "<unset>" : hints.transport_request_id)
+                  << " artifact_id=" << hints.artifact_id << " source_ordered=false"
+                  << " direct_write_supported=" << plan_source->supports_direct_write_at()
+                  << " storage_count=" << target_layout.storages.size()
+                  << " mapping_segments=" << effective_map.segments.size()
+                  << " total_bytes=" << effective_map.total_bytes << " num_chunks=" << num_chunks
+                  << " slice_bytes=" << slice_bytes
+                  << " streaming_buffer_init_ms=" << absl::ToDoubleMilliseconds(streaming_buffer_init_elapsed)
+                  << " pump_ms=" << absl::ToDoubleMilliseconds(pump_elapsed)
+                  << " sink_close_ms=" << absl::ToDoubleMilliseconds(sink_close_elapsed)
+                  << " total_ms=" << absl::ToDoubleMilliseconds(total_elapsed);
+      } else if (absl::ToDoubleMilliseconds(total_elapsed) >= 25.0) {
+        VLOG(1) << "materialize_into_target.summary"
+                << " request_id=<unset>"
+                << " artifact_id=" << hints.artifact_id << " source_ordered=false"
+                << " direct_write_supported=" << plan_source->supports_direct_write_at()
+                << " storage_count=" << target_layout.storages.size()
+                << " mapping_segments=" << effective_map.segments.size() << " total_bytes=" << effective_map.total_bytes
+                << " num_chunks=" << num_chunks << " slice_bytes=" << slice_bytes
+                << " streaming_buffer_init_ms=" << absl::ToDoubleMilliseconds(streaming_buffer_init_elapsed)
+                << " pump_ms=" << absl::ToDoubleMilliseconds(pump_elapsed)
+                << " sink_close_ms=" << absl::ToDoubleMilliseconds(sink_close_elapsed)
+                << " total_ms=" << absl::ToDoubleMilliseconds(total_elapsed);
+      }
     }
-    auto close_status = sink.close();
-    if (!close_status.ok()) {
-      return absl::DataLossError(absl::StrCat("materialize_into_target sink close failed: ", close_status.message()));
+    if (!sink_closed) {
+      const absl::Time sink_close_started_at = absl::Now();
+      auto close_status = sink.close();
+      sink_close_elapsed = absl::Now() - sink_close_started_at;
+      if (!close_status.ok()) {
+        return absl::DataLossError(absl::StrCat("materialize_into_target sink close failed: ", close_status.message()));
+      }
     }
     if (view_plan.has_value() && view_plan->transform.requires_materialization &&
         placement == loading::TransformPlacement::kServer) {
@@ -3800,6 +3860,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       fill_runtime_p2p_bindings(comm_manager, &p2p_src);
       p2p_src.request_budget = hints.request_budget;
       p2p_src.artifact_id = hints.artifact_id;
+      p2p_src.transport_request_id = std::string(transport_request_id);
       if (has_disk_source && allow_disk && !prefer_p2p) {
         p2p_src.fallback_disk_dir = disk_source->path.string();
       }
@@ -3902,10 +3963,6 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   if (target_layout.storages.empty()) {
     return absl::InvalidArgumentError("materialize_mapped_into_target requires at least one target storage");
   }
-  if (executor_private_map.total_bytes > 0 && executor_private_map.num_sources != 1) {
-    return absl::InvalidArgumentError("materialize_mapped_into_target requires mapping.num_sources == 1");
-  }
-
   uint64_t total_size = target_layout.total_size;
   uint64_t computed_total = 0;
   for (const auto& storage : target_layout.storages) {
@@ -4113,6 +4170,20 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     std::shared_ptr<loader::SeekableSource> base_source = std::move(*source_or);
     std::vector<std::shared_ptr<loader::SeekableSource>> sources;
     sources.emplace_back(base_source);
+    const uint32_t required_source_count =
+        std::max(effective_map.num_sources, collective_effective_data_map.num_sources);
+    if (required_source_count > sources.size()) {
+      return absl::FailedPreconditionError(
+          absl::StrCat(
+              "materialize_mapped_into_target resolved ",
+              sources.size(),
+              " source(s) but execution maps require ",
+              required_source_count,
+              "; composite source resolution is not wired for source_kind=",
+              static_cast<int>(source_kind),
+              " source_byte_space=",
+              static_cast<int>(source_byte_space)));
+    }
 
     const bool map_crosses_storage_boundaries =
         byte_range_map_crosses_target_storage_boundaries(effective_map, target_layout);
@@ -4136,6 +4207,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       }
       loader::ByteRangeMappedSource::Options map_opts{
           .path = "materialize_mapped_into_target",
+          .transport_request_id = std::string(request_hints.transport_request_id),
           .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
       };
       auto mapped_or =
@@ -4596,7 +4668,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
             absl::StrCat("materialize_mapped_into_target source-ordered execution failed: ", exec_status.message()));
       }
     } else if (effective_map.total_bytes > 0 && !effective_map.segments.empty()) {
-      const size_t num_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
+      const size_t num_chunks = resolve_streaming_buffer_chunks_for_transfer(
+          effective_map.total_bytes, slice_bytes, config_.runtime_context->options().streaming_buffer_chunks);
       auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
           /*num_chunks=*/num_chunks, slice_bytes, config_.runtime_context->pinned_buffer_pool());
       auto init_spb_status = session_spb->initialize(timeout);
@@ -4610,7 +4683,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
           adapter,
           absl::MakeSpan(ranges),
           concurrency,
-          config_.runtime_context->async_runtime()->blocking_executor());
+          config_.runtime_context->async_runtime()->blocking_executor(),
+          nullptr,
+          make_pump_direct_write_options(config_.options->materialization_strategy));
       if (!pump_status.ok()) {
         LOG(ERROR) << "materialize_mapped_into_target pump failed"
                    << " source_kind=" << static_cast<int>(source_kind)
@@ -4874,6 +4949,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       fill_runtime_p2p_bindings(comm_manager, &p2p_src);
       p2p_src.request_budget = request_hints.request_budget;
       p2p_src.artifact_id = request_hints.artifact_id;
+      p2p_src.transport_request_id = std::string(transport_request_id);
       if (has_disk_source && allow_disk && !prefer_p2p) {
         p2p_src.fallback_disk_dir = disk_source->path.string();
       }
@@ -4924,6 +5000,266 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   return materialize_mapped_into_target(target_device, prepared_execution, hints, std::nullopt);
 }
 
+absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::materialize_mapped_sources_into_target(
+    const DeviceKey& target_device,
+    const loading::IntoTargetLayout& target_layout,
+    std::vector<std::shared_ptr<loader::SeekableSource>> sources,
+    const loader::ByteRangeMap& mapping,
+    const loading::MaterializeHints& hints,
+    loading::MaterializationSource source_kind) {
+  const absl::Time total_started_at = absl::Now();
+  absl::Duration compile_elapsed = absl::ZeroDuration();
+  absl::Duration mapped_source_create_elapsed = absl::ZeroDuration();
+  absl::Duration sink_setup_elapsed = absl::ZeroDuration();
+  absl::Duration streaming_buffer_init_elapsed = absl::ZeroDuration();
+  absl::Duration pump_elapsed = absl::ZeroDuration();
+  absl::Duration sink_close_elapsed = absl::ZeroDuration();
+  bool streaming_buffer_used = false;
+  if (target_device.type != DeviceType::GPU && target_device.type != DeviceType::CPU) {
+    return absl::InvalidArgumentError("materialize_mapped_sources_into_target requires GPU or CPU target device");
+  }
+  if (hints.artifact_id.empty()) {
+    return absl::InvalidArgumentError("materialize_mapped_sources_into_target requires hints.artifact_id");
+  }
+  if (target_layout.storages.empty()) {
+    return absl::InvalidArgumentError("materialize_mapped_sources_into_target requires at least one target storage");
+  }
+  if (sources.size() < mapping.num_sources) {
+    return absl::InvalidArgumentError("materialize_mapped_sources_into_target sources do not satisfy map.num_sources");
+  }
+  if (hints.variant && hints.variant->cached_plan.has_value() && !hints.variant->cached_plan->is_identity) {
+    return absl::InvalidArgumentError("materialize_mapped_sources_into_target does not support view transforms");
+  }
+
+  uint64_t total_size = target_layout.total_size;
+  uint64_t computed_total = 0;
+  for (const auto& storage : target_layout.storages) {
+    if (storage.length == 0) {
+      return absl::InvalidArgumentError("materialize_mapped_sources_into_target requires non-empty storage length");
+    }
+    if (storage.length > std::numeric_limits<uint64_t>::max() - computed_total) {
+      return absl::OutOfRangeError("materialize_mapped_sources_into_target storage length overflow");
+    }
+    computed_total += storage.length;
+  }
+  if (total_size == 0) {
+    total_size = computed_total;
+  } else if (total_size != computed_total) {
+    return absl::InvalidArgumentError(
+        "materialize_mapped_sources_into_target total_size does not match storage lengths");
+  }
+  if (total_size == 0) {
+    return absl::InvalidArgumentError("materialize_mapped_sources_into_target requires total_size > 0");
+  }
+  if (mapping.total_bytes != total_size) {
+    return absl::InvalidArgumentError("materialize_mapped_sources_into_target mapping total_bytes mismatch");
+  }
+
+  loader::ByteRangeCompiler compiler(config_.options->byte_mapping, "materialize_mapped_sources_into_target");
+  const absl::Time compile_started_at = absl::Now();
+  auto program_or = compiler.Compile(mapping);
+  compile_elapsed = absl::Now() - compile_started_at;
+  if (!program_or.ok()) {
+    return program_or.status();
+  }
+  loader::ByteRangeMappedSource::Options map_opts{
+      .path = "materialize_mapped_sources_into_target",
+      .transport_request_id = std::string(hints.transport_request_id),
+      .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
+  };
+  const absl::Time mapped_source_create_started_at = absl::Now();
+  auto mapped_or = loader::ByteRangeMappedSource::Create(mapping, *program_or, std::move(sources), std::move(map_opts));
+  mapped_source_create_elapsed = absl::Now() - mapped_source_create_started_at;
+  if (!mapped_or.ok()) {
+    return mapped_or.status();
+  }
+  const bool direct_write_supported = (*mapped_or)->supports_direct_write_at();
+
+  const size_t slice_bytes = config_.runtime_context->tx_slice_bytes();
+  if (slice_bytes == 0 || config_.artifact_chunk_bytes == 0) {
+    return absl::FailedPreconditionError("tx_slice_bytes or artifact_chunk_bytes is zero");
+  }
+  const std::chrono::milliseconds timeout =
+      hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : config_.pinned_memory_timeout;
+
+  std::vector<loader::TargetStorage> gpu_storages;
+  std::vector<loader::HostTargetStorage> host_storages;
+  gpu_storages.reserve(target_layout.storages.size());
+  host_storages.reserve(target_layout.storages.size());
+  std::vector<loader::Range> ranges;
+  const bool collapse_ranges_for_single_source_direct_write = direct_write_supported && mapping.num_sources == 1;
+  ranges.reserve(collapse_ranges_for_single_source_direct_write ? 1 : target_layout.storages.size());
+  std::unique_ptr<loader::PositionedSink> sink;
+  {
+    const absl::Time sink_setup_started_at = absl::Now();
+    uint64_t range_cursor = 0;
+    for (const auto& storage : target_layout.storages) {
+      if (storage.length > std::numeric_limits<size_t>::max()) {
+        return absl::OutOfRangeError("materialize_mapped_sources_into_target storage length exceeds host limits");
+      }
+      if (target_device.type == DeviceType::GPU) {
+        gpu_storages.push_back(loader::TargetStorage{storage.base_ptr, storage.length});
+      } else {
+        host_storages.push_back(
+            loader::HostTargetStorage{
+                .base_ptr = storage.base_ptr,
+                .length = storage.length,
+                .stable_backing = storage.stable_backing,
+                .keepalive = storage.keepalive,
+            });
+      }
+      range_cursor += storage.length;
+    }
+    if (range_cursor != total_size) {
+      return absl::InvalidArgumentError("materialize_mapped_sources_into_target storage ranges do not span total_size");
+    }
+    if (collapse_ranges_for_single_source_direct_write) {
+      ranges.emplace_back(/*offset=*/0, static_cast<size_t>(total_size));
+    } else {
+      uint64_t range_offset = 0;
+      for (const auto& storage : target_layout.storages) {
+        ranges.emplace_back(range_offset, static_cast<size_t>(storage.length));
+        range_offset += storage.length;
+      }
+    }
+
+    if (target_device.type == DeviceType::GPU) {
+      loader::TargetLayoutGpuSink::Options sink_opts{
+          .storages = std::move(gpu_storages),
+          .chunk_size = config_.artifact_chunk_bytes,
+          .device_id = target_device.ordinal,
+      };
+      sink = std::make_unique<loader::TargetLayoutGpuSink>(std::move(sink_opts));
+    } else {
+      loader::TargetLayoutHostSink::Options sink_opts{
+          .storages = std::move(host_storages),
+      };
+      sink = std::make_unique<loader::TargetLayoutHostSink>(std::move(sink_opts));
+    }
+    sink_setup_elapsed = absl::Now() - sink_setup_started_at;
+  }
+
+  const int concurrency = loading::resolve_materialization_concurrency(config_.num_threads, hints);
+  const bool use_direct_write_path = direct_write_supported && target_device.type == DeviceType::CPU &&
+      dynamic_cast<loader::DirectWriteCapable*>(sink.get()) != nullptr;
+  const size_t num_chunks = use_direct_write_path
+      ? 0
+      : resolve_streaming_buffer_chunks_for_transfer(
+            total_size, slice_bytes, config_.runtime_context->options().streaming_buffer_chunks);
+  loader::PumpDebugStats pump_debug_stats;
+  const absl::Time pump_started_at = absl::Now();
+  absl::Status pump_status;
+  if (use_direct_write_path) {
+    pump_status = loader::pump_ranges_direct_write(
+        **mapped_or,
+        *sink,
+        absl::MakeSpan(ranges),
+        slice_bytes,
+        concurrency,
+        &pump_debug_stats,
+        make_pump_direct_write_options(config_.options->materialization_strategy));
+  } else {
+    streaming_buffer_used = true;
+    auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
+        /*num_chunks=*/num_chunks, slice_bytes, config_.runtime_context->pinned_buffer_pool());
+    const absl::Time streaming_buffer_init_started_at = absl::Now();
+    auto init_spb_status = session_spb->initialize(
+        timeout,
+        make_materialize_into_target_pinned_wait_context(hints, target_device.ordinal, num_chunks, slice_bytes));
+    streaming_buffer_init_elapsed = absl::Now() - streaming_buffer_init_started_at;
+    if (!init_spb_status.ok()) {
+      return init_spb_status;
+    }
+    loader::StreamingBufferAdapter adapter(session_spb);
+    pump_status = loader::pump_ranges(
+        **mapped_or,
+        *sink,
+        adapter,
+        absl::MakeSpan(ranges),
+        concurrency,
+        config_.runtime_context->async_runtime()->blocking_executor(),
+        &pump_debug_stats,
+        make_pump_direct_write_options(config_.options->materialization_strategy));
+  }
+  pump_elapsed = absl::Now() - pump_started_at;
+  if (!pump_status.ok()) {
+    return absl::DataLossError(
+        absl::StrCat("materialize_mapped_sources_into_target pump failed: ", pump_status.message()));
+  }
+  const absl::Time sink_close_started_at = absl::Now();
+  auto close_status = sink->close();
+  sink_close_elapsed = absl::Now() - sink_close_started_at;
+  if (!close_status.ok()) {
+    return absl::DataLossError(
+        absl::StrCat("materialize_mapped_sources_into_target sink close failed: ", close_status.message()));
+  }
+  if (target_device.type == DeviceType::CPU) {
+    const absl::Duration total_elapsed = absl::Now() - total_started_at;
+    if (!hints.transport_request_id.empty()) {
+      LOG(INFO) << "materialize_mapped_sources_into_target.summary"
+                << " request_id=" << (hints.transport_request_id.empty() ? "<unset>" : hints.transport_request_id)
+                << " artifact_id=" << hints.artifact_id << " direct_write_supported=" << direct_write_supported
+                << " streaming_buffer_used=" << (streaming_buffer_used ? "true" : "false")
+                << " storage_count=" << target_layout.storages.size() << " mapping_segments=" << mapping.segments.size()
+                << " total_bytes=" << total_size << " num_chunks=" << num_chunks << " slice_bytes=" << slice_bytes
+                << " compile_ms=" << absl::ToDoubleMilliseconds(compile_elapsed)
+                << " mapped_source_create_ms=" << absl::ToDoubleMilliseconds(mapped_source_create_elapsed)
+                << " sink_setup_ms=" << absl::ToDoubleMilliseconds(sink_setup_elapsed)
+                << " streaming_buffer_init_ms=" << absl::ToDoubleMilliseconds(streaming_buffer_init_elapsed)
+                << " pump_ms=" << absl::ToDoubleMilliseconds(pump_elapsed)
+                << " sink_close_ms=" << absl::ToDoubleMilliseconds(sink_close_elapsed)
+                << " total_ms=" << absl::ToDoubleMilliseconds(total_elapsed);
+    } else if (absl::ToDoubleMilliseconds(total_elapsed) >= 25.0) {
+      VLOG(1) << "materialize_mapped_sources_into_target.summary"
+              << " request_id=<unset>"
+              << " artifact_id=" << hints.artifact_id << " direct_write_supported=" << direct_write_supported
+              << " streaming_buffer_used=" << (streaming_buffer_used ? "true" : "false")
+              << " storage_count=" << target_layout.storages.size() << " mapping_segments=" << mapping.segments.size()
+              << " total_bytes=" << total_size << " num_chunks=" << num_chunks << " slice_bytes=" << slice_bytes
+              << " compile_ms=" << absl::ToDoubleMilliseconds(compile_elapsed)
+              << " mapped_source_create_ms=" << absl::ToDoubleMilliseconds(mapped_source_create_elapsed)
+              << " sink_setup_ms=" << absl::ToDoubleMilliseconds(sink_setup_elapsed)
+              << " streaming_buffer_init_ms=" << absl::ToDoubleMilliseconds(streaming_buffer_init_elapsed)
+              << " pump_ms=" << absl::ToDoubleMilliseconds(pump_elapsed)
+              << " sink_close_ms=" << absl::ToDoubleMilliseconds(sink_close_elapsed)
+              << " total_ms=" << absl::ToDoubleMilliseconds(total_elapsed);
+    } else {
+      VLOG(2) << "materialize_mapped_sources_into_target.summary"
+              << " artifact_id=" << hints.artifact_id << " direct_write_supported=" << direct_write_supported
+              << " streaming_buffer_used=" << (streaming_buffer_used ? "true" : "false")
+              << " storage_count=" << target_layout.storages.size() << " mapping_segments=" << mapping.segments.size()
+              << " total_bytes=" << total_size << " num_chunks=" << num_chunks << " slice_bytes=" << slice_bytes
+              << " compile_ms=" << absl::ToDoubleMilliseconds(compile_elapsed)
+              << " mapped_source_create_ms=" << absl::ToDoubleMilliseconds(mapped_source_create_elapsed)
+              << " sink_setup_ms=" << absl::ToDoubleMilliseconds(sink_setup_elapsed)
+              << " streaming_buffer_init_ms=" << absl::ToDoubleMilliseconds(streaming_buffer_init_elapsed)
+              << " pump_ms=" << absl::ToDoubleMilliseconds(pump_elapsed)
+              << " sink_close_ms=" << absl::ToDoubleMilliseconds(sink_close_elapsed)
+              << " total_ms=" << absl::ToDoubleMilliseconds(total_elapsed);
+    }
+  }
+  return loading::MaterializeIntoTargetResult{
+      .source = source_kind,
+      .requested_bytes = total_size,
+      .committed_bytes = total_size,
+      .fallback_bytes = total_size,
+      .residual_bytes = 0,
+      .collective_handled = false,
+      .direct_write_supported = direct_write_supported,
+      .source_ordered = false,
+      .dominant_executor = "MappedSourcesTargetExecutor",
+      .selection_reason = "mapped_sources_target",
+      .debug_stats =
+          loading::MaterializeIntoTargetResult::DebugStats{
+              .produced_chunks = pump_debug_stats.produced_chunks,
+              .produced_bytes = pump_debug_stats.produced_bytes,
+              .source_read_at_us_total = pump_debug_stats.source_read_at_us_total,
+              .gpu_write_wait_us_total = pump_debug_stats.gpu_write_wait_us_total,
+              .gpu_write_bytes_total = pump_debug_stats.gpu_write_bytes_total,
+          },
+  };
+}
+
 absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::materialize_mapped_loader_into_target(
     const DeviceKey& target_device,
     const loading::IntoTargetLayout& target_layout,
@@ -4931,6 +5267,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     const loader::ByteRangeMap& mapping,
     const loading::MaterializeHints& hints,
     loading::MaterializationSource source_kind) {
+  // Public compatibility wrapper: callers still provide one loader even
+  // though internal execution can now target multiple resolved sources.
   if (target_device.type != DeviceType::GPU && target_device.type != DeviceType::CPU) {
     return absl::InvalidArgumentError("materialize_mapped_loader_into_target requires GPU or CPU target device");
   }
@@ -4992,115 +5330,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
 
   std::vector<std::shared_ptr<loader::SeekableSource>> sources;
   sources.emplace_back(std::move(*source_or));
-
-  loader::ByteRangeCompiler compiler(config_.options->byte_mapping, "materialize_mapped_loader_into_target");
-  auto program_or = compiler.Compile(mapping);
-  if (!program_or.ok()) {
-    return program_or.status();
-  }
-  loader::ByteRangeMappedSource::Options map_opts{
-      .path = "materialize_mapped_loader_into_target",
-      .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
-  };
-  auto mapped_or = loader::ByteRangeMappedSource::Create(mapping, *program_or, std::move(sources), std::move(map_opts));
-  if (!mapped_or.ok()) {
-    return mapped_or.status();
-  }
-
-  const size_t slice_bytes = config_.runtime_context->tx_slice_bytes();
-  if (slice_bytes == 0 || config_.artifact_chunk_bytes == 0) {
-    return absl::FailedPreconditionError("tx_slice_bytes or artifact_chunk_bytes is zero");
-  }
-  const std::chrono::milliseconds timeout =
-      hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : config_.pinned_memory_timeout;
-
-  std::vector<loader::TargetStorage> gpu_storages;
-  std::vector<loader::HostTargetStorage> host_storages;
-  gpu_storages.reserve(target_layout.storages.size());
-  host_storages.reserve(target_layout.storages.size());
-  std::vector<loader::Range> ranges;
-  ranges.reserve(target_layout.storages.size());
-  uint64_t range_cursor = 0;
-  for (const auto& storage : target_layout.storages) {
-    if (storage.length > std::numeric_limits<size_t>::max()) {
-      return absl::OutOfRangeError("materialize_mapped_loader_into_target storage length exceeds host limits");
-    }
-    if (target_device.type == DeviceType::GPU) {
-      gpu_storages.push_back(loader::TargetStorage{storage.base_ptr, storage.length});
-    } else {
-      host_storages.push_back(loader::HostTargetStorage{storage.base_ptr, storage.length});
-    }
-    ranges.emplace_back(range_cursor, static_cast<size_t>(storage.length));
-    range_cursor += storage.length;
-  }
-  if (range_cursor != total_size) {
-    return absl::InvalidArgumentError("materialize_mapped_loader_into_target storage ranges do not span total_size");
-  }
-
-  std::unique_ptr<loader::PositionedSink> sink;
-  if (target_device.type == DeviceType::GPU) {
-    loader::TargetLayoutGpuSink::Options sink_opts{
-        .storages = std::move(gpu_storages),
-        .chunk_size = config_.artifact_chunk_bytes,
-        .device_id = target_device.ordinal,
-    };
-    sink = std::make_unique<loader::TargetLayoutGpuSink>(std::move(sink_opts));
-  } else {
-    loader::TargetLayoutHostSink::Options sink_opts{
-        .storages = std::move(host_storages),
-    };
-    sink = std::make_unique<loader::TargetLayoutHostSink>(std::move(sink_opts));
-  }
-
-  const int concurrency =
-      hints.pipeline_concurrency > 0 ? static_cast<int>(hints.pipeline_concurrency) : std::max(1, config_.num_threads);
-  const size_t num_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
-  auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
-      /*num_chunks=*/num_chunks, slice_bytes, config_.runtime_context->pinned_buffer_pool());
-  auto init_spb_status = session_spb->initialize(
-      timeout, make_materialize_into_target_pinned_wait_context(hints, target_device.ordinal, num_chunks, slice_bytes));
-  if (!init_spb_status.ok()) {
-    return init_spb_status;
-  }
-  loader::StreamingBufferAdapter adapter(session_spb);
-  loader::PumpDebugStats pump_debug_stats;
-  auto pump_status = loader::pump_ranges(
-      **mapped_or,
-      *sink,
-      adapter,
-      absl::MakeSpan(ranges),
-      concurrency,
-      config_.runtime_context->async_runtime()->blocking_executor(),
-      &pump_debug_stats);
-  if (!pump_status.ok()) {
-    return absl::DataLossError(
-        absl::StrCat("materialize_mapped_loader_into_target pump failed: ", pump_status.message()));
-  }
-  auto close_status = sink->close();
-  if (!close_status.ok()) {
-    return absl::DataLossError(
-        absl::StrCat("materialize_mapped_loader_into_target sink close failed: ", close_status.message()));
-  }
-  return loading::MaterializeIntoTargetResult{
-      .source = source_kind,
-      .requested_bytes = total_size,
-      .committed_bytes = total_size,
-      .fallback_bytes = total_size,
-      .residual_bytes = 0,
-      .collective_handled = false,
-      .direct_write_supported = false,
-      .source_ordered = false,
-      .dominant_executor = "MappedLoaderTargetExecutor",
-      .selection_reason = "mapped_loader_target",
-      .debug_stats =
-          loading::MaterializeIntoTargetResult::DebugStats{
-              .produced_chunks = pump_debug_stats.produced_chunks,
-              .produced_bytes = pump_debug_stats.produced_bytes,
-              .source_read_at_us_total = pump_debug_stats.source_read_at_us_total,
-              .gpu_write_wait_us_total = pump_debug_stats.gpu_write_wait_us_total,
-              .gpu_write_bytes_total = pump_debug_stats.gpu_write_bytes_total,
-          },
-  };
+  return materialize_mapped_sources_into_target(
+      target_device, target_layout, std::move(sources), mapping, hints, source_kind);
 }
 
 absl::StatusOr<ArtifactLoweringResult> MaterializationFacade::execute_artifact_lowering_plan(
@@ -6756,6 +6987,9 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::ingest_mapped_load
     const loader::ByteRangeMap& mapping,
     const loading::MaterializeHints& hints,
     loading::MaterializationSource source_kind) {
+  // Public compatibility wrapper: logical/physical ids plus the single-loader
+  // contract remain part of the facade shape until composite sources become a
+  // first-class request concept.
   if (logical_artifact_id.empty()) {
     return absl::InvalidArgumentError("ingest_mapped_loader_into_replica requires logical_artifact_id");
   }

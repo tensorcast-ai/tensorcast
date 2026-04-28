@@ -1755,4 +1755,41 @@ void LipManager::attach_replica_id(const std::string& registration_id, std::stri
   routable_replica_ids_[*key] = std::move(replica_id);
 }
 
+std::vector<LipManager::RoutableInventoryEntry> LipManager::list_active_routable_inventory() const {
+  absl::flat_hash_map<ArtifactDeviceKey, uint64_t> active_sizes;
+  {
+    absl::MutexLock l(&mu_);
+    const auto now = std::chrono::steady_clock::now();
+    active_sizes.reserve(leases_.size());
+    for (const auto& [key, lease] : leases_) {
+      if (lease.expiry.time_since_epoch().count() > 0 && now > lease.expiry) {
+        continue;
+      }
+      active_sizes.emplace(key, lease.total_size);
+    }
+  }
+
+  std::vector<RoutableInventoryEntry> result;
+  {
+    absl::MutexLock lk(&routable_mu_);
+    result.reserve(routable_exports_.size());
+    for (const auto& [key, export_record] : routable_exports_) {
+      auto size_it = active_sizes.find(key);
+      if (size_it == active_sizes.end()) {
+        continue;
+      }
+      if (export_record.tensor_keys.empty() || export_record.buffer_sizes.empty()) {
+        continue;
+      }
+      RoutableInventoryEntry entry;
+      entry.key = key;
+      entry.total_size = size_it->second;
+      entry.remote_memory_keys = export_record.tensor_keys;
+      entry.buffer_sizes = export_record.buffer_sizes;
+      result.push_back(std::move(entry));
+    }
+  }
+  return result;
+}
+
 } // namespace tensorcast::daemon

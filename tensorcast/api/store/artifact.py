@@ -13,7 +13,15 @@ import uuid
 import weakref
 from dataclasses import dataclass, field
 from datetime import timezone
-from typing import TYPE_CHECKING, Mapping, Sequence, TypedDict
+from typing import (
+    TYPE_CHECKING,
+    Mapping,
+    Sequence,
+    SupportsIndex,
+    SupportsInt,
+    TypedDict,
+    cast,
+)
 
 import torch
 
@@ -32,7 +40,10 @@ from tensorcast.api.operation import (
     PollingOperation,
 )
 from tensorcast.api.store.binding import Binding
-from tensorcast.api.store.binding_state import parse_binding_value_or_raise
+from tensorcast.api.store.binding_state import (
+    BindingValueMetadata,
+    parse_binding_value_or_raise,
+)
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import (
     canonical_index_from_bytes,
@@ -427,7 +438,7 @@ def _read_context_tag_int(
     if value is None:
         return default
     try:
-        return int(value)
+        return int(cast(SupportsInt | SupportsIndex | str | bytes | bytearray, value))
     except (TypeError, ValueError):
         return default
 
@@ -522,7 +533,7 @@ def _register_client_binding(
     source_artifact_id: str | None,
     target_publication_token: bytes | None,
     ctx: CallContext | None,
-) -> tuple[str, BindingLayout, object | None]:
+) -> tuple[str, BindingLayout, BindingValueMetadata | None]:
     binding_layout = build_binding_layout(
         target_layout=region_layout.layout,
         target_index_bytes=bytes(

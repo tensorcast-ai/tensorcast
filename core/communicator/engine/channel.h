@@ -67,6 +67,7 @@ class Channel {
       const std::string& remote_dev_name);
 
   bool has_gpu_slot() const {
+    absl::MutexLock lock(&state_mu_);
     return gpu_slot_handle_ != nullptr;
   }
 
@@ -92,6 +93,12 @@ class Channel {
   bool is_expired(uint64_t now) const;
 
   struct FlowState {
+    struct DirectSourceLaneState {
+      mutable absl::Mutex mu;
+      std::deque<std::shared_ptr<RdmaReadSession>> sessions ABSL_GUARDED_BY(mu);
+      bool scheduled ABSL_GUARDED_BY(mu) = false;
+    };
+
     FlowState(int credit, uint32_t max_window_segments)
         : ledger(credit),
           max_window_segments(max_window_segments == 0 ? static_cast<uint32_t>(credit) : max_window_segments) {}
@@ -99,9 +106,13 @@ class Channel {
     FlowCreditLedger ledger;
     StageLeaseRegistry registry;
     const uint32_t max_window_segments;
-    std::deque<std::shared_ptr<RdmaReadSession>> rdma_pending_reads;
+    mutable absl::Mutex rdma_pending_reads_mu;
+    std::deque<std::shared_ptr<RdmaReadSession>> rdma_pending_reads ABSL_GUARDED_BY(rdma_pending_reads_mu);
     std::atomic_bool rdma_refill_in_progress{false};
     std::atomic_bool rdma_refill_requested{false};
+    mutable absl::Mutex direct_source_lanes_mu;
+    absl::flat_hash_map<int16_t, std::shared_ptr<DirectSourceLaneState>> direct_source_lanes
+        ABSL_GUARDED_BY(direct_source_lanes_mu);
   };
 
   std::shared_ptr<FlowState> flow_state() const {
@@ -109,17 +120,18 @@ class Channel {
   }
 
  private:
-  int type_;
-  transport::tcp_transport_t control_;
+  int type_ ABSL_GUARDED_BY(state_mu_);
+  mutable absl::Mutex state_mu_;
+  transport::tcp_transport_t control_ ABSL_GUARDED_BY(state_mu_);
   std::shared_ptr<RdmaEndpoint> find_rdma_endpoint_locked(const std::string& key) const
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(rdma_mu_);
   absl::flat_hash_map<std::string, std::shared_ptr<RdmaEndpoint>> rdma_ ABSL_GUARDED_BY(rdma_mu_);
   mutable absl::Mutex rdma_mu_;
-  transport::mtcp_transport_t mtcp_;
+  transport::mtcp_transport_t mtcp_ ABSL_GUARDED_BY(state_mu_);
   std::atomic<int> mtcp_active_requests_{0};
   uint64_t expired_time_;
   std::shared_ptr<FlowState> flow_state_;
-  std::shared_ptr<void> gpu_slot_handle_;
+  std::shared_ptr<void> gpu_slot_handle_ ABSL_GUARDED_BY(state_mu_);
 };
 
 using channel_t = std::shared_ptr<Channel>;

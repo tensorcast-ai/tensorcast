@@ -221,6 +221,8 @@ sc_cc_library(
         "//core/common:capability_token_lib",
         "//core/common:memory_location_lib",
         "//core/common:selection_identity_lib",
+        "//core/communicator:config_io_lib",
+        "//core/communicator:host_topology_builder_lib",
         "//core/store:device_registry",
         "//core/store:global_store_client",
         "//core/store:store_engine",
@@ -728,6 +730,7 @@ sc_cc_library(
     hdrs = ["ha/worker_lifecycle_manager.h"],
     deps = [
         ":identity_utils_lib",
+        ":worker_directory_cache_lib",
         ":worker_lifecycle_ports_hdr",
         "//core/communicator:utils_lib",
         "//core/store:store_engine",
@@ -1365,6 +1368,7 @@ sc_cc_library(
         ":grpc_peer_utils_lib",
         ":ipc_region_registry_lib",
         ":materialization_target_storage_utils_lib",
+        "//core/store:communication_manager",
         "//core/store:device_types",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -1654,9 +1658,11 @@ sc_cc_library(
     deps = [
         ":ipc_region_registry_lib",
         "//core/cuda:cuda_ipc_lib",
+        "//core/store:communication_manager",
         "//core/store:store_engine",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
         "@protobuf",
     ],
 )
@@ -1754,6 +1760,7 @@ sc_cc_library(
     deps = [
         ":ipc_region_registry_lib",
         ":materialization_target_storage_utils_lib",
+        "//core/store:communication_manager",
         "//core/store:device_registry",
         "//core/store:device_types",
         "//core/store/materialization/contracts:loading_spec",
@@ -2136,7 +2143,9 @@ cc_test(
         ":routed_authority_wire_hdr",
         "//core/common:artifact_hash_lib",
         "//core/store:store_engine",
+        "//core/store:testing_global_store_client_stub",
         "//core/store:testing_recording_global_store_client",
+        "//core/testing:test_helpers",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
@@ -2526,6 +2535,22 @@ cc_test(
 alias(
     name = "resolve_artifact_from_disk_test",
     actual = ":import_artifact_from_path_test",
+)
+
+cc_test(
+    name = "byte_artifact_region_layout_host_shared_test",
+    srcs = ["service/byte_artifact_region_layout_host_shared_test.cc"],
+    deps = [
+        ":external_target_access_service_lib",
+        ":ipc_region_registry_lib",
+        ":materialization_target_storage_utils_lib",
+        "//core/store:communication_manager",
+        "//core/store:device_registry",
+        "//core/testing:test_helpers",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
+    ],
 )
 
 cc_test(

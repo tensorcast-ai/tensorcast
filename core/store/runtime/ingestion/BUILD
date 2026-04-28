@@ -79,12 +79,24 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "materialization_pump_options",
+    srcs = ["materialization_pump_options.cc"],
+    hdrs = ["materialization_pump_options.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core/store:store_engine_options",
+        "//core/store/materialization/dataplane:pump",
+    ],
+)
+
+sc_cc_library(
     name = "materialization_facade",
     srcs = ["materialization_facade.cc"],
     hdrs = ["materialization_facade.h"],
     deps = [
         ":artifact_lowering_plan",
         ":ingestion_event_hub",
+        ":materialization_pump_options",
         ":materialization_service",
         ":materialization_strategy_types",
         "//core/common:artifact_hash_lib",
@@ -169,6 +181,16 @@ cc_test(
         ":ingestion_event_hub",
         "//core/testing:catch_main",
         "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "materialization_pump_options_test",
+    srcs = ["materialization_pump_options_test.cc"],
+    deps = [
+        ":materialization_pump_options",
+        "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],
 )

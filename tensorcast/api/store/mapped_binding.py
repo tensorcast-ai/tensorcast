@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Mapping, Sequence, SupportsIndex, SupportsInt, TypedDict, cast
 
 import torch
 
@@ -42,6 +42,27 @@ TargetTensors = Mapping[str, torch.Tensor]
 
 _COPY_PLAN_VERSION = 1
 _MAPPED_VIEW_ID_VERSION = 1
+
+
+class _RangePayload(TypedDict):
+    dim: int
+    start: int
+    end: int
+
+
+class _CopyPlanEntryPayload(TypedDict):
+    ckpt_name: str
+    ckpt_range: _RangePayload | None
+    dst_name: str
+    dst_range: _RangePayload | None
+
+
+class _TargetSpecPayload(TypedDict):
+    name: str
+    dtype: str
+    shape: tuple[int, ...]
+    stride: tuple[int, ...]
+    logical_length: int
 
 
 def copy_plan_to_json(plan: CopyPlan) -> str:
@@ -164,6 +185,9 @@ def compute_mapped_view_id_from_specs(
         )
 
     normalized = normalize_copy_plan(plan)
+    normalized_target_specs = tuple(
+        _coerce_target_spec_payload(spec) for spec in target_specs
+    )
     copy_plan_payload = sorted(
         (_entry_to_dict(entry) for entry in normalized),
         key=lambda item: (
@@ -193,7 +217,7 @@ def compute_mapped_view_id_from_specs(
                     "stride": [int(v) for v in spec["stride"]],
                     "logical_length": int(spec["logical_length"]),
                 }
-                for spec in target_specs
+                for spec in normalized_target_specs
             ),
             key=lambda item: str(item["name"]),
         ),
@@ -431,7 +455,7 @@ def view_narrow_ranges(view_spec: ViewSpecBuildResult | None) -> dict[str, Range
     return narrows
 
 
-def _entry_to_dict(entry: CopyPlanEntry) -> dict[str, object]:
+def _entry_to_dict(entry: CopyPlanEntry) -> _CopyPlanEntryPayload:
     return {
         "ckpt_name": entry.ckpt_name,
         "ckpt_range": _range_to_dict(entry.ckpt_range),
@@ -469,7 +493,7 @@ def _range_from_dict(data: object) -> Range | None:
     )
 
 
-def _range_to_dict(rng: Range | None) -> dict[str, int] | None:
+def _range_to_dict(rng: Range | None) -> _RangePayload | None:
     if rng is None:
         return None
     return {"dim": int(rng.dim), "start": int(rng.start), "end": int(rng.end)}
@@ -489,10 +513,10 @@ def _coerce_range(value: object) -> Range | None:
 
 def _target_spec_payloads_from_tensors(
     target_tensors: TargetTensors,
-) -> list[dict[str, object]]:
+) -> list[_TargetSpecPayload]:
     if not target_tensors:
         return []
-    payloads: list[dict[str, object]] = []
+    payloads: list[_TargetSpecPayload] = []
     normalized_targets = {str(name): tensor for name, tensor in target_tensors.items()}
     for name in sorted(normalized_targets):
         tensor = normalized_targets[name]
@@ -512,6 +536,27 @@ def _target_spec_payloads_from_tensors(
             }
         )
     return payloads
+
+
+def _coerce_target_spec_payload(spec: Mapping[str, object]) -> _TargetSpecPayload:
+    return {
+        "name": str(spec["name"]),
+        "dtype": str(spec["dtype"]),
+        "shape": tuple(
+            int(cast(SupportsInt | SupportsIndex | str | bytes | bytearray, v))
+            for v in cast(Sequence[object], spec["shape"])
+        ),
+        "stride": tuple(
+            int(cast(SupportsInt | SupportsIndex | str | bytes | bytearray, v))
+            for v in cast(Sequence[object], spec["stride"])
+        ),
+        "logical_length": int(
+            cast(
+                SupportsInt | SupportsIndex | str | bytes | bytearray,
+                spec["logical_length"],
+            )
+        ),
+    }
 
 
 def _group_entries_by_dst(

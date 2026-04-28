@@ -43,6 +43,7 @@ class RouteChannel {
   }
 
   transport::future_read_result_t read_tensor(const ReadRequest& request);
+  transport::future_read_result_t read_plan(const ReadPlan& plan);
   HealthState health() const;
 
  private:

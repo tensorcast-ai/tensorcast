@@ -24,7 +24,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, SupportsIndex, SupportsInt, cast
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -94,7 +94,9 @@ class PortConfig(BaseModel):
         if isinstance(value, bool):
             raise ValueError("port values must be integers between 0 and 65535")
         try:
-            port = int(value)
+            port = int(
+                cast(SupportsInt | SupportsIndex | str | bytes | bytearray, value)
+            )
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 "port values must be integers between 0 and 65535"

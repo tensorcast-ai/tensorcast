@@ -7,7 +7,7 @@ import hashlib
 import json
 from datetime import datetime
 from enum import Enum, IntFlag
-from typing import Iterable, Literal, Union
+from typing import Iterable, Literal, Union, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -155,61 +155,49 @@ class IdentityMintStrategy(str, Enum):
     CLOSEOUT_MINT = "closeout_mint"
 
 
-_COLLECTIVE_POLICY_TO_PROTO: dict[CollectivePolicy, int] = {
-    CollectivePolicy.REQUIRE_COLLECTIVE: int(
-        store_daemon_pb2.COLLECTIVE_POLICY_REQUIRE_COLLECTIVE
-    ),
-    CollectivePolicy.COLLECTIVE_FIRST: int(
-        store_daemon_pb2.COLLECTIVE_POLICY_COLLECTIVE_FIRST
-    ),
-    CollectivePolicy.DISABLE_COLLECTIVE: int(
-        store_daemon_pb2.COLLECTIVE_POLICY_DISABLE_COLLECTIVE
-    ),
+_COLLECTIVE_POLICY_TO_PROTO: dict[
+    CollectivePolicy, store_daemon_pb2.CollectivePolicy
+] = {
+    CollectivePolicy.REQUIRE_COLLECTIVE: store_daemon_pb2.COLLECTIVE_POLICY_REQUIRE_COLLECTIVE,
+    CollectivePolicy.COLLECTIVE_FIRST: store_daemon_pb2.COLLECTIVE_POLICY_COLLECTIVE_FIRST,
+    CollectivePolicy.DISABLE_COLLECTIVE: store_daemon_pb2.COLLECTIVE_POLICY_DISABLE_COLLECTIVE,
 }
 _COLLECTIVE_POLICY_FROM_PROTO: dict[int, CollectivePolicy] = {
     value: key for key, value in _COLLECTIVE_POLICY_TO_PROTO.items()
 }
-_COLLECTIVE_FAILURE_CLASS_TO_PROTO: dict[CollectiveFailureClass, int] = {
-    CollectiveFailureClass.NOT_ELIGIBLE: int(
-        store_daemon_pb2.COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE
-    ),
-    CollectiveFailureClass.EXECUTION_FAILED: int(
-        store_daemon_pb2.COLLECTIVE_FAILURE_CLASS_EXECUTION_FAILED
-    ),
+_COLLECTIVE_FAILURE_CLASS_TO_PROTO: dict[
+    CollectiveFailureClass, store_daemon_pb2.CollectiveFailureClass
+] = {
+    CollectiveFailureClass.NOT_ELIGIBLE: store_daemon_pb2.COLLECTIVE_FAILURE_CLASS_NOT_ELIGIBLE,
+    CollectiveFailureClass.EXECUTION_FAILED: store_daemon_pb2.COLLECTIVE_FAILURE_CLASS_EXECUTION_FAILED,
 }
 _COLLECTIVE_FAILURE_CLASS_FROM_PROTO: dict[int, CollectiveFailureClass] = {
     value: key for key, value in _COLLECTIVE_FAILURE_CLASS_TO_PROTO.items()
 }
-_HASH_BACKEND_TO_PROTO: dict[HashBackend, int] = {
-    HashBackend.NONE: int(store_daemon_pb2.HASH_BACKEND_NONE),
-    HashBackend.GPU: int(store_daemon_pb2.HASH_BACKEND_GPU),
-    HashBackend.D2H_CPU: int(store_daemon_pb2.HASH_BACKEND_D2H_CPU),
-    HashBackend.CPU: int(store_daemon_pb2.HASH_BACKEND_CPU),
+_HASH_BACKEND_TO_PROTO: dict[HashBackend, store_daemon_pb2.HashBackend] = {
+    HashBackend.NONE: store_daemon_pb2.HASH_BACKEND_NONE,
+    HashBackend.GPU: store_daemon_pb2.HASH_BACKEND_GPU,
+    HashBackend.D2H_CPU: store_daemon_pb2.HASH_BACKEND_D2H_CPU,
+    HashBackend.CPU: store_daemon_pb2.HASH_BACKEND_CPU,
 }
 _HASH_BACKEND_FROM_PROTO: dict[int, HashBackend] = {
     value: key for key, value in _HASH_BACKEND_TO_PROTO.items()
 }
-_HASH_LOCATION_TO_PROTO: dict[HashLocation, int] = {
-    HashLocation.NONE: int(store_daemon_pb2.HASH_LOCATION_NONE),
-    HashLocation.SEAL: int(store_daemon_pb2.HASH_LOCATION_SEAL),
-    HashLocation.BINDING_CLOSEOUT: int(store_daemon_pb2.HASH_LOCATION_BINDING_CLOSEOUT),
+_HASH_LOCATION_TO_PROTO: dict[HashLocation, store_daemon_pb2.HashLocation] = {
+    HashLocation.NONE: store_daemon_pb2.HASH_LOCATION_NONE,
+    HashLocation.SEAL: store_daemon_pb2.HASH_LOCATION_SEAL,
+    HashLocation.BINDING_CLOSEOUT: store_daemon_pb2.HASH_LOCATION_BINDING_CLOSEOUT,
 }
 _HASH_LOCATION_FROM_PROTO: dict[int, HashLocation] = {
     value: key for key, value in _HASH_LOCATION_TO_PROTO.items()
 }
-_IDENTITY_MINT_STRATEGY_TO_PROTO: dict[IdentityMintStrategy, int] = {
-    IdentityMintStrategy.NOT_APPLICABLE: int(
-        store_daemon_pb2.IDENTITY_MINT_STRATEGY_NOT_APPLICABLE
-    ),
-    IdentityMintStrategy.SEAL_MINT: int(
-        store_daemon_pb2.IDENTITY_MINT_STRATEGY_SEAL_MINT
-    ),
-    IdentityMintStrategy.SEAL_REUSE: int(
-        store_daemon_pb2.IDENTITY_MINT_STRATEGY_SEAL_REUSE
-    ),
-    IdentityMintStrategy.CLOSEOUT_MINT: int(
-        store_daemon_pb2.IDENTITY_MINT_STRATEGY_CLOSEOUT_MINT
-    ),
+_IDENTITY_MINT_STRATEGY_TO_PROTO: dict[
+    IdentityMintStrategy, store_daemon_pb2.IdentityMintStrategy
+] = {
+    IdentityMintStrategy.NOT_APPLICABLE: store_daemon_pb2.IDENTITY_MINT_STRATEGY_NOT_APPLICABLE,
+    IdentityMintStrategy.SEAL_MINT: store_daemon_pb2.IDENTITY_MINT_STRATEGY_SEAL_MINT,
+    IdentityMintStrategy.SEAL_REUSE: store_daemon_pb2.IDENTITY_MINT_STRATEGY_SEAL_REUSE,
+    IdentityMintStrategy.CLOSEOUT_MINT: store_daemon_pb2.IDENTITY_MINT_STRATEGY_CLOSEOUT_MINT,
 }
 _IDENTITY_MINT_STRATEGY_FROM_PROTO: dict[int, IdentityMintStrategy] = {
     value: key for key, value in _IDENTITY_MINT_STRATEGY_TO_PROTO.items()
@@ -580,19 +568,24 @@ AssemblyCloseoutKind = Literal[
     "rollout_gated_publish",
 ]
 
-_ASSEMBLY_TARGET_KIND_TO_PROTO: dict[AssemblyTargetKind, int] = {
-    "structural_view": int(store_daemon_pb2.ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW),
-    "canonical_layout": int(store_daemon_pb2.ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT),
+_ASSEMBLY_TARGET_KIND_TO_PROTO: dict[
+    AssemblyTargetKind, store_daemon_pb2.AssemblyTargetKind
+] = {
+    "structural_view": store_daemon_pb2.ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW,
+    "canonical_layout": store_daemon_pb2.ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT,
 }
 _ASSEMBLY_TARGET_KIND_FROM_PROTO: dict[int, AssemblyTargetKind] = {
     int(store_daemon_pb2.ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW): "structural_view",
     int(store_daemon_pb2.ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT): "canonical_layout",
 }
-_ASSEMBLY_LIVENESS_MODE_TO_PROTO: dict[AssemblyContributorLivenessMode, int] = {
-    "require_live_until_cut": int(
+_ASSEMBLY_LIVENESS_MODE_TO_PROTO: dict[
+    AssemblyContributorLivenessMode,
+    store_daemon_pb2.AssemblyContributorLivenessMode,
+] = {
+    "require_live_until_cut": (
         store_daemon_pb2.ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_REQUIRE_LIVE_UNTIL_CUT
     ),
-    "allow_durable_occupancy": int(
+    "allow_durable_occupancy": (
         store_daemon_pb2.ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_ALLOW_DURABLE_OCCUPANCY
     ),
 }
@@ -604,16 +597,12 @@ _ASSEMBLY_LIVENESS_MODE_FROM_PROTO: dict[int, AssemblyContributorLivenessMode] =
         store_daemon_pb2.ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_ALLOW_DURABLE_OCCUPANCY
     ): "allow_durable_occupancy",
 }
-_ASSEMBLY_CLOSEOUT_KIND_TO_PROTO: dict[AssemblyCloseoutKind, int] = {
-    "source_publish_only": int(
-        store_daemon_pb2.ASSEMBLY_CLOSEOUT_KIND_SOURCE_PUBLISH_ONLY
-    ),
-    "representation_publish": int(
-        store_daemon_pb2.ASSEMBLY_CLOSEOUT_KIND_REPRESENTATION_PUBLISH
-    ),
-    "rollout_gated_publish": int(
-        store_daemon_pb2.ASSEMBLY_CLOSEOUT_KIND_ROLLOUT_GATED_PUBLISH
-    ),
+_ASSEMBLY_CLOSEOUT_KIND_TO_PROTO: dict[
+    AssemblyCloseoutKind, store_daemon_pb2.AssemblyCloseoutKind
+] = {
+    "source_publish_only": store_daemon_pb2.ASSEMBLY_CLOSEOUT_KIND_SOURCE_PUBLISH_ONLY,
+    "representation_publish": store_daemon_pb2.ASSEMBLY_CLOSEOUT_KIND_REPRESENTATION_PUBLISH,
+    "rollout_gated_publish": store_daemon_pb2.ASSEMBLY_CLOSEOUT_KIND_ROLLOUT_GATED_PUBLISH,
 }
 _ASSEMBLY_CLOSEOUT_KIND_FROM_PROTO: dict[int, AssemblyCloseoutKind] = {
     int(store_daemon_pb2.ASSEMBLY_CLOSEOUT_KIND_SOURCE_PUBLISH_ONLY): (
@@ -690,20 +679,20 @@ class ServingSupportLevel(str, Enum):
     RUNTIME_BIND_SWAP_READY = "runtime_bind_swap_ready"
 
 
-_PUBLICATION_BUILDER_MODE_TO_PROTO: dict[BuilderMode, int] = {
-    BuilderMode.PURE_TRANSFORM: int(publication_pb2.BUILDER_MODE_PURE_TRANSFORM),
-    BuilderMode.BINDING_FINALIZE: int(publication_pb2.BUILDER_MODE_BINDING_FINALIZE),
+_PUBLICATION_BUILDER_MODE_TO_PROTO: dict[BuilderMode, publication_pb2.BuilderMode] = {
+    BuilderMode.PURE_TRANSFORM: publication_pb2.BUILDER_MODE_PURE_TRANSFORM,
+    BuilderMode.BINDING_FINALIZE: publication_pb2.BUILDER_MODE_BINDING_FINALIZE,
 }
 _PUBLICATION_BUILDER_MODE_FROM_PROTO: dict[int, BuilderMode] = {
     int(publication_pb2.BUILDER_MODE_PURE_TRANSFORM): BuilderMode.PURE_TRANSFORM,
     int(publication_pb2.BUILDER_MODE_BINDING_FINALIZE): BuilderMode.BINDING_FINALIZE,
 }
-_PUBLICATION_FINALIZE_CLASS_TO_PROTO: dict[FinalizeClass, int] = {
-    FinalizeClass.RUNTIME_ONLY: int(publication_pb2.FINALIZE_CLASS_RUNTIME_ONLY),
-    FinalizeClass.REPRESENTATION_CHANGING: int(
-        publication_pb2.FINALIZE_CLASS_REPRESENTATION_CHANGING
-    ),
-    FinalizeClass.UNKNOWN_BLOCKED: int(publication_pb2.FINALIZE_CLASS_UNKNOWN_BLOCKED),
+_PUBLICATION_FINALIZE_CLASS_TO_PROTO: dict[
+    FinalizeClass, publication_pb2.FinalizeClass
+] = {
+    FinalizeClass.RUNTIME_ONLY: publication_pb2.FINALIZE_CLASS_RUNTIME_ONLY,
+    FinalizeClass.REPRESENTATION_CHANGING: publication_pb2.FINALIZE_CLASS_REPRESENTATION_CHANGING,
+    FinalizeClass.UNKNOWN_BLOCKED: publication_pb2.FINALIZE_CLASS_UNKNOWN_BLOCKED,
 }
 _PUBLICATION_FINALIZE_CLASS_FROM_PROTO: dict[int, FinalizeClass] = {
     int(publication_pb2.FINALIZE_CLASS_RUNTIME_ONLY): FinalizeClass.RUNTIME_ONLY,
@@ -714,15 +703,17 @@ _PUBLICATION_FINALIZE_CLASS_FROM_PROTO: dict[int, FinalizeClass] = {
         FinalizeClass.UNKNOWN_BLOCKED
     ),
 }
-_PUBLICATION_SERVING_SUPPORT_LEVEL_TO_PROTO: dict[ServingSupportLevel, int] = {
-    ServingSupportLevel.BLOCKED: int(publication_pb2.SERVING_SUPPORT_LEVEL_BLOCKED),
-    ServingSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY: int(
+_PUBLICATION_SERVING_SUPPORT_LEVEL_TO_PROTO: dict[
+    ServingSupportLevel, publication_pb2.ServingSupportLevel
+] = {
+    ServingSupportLevel.BLOCKED: publication_pb2.SERVING_SUPPORT_LEVEL_BLOCKED,
+    ServingSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY: (
         publication_pb2.SERVING_SUPPORT_LEVEL_SOURCE_BIND_BOOTSTRAP_ONLY
     ),
-    ServingSupportLevel.BUILDER_PUBLICATION_READY: int(
+    ServingSupportLevel.BUILDER_PUBLICATION_READY: (
         publication_pb2.SERVING_SUPPORT_LEVEL_BUILDER_PUBLICATION_READY
     ),
-    ServingSupportLevel.RUNTIME_BIND_SWAP_READY: int(
+    ServingSupportLevel.RUNTIME_BIND_SWAP_READY: (
         publication_pb2.SERVING_SUPPORT_LEVEL_RUNTIME_BIND_SWAP_READY
     ),
 }
@@ -738,21 +729,24 @@ _PUBLICATION_SERVING_SUPPORT_LEVEL_FROM_PROTO: dict[int, ServingSupportLevel] = 
         ServingSupportLevel.RUNTIME_BIND_SWAP_READY
     ),
 }
-_PUBLICATION_ASSEMBLY_TARGET_KIND_TO_PROTO: dict[AssemblyTargetKind, int] = {
-    "structural_view": int(publication_pb2.ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW),
-    "canonical_layout": int(publication_pb2.ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT),
+_PUBLICATION_ASSEMBLY_TARGET_KIND_TO_PROTO: dict[
+    AssemblyTargetKind, publication_pb2.AssemblyTargetKind
+] = {
+    "structural_view": publication_pb2.ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW,
+    "canonical_layout": publication_pb2.ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT,
 }
 _PUBLICATION_ASSEMBLY_TARGET_KIND_FROM_PROTO: dict[int, AssemblyTargetKind] = {
     int(publication_pb2.ASSEMBLY_TARGET_KIND_STRUCTURAL_VIEW): "structural_view",
     int(publication_pb2.ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT): "canonical_layout",
 }
 _PUBLICATION_ASSEMBLY_LIVENESS_MODE_TO_PROTO: dict[
-    AssemblyContributorLivenessMode, int
+    AssemblyContributorLivenessMode,
+    publication_pb2.AssemblyContributorLivenessMode,
 ] = {
-    "require_live_until_cut": int(
+    "require_live_until_cut": (
         publication_pb2.ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_REQUIRE_LIVE_UNTIL_CUT
     ),
-    "allow_durable_occupancy": int(
+    "allow_durable_occupancy": (
         publication_pb2.ASSEMBLY_CONTRIBUTOR_LIVENESS_MODE_ALLOW_DURABLE_OCCUPANCY
     ),
 }
@@ -1223,7 +1217,10 @@ class PureTransformPublicationSpec(BaseModel):
     ) -> "PureTransformPublicationSpec":
         return cls(
             build_intent=ServingBuildIntent.from_publication_proto(proto.build_intent),
-            contract_family=str(proto.contract_family or "") or None,
+            contract_family=cast(
+                AssemblyContractFamily | None,
+                str(proto.contract_family or "") or None,
+            ),
             source_version_key=str(proto.source_version_key or "") or None,
             serving_version_key=str(proto.serving_version_key or "") or None,
             logical_topology_json=str(proto.logical_topology_json or "") or None,
@@ -1573,7 +1570,7 @@ class BindingValueRef(BaseModel):
     @classmethod
     def from_proto(
         cls,
-        proto: publication_pb2.BindingValueRef | store_daemon_pb2.BindingValueRef,
+        proto: publication_pb2.BindingValueRef,
     ) -> "BindingValueRef":
         return cls(
             binding_id=str(proto.binding_id),
@@ -2068,7 +2065,10 @@ class RepresentationPublishSpec(BaseModel):
             representation_publish_contract=representation_publish_contract,
             closeout_contract=closeout_contract,
             source_artifact_ref=str(proto.source_artifact_ref or "") or None,
-            contract_family=str(proto.contract_family or "") or None,
+            contract_family=cast(
+                AssemblyContractFamily | None,
+                str(proto.contract_family or "") or None,
+            ),
             structural_view_ids=tuple(str(item) for item in proto.structural_view_ids),
             layout_id=str(proto.layout_id or "") or None,
             requirements=(

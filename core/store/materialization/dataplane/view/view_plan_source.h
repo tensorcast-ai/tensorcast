@@ -48,6 +48,7 @@ class ViewPlanSource final : public SeekableSource {
       uint64_t dest_va_offset,
       size_t bytes,
       const DirectWriteGrant& grant) override;
+  absl::StatusOr<size_t> readv_into_at(absl::Span<const DirectWriteOp> ops, const DirectWriteGrant& grant) override;
 
  private:
   gsl::not_null<SeekableSource*> base_;

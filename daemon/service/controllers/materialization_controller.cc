@@ -69,6 +69,7 @@ MaterializationController::MaterializationController(Dep d)
               .lip_manager = &d.lip_manager,
               .lifecycle = d.lifecycle,
               .post_seal_policy = d.post_seal_policy,
+              .await_state_sync_barrier = d.await_state_sync_barrier,
           }),
       disk_artifact_service_(
           DiskArtifactService::Dep{
@@ -121,6 +122,7 @@ MaterializationController::MaterializationController(Dep d)
               .capability_tokens = d.capability_tokens,
               .external_target_verification_enabled = d.external_target_verification_enabled,
               .storage_path = d.storage_path,
+              .await_state_sync_barrier = d.await_state_sync_barrier,
           }),
       owner_binding_service_(
           OwnedBindingService::Dep{
@@ -142,6 +144,7 @@ MaterializationController::MaterializationController(Dep d)
               .capability_tokens = d.capability_tokens,
               .target_materialization_service = &target_materialization_service_,
               .storage_path = d.storage_path,
+              .await_state_sync_barrier = d.await_state_sync_barrier,
           }) {
   // Register publish replay admission as one child-owner policy behind the
   // shared observation-path dispatcher. The dispatcher itself does not own

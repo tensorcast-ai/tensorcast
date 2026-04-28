@@ -136,10 +136,12 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
     }
     kernel->lip_manager().set_global_store_client(global_store_client);
   }
+  std::shared_ptr<store::components::CommunicationManager> comm_manager = kernel->engine().get_shared_comm_manager();
 
   auto external_target_access_service = std::make_unique<ExternalTargetAccessService>(ExternalTargetAccessService::Dep{
       .devices = kernel->device_resolver(),
       .regions = kernel->region_registry(),
+      .comm_manager = comm_manager.get(),
   });
 
   auto byte_artifact_controller = std::make_unique<ByteArtifactController>(
@@ -167,6 +169,15 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
                   .worker_directory_staleness_budget = options.byte_artifact_routing.worker_directory_staleness_budget,
                   .routing_epoch = options.byte_artifact_routing.routing_epoch,
                   .shard_home_eligible = options.byte_artifact_routing.shard_home_eligible,
+              },
+          .publish_prereg =
+              {
+                  .enabled = options.byte_artifact_routing.payload_transport.source_publish_prereg.enabled,
+                  .ttl = options.byte_artifact_routing.payload_transport.source_publish_prereg.ttl,
+                  .max_live_entries =
+                      options.byte_artifact_routing.payload_transport.source_publish_prereg.max_live_entries,
+                  .max_live_bytes =
+                      options.byte_artifact_routing.payload_transport.source_publish_prereg.max_live_bytes,
               },
           .gateway_ingress_enabled = options.gateway_ingress_enabled,
       });
@@ -237,6 +248,8 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .batch_payload_host_memory_export_enabled =
           options.byte_artifact_routing.payload_transport.batch_transport_protocol_version >= 2 &&
           options.byte_artifact_routing.payload_transport.host_memory_export_enabled,
+      .batch_payload_segmented_communicator_export_enabled =
+          kernel->payload_transport_broker().batch_transport_segmented_communicator_export_enabled(),
       .max_batch_payload_bytes = options.byte_artifact_routing.payload_transport.max_batch_payload_bytes,
       .startup_coordinator = startup_coordinator,
       .worker_directory_cache = kernel->worker_directory_cache(),

@@ -113,9 +113,12 @@ sc_cc_library(
     deps = [
         ":index_reader",
         ":safetensors_util",
+        "//core/checkpoint:tensor_writer_lib",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
+        "@nlohmann_json//:json",
     ],
 )
 
@@ -407,6 +410,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":sink",
+        "//core/store/materialization/contracts:stable_local_backing",
         "@abseil-cpp//absl/types:span",
         "@gsl",
     ],
@@ -640,6 +644,16 @@ cc_test(
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
         "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "byte_range_mapped_source_direct_test",
+    srcs = ["sources/tests/byte_range_mapped_source_direct_test.cc"],
+    deps = [
+        ":byte_range_mapped_source",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
     ],
 )
 
