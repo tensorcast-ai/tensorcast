@@ -437,13 +437,14 @@ TEST_CASE(
   REQUIRE(prepared_or.ok());
   REQUIRE(prepared_or->lowering_artifacts.has_value());
   REQUIRE(prepared_or->lowering_artifacts->collective_data_map.has_value());
-  CHECK(covered_bytes(*prepared_or->lowering_artifacts->collective_data_map) == 16);
+  CHECK(covered_bytes(*prepared_or->lowering_artifacts->collective_data_map) == 8);
   REQUIRE(prepared_or->lowering_artifacts->executor_generic_data_map.has_value());
   CHECK(covered_bytes(*prepared_or->lowering_artifacts->executor_generic_data_map) == 16);
 
   store::StoreEngineOptions::MaterializationStrategyConfig strategy_config;
   strategy_config.enable_owner_file_collective = true;
   strategy_config.allow_mixed_execution = true;
+  strategy_config.owner_file_collective_min_dedup_saving_bytes = 0;
 
   store::loading::ExecutionTopologyContext topology;
   topology.collective_load_group = store::loading::CollectiveLoadGroupHint{
@@ -465,10 +466,10 @@ TEST_CASE(
   CHECK(
       strategy_plan_or->lane_plan.mode ==
       store::runtime::ingestion::strategy::SourceBoundExecutionMode::kCollectiveFirstMixed);
-  CHECK(strategy_plan_or->summary.planned_collective_candidate_bytes == 16);
-  CHECK(strategy_plan_or->summary.planned_non_admitted_typed_bytes == 0);
-  CHECK(strategy_plan_or->summary.planned_collective_admitted_bytes == 16);
-  CHECK(covered_bytes(strategy_plan_or->lane_plan.collective_lane_map) == 16);
+  CHECK(strategy_plan_or->summary.planned_collective_candidate_bytes == 8);
+  CHECK(strategy_plan_or->summary.planned_non_admitted_typed_bytes == 8);
+  CHECK(strategy_plan_or->summary.planned_collective_admitted_bytes == 8);
+  CHECK(covered_bytes(strategy_plan_or->lane_plan.collective_lane_map) == 8);
   CHECK_FALSE(strategy_plan_or->summary.planner_reject_reason_buckets.contains("generic_backend_coverage_unproven"));
 }
 

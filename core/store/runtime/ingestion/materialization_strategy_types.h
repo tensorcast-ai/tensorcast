@@ -39,6 +39,7 @@ enum class SourceBoundExecutionMode : std::uint8_t {
   kGenericOnly = 2,
   kLocalTypedOnly = 3,
   kRejected = 4,
+  kLocalMappedTyped = 5,
 };
 
 inline std::string_view source_bound_execution_mode_name(SourceBoundExecutionMode mode) {
@@ -47,6 +48,8 @@ inline std::string_view source_bound_execution_mode_name(SourceBoundExecutionMod
       return "pure_collective";
     case SourceBoundExecutionMode::kCollectiveFirstMixed:
       return "collective_first_mixed";
+    case SourceBoundExecutionMode::kLocalMappedTyped:
+      return "local_mapped_typed";
     case SourceBoundExecutionMode::kLocalTypedOnly:
       return "local_typed_only";
     case SourceBoundExecutionMode::kRejected:

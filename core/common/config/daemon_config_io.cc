@@ -589,7 +589,7 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
   }
   if (!ms->has_owner_file_collective_group_assemble_timeout()) {
     auto* d = ms->mutable_owner_file_collective_group_assemble_timeout();
-    d->set_seconds(2);
+    d->set_seconds(15);
     d->set_nanos(0);
   }
   if (!ms->has_owner_file_collective_allow_mixed_residual()) {

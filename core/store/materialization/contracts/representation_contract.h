@@ -74,6 +74,11 @@ struct TensorCoordinateSpec {
   bool operator==(const TensorCoordinateSpec&) const = default;
 };
 
+struct TensorByteSpan {
+  uint64_t offset{0};
+  uint64_t length{0};
+};
+
 enum class SourceFragmentRole : std::uint8_t {
   kDefault = 0,
   kConcat = 1,
@@ -136,6 +141,7 @@ enum class RepresentationWorkItemKind : std::uint8_t {
   kScalarBroadcastFill = 3,
   kConstFill = 4,
   kPadFill = 5,
+  kExpertDim0Concat = 6,
 };
 
 enum class WorkPartitionKind : std::uint8_t {
@@ -189,6 +195,10 @@ absl::StatusOr<RepresentationTransformContract> normalize_representation_transfo
 absl::StatusOr<std::string> compute_tensor_schema_hash(const RepresentationTransformContract& contract);
 
 absl::StatusOr<std::string> compute_representation_contract_hash(const RepresentationTransformContract& contract);
+
+absl::StatusOr<std::vector<TensorByteSpan>> build_coordinate_byte_spans(
+    const RepresentationTensorSpec& spec,
+    const TensorCoordinateSpec& range);
 
 absl::StatusOr<RepresentationWorkPlan> build_representation_work_plan(const RepresentationTransformContract& contract);
 

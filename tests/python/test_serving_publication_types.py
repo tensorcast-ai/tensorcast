@@ -24,7 +24,12 @@ from tensorcast.api.store import (
     prepare_serving_registration,
 )
 from tensorcast.api.store.handles import RegisteredArtifact
-from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry, ReplicaInfo
+from tensorcast.api.store.types import (
+    ArtifactError,
+    CanonicalIndex,
+    CanonicalIndexEntry,
+    ReplicaInfo,
+)
 from tensorcast.types import (
     SERVING_BUILD_DIGEST_VERSION,
     SERVING_MANIFEST_TENSOR_NAME,
@@ -46,9 +51,7 @@ from tensorcast.types import (
     coerce_serving_runtime_policy,
     parse_serving_manifest_ref,
 )
-from tensorcast.types import (
-    ArtifactDescriptor as PublishedArtifactDescriptor,
-)
+from tensorcast.types import ArtifactDescriptor as PublishedArtifactDescriptor
 
 
 def _canonical_index(
@@ -237,6 +240,121 @@ def test_build_binding_finalize_admission_facts_defaults_to_scratch_then_commit(
     assert facts.finalize_class == FinalizeClass.REPRESENTATION_CHANGING
     assert facts.realization_protocol == RealizationProtocol.SCRATCH_THEN_COMMIT
     assert facts.support_level == ServingSupportLevel.BUILDER_PUBLICATION_READY
+
+
+def test_build_binding_finalize_publication_bundle_rejects_mounted_source_scratch() -> (
+    None
+):
+    canonical_index = _canonical_index(
+        CanonicalIndexEntry(
+            name="weights",
+            dtype=torch.float16,
+            shape=(8,),
+            stride=(1,),
+            storage_offset=0,
+            segment_offset=0,
+            size_bytes=16,
+        ),
+    )
+    registered_artifact = RegisteredArtifact(
+        artifact_id="mi2:test:serving-binding",
+        replica=ReplicaInfo(
+            replica_id="mi2:test:serving-binding",
+            replica_type="COALESCED_VRAM",
+            device=torch.device("cuda", 0),
+            plan=PlanType.VRAM_COALESCED,
+            size_bytes=16,
+        ),
+        canonical_index=canonical_index,
+        lease=None,
+    )
+    intent = ServingBuildIntent(
+        representation_contract_hash="bafkbindingrepr",
+        builder_mode=BuilderMode.BINDING_FINALIZE,
+        framework_name="torch",
+        adapter_version="adapter-mounted-source",
+        serving_abi_version="abi-mounted-source",
+        build_pipeline_version="pipeline-mounted-source",
+        source_artifact_ref="msa1:test-session~policy~safetensors~deadbeef",
+    )
+
+    class _MountedSource:
+        artifact_id = "msa1:test-session~policy~safetensors~deadbeef"
+
+    with pytest.raises(ArtifactError, match="SAME_BINDING_FAST_PATH"):
+        build_binding_finalize_publication_bundle_from_registered_artifact(
+            build_intent=intent,
+            source_artifact=_MountedSource(),
+            serving_artifact=registered_artifact,
+            admission_facts=build_binding_finalize_admission_facts(
+                support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY,
+                realization_protocol=RealizationProtocol.SCRATCH_THEN_COMMIT,
+            ),
+        )
+
+    with pytest.raises(ArtifactError, match="SAME_BINDING_FAST_PATH"):
+        build_binding_finalize_publication_bundle_from_registered_artifact(
+            build_intent=intent,
+            serving_artifact=registered_artifact,
+            admission_facts=build_binding_finalize_admission_facts(
+                support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY,
+                realization_protocol=RealizationProtocol.SCRATCH_THEN_COMMIT,
+            ),
+        )
+
+
+def test_build_binding_finalize_publication_bundle_accepts_mounted_source_fast_path() -> (
+    None
+):
+    canonical_index = _canonical_index(
+        CanonicalIndexEntry(
+            name="weights",
+            dtype=torch.float16,
+            shape=(8,),
+            stride=(1,),
+            storage_offset=0,
+            segment_offset=0,
+            size_bytes=16,
+        ),
+    )
+    registered_artifact = RegisteredArtifact(
+        artifact_id="mi2:test:serving-binding",
+        replica=ReplicaInfo(
+            replica_id="mi2:test:serving-binding",
+            replica_type="COALESCED_VRAM",
+            device=torch.device("cuda", 0),
+            plan=PlanType.VRAM_COALESCED,
+            size_bytes=16,
+        ),
+        canonical_index=canonical_index,
+        lease=None,
+    )
+    intent = ServingBuildIntent(
+        representation_contract_hash="bafkbindingrepr",
+        builder_mode=BuilderMode.BINDING_FINALIZE,
+        framework_name="torch",
+        adapter_version="adapter-mounted-source",
+        serving_abi_version="abi-mounted-source",
+        build_pipeline_version="pipeline-mounted-source",
+        source_artifact_ref="msa1:test-session~policy~safetensors~deadbeef",
+    )
+
+    bundle = build_binding_finalize_publication_bundle_from_registered_artifact(
+        build_intent=intent,
+        source_artifact="msa1:test-session~policy~safetensors~deadbeef",
+        serving_artifact=registered_artifact,
+        admission_facts=build_binding_finalize_admission_facts(
+            support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY,
+            realization_protocol=RealizationProtocol.SAME_BINDING_FAST_PATH,
+            fast_path_validated=True,
+        ),
+    )
+
+    assert bundle.admission_facts is not None
+    assert (
+        bundle.admission_facts.realization_protocol
+        == RealizationProtocol.SAME_BINDING_FAST_PATH
+    )
 
 
 def test_compute_serving_tensor_schema_hash_excludes_reserved_manifest_tensor() -> None:

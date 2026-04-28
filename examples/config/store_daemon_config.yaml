@@ -115,7 +115,7 @@ engine:
     owner_file_collective_shared_fs_only: true
     owner_file_collective_max_owner_skew_ratio: 1.5
     owner_file_collective_min_dedup_saving_bytes: 64MB
-    owner_file_collective_group_assemble_timeout: 2s
+    owner_file_collective_group_assemble_timeout: 15s
     owner_file_collective_allow_mixed_residual: false
     owner_file_collective_planner_cache_entries: 256
   # Enable memfd-backed UMA CPU allocations for zero-copy CPU tensor materialization.

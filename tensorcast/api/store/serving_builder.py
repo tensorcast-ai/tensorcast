@@ -17,6 +17,7 @@ from tensorcast.api.store.common import (
 )
 from tensorcast.api.store.handles import RegisteredArtifact
 from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry
+from tensorcast.common.identity import ArtifactIdKind, infer_artifact_id_kind
 from tensorcast.common.selection_contract import compute_selected_index_bytes
 from tensorcast.types import (
     SERVING_MANIFEST_TENSOR_NAME,
@@ -221,6 +222,51 @@ def _coerce_realization_protocol(
     if isinstance(value, RealizationProtocol):
         return value
     return RealizationProtocol(str(value).strip())
+
+
+def _source_artifact_id(source_artifact: object | None) -> str | None:
+    if source_artifact is None:
+        return None
+    candidate = (
+        source_artifact
+        if isinstance(source_artifact, str)
+        else getattr(source_artifact, "artifact_id", None)
+    )
+    if candidate is None:
+        return None
+    artifact_id = str(candidate).strip()
+    return artifact_id or None
+
+
+def _is_mounted_source_artifact(source_artifact: object | None) -> bool:
+    artifact_id = _source_artifact_id(source_artifact)
+    if artifact_id is None:
+        return False
+    return infer_artifact_id_kind(artifact_id) is ArtifactIdKind.MSA1
+
+
+def _validate_binding_finalize_realization_protocol(
+    *,
+    build_intent: ServingBuildIntent,
+    source_artifact: object | None,
+    admission_facts: ServingAdmissionFacts,
+) -> None:
+    if not (
+        _is_mounted_source_artifact(source_artifact)
+        or _is_mounted_source_artifact(build_intent.source_artifact_ref)
+    ):
+        return
+    if (
+        admission_facts.realization_protocol
+        == RealizationProtocol.SAME_BINDING_FAST_PATH
+    ):
+        return
+    raise ArtifactError(
+        "binding-finalize publication from Store.from_disk(...) mounted-source "
+        "artifacts requires RealizationProtocol.SAME_BINDING_FAST_PATH",
+        status_code="FAILED_PRECONDITION",
+        retryable=False,
+    )
 
 
 def _resolve_manifest_tensor_name(
@@ -1269,6 +1315,11 @@ def build_binding_finalize_publication_bundle(
             status_code="FAILED_PRECONDITION",
             retryable=False,
         )
+    _validate_binding_finalize_realization_protocol(
+        build_intent=build_intent,
+        source_artifact=source_artifact,
+        admission_facts=admission_facts,
+    )
     return build_serving_publication_bundle(
         build_intent=build_intent,
         source_artifact=source_artifact,

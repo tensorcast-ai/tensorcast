@@ -92,6 +92,8 @@ std::string_view work_item_kind_name(RepresentationWorkItemKind kind) {
       return "const_fill";
     case RepresentationWorkItemKind::kPadFill:
       return "pad_fill";
+    case RepresentationWorkItemKind::kExpertDim0Concat:
+      return "expert_dim0_concat";
   }
   return "tensor_copy";
 }
@@ -331,10 +333,45 @@ std::optional<WorkPartitionKind> infer_single_source_partition_kind(
   return std::nullopt;
 }
 
-struct ByteSpan {
-  uint64_t offset{0};
-  uint64_t length{0};
-};
+std::optional<TensorAxisRange> find_axis_by_dim(const TensorCoordinateSpec& spec, int32_t dim) {
+  if (spec.selects_scalar) {
+    return std::nullopt;
+  }
+  for (const auto& axis : spec.axes) {
+    if (axis.dim == dim) {
+      return axis;
+    }
+  }
+  return std::nullopt;
+}
+
+bool is_expert_dim0_value_axis_copy(const RepresentationWorkItem& item) {
+  if (item.kind != RepresentationWorkItemKind::kTensorCopy || item.sources.size() != 1 ||
+      item.partition_kind != WorkPartitionKind::kUnknown) {
+    return false;
+  }
+  const auto& fragment = item.sources.front().fragment;
+  const auto source_axis = single_axis_range(fragment.source_range);
+  if (!source_axis.has_value() || source_axis->dim != 0 || source_axis->end <= source_axis->start) {
+    return false;
+  }
+  if (fragment.destination_range.selects_scalar || fragment.destination_range.axes.size() != 2) {
+    return false;
+  }
+  const auto dst_expert_axis = find_axis_by_dim(fragment.destination_range, 0);
+  if (!dst_expert_axis.has_value() || dst_expert_axis->end <= dst_expert_axis->start) {
+    return false;
+  }
+  if ((dst_expert_axis->end - dst_expert_axis->start) != (source_axis->end - source_axis->start)) {
+    return false;
+  }
+  for (const auto& axis : fragment.destination_range.axes) {
+    if (axis.dim != 0 && axis.end > axis.start) {
+      return true;
+    }
+  }
+  return false;
+}
 
 absl::Status validate_axis_range(
     const TensorAxisRange& axis,
@@ -422,7 +459,7 @@ absl::StatusOr<uint64_t> product_dims(const std::vector<int64_t>& dims, size_t b
   return total;
 }
 
-absl::StatusOr<std::vector<ByteSpan>> build_coordinate_byte_spans(
+absl::StatusOr<std::vector<TensorByteSpan>> build_coordinate_byte_spans_impl(
     const RepresentationTensorSpec& spec,
     const TensorCoordinateSpec& range) {
   if (spec.element_size == 0 && spec.logical_length == 0) {
@@ -436,10 +473,11 @@ absl::StatusOr<std::vector<ByteSpan>> build_coordinate_byte_spans(
       element_offset +=
           static_cast<uint64_t>(axis.start) * static_cast<uint64_t>(spec.stride[static_cast<size_t>(axis.dim)]);
     }
-    return std::vector<ByteSpan>{{.offset = base_offset + element_offset * element_bytes, .length = element_bytes}};
+    return std::vector<TensorByteSpan>{
+        {.offset = base_offset + element_offset * element_bytes, .length = element_bytes}};
   }
   if (spec.shape.empty() || range.axes.empty()) {
-    return std::vector<ByteSpan>{{.offset = base_offset, .length = spec.logical_length}};
+    return std::vector<TensorByteSpan>{{.offset = base_offset, .length = spec.logical_length}};
   }
   if (!is_row_major_contiguous(spec)) {
     return absl::InvalidArgumentError("multi-axis coordinates require row-major contiguous tensors");
@@ -450,10 +488,10 @@ absl::StatusOr<std::vector<ByteSpan>> build_coordinate_byte_spans(
     starts[static_cast<size_t>(axis.dim)] = axis.start;
     ends[static_cast<size_t>(axis.dim)] = axis.end;
   }
-  std::vector<ByteSpan> spans;
+  std::vector<TensorByteSpan> spans;
   auto emit = [&](auto&& self, size_t dim, uint64_t element_offset) -> absl::Status {
     if (dim == spec.shape.size()) {
-      spans.push_back(ByteSpan{.offset = base_offset + element_offset * element_bytes, .length = element_bytes});
+      spans.push_back(TensorByteSpan{.offset = base_offset + element_offset * element_bytes, .length = element_bytes});
       return absl::OkStatus();
     }
     bool later_full = true;
@@ -472,7 +510,7 @@ absl::StatusOr<std::vector<ByteSpan>> build_coordinate_byte_spans(
           element_offset + static_cast<uint64_t>(starts[dim]) * static_cast<uint64_t>(spec.stride[dim]);
       const uint64_t span_elems = static_cast<uint64_t>(ends[dim] - starts[dim]) * (*tail_or);
       spans.push_back(
-          ByteSpan{.offset = base_offset + elem_start * element_bytes, .length = span_elems * element_bytes});
+          TensorByteSpan{.offset = base_offset + elem_start * element_bytes, .length = span_elems * element_bytes});
       return absl::OkStatus();
     }
     for (int64_t index = starts[dim]; index < ends[dim]; ++index) {
@@ -491,7 +529,7 @@ absl::StatusOr<std::vector<ByteSpan>> build_coordinate_byte_spans(
   if (spans.empty()) {
     return absl::InvalidArgumentError("coordinate selection produced no byte spans");
   }
-  std::vector<ByteSpan> merged;
+  std::vector<TensorByteSpan> merged;
   merged.reserve(spans.size());
   for (const auto& span : spans) {
     if (merged.empty()) {
@@ -509,7 +547,7 @@ absl::StatusOr<std::vector<ByteSpan>> build_coordinate_byte_spans(
 }
 
 absl::StatusOr<uint64_t> slice_size_bytes(const RepresentationTensorSpec& spec, const TensorCoordinateSpec& range) {
-  auto spans_or = build_coordinate_byte_spans(spec, range);
+  auto spans_or = build_coordinate_byte_spans_impl(spec, range);
   if (!spans_or.ok()) {
     return spans_or.status();
   }
@@ -521,7 +559,7 @@ absl::StatusOr<uint64_t> slice_size_bytes(const RepresentationTensorSpec& spec, 
 }
 
 absl::Status add_spans_to_covered_ranges(
-    const std::vector<ByteSpan>& spans,
+    const std::vector<TensorByteSpan>& spans,
     std::vector<std::pair<uint64_t, uint64_t>>* covered_ranges) {
   if (covered_ranges == nullptr) {
     return absl::InvalidArgumentError("covered range output must not be null");
@@ -564,9 +602,10 @@ absl::Status validate_work_plan_residual_coverage(const RepresentationWorkPlan& 
     switch (item.kind) {
       case RepresentationWorkItemKind::kTensorCopy:
       case RepresentationWorkItemKind::kConcatAssemble:
+      case RepresentationWorkItemKind::kExpertDim0Concat:
       case RepresentationWorkItemKind::kScalarBroadcastFill:
         for (const auto& source : item.sources) {
-          auto spans_or = build_coordinate_byte_spans(item.dst_spec, source.fragment.destination_range);
+          auto spans_or = build_coordinate_byte_spans_impl(item.dst_spec, source.fragment.destination_range);
           if (!spans_or.ok()) {
             return spans_or.status();
           }
@@ -581,7 +620,7 @@ absl::Status validate_work_plan_residual_coverage(const RepresentationWorkPlan& 
           return absl::InvalidArgumentError("const fill work item requires fill_rule");
         }
         {
-          auto spans_or = build_coordinate_byte_spans(item.dst_spec, item.fill_rule->destination_range);
+          auto spans_or = build_coordinate_byte_spans_impl(item.dst_spec, item.fill_rule->destination_range);
           if (!spans_or.ok()) {
             return spans_or.status();
           }
@@ -734,7 +773,7 @@ absl::Status validate_binding(const RepresentationTensorBinding& binding) {
 
   std::vector<std::pair<uint64_t, uint64_t>> dst_spans;
   for (const auto& fragment : binding.sources) {
-    auto spans_or = build_coordinate_byte_spans(binding.dst_spec, fragment.destination_range);
+    auto spans_or = build_coordinate_byte_spans_impl(binding.dst_spec, fragment.destination_range);
     if (!spans_or.ok()) {
       return spans_or.status();
     }
@@ -743,7 +782,7 @@ absl::Status validate_binding(const RepresentationTensorBinding& binding) {
     }
   }
   if (binding.fill_rule.has_value()) {
-    auto spans_or = build_coordinate_byte_spans(binding.dst_spec, binding.fill_rule->destination_range);
+    auto spans_or = build_coordinate_byte_spans_impl(binding.dst_spec, binding.fill_rule->destination_range);
     if (!spans_or.ok()) {
       return spans_or.status();
     }
@@ -1117,6 +1156,12 @@ absl::StatusOr<DerivedTensorSlice> derive_tensor_slice(
 
 } // namespace
 
+absl::StatusOr<std::vector<TensorByteSpan>> build_coordinate_byte_spans(
+    const RepresentationTensorSpec& spec,
+    const TensorCoordinateSpec& range) {
+  return build_coordinate_byte_spans_impl(spec, range);
+}
+
 absl::Status validate_representation_transform_contract(const RepresentationTransformContract& contract) {
   if (contract.source_byte_space.kind() == tensorcast::common::v1::BYTE_SPACE_KIND_UNSPECIFIED) {
     return absl::InvalidArgumentError("representation contract requires source_byte_space.kind");
@@ -1293,6 +1338,9 @@ absl::StatusOr<RepresentationWorkPlan> build_representation_work_plan(const Repr
           item.sources.front().fragment.destination_range);
       if (partition_kind.has_value()) {
         item.partition_kind = *partition_kind;
+      }
+      if (item.partition_kind == WorkPartitionKind::kUnknown && is_expert_dim0_value_axis_copy(item)) {
+        item.kind = RepresentationWorkItemKind::kExpertDim0Concat;
       }
     } else if (item.kind == RepresentationWorkItemKind::kScalarBroadcastFill) {
       item.partition_kind = WorkPartitionKind::kUnknown;

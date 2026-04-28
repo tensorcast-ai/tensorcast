@@ -98,13 +98,15 @@ Execution policy for this plan:
   contract/version gating plus typed execution/hash/identity diagnostics:
   - `vllm/model_executor/model_loader/tensorcast_loader.py`
   - `/data/workspace/internal-vllm/docs/tensorcast/tensorcast_step3p5_from_disk_cold_start_performance_followup.md`
-- the remaining closure blockers are now:
+- the remaining closure blockers before the final 2026-04-28 TP8 run were:
   - broader Step3p5 mounted `TP=8` / `8xH800` evidence and performance signoff
     versus default and `fastsafetensors` loaders,
   - `0109` residual mixed-residual policy and prototype-delete gate decisions
     backed by explicit evidence,
   - and final retirement of legacy diagnostics fallbacks that remain only for
     backward-compatible error surfacing.
+  The 2026-04-28 tensor-aware mapped executor evidence below closes the
+  same-host TP8 performance blocker for this packet.
 - Documentation SOT before this change was fragmented across the deleted
   companion plans:
   - `0108-tensor-aware-materialization-strategy-plane.md`
@@ -350,7 +352,68 @@ Current SOT rule for this work:
     `Tensorcast load_model timings` around `167.526s` to `171.516s`; but
   - broader Step3p5 `TP=8` performance signoff still remains open because
     same-host `safetensors` measured `158.172s` and same-host
-    `fastsafetensors` measured `162.179s`.
+    `fastsafetensors` measured `162.179s`;
+  - daemon-side profiling identified the remaining gap as disk-loader strategy:
+    the same-host path selected `OwnerFileCollectiveExecutor`, executed `258`
+    concat jobs over `127,656,296,448` source bytes, then processed `428`
+    mapped residual windows and `906` chunks over another `197,099,083,520`
+    read bytes, for `149.071s` in the mapped collective executor; and
+  - the remaining gate should be treated as a same-host loader-shape problem:
+    TensorCast must avoid turning this case into a root-rank staged read plus
+    peer/NCCL distribution path if it needs to match the same-host
+    `safetensors` / `fastsafetensors` baselines.
+- 2026-04-28:
+  - a follow-up 8xH800 no-collective strategy probe ran at
+    `/data/tc/0113-tp8-8gpu-ab-20260428-064325/0113-tp8-nocollective-rerun-20260428-064445`
+    on `dev-yuchu-kk2x2-362559-worker-0`;
+  - the probe used
+    `{"tensorcast_collective_policy":"disable_collective"}` and selected
+    `SourceOrderedMappedTargetExecutor` with
+    `bootstrap_realize_collective_requested=false`,
+    `bootstrap_realize_collective_used=false`, and
+    `bootstrap_realize_actual_generic_backend_bytes=25,550,556,928`;
+  - ready time improved to `262.284s`, and rank-local
+    `Tensorcast load_model timings` improved to `117.313s` to `128.150s`; but
+  - the gate still remains open because this best measured existing strategy
+    remains much slower than same-host `safetensors` `158.172s` and
+    `fastsafetensors` `162.179s`, with daemon profile showing
+    `375,214` to `375,310` mapped byte-range segments per rank.
+- 2026-04-28:
+  - the tensor-aware mapped executor closure ran on
+    `ws-7681b3683947089e-worker-k68dd`
+    (`dev-yuchu-4thvk-367119-worker-0`) at
+    `/data/tc/0113-tp8-rect2d-final-20260428-125500`;
+  - the fix routes same-host disjoint TP shard work to the local typed mapped
+    executor while the owner-file collective lane only carries the small
+    replicated overlap selected by the overlap/dedup gate;
+  - daemon profile shows `accepted_rect2d=137`,
+    `accepted_bytes=873,562,112`, `residual_segments=0`,
+    `residual_bytes=0`, and
+    `actual_generic_backend_bytes=0`;
+  - rank-local `Tensorcast load_model timings` improved to `17.434s` to
+    `19.549s`; and
+  - the same-host TP8 ready gate now passes with TensorCast `136.271s` against
+    same-host `safetensors` `144.155s` and `fastsafetensors` `152.174s`.
+- 2026-04-28:
+  - the same-prompt TP8 model-output comparison is recorded in
+    `docs/benchmarks/20260427-step3p5-fp8-mounted-tp8-cold-start-evidence.md`;
+  - the compared request is
+    `{"prompt":"Say hi in five words.","max_tokens":8,"temperature":0}`;
+  - TensorCast artifact
+    `/data/tc/0113-tp8-20260428-004448/completion.json`,
+    same-host `safetensors`
+    `/data/tc/0113-safetensors-tp8-final-20260428-125212/completion.json`,
+    and same-host `fastsafetensors`
+    `/data/tc/0113-fastsafetensors-tp8-final-20260428-125809/completion.json`
+    all return `"\tCHITCHAT\nI'm going"` with `finish_reason=length`,
+    `prompt_tokens=7`, `completion_tokens=8`, and `total_tokens=15`;
+  - normalized response equality is `true` after excluding only expected
+    volatile envelope fields `id`, `created`, and `model`; and
+  - the final `136.271s` TensorCast performance packet only issued a shorter
+    smoke completion. Rerunning that optimized packet with the same prompt was
+    attempted on 2026-04-28 but blocked by 8-GPU scheduling capacity:
+    `codesign` quota check reported `gpu: 133/128`, and `tensorcast_dev`
+    returned `no machine available`.
 
 ## Evidence package
 

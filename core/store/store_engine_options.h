@@ -162,7 +162,7 @@ struct StoreEngineOptions {
     bool owner_file_collective_shared_fs_only{true};
     double owner_file_collective_max_owner_skew_ratio{1.5};
     uint64_t owner_file_collective_min_dedup_saving_bytes{64ULL * 1024ULL * 1024ULL};
-    std::chrono::milliseconds owner_file_collective_group_assemble_timeout{std::chrono::milliseconds(2000)};
+    std::chrono::milliseconds owner_file_collective_group_assemble_timeout{std::chrono::milliseconds(15000)};
     bool owner_file_collective_allow_mixed_residual{false};
     uint32_t owner_file_collective_planner_cache_entries{256};
   };

@@ -473,3 +473,8 @@ if (fd < 0) {
 
 ### Code Fixing and Testing
 - When debugging or fixing tests—or investigating/fixing any issue—first identify the root cause and implement the fundamental solution. Make tests reflect the real, reasonable system behavior rather than bending the system to fit an original test, and avoid quick or convenient workarounds. Never modify the system merely to make a test pass; find the root cause and design a fundamental fix, aiming for the minimal sufficient change. When a test must change, update it to assert the clearly documented, reasonable system behavior. Solve from a system-wide perspective, aiming for globally optimal changes, not local patches.
+
+### Explicit Planning and Fallbacks
+- Prefer explicit plans over implicit fallbacks. Known cases should be classified before execution, and the chosen behavior should be intentional for that scenario.
+- Fallbacks are acceptable only when they are part of the plan or clearly requested by configuration. Do not use a broad fallback to hide unexpected states, contract violations, or partial failures.
+- When an unplanned situation is encountered, fail with a clear error rather than silently switching to a slower or less precise path.

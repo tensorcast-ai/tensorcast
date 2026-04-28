@@ -373,7 +373,7 @@ TEST_CASE("representation work plan accepts multi-axis slice copy coordinates", 
   auto plan_or = build_representation_work_plan(*normalized_or);
   REQUIRE(plan_or.ok());
   REQUIRE(plan_or->items.size() == 1);
-  CHECK(plan_or->items.front().kind == RepresentationWorkItemKind::kTensorCopy);
+  CHECK(plan_or->items.front().kind == RepresentationWorkItemKind::kExpertDim0Concat);
   CHECK(plan_or->items.front().committed_bytes == 640);
   CHECK(plan_or->items.front().partition_kind == WorkPartitionKind::kUnknown);
 }

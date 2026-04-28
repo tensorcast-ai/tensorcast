@@ -568,7 +568,7 @@ TEST_CASE("SourceBoundPlanSummary keeps collective lane eligibility separate fro
 
   WorkItem collective_item;
   collective_item.kind = WorkItemKind::kTensorCopy;
-  collective_item.partition_kind = WorkPartitionKind::kDim0Partitioned;
+  collective_item.partition_kind = WorkPartitionKind::kReplicated;
   collective_item.committed_bytes = 8;
   work_plan.items.push_back(collective_item);
 
@@ -588,6 +588,7 @@ TEST_CASE("SourceBoundPlanSummary keeps collective lane eligibility separate fro
   strategy_config.enable_owner_file_collective = true;
   strategy_config.allow_mixed_execution = true;
   strategy_config.owner_file_collective_allow_mixed_residual = true;
+  strategy_config.owner_file_collective_min_dedup_saving_bytes = 0;
 
   tensorcast::store::loading::ExecutionTopologyContext execution_topology;
   execution_topology.collective_load_group =
@@ -628,7 +629,7 @@ TEST_CASE(
 
   WorkItem collective_item;
   collective_item.kind = WorkItemKind::kTensorCopy;
-  collective_item.partition_kind = WorkPartitionKind::kDim0Partitioned;
+  collective_item.partition_kind = WorkPartitionKind::kReplicated;
   collective_item.committed_bytes = 8;
   work_plan.items.push_back(collective_item);
 
@@ -642,6 +643,7 @@ TEST_CASE(
   tensorcast::store::StoreEngineOptions::MaterializationStrategyConfig strategy_config;
   strategy_config.enable_owner_file_collective = true;
   strategy_config.allow_mixed_execution = true;
+  strategy_config.owner_file_collective_min_dedup_saving_bytes = 0;
 
   tensorcast::store::loading::ExecutionTopologyContext execution_topology;
   execution_topology.collective_load_group =
@@ -666,8 +668,8 @@ TEST_CASE(
   CHECK(summary.planned_collective_candidate_bytes == 8);
   CHECK(summary.planned_collective_admitted_bytes == 8);
   CHECK(summary.planned_non_admitted_typed_bytes == 4);
-  REQUIRE(summary.planner_reject_reason_buckets.contains("concat_not_admitted"));
-  CHECK(summary.planner_reject_reason_buckets.at("concat_not_admitted") == 4);
+  REQUIRE(summary.planner_reject_reason_buckets.contains("typed_work_without_source_overlap"));
+  CHECK(summary.planner_reject_reason_buckets.at("typed_work_without_source_overlap") == 4);
   REQUIRE(summary.planner_reject_reason_buckets.contains("typed_work_not_collective_admitted"));
   CHECK(summary.planner_reject_reason_buckets.at("typed_work_not_collective_admitted") == 4);
   CHECK_FALSE(summary.planner_reject_reason_buckets.contains("local_typed_work_present"));
