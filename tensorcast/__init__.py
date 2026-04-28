@@ -174,7 +174,6 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "HashBackend": ("tensorcast.api", "HashBackend"),
     "HashLocation": ("tensorcast.api", "HashLocation"),
     "IdentityMintStrategy": ("tensorcast.api", "IdentityMintStrategy"),
-    "RealizationProtocol": ("tensorcast.api", "RealizationProtocol"),
     "RepresentationPublishContract": (
         "tensorcast.api",
         "RepresentationPublishContract",
@@ -236,10 +235,6 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "register_async": ("tensorcast.api.store", "register_async"),
     "register_view": ("tensorcast.api.store", "register_view"),
     "register_piece": ("tensorcast.api.store", "register_piece"),
-    "register_binding_finalize_publication": (
-        "tensorcast.api.store",
-        "register_binding_finalize_publication",
-    ),
     "register_pure_transform_publication": (
         "tensorcast.api.store",
         "register_pure_transform_publication",
@@ -287,10 +282,6 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "tensorcast.api.store",
         "build_binding_finalize_publication_bundle",
     ),
-    "build_binding_finalize_publication_bundle_from_registered_artifact": (
-        "tensorcast.api.store",
-        "build_binding_finalize_publication_bundle_from_registered_artifact",
-    ),
     "build_serving_publication_bundle": (
         "tensorcast.api.store",
         "build_serving_publication_bundle",
@@ -322,10 +313,6 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "complete_canonical_representation_publish_attempt": (
         "tensorcast.api.store",
         "complete_canonical_representation_publish_attempt",
-    ),
-    "complete_binding_finalize_publication": (
-        "tensorcast.api.store",
-        "complete_binding_finalize_publication",
     ),
     "complete_binding_finalize_publication_from_binding": (
         "tensorcast.api.store",

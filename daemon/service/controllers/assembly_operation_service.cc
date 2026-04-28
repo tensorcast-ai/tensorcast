@@ -236,6 +236,15 @@ v2::AssemblyCloseoutContract publication_closeout_to_v2(
 absl::Status validate_representation_publish_admission_facts(
     const tensorcast::publication::v1::RepresentationPublishSpec& spec) {
   if (!spec.has_admission_facts()) {
+    if (!spec.serving_manifest_bytes().empty()) {
+      auto manifest_or = serving_manifest::parse_serving_manifest_payload(spec.serving_manifest_bytes());
+      if (!manifest_or.ok()) {
+        return manifest_or.status();
+      }
+      if (manifest_or->builder_mode == "binding_finalize") {
+        return absl::FailedPreconditionError("binding_finalize representation_publish requires admission_facts");
+      }
+    }
     return absl::OkStatus();
   }
   if (spec.serving_manifest_bytes().empty()) {
@@ -250,9 +259,6 @@ absl::Status validate_representation_publish_admission_facts(
   const auto& admission = spec.admission_facts();
   if (admission.finalize_class() == tensorcast::publication::v1::FINALIZE_CLASS_UNSPECIFIED) {
     return absl::InvalidArgumentError("representation_publish admission_facts require finalize_class");
-  }
-  if (admission.realization_protocol() == tensorcast::publication::v1::REALIZATION_PROTOCOL_UNSPECIFIED) {
-    return absl::InvalidArgumentError("representation_publish admission_facts require realization_protocol");
   }
   if (admission.support_level() == tensorcast::publication::v1::SERVING_SUPPORT_LEVEL_UNSPECIFIED) {
     return absl::InvalidArgumentError("representation_publish admission_facts require support_level");
@@ -271,20 +277,26 @@ absl::Status validate_representation_publish_admission_facts(
     return absl::FailedPreconditionError(
         "representation_publish admission_facts require support_level=runtime_bind_swap_ready for serving_version_key activation");
   }
-  if (admission.realization_protocol() == tensorcast::publication::v1::REALIZATION_PROTOCOL_SAME_BINDING_FAST_PATH &&
-      !admission.fast_path_validated()) {
-    return absl::InvalidArgumentError(
-        "representation_publish admission_facts require fast_path_validated=true for same_binding_fast_path");
-  }
   if (manifest_or->builder_mode == "pure_transform" &&
       admission.finalize_class() == tensorcast::publication::v1::FINALIZE_CLASS_REPRESENTATION_CHANGING) {
     return absl::FailedPreconditionError(
         "representation_publish admission_facts do not allow finalize_class=representation_changing with builder_mode=pure_transform");
   }
-  if (manifest_or->builder_mode == "binding_finalize" &&
-      admission.finalize_class() != tensorcast::publication::v1::FINALIZE_CLASS_REPRESENTATION_CHANGING) {
-    return absl::FailedPreconditionError(
-        "representation_publish admission_facts require finalize_class=representation_changing with builder_mode=binding_finalize");
+  if (manifest_or->builder_mode == "binding_finalize") {
+    if (admission.finalize_class() != tensorcast::publication::v1::FINALIZE_CLASS_REPRESENTATION_CHANGING) {
+      return absl::FailedPreconditionError(
+          "representation_publish admission_facts require finalize_class=representation_changing with builder_mode=binding_finalize");
+    }
+    if (!admission.same_binding_fast_path_validated()) {
+      return absl::FailedPreconditionError(
+          "binding_finalize representation_publish requires same_binding_fast_path_validated=true");
+    }
+    if (!spec.representation_publish_contract().has_subject() ||
+        spec.representation_publish_contract().subject().ref_case() !=
+            tensorcast::publication::v1::ServingPublicationSubject::kBindingValue) {
+      return absl::FailedPreconditionError(
+          "binding_finalize representation_publish requires binding_value_ref subject");
+    }
   }
   return absl::OkStatus();
 }

@@ -384,7 +384,6 @@ TEST_CASE("StartAssemblyAttempt accepts representation_publish_spec carrier", "[
       "tensorcast.serving_build_digest.v1");
   auto* admission = spec->mutable_admission_facts();
   admission->set_finalize_class(tensorcast::publication::v1::FINALIZE_CLASS_RUNTIME_ONLY);
-  admission->set_realization_protocol(tensorcast::publication::v1::REALIZATION_PROTOCOL_SCRATCH_THEN_COMMIT);
   admission->set_support_level(tensorcast::publication::v1::SERVING_SUPPORT_LEVEL_RUNTIME_BIND_SWAP_READY);
 
   grpc::ServerContext ctx;
@@ -427,7 +426,6 @@ TEST_CASE(
   spec->mutable_representation_publish_contract()->set_serving_build_digest("bafkbuilddigest");
   auto* admission = spec->mutable_admission_facts();
   admission->set_finalize_class(tensorcast::publication::v1::FINALIZE_CLASS_RUNTIME_ONLY);
-  admission->set_realization_protocol(tensorcast::publication::v1::REALIZATION_PROTOCOL_SCRATCH_THEN_COMMIT);
   admission->set_support_level(tensorcast::publication::v1::SERVING_SUPPORT_LEVEL_BUILDER_PUBLICATION_READY);
 
   grpc::ServerContext ctx;
@@ -437,6 +435,95 @@ TEST_CASE(
   REQUIRE_FALSE(st.ok());
   REQUIRE(st.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
   REQUIRE(st.error_message().find("binding_finalize") != std::string::npos);
+}
+
+TEST_CASE(
+    "StartAssemblyAttempt rejects binding_finalize representation_publish without same-binding proof",
+    "[daemon][assembly][attempt]") {
+  auto gs_client = std::make_shared<StartAssemblyAttemptClient>();
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  engine->set_global_store_client_for_testing(gs_client);
+
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = test_tmpdir();
+  std::filesystem::create_directories(daemon_opts.storage_path);
+  auto harness_or =
+      tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts, /*async_runtime=*/nullptr, gs_client);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::StartAssemblyAttemptRequest req;
+  auto* spec = req.mutable_representation_publish_spec();
+  spec->set_layout_id("layout-1");
+  auto* requirement = spec->mutable_requirements()->add_inline_requirements();
+  requirement->set_slot_id("__canonical_full__");
+  requirement->mutable_target()->set_kind(tensorcast::publication::v1::ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT);
+  requirement->set_coverage_contract("canonical_full");
+  spec->set_serving_manifest_bytes(representation_publish_manifest_payload("binding_finalize"));
+  auto* binding_value = spec->mutable_representation_publish_contract()->mutable_subject()->mutable_binding_value();
+  binding_value->set_binding_id("binding-1");
+  binding_value->set_binding_layout_id("layout-1");
+  binding_value->set_binding_value_id("value-1");
+  binding_value->set_seal_generation(1);
+  spec->mutable_representation_publish_contract()->set_serving_manifest_ref("tensor:__tensorcast_meta__.manifest_json");
+  spec->mutable_representation_publish_contract()->set_representation_contract_hash("bafkrepresentation");
+  spec->mutable_representation_publish_contract()->set_serving_build_digest("bafkbuilddigest");
+  auto* admission = spec->mutable_admission_facts();
+  admission->set_finalize_class(tensorcast::publication::v1::FINALIZE_CLASS_REPRESENTATION_CHANGING);
+  admission->set_support_level(tensorcast::publication::v1::SERVING_SUPPORT_LEVEL_BUILDER_PUBLICATION_READY);
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::StartAssemblyAttemptResponse resp;
+  const auto st = svc.StartAssemblyAttempt(&ctx, &req, &resp);
+
+  REQUIRE_FALSE(st.ok());
+  REQUIRE(st.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+  REQUIRE(st.error_message().find("same_binding_fast_path_validated") != std::string::npos);
+}
+
+TEST_CASE(
+    "StartAssemblyAttempt rejects binding_finalize representation_publish with artifact subject",
+    "[daemon][assembly][attempt]") {
+  auto gs_client = std::make_shared<StartAssemblyAttemptClient>();
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  engine->set_global_store_client_for_testing(gs_client);
+
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = test_tmpdir();
+  std::filesystem::create_directories(daemon_opts.storage_path);
+  auto harness_or =
+      tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts, /*async_runtime=*/nullptr, gs_client);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::StartAssemblyAttemptRequest req;
+  auto* spec = req.mutable_representation_publish_spec();
+  spec->set_layout_id("layout-1");
+  auto* requirement = spec->mutable_requirements()->add_inline_requirements();
+  requirement->set_slot_id("__canonical_full__");
+  requirement->mutable_target()->set_kind(tensorcast::publication::v1::ASSEMBLY_TARGET_KIND_CANONICAL_LAYOUT);
+  requirement->set_coverage_contract("canonical_full");
+  spec->set_serving_manifest_bytes(representation_publish_manifest_payload("binding_finalize"));
+  spec->mutable_representation_publish_contract()->mutable_subject()->set_serving_artifact_id("mi2:serving:index:data");
+  spec->mutable_representation_publish_contract()->set_serving_manifest_ref("tensor:__tensorcast_meta__.manifest_json");
+  spec->mutable_representation_publish_contract()->set_representation_contract_hash("bafkrepresentation");
+  spec->mutable_representation_publish_contract()->set_serving_build_digest("bafkbuilddigest");
+  auto* admission = spec->mutable_admission_facts();
+  admission->set_finalize_class(tensorcast::publication::v1::FINALIZE_CLASS_REPRESENTATION_CHANGING);
+  admission->set_support_level(tensorcast::publication::v1::SERVING_SUPPORT_LEVEL_BUILDER_PUBLICATION_READY);
+  admission->set_same_binding_fast_path_validated(true);
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::StartAssemblyAttemptResponse resp;
+  const auto st = svc.StartAssemblyAttempt(&ctx, &req, &resp);
+
+  REQUIRE_FALSE(st.ok());
+  REQUIRE(st.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+  REQUIRE(st.error_message().find("binding_value_ref subject") != std::string::npos);
 }
 
 TEST_CASE(
@@ -471,7 +558,6 @@ TEST_CASE(
   spec->mutable_representation_publish_contract()->set_serving_build_digest("bafkbuilddigest");
   auto* admission = spec->mutable_admission_facts();
   admission->set_finalize_class(tensorcast::publication::v1::FINALIZE_CLASS_REPRESENTATION_CHANGING);
-  admission->set_realization_protocol(tensorcast::publication::v1::REALIZATION_PROTOCOL_SCRATCH_THEN_COMMIT);
   admission->set_support_level(tensorcast::publication::v1::SERVING_SUPPORT_LEVEL_BUILDER_PUBLICATION_READY);
 
   grpc::ServerContext ctx;

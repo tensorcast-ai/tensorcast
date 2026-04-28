@@ -1857,6 +1857,7 @@ def test_complete_binding_finalize_publication_from_binding_uses_current_value_c
         ),
         admission_facts=store_mod.build_binding_finalize_admission_facts(
             support_level=store_mod.ServingSupportLevel.BUILDER_PUBLICATION_READY,
+            same_binding_fast_path_validated=True,
         ),
         contract_family="canonical_full",
         representation_contract_hash="bafkboundrepr",

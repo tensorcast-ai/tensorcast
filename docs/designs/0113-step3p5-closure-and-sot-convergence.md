@@ -262,7 +262,7 @@ Normative completion rules:
    `operation_id` payloads;
 3. same-binding closeout must have one chosen single-mint end state for steady
    bytes instead of an open-ended "remove some hash later" direction;
-4. `fast_path_validated` must have one stable meaning across `0111`, `0113`,
+4. `same_binding_fast_path_validated` must have one stable meaning across `0111`, `0113`,
    TensorCast code, and downstream docs;
 5. TensorCast must expose a stable capability or version surface that lets
    downstream integrations switch to the new contract without guessing repo
@@ -313,7 +313,7 @@ Normative completion rules:
 - silent fallback is forbidden; any non-collective result on a request that
   asked for collective must be represented through typed policy and typed
   outcome facts.
-- `fast_path_validated` remains a correctness and admission fact for the
+- `same_binding_fast_path_validated` remains a correctness and admission fact for the
   same-binding path only. It does not certify collective use, direct-write use,
   dominant executor quality, or GPU-only or single-round hash behavior.
 - execution-quality and identity-quality facts must travel through a separate
@@ -513,7 +513,7 @@ That packet proves:
   - first-class source-bound collective ingress,
   - typed collective policy and typed failure class,
   - stable execution, hash, and identity diagnostics for downstream consumers,
-  - correctness-only `fast_path_validated` semantics,
+  - correctness-only `same_binding_fast_path_validated` semantics,
   - single-mint closeout,
   - source-bound executor convergence,
   - capability or version handoff for downstream integration switching,

@@ -106,7 +106,6 @@ from tensorcast.api.store.serving_builder import (
     RegisteredServingPublication,
     build_binding_finalize_admission_facts,
     build_binding_finalize_publication_bundle,
-    build_binding_finalize_publication_bundle_from_registered_artifact,
     build_pure_transform_publication_bundle,
     build_pure_transform_publication_bundle_from_registered_artifact,
     build_pure_transform_publication_spec,
@@ -168,7 +167,6 @@ from tensorcast.types import (
     PartialSealResult,
     PublicDiskSourceHandle,
     PublishedModelVersion,
-    RealizationProtocol,
     RepresentationPublishContract,
     RepresentationPublishSpec,
     SealAssemblyResult,
@@ -1667,62 +1665,6 @@ class Store:
             publication=publication,
         )
 
-    def register_binding_finalize_publication(
-        self,
-        tensors: TensorDict,
-        *,
-        build_intent: ServingBuildIntent,
-        admission_facts: ServingAdmissionFacts,
-        source_artifact: Artifact
-        | RegisteredArtifact
-        | CanonicalIndex
-        | object
-        | None = None,
-        contract_family: AssemblyContractFamily | str | None = None,
-        artifact_id: str | None = None,
-        key: str | None = None,
-        policy: StorePolicy | str | None = None,
-        device: int | torch.device | None = None,
-        representation_contract_hash: str | None = None,
-        source_version_key: str | None = None,
-        serving_version_key: str | None = None,
-        logical_topology_json: str | None = None,
-        serving_manifest_ref: str | None = None,
-    ) -> RegisteredServingPublication:
-        prepared = prepare_binding_finalize_serving_registration(
-            build_intent=build_intent,
-            tensors=tensors,
-            representation_contract_hash=representation_contract_hash,
-            logical_topology_json=logical_topology_json,
-            serving_manifest_ref=serving_manifest_ref,
-        )
-        registered_artifact = self.put(
-            prepared.tensors,
-            artifact_id=artifact_id,
-            key=key,
-            policy=policy,
-            device=device,
-        )
-        publication = (
-            build_binding_finalize_publication_bundle_from_registered_artifact(
-                build_intent=build_intent,
-                admission_facts=admission_facts,
-                source_artifact=source_artifact,
-                contract_family=contract_family,
-                serving_artifact=registered_artifact,
-                representation_contract_hash=prepared.representation_contract_hash,
-                source_version_key=source_version_key,
-                serving_version_key=serving_version_key,
-                logical_topology_json=logical_topology_json,
-                serving_manifest_ref=prepared.serving_manifest_ref,
-            )
-        )
-        return RegisteredServingPublication(
-            registered_artifact=registered_artifact,
-            prepared_registration=prepared,
-            publication=publication,
-        )
-
     def complete_pure_transform_publication(
         self,
         tensors: TensorDict,
@@ -2063,80 +2005,6 @@ class Store:
                     result, "serving_manifest_ref", None
                 )
             return result
-
-    def complete_binding_finalize_publication(
-        self,
-        tensors: TensorDict,
-        *,
-        build_intent: ServingBuildIntent,
-        admission_facts: ServingAdmissionFacts,
-        source_artifact: Artifact
-        | RegisteredArtifact
-        | CanonicalIndex
-        | object
-        | None = None,
-        contract_family: AssemblyContractFamily | str | None = None,
-        artifact_id: str | None = None,
-        key: str | None = None,
-        policy: StorePolicy | str | None = None,
-        device: int | torch.device | None = None,
-        representation_contract_hash: str | None = None,
-        source_version_key: str | None = None,
-        serving_version_key: str | None = None,
-        logical_topology_json: str | None = None,
-        serving_manifest_ref: str | None = None,
-        structural_view_ids: Sequence[str] | None = None,
-        source_contribution_device: str | int | None = None,
-        source_contribution_artifacts: Sequence[Artifact] | None = None,
-        layout_id: str | None = None,
-        layout_artifact_id: str | None = None,
-        readiness_policy: AssemblyReadinessPolicy | None = None,
-        timeout_s: float | None = None,
-        ctx: CallContext | None = None,
-    ) -> PublishedModelVersion:
-        with tensorcast_profile_stage(
-            "tensorcast",
-            "publication.register_binding_finalize_publication",
-            logger=logger,
-            extra={
-                "tensor_count": len(tensors),
-                "device": None if device is None else str(device),
-                "contract_family": contract_family,
-            },
-        ) as profile:
-            publication = self.register_binding_finalize_publication(
-                tensors,
-                build_intent=build_intent,
-                admission_facts=admission_facts,
-                source_artifact=source_artifact,
-                contract_family=contract_family,
-                artifact_id=artifact_id,
-                key=key,
-                policy=policy,
-                device=device,
-                representation_contract_hash=representation_contract_hash,
-                source_version_key=source_version_key,
-                serving_version_key=serving_version_key,
-                logical_topology_json=logical_topology_json,
-                serving_manifest_ref=serving_manifest_ref,
-            )
-            if profile is not None:
-                profile["serving_artifact_id"] = getattr(
-                    publication.publication, "serving_artifact_id", None
-                )
-        return self._complete_registered_representation_publication(
-            publication=publication,
-            contract_family=contract_family,
-            source_artifact=source_artifact,
-            structural_view_ids=structural_view_ids,
-            source_contribution_device=source_contribution_device,
-            source_contribution_artifacts=source_contribution_artifacts,
-            layout_id=layout_id,
-            layout_artifact_id=layout_artifact_id,
-            readiness_policy=readiness_policy,
-            timeout_s=timeout_s,
-            ctx=ctx,
-        )
 
     def complete_binding_finalize_publication_from_binding(
         self,
@@ -3786,100 +3654,6 @@ def complete_pure_transform_publication_from_binding(
     )
 
 
-def register_binding_finalize_publication(
-    tensors: TensorDict,
-    *,
-    build_intent: ServingBuildIntent,
-    admission_facts: ServingAdmissionFacts,
-    source_artifact: Artifact
-    | RegisteredArtifact
-    | CanonicalIndex
-    | object
-    | None = None,
-    contract_family: AssemblyContractFamily | str | None = None,
-    artifact_id: str | None = None,
-    key: str | None = None,
-    policy: StorePolicy | str | None = None,
-    device: int | torch.device | None = None,
-    representation_contract_hash: str | None = None,
-    source_version_key: str | None = None,
-    serving_version_key: str | None = None,
-    logical_topology_json: str | None = None,
-    serving_manifest_ref: str | None = None,
-) -> RegisteredServingPublication:
-    return _coerce_store().register_binding_finalize_publication(
-        tensors,
-        build_intent=build_intent,
-        admission_facts=admission_facts,
-        source_artifact=source_artifact,
-        contract_family=contract_family,
-        artifact_id=artifact_id,
-        key=key,
-        policy=policy,
-        device=device,
-        representation_contract_hash=representation_contract_hash,
-        source_version_key=source_version_key,
-        serving_version_key=serving_version_key,
-        logical_topology_json=logical_topology_json,
-        serving_manifest_ref=serving_manifest_ref,
-    )
-
-
-def complete_binding_finalize_publication(
-    tensors: TensorDict,
-    *,
-    build_intent: ServingBuildIntent,
-    admission_facts: ServingAdmissionFacts,
-    source_artifact: Artifact
-    | RegisteredArtifact
-    | CanonicalIndex
-    | object
-    | None = None,
-    contract_family: AssemblyContractFamily | str | None = None,
-    artifact_id: str | None = None,
-    key: str | None = None,
-    policy: StorePolicy | str | None = None,
-    device: int | torch.device | None = None,
-    representation_contract_hash: str | None = None,
-    source_version_key: str | None = None,
-    serving_version_key: str | None = None,
-    logical_topology_json: str | None = None,
-    serving_manifest_ref: str | None = None,
-    structural_view_ids: Sequence[str] | None = None,
-    source_contribution_device: str | int | None = None,
-    source_contribution_artifacts: Sequence[Artifact] | None = None,
-    layout_id: str | None = None,
-    layout_artifact_id: str | None = None,
-    readiness_policy: AssemblyReadinessPolicy | None = None,
-    timeout_s: float | None = None,
-    ctx: CallContext | None = None,
-) -> PublishedModelVersion:
-    return _coerce_store().complete_binding_finalize_publication(
-        tensors,
-        build_intent=build_intent,
-        admission_facts=admission_facts,
-        source_artifact=source_artifact,
-        contract_family=contract_family,
-        artifact_id=artifact_id,
-        key=key,
-        policy=policy,
-        device=device,
-        representation_contract_hash=representation_contract_hash,
-        source_version_key=source_version_key,
-        serving_version_key=serving_version_key,
-        logical_topology_json=logical_topology_json,
-        serving_manifest_ref=serving_manifest_ref,
-        structural_view_ids=structural_view_ids,
-        source_contribution_device=source_contribution_device,
-        source_contribution_artifacts=source_contribution_artifacts,
-        layout_id=layout_id,
-        layout_artifact_id=layout_artifact_id,
-        readiness_policy=readiness_policy,
-        timeout_s=timeout_s,
-        ctx=ctx,
-    )
-
-
 def complete_binding_finalize_publication_from_binding(
     binding: Binding | SealedBindingValue,
     *,
@@ -4474,7 +4248,6 @@ __all__ = [
     "HashBackend",
     "HashLocation",
     "IdentityMintStrategy",
-    "RealizationProtocol",
     "RegisteredServingPublication",
     "RegisteredArtifact",
     "RepresentationPublishContract",
@@ -4507,7 +4280,6 @@ __all__ = [
     "build_owned_layout",
     "build_binding_finalize_admission_facts",
     "build_binding_finalize_publication_bundle",
-    "build_binding_finalize_publication_bundle_from_registered_artifact",
     "build_owned_layout",
     "build_serving_publication_bundle",
     "build_serving_publication_bundle_from_registered_artifact",
@@ -4517,7 +4289,6 @@ __all__ = [
     "build_pure_transform_serving_args",
     "build_pure_transform_transform_spec",
     "build_representation_publish_requirements",
-    "complete_binding_finalize_publication",
     "complete_binding_finalize_publication_from_binding",
     "complete_pure_transform_publication",
     "complete_pure_transform_publication_from_binding",
@@ -4556,7 +4327,6 @@ __all__ = [
     "put_async",
     "query_persistence_status",
     "persistence_operation",
-    "register_binding_finalize_publication",
     "register_pure_transform_publication",
     "start_canonical_representation_publish_attempt",
     "start_assembly_attempt",

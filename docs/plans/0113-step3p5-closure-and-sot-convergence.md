@@ -75,7 +75,7 @@ Execution policy for this plan:
 - `0111` repo-owned builder/publication bridge is landed at base scope:
   - `tensorcast/api/store/serving_builder.py`
   - `daemon/service/controllers/assembly_operation_service.cc`
-- `ServingAdmissionFacts.fast_path_validated` is already a correctness and
+- `ServingAdmissionFacts.same_binding_fast_path_validated` is already a correctness and
   admission gate for same-binding publication:
   - `tensorcast/types.py`
   - `docs/designs/0111-source-to-serving-builder-and-representation-publication.md`
@@ -148,7 +148,7 @@ Current SOT rule for this work:
     the first-class source-bound contract as ready for downstream use.
 
 - [x] Phase 3: Diagnostics And Admission Semantics
-  - [x] Milestone 3.1: Freeze `fast_path_validated` as a correctness and
+  - [x] Milestone 3.1: Freeze `same_binding_fast_path_validated` as a correctness and
     admission fact only, not a performance-quality claim.
   - [x] Milestone 3.2: Expose stable typed execution, hash, and identity facts
     for downstream consumers.
@@ -211,7 +211,7 @@ Current SOT rule for this work:
 - [x] Diagnostics and capability work
   - [x] Extend the source-bound execution report surface with stable typed facts
     for collective, executor, hash, and identity outcomes.
-  - [x] Freeze `fast_path_validated` as correctness-only across `0111`, `0113`,
+  - [x] Freeze `same_binding_fast_path_validated` as correctness-only across `0111`, `0113`,
     and downstream-facing docs.
   - [x] Expose a stable capability or version surface so downstream
     integrations can detect when the first-class contract and diagnostics are
@@ -252,7 +252,7 @@ Current SOT rule for this work:
     lowering deletion, then residual `internal-vllm` compat fallback cleanup.
   - [x] Expand bootstrap summary and profile fields only after TensorCast
     exposes stable typed facts and separates them from
-    `fast_path_validated`.
+    `same_binding_fast_path_validated`.
   - [x] Re-run mounted 8xH800 cold-start, TP=8 serving correctness, and the
     benchmark matrix before deleting compatibility scaffolding.
   - [x] Retire compatibility-only tests that assert `operation_id`-encoded
@@ -273,7 +273,7 @@ Current SOT rule for this work:
   as its primary collective contract.
 - [x] a stable capability or version surface exists for source-bound first-class
   collective ingress and diagnostics.
-- [x] `fast_path_validated` is documented and enforced as correctness-only.
+- [x] `same_binding_fast_path_validated` is documented and enforced as correctness-only.
 - [x] downstream-consumable typed execution, hash, and identity diagnostics are
   available without log parsing.
 - [x] same-binding closeout no longer pays a second-stage full-data hash.
@@ -480,7 +480,7 @@ Current SOT rule for this work:
   TensorCast delays first-class ingress.
   - Mitigation: treat first-class ingress as Phase 2 critical path and do not
     add new Python data-plane workaround logic.
-- [ ] Risk: downstream integrations continue to treat `fast_path_validated` as a
+- [ ] Risk: downstream integrations continue to treat `same_binding_fast_path_validated` as a
   performance guarantee.
   - Mitigation: freeze correctness-only semantics in `0111`, `0113`, and
     downstream docs before code rollout.

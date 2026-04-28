@@ -179,28 +179,21 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
     typed `representation_publish_spec` daemon ingress instead of re-authoring
     the generic closeout shell at each call site.
     When the spec carries optional `ServingAdmissionFacts`, TensorCast validates
-    the supplied finalize classification, realization protocol, and support
-    level for consistency without inferring missing integration-private rollout
-    state.
-  - For explicit `BINDING_FINALIZE` paths, use
-    `prepare_binding_finalize_serving_registration(...)`,
-    `build_binding_finalize_admission_facts(...)`, and
-    `build_binding_finalize_publication_bundle_from_registered_artifact(...)`
-    to keep finalize classification fixed at
-    `FinalizeClass.REPRESENTATION_CHANGING` while still surfacing repo-owned
-    realization protocol and support-level truth.
-  - If the builder already has finalized serving tensors in memory for a
-    `BINDING_FINALIZE` family, use
-    `Store.register_binding_finalize_publication(...)` or
-    `Store.complete_binding_finalize_publication(...)` for the same
-    register + typed `representation_publish` closeout flow that the
-    `PURE_TRANSFORM` helpers use.
-  - For same-binding serving builds, prefer
-    `Store.complete_pure_transform_publication_from_binding(...)` or
-    `Store.complete_binding_finalize_publication_from_binding(...)`. These
-    paths now emit a binding-value publication subject directly into the typed
-    closeout contract; the tensor-registration helpers remain available only
-    for workflows that still start from in-memory tensors.
+    the supplied finalize classification, same-binding proof, and support level
+    for consistency without inferring missing integration-private rollout state.
+  - `BINDING_FINALIZE` publication is same-binding-only. Use
+    `Store.complete_binding_finalize_publication_from_binding(...)` after the
+    serving binding current value has been realized, finalized, and sealed.
+    The resulting spec must carry a binding-value publication subject and
+    `same_binding_fast_path_validated=True`.
+  - Tensor-entry `BINDING_FINALIZE` publication helpers have been removed.
+    Finalized tensors in ordinary memory are not an admitted publication path
+    for representation-changing families; they must first be realized through
+    the binding-native path.
+  - For same-binding pure transforms, use
+    `Store.complete_pure_transform_publication_from_binding(...)`. Pure
+    transform publication may still use registered-artifact helpers because it
+    does not represent a framework finalize that changes serving bytes.
   - `Store.complete_representation_publish_attempt(...)` runs the same repo-owned
     spec path through `start -> seal -> wait` and returns the final
     `PublishedModelVersion`.

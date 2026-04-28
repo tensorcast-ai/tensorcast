@@ -239,18 +239,17 @@ The validated cold-start chain is:
 6. seal canonical-full from explicit binding-backed source evidence,
 7. reach ordinary serving runtime without runtime fallback.
 
-The broader repo still retains legacy helper surfaces for unaudited families,
-so the design is not yet globally complete. But the audited Step3p5 family is
-no longer routing through `SCRATCH_THEN_COMMIT`, tensor-publication helpers, or
-runtime bridge behavior.
+The broader repo now uses the same rule for all `BINDING_FINALIZE` families:
+same-binding publication is the only admitted path. The audited Step3p5 family
+therefore no longer routes through tensor-publication helpers or runtime bridge
+behavior.
 
-## 5. Demote tensor-publication helpers to explicit legacy bridge status
+## 5. Remove tensor-publication helpers for `BINDING_FINALIZE`
 
 This blocker is now closed.
 
-Ambiguous tensor-entry helper names have been removed from the public surface.
-The remaining tensor-entry helpers now carry explicit `*_bridge(...)` naming,
-so same-binding code no longer has a silent path back to the older
+Tensor-entry `BINDING_FINALIZE` helper names have been removed from the public
+surface. Same-binding code no longer has a path back to the older
 register-then-closeout model.
 
 ## 6. Step3p5 runtime bridge is now closed
@@ -308,16 +307,13 @@ shape, but the execution path is still split across two inconsistent models.
 5. promote the same finalized bytes into a durable serving artifact,
 6. complete `representation_publish`.
 
-See `0111` section 4.4, especially the preferred
-`SAME_BINDING_FAST_PATH` wording.
+See `0111` section 4.4 for the required same-binding path.
 
-However, the current implementation still combines that intended shape with an
-older scratch-style publication flow:
+The old implementation combined that intended shape with an older
+tensor-entry publication flow:
 
-- vLLM and the SDK can still build finalized serving tensors in memory and call
-  `Store.register_binding_finalize_publication(...)` or
-  `Store.complete_binding_finalize_publication(...)`, which first registers a
-  new serving artifact from those tensors and only then performs
+- vLLM and the SDK could build finalized serving tensors in memory, register a
+  new serving artifact from those tensors, and only then perform
   `representation_publish`.
 - canonical-full contribution still re-materializes publication tensors into a
   temporary binding-backed contribution object instead of contributing the
@@ -347,9 +343,9 @@ That boundary is correct.
 What is missing is a first-class promotion path from
 `SealedBindingValue -> serving artifact` inside the serving publication domain.
 
-Instead, the current `BINDING_FINALIZE` helper path commonly does this:
+Instead, the old `BINDING_FINALIZE` helper path commonly did this:
 
-1. realize bytes into binding-backed or scratch tensors,
+1. realize bytes into binding-backed tensors and then rebuild a tensor mapping,
 2. finalize,
 3. build a second tensor mapping,
 4. `put(...)` or register those finalized tensors,
@@ -445,7 +441,7 @@ Neither is acceptable as a long-term design.
   first-class.
 - Keep `0105`'s cut-driven seal model intact: seal consumes snapped attempt
   truth and explicit source evidence, not workspace reconstruction or fallback.
-- Preserve `0111`'s distinction between builder mode, realization protocol,
+- Preserve `0111`'s distinction between builder mode, same-binding admission,
   semantic identity, and publication lineage.
 - Push source-to-target copy and fill into TensorCast whenever the operation is
   representable by TensorCast's internal realization contracts.
@@ -465,8 +461,8 @@ Neither is acceptable as a long-term design.
   source-to-serving publication lineage.
 - This design does not require every framework-specific finalize kernel to move
   into TensorCast immediately.
-- This design does not make `SCRATCH_THEN_COMMIT` invalid overnight; it remains
-  an admitted bridge protocol, but not the preferred long-term shape.
+- This design does not preserve tensor-entry or scratch-host
+  `BINDING_FINALIZE` publication.
 - This design does not redefine offline builder publication.
 
 # Core Principles
@@ -574,7 +570,7 @@ This operation:
 7. returns a durable `RegisteredArtifact` or equivalent descriptor.
 
 This is the key architectural replacement for the current
-`register_binding_finalize_publication(tensors=...)` path.
+tensor-entry `BINDING_FINALIZE` publication path.
 
 Normative rules:
 
@@ -647,9 +643,9 @@ It is a correctness rule.
 
 # Realization Data Flow
 
-## Preferred same-binding flow
+## Required same-binding flow
 
-For `BINDING_FINALIZE + SAME_BINDING_FAST_PATH`:
+For `BINDING_FINALIZE`:
 
 1. compile recipe into:
    - final serving canonical layout
@@ -668,19 +664,12 @@ For `BINDING_FINALIZE + SAME_BINDING_FAST_PATH`:
 10. runtime handoff continues to use the same binding-backed tensors without a
     second model-sized copy
 
-## Admitted bridge flow
+## Removed bridge flow
 
-`SCRATCH_THEN_COMMIT` remains admitted when a family cannot yet validate the
-same-binding path.
-
-However, even that bridge flow should converge toward the same publication
-contract:
-
-- scratch storage is a temporary builder host,
-- commit into the final serving binding or serving target still happens before
-  promotion,
-- and durable publication still operates on the final serving host rather than
-  on an unrelated extra registration copy.
+Builder-local scratch realization followed by commit into a serving target is
+not admitted for `BINDING_FINALIZE`. A family that cannot validate the
+same-binding path must fail admission rather than publish through a slower
+generic bridge.
 
 # Public Realization Contract
 
@@ -753,13 +742,13 @@ Execution responsibility:
 
 The integration layer only prepares the plan and invokes framework finalize.
 
-Normative execution rule for the preferred same-binding builder path:
+Normative execution rule for the same-binding builder path:
 
 - `Binding.realize_from(...)` / `Store.realize_into_binding(...)` are
   execution-only ingress points;
 - they write source bytes into binding-backed target storage but do not
   implicitly seal, mint identity, or return a publication-ready current value;
-- audited `BINDING_FINALIZE + SAME_BINDING_FAST_PATH` flows must therefore use
+- audited `BINDING_FINALIZE` flows must therefore use
   the explicit binding update window:
   `begin_update(...) -> realize_from(...) -> framework finalize -> seal_current(...)`;
 - the public ingress remains one ingress, but its correct long-term semantics
@@ -936,13 +925,8 @@ The current helpers should be classified as follows:
   - preferred same-binding closeout entry for `PURE_TRANSFORM`
   - subject-first closeout on the sealed binding current value
 - `Store.complete_binding_finalize_publication_from_binding(...)`
-  - preferred same-binding closeout entry for `BINDING_FINALIZE`
+  - required same-binding closeout entry for `BINDING_FINALIZE`
   - subject-first closeout on the sealed binding current value
-- `Store.register_binding_finalize_publication(tensors=...)`
-  - explicit bridge path
-  - not the long-term same-binding publication architecture
-- `Store.complete_binding_finalize_publication(tensors=...)`
-  - same explicit bridge status
 - `Store.from_disk(...)`
   - remains an import-oriented API
   - not the intended Phase 5 public realization ingress for same-binding
@@ -1012,8 +996,8 @@ The final preferred same-binding path must satisfy all of the following:
   the only serving publication subject,
 - the audited Step3p5 loading chain completes without runtime fallback or
   bridge behavior,
-- same-binding / binding-finalize audited families no longer route to
-  `SCRATCH_THEN_COMMIT`,
+- same-binding / binding-finalize audited families no longer route to tensor
+  entry or bridge publication,
 - no `registration_commit.stable_dram.stage_gpu_copy` on the binding-finalize
   publication critical path,
 - no `registration_commit.hash.data.cpu` on the same path,

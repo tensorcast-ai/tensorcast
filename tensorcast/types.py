@@ -677,11 +677,6 @@ class BuilderMode(str, Enum):
     BINDING_FINALIZE = "binding_finalize"
 
 
-class RealizationProtocol(str, Enum):
-    SAME_BINDING_FAST_PATH = "same_binding_fast_path"
-    SCRATCH_THEN_COMMIT = "scratch_then_commit"
-
-
 class FinalizeClass(str, Enum):
     RUNTIME_ONLY = "runtime_only"
     REPRESENTATION_CHANGING = "representation_changing"
@@ -702,22 +697,6 @@ _PUBLICATION_BUILDER_MODE_TO_PROTO: dict[BuilderMode, int] = {
 _PUBLICATION_BUILDER_MODE_FROM_PROTO: dict[int, BuilderMode] = {
     int(publication_pb2.BUILDER_MODE_PURE_TRANSFORM): BuilderMode.PURE_TRANSFORM,
     int(publication_pb2.BUILDER_MODE_BINDING_FINALIZE): BuilderMode.BINDING_FINALIZE,
-}
-_PUBLICATION_REALIZATION_PROTOCOL_TO_PROTO: dict[RealizationProtocol, int] = {
-    RealizationProtocol.SAME_BINDING_FAST_PATH: int(
-        publication_pb2.REALIZATION_PROTOCOL_SAME_BINDING_FAST_PATH
-    ),
-    RealizationProtocol.SCRATCH_THEN_COMMIT: int(
-        publication_pb2.REALIZATION_PROTOCOL_SCRATCH_THEN_COMMIT
-    ),
-}
-_PUBLICATION_REALIZATION_PROTOCOL_FROM_PROTO: dict[int, RealizationProtocol] = {
-    int(publication_pb2.REALIZATION_PROTOCOL_SAME_BINDING_FAST_PATH): (
-        RealizationProtocol.SAME_BINDING_FAST_PATH
-    ),
-    int(publication_pb2.REALIZATION_PROTOCOL_SCRATCH_THEN_COMMIT): (
-        RealizationProtocol.SCRATCH_THEN_COMMIT
-    ),
 }
 _PUBLICATION_FINALIZE_CLASS_TO_PROTO: dict[FinalizeClass, int] = {
     FinalizeClass.RUNTIME_ONLY: int(publication_pb2.FINALIZE_CLASS_RUNTIME_ONLY),
@@ -1273,10 +1252,9 @@ class ServingAdmissionFacts(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     finalize_class: FinalizeClass
-    realization_protocol: RealizationProtocol
     support_level: ServingSupportLevel
     topology_admission_digest: str | None = None
-    fast_path_validated: bool = False
+    same_binding_fast_path_validated: bool = False
 
     @field_validator("topology_admission_digest", mode="before")
     @classmethod
@@ -1288,10 +1266,13 @@ class ServingAdmissionFacts(BaseModel):
     @model_validator(mode="after")
     def _validate_admission_facts(self) -> "ServingAdmissionFacts":
         if (
-            self.realization_protocol == RealizationProtocol.SAME_BINDING_FAST_PATH
-            and not self.fast_path_validated
+            self.finalize_class == FinalizeClass.REPRESENTATION_CHANGING
+            and not self.same_binding_fast_path_validated
         ):
-            raise ValueError("same_binding_fast_path requires fast_path_validated=True")
+            raise ValueError(
+                "representation_changing admission requires "
+                "same_binding_fast_path_validated=True"
+            )
         return self
 
     def validate_for_representation_publish(self, *, builder_mode: BuilderMode) -> None:
@@ -1320,6 +1301,13 @@ class ServingAdmissionFacts(BaseModel):
             raise ValueError(
                 "BINDING_FINALIZE publication requires finalize_class=REPRESENTATION_CHANGING"
             )
+        if (
+            builder_mode == BuilderMode.BINDING_FINALIZE
+            and not self.same_binding_fast_path_validated
+        ):
+            raise ValueError(
+                "BINDING_FINALIZE publication requires same_binding_fast_path_validated=True"
+            )
 
     def admits_builder_publication(self) -> bool:
         return self.support_level in {
@@ -1345,13 +1333,12 @@ class ServingAdmissionFacts(BaseModel):
     def to_publication_proto(self) -> publication_pb2.ServingAdmissionFacts:
         proto = publication_pb2.ServingAdmissionFacts(
             finalize_class=_PUBLICATION_FINALIZE_CLASS_TO_PROTO[self.finalize_class],
-            realization_protocol=_PUBLICATION_REALIZATION_PROTOCOL_TO_PROTO[
-                self.realization_protocol
-            ],
             support_level=_PUBLICATION_SERVING_SUPPORT_LEVEL_TO_PROTO[
                 self.support_level
             ],
-            fast_path_validated=bool(self.fast_path_validated),
+            same_binding_fast_path_validated=bool(
+                self.same_binding_fast_path_validated
+            ),
         )
         if self.topology_admission_digest is not None:
             proto.topology_admission_digest = str(self.topology_admission_digest)
@@ -1364,12 +1351,6 @@ class ServingAdmissionFacts(BaseModel):
     ) -> "ServingAdmissionFacts":
         if int(proto.finalize_class) == int(publication_pb2.FINALIZE_CLASS_UNSPECIFIED):
             raise ValueError("ServingAdmissionFacts.finalize_class must be specified")
-        if int(proto.realization_protocol) == int(
-            publication_pb2.REALIZATION_PROTOCOL_UNSPECIFIED
-        ):
-            raise ValueError(
-                "ServingAdmissionFacts.realization_protocol must be specified"
-            )
         if int(proto.support_level) == int(
             publication_pb2.SERVING_SUPPORT_LEVEL_UNSPECIFIED
         ):
@@ -1378,16 +1359,15 @@ class ServingAdmissionFacts(BaseModel):
             finalize_class=_PUBLICATION_FINALIZE_CLASS_FROM_PROTO[
                 int(proto.finalize_class)
             ],
-            realization_protocol=_PUBLICATION_REALIZATION_PROTOCOL_FROM_PROTO[
-                int(proto.realization_protocol)
-            ],
             support_level=_PUBLICATION_SERVING_SUPPORT_LEVEL_FROM_PROTO[
                 int(proto.support_level)
             ],
             topology_admission_digest=(
                 str(proto.topology_admission_digest or "") or None
             ),
-            fast_path_validated=bool(proto.fast_path_validated),
+            same_binding_fast_path_validated=bool(
+                proto.same_binding_fast_path_validated
+            ),
         )
 
 
@@ -1985,6 +1965,20 @@ class RepresentationPublishSpec(BaseModel):
             raise ValueError(
                 "binding-native representation publish specs must not set serving_artifact_id before closeout promotion"
             )
+        if (
+            self.serving_manifest.builder_mode == BuilderMode.BINDING_FINALIZE
+            and self.representation_publish_contract.binding_value_ref is None
+        ):
+            raise ValueError(
+                "BINDING_FINALIZE representation publish requires a binding_value_ref subject"
+            )
+        if (
+            self.serving_manifest.builder_mode == BuilderMode.BINDING_FINALIZE
+            and self.admission_facts is None
+        ):
+            raise ValueError(
+                "BINDING_FINALIZE representation publish requires admission_facts"
+            )
         if self.closeout_contract.kind != "representation_publish":
             raise ValueError(
                 "RepresentationPublishSpec.closeout_contract must use kind='representation_publish'"
@@ -2550,7 +2544,6 @@ __all__ = [
     "CommitResult",
     "PublishedModelVersion",
     "PureTransformPublicationSpec",
-    "RealizationProtocol",
     "RepresentationPublishContract",
     "RepresentationPublishSpec",
     "PublicDiskSourceHandle",
