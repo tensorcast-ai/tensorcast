@@ -54,6 +54,14 @@ class BroadcastService:
         target_worker_ids: list[str] | tuple[str, ...] | None = None,
     ) -> BroadcastSession:
         """Create a broadcast session and reserve the first planned edges."""
+        session_id = str(session_id).strip()
+        artifact_id = str(artifact_id).strip()
+        if not session_id:
+            raise ValueError("session_id is required")
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        if epoch < 0:
+            raise ValueError("epoch must be >= 0")
         if fanout <= 0:
             raise ValueError("fanout must be > 0")
         if max_attempts <= 0:
@@ -125,6 +133,10 @@ class BroadcastService:
         finally:
             cursor.close()
 
+    def list_targets(self, session_id: str) -> list[BroadcastTarget]:
+        """List broadcast targets for a session."""
+        return self._broadcast_repository.list_targets(session_id)
+
     def cancel_session(self, session_id: str) -> bool:
         """Mark a broadcast session cancelled."""
         return self._broadcast_repository.update_session_state(
@@ -140,6 +152,9 @@ class BroadcastService:
     ) -> list[Worker]:
         targets: dict[str, Worker] = {}
         for worker_id in target_worker_ids:
+            worker_id = str(worker_id).strip()
+            if not worker_id:
+                continue
             worker = self._worker_repository.find_by_id(
                 worker_id,
                 include_inactive=False,
@@ -149,6 +164,9 @@ class BroadcastService:
             targets[worker.worker_id] = worker
 
         for daemon_id in target_daemon_ids:
+            daemon_id = str(daemon_id).strip()
+            if not daemon_id:
+                continue
             worker = self._worker_repository.find_by_daemon_id(
                 daemon_id,
                 include_inactive=False,

@@ -1102,7 +1102,7 @@ message BroadcastTargetIdentity {
 message BroadcastSessionInfo {
   string session_id = 1;
   string artifact_id = 2;
-  optional string requested_view_id = 3;
+  tensorcast.common.v1.ByteSpaceRef requested_byte_space = 3;
   uint64 epoch = 4;
   uint32 fanout = 5;
   uint32 max_attempts = 6;
@@ -1148,7 +1148,7 @@ message BroadcastEdgeInfo {
 message CreateBroadcastSessionRequest {
   string session_id = 1;
   string artifact_id = 2;
-  optional string requested_view_id = 3;
+  tensorcast.common.v1.ByteSpaceRef requested_byte_space = 3;
   uint64 epoch = 4;
   uint32 fanout = 5;
   bool strict_parent = 6;
@@ -1160,7 +1160,8 @@ message CreateBroadcastSessionRequest {
 message CreateBroadcastSessionResponse {
   Status status = 1;
   BroadcastSessionInfo session = 2;
-  repeated BroadcastEdgeInfo edges = 3;
+  repeated BroadcastTargetInfo targets = 3;
+  repeated BroadcastEdgeInfo edges = 4;
 }
 
 message GetBroadcastSessionRequest {
@@ -1170,6 +1171,7 @@ message GetBroadcastSessionRequest {
 message GetBroadcastSessionResponse {
   Status status = 1;
   BroadcastSessionInfo session = 2;
+  repeated BroadcastTargetInfo targets = 3;
 }
 
 message ListBroadcastEdgesRequest {
@@ -1183,6 +1185,7 @@ message ListBroadcastEdgesResponse {
 
 message CancelBroadcastSessionRequest {
   string session_id = 1;
+  string reason = 2;
 }
 
 message CancelBroadcastSessionResponse {

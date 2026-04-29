@@ -14,8 +14,11 @@ from tensorcast.global_store.models import (
     BroadcastEdgeState,
     BroadcastSession,
     BroadcastSessionState,
+    BroadcastTarget,
+    BroadcastTargetState,
 )
 from tensorcast.global_store.services import BroadcastService
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2
 
 
@@ -36,6 +39,15 @@ _EDGE_STATE_TO_PROTO = {
     BroadcastEdgeState.CANCELLED: global_store_pb2.BROADCAST_EDGE_STATE_CANCELLED,
 }
 
+_TARGET_STATE_TO_PROTO = {
+    BroadcastTargetState.PENDING: global_store_pb2.BROADCAST_TARGET_STATE_PENDING,
+    BroadcastTargetState.ASSIGNED: global_store_pb2.BROADCAST_TARGET_STATE_ASSIGNED,
+    BroadcastTargetState.MATERIALIZING: global_store_pb2.BROADCAST_TARGET_STATE_MATERIALIZING,
+    BroadcastTargetState.COMPLETED: global_store_pb2.BROADCAST_TARGET_STATE_COMPLETED,
+    BroadcastTargetState.FAILED: global_store_pb2.BROADCAST_TARGET_STATE_FAILED,
+    BroadcastTargetState.CANCELLED: global_store_pb2.BROADCAST_TARGET_STATE_CANCELLED,
+}
+
 
 class BroadcastRpcHandler:
     """Owns broadcast planning RPC behavior and error mapping."""
@@ -50,27 +62,34 @@ class BroadcastRpcHandler:
         context: grpc.ServicerContext,
     ) -> global_store_pb2.CreateBroadcastSessionResponse:
         try:
-            requested_view_id = (
-                request.requested_view_id
-                if request.HasField("requested_view_id")
-                else None
-            )
+            requested_view_id = self._requested_view_id_from_byte_space(request)
+            target_worker_ids: list[str] = []
+            target_daemon_ids: list[str] = []
+            for target in request.targets:
+                worker_id = target.worker_id.strip()
+                daemon_id = target.daemon_id.strip()
+                if worker_id:
+                    target_worker_ids.append(worker_id)
+                if daemon_id:
+                    target_daemon_ids.append(daemon_id)
             session = self._broadcast_service.create_session(
                 session_id=request.session_id,
                 artifact_id=request.artifact_id,
                 requested_view_id=requested_view_id,
                 epoch=int(request.epoch),
                 fanout=int(request.fanout),
-                target_worker_ids=[target.worker_id for target in request.targets],
-                target_daemon_ids=[target.daemon_id for target in request.targets],
+                target_worker_ids=target_worker_ids,
+                target_daemon_ids=target_daemon_ids,
                 root_replica_id=request.root_replica_id,
                 strict_parent=bool(request.strict_parent),
                 max_attempts=int(request.max_attempts),
             )
             edges = self._broadcast_service.list_edges(session.session_id)
+            targets = self._broadcast_service.list_targets(session.session_id)
             return global_store_pb2.CreateBroadcastSessionResponse(
                 status=global_store_pb2.STATUS_OK,
                 session=self._session_to_proto(session),
+                targets=[self._target_to_proto(target) for target in targets],
                 edges=[self._edge_to_proto(edge) for edge in edges],
             )
         except ValueError as exc:
@@ -101,6 +120,12 @@ class BroadcastRpcHandler:
             return global_store_pb2.GetBroadcastSessionResponse(
                 status=global_store_pb2.STATUS_OK,
                 session=self._session_to_proto(session),
+                targets=[
+                    self._target_to_proto(target)
+                    for target in self._broadcast_service.list_targets(
+                        session.session_id
+                    )
+                ],
             )
         except Exception as exc:  # noqa: BLE001
             self._logger.exception("GetBroadcastSession failed")
@@ -172,10 +197,36 @@ class BroadcastRpcHandler:
             root_replica_id=str(session.root_replica_id or ""),
         )
         if session.requested_view_id is not None:
-            message.requested_view_id = session.requested_view_id
+            message.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_VIEW
+            message.requested_byte_space.id = session.requested_view_id
+        else:
+            message.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_CANONICAL
         self._copy_timestamp(message.created_at, session.created_at)
         self._copy_timestamp(message.updated_at, session.updated_at)
         self._copy_timestamp(message.completed_at, session.completed_at)
+        return message
+
+    def _target_to_proto(
+        self,
+        target: BroadcastTarget,
+    ) -> global_store_pb2.BroadcastTargetInfo:
+        message = global_store_pb2.BroadcastTargetInfo(
+            session_id=target.session_id,
+            target_worker_id=target.target_worker_id,
+            target_daemon_id=target.target_daemon_id or "",
+            state=_TARGET_STATE_TO_PROTO.get(
+                target.state,
+                global_store_pb2.BROADCAST_TARGET_STATE_UNSPECIFIED,
+            ),
+            level=int(target.level or 0),
+            attempt=int(target.attempt),
+            assigned_edge_id=target.assigned_edge_id or "",
+            completed_replica_id=str(target.completed_replica_id or ""),
+            failure_reason=target.failure_reason or "",
+        )
+        self._copy_timestamp(message.created_at, target.created_at)
+        self._copy_timestamp(message.updated_at, target.updated_at)
+        self._copy_timestamp(message.completed_at, target.completed_at)
         return message
 
     def _edge_to_proto(
@@ -209,3 +260,17 @@ class BroadcastRpcHandler:
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
         target.FromDatetime(value)
+
+    @staticmethod
+    def _requested_view_id_from_byte_space(
+        request: global_store_pb2.CreateBroadcastSessionRequest,
+    ) -> str | None:
+        if not request.HasField("requested_byte_space"):
+            return None
+        byte_space = request.requested_byte_space
+        if byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW:
+            view_id = byte_space.id.strip()
+            if not view_id:
+                raise ValueError("requested_byte_space VIEW requires id")
+            return view_id
+        return None

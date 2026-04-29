@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from tensorcast.global_store.models import (
     BroadcastEdgeState,
     BroadcastSessionState,
@@ -89,3 +91,47 @@ def test_create_session_plans_first_layer_by_fanout(repositories):
     assert all(edge is not None for edge in edges)
     assert all(edge.state is BroadcastEdgeState.PLANNED for edge in edges if edge)
     assert all(edge.parent_replica_id == root_replica.replica_id for edge in edges if edge)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"session_id": ""}, "session_id is required"),
+        ({"artifact_id": ""}, "artifact_id is required"),
+        ({"epoch": -1}, "epoch must be >= 0"),
+    ],
+)
+def test_create_session_validates_required_inputs(repositories, overrides, message):
+    worker_repo = repositories["worker"]
+    replica_repo = repositories["replica"]
+    broadcast_repo = repositories["broadcast"]
+    service = BroadcastService(
+        broadcast_repository=broadcast_repo,
+        replica_repository=replica_repo,
+        worker_repository=worker_repo,
+    )
+    root = _worker("worker-root-validation", "daemon-root-validation", "node1")
+    child = _worker("worker-child-validation", "daemon-child-validation", "node2")
+    for worker in (root, child):
+        worker_repo.create(worker)
+        assert worker_repo.update_heartbeat(worker.worker_id, 4096, True)
+    root_replica = replica_repo.create(
+        _exportable_replica("mi2:model-validation", root)
+    )
+
+    kwargs = {
+        "session_id": "session-validation",
+        "artifact_id": "mi2:model-validation",
+        "requested_view_id": None,
+        "epoch": 1,
+        "fanout": 1,
+        "target_daemon_ids": ["daemon-child-validation"],
+        "root_replica_id": str(root_replica.replica_id),
+        "strict_parent": True,
+        "max_attempts": 3,
+    }
+    kwargs.update(overrides)
+
+    with pytest.raises(ValueError, match=message):
+        service.create_session(**kwargs)
+    assert broadcast_repo.find_session("session-validation") is None
