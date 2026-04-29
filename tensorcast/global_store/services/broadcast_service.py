@@ -278,6 +278,8 @@ class BroadcastService:
         session = self._broadcast_repository.find_session(session_id, cursor=cursor)
         if session is None:
             raise NotFoundError(f"broadcast session not found: {session_id}")
+        if session.state is not BroadcastSessionState.ACTIVE:
+            return
         edge = self._broadcast_repository.find_edge(edge_id, cursor=cursor)
         if edge is None:
             raise NotFoundError(f"broadcast edge not found: {edge_id}")
@@ -352,6 +354,9 @@ class BroadcastService:
         self._mark_session_terminal_if_done(session.session_id, cursor=cursor)
 
     def _mark_session_terminal_if_done(self, session_id: str, *, cursor=None) -> None:
+        session = self._broadcast_repository.find_session(session_id, cursor=cursor)
+        if session is None or session.state is not BroadcastSessionState.ACTIVE:
+            return
         if self._broadcast_repository.count_incomplete_targets(
             session_id,
             cursor=cursor,
@@ -476,6 +481,18 @@ class BroadcastService:
         *,
         cursor=None,
     ) -> list[BroadcastEdge]:
+        if session.state is not BroadcastSessionState.ACTIVE:
+            return []
+        current_session = self._broadcast_repository.find_session(
+            session.session_id,
+            cursor=cursor,
+        )
+        if (
+            current_session is None
+            or current_session.state is not BroadcastSessionState.ACTIVE
+        ):
+            return []
+        session = current_session
         pending_targets = self._broadcast_repository.list_targets_by_state(
             session.session_id,
             BroadcastTargetState.PENDING,

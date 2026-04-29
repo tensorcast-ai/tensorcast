@@ -392,3 +392,92 @@ def test_complete_transport_edge_stale_failure_does_not_requeue_target(
         {"edge-stale", "edge-new"} if assigned_edge_id == "edge-new" else {"edge-stale"}
     )
     assert session.state is BroadcastSessionState.ACTIVE
+
+
+def test_complete_transport_edge_success_noops_after_session_cancelled(repositories):
+    worker_repo = repositories["worker"]
+    replica_repo = repositories["replica"]
+    broadcast_repo = repositories["broadcast"]
+    service = BroadcastService(
+        broadcast_repository=broadcast_repo,
+        replica_repository=replica_repo,
+        worker_repository=worker_repo,
+    )
+    root = _worker("worker-root-cancel", "daemon-root-cancel", "node1")
+    child1 = _worker("worker-child-cancel-1", "daemon-child-cancel-1", "node2")
+    child2 = _worker("worker-child-cancel-2", "daemon-child-cancel-2", "node3")
+    for worker in (root, child1, child2):
+        worker_repo.create(worker)
+        assert worker_repo.update_heartbeat(worker.worker_id, 4096, True)
+    root_replica = replica_repo.create(_exportable_replica("mi2:model-cancel", root))
+
+    service.create_session(
+        session_id="session-cancel-inflight",
+        artifact_id="mi2:model-cancel",
+        requested_view_id=None,
+        epoch=1,
+        fanout=1,
+        target_daemon_ids=[
+            "daemon-child-cancel-1",
+            "daemon-child-cancel-2",
+        ],
+        root_replica_id=str(root_replica.replica_id),
+        strict_parent=True,
+        max_attempts=3,
+    )
+    assigned_before_claim = [
+        target
+        for target in broadcast_repo.list_targets("session-cancel-inflight")
+        if target.state is BroadcastTargetState.ASSIGNED
+    ]
+    assert len(assigned_before_claim) == 1
+    claimed_worker_id = assigned_before_claim[0].target_worker_id
+
+    with broadcast_repo.transaction() as tx:
+        _, edge = service.claim_transport_edge(
+            session_id="session-cancel-inflight",
+            artifact_id="mi2:model-cancel",
+            requested_view_id=None,
+            requester_worker_id=claimed_worker_id,
+            request_id="request-cancel-inflight",
+            heartbeat_timeout_seconds=30.0,
+            cursor=tx,
+        )
+
+    assert service.cancel_session("session-cancel-inflight")
+    completed_child = child1 if child1.worker_id == claimed_worker_id else child2
+    replica_repo.create(_exportable_replica("mi2:model-cancel", completed_child))
+
+    with broadcast_repo.transaction() as tx:
+        service.complete_transport_edge(
+            session_id="session-cancel-inflight",
+            edge_id=edge.edge_id,
+            transport_outcome=TransportCompletionOutcome.SUCCESS,
+            outcome_detail=None,
+            cursor=tx,
+        )
+
+    session = broadcast_repo.find_session("session-cancel-inflight")
+    edge_after = broadcast_repo.find_edge(edge.edge_id)
+    targets = broadcast_repo.list_targets("session-cancel-inflight")
+    edges = broadcast_repo.list_edges("session-cancel-inflight")
+
+    assert session is not None
+    assert edge_after is not None
+    assert session.state is BroadcastSessionState.CANCELLED
+    assert edge_after.state is BroadcastEdgeState.MATERIALIZING
+    assert edge_after.completed_at is None
+    assert len(edges) == 1
+    materializing_targets = [
+        target
+        for target in targets
+        if target.state is BroadcastTargetState.MATERIALIZING
+    ]
+    pending_targets = [
+        target for target in targets if target.state is BroadcastTargetState.PENDING
+    ]
+    assert len(materializing_targets) == 1
+    assert materializing_targets[0].target_worker_id == claimed_worker_id
+    assert materializing_targets[0].assigned_edge_id == edge.edge_id
+    assert len(pending_targets) == 1
+    assert pending_targets[0].assigned_edge_id is None
