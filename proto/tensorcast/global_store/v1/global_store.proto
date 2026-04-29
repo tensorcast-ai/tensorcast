@@ -1151,10 +1151,10 @@ message CreateBroadcastSessionRequest {
   tensorcast.common.v1.ByteSpaceRef requested_byte_space = 3;
   uint64 epoch = 4;
   uint32 fanout = 5;
-  bool strict_parent = 6;
-  uint32 max_attempts = 7;
-  string root_replica_id = 8;
-  repeated BroadcastTargetIdentity targets = 9;
+  repeated BroadcastTargetIdentity targets = 6;
+  string root_replica_id = 7;
+  bool strict_parent = 8;
+  uint32 max_attempts = 9;
 }
 
 message CreateBroadcastSessionResponse {

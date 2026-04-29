@@ -29,6 +29,10 @@ def test_broadcast_proto_contract_uses_byte_space_and_targets():
         create_fields["requested_byte_space"].message_type.full_name
         == "tensorcast.common.v1.ByteSpaceRef"
     )
+    assert create_fields["targets"].number == 6
+    assert create_fields["root_replica_id"].number == 7
+    assert create_fields["strict_parent"].number == 8
+    assert create_fields["max_attempts"].number == 9
     assert create_response_fields["targets"].number == 3
     assert create_response_fields["edges"].number == 4
     assert get_response_fields["targets"].number == 3
