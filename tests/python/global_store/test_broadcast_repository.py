@@ -95,6 +95,8 @@ def test_broadcast_repository_creates_session_targets_and_edges(db_connection):
     assert edge is not None
     assert edge.parent_worker_id == "worker-root"
     assert edge.state is BroadcastEdgeState.PLANNED
+    edges = repo.list_edges("session-a")
+    assert [edge.edge_id for edge in edges] == ["edge-1"]
 
 
 def test_broadcast_repository_prevents_two_active_edges_for_child(db_connection):

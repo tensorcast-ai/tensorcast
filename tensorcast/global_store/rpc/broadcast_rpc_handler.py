@@ -63,23 +63,21 @@ class BroadcastRpcHandler:
     ) -> global_store_pb2.CreateBroadcastSessionResponse:
         try:
             requested_view_id = self._requested_view_id_from_byte_space(request)
-            target_worker_ids: list[str] = []
-            target_daemon_ids: list[str] = []
+            target_identities: list[tuple[str, str]] = []
             for target in request.targets:
                 worker_id = target.worker_id.strip()
                 daemon_id = target.daemon_id.strip()
-                if worker_id:
-                    target_worker_ids.append(worker_id)
-                if daemon_id:
-                    target_daemon_ids.append(daemon_id)
+                if worker_id or daemon_id:
+                    target_identities.append((worker_id, daemon_id))
             session = self._broadcast_service.create_session(
                 session_id=request.session_id,
                 artifact_id=request.artifact_id,
                 requested_view_id=requested_view_id,
                 epoch=int(request.epoch),
                 fanout=int(request.fanout),
-                target_worker_ids=target_worker_ids,
-                target_daemon_ids=target_daemon_ids,
+                target_worker_ids=(),
+                target_daemon_ids=(),
+                target_identities=target_identities,
                 root_replica_id=request.root_replica_id,
                 strict_parent=bool(request.strict_parent),
                 max_attempts=int(request.max_attempts),
@@ -111,8 +109,13 @@ class BroadcastRpcHandler:
         request: global_store_pb2.GetBroadcastSessionRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.GetBroadcastSessionResponse:
+        session_id = self._required_session_id(request.session_id, context)
+        if session_id is None:
+            return global_store_pb2.GetBroadcastSessionResponse(
+                status=global_store_pb2.STATUS_ERROR
+            )
         try:
-            session = self._broadcast_service.get_session(request.session_id)
+            session = self._broadcast_service.get_session(session_id)
             if session is None:
                 return global_store_pb2.GetBroadcastSessionResponse(
                     status=global_store_pb2.STATUS_NOT_FOUND
@@ -127,6 +130,12 @@ class BroadcastRpcHandler:
                     )
                 ],
             )
+        except ValueError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.GetBroadcastSessionResponse(
+                status=global_store_pb2.STATUS_ERROR
+            )
         except Exception as exc:  # noqa: BLE001
             self._logger.exception("GetBroadcastSession failed")
             context.set_code(grpc.StatusCode.INTERNAL)
@@ -140,13 +149,24 @@ class BroadcastRpcHandler:
         request: global_store_pb2.ListBroadcastEdgesRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.ListBroadcastEdgesResponse:
+        session_id = self._required_session_id(request.session_id, context)
+        if session_id is None:
+            return global_store_pb2.ListBroadcastEdgesResponse(
+                status=global_store_pb2.STATUS_ERROR
+            )
         try:
             return global_store_pb2.ListBroadcastEdgesResponse(
                 status=global_store_pb2.STATUS_OK,
                 edges=[
                     self._edge_to_proto(edge)
-                    for edge in self._broadcast_service.list_edges(request.session_id)
+                    for edge in self._broadcast_service.list_edges(session_id)
                 ],
+            )
+        except ValueError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.ListBroadcastEdgesResponse(
+                status=global_store_pb2.STATUS_ERROR
             )
         except Exception as exc:  # noqa: BLE001
             self._logger.exception("ListBroadcastEdges failed")
@@ -161,8 +181,14 @@ class BroadcastRpcHandler:
         request: global_store_pb2.CancelBroadcastSessionRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.CancelBroadcastSessionResponse:
+        session_id = self._required_session_id(request.session_id, context)
+        if session_id is None:
+            return global_store_pb2.CancelBroadcastSessionResponse(
+                status=global_store_pb2.STATUS_ERROR,
+                cancelled=False,
+            )
         try:
-            cancelled = self._broadcast_service.cancel_session(request.session_id)
+            cancelled = self._broadcast_service.cancel_session(session_id)
             return global_store_pb2.CancelBroadcastSessionResponse(
                 status=(
                     global_store_pb2.STATUS_OK
@@ -170,6 +196,13 @@ class BroadcastRpcHandler:
                     else global_store_pb2.STATUS_NOT_FOUND
                 ),
                 cancelled=cancelled,
+            )
+        except ValueError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.CancelBroadcastSessionResponse(
+                status=global_store_pb2.STATUS_ERROR,
+                cancelled=False,
             )
         except Exception as exc:  # noqa: BLE001
             self._logger.exception("CancelBroadcastSession failed")
@@ -273,4 +306,16 @@ class BroadcastRpcHandler:
             if not view_id:
                 raise ValueError("requested_byte_space VIEW requires id")
             return view_id
+        return None
+
+    @staticmethod
+    def _required_session_id(
+        raw_session_id: str,
+        context: grpc.ServicerContext,
+    ) -> str | None:
+        session_id = raw_session_id.strip()
+        if session_id:
+            return session_id
+        context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+        context.set_details("session_id is required")
         return None

@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from uuid import UUID, uuid4
 
+from tensorcast.global_store.exceptions import DatabaseError
 from tensorcast.global_store.models import (
     BroadcastEdge,
     BroadcastEdgeState,
@@ -52,6 +54,7 @@ class BroadcastService:
         strict_parent: bool,
         max_attempts: int,
         target_worker_ids: list[str] | tuple[str, ...] | None = None,
+        target_identities: Sequence[tuple[str, str]] | None = None,
     ) -> BroadcastSession:
         """Create a broadcast session and reserve the first planned edges."""
         session_id = str(session_id).strip()
@@ -67,45 +70,65 @@ class BroadcastService:
         if max_attempts <= 0:
             raise ValueError("max_attempts must be > 0")
 
+        existing = self._broadcast_repository.find_session(session_id)
+        if existing is not None:
+            return existing
+
         targets = self._resolve_targets(
             target_worker_ids=target_worker_ids or (),
             target_daemon_ids=target_daemon_ids,
+            target_identities=target_identities or (),
         )
-        root_replica, selected_root = self._resolve_root_replica(
-            artifact_id=artifact_id,
-            requested_view_id=requested_view_id,
-            root_replica_id=root_replica_id,
-        )
-
-        session = BroadcastSession(
-            session_id=session_id,
-            artifact_id=artifact_id,
-            requested_view_id=requested_view_id,
-            epoch=int(epoch),
-            fanout=int(fanout),
-            max_attempts=int(max_attempts),
-            strict_parent=bool(strict_parent),
-            state=BroadcastSessionState.ACTIVE,
-            root_replica_id=root_replica.replica_id,
-        )
-        self._broadcast_repository.create_session(session)
-
-        for worker in targets:
-            self._broadcast_repository.upsert_target(
-                BroadcastTarget(
-                    session_id=session.session_id,
-                    target_worker_id=worker.worker_id,
-                    target_daemon_id=worker.daemon_id,
-                    state=BroadcastTargetState.PENDING,
+        root_replica: Replica | None = None
+        selected_root = False
+        try:
+            try:
+                root_replica, selected_root = self._resolve_root_replica(
+                    artifact_id=artifact_id,
+                    requested_view_id=requested_view_id,
+                    root_replica_id=root_replica_id,
                 )
-            )
 
-        self._plan_more_edges(session)
+                session = BroadcastSession(
+                    session_id=session_id,
+                    artifact_id=artifact_id,
+                    requested_view_id=requested_view_id,
+                    epoch=int(epoch),
+                    fanout=int(fanout),
+                    max_attempts=int(max_attempts),
+                    strict_parent=bool(strict_parent),
+                    state=BroadcastSessionState.ACTIVE,
+                    root_replica_id=root_replica.replica_id,
+                )
+                with self._broadcast_repository.transaction() as tx:
+                    existing = self._broadcast_repository.find_session(
+                        session_id,
+                        cursor=tx,
+                    )
+                    if existing is not None:
+                        return existing
+                    self._broadcast_repository.create_session(session, cursor=tx)
+                    for worker in targets:
+                        self._broadcast_repository.upsert_target(
+                            BroadcastTarget(
+                                session_id=session.session_id,
+                                target_worker_id=worker.worker_id,
+                                target_daemon_id=worker.daemon_id,
+                                state=BroadcastTargetState.PENDING,
+                            ),
+                            cursor=tx,
+                        )
 
-        if selected_root:
-            self._replica_repository.decrement_requests(root_replica.replica_id)
+                    self._plan_more_edges(session, cursor=tx)
 
-        return session
+                return session
+            except DatabaseError as exc:
+                if exc.__cause__ is not None:
+                    raise exc.__cause__ from exc
+                raise
+        finally:
+            if selected_root and root_replica is not None:
+                self._replica_repository.decrement_requests(root_replica.replica_id)
 
     def get_session(self, session_id: str) -> BroadcastSession | None:
         """Return a broadcast session by ID."""
@@ -113,25 +136,7 @@ class BroadcastService:
 
     def list_edges(self, session_id: str) -> list[BroadcastEdge]:
         """List broadcast edges for a session."""
-        cursor = self._broadcast_repository.get_cursor()
-        try:
-            query = cursor.execute(
-                f"""
-                SELECT {self._broadcast_repository._EDGE_PROJECTION}
-                FROM broadcast_edges
-                WHERE session_id = ?
-                ORDER BY level ASC, created_at ASC, edge_id ASC
-                """,
-                [session_id],
-            )
-            rows = query.fetchall()
-            assert query.description is not None
-            columns = [desc[0] for desc in query.description]
-            return [
-                self._broadcast_repository._row_to_edge(row, columns) for row in rows
-            ]
-        finally:
-            cursor.close()
+        return self._broadcast_repository.list_edges(session_id)
 
     def list_targets(self, session_id: str) -> list[BroadcastTarget]:
         """List broadcast targets for a session."""
@@ -149,8 +154,43 @@ class BroadcastService:
         *,
         target_worker_ids: list[str] | tuple[str, ...],
         target_daemon_ids: list[str] | tuple[str, ...],
+        target_identities: Sequence[tuple[str, str]],
     ) -> list[Worker]:
         targets: dict[str, Worker] = {}
+        for raw_worker_id, raw_daemon_id in target_identities:
+            worker_id = str(raw_worker_id).strip()
+            daemon_id = str(raw_daemon_id).strip()
+            if not worker_id and not daemon_id:
+                continue
+
+            worker_by_id: Worker | None = None
+            worker_by_daemon: Worker | None = None
+            if worker_id:
+                worker_by_id = self._worker_repository.find_by_id(
+                    worker_id,
+                    include_inactive=False,
+                )
+                if worker_by_id is None:
+                    raise ValueError(f"target worker not found: {worker_id}")
+            if daemon_id:
+                worker_by_daemon = self._worker_repository.find_by_daemon_id(
+                    daemon_id,
+                    include_inactive=False,
+                )
+                if worker_by_daemon is None:
+                    raise ValueError(f"target daemon not found: {daemon_id}")
+            if (
+                worker_by_id is not None
+                and worker_by_daemon is not None
+                and worker_by_id.worker_id != worker_by_daemon.worker_id
+            ):
+                raise ValueError(
+                    "target worker_id and daemon_id resolve to different workers"
+                )
+            worker = worker_by_id or worker_by_daemon
+            if worker is not None:
+                targets[worker.worker_id] = worker
+
         for worker_id in target_worker_ids:
             worker_id = str(worker_id).strip()
             if not worker_id:
@@ -205,21 +245,27 @@ class BroadcastService:
             raise ValueError(f"no available root replica for artifact: {artifact_id}")
         return result.replica, True
 
-    def _plan_more_edges(self, session: BroadcastSession) -> list[BroadcastEdge]:
+    def _plan_more_edges(
+        self,
+        session: BroadcastSession,
+        *,
+        cursor=None,
+    ) -> list[BroadcastEdge]:
         pending_targets = self._broadcast_repository.list_targets_by_state(
             session.session_id,
             BroadcastTargetState.PENDING,
             limit=max(0, int(session.fanout)),
+            cursor=cursor,
         )
         if not pending_targets or session.root_replica_id is None:
             return []
 
-        active_edges_count = self._count_active_edges(session.session_id)
+        active_edges_count = self._count_active_edges(session.session_id, cursor=cursor)
         capacity = max(0, int(session.fanout) - active_edges_count)
         if capacity <= 0:
             return []
 
-        parent_pool = self._parent_pool(session)
+        parent_pool = self._parent_pool(session, cursor=cursor)
         if not parent_pool:
             return []
 
@@ -236,17 +282,19 @@ class BroadcastService:
                 attempt=target.attempt + 1,
                 state=BroadcastEdgeState.PLANNED,
             )
-            self._broadcast_repository.create_edge(edge)
+            self._broadcast_repository.create_edge(edge, cursor=cursor)
             target.state = BroadcastTargetState.ASSIGNED
             target.level = edge.level
             target.attempt = edge.attempt
             target.assigned_edge_id = edge.edge_id
-            self._broadcast_repository.upsert_target(target)
+            self._broadcast_repository.upsert_target(target, cursor=cursor)
             planned.append(edge)
         return planned
 
-    def _count_active_edges(self, session_id: str) -> int:
-        cursor = self._broadcast_repository.get_cursor()
+    def _count_active_edges(self, session_id: str, *, cursor=None) -> int:
+        owns_cursor = cursor is None
+        if owns_cursor:
+            cursor = self._broadcast_repository.get_cursor()
         try:
             row = cursor.execute(
                 """
@@ -259,17 +307,21 @@ class BroadcastService:
             ).fetchone()
             return int(row[0]) if row is not None else 0
         finally:
-            cursor.close()
+            if owns_cursor:
+                cursor.close()
 
     def _parent_pool(
         self,
         session: BroadcastSession,
+        *,
+        cursor=None,
     ) -> list[tuple[Replica, int]]:
         parents: list[tuple[Replica, int]] = []
         if session.root_replica_id is not None:
             root = self._replica_repository.find_by_id(
                 session.root_replica_id,
                 session.artifact_id,
+                cursor=cursor,
             )
             if root is not None:
                 parents.append((root, 0))
@@ -278,6 +330,7 @@ class BroadcastService:
             session.session_id,
             BroadcastTargetState.COMPLETED,
             limit=10_000,
+            cursor=cursor,
         )
         for target in completed_targets:
             if target.completed_replica_id is None:

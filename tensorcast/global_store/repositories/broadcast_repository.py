@@ -382,6 +382,34 @@ class BroadcastRepository(BaseRepository):
             if owns_cursor:
                 cursor.close()
 
+    def list_edges(
+        self,
+        session_id: str,
+        cursor: DuckDBPyConnection | None = None,
+    ) -> list[BroadcastEdge]:
+        """List all broadcast edges for a session."""
+        normalized_session_id = self._normalize_required_text(session_id)
+        owns_cursor = cursor is None
+        if owns_cursor:
+            cursor = self.get_cursor()
+        try:
+            query = cursor.execute(
+                f"""
+                SELECT {self._EDGE_PROJECTION}
+                FROM broadcast_edges
+                WHERE session_id = ?
+                ORDER BY level ASC, created_at ASC, edge_id ASC
+                """,
+                [normalized_session_id],
+            )
+            rows = query.fetchall()
+            assert query.description is not None
+            columns = [desc[0] for desc in query.description]
+            return [self._row_to_edge(row, columns) for row in rows]
+        finally:
+            if owns_cursor:
+                cursor.close()
+
     def find_active_edge_for_child(
         self,
         session_id: str,

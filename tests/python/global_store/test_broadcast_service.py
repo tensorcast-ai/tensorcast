@@ -91,6 +91,147 @@ def test_create_session_plans_first_layer_by_fanout(repositories):
     assert all(edge is not None for edge in edges)
     assert all(edge.state is BroadcastEdgeState.PLANNED for edge in edges if edge)
     assert all(edge.parent_replica_id == root_replica.replica_id for edge in edges if edge)
+    assert len(service.list_edges("session-a")) == 2
+
+
+def test_create_session_duplicate_explicit_root_returns_existing_without_counter_change(
+    repositories,
+):
+    worker_repo = repositories["worker"]
+    replica_repo = repositories["replica"]
+    broadcast_repo = repositories["broadcast"]
+    service = BroadcastService(
+        broadcast_repository=broadcast_repo,
+        replica_repository=replica_repo,
+        worker_repository=worker_repo,
+    )
+    root = _worker("worker-root-explicit", "daemon-root-explicit", "node1")
+    child = _worker("worker-child-explicit", "daemon-child-explicit", "node2")
+    for worker in (root, child):
+        worker_repo.create(worker)
+        assert worker_repo.update_heartbeat(worker.worker_id, 4096, True)
+    root_replica = replica_repo.create(_exportable_replica("mi2:model-explicit", root))
+
+    first = service.create_session(
+        session_id="session-explicit",
+        artifact_id="mi2:model-explicit",
+        requested_view_id=None,
+        epoch=1,
+        fanout=1,
+        target_daemon_ids=["daemon-child-explicit"],
+        root_replica_id=str(root_replica.replica_id),
+        strict_parent=True,
+        max_attempts=3,
+    )
+    assert replica_repo.get_current_requests(root_replica.replica_id) == 0
+
+    second = service.create_session(
+        session_id="session-explicit",
+        artifact_id="mi2:model-explicit",
+        requested_view_id=None,
+        epoch=1,
+        fanout=1,
+        target_daemon_ids=["daemon-child-explicit"],
+        root_replica_id=str(root_replica.replica_id),
+        strict_parent=True,
+        max_attempts=3,
+    )
+
+    assert second.session_id == first.session_id
+    assert replica_repo.get_current_requests(root_replica.replica_id) == 0
+    assert len(broadcast_repo.list_targets("session-explicit")) == 1
+    assert len(service.list_edges("session-explicit")) == 1
+
+
+def test_create_session_duplicate_auto_root_returns_existing_without_counter_change(
+    repositories,
+):
+    worker_repo = repositories["worker"]
+    replica_repo = repositories["replica"]
+    broadcast_repo = repositories["broadcast"]
+    service = BroadcastService(
+        broadcast_repository=broadcast_repo,
+        replica_repository=replica_repo,
+        worker_repository=worker_repo,
+    )
+    root = _worker("worker-root-auto", "daemon-root-auto", "node1")
+    child = _worker("worker-child-auto", "daemon-child-auto", "node2")
+    for worker in (root, child):
+        worker_repo.create(worker)
+        assert worker_repo.update_heartbeat(worker.worker_id, 4096, True)
+    root_replica = replica_repo.create(_exportable_replica("mi2:model-auto", root))
+
+    first = service.create_session(
+        session_id="session-auto",
+        artifact_id="mi2:model-auto",
+        requested_view_id=None,
+        epoch=1,
+        fanout=1,
+        target_daemon_ids=["daemon-child-auto"],
+        root_replica_id="",
+        strict_parent=True,
+        max_attempts=3,
+    )
+    assert replica_repo.get_current_requests(root_replica.replica_id) == 0
+
+    second = service.create_session(
+        session_id="session-auto",
+        artifact_id="mi2:model-auto",
+        requested_view_id=None,
+        epoch=1,
+        fanout=1,
+        target_daemon_ids=["daemon-child-auto"],
+        root_replica_id="",
+        strict_parent=True,
+        max_attempts=3,
+    )
+
+    assert second.session_id == first.session_id
+    assert replica_repo.get_current_requests(root_replica.replica_id) == 0
+    assert len(broadcast_repo.list_targets("session-auto")) == 1
+    assert len(service.list_edges("session-auto")) == 1
+
+
+def test_create_session_auto_root_failure_releases_counter_and_rolls_back(
+    repositories,
+    monkeypatch,
+):
+    worker_repo = repositories["worker"]
+    replica_repo = repositories["replica"]
+    broadcast_repo = repositories["broadcast"]
+    service = BroadcastService(
+        broadcast_repository=broadcast_repo,
+        replica_repository=replica_repo,
+        worker_repository=worker_repo,
+    )
+    root = _worker("worker-root-failure", "daemon-root-failure", "node1")
+    child = _worker("worker-child-failure", "daemon-child-failure", "node2")
+    for worker in (root, child):
+        worker_repo.create(worker)
+        assert worker_repo.update_heartbeat(worker.worker_id, 4096, True)
+    root_replica = replica_repo.create(_exportable_replica("mi2:model-failure", root))
+
+    def fail_planning(*args, **kwargs):
+        raise RuntimeError("forced planning failure")
+
+    monkeypatch.setattr(service, "_plan_more_edges", fail_planning)
+
+    with pytest.raises(RuntimeError, match="forced planning failure"):
+        service.create_session(
+            session_id="session-failure",
+            artifact_id="mi2:model-failure",
+            requested_view_id=None,
+            epoch=1,
+            fanout=1,
+            target_daemon_ids=["daemon-child-failure"],
+            root_replica_id=None,
+            strict_parent=True,
+            max_attempts=3,
+        )
+
+    assert replica_repo.get_current_requests(root_replica.replica_id) == 0
+    assert broadcast_repo.find_session("session-failure") is None
+    assert broadcast_repo.list_targets("session-failure") == []
 
 
 @pytest.mark.parametrize(

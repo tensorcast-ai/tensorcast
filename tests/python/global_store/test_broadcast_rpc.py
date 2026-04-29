@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import grpc
+
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2
 
@@ -205,3 +207,112 @@ def test_create_broadcast_session_accepts_worker_only_and_daemon_only_targets(
         worker_only_target,
         daemon_only_target,
     }
+    assert (
+        response.session.requested_byte_space.kind
+        == common_pb2.BYTE_SPACE_KIND_CANONICAL
+    )
+
+
+def test_blank_broadcast_session_ids_are_invalid(servicer, test_context):
+    get_resp = servicer.GetBroadcastSession(
+        global_store_pb2.GetBroadcastSessionRequest(session_id=" "),
+        test_context,
+    )
+    assert get_resp.status == global_store_pb2.STATUS_ERROR
+    assert test_context.code == grpc.StatusCode.INVALID_ARGUMENT
+
+    test_context.code = None
+    test_context.details = None
+    list_resp = servicer.ListBroadcastEdges(
+        global_store_pb2.ListBroadcastEdgesRequest(session_id=" "),
+        test_context,
+    )
+    assert list_resp.status == global_store_pb2.STATUS_ERROR
+    assert test_context.code == grpc.StatusCode.INVALID_ARGUMENT
+
+    test_context.code = None
+    test_context.details = None
+    cancel_resp = servicer.CancelBroadcastSession(
+        global_store_pb2.CancelBroadcastSessionRequest(session_id=" "),
+        test_context,
+    )
+    assert cancel_resp.status == global_store_pb2.STATUS_ERROR
+    assert test_context.code == grpc.StatusCode.INVALID_ARGUMENT
+
+
+def test_create_broadcast_session_rejects_mismatched_target_identity(
+    servicer,
+    test_context,
+    memory_info,
+):
+    root_worker = servicer.RegisterWorker(
+        global_store_pb2.RegisterWorkerRequest(
+            daemon_id="daemon-root-mismatch",
+            node_id="node-root-mismatch",
+            node_address="10.30.0.1",
+            grpc_port=52101,
+            p2p_port=52102,
+            mem_pool_total_size=4096,
+            mem_pool_available_size=4096,
+        ),
+        test_context,
+    ).worker_id
+    worker_target = servicer.RegisterWorker(
+        global_store_pb2.RegisterWorkerRequest(
+            daemon_id="daemon-worker-mismatch",
+            node_id="node-worker-mismatch",
+            node_address="10.30.0.2",
+            grpc_port=52201,
+            p2p_port=52202,
+            mem_pool_total_size=4096,
+            mem_pool_available_size=4096,
+        ),
+        test_context,
+    ).worker_id
+    servicer.RegisterWorker(
+        global_store_pb2.RegisterWorkerRequest(
+            daemon_id="daemon-other-mismatch",
+            node_id="node-other-mismatch",
+            node_address="10.30.0.3",
+            grpc_port=52301,
+            p2p_port=52302,
+            mem_pool_total_size=4096,
+            mem_pool_available_size=4096,
+        ),
+        test_context,
+    )
+    memory_info.node_id = "node-root-mismatch"
+    memory_info.node_address = "10.30.0.1"
+    memory_info.node_port = 52102
+    register_resp = servicer.RegisterReplica(
+        global_store_pb2.RegisterReplicaRequest(
+            artifact_id="mi2:model-mismatch",
+            worker_id=root_worker,
+            mem_info=memory_info,
+            max_concurrency=4,
+        ),
+        test_context,
+    )
+    assert register_resp.status == global_store_pb2.STATUS_OK
+
+    response = servicer.CreateBroadcastSession(
+        global_store_pb2.CreateBroadcastSessionRequest(
+            session_id="session-mismatch",
+            artifact_id="mi2:model-mismatch",
+            epoch=1,
+            fanout=1,
+            strict_parent=True,
+            max_attempts=3,
+            root_replica_id=register_resp.replica_id,
+            targets=[
+                global_store_pb2.BroadcastTargetIdentity(
+                    worker_id=worker_target,
+                    daemon_id="daemon-other-mismatch",
+                )
+            ],
+        ),
+        test_context,
+    )
+
+    assert response.status == global_store_pb2.STATUS_ERROR
+    assert test_context.code == grpc.StatusCode.INVALID_ARGUMENT
