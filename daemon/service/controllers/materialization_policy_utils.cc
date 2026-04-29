@@ -106,6 +106,22 @@ std::optional<store::loading::CollectiveLoadGroupHint> resolve_collective_group_
   };
 }
 
+std::optional<store::loading::TransportSchedulingGroupHint> resolve_transport_scheduling_group_hint(
+    const v2::TransportSchedulingGroupHint* group) {
+  if (group == nullptr || group->group_kind().empty() || group->group_id().empty() ||
+      group->part_id().empty() || group->total_parts() == 0) {
+    return std::nullopt;
+  }
+  return store::loading::TransportSchedulingGroupHint{
+      .group_kind = group->group_kind(),
+      .group_id = group->group_id(),
+      .total_parts = group->total_parts(),
+      .part_id = group->part_id(),
+      .priority = group->priority(),
+      .epoch = group->epoch(),
+  };
+}
+
 absl::StatusOr<ExecutionTopologyContext> resolve_source_execution_topology(
     const v2::SourceExecutionTopology* topology) {
   ExecutionTopologyContext execution_topology;
