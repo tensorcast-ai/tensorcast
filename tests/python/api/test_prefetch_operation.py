@@ -252,3 +252,12 @@ def test_prefetch_forwards_broadcast_context_hint() -> None:
     call = store._materialization.calls[0]
     assert call["broadcast_session_id"] == "broadcast-session-1"
     assert call["broadcast_strict_parent"] is True
+
+
+def test_top_level_exports_broadcast_context() -> None:
+    assert "BroadcastContext" in tc.__all__
+
+    ctx = tc.BroadcastContext(session_id=" broadcast-session-1 ")
+
+    assert ctx.session_id == "broadcast-session-1"
+    assert ctx.strict_parent is True

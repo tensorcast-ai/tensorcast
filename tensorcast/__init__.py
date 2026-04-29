@@ -521,6 +521,7 @@ __all__ = [
     "calculate_tensor_device_offsets",
     "build_indices_from_safetensors",
     "binding_realization_plan_to_proto",
+    "BroadcastContext",
     "CallContext",
     "CollectiveLoadGroup",
     "TransportSchedulingGroup",
