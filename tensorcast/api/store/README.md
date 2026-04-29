@@ -385,6 +385,13 @@ binding.swap("model:v2")
   `logical_layout_hash`, `selection_hash`) and target placement (daemon + device/tier). `selection_hash` is computed via
   `tensorcast.common.selection_identity` (stable `view_id` + `view_subset_hash`), matching Plan selection identity
   semantics.
+- To spread a model-weight warmup across replicas, pass
+  `ctx=tc.context(transport_group=tc.TransportSchedulingGroup(...))` to
+  `artifact.prefetch(...)`. All targets for the same model version should share
+  `group_kind`, `group_id`, and `epoch`, while each target uses a unique
+  `part_id`; the SDK forwards the group and a stable `transport_request_id` to
+  the daemon so the existing Global Store group dispatcher can spread source
+  selection. Unset transport groups keep the ordinary materialization path.
 - `artifact.pin_device_residency(device=..., ttl_ms=..., ctx=...) -> Operation[PlacementPin]` creates a placement pin
   (process-independent device residency intent) backed by a daemon-scoped capability token; the returned `PlacementPin`
   supports `renew()` / `release()`.

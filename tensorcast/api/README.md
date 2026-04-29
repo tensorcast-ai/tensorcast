@@ -60,6 +60,13 @@ By default, the Python SDK surfaces a concise `ArtifactError` stack without gRPC
   artifact/view identity, but `ctx.idempotency_key` seeds deterministic operation ids for joinable actions.
 - Collective disk loads are explicit at the API boundary via `CallContext.collective=CollectiveLoadGroup(...)`; the SDK
   no longer infers collective mode from ambient GPU environment variables or overloads `replica_uuid` with group hints.
+- Coordinated model-weight prefetch can opt into Global Store group dispatch via
+  `CallContext.transport_group=TransportSchedulingGroup(...)`. Use a stable
+  `group_kind`/`group_id`/`epoch` for the model version and unique
+  `part_id` per target daemon/rank; `Artifact.prefetch(...)` derives a stable
+  transport request id when `request_id` is omitted. `Plan` serializes the same
+  hint so Node Agent prefetches reach the daemon with the matching transport
+  scheduling group.
 - Long-tail control-plane actions return `Operation[T]` (sync/blocking): use `status()` / `result()` / `cancel()` to
   implement wait/cancel without ad-hoc polling loops.
 - `Artifact.prefetch(...)` warms a **daemon-owned** replica and supports both GPU and CPU/DRAM placement:
