@@ -13,7 +13,7 @@ from tensorcast.api._config import StorePolicy
 from tensorcast.api._device import CPU_DEVICE_ID, device_uuid_for
 from tensorcast.api._errors import DeviceMismatch
 from tensorcast.api._view_ops import NarrowOp, TransposeOp, ViewSpecBuildResult
-from tensorcast.api.context import CallContext
+from tensorcast.api.context import CallContext, TransportSchedulingGroup
 from tensorcast.api.errors import ArtifactError
 from tensorcast.api.operation import OperationError, OperationStatus
 from tensorcast.api.plan.artifact_set import (
@@ -150,13 +150,85 @@ def _call_context_from_proto(ctx: plan_pb2.CallContext) -> CallContext:
         qos = "realtime"
     elif ctx.qos == plan_pb2.QOS_CLASS_BACKGROUND:
         qos = "background"
+    transport_group = (
+        _transport_group_from_proto(ctx.transport_group)
+        if ctx.HasField("transport_group")
+        else None
+    )
     return CallContext(
         request_id=str(ctx.request_id),
         qos=qos,
         deadline_ms=int(ctx.deadline_ms) if ctx.HasField("deadline_ms") else None,
         idempotency_key=str(ctx.idempotency_key) if ctx.idempotency_key else None,
         tags=dict(ctx.tags) if ctx.tags else None,
+        transport_group=transport_group,
     )
+
+
+def _transport_group_from_proto(
+    proto: plan_pb2.TransportSchedulingGroup,
+) -> TransportSchedulingGroup | None:
+    if (
+        not proto.group_kind
+        or not proto.group_id
+        or not proto.part_id
+        or proto.total_parts <= 0
+    ):
+        return None
+    return TransportSchedulingGroup(
+        group_kind=str(proto.group_kind),
+        group_id=str(proto.group_id),
+        total_parts=int(proto.total_parts),
+        part_id=str(proto.part_id),
+        priority=int(proto.priority),
+        epoch=int(proto.epoch),
+        request_id=str(proto.request_id) if proto.request_id else None,
+    )
+
+
+def _transport_group_to_daemon_proto(
+    group: TransportSchedulingGroup | None,
+) -> store_daemon_pb2.TransportSchedulingGroupHint | None:
+    if group is None:
+        return None
+    return store_daemon_pb2.TransportSchedulingGroupHint(
+        group_kind=group.group_kind,
+        group_id=group.group_id,
+        total_parts=int(group.total_parts),
+        part_id=group.part_id,
+        priority=int(group.priority),
+        epoch=int(group.epoch),
+    )
+
+
+def _transport_request_id_for_selection(
+    *,
+    group: TransportSchedulingGroup,
+    daemon_id: str,
+    selection: common_pb2.ArtifactSelection,
+    device_id: int,
+    device_uuid: str,
+) -> str:
+    if group.request_id:
+        return group.request_id
+    digest = hashlib.sha256()
+    digest.update(b"tensorcast.node_agent.prefetch.transport.v1")
+    for value in (
+        daemon_id,
+        selection.artifact_id,
+        selection.logical_layout_hash.hex(),
+        selection.selection_hash.hex(),
+        str(device_id),
+        device_uuid,
+        group.group_kind,
+        group.group_id,
+        str(group.epoch),
+        str(group.total_parts),
+        group.part_id,
+    ):
+        digest.update(b"|")
+        digest.update(str(value).encode("utf-8"))
+    return f"prefetch:{digest.hexdigest()}"
 
 
 def _ctx_timeout_s(ctx: CallContext) -> float | None:
@@ -556,6 +628,7 @@ class NodeAgentExecutor:
             deadline_ms=call_ctx.deadline_ms,
             idempotency_key=derived_key,
             tags=call_ctx.tags,
+            transport_group=call_ctx.transport_group,
         )
 
     def _instance_action_context(
@@ -583,6 +656,7 @@ class NodeAgentExecutor:
             deadline_ms=call_ctx.deadline_ms,
             idempotency_key=derived_key,
             tags=call_ctx.tags,
+            transport_group=call_ctx.transport_group,
         )
 
     def _artifact_from_selection(
@@ -998,9 +1072,18 @@ class NodeAgentExecutor:
             )
             ns = uuid.uuid5(uuid.NAMESPACE_DNS, "tensorcast.op.v1")
             replica_uuid = str(uuid.uuid5(ns, action_key))
+            scoped_ctx = CallContext(
+                request_id=call_ctx.request_id,
+                qos=call_ctx.qos,
+                deadline_ms=call_ctx.deadline_ms,
+                idempotency_key=action_key,
+                tags=call_ctx.tags,
+                transport_group=call_ctx.transport_group,
+            )
         else:
             replica_uuid = uuid.uuid4().hex
-        timeout_s = _ctx_timeout_s(call_ctx)
+            scoped_ctx = call_ctx
+        timeout_s = _ctx_timeout_s(scoped_ctx)
         if timeout_s is not None and timeout_s <= 0:
             return NodeAgentStepResult(
                 step_id=step.step_id,
@@ -1019,6 +1102,7 @@ class NodeAgentExecutor:
                 replica_uuid=replica_uuid,
                 timeout_s=timeout_s,
                 wait_for_completion=False,
+                call_ctx=scoped_ctx,
             )
         except DeviceMismatch as exc:
             return NodeAgentStepResult(
@@ -1131,6 +1215,7 @@ class NodeAgentExecutor:
                     replica_uuid=replica_uuid,
                     timeout_s=timeout_s,
                     wait_for_completion=True,
+                    call_ctx=scoped_ctx,
                 )
                 item_status = OperationStatus(
                     state="success",
@@ -1180,6 +1265,7 @@ class NodeAgentExecutor:
         replica_uuid: str,
         timeout_s: float | None,
         wait_for_completion: bool,
+        call_ctx: CallContext | None = None,
     ) -> None:
         if device_id == CPU_DEVICE_ID:
             target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
@@ -1187,6 +1273,21 @@ class NodeAgentExecutor:
         else:
             target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU
             device_uuid = device_uuid_for(device_id)
+        transport_kwargs: dict[str, object] = {}
+        transport_group = call_ctx.transport_group if call_ctx is not None else None
+        if transport_group is not None:
+            transport_kwargs["transport_request_id"] = (
+                _transport_request_id_for_selection(
+                    group=transport_group,
+                    daemon_id=self._daemon_id,
+                    selection=selection,
+                    device_id=device_id,
+                    device_uuid=device_uuid,
+                )
+            )
+            transport_group_proto = _transport_group_to_daemon_proto(transport_group)
+            if transport_group_proto is not None:
+                transport_kwargs["transport_scheduling_group"] = transport_group_proto
         self._client.materialize_by_artifact_id_v2(
             selection=selection,
             replica_uuid=replica_uuid,
@@ -1196,6 +1297,7 @@ class NodeAgentExecutor:
             target_device_type=target_device_type,
             lease_mode=store_daemon_pb2.LeaseMode.LEASE_MODE_NO_LEASE,
             timeout_s=timeout_s,
+            **transport_kwargs,
         )
 
     def _pin(

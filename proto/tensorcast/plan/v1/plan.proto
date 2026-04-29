@@ -11,6 +11,17 @@ message CallContext {
   optional uint64 deadline_ms = 3;
   string idempotency_key = 4;
   map<string, string> tags = 5;
+  TransportSchedulingGroup transport_group = 6;
+}
+
+message TransportSchedulingGroup {
+  string group_id = 1;
+  string group_kind = 2;
+  uint32 total_parts = 3;
+  string part_id = 4;
+  uint32 priority = 5;
+  uint64 epoch = 6;
+  string request_id = 7;
 }
 
 message GovernanceContext {

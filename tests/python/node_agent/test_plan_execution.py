@@ -10,7 +10,7 @@ import torch
 import tensorcast.node_agent.executor as executor_mod
 from tensorcast.api._config import PlanType
 from tensorcast.api._errors import DeviceMismatch
-from tensorcast.api.context import CallContext
+from tensorcast.api.context import CallContext, TransportSchedulingGroup
 from tensorcast.api.plan import ArtifactSetRef, Plan, Worker
 from tensorcast.api.store import (
     BuilderMode,
@@ -38,6 +38,7 @@ from tensorcast.engine_adapter import (
 from tensorcast.node_agent.executor import NodeAgentExecutor
 from tensorcast.node_agent.server import NodeAgentServicer
 from tensorcast.proto.common.v1 import common_pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.node_agent.v1 import node_agent_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
 from tensorcast.types import (
@@ -53,10 +54,12 @@ class _DaemonStub:
         self.placement_timeout_s: float | None = None
         self.release_timeout_s: float | None = None
         self.materialized_artifact_ids: list[str] = []
+        self.materialize_calls: list[dict[str, object]] = []
         self.wait_for_completion_values: list[bool] = []
 
     def materialize_by_artifact_id_v2(self, *args, **kwargs):  # noqa: ANN002, ANN003
         self.materialize_timeout_s = kwargs.get("timeout_s")
+        self.materialize_calls.append(dict(kwargs))
         selection = kwargs.get("selection")
         if selection is not None:
             self.materialized_artifact_ids.append(str(selection.artifact_id))
@@ -440,6 +443,67 @@ def test_node_agent_executes_prefetch_set_from_plan_builder(
     ]
     assert daemon.wait_for_completion_values
     assert all(daemon.wait_for_completion_values)
+
+
+def test_node_agent_prefetch_forwards_transport_group_from_plan_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daemon = _DaemonStub()
+    monkeypatch.setattr(executor_mod, "device_uuid_for", lambda _device_id: "gpu-0")
+
+    class _StoreStub:
+        closed = False
+        _runtime = None
+
+    canonical_bytes = _canonical_index_bytes()
+    store = _StoreStub()
+    artifact = Artifact(
+        store_ref=weakref.ref(store),
+        artifact_id="mi2:model-a:v42",
+        canonical_index_bytes=canonical_bytes,
+        canonical_index=canonical_index_from_bytes(canonical_bytes),
+    )
+    plan = Plan(
+        CallContext(
+            request_id="req-prefetch",
+            transport_group=TransportSchedulingGroup(
+                group_kind="weight_broadcast",
+                group_id="model-a:v42",
+                total_parts=16,
+                part_id="daemon-1",
+                priority=7,
+                epoch=42,
+                request_id="transport-req-1",
+            ),
+        )
+    )
+    worker = Worker(
+        worker_id="worker-1",
+        daemon_address="127.0.0.1:50051",
+        daemon_id="daemon-1",
+    )
+    plan.on_worker(worker).prefetch(artifact, device=0)
+
+    executor = NodeAgentExecutor(
+        daemon_id="daemon-1",
+        daemon_address="127.0.0.1:50051",
+        instance_id="inst-1",
+        engine_adapter=None,
+        client_factory=lambda _addr: daemon,
+    )
+    result = executor.execute_plan(plan.to_spec())
+
+    assert result.ok is True
+    request = daemon.materialize_calls[0]
+    assert request["transport_request_id"] == "transport-req-1"
+    group = request["transport_scheduling_group"]
+    assert isinstance(group, store_daemon_pb2.TransportSchedulingGroupHint)
+    assert group.group_kind == "weight_broadcast"
+    assert group.group_id == "model-a:v42"
+    assert group.total_parts == 16
+    assert group.part_id == "daemon-1"
+    assert group.priority == 7
+    assert group.epoch == 42
 
 
 def test_node_agent_executes_manifest_backed_prefetch_set_with_bridge(

@@ -8,7 +8,11 @@ import pytest
 import torch
 
 from tensorcast.api._config import PlanType
-from tensorcast.api.context import CallContext, GovernanceContext
+from tensorcast.api.context import (
+    CallContext,
+    GovernanceContext,
+    TransportSchedulingGroup,
+)
 from tensorcast.api.errors import ArtifactError
 from tensorcast.api.plan import (
     ARTIFACT_SET_CARRIER_INLINE,
@@ -118,6 +122,32 @@ def test_plan_to_spec_is_deterministic() -> None:
     assert selection.view_id == ""
 
 
+def test_plan_context_serializes_transport_group() -> None:
+    ctx = CallContext(
+        request_id="req-transport",
+        transport_group=TransportSchedulingGroup(
+            group_kind="weight_broadcast",
+            group_id="model-a:v42",
+            total_parts=16,
+            part_id="daemon-1",
+            priority=7,
+            epoch=42,
+            request_id="transport-req-1",
+        ),
+    )
+    spec = Plan(ctx).to_spec()
+
+    assert spec.context.HasField("transport_group")
+    group = spec.context.transport_group
+    assert group.group_kind == "weight_broadcast"
+    assert group.group_id == "model-a:v42"
+    assert group.total_parts == 16
+    assert group.part_id == "daemon-1"
+    assert group.priority == 7
+    assert group.epoch == 42
+    assert group.request_id == "transport-req-1"
+
+
 def test_plan_view_selection_hash_populated() -> None:
     store = _StoreStub()
     canonical_bytes = _canonical_index_bytes()
@@ -168,6 +198,7 @@ def test_plan_publish_serializes_canonical_action() -> None:
     assert second_step.action.WhichOneof("kind") == "publish"
     assert first_step.action.publish.engine_request_id == "rid-123"
     assert int(first_step.action.publish.ttl_ms) == 60_000
+
 
 def test_plan_hydrate_serializes_publish_manifest() -> None:
     ctx = CallContext(request_id="req-hydrate", idempotency_key="idem-hydrate")
