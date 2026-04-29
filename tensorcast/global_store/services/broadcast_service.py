@@ -296,24 +296,27 @@ class BroadcastService:
         reason: str,
         cursor: DuckDBPyConnection,
     ) -> None:
-        self._broadcast_repository.mark_edge_failed(
+        failed = self._broadcast_repository.mark_edge_failed(
             edge.edge_id,
             reason,
             cursor=cursor,
         )
+        if not failed:
+            return
         if int(edge.attempt) < int(session.max_attempts):
             target = self._broadcast_repository.find_target(
                 edge.session_id,
                 edge.child_worker_id,
                 cursor=cursor,
             )
-            if target is not None:
-                target.state = BroadcastTargetState.PENDING
-                target.assigned_edge_id = None
-                target.completed_replica_id = None
-                target.completed_at = None
-                self._broadcast_repository.upsert_target(target, cursor=cursor)
-                self._plan_more_edges(session, cursor=cursor)
+            if target is None or target.assigned_edge_id != edge.edge_id:
+                return
+            target.state = BroadcastTargetState.PENDING
+            target.assigned_edge_id = None
+            target.completed_replica_id = None
+            target.completed_at = None
+            self._broadcast_repository.upsert_target(target, cursor=cursor)
+            self._plan_more_edges(session, cursor=cursor)
             return
         self._mark_session_terminal_if_done(session.session_id, cursor=cursor)
 

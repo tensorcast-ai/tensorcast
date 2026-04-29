@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 import pytest
 
 from tensorcast.global_store.models import (
+    BroadcastEdge,
     BroadcastEdgeState,
+    BroadcastSession,
     BroadcastSessionState,
+    BroadcastTarget,
     BroadcastTargetState,
     ExportState,
     MemoryType,
     Replica,
+    TransportCompletionOutcome,
     Worker,
 )
 from tensorcast.global_store.services import BroadcastService
@@ -276,3 +282,113 @@ def test_create_session_validates_required_inputs(repositories, overrides, messa
     with pytest.raises(ValueError, match=message):
         service.create_session(**kwargs)
     assert broadcast_repo.find_session("session-validation") is None
+
+
+@pytest.mark.parametrize(
+    ("target_state", "assigned_edge_id"),
+    [
+        (BroadcastTargetState.COMPLETED, "edge-stale"),
+        (BroadcastTargetState.ASSIGNED, "edge-new"),
+    ],
+)
+def test_complete_transport_edge_stale_failure_does_not_requeue_target(
+    repositories,
+    target_state,
+    assigned_edge_id,
+):
+    replica_repo = repositories["replica"]
+    worker_repo = repositories["worker"]
+    broadcast_repo = repositories["broadcast"]
+    service = BroadcastService(
+        broadcast_repository=broadcast_repo,
+        replica_repository=replica_repo,
+        worker_repository=worker_repo,
+    )
+    root_replica_id = UUID("00000000-0000-0000-0000-000000000001")
+    completed_replica_id = UUID("00000000-0000-0000-0000-000000000002")
+    broadcast_repo.create_session(
+        BroadcastSession(
+            session_id="session-stale-failure",
+            artifact_id="mi2:stale-failure",
+            requested_view_id=None,
+            epoch=1,
+            fanout=1,
+            max_attempts=3,
+            strict_parent=True,
+            state=BroadcastSessionState.ACTIVE,
+            root_replica_id=root_replica_id,
+        )
+    )
+    broadcast_repo.upsert_target(
+        BroadcastTarget(
+            session_id="session-stale-failure",
+            target_worker_id="worker-child",
+            target_daemon_id="daemon-child",
+            state=target_state,
+            level=1,
+            attempt=2,
+            assigned_edge_id=assigned_edge_id,
+            completed_replica_id=(
+                completed_replica_id
+                if target_state is BroadcastTargetState.COMPLETED
+                else None
+            ),
+        )
+    )
+    broadcast_repo.create_edge(
+        BroadcastEdge(
+            edge_id="edge-stale",
+            session_id="session-stale-failure",
+            parent_worker_id="worker-root",
+            parent_replica_id=root_replica_id,
+            child_worker_id="worker-child",
+            level=1,
+            attempt=1,
+            state=BroadcastEdgeState.PLANNED,
+        )
+    )
+    if assigned_edge_id == "edge-new":
+        with broadcast_repo.transaction() as tx:
+            tx.execute(
+                """
+                INSERT INTO broadcast_edges (
+                    edge_id, session_id, parent_worker_id, parent_replica_id,
+                    child_worker_id, level, attempt, state
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    "edge-new",
+                    "session-stale-failure",
+                    "worker-root",
+                    str(root_replica_id),
+                    "worker-child",
+                    1,
+                    2,
+                    BroadcastEdgeState.PLANNED.value,
+                ],
+            )
+
+    with broadcast_repo.transaction() as tx:
+        service.complete_transport_edge(
+            session_id="session-stale-failure",
+            edge_id="edge-stale",
+            transport_outcome=TransportCompletionOutcome.FAILED,
+            outcome_detail="stale completion",
+            cursor=tx,
+        )
+
+    target = broadcast_repo.find_target("session-stale-failure", "worker-child")
+    edges = broadcast_repo.list_edges("session-stale-failure")
+    session = broadcast_repo.find_session("session-stale-failure")
+    assert target is not None
+    assert session is not None
+    assert target.state is target_state
+    assert target.assigned_edge_id == assigned_edge_id
+    assert target.completed_replica_id == (
+        completed_replica_id if target_state is BroadcastTargetState.COMPLETED else None
+    )
+    assert {edge.edge_id for edge in edges} == (
+        {"edge-stale", "edge-new"} if assigned_edge_id == "edge-new" else {"edge-stale"}
+    )
+    assert session.state is BroadcastSessionState.ACTIVE
