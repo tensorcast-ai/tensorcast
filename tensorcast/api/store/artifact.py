@@ -2274,6 +2274,14 @@ class Artifact:
             lease_mode=store_daemon_pb2.LeaseMode.LEASE_MODE_NO_LEASE,
             transport_request_id=transport_request_id,
             transport_scheduling_group=transport_scheduling_group,
+            broadcast_session_id=(
+                ctx.broadcast.session_id if ctx is not None and ctx.broadcast else None
+            ),
+            broadcast_strict_parent=(
+                ctx.broadcast.strict_parent
+                if ctx is not None and ctx.broadcast
+                else True
+            ),
         )
         self._update_metadata_from_payload(payload, runtime)
         operation_id = payload.ticket_replica_uuid or payload.replica_uuid or ""

@@ -1991,6 +1991,8 @@ class DaemonCtl:
         transport_request_id: str | None = None,
         transport_scheduling_group: store_daemon_pb2.TransportSchedulingGroupHint
         | None = None,
+        broadcast_session_id: str | None = None,
+        broadcast_strict_parent: bool = True,
         timeout_s: float | int | None = None,
         timing_out: dict[str, float] | None = None,
     ) -> store_daemon_pb2.MaterializeReplicaResponse: ...
@@ -2017,6 +2019,8 @@ class DaemonCtl:
         transport_request_id: str | None = None,
         transport_scheduling_group: store_daemon_pb2.TransportSchedulingGroupHint
         | None = None,
+        broadcast_session_id: str | None = None,
+        broadcast_strict_parent: bool = True,
         timeout_s: float | int | None = None,
         timing_out: dict[str, float] | None = None,
     ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus]: ...
@@ -2042,6 +2046,8 @@ class DaemonCtl:
         transport_request_id: str | None = None,
         transport_scheduling_group: store_daemon_pb2.TransportSchedulingGroupHint
         | None = None,
+        broadcast_session_id: str | None = None,
+        broadcast_strict_parent: bool = True,
         timeout_s: float | int | None = None,
         timing_out: dict[str, float] | None = None,
     ) -> bytes: ...
@@ -2066,6 +2072,8 @@ class DaemonCtl:
         transport_request_id: str | None = None,
         transport_scheduling_group: store_daemon_pb2.TransportSchedulingGroupHint
         | None = None,
+        broadcast_session_id: str | None = None,
+        broadcast_strict_parent: bool = True,
         timeout_s: float | int | None = None,
         timing_out: dict[str, float] | None = None,
     ) -> (
@@ -2106,6 +2114,9 @@ class DaemonCtl:
                 request.transport_request_id = str(transport_request_id)
             if transport_scheduling_group is not None:
                 request.transport_scheduling_group.CopyFrom(transport_scheduling_group)
+            if broadcast_session_id:
+                request.broadcast.session_id = str(broadcast_session_id)
+                request.broadcast.strict_parent = bool(broadcast_strict_parent)
             if wait_for_shared_disk_ms:
                 request.wait_for_shared_disk_ms = int(wait_for_shared_disk_ms)
             request.source_policy.CopyFrom(resolved_source_policy)

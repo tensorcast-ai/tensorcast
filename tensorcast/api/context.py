@@ -60,6 +60,21 @@ class TransportSchedulingGroup:
 
 
 @dataclass(frozen=True, slots=True)
+class BroadcastContext:
+    """Broadcast session hint for a materialization call."""
+
+    session_id: str
+    strict_parent: bool = True
+
+    def __post_init__(self) -> None:
+        session_id = str(self.session_id).strip()
+        if not session_id:
+            raise ValueError("BroadcastContext.session_id must be non-empty")
+        object.__setattr__(self, "session_id", session_id)
+        object.__setattr__(self, "strict_parent", bool(self.strict_parent))
+
+
+@dataclass(frozen=True, slots=True)
 class GovernanceContext:
     """Typed low-cardinality governance hints propagated with a plan."""
 
@@ -79,6 +94,7 @@ class CallContext:
     tags: Mapping[str, SpanAttributeValue] | None = None
     collective: CollectiveLoadGroup | None = None
     transport_group: TransportSchedulingGroup | None = None
+    broadcast: BroadcastContext | None = None
     governance: GovernanceContext | None = None
 
 
@@ -91,6 +107,7 @@ def context(
     tags: Mapping[str, SpanAttributeValue] | None = None,
     collective: CollectiveLoadGroup | None = None,
     transport_group: TransportSchedulingGroup | None = None,
+    broadcast: BroadcastContext | None = None,
     governance: GovernanceContext | None = None,
 ) -> CallContext:
     return CallContext(
@@ -101,12 +118,14 @@ def context(
         tags=tags,
         collective=collective,
         transport_group=transport_group,
+        broadcast=broadcast,
         governance=governance,
     )
 
 
 __all__ = [
     "CallContext",
+    "BroadcastContext",
     "CollectiveLoadGroup",
     "GovernanceContext",
     "QosClass",

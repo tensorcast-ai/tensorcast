@@ -288,6 +288,8 @@ def materialize_artifact_v2(
     lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
     transport_request_id: str | None = None,
     transport_scheduling_group: TransportSchedulingGroup | None = None,
+    broadcast_session_id: str | None = None,
+    broadcast_strict_parent: bool = True,
 ) -> MaterializationPayload:
     if artifact_id is not None and key is not None:
         raise ValueError("Exactly one of artifact_id or key must be provided")
@@ -417,6 +419,8 @@ def materialize_artifact_v2(
             collective_load_group=collective_load_group,
             transport_request_id=transport_request_id,
             transport_scheduling_group=transport_group_proto,
+            broadcast_session_id=broadcast_session_id,
+            broadcast_strict_parent=broadcast_strict_parent,
             timeout_s=effective_timeout_s,
             timing_out=materialize_timing,
         )

@@ -55,6 +55,7 @@ using materialization_policy::build_view_spec_proto;
 using materialization_policy::compute_view_id_from_spec;
 using materialization_policy::convert_view_spec;
 using materialization_policy::NormalizedMaterializationRequestContext;
+using materialization_policy::resolve_broadcast_materialization_hint;
 using materialization_policy::resolve_collective_group_hint;
 using materialization_policy::resolve_materialization_request_context;
 using materialization_policy::resolve_transport_scheduling_group_hint;
@@ -693,6 +694,12 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
         resolve_transport_scheduling_group_hint(&req.transport_scheduling_group());
     if (group_hint.has_value()) {
       hints.transport_scheduling_group = std::move(*group_hint);
+    }
+  }
+  if (req.has_broadcast()) {
+    auto broadcast_hint = resolve_broadcast_materialization_hint(&req.broadcast());
+    if (broadcast_hint.has_value()) {
+      hints.broadcast = std::move(*broadcast_hint);
     }
   }
   if (prefer_direct_disk_for_local_import) {

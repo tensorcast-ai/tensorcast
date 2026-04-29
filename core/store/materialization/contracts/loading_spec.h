@@ -171,6 +171,11 @@ struct CollectiveLoadGroupHint {
   uint32_t rank{0};
 };
 
+struct BroadcastHint {
+  std::string session_id;
+  bool strict_parent{true};
+};
+
 struct RetrievalPolicy {
   SourcePreference preference{SourcePreference::kAuto};
   bool allow_p2p{true};
@@ -213,6 +218,8 @@ struct MaterializeHints {
   std::optional<TransportSchedulingGroupHint> transport_scheduling_group;
   // Optional same-host multi-rank hint for shared-window disk loading.
   std::optional<CollectiveLoadGroupHint> collective_load_group;
+  // Optional broadcast session hint for coordinated global-store transport.
+  std::optional<BroadcastHint> broadcast;
   // Optional topology-locality hint. This remains distinct from retrieval
   // policy so the strategy plane can reason about source sharing without
   // rewriting semantic or transport policy.

@@ -7,6 +7,7 @@
 namespace {
 
 using tensorcast::daemon::materialization_policy::default_collective_policy_for_mapped_target;
+using tensorcast::daemon::materialization_policy::resolve_broadcast_materialization_hint;
 using tensorcast::daemon::materialization_policy::resolve_transport_scheduling_group_hint;
 using tensorcast::store::loading::CollectiveLoadGroupHint;
 using tensorcast::store::loading::ExecutionTopologyContext;
@@ -50,6 +51,18 @@ TEST_CASE("Transport scheduling group hint maps daemon proto", "[daemon][materia
   CHECK(hint->part_id == "daemon-1");
   CHECK(hint->priority == 7);
   CHECK(hint->epoch == 42);
+}
+
+TEST_CASE("Broadcast materialization hint maps daemon proto", "[daemon][materialization][policy]") {
+  v2::BroadcastMaterializationHint proto;
+  proto.set_session_id("session-a");
+  proto.set_strict_parent(true);
+
+  auto hint = resolve_broadcast_materialization_hint(&proto);
+
+  REQUIRE(hint.has_value());
+  CHECK(hint->session_id == "session-a");
+  CHECK(hint->strict_parent);
 }
 
 } // namespace

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "absl/status/status.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_split.h"
 #include "core/store/materialization/dataplane/view/view_identity.h"
@@ -119,6 +120,21 @@ std::optional<store::loading::TransportSchedulingGroupHint> resolve_transport_sc
       .part_id = group->part_id(),
       .priority = group->priority(),
       .epoch = group->epoch(),
+  };
+}
+
+std::optional<store::loading::BroadcastHint> resolve_broadcast_materialization_hint(
+    const v2::BroadcastMaterializationHint* hint) {
+  if (hint == nullptr) {
+    return std::nullopt;
+  }
+  std::string session_id = std::string(absl::StripAsciiWhitespace(hint->session_id()));
+  if (session_id.empty()) {
+    return std::nullopt;
+  }
+  return store::loading::BroadcastHint{
+      .session_id = std::move(session_id),
+      .strict_parent = hint->strict_parent(),
   };
 }
 

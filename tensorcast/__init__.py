@@ -141,6 +141,7 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "tensorcast.api",
         "calculate_tensor_device_offsets",
     ),
+    "BroadcastContext": ("tensorcast.api", "BroadcastContext"),
     "CallContext": ("tensorcast.api", "CallContext"),
     "CollectiveLoadGroup": ("tensorcast.api", "CollectiveLoadGroup"),
     "TransportSchedulingGroup": ("tensorcast.api", "TransportSchedulingGroup"),

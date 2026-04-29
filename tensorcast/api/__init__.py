@@ -26,6 +26,7 @@ from tensorcast.api._indices import (
 )
 from tensorcast.api._register import RegisteredLease, RegistrationResult
 from tensorcast.api.context import (
+    BroadcastContext,
     CallContext,
     CollectiveLoadGroup,
     GovernanceContext,
@@ -194,6 +195,7 @@ __all__ = [
     "BindingRealizationEntry",
     "BindingRealizationPlan",
     "Artifact",
+    "BroadcastContext",
     "CallContext",
     "CollectiveLoadGroup",
     "DirectorySnapshot",

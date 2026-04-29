@@ -235,3 +235,20 @@ def test_prefetch_without_group_sends_no_transport_hint() -> None:
     call = store._materialization.calls[0]
     assert call["transport_request_id"] is None
     assert call["transport_scheduling_group"] is None
+
+
+def test_prefetch_forwards_broadcast_context_hint() -> None:
+    store = _Store()
+    artifact = Artifact(store_ref=weakref.ref(store), artifact_id="aid")
+    ctx = tc.context(
+        broadcast=tc.BroadcastContext(
+            session_id="broadcast-session-1",
+            strict_parent=True,
+        )
+    )
+
+    artifact.prefetch(device="cuda:0", ctx=ctx)
+
+    call = store._materialization.calls[0]
+    assert call["broadcast_session_id"] == "broadcast-session-1"
+    assert call["broadcast_strict_parent"] is True

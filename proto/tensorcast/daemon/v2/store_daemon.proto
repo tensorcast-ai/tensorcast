@@ -524,6 +524,11 @@ message TransportSchedulingGroupHint {
   uint64 epoch = 6;
 }
 
+message BroadcastMaterializationHint {
+  string session_id = 1;
+  bool strict_parent = 2;
+}
+
 message MaterializeReplicaRequest {
   tensorcast.common.v1.ArtifactSelection selection = 1;
   reserved 2, 9;
@@ -557,6 +562,7 @@ message MaterializeReplicaRequest {
   ServingArtifactRuntimePolicy serving_artifact_policy = 20;
   string transport_request_id = 21;
   TransportSchedulingGroupHint transport_scheduling_group = 22;
+  BroadcastMaterializationHint broadcast = 23;
 }
 
 message CollectiveLoadGroup {
