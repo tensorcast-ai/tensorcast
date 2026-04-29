@@ -33,9 +33,9 @@ links:
 # Files
 
 - Modify: `proto/tensorcast/daemon/v2/store_daemon.proto`
-- Generate/modify: `proto/gen/python/tensorcast/daemon/v2/store_daemon_pb2.py`
-- Generate/modify: `proto/gen/python/tensorcast/daemon/v2/store_daemon_pb2.pyi`
-- Generate/modify: `proto/gen/python/tensorcast/daemon/v2/store_daemon_pb2_grpc.py` if Buf rewrites it
+- Generate locally: `proto/gen/python/tensorcast/daemon/v2/store_daemon_pb2.py` (ignored by git)
+- Generate locally: `proto/gen/python/tensorcast/daemon/v2/store_daemon_pb2.pyi` (ignored by git)
+- Generate locally: `proto/gen/python/tensorcast/daemon/v2/store_daemon_pb2_grpc.py` (ignored by git)
 - Modify: `tensorcast/api/context.py`
 - Modify: `tensorcast/api/__init__.py`
 - Modify: `tensorcast/__init__.py`
@@ -416,9 +416,9 @@ git commit -m "feat(sdk): derive prefetch transport group hints"
 
 **Files:**
 - Modify: `proto/tensorcast/daemon/v2/store_daemon.proto`
-- Generate/modify: `proto/gen/python/tensorcast/daemon/v2/store_daemon_pb2.py`
-- Generate/modify: `proto/gen/python/tensorcast/daemon/v2/store_daemon_pb2.pyi`
-- Generate/modify: `proto/gen/python/tensorcast/daemon/v2/store_daemon_pb2_grpc.py` if Buf rewrites it
+- Generate locally: `proto/gen/python/tensorcast/daemon/v2/store_daemon_pb2.py` (ignored by git)
+- Generate locally: `proto/gen/python/tensorcast/daemon/v2/store_daemon_pb2.pyi` (ignored by git)
+- Generate locally: `proto/gen/python/tensorcast/daemon/v2/store_daemon_pb2_grpc.py` (ignored by git)
 
 - [ ] **Step 1: Add daemon transport group proto fields**
 
@@ -451,7 +451,7 @@ bazel run @rules_buf_toolchains//:buf -- format ./proto -w
 bash tools/build_proto_python.sh
 ```
 
-Expected: `store_daemon_pb2.py` and `store_daemon_pb2.pyi` include `TransportSchedulingGroupHint`, `transport_request_id`, and `transport_scheduling_group`.
+Expected: local generated `store_daemon_pb2.py` and `store_daemon_pb2.pyi` include `TransportSchedulingGroupHint`, `transport_request_id`, and `transport_scheduling_group`. These generated files are ignored by `.gitignore`; they are validation artifacts, not files to force-add.
 
 - [ ] **Step 3: Inspect generated changes carefully**
 
@@ -462,18 +462,16 @@ git status --short proto/tensorcast/daemon/v2/store_daemon.proto proto/gen/pytho
 git diff -- proto/tensorcast/daemon/v2/store_daemon.proto proto/gen/python/tensorcast/daemon/v2/store_daemon_pb2.py proto/gen/python/tensorcast/daemon/v2/store_daemon_pb2.pyi proto/gen/python/tensorcast/daemon/v2/store_daemon_pb2_grpc.py
 ```
 
-Expected: diffs are limited to daemon v2 proto generation for the added fields. Do not stage unrelated pre-existing generated proto directories.
+Expected: tracked diffs are limited to `proto/tensorcast/daemon/v2/store_daemon.proto`. Generated daemon files may appear under ignored or untracked paths for local validation. Do not stage unrelated pre-existing generated proto directories.
 
 - [ ] **Step 4: Commit**
 
 Run:
 
 ```bash
-git add proto/tensorcast/daemon/v2/store_daemon.proto proto/gen/python/tensorcast/daemon/v2/store_daemon_pb2.py proto/gen/python/tensorcast/daemon/v2/store_daemon_pb2.pyi proto/gen/python/tensorcast/daemon/v2/store_daemon_pb2_grpc.py
+git add proto/tensorcast/daemon/v2/store_daemon.proto
 git commit -m "feat(proto): add materialize replica transport hints"
 ```
-
-If `store_daemon_pb2_grpc.py` has no diff, omit it from `git add`.
 
 ### Task 4: DaemonCtl and Materialization Pipeline Forwarding
 
@@ -778,8 +776,8 @@ git commit -m "feat(daemon): map materialize transport hints"
 
 **Files:**
 - Modify: `proto/tensorcast/plan/v1/plan.proto`
-- Generate/modify: `proto/gen/python/tensorcast/plan/v1/plan_pb2.py`
-- Generate/modify: `proto/gen/python/tensorcast/plan/v1/plan_pb2.pyi`
+- Generate locally: `proto/gen/python/tensorcast/plan/v1/plan_pb2.py` (ignored by git)
+- Generate locally: `proto/gen/python/tensorcast/plan/v1/plan_pb2.pyi` (ignored by git)
 - Modify: `tensorcast/api/plan/plan.py`
 - Modify: `tensorcast/node_agent/executor.py`
 - Test: `tests/python/api/test_plan_spec.py`
@@ -1016,11 +1014,9 @@ Expected: PASS.
 Run:
 
 ```bash
-git add proto/tensorcast/plan/v1/plan.proto proto/gen/python/tensorcast/plan/v1/plan_pb2.py proto/gen/python/tensorcast/plan/v1/plan_pb2.pyi proto/gen/python/tensorcast/plan/v1/plan_pb2_grpc.py tensorcast/api/plan/plan.py tensorcast/node_agent/executor.py tests/python/api/test_plan_spec.py tests/python/node_agent/test_plan_execution.py
+git add proto/tensorcast/plan/v1/plan.proto tensorcast/api/plan/plan.py tensorcast/node_agent/executor.py tests/python/api/test_plan_spec.py tests/python/node_agent/test_plan_execution.py
 git commit -m "feat(plan): propagate prefetch transport groups"
 ```
-
-If `plan_pb2_grpc.py` has no diff, omit it from `git add`.
 
 ### Task 7: Documentation, Verification, and Cleanup
 
