@@ -416,6 +416,7 @@ class TransportService:
         if requester_worker_id is None:
             raise ValidationError("broadcast transport requires requester_worker_id")
 
+        claim_error: NotFoundError | ValidationError | None = None
         try:
             with self._dispatch_loop_lock, self.replica_repository.transaction() as tx:
                 existing = self.transport_repository.find_by_request_id(
@@ -441,67 +442,77 @@ class TransportService:
                         "existing broadcast transport source replica is missing"
                     )
 
-                replica, edge = self.broadcast_service.claim_transport_edge(
-                    session_id=broadcast_hint.session_id,
-                    artifact_id=artifact_id,
-                    requested_view_id=view_id,
-                    requester_worker_id=requester_worker_id,
-                    request_id=request_id,
-                    heartbeat_timeout_seconds=self.config.heartbeat_timeout_ms / 1000,
-                    cursor=tx,
-                )
-                transport = self._build_transport(
-                    replica=replica,
-                    artifact_id=artifact_id,
-                    requested_view_id=view_id,
-                    source_node_id=source_node_id,
-                    source_address=source_address,
-                    source_port=source_port,
-                    request_id=request_id,
-                    request_fingerprint=request_fingerprint,
-                    requester_worker_id=requester_worker_id,
-                    scheduling_group=None,
-                    broadcast_session_id=broadcast_hint.session_id,
-                    broadcast_edge_id=edge.edge_id,
-                )
-                resolved_transport, created = (
-                    self.transport_repository.create_if_absent_with_cursor(
-                        transport,
-                        tx,
-                    )
-                )
-                if not created:
-                    self.replica_repository.decrement_requests_with_cursor(
-                        replica.replica_id,
-                        tx,
-                    )
-                    self.broadcast_service.complete_transport_edge(
+                try:
+                    replica, edge = self.broadcast_service.claim_transport_edge(
                         session_id=broadcast_hint.session_id,
-                        edge_id=edge.edge_id,
-                        transport_outcome=TransportCompletionOutcome.FAILED,
-                        outcome_detail="duplicate_request_after_broadcast_claim",
-                        cursor=tx,
-                    )
-                    existing_replica = self.replica_repository.find_by_id(
-                        resolved_transport.replica_id,
-                        resolved_transport.artifact_id,
-                        cursor=tx,
-                    )
-                    if existing_replica is None:
-                        raise NotFoundError(
-                            "existing broadcast transport source replica is missing"
-                        )
-                    return existing_replica, resolved_transport.transport_id
-                else:
-                    inc_active_transports()
-                    record_transport_source_assignment(
                         artifact_id=artifact_id,
-                        replica_id=str(replica.replica_id),
-                        source_created_at=replica.created_at,
+                        requested_view_id=view_id,
+                        requester_worker_id=requester_worker_id,
+                        request_id=request_id,
+                        heartbeat_timeout_seconds=self.config.heartbeat_timeout_ms
+                        / 1000,
+                        cursor=tx,
                     )
-                inc_transport_request(artifact_id, "success")
-                observe_transport_wait(artifact_id, time.time() - start_time)
-                return replica, resolved_transport.transport_id
+                except (NotFoundError, ValidationError) as exc:
+                    claim_error = exc
+                    replica = None
+                    edge = None
+
+                if claim_error is None:
+                    transport = self._build_transport(
+                        replica=replica,
+                        artifact_id=artifact_id,
+                        requested_view_id=view_id,
+                        source_node_id=source_node_id,
+                        source_address=source_address,
+                        source_port=source_port,
+                        request_id=request_id,
+                        request_fingerprint=request_fingerprint,
+                        requester_worker_id=requester_worker_id,
+                        scheduling_group=None,
+                        broadcast_session_id=broadcast_hint.session_id,
+                        broadcast_edge_id=edge.edge_id,
+                    )
+                    resolved_transport, created = (
+                        self.transport_repository.create_if_absent_with_cursor(
+                            transport,
+                            tx,
+                        )
+                    )
+                    if not created:
+                        self.replica_repository.decrement_requests_with_cursor(
+                            replica.replica_id,
+                            tx,
+                        )
+                        self.broadcast_service.complete_transport_edge(
+                            session_id=broadcast_hint.session_id,
+                            edge_id=edge.edge_id,
+                            transport_outcome=TransportCompletionOutcome.FAILED,
+                            outcome_detail="duplicate_request_after_broadcast_claim",
+                            cursor=tx,
+                        )
+                        existing_replica = self.replica_repository.find_by_id(
+                            resolved_transport.replica_id,
+                            resolved_transport.artifact_id,
+                            cursor=tx,
+                        )
+                        if existing_replica is None:
+                            raise NotFoundError(
+                                "existing broadcast transport source replica is missing"
+                            )
+                        return existing_replica, resolved_transport.transport_id
+                    else:
+                        inc_active_transports()
+                        record_transport_source_assignment(
+                            artifact_id=artifact_id,
+                            replica_id=str(replica.replica_id),
+                            source_created_at=replica.created_at,
+                        )
+                    inc_transport_request(artifact_id, "success")
+                    observe_transport_wait(artifact_id, time.time() - start_time)
+                    return replica, resolved_transport.transport_id
+            if claim_error is not None:
+                raise claim_error
         except DatabaseError as exc:
             if isinstance(exc.__cause__, (NotFoundError, ValidationError)):
                 raise exc.__cause__ from exc

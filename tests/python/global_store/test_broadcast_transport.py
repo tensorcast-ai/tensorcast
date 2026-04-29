@@ -363,6 +363,155 @@ def test_broadcast_request_existing_transport_missing_replica_does_not_claim_edg
     assert target.assigned_edge_id == edges[0].edge_id
 
 
+def test_broadcast_parent_ineligible_exhausts_attempt_and_fails_session(
+    servicer,
+    test_context,
+):
+    artifact_id = "mi2:broadcast-parent-ineligible-max"
+    root_worker = _register_worker(
+        servicer,
+        test_context,
+        worker_id="root-ineligible-max",
+        node_id="node-1",
+        port=55700,
+    )
+    child_worker = _register_worker(
+        servicer,
+        test_context,
+        worker_id="child-ineligible-max",
+        node_id="node-2",
+        port=55800,
+    )
+    root_replica_id = _register_exportable_replica(
+        servicer,
+        test_context,
+        artifact_id=artifact_id,
+        worker_id=root_worker,
+        node_id="node-1",
+        node_address="10.57.0.1",
+        node_port=55701,
+        remote_key="rk-root-ineligible-max",
+    )
+    _create_broadcast_session(
+        servicer,
+        test_context,
+        session_id="session-parent-ineligible-max",
+        artifact_id=artifact_id,
+        root_replica_id=root_replica_id,
+        child_worker_id=child_worker,
+        max_attempts=1,
+    )
+    servicer.replica_repository.mark_unavailable(UUID(root_replica_id))
+
+    response = servicer.RequestReplicaTransport(
+        global_store_pb2.RequestReplicaTransportRequest(
+            artifact_id=artifact_id,
+            source_node_id="requester-node",
+            source_address="10.57.9.9",
+            source_port=59008,
+            requested_byte_space=common_pb2.ByteSpaceRef(
+                kind=common_pb2.BYTE_SPACE_KIND_CANONICAL,
+            ),
+            requester_worker_id=child_worker,
+            request_id="request-parent-ineligible-max",
+            broadcast=global_store_pb2.BroadcastTransportHint(
+                session_id="session-parent-ineligible-max",
+                strict_parent=True,
+            ),
+        ),
+        test_context,
+    )
+
+    assert response.status == global_store_pb2.STATUS_NOT_FOUND
+    edges = servicer.broadcast_service.list_edges("session-parent-ineligible-max")
+    target = servicer.broadcast_service.list_targets("session-parent-ineligible-max")[0]
+    session = servicer.broadcast_service.get_session("session-parent-ineligible-max")
+    assert session is not None
+    assert len(edges) == 1
+    assert edges[0].state is BroadcastEdgeState.FAILED
+    assert edges[0].failure_reason == "parent_replica_not_transport_eligible"
+    assert target.state is BroadcastTargetState.FAILED
+    assert session.state is BroadcastSessionState.FAILED
+
+
+def test_broadcast_parent_ineligible_retries_without_stuck_active_edge(
+    servicer,
+    test_context,
+):
+    artifact_id = "mi2:broadcast-parent-ineligible-retry"
+    root_worker = _register_worker(
+        servicer,
+        test_context,
+        worker_id="root-ineligible-retry",
+        node_id="node-1",
+        port=55900,
+    )
+    child_worker = _register_worker(
+        servicer,
+        test_context,
+        worker_id="child-ineligible-retry",
+        node_id="node-2",
+        port=56000,
+    )
+    root_replica_id = _register_exportable_replica(
+        servicer,
+        test_context,
+        artifact_id=artifact_id,
+        worker_id=root_worker,
+        node_id="node-1",
+        node_address="10.59.0.1",
+        node_port=55901,
+        remote_key="rk-root-ineligible-retry",
+    )
+    _create_broadcast_session(
+        servicer,
+        test_context,
+        session_id="session-parent-ineligible-retry",
+        artifact_id=artifact_id,
+        root_replica_id=root_replica_id,
+        child_worker_id=child_worker,
+        max_attempts=3,
+    )
+    original_edge = servicer.broadcast_service.list_edges(
+        "session-parent-ineligible-retry"
+    )[0]
+    servicer.replica_repository.mark_unavailable(UUID(root_replica_id))
+
+    response = servicer.RequestReplicaTransport(
+        global_store_pb2.RequestReplicaTransportRequest(
+            artifact_id=artifact_id,
+            source_node_id="requester-node",
+            source_address="10.59.9.9",
+            source_port=59009,
+            requested_byte_space=common_pb2.ByteSpaceRef(
+                kind=common_pb2.BYTE_SPACE_KIND_CANONICAL,
+            ),
+            requester_worker_id=child_worker,
+            request_id="request-parent-ineligible-retry",
+            broadcast=global_store_pb2.BroadcastTransportHint(
+                session_id="session-parent-ineligible-retry",
+                strict_parent=True,
+            ),
+        ),
+        test_context,
+    )
+
+    assert response.status == global_store_pb2.STATUS_NOT_FOUND
+    edges = servicer.broadcast_service.list_edges("session-parent-ineligible-retry")
+    target = servicer.broadcast_service.list_targets(
+        "session-parent-ineligible-retry"
+    )[0]
+    original = [edge for edge in edges if edge.edge_id == original_edge.edge_id][0]
+    retry_edges = [edge for edge in edges if edge.edge_id != original_edge.edge_id]
+    assert original.state is BroadcastEdgeState.FAILED
+    assert original.failure_reason == "parent_replica_not_transport_eligible"
+    assert len(retry_edges) == 1
+    assert retry_edges[0].state is BroadcastEdgeState.PLANNED
+    assert retry_edges[0].attempt == 2
+    assert target.state is BroadcastTargetState.ASSIGNED
+    assert target.assigned_edge_id == retry_edges[0].edge_id
+
+
 def test_broadcast_success_without_child_replica_requeues(servicer, test_context):
     artifact_id = "mi2:broadcast-transport-success-no-child"
     root_worker = _register_worker(

@@ -215,6 +215,23 @@ class BroadcastService:
             cursor=cursor,
         )
         if selection.replica is None:
+            materialized = self._broadcast_repository.mark_edge_materializing(
+                edge.edge_id,
+                request_id,
+                cursor=cursor,
+            )
+            if materialized:
+                claimed_edge = self._broadcast_repository.find_edge(
+                    edge.edge_id,
+                    cursor=cursor,
+                )
+                if claimed_edge is not None:
+                    self._fail_edge_and_maybe_retry(
+                        session=session,
+                        edge=claimed_edge,
+                        reason="parent_replica_not_transport_eligible",
+                        cursor=cursor,
+                    )
             raise NotFoundError("broadcast parent replica is not transport eligible")
 
         materialized = self._broadcast_repository.mark_edge_materializing(
