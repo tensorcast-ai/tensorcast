@@ -2107,7 +2107,7 @@ uint64_t Communicator::add_transfer_progress_bytes(
   const double progress_percent =
       state->total_bytes > 0 ? static_cast<double>(done) * 100.0 / static_cast<double>(state->total_bytes) : 100.0;
   LOG(INFO) << std::format(
-      "[xfer_progress] side={} transport={} state=progress peer={} request={} bar=[{}] {:5.1f}% "
+      "[xfer_progress] side={} transport={} state=progress peer={} request={} bar=[{}] {:.1f}% "
       "done_gib={:.3f}/{:.3f} rate_inst_gibps={:.3f} rate_avg_gibps={:.3f}",
       state->side,
       state->transport,
@@ -2151,7 +2151,7 @@ void Communicator::finish_transfer_progress(
   const std::string phase = status.ok() ? "done" : "failed";
   const std::string status_text = status.ok() ? std::string() : truncate_token(status.message(), 120);
   const std::string line = std::format(
-      "[xfer_progress] side={} transport={} state={} peer={} request={} bar=[{}] {:5.1f}% "
+      "[xfer_progress] side={} transport={} state={} peer={} request={} bar=[{}] {:.1f}% "
       "done_gib={:.3f}/{:.3f} rate_inst_gibps={:.3f} rate_avg_gibps={:.3f}{}",
       state->side,
       state->transport,
