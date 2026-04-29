@@ -260,9 +260,10 @@ class BroadcastService:
                 cursor=cursor,
             )
             if child_replica is None:
-                self._broadcast_repository.mark_edge_failed(
-                    edge.edge_id,
-                    "child_replica_not_exportable_after_success",
+                self._fail_edge_and_maybe_retry(
+                    session=session,
+                    edge=edge,
+                    reason="child_replica_not_exportable_after_success",
                     cursor=cursor,
                 )
                 return
@@ -272,7 +273,7 @@ class BroadcastService:
                 cursor=cursor,
             )
             self._plan_more_edges(session, cursor=cursor)
-            self._mark_session_complete_if_done(session.session_id, cursor=cursor)
+            self._mark_session_terminal_if_done(session.session_id, cursor=cursor)
             return
 
         reason = (
@@ -280,6 +281,21 @@ class BroadcastService:
         ).strip()
         if not reason:
             reason = "transport_failed"
+        self._fail_edge_and_maybe_retry(
+            session=session,
+            edge=edge,
+            reason=reason,
+            cursor=cursor,
+        )
+
+    def _fail_edge_and_maybe_retry(
+        self,
+        *,
+        session: BroadcastSession,
+        edge: BroadcastEdge,
+        reason: str,
+        cursor: DuckDBPyConnection,
+    ) -> None:
         self._broadcast_repository.mark_edge_failed(
             edge.edge_id,
             reason,
@@ -298,12 +314,26 @@ class BroadcastService:
                 target.completed_at = None
                 self._broadcast_repository.upsert_target(target, cursor=cursor)
                 self._plan_more_edges(session, cursor=cursor)
+            return
+        self._mark_session_terminal_if_done(session.session_id, cursor=cursor)
 
-    def _mark_session_complete_if_done(self, session_id: str, *, cursor=None) -> None:
+    def _mark_session_terminal_if_done(self, session_id: str, *, cursor=None) -> None:
         if self._broadcast_repository.count_incomplete_targets(
             session_id,
             cursor=cursor,
-        ) == 0:
+        ) != 0:
+            return
+        targets = self._broadcast_repository.list_targets(session_id, cursor=cursor)
+        if any(target.state is BroadcastTargetState.FAILED for target in targets):
+            self._broadcast_repository.update_session_state(
+                session_id,
+                BroadcastSessionState.FAILED,
+                cursor=cursor,
+            )
+            return
+        if targets and all(
+            target.state is BroadcastTargetState.COMPLETED for target in targets
+        ):
             self._broadcast_repository.update_session_state(
                 session_id,
                 BroadcastSessionState.COMPLETED,

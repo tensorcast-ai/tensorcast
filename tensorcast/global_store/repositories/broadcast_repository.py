@@ -563,6 +563,8 @@ class BroadcastRepository(BaseRepository):
         edge = self.find_edge(normalized_edge_id, cursor=cursor)
         if edge is None:
             return False
+        if edge.state is not BroadcastEdgeState.MATERIALIZING:
+            return False
         target = self.find_target(edge.session_id, edge.child_worker_id, cursor=cursor)
         if target is None or target.assigned_edge_id != edge.edge_id:
             return False
@@ -575,6 +577,7 @@ class BroadcastRepository(BaseRepository):
                 updated_at = CURRENT_TIMESTAMP,
                 completed_at = CURRENT_TIMESTAMP
             WHERE edge_id = ?
+              AND state = 'materializing'
             RETURNING edge_id
             """,
             [normalized_reason, normalized_edge_id],
@@ -624,6 +627,8 @@ class BroadcastRepository(BaseRepository):
         edge = self.find_edge(normalized_edge_id, cursor=cursor)
         if edge is None:
             return False
+        if edge.state is not BroadcastEdgeState.MATERIALIZING:
+            return False
         target = self.find_target(edge.session_id, edge.child_worker_id, cursor=cursor)
         if target is None or target.assigned_edge_id != edge.edge_id:
             return False
@@ -635,6 +640,7 @@ class BroadcastRepository(BaseRepository):
                 updated_at = CURRENT_TIMESTAMP,
                 completed_at = CURRENT_TIMESTAMP
             WHERE edge_id = ?
+              AND state = 'materializing'
             RETURNING edge_id
             """,
             [normalized_edge_id],

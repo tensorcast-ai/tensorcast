@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from tensorcast.global_store.models import BroadcastEdgeState
+from uuid import UUID
+
+from tensorcast.global_store.models import (
+    BroadcastEdgeState,
+    BroadcastSessionState,
+    BroadcastTargetState,
+    Transport,
+)
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2
 
@@ -71,6 +78,7 @@ def _create_broadcast_session(
     artifact_id: str,
     root_replica_id: str,
     child_worker_id: str,
+    max_attempts: int = 3,
 ) -> None:
     response = servicer.CreateBroadcastSession(
         global_store_pb2.CreateBroadcastSessionRequest(
@@ -82,7 +90,7 @@ def _create_broadcast_session(
             epoch=1,
             fanout=1,
             strict_parent=True,
-            max_attempts=3,
+            max_attempts=max_attempts,
             root_replica_id=root_replica_id,
             targets=[
                 global_store_pb2.BroadcastTargetIdentity(
@@ -219,3 +227,333 @@ def test_broadcast_failed_transport_requeues_target(servicer, test_context):
 
     edges = servicer.broadcast_service.list_edges("session-transport-failed")
     assert any(edge.state is BroadcastEdgeState.FAILED for edge in edges)
+
+
+def test_duplicate_broadcast_request_reuses_existing_edge(servicer, test_context):
+    artifact_id = "mi2:broadcast-transport-duplicate"
+    root_worker = _register_worker(
+        servicer, test_context, worker_id="root-dup", node_id="node-1", port=55100
+    )
+    child_worker = _register_worker(
+        servicer, test_context, worker_id="child-dup", node_id="node-2", port=55200
+    )
+    root_replica_id = _register_exportable_replica(
+        servicer,
+        test_context,
+        artifact_id=artifact_id,
+        worker_id=root_worker,
+        node_id="node-1",
+        node_address="10.50.0.1",
+        node_port=55101,
+        remote_key="rk-root-dup",
+    )
+    _create_broadcast_session(
+        servicer,
+        test_context,
+        session_id="session-transport-duplicate",
+        artifact_id=artifact_id,
+        root_replica_id=root_replica_id,
+        child_worker_id=child_worker,
+    )
+    request = global_store_pb2.RequestReplicaTransportRequest(
+        artifact_id=artifact_id,
+        source_node_id="requester-node",
+        source_address="10.50.9.9",
+        source_port=59002,
+        requested_byte_space=common_pb2.ByteSpaceRef(
+            kind=common_pb2.BYTE_SPACE_KIND_CANONICAL,
+        ),
+        requester_worker_id=child_worker,
+        request_id="request-broadcast-duplicate",
+        broadcast=global_store_pb2.BroadcastTransportHint(
+            session_id="session-transport-duplicate",
+            strict_parent=True,
+        ),
+    )
+
+    first = servicer.RequestReplicaTransport(request, test_context)
+    second = servicer.RequestReplicaTransport(request, test_context)
+
+    assert first.status == global_store_pb2.STATUS_OK
+    assert second.status == global_store_pb2.STATUS_OK
+    assert second.transport_id == first.transport_id
+    edges = servicer.broadcast_service.list_edges("session-transport-duplicate")
+    assert len(edges) == 1
+    assert edges[0].state is BroadcastEdgeState.MATERIALIZING
+    targets = servicer.broadcast_service.list_targets("session-transport-duplicate")
+    assert len(targets) == 1
+    assert targets[0].state is BroadcastTargetState.MATERIALIZING
+    assert targets[0].assigned_edge_id == edges[0].edge_id
+
+
+def test_broadcast_request_existing_transport_missing_replica_does_not_claim_edge(
+    servicer,
+    test_context,
+):
+    artifact_id = "mi2:broadcast-transport-missing-replica"
+    root_worker = _register_worker(
+        servicer,
+        test_context,
+        worker_id="root-missing-replica",
+        node_id="node-1",
+        port=55500,
+    )
+    child_worker = _register_worker(
+        servicer,
+        test_context,
+        worker_id="child-missing-replica",
+        node_id="node-2",
+        port=55600,
+    )
+    root_replica_id = _register_exportable_replica(
+        servicer,
+        test_context,
+        artifact_id=artifact_id,
+        worker_id=root_worker,
+        node_id="node-1",
+        node_address="10.55.0.1",
+        node_port=55501,
+        remote_key="rk-root-missing-replica",
+    )
+    _create_broadcast_session(
+        servicer,
+        test_context,
+        session_id="session-missing-replica",
+        artifact_id=artifact_id,
+        root_replica_id=root_replica_id,
+        child_worker_id=child_worker,
+    )
+    servicer.transport_repository.create(
+        Transport(
+            replica_id=UUID("00000000-0000-0000-0000-00000000dead"),
+            artifact_id=artifact_id,
+            source_node_id="stale-node",
+            source_address="10.55.9.9",
+            source_port=59006,
+            requester_worker_id=child_worker,
+            request_id="request-missing-replica",
+        )
+    )
+
+    response = servicer.RequestReplicaTransport(
+        global_store_pb2.RequestReplicaTransportRequest(
+            artifact_id=artifact_id,
+            source_node_id="requester-node",
+            source_address="10.55.9.10",
+            source_port=59007,
+            requested_byte_space=common_pb2.ByteSpaceRef(
+                kind=common_pb2.BYTE_SPACE_KIND_CANONICAL,
+            ),
+            requester_worker_id=child_worker,
+            request_id="request-missing-replica",
+            broadcast=global_store_pb2.BroadcastTransportHint(
+                session_id="session-missing-replica",
+                strict_parent=True,
+            ),
+        ),
+        test_context,
+    )
+
+    assert response.status == global_store_pb2.STATUS_NOT_FOUND
+    edges = servicer.broadcast_service.list_edges("session-missing-replica")
+    assert len(edges) == 1
+    assert edges[0].state is BroadcastEdgeState.PLANNED
+    target = servicer.broadcast_service.list_targets("session-missing-replica")[0]
+    assert target.state is BroadcastTargetState.ASSIGNED
+    assert target.assigned_edge_id == edges[0].edge_id
+
+
+def test_broadcast_success_without_child_replica_requeues(servicer, test_context):
+    artifact_id = "mi2:broadcast-transport-success-no-child"
+    root_worker = _register_worker(
+        servicer,
+        test_context,
+        worker_id="root-no-child",
+        node_id="node-1",
+        port=56100,
+    )
+    child_worker = _register_worker(
+        servicer,
+        test_context,
+        worker_id="child-no-child",
+        node_id="node-2",
+        port=56200,
+    )
+    root_replica_id = _register_exportable_replica(
+        servicer,
+        test_context,
+        artifact_id=artifact_id,
+        worker_id=root_worker,
+        node_id="node-1",
+        node_address="10.60.0.1",
+        node_port=56101,
+        remote_key="rk-root-no-child",
+    )
+    _create_broadcast_session(
+        servicer,
+        test_context,
+        session_id="session-success-no-child",
+        artifact_id=artifact_id,
+        root_replica_id=root_replica_id,
+        child_worker_id=child_worker,
+    )
+    transport_response = servicer.RequestReplicaTransport(
+        global_store_pb2.RequestReplicaTransportRequest(
+            artifact_id=artifact_id,
+            source_node_id="requester-node",
+            source_address="10.60.9.9",
+            source_port=59003,
+            requested_byte_space=common_pb2.ByteSpaceRef(
+                kind=common_pb2.BYTE_SPACE_KIND_CANONICAL,
+            ),
+            requester_worker_id=child_worker,
+            request_id="request-success-no-child",
+            broadcast=global_store_pb2.BroadcastTransportHint(
+                session_id="session-success-no-child",
+                strict_parent=True,
+            ),
+        ),
+        test_context,
+    )
+    assert transport_response.status == global_store_pb2.STATUS_OK
+
+    complete_response = servicer.CompleteReplicaTransport(
+        global_store_pb2.CompleteReplicaTransportRequest(
+            transport_id=transport_response.transport_id,
+            outcome=global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_SUCCESS,
+        ),
+        test_context,
+    )
+
+    assert complete_response.status == global_store_pb2.STATUS_OK
+    edges = servicer.broadcast_service.list_edges("session-success-no-child")
+    assert [edge.state for edge in edges].count(BroadcastEdgeState.FAILED) == 1
+    assert [edge.state for edge in edges].count(BroadcastEdgeState.PLANNED) == 1
+    target = servicer.broadcast_service.list_targets("session-success-no-child")[0]
+    assert target.state is BroadcastTargetState.ASSIGNED
+    assert target.attempt == 2
+
+
+def test_broadcast_max_attempt_exhaustion_marks_session_failed(servicer, test_context):
+    artifact_id = "mi2:broadcast-transport-max-attempts"
+    root_worker = _register_worker(
+        servicer, test_context, worker_id="root-max", node_id="node-1", port=57100
+    )
+    child_worker = _register_worker(
+        servicer, test_context, worker_id="child-max", node_id="node-2", port=57200
+    )
+    root_replica_id = _register_exportable_replica(
+        servicer,
+        test_context,
+        artifact_id=artifact_id,
+        worker_id=root_worker,
+        node_id="node-1",
+        node_address="10.70.0.1",
+        node_port=57101,
+        remote_key="rk-root-max",
+    )
+    _create_broadcast_session(
+        servicer,
+        test_context,
+        session_id="session-max-attempts",
+        artifact_id=artifact_id,
+        root_replica_id=root_replica_id,
+        child_worker_id=child_worker,
+        max_attempts=1,
+    )
+    transport_response = servicer.RequestReplicaTransport(
+        global_store_pb2.RequestReplicaTransportRequest(
+            artifact_id=artifact_id,
+            source_node_id="requester-node",
+            source_address="10.70.9.9",
+            source_port=59004,
+            requested_byte_space=common_pb2.ByteSpaceRef(
+                kind=common_pb2.BYTE_SPACE_KIND_CANONICAL,
+            ),
+            requester_worker_id=child_worker,
+            request_id="request-max-attempts",
+            broadcast=global_store_pb2.BroadcastTransportHint(
+                session_id="session-max-attempts",
+                strict_parent=True,
+            ),
+        ),
+        test_context,
+    )
+    assert transport_response.status == global_store_pb2.STATUS_OK
+
+    complete_response = servicer.CompleteReplicaTransport(
+        global_store_pb2.CompleteReplicaTransportRequest(
+            transport_id=transport_response.transport_id,
+            outcome=global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_FAILED,
+        ),
+        test_context,
+    )
+
+    assert complete_response.status == global_store_pb2.STATUS_OK
+    session = servicer.broadcast_service.get_session("session-max-attempts")
+    target = servicer.broadcast_service.list_targets("session-max-attempts")[0]
+    assert session is not None
+    assert session.state is BroadcastSessionState.FAILED
+    assert target.state is BroadcastTargetState.FAILED
+
+
+def test_duplicate_broadcast_completion_is_noop(servicer, test_context):
+    artifact_id = "mi2:broadcast-transport-complete-twice"
+    root_worker = _register_worker(
+        servicer, test_context, worker_id="root-twice", node_id="node-1", port=58100
+    )
+    child_worker = _register_worker(
+        servicer, test_context, worker_id="child-twice", node_id="node-2", port=58200
+    )
+    root_replica_id = _register_exportable_replica(
+        servicer,
+        test_context,
+        artifact_id=artifact_id,
+        worker_id=root_worker,
+        node_id="node-1",
+        node_address="10.80.0.1",
+        node_port=58101,
+        remote_key="rk-root-twice",
+    )
+    _create_broadcast_session(
+        servicer,
+        test_context,
+        session_id="session-complete-twice",
+        artifact_id=artifact_id,
+        root_replica_id=root_replica_id,
+        child_worker_id=child_worker,
+    )
+    transport_response = servicer.RequestReplicaTransport(
+        global_store_pb2.RequestReplicaTransportRequest(
+            artifact_id=artifact_id,
+            source_node_id="requester-node",
+            source_address="10.80.9.9",
+            source_port=59005,
+            requested_byte_space=common_pb2.ByteSpaceRef(
+                kind=common_pb2.BYTE_SPACE_KIND_CANONICAL,
+            ),
+            requester_worker_id=child_worker,
+            request_id="request-complete-twice",
+            broadcast=global_store_pb2.BroadcastTransportHint(
+                session_id="session-complete-twice",
+                strict_parent=True,
+            ),
+        ),
+        test_context,
+    )
+    assert transport_response.status == global_store_pb2.STATUS_OK
+    complete_request = global_store_pb2.CompleteReplicaTransportRequest(
+        transport_id=transport_response.transport_id,
+        outcome=global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_FAILED,
+    )
+
+    first = servicer.CompleteReplicaTransport(complete_request, test_context)
+    edges_after_first = servicer.broadcast_service.list_edges("session-complete-twice")
+    second = servicer.CompleteReplicaTransport(complete_request, test_context)
+    edges_after_second = servicer.broadcast_service.list_edges("session-complete-twice")
+
+    assert first.status == global_store_pb2.STATUS_OK
+    assert second.status == global_store_pb2.STATUS_OK
+    assert [(e.edge_id, e.state) for e in edges_after_second] == [
+        (e.edge_id, e.state) for e in edges_after_first
+    ]

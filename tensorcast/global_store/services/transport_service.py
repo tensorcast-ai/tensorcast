@@ -437,6 +437,9 @@ class TransportService:
                     )
                     if replica is not None:
                         return replica, existing.transport_id
+                    raise NotFoundError(
+                        "existing broadcast transport source replica is missing"
+                    )
 
                 replica, edge = self.broadcast_service.claim_transport_edge(
                     session_id=broadcast_hint.session_id,
@@ -472,6 +475,23 @@ class TransportService:
                         replica.replica_id,
                         tx,
                     )
+                    self.broadcast_service.complete_transport_edge(
+                        session_id=broadcast_hint.session_id,
+                        edge_id=edge.edge_id,
+                        transport_outcome=TransportCompletionOutcome.FAILED,
+                        outcome_detail="duplicate_request_after_broadcast_claim",
+                        cursor=tx,
+                    )
+                    existing_replica = self.replica_repository.find_by_id(
+                        resolved_transport.replica_id,
+                        resolved_transport.artifact_id,
+                        cursor=tx,
+                    )
+                    if existing_replica is None:
+                        raise NotFoundError(
+                            "existing broadcast transport source replica is missing"
+                        )
+                    return existing_replica, resolved_transport.transport_id
                 else:
                     inc_active_transports()
                     record_transport_source_assignment(

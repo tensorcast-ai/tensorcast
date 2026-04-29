@@ -406,3 +406,63 @@ def test_broadcast_repository_marks_edge_completed_and_target_completed(db_conne
     assert edge.state is BroadcastEdgeState.COMPLETED
     assert target.state is BroadcastTargetState.COMPLETED
     assert target.completed_replica_id == completed_replica_id
+
+
+@pytest.mark.parametrize("transition", ["failed", "completed"])
+def test_broadcast_repository_rejects_non_materializing_terminal_transition(
+    db_connection,
+    transition,
+):
+    repo = BroadcastRepository(db_connection)
+    repo.create_session(
+        BroadcastSession(
+            session_id="session-non-materializing",
+            artifact_id="mi2:test",
+            requested_view_id=None,
+            epoch=1,
+            fanout=1,
+            max_attempts=3,
+            strict_parent=True,
+            state=BroadcastSessionState.ACTIVE,
+            root_replica_id=UUID("00000000-0000-0000-0000-000000000001"),
+        )
+    )
+    repo.upsert_target(
+        BroadcastTarget(
+            session_id="session-non-materializing",
+            target_worker_id="worker-child",
+            target_daemon_id="daemon-child",
+            state=BroadcastTargetState.ASSIGNED,
+            assigned_edge_id="edge-planned",
+        )
+    )
+    repo.create_edge(
+        BroadcastEdge(
+            edge_id="edge-planned",
+            session_id="session-non-materializing",
+            parent_worker_id="worker-root",
+            parent_replica_id=UUID("00000000-0000-0000-0000-000000000001"),
+            child_worker_id="worker-child",
+            level=1,
+            attempt=1,
+            state=BroadcastEdgeState.PLANNED,
+        )
+    )
+
+    if transition == "failed":
+        changed = repo.mark_edge_failed(edge_id="edge-planned", reason="not ready")
+    else:
+        changed = repo.mark_edge_completed(
+            edge_id="edge-planned",
+            completed_replica_id=UUID("00000000-0000-0000-0000-000000000002"),
+        )
+
+    edge = repo.find_edge("edge-planned")
+    target = repo.find_target("session-non-materializing", "worker-child")
+    assert not changed
+    assert edge is not None
+    assert target is not None
+    assert edge.state is BroadcastEdgeState.PLANNED
+    assert edge.completed_at is None
+    assert target.state is BroadcastTargetState.ASSIGNED
+    assert target.completed_at is None
