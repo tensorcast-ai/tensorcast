@@ -283,6 +283,30 @@ class TransportRepository(BaseRepository):
         ).fetchone()
         return row is not None
 
+    def clear_request_identity_with_cursor(
+        self,
+        *,
+        transport_id: UUID,
+        request_id: str,
+        cursor,
+    ) -> bool:
+        """Clear request idempotency fields for one known transport row."""
+        normalized_request_id = self._normalize_request_id(request_id)
+        if normalized_request_id is None:
+            return False
+        row = cursor.execute(
+            """
+            UPDATE artifact_transports
+            SET request_id = NULL,
+                request_fingerprint = NULL
+            WHERE transport_id = ?
+              AND request_id = ?
+            RETURNING transport_id
+            """,
+            [str(transport_id), normalized_request_id],
+        ).fetchone()
+        return row is not None
+
     def update_status(self, transport_id: UUID, status: str, completed_at=None) -> bool:
         """Update transport status and optionally set completed_at."""
         cursor = self.get_cursor()

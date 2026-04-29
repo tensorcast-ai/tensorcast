@@ -286,6 +286,154 @@ def test_duplicate_broadcast_request_reuses_existing_edge(servicer, test_context
     assert targets[0].assigned_edge_id == edges[0].edge_id
 
 
+def test_failed_broadcast_transport_replay_claims_retry_edge(servicer, test_context):
+    artifact_id = "mi2:broadcast-replay-after-failure"
+    root_worker = _register_worker(
+        servicer,
+        test_context,
+        worker_id="root-replay-failure",
+        node_id="node-1",
+        port=55300,
+    )
+    child_worker = _register_worker(
+        servicer,
+        test_context,
+        worker_id="child-replay-failure",
+        node_id="node-2",
+        port=55400,
+    )
+    root_replica_id = _register_exportable_replica(
+        servicer,
+        test_context,
+        artifact_id=artifact_id,
+        worker_id=root_worker,
+        node_id="node-1",
+        node_address="10.53.0.1",
+        node_port=55301,
+        remote_key="rk-root-replay-failure",
+    )
+    _create_broadcast_session(
+        servicer,
+        test_context,
+        session_id="session-replay-failure",
+        artifact_id=artifact_id,
+        root_replica_id=root_replica_id,
+        child_worker_id=child_worker,
+    )
+    request = global_store_pb2.RequestReplicaTransportRequest(
+        artifact_id=artifact_id,
+        source_node_id="requester-node",
+        source_address="10.53.9.9",
+        source_port=59010,
+        requested_byte_space=common_pb2.ByteSpaceRef(
+            kind=common_pb2.BYTE_SPACE_KIND_CANONICAL,
+        ),
+        requester_worker_id=child_worker,
+        request_id="request-replay-failure",
+        broadcast=global_store_pb2.BroadcastTransportHint(
+            session_id="session-replay-failure",
+            strict_parent=True,
+        ),
+    )
+    first = servicer.RequestReplicaTransport(request, test_context)
+    assert first.status == global_store_pb2.STATUS_OK
+    complete = servicer.CompleteReplicaTransport(
+        global_store_pb2.CompleteReplicaTransportRequest(
+            transport_id=first.transport_id,
+            outcome=global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_FAILED,
+        ),
+        test_context,
+    )
+    assert complete.status == global_store_pb2.STATUS_OK
+    retry_edge = [
+        edge
+        for edge in servicer.broadcast_service.list_edges("session-replay-failure")
+        if edge.state is BroadcastEdgeState.PLANNED
+    ][0]
+
+    replay = servicer.RequestReplicaTransport(request, test_context)
+
+    assert replay.status == global_store_pb2.STATUS_OK
+    assert replay.transport_id != first.transport_id
+    edges = servicer.broadcast_service.list_edges("session-replay-failure")
+    retry = [edge for edge in edges if edge.edge_id == retry_edge.edge_id][0]
+    assert retry.state is BroadcastEdgeState.MATERIALIZING
+
+
+def test_success_without_child_replay_claims_retry_edge(servicer, test_context):
+    artifact_id = "mi2:broadcast-replay-after-no-child"
+    root_worker = _register_worker(
+        servicer,
+        test_context,
+        worker_id="root-replay-no-child",
+        node_id="node-1",
+        port=56300,
+    )
+    child_worker = _register_worker(
+        servicer,
+        test_context,
+        worker_id="child-replay-no-child",
+        node_id="node-2",
+        port=56400,
+    )
+    root_replica_id = _register_exportable_replica(
+        servicer,
+        test_context,
+        artifact_id=artifact_id,
+        worker_id=root_worker,
+        node_id="node-1",
+        node_address="10.63.0.1",
+        node_port=56301,
+        remote_key="rk-root-replay-no-child",
+    )
+    _create_broadcast_session(
+        servicer,
+        test_context,
+        session_id="session-replay-no-child",
+        artifact_id=artifact_id,
+        root_replica_id=root_replica_id,
+        child_worker_id=child_worker,
+    )
+    request = global_store_pb2.RequestReplicaTransportRequest(
+        artifact_id=artifact_id,
+        source_node_id="requester-node",
+        source_address="10.63.9.9",
+        source_port=59011,
+        requested_byte_space=common_pb2.ByteSpaceRef(
+            kind=common_pb2.BYTE_SPACE_KIND_CANONICAL,
+        ),
+        requester_worker_id=child_worker,
+        request_id="request-replay-no-child",
+        broadcast=global_store_pb2.BroadcastTransportHint(
+            session_id="session-replay-no-child",
+            strict_parent=True,
+        ),
+    )
+    first = servicer.RequestReplicaTransport(request, test_context)
+    assert first.status == global_store_pb2.STATUS_OK
+    complete = servicer.CompleteReplicaTransport(
+        global_store_pb2.CompleteReplicaTransportRequest(
+            transport_id=first.transport_id,
+            outcome=global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_SUCCESS,
+        ),
+        test_context,
+    )
+    assert complete.status == global_store_pb2.STATUS_OK
+    retry_edge = [
+        edge
+        for edge in servicer.broadcast_service.list_edges("session-replay-no-child")
+        if edge.state is BroadcastEdgeState.PLANNED
+    ][0]
+
+    replay = servicer.RequestReplicaTransport(request, test_context)
+
+    assert replay.status == global_store_pb2.STATUS_OK
+    assert replay.transport_id != first.transport_id
+    edges = servicer.broadcast_service.list_edges("session-replay-no-child")
+    retry = [edge for edge in edges if edge.edge_id == retry_edge.edge_id][0]
+    assert retry.state is BroadcastEdgeState.MATERIALIZING
+
+
 def test_broadcast_request_existing_transport_missing_replica_does_not_claim_edge(
     servicer,
     test_context,

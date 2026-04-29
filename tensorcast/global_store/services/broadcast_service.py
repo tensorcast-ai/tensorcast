@@ -149,6 +149,20 @@ class BroadcastService:
         """List broadcast targets for a session."""
         return self._broadcast_repository.list_targets(session_id)
 
+    def find_active_edge_for_target(
+        self,
+        *,
+        session_id: str,
+        target_worker_id: str,
+        cursor: DuckDBPyConnection,
+    ) -> BroadcastEdge | None:
+        """Return the current active edge for one target worker."""
+        return self._broadcast_repository.find_active_edge_for_child(
+            session_id,
+            target_worker_id,
+            cursor=cursor,
+        )
+
     def cancel_session(self, session_id: str) -> bool:
         """Mark a broadcast session cancelled."""
         return self._broadcast_repository.update_session_state(

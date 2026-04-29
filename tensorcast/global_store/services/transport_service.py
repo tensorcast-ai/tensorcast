@@ -363,12 +363,6 @@ class TransportService:
             scheduling_group=scheduling_group,
             broadcast_hint=broadcast_hint,
         )
-        existing = self._resolve_existing_request(
-            normalized_request_id, request_fingerprint
-        )
-        if existing is not None:
-            return existing
-
         if broadcast_hint is not None:
             return self._request_transport_broadcast(
                 artifact_id=artifact_id,
@@ -381,6 +375,12 @@ class TransportService:
                 request_id=normalized_request_id,
                 broadcast_hint=broadcast_hint,
             )
+
+        existing = self._resolve_existing_request(
+            normalized_request_id, request_fingerprint
+        )
+        if existing is not None:
+            return existing
 
         return self._request_transport_group_dispatch(
             artifact_id=artifact_id,
@@ -431,16 +431,15 @@ class TransportService:
                         raise ValidationError(
                             f"request_id={request_id} already used with different payload"
                         )
-                    replica = self.replica_repository.find_by_id(
-                        existing.replica_id,
-                        existing.artifact_id,
+                    replay = self._resolve_existing_broadcast_transport_replay(
+                        existing=existing,
+                        request_id=request_id,
+                        session_id=broadcast_hint.session_id,
+                        requester_worker_id=requester_worker_id,
                         cursor=tx,
                     )
-                    if replica is not None:
-                        return replica, existing.transport_id
-                    raise NotFoundError(
-                        "existing broadcast transport source replica is missing"
-                    )
+                    if replay is not None:
+                        return replay
 
                 try:
                     replica, edge = self.broadcast_service.claim_transport_edge(
@@ -517,6 +516,63 @@ class TransportService:
             if isinstance(exc.__cause__, (NotFoundError, ValidationError)):
                 raise exc.__cause__ from exc
             raise
+
+    def _resolve_existing_broadcast_transport_replay(
+        self,
+        *,
+        existing: Transport,
+        request_id: str,
+        session_id: str,
+        requester_worker_id: str,
+        cursor,
+    ) -> tuple[Replica, UUID] | None:
+        active_edge = None
+        if self.broadcast_service is not None:
+            active_edge = self.broadcast_service.find_active_edge_for_target(
+                session_id=session_id,
+                target_worker_id=requester_worker_id,
+                cursor=cursor,
+            )
+        existing_edge_id = existing.broadcast_edge_id or ""
+        existing_session_id = existing.broadcast_session_id or ""
+        if (
+            active_edge is not None
+            and existing_session_id == session_id
+            and existing_edge_id == active_edge.edge_id
+        ):
+            replica = self.replica_repository.find_by_id(
+                existing.replica_id,
+                existing.artifact_id,
+                cursor=cursor,
+            )
+            if replica is None:
+                raise NotFoundError(
+                    "existing broadcast transport source replica is missing"
+                )
+            return replica, existing.transport_id
+
+        if (
+            active_edge is not None
+            and existing_session_id == session_id
+            and existing_edge_id
+            and existing_edge_id != active_edge.edge_id
+        ):
+            cleared = self.transport_repository.clear_request_identity_with_cursor(
+                transport_id=existing.transport_id,
+                request_id=request_id,
+                cursor=cursor,
+            )
+            if cleared:
+                return None
+
+        replica = self.replica_repository.find_by_id(
+            existing.replica_id,
+            existing.artifact_id,
+            cursor=cursor,
+        )
+        if replica is not None:
+            return replica, existing.transport_id
+        raise NotFoundError("existing broadcast transport source replica is missing")
 
     def _request_transport_group_dispatch(
         self,
