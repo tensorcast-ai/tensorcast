@@ -42,6 +42,11 @@ enum class SourceBoundExecutionMode : std::uint8_t {
   kLocalMappedTyped = 5,
 };
 
+struct SourceBoundSourceFacts {
+  bool disk_source_available{false};
+  bool disk_source_is_safetensors{false};
+};
+
 inline std::string_view source_bound_execution_mode_name(SourceBoundExecutionMode mode) {
   switch (mode) {
     case SourceBoundExecutionMode::kPureCollective:
@@ -125,6 +130,7 @@ struct SourceBoundLanePlan {
   uint64_t local_pad_bytes{0};
   uint64_t local_fill_bytes{0};
   uint64_t deferred_typed_bytes{0};
+  bool local_mapped_typed_selected{false};
   bool require_collective_success{false};
   std::string selection_reason;
   absl::flat_hash_map<std::string, uint64_t> reject_reason_buckets;

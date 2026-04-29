@@ -72,6 +72,13 @@ uint64_t covered_bytes(const ByteRangeMap& map) {
   return total;
 }
 
+store::runtime::ingestion::strategy::SourceBoundSourceFacts safetensors_disk_source() {
+  return store::runtime::ingestion::strategy::SourceBoundSourceFacts{
+      .disk_source_available = true,
+      .disk_source_is_safetensors = true,
+  };
+}
+
 } // namespace
 
 TEST_CASE(
@@ -461,7 +468,7 @@ TEST_CASE(
       store::runtime::ingestion::strategy::SourceBoundPolicy::kCollectiveFirst,
       strategy_config,
       topology,
-      /*disk_source_available=*/true);
+      safetensors_disk_source());
   REQUIRE(strategy_plan_or.ok());
   CHECK(
       strategy_plan_or->lane_plan.mode ==

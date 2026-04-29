@@ -1075,6 +1075,10 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   // Mapped-target RPCs only carry collective topology via operation metadata, so the
   // best-effort default must stay collective-first rather than source-bound strict mode.
   const auto collective_policy = default_collective_policy_for_mapped_target(request_context.execution_topology);
+  const auto source_facts = store::runtime::ingestion::strategy::SourceBoundSourceFacts{
+      .disk_source_available = disk_source.has_value(),
+      .disk_source_is_safetensors = disk_metadata.has_value() && disk_metadata->is_safetensors.value_or(false),
+  };
   auto strategy_plan_or = store::runtime::ingestion::strategy::build_source_bound_execution_strategy_plan(
       prepared_execution.resolved_plan,
       prepared_execution.lowering_artifacts,
@@ -1085,7 +1089,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
           : store::runtime::ingestion::strategy::SourceBoundPolicy::kCollectiveFirst,
       d_.engine.options().materialization_strategy,
       request_context.execution_topology,
-      disk_source.has_value());
+      source_facts);
   if (!strategy_plan_or.ok()) {
     return to_grpc_status(strategy_plan_or.status());
   }

@@ -1041,14 +1041,14 @@ store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary summarize_s
     const store::StoreEngineOptions::MaterializationStrategyConfig& strategy_config,
     const store::loading::ExecutionTopologyContext& execution_topology,
     v2::CollectivePolicy collective_policy,
-    bool disk_source_available) {
+    store::runtime::ingestion::strategy::SourceBoundSourceFacts source_facts) {
   auto strategy_plan_or = store::runtime::ingestion::strategy::build_source_bound_execution_strategy_plan(
       resolved_plan,
       lowering_artifacts,
       normalize_source_bound_policy(collective_policy),
       strategy_config,
       execution_topology,
-      disk_source_available);
+      source_facts);
   if (!strategy_plan_or.ok()) {
     LOG(ERROR) << "source-bound strategy planning failed: " << strategy_plan_or.status();
     store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary summary;
@@ -1747,7 +1747,11 @@ grpc::Status prepare_source_bound_execution(
         normalize_source_bound_policy(prepared_plan.collective_policy),
         d.engine.options().materialization_strategy,
         prepared_plan.request_context.execution_topology,
-        prepared_plan.disk_source.has_value());
+        store::runtime::ingestion::strategy::SourceBoundSourceFacts{
+            .disk_source_available = prepared_plan.disk_source.has_value(),
+            .disk_source_is_safetensors =
+                prepared_plan.disk_metadata.has_value() && prepared_plan.disk_metadata->is_safetensors.value_or(false),
+        });
     if (!strategy_plan_or.ok()) {
       return to_grpc_status(strategy_plan_or.status());
     }
@@ -1788,7 +1792,15 @@ store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary summarize_s
     v2::CollectivePolicy collective_policy,
     bool disk_source_available) {
   return summarize_source_bound_plan(
-      resolved_plan, lowering_artifacts, strategy_config, execution_topology, collective_policy, disk_source_available);
+      resolved_plan,
+      lowering_artifacts,
+      strategy_config,
+      execution_topology,
+      collective_policy,
+      store::runtime::ingestion::strategy::SourceBoundSourceFacts{
+          .disk_source_available = disk_source_available,
+          .disk_source_is_safetensors = disk_source_available,
+      });
 }
 
 grpc::Status evaluate_strict_collective_preflight_for_testing(

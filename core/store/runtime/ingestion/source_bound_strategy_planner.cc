@@ -163,12 +163,14 @@ absl::StatusOr<SourceBoundStrategyPlan> build_source_bound_execution_strategy_pl
     SourceBoundPolicy policy,
     const StoreEngineOptions::MaterializationStrategyConfig& strategy_config,
     const loading::ExecutionTopologyContext& execution_topology,
-    bool disk_source_available) {
+    SourceBoundSourceFacts source_facts) {
   using ExecutorPreference = StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference;
   SourceBoundStrategyPlan strategy_plan;
   strategy_plan.policy = policy;
   strategy_plan.summary.planner_version = "source_bound_collective_first.v4";
   strategy_plan.lane_plan.require_collective_success = policy == SourceBoundPolicy::kRequirePureCollective;
+  const bool disk_source_available = source_facts.disk_source_available;
+  const bool safetensors_disk_source_available = disk_source_available && source_facts.disk_source_is_safetensors;
 
   if (resolved_plan.representation_work_plan.has_value()) {
     summarize_work_plan(*resolved_plan.representation_work_plan, &strategy_plan.summary, &strategy_plan.lane_plan);
@@ -207,6 +209,11 @@ absl::StatusOr<SourceBoundStrategyPlan> build_source_bound_execution_strategy_pl
     add_reject_reason_bytes(
         &strategy_plan.summary.planner_reject_reason_buckets,
         "disk_source_unavailable",
+        strategy_plan.summary.planned_collective_candidate_bytes);
+  } else if (!source_facts.disk_source_is_safetensors) {
+    add_reject_reason_bytes(
+        &strategy_plan.summary.planner_reject_reason_buckets,
+        "non_safetensors_source",
         strategy_plan.summary.planned_collective_candidate_bytes);
   } else if (!has_collective_group || world_size <= 1) {
     add_reject_reason_bytes(
@@ -248,19 +255,25 @@ absl::StatusOr<SourceBoundStrategyPlan> build_source_bound_execution_strategy_pl
         "mixed_generic_residual_policy_disabled",
         strategy_plan.summary.planned_generic_residual_bytes);
   }
-  const bool typed_work_requires_local_mapped = strategy_plan.summary.planned_non_admitted_typed_bytes > 0 &&
+  const bool typed_work_prefers_local_mapped = strategy_plan.summary.planned_non_admitted_typed_bytes > 0 &&
       strategy_config.executor_preference != ExecutorPreference::kGenericByteRange;
   const bool local_mapped_typed_available = strategy_config.enable_tensor_aware_mapped_executor &&
-      strategy_config.allow_mixed_execution && disk_source_available;
-  if (typed_work_requires_local_mapped && !local_mapped_typed_available) {
+      strategy_config.allow_mixed_execution && safetensors_disk_source_available;
+  if (typed_work_prefers_local_mapped && !local_mapped_typed_available) {
+    std::string_view reason = "local_mapped_typed_executor_unavailable";
+    if (!disk_source_available) {
+      reason = "disk_source_unavailable";
+    } else if (!source_facts.disk_source_is_safetensors) {
+      reason = "non_safetensors_source";
+    }
     add_reject_reason_bytes(
         &strategy_plan.summary.planner_reject_reason_buckets,
-        "local_mapped_typed_executor_unavailable",
+        reason,
         strategy_plan.summary.planned_non_admitted_typed_bytes);
   }
 
-  const bool base_collective_prereqs_ok = strategy_config.enable_owner_file_collective && disk_source_available &&
-      has_collective_group && world_size > 1 &&
+  const bool base_collective_prereqs_ok = strategy_config.enable_owner_file_collective &&
+      safetensors_disk_source_available && has_collective_group && world_size > 1 &&
       (!strategy_config.owner_file_collective_shared_fs_only || shared_source_proven) &&
       execution_topology.source_locality != loading::SourceLocalityHint::kHostLocal &&
       (strategy_plan.summary.planned_collective_candidate_bytes == 0 ||
@@ -306,7 +319,7 @@ absl::StatusOr<SourceBoundStrategyPlan> build_source_bound_execution_strategy_pl
             collective_coverage_gap == 0
         ? SourceBoundExecutionMode::kPureCollective
         : SourceBoundExecutionMode::kRejected;
-  } else if (generic_coverage_gap > 0 || (typed_work_requires_local_mapped && !local_mapped_typed_available)) {
+  } else if (generic_coverage_gap > 0) {
     strategy_plan.lane_plan.mode = SourceBoundExecutionMode::kRejected;
   } else if (
       strategy_plan.summary.planned_collective_candidate_bytes == 0 &&
@@ -315,7 +328,7 @@ absl::StatusOr<SourceBoundStrategyPlan> build_source_bound_execution_strategy_pl
       strategy_plan.summary.planned_local_typed_bytes > 0) {
     strategy_plan.lane_plan.mode = SourceBoundExecutionMode::kLocalTypedOnly;
   } else if (
-      typed_work_requires_local_mapped && local_mapped_typed_available &&
+      typed_work_prefers_local_mapped && local_mapped_typed_available &&
       strategy_plan.summary.planned_collective_candidate_bytes == 0 &&
       strategy_plan.summary.planned_generic_residual_bytes == 0) {
     strategy_plan.lane_plan.mode = SourceBoundExecutionMode::kLocalMappedTyped;
@@ -328,7 +341,9 @@ absl::StatusOr<SourceBoundStrategyPlan> build_source_bound_execution_strategy_pl
   strategy_plan.summary.execution_plan_kind =
       std::string(source_bound_execution_mode_name(strategy_plan.lane_plan.mode));
   strategy_plan.lane_plan.selection_reason = strategy_plan.summary.execution_plan_kind;
-  if (typed_work_requires_local_mapped && local_mapped_typed_available &&
+  strategy_plan.lane_plan.local_mapped_typed_selected = typed_work_prefers_local_mapped &&
+      local_mapped_typed_available && strategy_plan.lane_plan.mode != SourceBoundExecutionMode::kRejected;
+  if (typed_work_prefers_local_mapped && local_mapped_typed_available &&
       strategy_plan.lane_plan.mode != SourceBoundExecutionMode::kRejected &&
       strategy_plan.lane_plan.mode != SourceBoundExecutionMode::kLocalMappedTyped) {
     absl::StrAppend(&strategy_plan.lane_plan.selection_reason, ";local_mapped_typed");

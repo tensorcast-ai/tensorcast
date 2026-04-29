@@ -4021,8 +4021,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   const auto& strategy_config = config_.options->materialization_strategy;
   const bool source_bound_plan_uses_local_mapped =
       source_bound_execution_mode_uses_local_mapped(source_bound_lane_plan.mode) ||
-      (source_bound_lane_plan.deferred_typed_bytes > 0 &&
-       strategy_config.executor_preference != StrategyConfig::ExecutorPreference::kGenericByteRange);
+      source_bound_lane_plan.local_mapped_typed_selected;
 
   if (executor_private_map.segments.empty() && has_fill_items &&
       !work_plan_has_scalar_fill_items(representation_work_plan)) {

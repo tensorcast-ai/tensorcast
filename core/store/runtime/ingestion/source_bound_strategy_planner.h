@@ -16,6 +16,6 @@ absl::StatusOr<SourceBoundStrategyPlan> build_source_bound_execution_strategy_pl
     SourceBoundPolicy policy,
     const StoreEngineOptions::MaterializationStrategyConfig& strategy_config,
     const loading::ExecutionTopologyContext& execution_topology,
-    bool disk_source_available);
+    SourceBoundSourceFacts source_facts);
 
 } // namespace tensorcast::store::runtime::ingestion::strategy

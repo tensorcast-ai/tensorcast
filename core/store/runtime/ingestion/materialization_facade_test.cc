@@ -121,6 +121,10 @@ tensorcast::store::runtime::ingestion::strategy::SourceBoundStrategyPlan make_so
     lane_plan.selection_reason =
         std::string(tensorcast::store::runtime::ingestion::strategy::source_bound_execution_mode_name(mode));
   }
+  if (!lane_plan.local_mapped_typed_selected &&
+      lane_plan.selection_reason.find("local_mapped_typed") != std::string::npos) {
+    lane_plan.local_mapped_typed_selected = true;
+  }
   lane_plan.mode = mode;
   if (summary.execution_plan_kind.empty()) {
     summary.execution_plan_kind =
