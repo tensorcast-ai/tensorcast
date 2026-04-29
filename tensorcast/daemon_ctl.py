@@ -1245,6 +1245,68 @@ class DaemonCtl:
                 ) from e
         return response
 
+    def create_broadcast_session(
+        self,
+        *,
+        artifact_id: str,
+        session_id: str | None = None,
+        requested_view_id: str | None = None,
+        epoch: int = 0,
+        fanout: int = 0,
+        target_worker_ids: Iterable[str] | None = None,
+        target_daemon_ids: Iterable[str] | None = None,
+        root_replica_id: str | None = None,
+        strict_parent: bool = True,
+        max_attempts: int = 3,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.CreateBroadcastSessionResponse:
+        if not session_id:
+            raise ValueError("session_id is required")
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        if int(fanout) <= 0:
+            raise ValueError("fanout must be > 0")
+        if int(max_attempts) <= 0:
+            raise ValueError("max_attempts must be > 0")
+        request = store_daemon_pb2.CreateBroadcastSessionRequest(
+            session_id=str(session_id),
+            artifact_id=str(artifact_id),
+            epoch=int(epoch),
+            fanout=int(fanout),
+            strict_parent=bool(strict_parent),
+            max_attempts=int(max_attempts),
+        )
+        if requested_view_id:
+            request.requested_view_id = str(requested_view_id)
+        if target_worker_ids is not None:
+            request.target_worker_ids.extend(str(item) for item in target_worker_ids)
+        if target_daemon_ids is not None:
+            request.target_daemon_ids.extend(str(item) for item in target_daemon_ids)
+        if root_replica_id:
+            request.root_replica_id = str(root_replica_id)
+        with self._client_span("Client/CreateBroadcastSession") as span:
+            try:
+                response: store_daemon_pb2.CreateBroadcastSessionResponse = (
+                    self._unary_call(
+                        self.stub_v2.CreateBroadcastSession,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                raise RuntimeError(
+                    _grpc_message(e, fallback="CreateBroadcastSession RPC failed")
+                ) from e
+        return response
+
     def commit_binding_artifact(
         self,
         *,

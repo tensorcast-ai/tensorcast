@@ -2565,6 +2565,24 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_view_transport(
   return session;
 }
 
+absl::StatusOr<global_store::CreateBroadcastSessionResponse> GlobalStoreClient::create_broadcast_session(
+    const global_store::CreateBroadcastSessionRequest& request,
+    const RpcOptions& rpc_options) {
+  global_store::CreateBroadcastSessionResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->CreateBroadcastSession(ctx, req, resp);
+      },
+      "CreateBroadcastSession",
+      rpc_options);
+  if (!status.ok()) {
+    return status;
+  }
+  return response;
+}
+
 absl::Status GlobalStoreClient::complete_replica_transport(
     std::string_view transport_id,
     TransportCompletionOutcome outcome,

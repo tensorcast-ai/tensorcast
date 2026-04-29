@@ -11,6 +11,7 @@ import threading
 import time
 import weakref
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 import grpc
@@ -199,6 +200,11 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from tensorcast.api.plan import PlanResult, PlanStepRef
+
+
+@dataclass(frozen=True, slots=True)
+class BroadcastSessionHandle:
+    session_id: str
 
 
 def _coerce_representation_publish_closeout(
@@ -1097,6 +1103,71 @@ class Store:
             else None
         )
         _LIVE_STORES.add(self)
+
+    def create_broadcast_session(
+        self,
+        *,
+        artifact_id: str,
+        session_id: str | None = None,
+        requested_view_id: str | None = None,
+        epoch: int = 0,
+        fanout: int = 0,
+        target_worker_ids: Sequence[str] | None = None,
+        target_daemon_ids: Sequence[str] | None = None,
+        root_replica_id: str | None = None,
+        strict_parent: bool = True,
+        max_attempts: int = 3,
+    ) -> BroadcastSessionHandle:
+        if not session_id:
+            raise ArtifactError(
+                "session_id is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if not artifact_id:
+            raise ArtifactError(
+                "artifact_id is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if int(fanout) <= 0:
+            raise ArtifactError(
+                "fanout must be > 0",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if int(max_attempts) <= 0:
+            raise ArtifactError(
+                "max_attempts must be > 0",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        response = self._runtime.ensure_client().create_broadcast_session(
+            session_id=session_id,
+            artifact_id=artifact_id,
+            requested_view_id=requested_view_id,
+            epoch=epoch,
+            fanout=fanout,
+            target_worker_ids=list(target_worker_ids or ()),
+            target_daemon_ids=list(target_daemon_ids or ()),
+            root_replica_id=root_replica_id,
+            strict_parent=strict_parent,
+            max_attempts=max_attempts,
+        )
+        status = response.status
+        if status == store_daemon_pb2.BROADCAST_SESSION_STATUS_OK:
+            return BroadcastSessionHandle(session_id=str(response.session_id))
+        if status == store_daemon_pb2.BROADCAST_SESSION_STATUS_NOT_FOUND:
+            raise ArtifactError(
+                "broadcast session source artifact or target not found",
+                status_code="NOT_FOUND",
+                retryable=False,
+            )
+        raise ArtifactError(
+            "failed to create broadcast session",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
 
     def set_register_fn(self, register_fn: Callable[..., RegistrationResult]) -> None:
         self._registration.set_register_fn(register_fn)
@@ -4380,6 +4451,7 @@ __all__ = [
     "BindingValueRef",
     "BindingLayout",
     "BindingUpdateEpoch",
+    "BroadcastSessionHandle",
     "BuilderMode",
     "CanonicalIndex",
     "CanonicalIndexEntry",

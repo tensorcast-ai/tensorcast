@@ -6,6 +6,7 @@ namespace tensorcast::daemon {
 
 using ::grpc::Status;
 using ::grpc::StatusCode;
+namespace global_store = tensorcast::global_store::v1;
 
 Status StoreDaemonServiceImpl::MaterializeReplica(
     grpc::ServerContext* ctx,
@@ -586,6 +587,67 @@ Status StoreDaemonServiceImpl::UnlockTransportChunks(
   RpcContext rctx{"UnlockTransportChunks", *ctx, opts_.allow_high_card_attrs};
   v2::UnlockTransportChunksResponse dummy;
   return transport_controller_->unlock(rctx, *req, dummy);
+}
+
+Status StoreDaemonServiceImpl::CreateBroadcastSession(
+    grpc::ServerContext* ctx,
+    const v2::CreateBroadcastSessionRequest* req,
+    v2::CreateBroadcastSessionResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"CreateBroadcastSession", *ctx, opts_.allow_high_card_attrs};
+  if (global_store_client_ == nullptr || !global_store_client_->is_connected()) {
+    resp->set_status(v2::BROADCAST_SESSION_STATUS_ERROR);
+    rctx.mark_success();
+    return Status::OK;
+  }
+
+  global_store::CreateBroadcastSessionRequest global_req;
+  global_req.set_session_id(req->session_id());
+  global_req.set_artifact_id(req->artifact_id());
+  if (!req->requested_view_id().empty()) {
+    auto* requested_space = global_req.mutable_requested_byte_space();
+    requested_space->set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_VIEW);
+    requested_space->set_id(req->requested_view_id());
+  }
+  global_req.set_epoch(req->epoch());
+  global_req.set_fanout(req->fanout());
+  global_req.set_root_replica_id(req->root_replica_id());
+  global_req.set_strict_parent(req->strict_parent());
+  global_req.set_max_attempts(req->max_attempts());
+  for (const auto& worker_id : req->target_worker_ids()) {
+    global_req.add_targets()->set_worker_id(worker_id);
+  }
+  for (const auto& daemon_id : req->target_daemon_ids()) {
+    global_req.add_targets()->set_daemon_id(daemon_id);
+  }
+
+  store::components::RpcOptions rpc_options;
+  rpc_options.max_retries = 0;
+  rpc_options.cancel_check = [ctx]() { return ctx != nullptr && ctx->IsCancelled(); };
+  auto global_resp_or = global_store_client_->create_broadcast_session(global_req, rpc_options);
+  if (!global_resp_or.ok()) {
+    resp->set_status(v2::BROADCAST_SESSION_STATUS_ERROR);
+    rctx.mark_success();
+    return Status::OK;
+  }
+
+  const auto& global_resp = *global_resp_or;
+  if (global_resp.status() == global_store::STATUS_OK) {
+    resp->set_status(v2::BROADCAST_SESSION_STATUS_OK);
+    std::string session_id = req->session_id();
+    if (global_resp.has_session() && !global_resp.session().session_id().empty()) {
+      session_id = global_resp.session().session_id();
+    }
+    resp->set_session_id(session_id);
+  } else if (global_resp.status() == global_store::STATUS_NOT_FOUND) {
+    resp->set_status(v2::BROADCAST_SESSION_STATUS_NOT_FOUND);
+  } else {
+    resp->set_status(v2::BROADCAST_SESSION_STATUS_ERROR);
+  }
+  rctx.mark_success();
+  return Status::OK;
 }
 
 Status StoreDaemonServiceImpl::BeginRegisterArtifact(

@@ -62,6 +62,7 @@ service StoreDaemonService {
   // Dual-end locking mechanism for P2P transfers
   rpc LockTransportChunks(LockTransportChunksRequest) returns (LockTransportChunksResponse) {}
   rpc UnlockTransportChunks(UnlockTransportChunksRequest) returns (UnlockTransportChunksResponse) {}
+  rpc CreateBroadcastSession(CreateBroadcastSessionRequest) returns (CreateBroadcastSessionResponse) {}
 
   // ========== Memory Artifact Registration ==========
   // New canonical RPC names
@@ -250,6 +251,31 @@ enum ExportPolicy {
   EXPORT_POLICY_NEVER = 1;
   EXPORT_POLICY_AUTO = 2;
   EXPORT_POLICY_FORCE = 3;
+}
+
+enum BroadcastSessionStatus {
+  BROADCAST_SESSION_STATUS_UNSPECIFIED = 0;
+  BROADCAST_SESSION_STATUS_OK = 1;
+  BROADCAST_SESSION_STATUS_ERROR = 2;
+  BROADCAST_SESSION_STATUS_NOT_FOUND = 3;
+}
+
+message CreateBroadcastSessionRequest {
+  string session_id = 1;
+  string artifact_id = 2;
+  string requested_view_id = 3;
+  uint64 epoch = 4;
+  uint32 fanout = 5;
+  repeated string target_worker_ids = 6;
+  repeated string target_daemon_ids = 7;
+  string root_replica_id = 8;
+  bool strict_parent = 9;
+  uint32 max_attempts = 10;
+}
+
+message CreateBroadcastSessionResponse {
+  BroadcastSessionStatus status = 1;
+  string session_id = 2;
 }
 
 // Source selection policy that can further gate which sources are allowed.

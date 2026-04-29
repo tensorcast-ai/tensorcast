@@ -604,6 +604,14 @@ class IGlobalStoreClient {
       std::string_view artifact_id,
       std::optional<std::string_view> view_id = std::nullopt) = 0;
 
+  virtual absl::StatusOr<global_store::CreateBroadcastSessionResponse> create_broadcast_session(
+      const global_store::CreateBroadcastSessionRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) {
+    (void)request;
+    (void)rpc_options;
+    return absl::UnimplementedError("CreateBroadcastSession not available");
+  }
+
   virtual absl::StatusOr<std::vector<ChunkLocationInfo>> query_chunk_locations(
       std::string_view artifact_id,
       const std::vector<uint32_t>& chunk_indices) = 0;
@@ -1037,6 +1045,10 @@ class GlobalStoreClient : public IGlobalStoreClient {
   absl::StatusOr<std::vector<RemoteReplicaInfo>> get_artifact_replicas(
       std::string_view artifact_id,
       std::optional<std::string_view> view_id = std::nullopt) override;
+
+  absl::StatusOr<global_store::CreateBroadcastSessionResponse> create_broadcast_session(
+      const global_store::CreateBroadcastSessionRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
 
   absl::StatusOr<std::vector<ChunkLocationInfo>> query_chunk_locations(
       std::string_view artifact_id,
