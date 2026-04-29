@@ -515,6 +515,15 @@ message ReplicaOperationStatus {
   optional ReplicaOperationError error = 5;
 }
 
+message TransportSchedulingGroupHint {
+  string group_id = 1;
+  string group_kind = 2;
+  uint32 total_parts = 3;
+  string part_id = 4;
+  uint32 priority = 5;
+  uint64 epoch = 6;
+}
+
 message MaterializeReplicaRequest {
   tensorcast.common.v1.ArtifactSelection selection = 1;
   reserved 2, 9;
@@ -546,6 +555,8 @@ message MaterializeReplicaRequest {
   // Explicit collective group hint for same-host coordinated disk->GPU loads.
   optional CollectiveLoadGroup collective_load_group = 19;
   ServingArtifactRuntimePolicy serving_artifact_policy = 20;
+  string transport_request_id = 21;
+  TransportSchedulingGroupHint transport_scheduling_group = 22;
 }
 
 message CollectiveLoadGroup {
