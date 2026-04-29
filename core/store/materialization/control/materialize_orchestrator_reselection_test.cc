@@ -37,6 +37,7 @@ class FakeMaterializationBackend final : public MaterializationBackend {
 
   std::vector<P2pAttempt> p2p_attempts;
   std::vector<absl::Status> p2p_scripted_statuses;
+  absl::Status register_status{absl::OkStatus()};
   int register_calls{0};
 
   absl::StatusOr<ReplicaHandle> ingest_from_p2p(
@@ -80,7 +81,7 @@ class FakeMaterializationBackend final : public MaterializationBackend {
 
   absl::Status register_replica_with_global_store(const ReplicaKey&, std::string_view, std::string_view) override {
     register_calls += 1;
-    return absl::OkStatus();
+    return register_status;
   }
 };
 
@@ -281,6 +282,87 @@ TEST_CASE(
   CHECK(gs_client->view_request_wait_timeouts_ms.front() > 0);
   CHECK(gs_client->view_request_wait_timeouts_ms.front() < gs_client->replica_request_wait_timeouts_ms.front());
   CHECK(gs_client->replica_request_wait_timeouts_ms.front() == 5000);
+}
+
+TEST_CASE(
+    "MaterializeOrchestrator propagates broadcast transport parent hint",
+    "[store][materialize][reselection][broadcast]") {
+  auto gs_client = std::make_shared<RecordingGlobalStoreClient>();
+  gs_client->connected = true;
+  gs_client->allow_replica_transport = true;
+  gs_client->push_scripted_transport_session(make_transport_session(
+      "transport-broadcast", "node-remote", "10.6.6.2", 50052, common::memory::MemoryLocation::GPU, 0));
+
+  FakeMaterializationBackend backend;
+  MaterializeHints hints;
+  hints.artifact_id = "artifact-broadcast-hint";
+  hints.allow_p2p = true;
+  hints.allow_disk = false;
+  hints.transport_request_id = "request-broadcast-1";
+  hints.broadcast = loading::BroadcastHint{
+      .session_id = "session-a",
+      .strict_parent = true,
+  };
+
+  components::WorkerIdentity local_identity{
+      .worker_id = "worker-local",
+      .node_id = "node-local",
+      .node_address = "10.6.6.1",
+      .p2p_port = 50051,
+  };
+  MaterializeOrchestrator orchestrator(
+      gsl::not_null<MaterializationBackend*>{&backend},
+      gsl::not_null<components::IGlobalStoreClient*>{gs_client.get()},
+      local_identity);
+
+  auto result = orchestrator.run("artifact-broadcast-hint", make_gpu_target(0), hints, std::nullopt);
+  REQUIRE(result.ok());
+  REQUIRE(gs_client->replica_request_broadcast_hints.size() == 1);
+  REQUIRE(gs_client->replica_request_broadcast_hints.front().has_value());
+  CHECK(gs_client->replica_request_broadcast_hints.front()->session_id == "session-a");
+  CHECK(gs_client->replica_request_broadcast_hints.front()->strict_parent);
+}
+
+TEST_CASE(
+    "MaterializeOrchestrator completes broadcast transport as failed when local registration fails",
+    "[store][materialize][reselection][broadcast]") {
+  auto gs_client = std::make_shared<RecordingGlobalStoreClient>();
+  gs_client->connected = true;
+  gs_client->allow_replica_transport = false;
+  gs_client->push_scripted_transport_session(make_transport_session(
+      "transport-broadcast", "node-remote", "10.7.7.2", 50062, common::memory::MemoryLocation::GPU, 0));
+
+  FakeMaterializationBackend backend;
+  backend.register_status = absl::UnavailableError("register failed");
+
+  MaterializeHints hints;
+  hints.artifact_id = "artifact-broadcast-register-fails";
+  hints.allow_p2p = true;
+  hints.allow_disk = false;
+  hints.transport_request_id = "request-broadcast-register-fails";
+  hints.broadcast = loading::BroadcastHint{
+      .session_id = "session-register-fails",
+      .strict_parent = true,
+  };
+
+  components::WorkerIdentity local_identity{
+      .worker_id = "worker-local",
+      .node_id = "node-local",
+      .node_address = "10.7.7.1",
+      .p2p_port = 50061,
+  };
+  MaterializeOrchestrator orchestrator(
+      gsl::not_null<MaterializationBackend*>{&backend},
+      gsl::not_null<components::IGlobalStoreClient*>{gs_client.get()},
+      local_identity);
+
+  auto result = orchestrator.run("artifact-broadcast-register-fails", make_gpu_target(0), hints, std::nullopt);
+  REQUIRE_FALSE(result.ok());
+  REQUIRE(backend.register_calls == 1);
+  REQUIRE(gs_client->completed_transport_ids.size() == 1);
+  CHECK(gs_client->completed_transport_ids.front() == "transport-broadcast");
+  REQUIRE(gs_client->completed_transport_outcomes.size() == 1);
+  CHECK(gs_client->completed_transport_outcomes.front() == TransportCompletionOutcome::kFailed);
 }
 
 TEST_CASE(

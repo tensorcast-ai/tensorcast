@@ -136,6 +136,11 @@ struct TransportSchedulingGroupHint {
   uint64_t epoch{0};
 };
 
+struct BroadcastTransportHint {
+  std::string session_id;
+  bool strict_parent{true};
+};
+
 enum class TransportCompletionOutcome : uint8_t {
   kUnspecified = 0,
   kSuccess = 1,
@@ -573,6 +578,7 @@ class IGlobalStoreClient {
       const DeviceKey& target_device,
       uint32_t wait_timeout_ms = 30000,
       const std::optional<TransportSchedulingGroupHint>& scheduling_group = std::nullopt,
+      const std::optional<BroadcastTransportHint>& broadcast_hint = std::nullopt,
       std::string_view requester_worker_id = {},
       std::string_view request_id = {}) = 0;
 
@@ -585,6 +591,7 @@ class IGlobalStoreClient {
       const DeviceKey& target_device,
       uint32_t wait_timeout_ms = 30000,
       const std::optional<TransportSchedulingGroupHint>& scheduling_group = std::nullopt,
+      const std::optional<BroadcastTransportHint>& broadcast_hint = std::nullopt,
       std::string_view requester_worker_id = {},
       std::string_view request_id = {}) = 0;
 
@@ -1006,6 +1013,7 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const DeviceKey& target_device,
       uint32_t wait_timeout_ms = 30000,
       const std::optional<TransportSchedulingGroupHint>& scheduling_group = std::nullopt,
+      const std::optional<BroadcastTransportHint>& broadcast_hint = std::nullopt,
       std::string_view requester_worker_id = {},
       std::string_view request_id = {}) override;
   absl::StatusOr<TransportSession> request_view_transport(
@@ -1017,6 +1025,7 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const DeviceKey& target_device,
       uint32_t wait_timeout_ms = 30000,
       const std::optional<TransportSchedulingGroupHint>& scheduling_group = std::nullopt,
+      const std::optional<BroadcastTransportHint>& broadcast_hint = std::nullopt,
       std::string_view requester_worker_id = {},
       std::string_view request_id = {}) override;
 

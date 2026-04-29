@@ -132,6 +132,17 @@ void apply_transport_scheduling_group_hint(
   group->set_epoch(scheduling_group->epoch);
 }
 
+void apply_broadcast_transport_hint(
+    const std::optional<BroadcastTransportHint>& broadcast_hint,
+    global_store::RequestReplicaTransportRequest* request) {
+  if (!broadcast_hint.has_value() || broadcast_hint->session_id.empty()) {
+    return;
+  }
+  auto* broadcast = request->mutable_broadcast();
+  broadcast->set_session_id(broadcast_hint->session_id);
+  broadcast->set_strict_parent(broadcast_hint->strict_parent);
+}
+
 std::string build_transport_request_id(std::string_view operation_kind) {
   static std::atomic<std::uint64_t> transport_request_sequence{1};
   const std::uint64_t sequence = transport_request_sequence.fetch_add(1, std::memory_order_relaxed);
@@ -2376,6 +2387,7 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
     const DeviceKey& target_device,
     uint32_t wait_timeout_ms,
     const std::optional<TransportSchedulingGroupHint>& scheduling_group,
+    const std::optional<BroadcastTransportHint>& broadcast_hint,
     std::string_view requester_worker_id,
     std::string_view request_id) {
   const std::string effective_request_id =
@@ -2386,6 +2398,7 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
   request.set_source_address(std::string(source_address));
   request.set_source_port(source_port);
   apply_transport_scheduling_group_hint(scheduling_group, &request);
+  apply_broadcast_transport_hint(broadcast_hint, &request);
   if (!requester_worker_id.empty()) {
     request.set_requester_worker_id(std::string(requester_worker_id));
   }
@@ -2459,6 +2472,7 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_view_transport(
     const DeviceKey& target_device,
     uint32_t wait_timeout_ms,
     const std::optional<TransportSchedulingGroupHint>& scheduling_group,
+    const std::optional<BroadcastTransportHint>& broadcast_hint,
     std::string_view requester_worker_id,
     std::string_view request_id) {
   if (view_id.empty()) {
@@ -2473,6 +2487,7 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_view_transport(
   request.set_source_address(std::string(source_address));
   request.set_source_port(source_port);
   apply_transport_scheduling_group_hint(scheduling_group, &request);
+  apply_broadcast_transport_hint(broadcast_hint, &request);
   if (!requester_worker_id.empty()) {
     request.set_requester_worker_id(std::string(requester_worker_id));
   }
