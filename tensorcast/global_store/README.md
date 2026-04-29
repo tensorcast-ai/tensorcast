@@ -258,6 +258,17 @@ counts by scope and capability.
 2. Select replica with source-balance scoring and memory-tier preference (GPU > RAM > DISK).
 3. Finalize assignment transactionally with idempotent request replay protection.
 
+### Broadcast Sessions
+
+Broadcast sessions coordinate strict tree dissemination for model-weight prefetch. A session records the artifact or
+view, epoch, target workers, fanout, and planned parent-child edges. Broadcast-tagged `RequestReplicaTransport` calls
+resolve to the parent replica assigned by the active edge; untagged requests continue to use group dispatch or ordinary
+source selection.
+
+Only successful transport completions advance tree progress. After a child materializes and registers an exportable
+replica, that child can become a parent for the next layer; failed or exhausted edges are retried or marked terminal by
+the Global Store while the artifact bytes still move only between Store Daemons.
+
 ### RecoveryService
 
 **Purpose:** Handle high-availability state reconciliation.

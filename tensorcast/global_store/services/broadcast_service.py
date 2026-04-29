@@ -357,10 +357,13 @@ class BroadcastService:
         session = self._broadcast_repository.find_session(session_id, cursor=cursor)
         if session is None or session.state is not BroadcastSessionState.ACTIVE:
             return
-        if self._broadcast_repository.count_incomplete_targets(
-            session_id,
-            cursor=cursor,
-        ) != 0:
+        if (
+            self._broadcast_repository.count_incomplete_targets(
+                session_id,
+                cursor=cursor,
+            )
+            != 0
+        ):
             return
         targets = self._broadcast_repository.list_targets(session_id, cursor=cursor)
         if any(target.state is BroadcastTargetState.FAILED for target in targets):
@@ -512,7 +515,9 @@ class BroadcastService:
             return []
 
         planned: list[BroadcastEdge] = []
-        for target, parent in zip(pending_targets[:capacity], parent_pool * capacity):
+        for target, parent in zip(
+            pending_targets[:capacity], parent_pool, strict=False
+        ):
             parent_replica, parent_level = parent
             edge = BroadcastEdge(
                 edge_id=str(uuid4()),
@@ -559,6 +564,15 @@ class BroadcastService:
         cursor=None,
     ) -> list[tuple[Replica, int]]:
         parents: list[tuple[Replica, int]] = []
+        edge_counts = self._parent_edge_counts(session.session_id, cursor=cursor)
+        fanout = max(0, int(session.fanout))
+
+        def add_available_slots(replica: Replica, level: int) -> None:
+            if fanout <= 0:
+                return
+            remaining = fanout - edge_counts.get(str(replica.replica_id), 0)
+            parents.extend((replica, level) for _ in range(max(0, remaining)))
+
         if session.root_replica_id is not None:
             root = self._replica_repository.find_by_id(
                 session.root_replica_id,
@@ -566,7 +580,7 @@ class BroadcastService:
                 cursor=cursor,
             )
             if root is not None:
-                parents.append((root, 0))
+                add_available_slots(root, 0)
 
         completed_targets = self._broadcast_repository.list_targets_by_state(
             session.session_id,
@@ -581,5 +595,25 @@ class BroadcastService:
                 target.completed_replica_id
             )
             if replica is not None:
-                parents.append((replica, int(target.level or 0)))
+                add_available_slots(replica, int(target.level or 0))
         return parents
+
+    def _parent_edge_counts(self, session_id: str, *, cursor=None) -> dict[str, int]:
+        owns_cursor = cursor is None
+        if owns_cursor:
+            cursor = self._broadcast_repository.get_cursor()
+        try:
+            rows = cursor.execute(
+                """
+                SELECT parent_replica_id, COUNT(*)
+                FROM broadcast_edges
+                WHERE session_id = ?
+                  AND state IN ('planned', 'assigned', 'materializing', 'completed')
+                GROUP BY parent_replica_id
+                """,
+                [session_id],
+            ).fetchall()
+            return {str(row[0]): int(row[1] or 0) for row in rows}
+        finally:
+            if owns_cursor:
+                cursor.close()

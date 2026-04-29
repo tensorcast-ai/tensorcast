@@ -11,7 +11,9 @@ from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
 class _DaemonClient:
-    def __init__(self, response: store_daemon_pb2.CreateBroadcastSessionResponse) -> None:
+    def __init__(
+        self, response: store_daemon_pb2.CreateBroadcastSessionResponse
+    ) -> None:
         self.response = response
         self.calls: list[dict[str, object]] = []
 

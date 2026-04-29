@@ -96,8 +96,69 @@ def test_create_session_plans_first_layer_by_fanout(repositories):
     ]
     assert all(edge is not None for edge in edges)
     assert all(edge.state is BroadcastEdgeState.PLANNED for edge in edges if edge)
-    assert all(edge.parent_replica_id == root_replica.replica_id for edge in edges if edge)
+    assert all(
+        edge.parent_replica_id == root_replica.replica_id for edge in edges if edge
+    )
     assert len(service.list_edges("session-a")) == 2
+
+
+def test_completed_child_becomes_parent_after_root_fanout_is_full(repositories):
+    worker_repo = repositories["worker"]
+    replica_repo = repositories["replica"]
+    broadcast_repo = repositories["broadcast"]
+    service = BroadcastService(
+        broadcast_repository=broadcast_repo,
+        replica_repository=replica_repo,
+        worker_repository=worker_repo,
+    )
+    root = _worker("worker-root-hop", "daemon-root-hop", "node1")
+    child1 = _worker("worker-child-hop-1", "daemon-child-hop-1", "node2")
+    child2 = _worker("worker-child-hop-2", "daemon-child-hop-2", "node3")
+    for worker in (root, child1, child2):
+        worker_repo.create(worker)
+        assert worker_repo.update_heartbeat(worker.worker_id, 4096, True)
+    root_replica = replica_repo.create(_exportable_replica("mi2:model-hop", root))
+
+    service.create_session(
+        session_id="session-hop",
+        artifact_id="mi2:model-hop",
+        requested_view_id=None,
+        epoch=1,
+        fanout=1,
+        target_daemon_ids=["daemon-child-hop-1", "daemon-child-hop-2"],
+        root_replica_id=str(root_replica.replica_id),
+        strict_parent=True,
+        max_attempts=3,
+    )
+    first_edge = broadcast_repo.find_active_edge_for_child(
+        "session-hop",
+        child1.worker_id,
+    )
+    assert first_edge is not None
+    assert first_edge.parent_replica_id == root_replica.replica_id
+
+    child1_replica = replica_repo.create(_exportable_replica("mi2:model-hop", child1))
+    with broadcast_repo.transaction() as tx:
+        assert broadcast_repo.mark_edge_materializing(
+            first_edge.edge_id,
+            "request-hop-1",
+            cursor=tx,
+        )
+        service.complete_transport_edge(
+            session_id="session-hop",
+            edge_id=first_edge.edge_id,
+            transport_outcome=TransportCompletionOutcome.SUCCESS,
+            outcome_detail=None,
+            cursor=tx,
+        )
+
+    second_edge = broadcast_repo.find_active_edge_for_child(
+        "session-hop",
+        child2.worker_id,
+    )
+    assert second_edge is not None
+    assert second_edge.parent_replica_id == child1_replica.replica_id
+    assert second_edge.level == 2
 
 
 def test_create_session_duplicate_explicit_root_returns_existing_without_counter_change(
