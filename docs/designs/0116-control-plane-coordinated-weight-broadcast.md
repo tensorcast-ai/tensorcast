@@ -9,9 +9,12 @@ related_code:
   - tensorcast/api/context.py
   - tensorcast/api/store/artifact.py
   - tensorcast/api/_materialize.py
+  - tensorcast/api/plan/plan.py
   - tensorcast/daemon_ctl.py
   - proto/tensorcast/daemon/v2/store_daemon.proto
   - proto/tensorcast/global_store/v1/global_store.proto
+  - proto/tensorcast/plan/v1/plan.proto
+  - tensorcast/node_agent/executor.py
   - daemon/service/controllers/replica_materialization_service.cc
   - daemon/service/controllers/materialization_policy_utils.cc
   - core/store/materialization/contracts/loading_spec.h
@@ -22,6 +25,7 @@ related_code:
   - tensorcast/global_store/repositories/transport_repository.py
   - docs/plans/0083-group-aware-transport-scheduling.md
 links:
+  plan: ../plans/0116-control-plane-coordinated-weight-broadcast.md
   dependencies:
     - ../plans/0083-group-aware-transport-scheduling.md
     - ./0108-tensor-aware-materialization-strategy-plane.md
@@ -147,6 +151,10 @@ transport_group: TransportSchedulingGroup | None = None
 binding and mapped target paths already use those tags to build
 `operation_id#tcg:...` strings. The typed field is the preferred API for new
 prefetch callers.
+
+Programmable plans serialize the same typed group through `plan.v1.CallContext`
+so node-agent prefetch steps can preserve group membership when a cluster plan
+fans out work to multiple daemons.
 
 For model weights, callers should use:
 
