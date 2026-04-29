@@ -2387,9 +2387,9 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
     const DeviceKey& target_device,
     uint32_t wait_timeout_ms,
     const std::optional<TransportSchedulingGroupHint>& scheduling_group,
-    const std::optional<BroadcastTransportHint>& broadcast_hint,
     std::string_view requester_worker_id,
-    std::string_view request_id) {
+    std::string_view request_id,
+    const std::optional<BroadcastTransportHint>& broadcast_hint) {
   const std::string effective_request_id =
       request_id.empty() ? build_transport_request_id("canonical") : std::string(request_id);
   global_store::RequestReplicaTransportRequest request;
@@ -2472,9 +2472,9 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_view_transport(
     const DeviceKey& target_device,
     uint32_t wait_timeout_ms,
     const std::optional<TransportSchedulingGroupHint>& scheduling_group,
-    const std::optional<BroadcastTransportHint>& broadcast_hint,
     std::string_view requester_worker_id,
-    std::string_view request_id) {
+    std::string_view request_id,
+    const std::optional<BroadcastTransportHint>& broadcast_hint) {
   if (view_id.empty()) {
     return absl::InvalidArgumentError("view_id must be non-empty for view transport");
   }

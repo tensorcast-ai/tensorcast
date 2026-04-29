@@ -3779,9 +3779,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         target_device,
         resolve_transport_wait_timeout_ms(hints),
         scheduling_group_hint,
-        broadcast_hint,
         requester_worker_id,
-        transport_request_id);
+        transport_request_id,
+        broadcast_hint);
     if (transport_or.ok()) {
       const auto& session = *transport_or;
       const auto& remote = session.remote_replica;
@@ -4606,9 +4606,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
             target_device,
             view_probe_timeout_ms,
             scheduling_group_hint,
-            broadcast_hint,
             requester_worker_id,
-            transport_request_id);
+            transport_request_id,
+            broadcast_hint);
         if (!view_transport_or.ok() &&
             (absl::IsNotFound(view_transport_or.status()) || absl::IsUnimplemented(view_transport_or.status()) ||
              absl::IsDeadlineExceeded(view_transport_or.status()))) {
@@ -4634,9 +4634,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               target_device,
               wait_timeout_ms,
               scheduling_group_hint,
-              broadcast_hint,
               requester_worker_id,
-              transport_request_id);
+              transport_request_id,
+              broadcast_hint);
         }
         return view_transport_or;
       }
@@ -4648,9 +4648,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
           target_device,
           wait_timeout_ms,
           scheduling_group_hint,
-          broadcast_hint,
           requester_worker_id,
-          transport_request_id);
+          transport_request_id,
+          broadcast_hint);
     };
 
     auto transport_or = request_transport();

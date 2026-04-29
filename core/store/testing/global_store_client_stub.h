@@ -146,9 +146,9 @@ class GlobalStoreClientStub : public components::IGlobalStoreClient {
       const DeviceKey&,
       uint32_t,
       const std::optional<components::TransportSchedulingGroupHint>&,
-      const std::optional<components::BroadcastTransportHint>&,
       std::string_view,
-      std::string_view) override {
+      std::string_view,
+      const std::optional<components::BroadcastTransportHint>&) override {
     return absl::UnimplementedError("request_replica_transport not supported in GlobalStoreClientStub");
   }
 
@@ -161,9 +161,9 @@ class GlobalStoreClientStub : public components::IGlobalStoreClient {
       const DeviceKey&,
       uint32_t,
       const std::optional<components::TransportSchedulingGroupHint>&,
-      const std::optional<components::BroadcastTransportHint>&,
       std::string_view,
-      std::string_view) override {
+      std::string_view,
+      const std::optional<components::BroadcastTransportHint>&) override {
     return absl::UnimplementedError("request_view_transport not supported in GlobalStoreClientStub");
   }
 

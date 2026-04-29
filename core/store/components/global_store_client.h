@@ -578,9 +578,9 @@ class IGlobalStoreClient {
       const DeviceKey& target_device,
       uint32_t wait_timeout_ms = 30000,
       const std::optional<TransportSchedulingGroupHint>& scheduling_group = std::nullopt,
-      const std::optional<BroadcastTransportHint>& broadcast_hint = std::nullopt,
       std::string_view requester_worker_id = {},
-      std::string_view request_id = {}) = 0;
+      std::string_view request_id = {},
+      const std::optional<BroadcastTransportHint>& broadcast_hint = std::nullopt) = 0;
 
   virtual absl::StatusOr<TransportSession> request_view_transport(
       std::string_view artifact_id,
@@ -591,9 +591,9 @@ class IGlobalStoreClient {
       const DeviceKey& target_device,
       uint32_t wait_timeout_ms = 30000,
       const std::optional<TransportSchedulingGroupHint>& scheduling_group = std::nullopt,
-      const std::optional<BroadcastTransportHint>& broadcast_hint = std::nullopt,
       std::string_view requester_worker_id = {},
-      std::string_view request_id = {}) = 0;
+      std::string_view request_id = {},
+      const std::optional<BroadcastTransportHint>& broadcast_hint = std::nullopt) = 0;
 
   virtual absl::Status complete_replica_transport(
       std::string_view transport_id,
@@ -1013,9 +1013,9 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const DeviceKey& target_device,
       uint32_t wait_timeout_ms = 30000,
       const std::optional<TransportSchedulingGroupHint>& scheduling_group = std::nullopt,
-      const std::optional<BroadcastTransportHint>& broadcast_hint = std::nullopt,
       std::string_view requester_worker_id = {},
-      std::string_view request_id = {}) override;
+      std::string_view request_id = {},
+      const std::optional<BroadcastTransportHint>& broadcast_hint = std::nullopt) override;
   absl::StatusOr<TransportSession> request_view_transport(
       std::string_view artifact_id,
       std::string_view view_id,
@@ -1025,9 +1025,9 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const DeviceKey& target_device,
       uint32_t wait_timeout_ms = 30000,
       const std::optional<TransportSchedulingGroupHint>& scheduling_group = std::nullopt,
-      const std::optional<BroadcastTransportHint>& broadcast_hint = std::nullopt,
       std::string_view requester_worker_id = {},
-      std::string_view request_id = {}) override;
+      std::string_view request_id = {},
+      const std::optional<BroadcastTransportHint>& broadcast_hint = std::nullopt) override;
 
   absl::Status complete_replica_transport(
       std::string_view transport_id,

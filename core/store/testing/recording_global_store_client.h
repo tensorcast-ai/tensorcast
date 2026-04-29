@@ -524,9 +524,9 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       const tensorcast::store::DeviceKey& target_device,
       uint32_t wait_timeout_ms,
       const std::optional<components::TransportSchedulingGroupHint>& scheduling_group,
-      const std::optional<components::BroadcastTransportHint>& broadcast_hint,
       std::string_view requester_worker_id,
-      std::string_view request_id) override {
+      std::string_view request_id,
+      const std::optional<components::BroadcastTransportHint>& broadcast_hint) override {
     replica_requests.emplace_back(std::string(artifact_id));
     replica_request_groups.push_back(scheduling_group);
     replica_request_broadcast_hints.push_back(broadcast_hint);
@@ -558,9 +558,9 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       const tensorcast::store::DeviceKey& target_device,
       uint32_t wait_timeout_ms,
       const std::optional<components::TransportSchedulingGroupHint>& scheduling_group,
-      const std::optional<components::BroadcastTransportHint>& broadcast_hint,
       std::string_view requester_worker_id,
-      std::string_view request_id) override {
+      std::string_view request_id,
+      const std::optional<components::BroadcastTransportHint>& broadcast_hint) override {
     view_requests.emplace_back(std::string(view_id));
     view_request_groups.push_back(scheduling_group);
     view_request_broadcast_hints.push_back(broadcast_hint);
