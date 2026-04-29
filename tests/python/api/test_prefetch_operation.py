@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import uuid
 import weakref
 from typing import Any
 
 import tensorcast as tc
 from tensorcast.api._materialize import MaterializationPayload
-from tensorcast.api._device import device_uuid_for
 from tensorcast.api.context import TransportSchedulingGroup
 from tensorcast.api.store.artifact import Artifact
 from tensorcast.common.selection_identity import (
     compute_selection_hash,
 )
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
+
+artifact_module = importlib.import_module("tensorcast.api.store.artifact")
 
 
 class _Client:
@@ -125,7 +127,8 @@ def test_context_accepts_typed_transport_group() -> None:
     assert tc.TransportSchedulingGroup is TransportSchedulingGroup
 
 
-def test_prefetch_uses_deterministic_operation_id() -> None:
+def test_prefetch_uses_deterministic_operation_id(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(artifact_module, "device_uuid_for", lambda _device_id: "uuid-0")
     store = _Store()
     artifact = Artifact(store_ref=weakref.ref(store), artifact_id="aid")
     ctx = tc.context(request_id="req-1", idempotency_key="idem-1")
@@ -138,7 +141,7 @@ def test_prefetch_uses_deterministic_operation_id() -> None:
         view_subset_hash=None,
     ).hex()
     logical_layout_hash = artifact._build_artifact_selection().logical_layout_hash.hex()
-    device_uuid = device_uuid_for(0)
+    device_uuid = "uuid-0"
     action_fingerprint = (
         f"prefetch|daemon={daemon_id}|artifact=aid|layout={logical_layout_hash}"
         f"|selection={selection_hash}|device=0|device_uuid={device_uuid}|lease=NO_LEASE|v2"
@@ -170,3 +173,65 @@ def test_prefetch_without_ctx_generates_operation_id() -> None:
     replica_uuid = str(store._materialization.calls[0]["replica_uuid"] or "")
     assert replica_uuid
     assert op.operation_id == replica_uuid
+
+
+def test_prefetch_forwards_typed_transport_group_hint() -> None:
+    store = _Store()
+    artifact = Artifact(store_ref=weakref.ref(store), artifact_id="aid")
+    group = tc.TransportSchedulingGroup(
+        group_kind="weight_broadcast",
+        group_id="model-a:v42",
+        epoch=42,
+        total_parts=16,
+        part_id="daemon-1",
+        priority=7,
+        request_id="explicit-transport-req",
+    )
+
+    artifact.prefetch(device="cuda:0", ctx=tc.context(transport_group=group))
+
+    call = store._materialization.calls[0]
+    assert call["transport_request_id"] == "explicit-transport-req"
+    forwarded = call["transport_scheduling_group"]
+    assert forwarded.group_kind == "weight_broadcast"
+    assert forwarded.group_id == "model-a:v42"
+    assert forwarded.epoch == 42
+    assert forwarded.total_parts == 16
+    assert forwarded.part_id == "daemon-1"
+    assert forwarded.priority == 7
+
+
+def test_prefetch_derives_stable_transport_request_id_for_group(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(artifact_module, "device_uuid_for", lambda _device_id: "uuid-0")
+    group = tc.TransportSchedulingGroup(
+        group_kind="weight_broadcast",
+        group_id="model-a:v42",
+        epoch=42,
+        total_parts=16,
+        part_id="daemon-1",
+    )
+    ctx = tc.context(transport_group=group)
+    first_store = _Store()
+    second_store = _Store()
+    first = Artifact(store_ref=weakref.ref(first_store), artifact_id="aid")
+    second = Artifact(store_ref=weakref.ref(second_store), artifact_id="aid")
+
+    first.prefetch(device="cuda:0", ctx=ctx)
+    second.prefetch(device="cuda:0", ctx=ctx)
+
+    first_request_id = first_store._materialization.calls[0]["transport_request_id"]
+    second_request_id = second_store._materialization.calls[0]["transport_request_id"]
+    assert first_request_id
+    assert first_request_id == second_request_id
+    assert first_request_id.startswith("prefetch:")
+
+
+def test_prefetch_without_group_sends_no_transport_hint() -> None:
+    store = _Store()
+    artifact = Artifact(store_ref=weakref.ref(store), artifact_id="aid")
+
+    artifact.prefetch(device="cuda:0")
+
+    call = store._materialization.calls[0]
+    assert call["transport_request_id"] is None
+    assert call["transport_scheduling_group"] is None

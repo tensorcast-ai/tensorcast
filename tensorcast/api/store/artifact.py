@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import timezone
 from typing import (
     TYPE_CHECKING,
+    Callable,
     Mapping,
     Sequence,
     SupportsIndex,
@@ -32,7 +33,7 @@ from tensorcast.api._view_ops import (
     _coerce_slice_spec,
     build_view_spec,
 )
-from tensorcast.api.context import CallContext
+from tensorcast.api.context import CallContext, TransportSchedulingGroup
 from tensorcast.api.operation import (
     DaemonReplicaOperation,
     Operation,
@@ -521,6 +522,78 @@ def _build_transport_operation_id(
         )
 
     return base_operation_id
+
+
+def _transport_group_from_ctx_tags(
+    ctx: CallContext | None,
+) -> TransportSchedulingGroup | None:
+    if ctx is None or not ctx.tags:
+        return None
+    group_kind = _read_context_tag_str(ctx.tags, _TRANSPORT_GROUP_KIND_TAG)
+    group_id = _read_context_tag_str(ctx.tags, _TRANSPORT_GROUP_ID_TAG)
+    part_id = _read_context_tag_str(ctx.tags, _TRANSPORT_GROUP_PART_ID_TAG)
+    total_parts = _read_context_tag_int(
+        ctx.tags,
+        _TRANSPORT_GROUP_TOTAL_PARTS_TAG,
+        default=0,
+    )
+    if not (group_kind and group_id and part_id and total_parts > 0):
+        return None
+    return TransportSchedulingGroup(
+        group_kind=group_kind,
+        group_id=group_id,
+        total_parts=total_parts,
+        part_id=part_id,
+        priority=_read_context_tag_int(
+            ctx.tags,
+            _TRANSPORT_GROUP_PRIORITY_TAG,
+            default=0,
+        ),
+        epoch=_read_context_tag_int(
+            ctx.tags,
+            _TRANSPORT_GROUP_EPOCH_TAG,
+            default=0,
+        ),
+        request_id=_read_context_tag_str(ctx.tags, _TRANSPORT_REQUEST_ID_TAG) or None,
+    )
+
+
+def _resolve_prefetch_transport_hints(
+    *,
+    ctx: CallContext | None,
+    daemon_id: str,
+    artifact_id: str,
+    selection_hash: str,
+    logical_layout_hash: str,
+    device_id: int,
+    device_uuid_factory: Callable[[], str],
+) -> tuple[str | None, TransportSchedulingGroup | None]:
+    group = (
+        ctx.transport_group if ctx is not None else None
+    ) or _transport_group_from_ctx_tags(ctx)
+    if group is None:
+        return None, None
+    if group.request_id:
+        return group.request_id, group
+    device_uuid = device_uuid_factory()
+    digest = hashlib.sha256()
+    digest.update(b"tensorcast.prefetch.transport.v1")
+    for value in (
+        daemon_id,
+        artifact_id,
+        logical_layout_hash,
+        selection_hash,
+        str(device_id),
+        device_uuid,
+        group.group_kind,
+        group.group_id,
+        str(group.epoch),
+        str(group.total_parts),
+        group.part_id,
+    ):
+        digest.update(b"|")
+        digest.update(str(value).encode("utf-8"))
+    return f"prefetch:{digest.hexdigest()}", group
 
 
 def _register_client_binding(
@@ -2136,18 +2209,27 @@ class Artifact:
         selection = self._build_artifact_selection()
         view_id = view_id_hint or selection.view_id
         selection_hash = bytes(selection.selection_hash).hex()
+        logical_layout_hash = bytes(selection.logical_layout_hash).hex()
+        device_uuid_value: str | None = None
+
+        def _device_uuid_value() -> str:
+            nonlocal device_uuid_value
+            if device_uuid_value is None:
+                device_uuid_value = (
+                    "" if device_id == CPU_DEVICE_ID else device_uuid_for(device_id)
+                )
+            return device_uuid_value
 
         deterministic_replica_uuid: str | None = None
         if ctx is not None and ctx.idempotency_key:
-            logical_layout_hash = bytes(selection.logical_layout_hash).hex()
-            device_uuid = device_uuid_for(device_id)
+            resolved_device_uuid = _device_uuid_value()
             ns = uuid.uuid5(uuid.NAMESPACE_DNS, "tensorcast.op.v1")
             idempotency_key_hex = hashlib.sha256(
                 ctx.idempotency_key.encode("utf-8")
             ).hexdigest()
             action_fingerprint = (
                 f"prefetch|daemon={daemon_id}|artifact={artifact_id}|layout={logical_layout_hash}"
-                f"|selection={selection_hash}|device={device_id}|device_uuid={device_uuid}|lease=NO_LEASE|v2"
+                f"|selection={selection_hash}|device={device_id}|device_uuid={resolved_device_uuid}|lease=NO_LEASE|v2"
             )
             deterministic_replica_uuid = str(
                 uuid.uuid5(ns, f"{idempotency_key_hex}|{action_fingerprint}")
@@ -2164,6 +2246,18 @@ class Artifact:
         if not replica_uuid:
             replica_uuid = uuid.uuid4().hex
 
+        transport_request_id, transport_scheduling_group = (
+            _resolve_prefetch_transport_hints(
+                ctx=ctx,
+                daemon_id=daemon_id,
+                artifact_id=artifact_id,
+                selection_hash=selection_hash,
+                logical_layout_hash=logical_layout_hash,
+                device_id=device_id,
+                device_uuid_factory=_device_uuid_value,
+            )
+        )
+
         payload, _ = pipeline.materialize_subset(
             artifact_id=artifact_id,
             key=None,
@@ -2178,6 +2272,8 @@ class Artifact:
             options=opts,
             ctx=ctx,
             lease_mode=store_daemon_pb2.LeaseMode.LEASE_MODE_NO_LEASE,
+            transport_request_id=transport_request_id,
+            transport_scheduling_group=transport_scheduling_group,
         )
         self._update_metadata_from_payload(payload, runtime)
         operation_id = payload.ticket_replica_uuid or payload.replica_uuid or ""
