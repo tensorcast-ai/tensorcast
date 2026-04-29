@@ -143,7 +143,7 @@ pinned_memory:
   REQUIRE(cfg.public_disk_source().trusted_root_policies(0).lightweight_attestation_enabled());
   REQUIRE(
       cfg.public_disk_source().unmatched_path_mode() ==
-      tensorcast::config::v1::DaemonConfig::PublicDiskSource::PUBLIC_DISK_SOURCE_UNMATCHED_PATH_MODE_REJECT);
+      tensorcast::config::v1::DaemonConfig::PublicDiskSource::UNMATCHED_PATH_MODE_REJECT);
 }
 
 TEST_CASE("DaemonConfig rejects overlapping public disk source roots", "[config]") {

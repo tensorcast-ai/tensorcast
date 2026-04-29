@@ -76,7 +76,7 @@ public_disk_source:
   # When omitted, the daemon derives one trusted root from server.storage_path.
   # Relative paths resolve under that root; absolute paths outside it are rejected.
   # unmatched_path_mode:
-  #   PUBLIC_DISK_SOURCE_UNMATCHED_PATH_MODE_REJECT
+  #   UNMATCHED_PATH_MODE_REJECT
   trusted_root_policies:
     - policy_id: trusted_models_root
       root_path: /data/models

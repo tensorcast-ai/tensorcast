@@ -294,12 +294,12 @@ def _normalize_defaults_inplace(msg: cfg_pb.DaemonConfig) -> None:
         trusted_root.root_path = str(msg.server.storage_path)
     if (
         public_disk_source.unmatched_path_mode
-        == cfg_pb.DaemonConfig.PublicDiskSource.PUBLIC_DISK_SOURCE_UNMATCHED_PATH_MODE_UNSPECIFIED
+        == cfg_pb.DaemonConfig.PublicDiskSource.UNMATCHED_PATH_MODE_UNSPECIFIED
     ):
         public_disk_source.unmatched_path_mode = (
-            cfg_pb.DaemonConfig.PublicDiskSource.PUBLIC_DISK_SOURCE_UNMATCHED_PATH_MODE_ALLOW_ABSOLUTE_FALLBACK
+            cfg_pb.DaemonConfig.PublicDiskSource.UNMATCHED_PATH_MODE_ALLOW_ABSOLUTE_FALLBACK
             if not str(msg.server.storage_path or "").strip()
-            else cfg_pb.DaemonConfig.PublicDiskSource.PUBLIC_DISK_SOURCE_UNMATCHED_PATH_MODE_REJECT
+            else cfg_pb.DaemonConfig.PublicDiskSource.UNMATCHED_PATH_MODE_REJECT
         )
     for trusted_root in public_disk_source.trusted_root_policies:
         if (
