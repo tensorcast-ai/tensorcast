@@ -1988,6 +1988,9 @@ class DaemonCtl:
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
+        transport_request_id: str | None = None,
+        transport_scheduling_group: store_daemon_pb2.TransportSchedulingGroupHint
+        | None = None,
         timeout_s: float | int | None = None,
         timing_out: dict[str, float] | None = None,
     ) -> store_daemon_pb2.MaterializeReplicaResponse: ...
@@ -2011,6 +2014,9 @@ class DaemonCtl:
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
+        transport_request_id: str | None = None,
+        transport_scheduling_group: store_daemon_pb2.TransportSchedulingGroupHint
+        | None = None,
         timeout_s: float | int | None = None,
         timing_out: dict[str, float] | None = None,
     ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus]: ...
@@ -2033,6 +2039,9 @@ class DaemonCtl:
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
+        transport_request_id: str | None = None,
+        transport_scheduling_group: store_daemon_pb2.TransportSchedulingGroupHint
+        | None = None,
         timeout_s: float | int | None = None,
         timing_out: dict[str, float] | None = None,
     ) -> bytes: ...
@@ -2054,6 +2063,9 @@ class DaemonCtl:
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
+        transport_request_id: str | None = None,
+        transport_scheduling_group: store_daemon_pb2.TransportSchedulingGroupHint
+        | None = None,
         timeout_s: float | int | None = None,
         timing_out: dict[str, float] | None = None,
     ) -> (
@@ -2090,6 +2102,10 @@ class DaemonCtl:
             )
             if collective_load_group is not None:
                 request.collective_load_group.CopyFrom(collective_load_group)
+            if transport_request_id:
+                request.transport_request_id = str(transport_request_id)
+            if transport_scheduling_group is not None:
+                request.transport_scheduling_group.CopyFrom(transport_scheduling_group)
             if wait_for_shared_disk_ms:
                 request.wait_for_shared_disk_ms = int(wait_for_shared_disk_ms)
             request.source_policy.CopyFrom(resolved_source_policy)

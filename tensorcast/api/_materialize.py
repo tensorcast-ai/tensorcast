@@ -28,7 +28,11 @@ from tensorcast.api._device import CPU_DEVICE_ID, device_uuid_for, resolve_devic
 from tensorcast.api._errors import DaemonUnavailable, IndexParseError
 from tensorcast.api._runtime import apply_client_load_defaults_if_present
 from tensorcast.api._utils import new_uuid
-from tensorcast.api.context import CallContext, CollectiveLoadGroup
+from tensorcast.api.context import (
+    CallContext,
+    CollectiveLoadGroup,
+    TransportSchedulingGroup,
+)
 from tensorcast.common.selection_contract import (
     build_artifact_selection,
     compute_selected_index_bytes,
@@ -208,6 +212,21 @@ def _resolve_collective_load_group(
     return group
 
 
+def _transport_group_to_daemon_proto(
+    group: TransportSchedulingGroup | None,
+) -> store_daemon_pb2.TransportSchedulingGroupHint | None:
+    if group is None:
+        return None
+    return store_daemon_pb2.TransportSchedulingGroupHint(
+        group_id=group.group_id,
+        group_kind=group.group_kind,
+        total_parts=int(group.total_parts),
+        part_id=group.part_id,
+        priority=int(group.priority),
+        epoch=int(group.epoch),
+    )
+
+
 def _build_artifact_selection(
     *,
     artifact_id: str,
@@ -267,6 +286,8 @@ def materialize_artifact_v2(
     ctx: CallContext | None = None,
     timeout_s: float | None = None,
     lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+    transport_request_id: str | None = None,
+    transport_scheduling_group: TransportSchedulingGroup | None = None,
 ) -> MaterializationPayload:
     if artifact_id is not None and key is not None:
         raise ValueError("Exactly one of artifact_id or key must be provided")
@@ -369,6 +390,9 @@ def materialize_artifact_v2(
         )
         replica_uuid_value = replica_uuid or new_uuid()
         collective_load_group = _resolve_collective_load_group(ctx)
+        transport_group_proto = _transport_group_to_daemon_proto(
+            transport_scheduling_group
+        )
 
         request_device_uuid = (
             ""
@@ -391,6 +415,8 @@ def materialize_artifact_v2(
             target_device_type=target_device_type,
             lease_mode=lease_mode,
             collective_load_group=collective_load_group,
+            transport_request_id=transport_request_id,
+            transport_scheduling_group=transport_group_proto,
             timeout_s=effective_timeout_s,
             timing_out=materialize_timing,
         )
