@@ -299,54 +299,59 @@ class BroadcastRepository(BaseRepository):
         cursor: DuckDBPyConnection | None = None,
     ) -> BroadcastEdge:
         """Create a broadcast edge row."""
+        if cursor is None:
+            conflict: ValueError | None = None
+            with self.transaction() as tx:
+                try:
+                    return self.create_edge(edge, cursor=tx)
+                except ValueError as exc:
+                    conflict = exc
+            if conflict is not None:
+                raise conflict
+            raise RuntimeError("broadcast edge transaction exited without result")
+
         normalized_edge_id = self._normalize_required_text(edge.edge_id)
         normalized_session_id = self._normalize_required_text(edge.session_id)
         normalized_child_worker_id = self._normalize_required_text(edge.child_worker_id)
-        owns_cursor = cursor is None
-        if owns_cursor:
-            cursor = self.get_cursor()
-        try:
-            if edge.state in self._ACTIVE_EDGE_STATES:
-                existing = self.find_active_edge_for_child(
-                    normalized_session_id,
-                    normalized_child_worker_id,
-                    cursor=cursor,
-                )
-                if existing is not None:
-                    raise ValueError(
-                        "active broadcast edge already exists for child "
-                        f"{normalized_child_worker_id} in session {normalized_session_id}"
-                    )
 
-            cursor.execute(
-                """
-                INSERT INTO broadcast_edges (
-                    edge_id, session_id, parent_worker_id, parent_replica_id,
-                    child_worker_id, level, attempt, state, transport_request_id,
-                    failure_reason
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    normalized_edge_id,
-                    normalized_session_id,
-                    self._normalize_required_text(edge.parent_worker_id),
-                    self._uuid_to_text(edge.parent_replica_id),
-                    normalized_child_worker_id,
-                    int(edge.level),
-                    int(edge.attempt),
-                    edge.state.value,
-                    self._normalize_optional_text(edge.transport_request_id),
-                    self._normalize_optional_text(edge.failure_reason),
-                ],
+        if edge.state in self._ACTIVE_EDGE_STATES:
+            existing = self.find_active_edge_for_child(
+                normalized_session_id,
+                normalized_child_worker_id,
+                cursor=cursor,
             )
-            edge.edge_id = normalized_edge_id
-            edge.session_id = normalized_session_id
-            edge.child_worker_id = normalized_child_worker_id
-            return edge
-        finally:
-            if owns_cursor:
-                cursor.close()
+            if existing is not None:
+                raise ValueError(
+                    "active broadcast edge already exists for child "
+                    f"{normalized_child_worker_id} in session {normalized_session_id}"
+                )
+
+        cursor.execute(
+            """
+            INSERT INTO broadcast_edges (
+                edge_id, session_id, parent_worker_id, parent_replica_id,
+                child_worker_id, level, attempt, state, transport_request_id,
+                failure_reason
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                normalized_edge_id,
+                normalized_session_id,
+                self._normalize_required_text(edge.parent_worker_id),
+                self._uuid_to_text(edge.parent_replica_id),
+                normalized_child_worker_id,
+                int(edge.level),
+                int(edge.attempt),
+                edge.state.value,
+                self._normalize_optional_text(edge.transport_request_id),
+                self._normalize_optional_text(edge.failure_reason),
+            ],
+        )
+        edge.edge_id = normalized_edge_id
+        edge.session_id = normalized_session_id
+        edge.child_worker_id = normalized_child_worker_id
+        return edge
 
     def find_edge(
         self,
@@ -419,62 +424,96 @@ class BroadcastRepository(BaseRepository):
         cursor: DuckDBPyConnection | None = None,
     ) -> bool:
         """Mark an edge and its target as materializing."""
+        if cursor is None:
+            conflict: ValueError | None = None
+            with self.transaction() as tx:
+                try:
+                    return self.mark_edge_materializing(
+                        edge_id=edge_id,
+                        transport_request_id=transport_request_id,
+                        cursor=tx,
+                    )
+                except ValueError as exc:
+                    conflict = exc
+            if conflict is not None:
+                raise conflict
+            raise RuntimeError("broadcast edge transaction exited without result")
+
         normalized_edge_id = self._normalize_required_text(edge_id)
         normalized_transport_request_id = self._normalize_required_text(
             transport_request_id
         )
-        owns_cursor = cursor is None
-        if owns_cursor:
-            cursor = self.get_cursor()
-        try:
-            edge = self.find_edge(normalized_edge_id, cursor=cursor)
-            if edge is None:
-                return False
-            existing = self.find_active_edge_for_child(
+        edge = self.find_edge(normalized_edge_id, cursor=cursor)
+        if edge is None:
+            return False
+        if edge.state not in (BroadcastEdgeState.PLANNED, BroadcastEdgeState.ASSIGNED):
+            return False
+
+        existing = cursor.execute(
+            """
+            SELECT edge_id
+            FROM broadcast_edges
+            WHERE session_id = ?
+              AND child_worker_id = ?
+              AND edge_id != ?
+              AND state IN ('planned', 'assigned', 'materializing')
+            LIMIT 1
+            """,
+            [edge.session_id, edge.child_worker_id, edge.edge_id],
+        ).fetchone()
+        if existing is not None:
+            raise ValueError(
+                "active broadcast edge already exists for child "
+                f"{edge.child_worker_id} in session {edge.session_id}"
+            )
+
+        target = self.find_target(edge.session_id, edge.child_worker_id, cursor=cursor)
+        if target is None:
+            return False
+        if (
+            target.assigned_edge_id is not None
+            and target.assigned_edge_id != edge.edge_id
+        ):
+            return False
+
+        edge_row = cursor.execute(
+            """
+            UPDATE broadcast_edges
+            SET state = 'materializing',
+                transport_request_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE edge_id = ?
+              AND state IN ('planned', 'assigned')
+            RETURNING edge_id
+            """,
+            [normalized_transport_request_id, normalized_edge_id],
+        ).fetchone()
+        if edge_row is None:
+            return False
+
+        target_row = cursor.execute(
+            """
+            UPDATE broadcast_targets
+            SET state = 'materializing',
+                assigned_edge_id = ?,
+                level = ?,
+                attempt = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE session_id = ?
+              AND target_worker_id = ?
+              AND (assigned_edge_id IS NULL OR assigned_edge_id = ?)
+            RETURNING target_worker_id
+            """,
+            [
+                normalized_edge_id,
+                int(edge.level),
+                int(edge.attempt),
                 edge.session_id,
                 edge.child_worker_id,
-                cursor=cursor,
-            )
-            if existing is not None and existing.edge_id != edge.edge_id:
-                raise ValueError(
-                    "active broadcast edge already exists for child "
-                    f"{edge.child_worker_id} in session {edge.session_id}"
-                )
-            row = cursor.execute(
-                """
-                UPDATE broadcast_edges
-                SET state = 'materializing',
-                    transport_request_id = ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE edge_id = ?
-                RETURNING edge_id
-                """,
-                [normalized_transport_request_id, normalized_edge_id],
-            ).fetchone()
-            if row is None:
-                return False
-            cursor.execute(
-                """
-                UPDATE broadcast_targets
-                SET state = 'materializing',
-                    assigned_edge_id = ?,
-                    level = ?,
-                    attempt = ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE session_id = ? AND target_worker_id = ?
-                """,
-                [
-                    normalized_edge_id,
-                    int(edge.level),
-                    int(edge.attempt),
-                    edge.session_id,
-                    edge.child_worker_id,
-                ],
-            )
-            return True
-        finally:
-            if owns_cursor:
-                cursor.close()
+                normalized_edge_id,
+            ],
+        ).fetchone()
+        return target_row is not None
 
     def mark_edge_failed(
         self,
@@ -483,50 +522,60 @@ class BroadcastRepository(BaseRepository):
         cursor: DuckDBPyConnection | None = None,
     ) -> bool:
         """Mark an edge and its target as failed."""
+        if cursor is None:
+            with self.transaction() as tx:
+                return self.mark_edge_failed(
+                    edge_id=edge_id,
+                    reason=reason,
+                    cursor=tx,
+                )
+
         normalized_edge_id = self._normalize_required_text(edge_id)
         normalized_reason = self._normalize_required_text(reason)
-        owns_cursor = cursor is None
-        if owns_cursor:
-            cursor = self.get_cursor()
-        try:
-            edge = self.find_edge(normalized_edge_id, cursor=cursor)
-            if edge is None:
-                return False
-            row = cursor.execute(
-                """
-                UPDATE broadcast_edges
-                SET state = 'failed',
-                    failure_reason = ?,
-                    updated_at = CURRENT_TIMESTAMP,
-                    completed_at = CURRENT_TIMESTAMP
-                WHERE edge_id = ?
-                RETURNING edge_id
-                """,
-                [normalized_reason, normalized_edge_id],
-            ).fetchone()
-            if row is None:
-                return False
-            cursor.execute(
-                """
-                UPDATE broadcast_targets
-                SET state = 'failed',
-                    failure_reason = ?,
-                    assigned_edge_id = ?,
-                    updated_at = CURRENT_TIMESTAMP,
-                    completed_at = CURRENT_TIMESTAMP
-                WHERE session_id = ? AND target_worker_id = ?
-                """,
-                [
-                    normalized_reason,
-                    normalized_edge_id,
-                    edge.session_id,
-                    edge.child_worker_id,
-                ],
-            )
-            return True
-        finally:
-            if owns_cursor:
-                cursor.close()
+        edge = self.find_edge(normalized_edge_id, cursor=cursor)
+        if edge is None:
+            return False
+        target = self.find_target(edge.session_id, edge.child_worker_id, cursor=cursor)
+        if target is None or target.assigned_edge_id != edge.edge_id:
+            return False
+
+        row = cursor.execute(
+            """
+            UPDATE broadcast_edges
+            SET state = 'failed',
+                failure_reason = ?,
+                updated_at = CURRENT_TIMESTAMP,
+                completed_at = CURRENT_TIMESTAMP
+            WHERE edge_id = ?
+            RETURNING edge_id
+            """,
+            [normalized_reason, normalized_edge_id],
+        ).fetchone()
+        if row is None:
+            return False
+
+        target_row = cursor.execute(
+            """
+            UPDATE broadcast_targets
+            SET state = 'failed',
+                failure_reason = ?,
+                assigned_edge_id = ?,
+                updated_at = CURRENT_TIMESTAMP,
+                completed_at = CURRENT_TIMESTAMP
+            WHERE session_id = ?
+              AND target_worker_id = ?
+              AND assigned_edge_id = ?
+            RETURNING target_worker_id
+            """,
+            [
+                normalized_reason,
+                normalized_edge_id,
+                edge.session_id,
+                edge.child_worker_id,
+                normalized_edge_id,
+            ],
+        ).fetchone()
+        return target_row is not None
 
     def mark_edge_completed(
         self,
@@ -535,48 +584,58 @@ class BroadcastRepository(BaseRepository):
         cursor: DuckDBPyConnection | None = None,
     ) -> bool:
         """Mark an edge and its target as completed."""
+        if cursor is None:
+            with self.transaction() as tx:
+                return self.mark_edge_completed(
+                    edge_id=edge_id,
+                    completed_replica_id=completed_replica_id,
+                    cursor=tx,
+                )
+
         normalized_edge_id = self._normalize_required_text(edge_id)
-        owns_cursor = cursor is None
-        if owns_cursor:
-            cursor = self.get_cursor()
-        try:
-            edge = self.find_edge(normalized_edge_id, cursor=cursor)
-            if edge is None:
-                return False
-            row = cursor.execute(
-                """
-                UPDATE broadcast_edges
-                SET state = 'completed',
-                    updated_at = CURRENT_TIMESTAMP,
-                    completed_at = CURRENT_TIMESTAMP
-                WHERE edge_id = ?
-                RETURNING edge_id
-                """,
-                [normalized_edge_id],
-            ).fetchone()
-            if row is None:
-                return False
-            cursor.execute(
-                """
-                UPDATE broadcast_targets
-                SET state = 'completed',
-                    completed_replica_id = ?,
-                    assigned_edge_id = ?,
-                    updated_at = CURRENT_TIMESTAMP,
-                    completed_at = CURRENT_TIMESTAMP
-                WHERE session_id = ? AND target_worker_id = ?
-                """,
-                [
-                    self._uuid_to_text(completed_replica_id),
-                    normalized_edge_id,
-                    edge.session_id,
-                    edge.child_worker_id,
-                ],
-            )
-            return True
-        finally:
-            if owns_cursor:
-                cursor.close()
+        edge = self.find_edge(normalized_edge_id, cursor=cursor)
+        if edge is None:
+            return False
+        target = self.find_target(edge.session_id, edge.child_worker_id, cursor=cursor)
+        if target is None or target.assigned_edge_id != edge.edge_id:
+            return False
+
+        row = cursor.execute(
+            """
+            UPDATE broadcast_edges
+            SET state = 'completed',
+                updated_at = CURRENT_TIMESTAMP,
+                completed_at = CURRENT_TIMESTAMP
+            WHERE edge_id = ?
+            RETURNING edge_id
+            """,
+            [normalized_edge_id],
+        ).fetchone()
+        if row is None:
+            return False
+
+        target_row = cursor.execute(
+            """
+            UPDATE broadcast_targets
+            SET state = 'completed',
+                completed_replica_id = ?,
+                assigned_edge_id = ?,
+                updated_at = CURRENT_TIMESTAMP,
+                completed_at = CURRENT_TIMESTAMP
+            WHERE session_id = ?
+              AND target_worker_id = ?
+              AND assigned_edge_id = ?
+            RETURNING target_worker_id
+            """,
+            [
+                self._uuid_to_text(completed_replica_id),
+                normalized_edge_id,
+                edge.session_id,
+                edge.child_worker_id,
+                normalized_edge_id,
+            ],
+        ).fetchone()
+        return target_row is not None
 
     def count_incomplete_targets(
         self,
