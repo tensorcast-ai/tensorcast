@@ -71,11 +71,52 @@ std::string_view binding_seal_identity_canonical_index_json(const BindingRegistr
   if (record.sealed_commit_result.has_value() && !record.sealed_commit_result->canonical_index_json.empty()) {
     return record.sealed_commit_result->canonical_index_json;
   }
-  return record.target_index_json;
+  if (!record.current_artifact_canonical_index_json.empty()) {
+    return record.current_artifact_canonical_index_json;
+  }
+  return std::string_view();
 }
 
 std::string_view binding_tensor_canonical_index_json(const BindingRegistry::Record& record) {
   return record.target_index_json;
+}
+
+absl::Status validate_seal_identity_index_matches_binding_layout(
+    std::string_view identity_index_json,
+    std::string_view binding_index_json) {
+  if (identity_index_json == binding_index_json) {
+    return absl::OkStatus();
+  }
+  auto identity_or = parse_canonical_index(identity_index_json);
+  if (!identity_or.ok()) {
+    return identity_or.status();
+  }
+  auto binding_or = parse_canonical_index(binding_index_json);
+  if (!binding_or.ok()) {
+    return binding_or.status();
+  }
+  if (identity_or->logical_total_size != binding_or->logical_total_size) {
+    return absl::FailedPreconditionError(
+        "canonical_full binding layout index total size does not match source identity index");
+  }
+  if (identity_or->entries.size() != binding_or->entries.size()) {
+    return absl::FailedPreconditionError(
+        "canonical_full binding layout tensor set does not match source identity index");
+  }
+  for (const auto& [name, identity_entry] : identity_or->entries) {
+    const auto binding_it = binding_or->entries.find(name);
+    if (binding_it == binding_or->entries.end()) {
+      return absl::FailedPreconditionError(absl::StrCat("canonical_full binding layout missing source tensor=", name));
+    }
+    const auto& binding_entry = binding_it->second;
+    if (identity_entry.logical_offset != binding_entry.logical_offset ||
+        identity_entry.logical_length != binding_entry.logical_length || identity_entry.dtype != binding_entry.dtype ||
+        identity_entry.shape != binding_entry.shape || identity_entry.stride != binding_entry.stride) {
+      return absl::FailedPreconditionError(
+          absl::StrCat("canonical_full binding layout entry does not match source identity tensor=", name));
+    }
+  }
+  return absl::OkStatus();
 }
 
 class OperationLeaseGuard {
@@ -570,7 +611,8 @@ absl::StatusOr<std::vector<store::StoreEngine::SealAssemblyCutInput::BoundCanoni
 
 absl::StatusOr<store::StoreEngine::SealAssemblyCutInput> build_seal_cut_input(
     BindingRegistry& bindings,
-    const v2::AssemblyReadinessCut& readiness_cut) {
+    const v2::AssemblyReadinessCut& readiness_cut,
+    store::components::IGlobalStoreClient* global_store_client) {
   store::StoreEngine::SealAssemblyCutInput input;
   input.structural_views.reserve(static_cast<size_t>(readiness_cut.views_size()));
   for (const auto& cut_view : readiness_cut.views()) {
@@ -618,6 +660,8 @@ absl::StatusOr<store::StoreEngine::SealAssemblyCutInput> build_seal_cut_input(
     return record_or.status();
   }
   const auto& record = *record_or;
+  std::string binding_index_json;
+  std::string identity_index_json;
   {
     absl::MutexLock lock(&record->mu);
     if (record->closed) {
@@ -631,13 +675,10 @@ absl::StatusOr<store::StoreEngine::SealAssemblyCutInput> build_seal_cut_input(
       if (!spans_or.ok()) {
         return spans_or.status();
       }
-      const std::string_view canonical_index_json = binding_seal_identity_canonical_index_json(*record);
-      if (!canonical_index_json.empty()) {
-        // Daemon-owned canonical bindings already carry the authoritative
-        // canonical index locally. Thread it through the cut so cut-driven
-        // sealing does not depend on a Global Store GetArtifactIndexById lookup
-        // for transient/local source identities.
-        input.canonical_index_json = std::string(canonical_index_json);
+      binding_index_json = std::string(binding_tensor_canonical_index_json(*record));
+      const std::string_view local_identity_index_json = binding_seal_identity_canonical_index_json(*record);
+      if (!local_identity_index_json.empty()) {
+        identity_index_json = std::string(local_identity_index_json);
       }
       if (record->sealed_commit_result.has_value() && !record->sealed_commit_result->artifact_id.empty()) {
         input.canonical_artifact_id = record->sealed_commit_result->artifact_id;
@@ -646,6 +687,29 @@ absl::StatusOr<store::StoreEngine::SealAssemblyCutInput> build_seal_cut_input(
       }
       input.bound_canonical_spans = std::move(*spans_or);
     }
+  }
+  if (!input.bound_canonical_spans.empty()) {
+    if (identity_index_json.empty()) {
+      if (input.canonical_artifact_id.empty()) {
+        identity_index_json = binding_index_json;
+      } else {
+        if (global_store_client == nullptr || !global_store_client->is_connected()) {
+          return absl::FailedPreconditionError(
+              "canonical_full source identity index lookup requires Global Store client");
+        }
+        auto identity_index_or = global_store_client->get_artifact_index_by_id(input.canonical_artifact_id);
+        if (!identity_index_or.ok()) {
+          return identity_index_or.status();
+        }
+        identity_index_json = std::move(*identity_index_or);
+      }
+    }
+    auto compatible_status =
+        validate_seal_identity_index_matches_binding_layout(identity_index_json, binding_index_json);
+    if (!compatible_status.ok()) {
+      return compatible_status;
+    }
+    input.canonical_index_json = std::move(identity_index_json);
   }
   return input;
 }
@@ -1362,6 +1426,7 @@ absl::StatusOr<RepresentationPublishValidationResult> finalize_binding_subject_c
           "binding publication subject generation changed during closeout finalization");
     }
     record->current_artifact_id = out_or->artifact_id;
+    record->current_artifact_canonical_index_json = registration_index_json;
     record->current_selection = selection;
     record->target_publication_token.clear();
     record->state = v2::BINDING_STATE_READY_ARTIFACT;
@@ -1983,7 +2048,7 @@ grpc::Status AssemblyOperationService::seal_assembly_attempt(
               }
               if (final_status.ok()) {
                 SC_TRACE_SCOPE("assembly_attempt.build_seal_cut_input");
-                auto seal_cut_input_or = build_seal_cut_input(*bindings, readiness_cut);
+                auto seal_cut_input_or = build_seal_cut_input(*bindings, readiness_cut, client_sp.get());
                 if (!seal_cut_input_or.ok()) {
                   final_status = seal_cut_input_or.status();
                 } else {

@@ -42,6 +42,7 @@ class BindingRegistry {
     std::string target_index_json;
     std::string target_layout_hash;
     std::string current_artifact_id;
+    std::string current_artifact_canonical_index_json;
     std::string target_publication_token;
     std::string current_binding_value_id;
     uint64_t seal_generation{0};

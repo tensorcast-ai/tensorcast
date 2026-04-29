@@ -1218,8 +1218,10 @@ void mark_ready_artifact(
     BindingRegistry::Record* record,
     std::string_view artifact_id,
     const tensorcast::common::v1::ArtifactSelection& selection,
-    std::string_view target_publication_token) {
+    std::string_view target_publication_token,
+    std::string_view canonical_index_json = std::string_view()) {
   record->current_artifact_id = std::string(artifact_id);
+  record->current_artifact_canonical_index_json = std::string(canonical_index_json);
   record->current_selection = selection;
   record->target_publication_token = std::string(target_publication_token);
   record->state = v2::BINDING_STATE_READY_ARTIFACT;
@@ -1231,6 +1233,7 @@ void mark_ready_artifact(
 
 void mark_allocated(BindingRegistry::Record* record) {
   record->current_artifact_id.clear();
+  record->current_artifact_canonical_index_json.clear();
   record->current_selection.Clear();
   record->target_publication_token.clear();
   record->current_binding_value_id.clear();
@@ -1241,6 +1244,7 @@ void mark_allocated(BindingRegistry::Record* record) {
 
 void mark_mutable(BindingRegistry::Record* record, std::string_view update_epoch) {
   record->current_artifact_id.clear();
+  record->current_artifact_canonical_index_json.clear();
   record->current_selection.Clear();
   record->target_publication_token.clear();
   record->current_binding_value_id.clear();
@@ -1251,6 +1255,7 @@ void mark_mutable(BindingRegistry::Record* record, std::string_view update_epoch
 
 void mark_ready_local(BindingRegistry::Record* record) {
   record->current_artifact_id.clear();
+  record->current_artifact_canonical_index_json.clear();
   record->current_selection.Clear();
   record->target_publication_token.clear();
   record->state = v2::BINDING_STATE_READY_LOCAL;
@@ -1262,6 +1267,7 @@ void mark_ready_local(BindingRegistry::Record* record) {
 
 void mark_dirty(BindingRegistry::Record* record) {
   record->current_artifact_id.clear();
+  record->current_artifact_canonical_index_json.clear();
   record->current_selection.Clear();
   record->target_publication_token.clear();
   record->current_binding_value_id.clear();
@@ -2122,7 +2128,11 @@ grpc::Status OwnedBindingService::create_owned_binding(
     record->target_index_json = std::string(req.target_index_bytes().data(), req.target_index_bytes().size());
     record->target_layout_hash = target_layout_hash;
     mark_ready_artifact(
-        record.get(), prepared_plan.resolved_artifact_id, prepared_plan.current_selection, std::string());
+        record.get(),
+        prepared_plan.resolved_artifact_id,
+        prepared_plan.current_selection,
+        std::string(),
+        prepared_plan.canonical_index_json);
     if (mapped) {
       record->copy_plan = req.copy_plan();
       record->dst_tensors.assign(req.dst_tensors().begin(), req.dst_tensors().end());
@@ -2367,6 +2377,7 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
     contribution_record.target_layout = binding_record->target_layout;
     contribution_record.target_index_json = binding_record->target_index_json;
     contribution_record.current_artifact_id = binding_record->current_artifact_id;
+    contribution_record.current_artifact_canonical_index_json = binding_record->current_artifact_canonical_index_json;
     contribution_record.current_selection = binding_record->current_selection;
     contribution_record.source_selection = binding_record->source_selection;
     contribution_record.handle_bytes = binding_record->handle_bytes;
@@ -2863,7 +2874,12 @@ grpc::Status OwnedBindingService::promote_binding_current_value(
     if (record->current_binding_value_id != req.binding_value_id()) {
       return {StatusCode::FAILED_PRECONDITION, "binding current value changed during promotion"};
     }
-    mark_ready_artifact(record.get(), out_or->artifact_id, selection, /*target_publication_token=*/"");
+    mark_ready_artifact(
+        record.get(),
+        out_or->artifact_id,
+        selection,
+        /*target_publication_token=*/"",
+        out_or->canonical_index_json);
     resp.set_state(record->state);
     fill_binding_value(*record, *resp.mutable_current_value());
   }
@@ -3115,7 +3131,8 @@ grpc::Status OwnedBindingService::refill_owned_binding(
         record.get(),
         prepared_plan.resolved_artifact_id,
         prepared_plan.current_selection,
-        target_publication_token_or.ok() ? *target_publication_token_or : std::string());
+        target_publication_token_or.ok() ? *target_publication_token_or : std::string(),
+        prepared_plan.canonical_index_json);
   }
 
   resp.set_artifact_id(prepared_plan.resolved_artifact_id);
