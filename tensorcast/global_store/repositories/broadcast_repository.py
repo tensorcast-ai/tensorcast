@@ -430,6 +430,16 @@ class BroadcastRepository(BaseRepository):
             edge = self.find_edge(normalized_edge_id, cursor=cursor)
             if edge is None:
                 return False
+            existing = self.find_active_edge_for_child(
+                edge.session_id,
+                edge.child_worker_id,
+                cursor=cursor,
+            )
+            if existing is not None and existing.edge_id != edge.edge_id:
+                raise ValueError(
+                    "active broadcast edge already exists for child "
+                    f"{edge.child_worker_id} in session {edge.session_id}"
+                )
             row = cursor.execute(
                 """
                 UPDATE broadcast_edges

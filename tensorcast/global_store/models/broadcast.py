@@ -53,7 +53,7 @@ class BroadcastSession:
     fanout: int
     max_attempts: int
     strict_parent: bool
-    state: BroadcastSessionState
+    state: BroadcastSessionState = BroadcastSessionState.PLANNING
     root_replica_id: UUID | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -67,7 +67,7 @@ class BroadcastTarget:
     session_id: str
     target_worker_id: str
     target_daemon_id: str | None
-    state: BroadcastTargetState
+    state: BroadcastTargetState = BroadcastTargetState.PENDING
     level: int | None = None
     attempt: int = 0
     assigned_edge_id: str | None = None
@@ -88,8 +88,8 @@ class BroadcastEdge:
     parent_replica_id: UUID
     child_worker_id: str
     level: int
-    attempt: int
-    state: BroadcastEdgeState
+    attempt: int = 1
+    state: BroadcastEdgeState = BroadcastEdgeState.PLANNED
     transport_request_id: str | None = None
     failure_reason: str | None = None
     created_at: datetime | None = None
