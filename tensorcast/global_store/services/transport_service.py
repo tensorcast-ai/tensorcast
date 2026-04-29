@@ -157,14 +157,6 @@ class TransportService:
             "source_address": source_address,
             "source_port": int(source_port),
             "requester_worker_id": (requester_worker_id or "").strip(),
-            "broadcast": (
-                {
-                    "session_id": broadcast_hint.session_id,
-                    "strict_parent": bool(broadcast_hint.strict_parent),
-                }
-                if broadcast_hint is not None
-                else None
-            ),
             "scheduling_group": (
                 {
                     "group_id": scheduling_group.group_id,
@@ -178,6 +170,11 @@ class TransportService:
                 else None
             ),
         }
+        if broadcast_hint is not None:
+            payload["broadcast"] = {
+                "session_id": broadcast_hint.session_id,
+                "strict_parent": bool(broadcast_hint.strict_parent),
+            }
         serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
