@@ -29,6 +29,7 @@ StagingWindow::StageFn MakeStageFunction(
     v1::RdmaConfig::StagedRdmaBackend staged_backend,
     bool use_direct,
     ::ibv_mr* direct_mr,
+    std::shared_ptr<void> direct_keepalive,
     std::shared_ptr<RdmaSourceStageProfile> source_stage_profile);
 
 TEST_CASE("MakeStageFunction guards null stager", "[communicator][rdma]") {
@@ -45,6 +46,7 @@ TEST_CASE("MakeStageFunction guards null stager", "[communicator][rdma]") {
       /*staged_backend=*/v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED,
       /*use_direct=*/false,
       /*direct_mr=*/nullptr,
+      /*direct_keepalive=*/nullptr,
       /*source_stage_profile=*/nullptr);
 
   auto lease_or = stage_fn(/*offset=*/0, /*bytes=*/1, /*segment_idx=*/0);

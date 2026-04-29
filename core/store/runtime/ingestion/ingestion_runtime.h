@@ -91,6 +91,14 @@ class IngestionRuntime {
       const loading::MaterializeHints& hints,
       loading::MaterializationSource source_kind);
 
+  absl::StatusOr<ingestion::MaterializationFacade::IngestMappedSourcesIntoReplicasResult>
+  ingest_mapped_sources_into_replicas(
+      std::vector<ingestion::MaterializationFacade::MappedReplicaTarget> targets,
+      std::vector<std::shared_ptr<loader::SeekableSource>> sources,
+      const loader::ByteRangeMap& mapping,
+      const loading::MaterializeHints& hints,
+      loading::MaterializationSource source_kind);
+
   absl::StatusOr<ingestion::ArtifactLoweringResult> execute_artifact_lowering_plan(
       ingestion::ArtifactLoweringPlan plan);
 

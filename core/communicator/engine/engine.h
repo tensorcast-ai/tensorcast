@@ -127,6 +127,16 @@ class Communicator {
 
   absl::Status deactivate_stable_local_backing(std::string_view backing_id);
 
+  struct StableLocalBackingSourceView {
+    std::string tensor_key;
+    uint64_t addr = 0;
+    uint64_t bytes = 0;
+    tensorcast::store::StableLocalBackingRef backing;
+    std::shared_ptr<void> keepalive;
+  };
+
+  absl::Status register_stable_local_backing_source_view(const StableLocalBackingSourceView& view);
+
   // Test-only stable-backing introspection.
   bool stable_local_backing_supported_for_test() const;
   bool stable_local_backing_active_for_test(std::string_view backing_id) const;
@@ -294,6 +304,25 @@ class Communicator {
     double gate_wait_ms = 0.0;
   };
 
+  struct StableSourceViewMrEnsureResult {
+    struct ibv_mr* mr = nullptr;
+    std::shared_ptr<void> backing_use;
+    std::string backing_id;
+    uint64_t chunk_index = 0;
+    bool cache_hit = false;
+    bool waited_on_inflight = false;
+    bool registered_now = false;
+    bool prewarm_requested = false;
+    bool prewarm_complete = false;
+  };
+
+  struct StableLocalBackingSourceViewState {
+    uint64_t addr = 0;
+    uint64_t bytes = 0;
+    tensorcast::store::StableLocalBackingRef backing;
+    std::shared_ptr<void> keepalive;
+  };
+
   struct TensorReadState {
     int inflight = 0;
     bool retiring = false;
@@ -303,6 +332,12 @@ class Communicator {
   absl::StatusOr<std::shared_ptr<void>> acquire_tensor_read_lease(const std::string& tensor_key);
   void release_tensor_read_lease(const std::string& tensor_key);
   absl::Status wait_for_tensor_reads_to_drain(const std::string& tensor_key, absl::Duration timeout);
+  std::shared_ptr<StableLocalBackingSourceViewState> lookup_stable_local_backing_source_view(
+      const std::string& tensor_key) const;
+  absl::StatusOr<StableSourceViewMrEnsureResult> ensure_stable_local_backing_source_view_mr(
+      const std::string& tensor_key,
+      const std::shared_ptr<StableLocalBackingSourceViewState>& view,
+      const transport::net_dev_t& dev);
 
   struct MtcpReadTask {
     channel_t channel;
@@ -457,6 +492,9 @@ class Communicator {
   mutable absl::Mutex stable_local_backings_mu_;
   absl::flat_hash_map<std::string, std::shared_ptr<StableLocalBackingState>> stable_local_backings_
       ABSL_GUARDED_BY(stable_local_backings_mu_);
+  mutable absl::Mutex stable_source_views_mu_;
+  absl::flat_hash_map<std::string, std::shared_ptr<StableLocalBackingSourceViewState>> stable_source_views_
+      ABSL_GUARDED_BY(stable_source_views_mu_);
 
   // Serialize channel creation to avoid duplicate control connections to same peer
   mutable absl::Mutex create_channel_mu_;

@@ -184,11 +184,15 @@ absl::StatusOr<ByteArtifactRegionLayout> ByteArtifactRegionLayout::acquire(
     if (!region_id_or.ok()) {
       return region_id_or.status();
     }
+    IpcRegionRegistry::HostRegionClass storage_host_region_class = IpcRegionRegistry::HostRegionClass::kNone;
+    bool storage_daemon_managed = false;
     if (*storage_memory_kind_or == IpcRegionRegistry::MemoryKind::kHostShared) {
       auto region_desc_or = registry.describe(*region_id_or);
       if (!region_desc_or.ok()) {
         return region_desc_or.status();
       }
+      storage_host_region_class = region_desc_or->host_region_class;
+      storage_daemon_managed = region_desc_or->daemon_managed;
       if (!host_region_class.has_value()) {
         host_region_class = region_desc_or->host_region_class;
       } else if (*host_region_class != region_desc_or->host_region_class) {
@@ -202,6 +206,8 @@ absl::StatusOr<ByteArtifactRegionLayout> ByteArtifactRegionLayout::acquire(
             .logical_base = logical_cursor,
             .length = storage.storage_length(),
             .memory_kind = *storage_memory_kind_or,
+            .host_region_class = storage_host_region_class,
+            .daemon_managed = storage_daemon_managed,
             .base_ptr = result.storage_lease_.storages().at(static_cast<std::size_t>(i)).base_ptr.get(),
             .device_id = storage.device_id(),
             .stable_backing = result.storage_lease_.storages().at(static_cast<std::size_t>(i)).stable_backing,
@@ -369,6 +375,50 @@ absl::StatusOr<std::shared_ptr<store::loader::SeekableSource>> ByteArtifactRegio
   }
   return std::shared_ptr<store::loader::SeekableSource>(std::make_shared<store::loader::GpuMemorySource>(
       gsl::not_null<void*>{item_base_ptr}, device_id_, range.logical_length));
+}
+
+absl::StatusOr<ByteArtifactRegionLayout::HostSharedSourceSpan> ByteArtifactRegionLayout::open_host_shared_source_span(
+    std::string_view artifact_id) const {
+  const auto it = items_.find(std::string(artifact_id));
+  if (it == items_.end()) {
+    return absl::NotFoundError("artifact_id is not mapped in region layout");
+  }
+  const auto& range = it->second;
+  const auto& storage = storages_.at(range.storage_index);
+  if (storage.memory_kind != IpcRegionRegistry::MemoryKind::kHostShared) {
+    return absl::FailedPreconditionError("source layout item is not HOST_SHARED");
+  }
+  if (!storage.daemon_managed) {
+    return absl::FailedPreconditionError("HOST_SHARED source layout item is not daemon-managed");
+  }
+  if (storage.base_ptr == nullptr) {
+    return absl::FailedPreconditionError("HOST_SHARED source layout base pointer is unavailable");
+  }
+  if (range.logical_length == 0) {
+    return absl::InvalidArgumentError("HOST_SHARED source layout item length must be > 0");
+  }
+  if (storage.host_region_class == IpcRegionRegistry::HostRegionClass::kAllocator && !range.slot_token.has_value()) {
+    return absl::FailedPreconditionError("allocator-backed HOST_SHARED source span requires slot token");
+  }
+  if (storage.keepalive == nullptr) {
+    return absl::FailedPreconditionError("HOST_SHARED source span requires region keepalive");
+  }
+  const void* item_base_ptr = static_cast<const std::uint8_t*>(storage.base_ptr) + range.storage_local_offset;
+  std::optional<store::StableLocalBackingRef> stable_backing = storage.stable_backing;
+  if (stable_backing.has_value() && range.slot_token.has_value() && range.logical_length > 0) {
+    stable_backing->slot_bytes = range.logical_length;
+  }
+  return HostSharedSourceSpan{
+      .data = item_base_ptr,
+      .length = range.logical_length,
+      .region_id = storage.region_id,
+      .host_region_class = storage.host_region_class,
+      .daemon_managed = storage.daemon_managed,
+      .slot_token = range.slot_token,
+      .stable_backing = stable_backing,
+      .stable_backing_keepalive = storage.stable_backing_keepalive,
+      .keepalive = storage.keepalive,
+  };
 }
 
 absl::Status ByteArtifactRegionLayout::activate_stable_local_backings(

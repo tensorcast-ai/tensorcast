@@ -12,13 +12,21 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include "absl/log/globals.h"
+#include "absl/log/log_entry.h"
+#include "absl/log/log_sink.h"
+#include "absl/log/log_sink_registry.h"
 #include "absl/strings/escaping.h"
 #include "absl/strings/str_cat.h"
+#include "absl/synchronization/mutex.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
 #include "core/common/artifact_identity.h"
+#include "core/communicator/routing/adapter.h"
+#include "core/communicator/routing/routing_context.h"
+#include "core/communicator/topology/topology.h"
 #include "core/cuda/cuda_api.h"
 #include "core/cuda/cuda_ipc.h"
 #include "core/store/components/endpoint_id.h"
@@ -40,6 +48,17 @@
 
 namespace {
 
+using tensorcast::communicator::routing::EndpointBinding;
+using tensorcast::communicator::routing::PcieAdapter;
+using tensorcast::communicator::routing::RoutingContext;
+using tensorcast::communicator::topology::Endpoint;
+using tensorcast::communicator::topology::EndpointKind;
+using tensorcast::communicator::topology::EndpointType;
+using tensorcast::communicator::topology::Link;
+using tensorcast::communicator::topology::LinkType;
+using tensorcast::communicator::topology::Pool;
+using tensorcast::communicator::topology::PoolType;
+using tensorcast::communicator::topology::Topology;
 using tensorcast::daemon::DaemonOptions;
 using tensorcast::daemon::DaemonServiceHarness;
 using tensorcast::daemon::v2::BatchExistsRequest;
@@ -135,6 +154,152 @@ class WorkerDirectoryTestGlobalStoreClient final : public tensorcast::store::tes
     return filtered;
   }
 };
+
+class CollectingLogSink final : public absl::LogSink {
+ public:
+  void Send(const absl::LogEntry& entry) override {
+    absl::MutexLock lock(&mu_);
+    messages_.push_back(std::string(entry.text_message()));
+  }
+
+  bool Contains(std::string_view needle) const {
+    absl::MutexLock lock(&mu_);
+    for (const auto& message : messages_) {
+      if (message.find(needle) != std::string::npos) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool ContainsAll(std::initializer_list<std::string_view> needles) const {
+    absl::MutexLock lock(&mu_);
+    for (const auto needle : needles) {
+      bool found = false;
+      for (const auto& message : messages_) {
+        if (message.find(needle) != std::string::npos) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+ private:
+  mutable absl::Mutex mu_;
+  std::vector<std::string> messages_ ABSL_GUARDED_BY(mu_);
+};
+
+class ScopedCollectingLogSink {
+ public:
+  explicit ScopedCollectingLogSink(CollectingLogSink& sink) : sink_(sink) {
+    absl::AddLogSink(&sink_);
+  }
+
+  ~ScopedCollectingLogSink() {
+    absl::RemoveLogSink(&sink_);
+  }
+
+  ScopedCollectingLogSink(const ScopedCollectingLogSink&) = delete;
+  ScopedCollectingLogSink& operator=(const ScopedCollectingLogSink&) = delete;
+
+ private:
+  CollectingLogSink& sink_;
+};
+
+class ScopedVLogLevel {
+ public:
+  explicit ScopedVLogLevel(int level) : previous_level_(absl::SetGlobalVLogLevel(level)) {}
+
+  ~ScopedVLogLevel() {
+    absl::SetGlobalVLogLevel(previous_level_);
+  }
+
+  ScopedVLogLevel(const ScopedVLogLevel&) = delete;
+  ScopedVLogLevel& operator=(const ScopedVLogLevel&) = delete;
+
+ private:
+  int previous_level_;
+};
+
+static Topology make_pcie_batch_payload_topology(
+    std::string_view local_endpoint_id,
+    std::string_view remote_endpoint_id) {
+  std::vector<Pool> pools;
+  pools.push_back(Pool{"cpu0", "cpu0", PoolType::kCpu});
+  pools.push_back(Pool{"gpu0", "gpu0", PoolType::kGpu});
+  pools.push_back(Pool{"gpu1", "gpu1", PoolType::kGpu});
+
+  std::vector<Endpoint> endpoints;
+  Endpoint local;
+  local.id = std::string(local_endpoint_id);
+  local.name = local.id;
+  local.kind = EndpointKind::kClient;
+  local.type = EndpointType::kPcie;
+  local.pool_ids = {"cpu0", "gpu0"};
+  endpoints.push_back(std::move(local));
+
+  Endpoint remote;
+  remote.id = std::string(remote_endpoint_id);
+  remote.name = remote.id;
+  remote.kind = EndpointKind::kClient;
+  remote.type = EndpointType::kPcie;
+  remote.pool_ids = {"cpu0", "gpu1"};
+  endpoints.push_back(std::move(remote));
+
+  std::vector<Link> links;
+  Link link;
+  link.id = absl::StrCat(local_endpoint_id, "_to_", remote_endpoint_id);
+  link.name = link.id;
+  link.type = LinkType::kP2P;
+  link.src_endpoint_id = std::string(local_endpoint_id);
+  link.dst_endpoint_id = std::string(remote_endpoint_id);
+  links.push_back(std::move(link));
+
+  auto topology_or = Topology::Build(
+      std::move(pools),
+      std::move(endpoints),
+      std::move(links),
+      {.require_endpoint_links = true, .require_connected = false});
+  INFO(topology_or.status().message());
+  REQUIRE(topology_or.ok());
+  return std::move(*topology_or);
+}
+
+static void install_pcie_batch_payload_routing_context(
+    const std::shared_ptr<tensorcast::store::components::CommunicationManager>& comm_manager,
+    std::string_view local_endpoint_id,
+    std::string_view remote_endpoint_id,
+    std::string_view local_host,
+    uint16_t local_port,
+    std::string_view remote_host,
+    uint16_t remote_port) {
+  auto engine = comm_manager->get_shared_engine();
+  auto routing_context = std::make_shared<RoutingContext>(
+      RoutingContext::Options{}, engine, nullptr, std::make_shared<PcieAdapter>(engine));
+  REQUIRE(routing_context->set_topology(make_pcie_batch_payload_topology(local_endpoint_id, remote_endpoint_id)).ok());
+  REQUIRE(routing_context
+              ->set_endpoint_bindings({
+                  EndpointBinding{
+                      .endpoint_id = std::string(local_endpoint_id),
+                      .node_id = "node-pcie-direct",
+                      .ip = std::string(local_host),
+                      .port = local_port,
+                  },
+                  EndpointBinding{
+                      .endpoint_id = std::string(remote_endpoint_id),
+                      .node_id = "node-pcie-direct",
+                      .ip = std::string(remote_host),
+                      .port = remote_port,
+                  },
+              })
+              .ok());
+  comm_manager->set_routing_context(std::move(routing_context));
+}
 
 static tensorcast::communicator::v1::CommunicatorConfig make_single_node_communicator_config(
     int node_index,
@@ -1658,6 +1823,253 @@ TEST_CASE("HomeBatchPutIfAbsent accepts batch payload slices", "[daemon][batch][
   REQUIRE(get_resp.items(1).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
   REQUIRE(get_resp.items(0).inline_payload() == payload_a);
   REQUIRE(get_resp.items(1).inline_payload() == payload_b);
+}
+
+TEST_CASE(
+    "HomeBatchPutIfAbsent consumes remote direct communicator slices without full-pack mirror",
+    "[daemon][batch][batch_payload_ref][put][communicator]") {
+  constexpr std::string_view kSourceDaemonId = "daemon-put-source-direct";
+  constexpr std::string_view kHomeDaemonId = "daemon-put-home-direct";
+  constexpr std::string_view kHost = "127.0.0.1";
+  constexpr std::string_view kLocalEndpoint = "pcie-home-put-direct";
+  constexpr std::string_view kRemoteEndpoint = "pcie-source-put-direct";
+
+  auto source_opts = make_opts_basic();
+  source_opts.comm_manager =
+      make_comm_manager_with_config(make_single_node_communicator_config(/*node_index=*/0, /*nic_name=*/"eth0"));
+  auto source_engine = std::make_shared<tensorcast::store::StoreEngine>(source_opts);
+
+  auto home_opts = make_opts_basic();
+  home_opts.comm_manager =
+      make_comm_manager_with_config(make_single_node_communicator_config(/*node_index=*/1, /*nic_name=*/"eth1"));
+  install_pcie_batch_payload_routing_context(
+      home_opts.comm_manager,
+      kLocalEndpoint,
+      kRemoteEndpoint,
+      kHost,
+      home_opts.comm_manager->listen_port(),
+      kHost,
+      source_opts.comm_manager->listen_port());
+  auto home_engine = std::make_shared<tensorcast::store::StoreEngine>(home_opts);
+
+  auto source_daemon_options = make_daemon_options();
+  source_daemon_options.daemon_id = std::string(kSourceDaemonId);
+  source_daemon_options.storage_path = make_test_storage_root("batch-runtime-put-direct-source");
+  auto source = make_harness(source_engine, source_daemon_options);
+
+  auto home_daemon_options = make_daemon_options();
+  home_daemon_options.daemon_id = std::string(kHomeDaemonId);
+  home_daemon_options.storage_path = make_test_storage_root("batch-runtime-put-direct-home");
+  auto home = make_harness(home_engine, home_daemon_options);
+
+  const std::string artifact_id_a = make_test_byte_artifact_id("batch-put-direct-a:blk-6a");
+  const std::string artifact_id_b = artifact_on_same_shard(artifact_id_a, "batchputdirect");
+  const std::string payload_a = "remote-direct-put-alpha";
+  const std::string payload_b = "remote-direct-put-beta-more-bytes";
+  const std::string slab = payload_a + payload_b;
+  const std::uint64_t shard_id = shard_for_artifact(artifact_id_a);
+
+  tensorcast::daemon::v2::BatchPayloadManifest manifest;
+  auto* entry_a = manifest.add_entries();
+  entry_a->set_artifact_id(artifact_id_a);
+  entry_a->set_offset(0);
+  entry_a->set_length(payload_a.size());
+  entry_a->set_digest_alg("sha256");
+  entry_a->set_digest_hex(sha256_hex(payload_a));
+  auto* entry_b = manifest.add_entries();
+  entry_b->set_artifact_id(artifact_id_b);
+  entry_b->set_offset(payload_a.size());
+  entry_b->set_length(payload_b.size());
+  entry_b->set_digest_alg("sha256");
+  entry_b->set_digest_hex(sha256_hex(payload_b));
+  manifest.set_total_size(slab.size());
+
+  auto export_or = source->kernel().payload_transport_broker().issue_batch_payload_communicator_export(
+      manifest,
+      std::make_shared<const std::string>(slab),
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
+      /*operation_id=*/"op-home-batch-put-direct-slice",
+      absl::Now() + absl::Minutes(1),
+      kHomeDaemonId);
+  REQUIRE(export_or.ok());
+
+  HomeBatchPutIfAbsentRequest put_req;
+  put_req.mutable_fence()->set_shard_id(shard_id);
+  put_req.mutable_fence()->set_lease_generation(1);
+  put_req.mutable_fence()->set_holder_daemon_id(std::string(kHomeDaemonId));
+  put_req.mutable_fence()->set_routing_epoch(1);
+  put_req.set_operation_id("op-home-batch-put-direct-slice");
+  auto* transport = put_req.add_batch_transports();
+  transport->set_transport_id("transport-put-direct");
+  transport->mutable_manifest()->CopyFrom(manifest);
+  auto* communicator_source = transport->mutable_communicator_source();
+  communicator_source->set_batch_payload_ref(export_or->batch_payload_ref);
+  communicator_source->set_protocol_version(2);
+  communicator_source->set_producer_daemon_id(std::string(kSourceDaemonId));
+  communicator_source->set_consumer_daemon_id(std::string(kHomeDaemonId));
+  communicator_source->set_producer_host(std::string(kHost));
+  communicator_source->set_producer_port(source_opts.comm_manager->listen_port());
+  communicator_source->set_remote_endpoint_id(std::string(kRemoteEndpoint));
+  communicator_source->set_local_endpoint_id_hint(std::string(kLocalEndpoint));
+  communicator_source->set_memory_location(tensorcast::daemon::v2::BATCH_PAYLOAD_MEMORY_LOCATION_HOST);
+  communicator_source->set_total_payload_bytes(slab.size());
+  for (const auto& memory_key : export_or->export_registration.remote_memory_keys) {
+    communicator_source->add_remote_memory_keys(memory_key);
+  }
+  for (const auto buffer_size : export_or->export_registration.buffer_sizes) {
+    communicator_source->add_buffer_sizes(buffer_size);
+  }
+
+  auto* item_a = put_req.add_items();
+  item_a->set_artifact_id(artifact_id_a);
+  set_invariant(item_a->mutable_invariant(), "layout_v1", payload_a);
+  item_a->mutable_batch_payload_slice()->set_transport_id("transport-put-direct");
+  item_a->mutable_batch_payload_slice()->set_offset(0);
+  item_a->mutable_batch_payload_slice()->set_length(payload_a.size());
+
+  auto* item_b = put_req.add_items();
+  item_b->set_artifact_id(artifact_id_b);
+  set_invariant(item_b->mutable_invariant(), "layout_v1", payload_b);
+  item_b->mutable_batch_payload_slice()->set_transport_id("transport-put-direct");
+  item_b->mutable_batch_payload_slice()->set_offset(payload_a.size());
+  item_b->mutable_batch_payload_slice()->set_length(payload_b.size());
+
+  CollectingLogSink sink;
+  HomeBatchPutIfAbsentResponse put_resp;
+  grpc::ServerContext put_ctx;
+  {
+    ScopedVLogLevel scoped_vlog(/*level=*/2);
+    ScopedCollectingLogSink scoped_sink(sink);
+    REQUIRE(home->service().HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
+  }
+  REQUIRE(put_resp.outcomes_size() == 2);
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(put_resp.outcomes(1).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  CHECK(sink.Contains(
+      "byte_artifact.home_batch_put_if_absent_transport_read_mode "
+      "operation_id=op-home-batch-put-direct-slice"));
+  CHECK(sink.Contains("read_mode=direct_remote_slice"));
+  CHECK(sink.Contains("realization=source_slice_loader"));
+  CHECK_FALSE(sink.Contains(
+      "byte_artifact.home_batch_put_if_absent_transport_mirror "
+      "operation_id=op-home-batch-put-direct-slice"));
+
+  HomeBatchGetRequest get_req;
+  get_req.mutable_fence()->CopyFrom(put_req.fence());
+  get_req.add_artifact_ids(artifact_id_a);
+  get_req.add_artifact_ids(artifact_id_b);
+  HomeBatchGetResponse get_resp;
+  grpc::ServerContext get_ctx;
+  REQUIRE(home->service().HomeBatchGet(&get_ctx, &get_req, &get_resp).ok());
+  REQUIRE(get_resp.items_size() == 2);
+  REQUIRE(get_resp.items(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(get_resp.items(1).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  REQUIRE(get_resp.items(0).inline_payload() == payload_a);
+  REQUIRE(get_resp.items(1).inline_payload() == payload_b);
+}
+
+TEST_CASE(
+    "HomeBatchPutIfAbsent keeps full-pack mirror for remote non-direct communicator sources",
+    "[daemon][batch][batch_payload_ref][put][communicator]") {
+  constexpr std::string_view kSourceDaemonId = "daemon-put-source-fallback";
+  constexpr std::string_view kHomeDaemonId = "daemon-put-home-fallback";
+  constexpr std::string_view kSourceHost = "127.0.0.1";
+
+  auto source_opts = make_opts_basic();
+  source_opts.comm_manager =
+      make_comm_manager_with_config(make_single_node_communicator_config(/*node_index=*/0, /*nic_name=*/"eth0"));
+  auto source_engine = std::make_shared<tensorcast::store::StoreEngine>(source_opts);
+
+  auto home_opts = make_opts_basic();
+  home_opts.comm_manager =
+      make_comm_manager_with_config(make_single_node_communicator_config(/*node_index=*/1, /*nic_name=*/"eth1"));
+  auto home_engine = std::make_shared<tensorcast::store::StoreEngine>(home_opts);
+
+  auto source_daemon_options = make_daemon_options();
+  source_daemon_options.daemon_id = std::string(kSourceDaemonId);
+  source_daemon_options.storage_path = make_test_storage_root("batch-runtime-put-fallback-source");
+  auto source = make_harness(source_engine, source_daemon_options);
+
+  auto home_daemon_options = make_daemon_options();
+  home_daemon_options.daemon_id = std::string(kHomeDaemonId);
+  home_daemon_options.storage_path = make_test_storage_root("batch-runtime-put-fallback-home");
+  auto home = make_harness(home_engine, home_daemon_options);
+
+  const std::string artifact_id = make_test_byte_artifact_id("batch-put-fallback-a:blk-6a");
+  const std::string payload = "remote-fallback-put-payload";
+  const std::uint64_t shard_id = shard_for_artifact(artifact_id);
+
+  tensorcast::daemon::v2::BatchPayloadManifest manifest;
+  auto* entry = manifest.add_entries();
+  entry->set_artifact_id(artifact_id);
+  entry->set_offset(0);
+  entry->set_length(payload.size());
+  entry->set_digest_alg("sha256");
+  entry->set_digest_hex(sha256_hex(payload));
+  manifest.set_total_size(payload.size());
+
+  auto export_or = source->kernel().payload_transport_broker().issue_batch_payload_communicator_export(
+      manifest,
+      std::make_shared<const std::string>(payload),
+      tensorcast::common::v1::PAYLOAD_REF_DIRECTION_PUT,
+      /*operation_id=*/"op-home-batch-put-fallback-mirror",
+      absl::Now() + absl::Minutes(1),
+      kHomeDaemonId);
+  REQUIRE(export_or.ok());
+
+  HomeBatchPutIfAbsentRequest put_req;
+  put_req.mutable_fence()->set_shard_id(shard_id);
+  put_req.mutable_fence()->set_lease_generation(1);
+  put_req.mutable_fence()->set_holder_daemon_id(std::string(kHomeDaemonId));
+  put_req.mutable_fence()->set_routing_epoch(1);
+  put_req.set_operation_id("op-home-batch-put-fallback-mirror");
+  auto* transport = put_req.add_batch_transports();
+  transport->set_transport_id("transport-put-fallback");
+  transport->mutable_manifest()->CopyFrom(manifest);
+  auto* communicator_source = transport->mutable_communicator_source();
+  communicator_source->set_batch_payload_ref(export_or->batch_payload_ref);
+  communicator_source->set_protocol_version(2);
+  communicator_source->set_producer_daemon_id(std::string(kSourceDaemonId));
+  communicator_source->set_consumer_daemon_id(std::string(kHomeDaemonId));
+  communicator_source->set_producer_host(std::string(kSourceHost));
+  communicator_source->set_producer_port(source_opts.comm_manager->listen_port());
+  communicator_source->set_remote_endpoint_id(
+      tensorcast::store::components::derive_endpoint_id(
+          "node-put-source-fallback", tensorcast::common::memory::MemoryLocation::CPU, /*device_id=*/0));
+  communicator_source->set_memory_location(tensorcast::daemon::v2::BATCH_PAYLOAD_MEMORY_LOCATION_HOST);
+  communicator_source->set_total_payload_bytes(payload.size());
+  for (const auto& memory_key : export_or->export_registration.remote_memory_keys) {
+    communicator_source->add_remote_memory_keys(memory_key);
+  }
+  for (const auto buffer_size : export_or->export_registration.buffer_sizes) {
+    communicator_source->add_buffer_sizes(buffer_size);
+  }
+
+  auto* item = put_req.add_items();
+  item->set_artifact_id(artifact_id);
+  set_invariant(item->mutable_invariant(), "layout_v1", payload);
+  item->mutable_batch_payload_slice()->set_transport_id("transport-put-fallback");
+  item->mutable_batch_payload_slice()->set_offset(0);
+  item->mutable_batch_payload_slice()->set_length(payload.size());
+
+  CollectingLogSink sink;
+  HomeBatchPutIfAbsentResponse put_resp;
+  grpc::ServerContext put_ctx;
+  {
+    ScopedVLogLevel scoped_vlog(/*level=*/2);
+    ScopedCollectingLogSink scoped_sink(sink);
+    REQUIRE(home->service().HomeBatchPutIfAbsent(&put_ctx, &put_req, &put_resp).ok());
+  }
+  REQUIRE(put_resp.outcomes_size() == 1);
+  INFO(put_resp.outcomes(0).message());
+  REQUIRE(put_resp.outcomes(0).status() == BatchItemStatus::BATCH_ITEM_STATUS_OK);
+  CHECK(sink.Contains(
+      "byte_artifact.home_batch_put_if_absent_transport_mirror "
+      "operation_id=op-home-batch-put-fallback-mirror"));
+  CHECK(sink.Contains("realization=full_pack_mirror"));
+  CHECK_FALSE(sink.Contains(
+      "byte_artifact.home_batch_put_if_absent_transport_read_mode "
+      "operation_id=op-home-batch-put-fallback-mirror"));
 }
 
 TEST_CASE(
@@ -3523,6 +3935,164 @@ TEST_CASE("BodyBackingManager fast CPU staging hashes during local byte ingress"
   REQUIRE(read_back_or.ok());
   CHECK(*read_back_or == *payload);
   REQUIRE(staged_or->body_handle.retire().ok());
+}
+
+class RecordingCompositeSource final : public tensorcast::store::loader::SeekableSource {
+ public:
+  explicit RecordingCompositeSource(std::string data) : data_(std::move(data)) {}
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return data_.size();
+  }
+
+  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
+    auto read_or = read_at(cursor_, dst, max_bytes);
+    if (!read_or.ok()) {
+      return read_or.status();
+    }
+    cursor_ += *read_or;
+    return *read_or;
+  }
+
+  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
+    if (offset >= data_.size() || bytes == 0) {
+      return static_cast<size_t>(0);
+    }
+    const size_t to_copy = static_cast<size_t>(std::min<uint64_t>(bytes, data_.size() - offset));
+    std::memcpy(dst, data_.data() + offset, to_copy);
+    return to_copy;
+  }
+
+  [[nodiscard]] bool supports_direct_write_at() const override {
+    return true;
+  }
+
+  [[nodiscard]] bool supports_batched_direct_write_at() const override {
+    return true;
+  }
+
+  absl::StatusOr<size_t> read_into_at(
+      uint64_t src_offset,
+      uint64_t dest_va_offset,
+      size_t bytes,
+      const tensorcast::store::DirectWriteGrant& grant) override {
+    if (src_offset > data_.size() || bytes > data_.size() - src_offset) {
+      return absl::OutOfRangeError("source read exceeds source data");
+    }
+    size_t copied = 0;
+    uint64_t cursor = dest_va_offset;
+    while (copied < bytes) {
+      bool matched = false;
+      for (const auto& window : grant.windows) {
+        if (cursor < window.va_offset || cursor >= window.va_offset + window.length) {
+          continue;
+        }
+        const uint64_t window_offset = cursor - window.va_offset;
+        const size_t take = static_cast<size_t>(std::min<uint64_t>(bytes - copied, window.length - window_offset));
+        std::memcpy(
+            reinterpret_cast<void*>(window.local_addr + window_offset), data_.data() + src_offset + copied, take);
+        copied += take;
+        cursor += take;
+        matched = true;
+        break;
+      }
+      if (!matched) {
+        return absl::OutOfRangeError("direct write grant does not cover destination range");
+      }
+    }
+    return copied;
+  }
+
+  absl::StatusOr<size_t> readv_into_at(
+      absl::Span<const tensorcast::store::loader::DirectWriteOp> ops,
+      const tensorcast::store::DirectWriteGrant& grant) override {
+    ++readv_calls_;
+    size_t total = 0;
+    for (const auto& op : ops) {
+      auto wrote_or = read_into_at(op.src_offset, op.dest_va_offset, op.bytes, grant);
+      if (!wrote_or.ok()) {
+        return wrote_or.status();
+      }
+      total += *wrote_or;
+    }
+    return total;
+  }
+
+  [[nodiscard]] int readv_calls() const {
+    return readv_calls_;
+  }
+
+ private:
+  std::string data_;
+  uint64_t cursor_{0};
+  int readv_calls_{0};
+};
+
+TEST_CASE(
+    "BodyBackingManager composite staging writes one source into multiple final bodies",
+    "[daemon][body_backing][composite]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  tensorcast::daemon::BodyBackingManager manager(*engine);
+
+  const std::string payload_a = "composite-body-alpha";
+  const std::string payload_b = "composite-body-beta-longer";
+  const std::string prefix = "source-prefix:";
+  const std::string gap = ":gap:";
+  const std::string slab = prefix + payload_a + gap + payload_b;
+  const std::uint64_t offset_a = prefix.size();
+  const std::uint64_t offset_b = prefix.size() + payload_a.size() + gap.size();
+  const auto source = std::make_shared<RecordingCompositeSource>(slab);
+
+  const std::string artifact_id_a = make_test_byte_artifact_id("composite-stage-a:blk-4");
+  const std::string artifact_id_b = make_test_byte_artifact_id("composite-stage-b:blk-4");
+  tensorcast::daemon::v2::PutIfAbsentInvariant invariant_a;
+  tensorcast::daemon::v2::PutIfAbsentInvariant invariant_b;
+  set_invariant(&invariant_a, "layout_v1", payload_a);
+  set_invariant(&invariant_b, "layout_v1", payload_b);
+  invariant_a.set_verification_mode(tensorcast::daemon::v2::BYTE_ARTIFACT_VERIFICATION_MODE_LAYOUT_AND_SIZE_ONLY);
+  invariant_b.set_verification_mode(tensorcast::daemon::v2::BYTE_ARTIFACT_VERIFICATION_MODE_LAYOUT_AND_SIZE_ONLY);
+
+  auto staged_or = manager.stage_bodies_composite(
+      tensorcast::daemon::BodyBackingManager::StageBodiesCompositeRequest{
+          .source = source,
+          .items =
+              {
+                  tensorcast::daemon::BodyBackingManager::CompositeStageItem{
+                      .artifact_id = artifact_id_a,
+                      .invariant = invariant_a,
+                      .source_offset = offset_a,
+                      .length = payload_a.size(),
+                  },
+                  tensorcast::daemon::BodyBackingManager::CompositeStageItem{
+                      .artifact_id = artifact_id_b,
+                      .invariant = invariant_b,
+                      .source_offset = offset_b,
+                      .length = payload_b.size(),
+                  },
+              },
+          .source_kind = tensorcast::store::loading::MaterializationSource::kP2P,
+          .operation_id = "op-body-composite-stage",
+          .transport_id = "transport-body-composite-stage",
+      });
+  REQUIRE(staged_or.ok());
+  REQUIRE(staged_or->staged_bodies.size() == 2);
+  CHECK(source->readv_calls() > 0);
+  CHECK(staged_or->materialize_result.direct_write_supported);
+
+  auto read_a_or = staged_or->staged_bodies[0].body_handle.read_all_bytes();
+  auto read_b_or = staged_or->staged_bodies[1].body_handle.read_all_bytes();
+  REQUIRE(read_a_or.ok());
+  REQUIRE(read_b_or.ok());
+  CHECK(*read_a_or == payload_a);
+  CHECK(*read_b_or == payload_b);
+  CHECK(staged_or->staged_bodies[0].descriptor.payload_digest_alg.empty());
+  CHECK(staged_or->staged_bodies[0].descriptor.payload_digest_hex.empty());
+  CHECK(
+      staged_or->staged_bodies[0].verification_record.verification_method ==
+      tensorcast::store::runtime::ingestion::VerificationMethod::kLayoutAndSizeContract);
+
+  REQUIRE(staged_or->staged_bodies[0].body_handle.retire().ok());
+  REQUIRE(staged_or->staged_bodies[1].body_handle.retire().ok());
 }
 
 TEST_CASE("HomeBatchTouchTtl keeps immortal entries immortal", "[daemon][batch][ttl]") {

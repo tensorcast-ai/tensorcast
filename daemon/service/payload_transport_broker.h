@@ -99,10 +99,21 @@ class PayloadTransportBroker {
     BatchRefMetadata metadata;
     std::string batch_payload_ref;
     store::ExportRegistration export_registration;
+    std::string registration_ownership;
+    std::string mr_ownership;
+    bool broker_owned_register{false};
   };
 
   struct BatchCommunicatorSourceSegment {
     BodyExportView export_view;
+  };
+
+  struct BatchCommunicatorRegionSourceSegment {
+    const void* data{nullptr};
+    std::uint64_t size_bytes{0};
+    std::optional<store::StableLocalBackingRef> stable_backing;
+    std::shared_ptr<void> stable_backing_keepalive;
+    std::shared_ptr<void> keepalive;
   };
 
   struct BatchPayloadSource {
@@ -180,6 +191,14 @@ class PayloadTransportBroker {
   [[nodiscard]] absl::StatusOr<BatchCommunicatorExport> issue_batch_payload_communicator_export(
       const v2::BatchPayloadManifest& manifest,
       absl::Span<const BatchCommunicatorSourceSegment> source_segments,
+      tensorcast::common::v1::PayloadRefDirection direction,
+      std::string_view operation_id = "",
+      absl::Time capability_expires_at = absl::InfiniteFuture(),
+      std::string_view consumer_daemon_id = "");
+
+  [[nodiscard]] absl::StatusOr<BatchCommunicatorExport> issue_batch_payload_communicator_export(
+      const v2::BatchPayloadManifest& manifest,
+      absl::Span<const BatchCommunicatorRegionSourceSegment> source_segments,
       tensorcast::common::v1::PayloadRefDirection direction,
       std::string_view operation_id = "",
       absl::Time capability_expires_at = absl::InfiniteFuture(),

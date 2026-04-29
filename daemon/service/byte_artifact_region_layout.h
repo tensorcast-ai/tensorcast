@@ -28,6 +28,18 @@ class ByteArtifactRegionLayout {
     std::optional<std::uint64_t> slot_generation;
   };
 
+  struct HostSharedSourceSpan {
+    const void* data{nullptr};
+    std::uint64_t length{0};
+    std::string region_id;
+    IpcRegionRegistry::HostRegionClass host_region_class{IpcRegionRegistry::HostRegionClass::kNone};
+    bool daemon_managed{false};
+    std::optional<SlotToken> slot_token;
+    std::optional<store::StableLocalBackingRef> stable_backing;
+    std::shared_ptr<void> stable_backing_keepalive;
+    std::shared_ptr<void> keepalive;
+  };
+
   ByteArtifactRegionLayout() = default;
   ByteArtifactRegionLayout(const ByteArtifactRegionLayout&) = delete;
   ByteArtifactRegionLayout& operator=(const ByteArtifactRegionLayout&) = delete;
@@ -50,6 +62,7 @@ class ByteArtifactRegionLayout {
       std::string_view artifact_id) const;
   [[nodiscard]] absl::StatusOr<std::shared_ptr<store::loader::SeekableSource>> open_item_source(
       std::string_view artifact_id) const;
+  [[nodiscard]] absl::StatusOr<HostSharedSourceSpan> open_host_shared_source_span(std::string_view artifact_id) const;
   [[nodiscard]] absl::Status activate_stable_local_backings(
       store::components::CommunicationManager& comm_manager) const;
 
@@ -60,6 +73,8 @@ class ByteArtifactRegionLayout {
     std::uint64_t logical_base{0};
     std::uint64_t length{0};
     IpcRegionRegistry::MemoryKind memory_kind{IpcRegionRegistry::MemoryKind::kVram};
+    IpcRegionRegistry::HostRegionClass host_region_class{IpcRegionRegistry::HostRegionClass::kNone};
+    bool daemon_managed{false};
     void* base_ptr{nullptr};
     int device_id{-1};
     std::optional<store::StableLocalBackingRef> stable_backing;

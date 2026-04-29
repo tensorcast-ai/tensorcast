@@ -1013,15 +1013,23 @@ StagingWindow::StageFn MakeStageFunction(
     v1::RdmaConfig::StagedRdmaBackend staged_backend,
     bool use_direct,
     ibv_mr* direct_mr,
+    std::shared_ptr<void> direct_keepalive,
     std::shared_ptr<RdmaSourceStageProfile> source_stage_profile) {
   if (use_direct) {
     const uint64_t base_addr = tensor->get_uint64_addr();
     const uint64_t tensor_bytes = tensor->get_bytes();
-    return [tensor, ledger, request_key = std::move(request_key), base_addr, tensor_bytes, direct_mr](
+    return [tensor,
+            ledger,
+            request_key = std::move(request_key),
+            base_addr,
+            tensor_bytes,
+            direct_mr,
+            direct_keepalive = std::move(direct_keepalive)](
                uint64_t offset, uint32_t bytes, uint32_t /*segment_idx*/) -> absl::StatusOr<StageLease> {
       if (offset + bytes > tensor_bytes) {
         return absl::OutOfRangeError("direct RDMA stage exceeded tensor bounds");
       }
+      (void)direct_keepalive;
       void* device_ptr = reinterpret_cast<void*>(base_addr + offset);
       StageLease::Metadata metadata;
       metadata.transport = StageTransport::kRdma;
@@ -1956,6 +1964,72 @@ absl::Status Communicator::wait_for_tensor_reads_to_drain(const std::string& ten
   return absl::OkStatus();
 }
 
+std::shared_ptr<Communicator::StableLocalBackingSourceViewState> Communicator::lookup_stable_local_backing_source_view(
+    const std::string& tensor_key) const {
+  absl::MutexLock lock(&stable_source_views_mu_);
+  auto it = stable_source_views_.find(tensor_key);
+  if (it == stable_source_views_.end()) {
+    return nullptr;
+  }
+  return it->second;
+}
+
+absl::StatusOr<Communicator::StableSourceViewMrEnsureResult> Communicator::ensure_stable_local_backing_source_view_mr(
+    const std::string& tensor_key,
+    const std::shared_ptr<StableLocalBackingSourceViewState>& view,
+    const net_dev_t& dev) {
+  if (view == nullptr) {
+    return absl::InvalidArgumentError("stable-backed source view is required");
+  }
+  if (dev == nullptr) {
+    return absl::InvalidArgumentError("stable-backed source view requires an RDMA device");
+  }
+  std::shared_ptr<StableLocalBackingState> state;
+  {
+    absl::MutexLock lock(&stable_local_backings_mu_);
+    auto it = stable_local_backings_.find(view->backing.backing_id);
+    if (it != stable_local_backings_.end()) {
+      state = it->second;
+    }
+  }
+  if (state == nullptr) {
+    return absl::FailedPreconditionError("stable-backed source view backing is not active");
+  }
+  auto stable_use = state->acquire_use();
+  if (stable_use == nullptr) {
+    return absl::FailedPreconditionError("stable-backed source view backing is retiring");
+  }
+
+  const uint32_t chunk_slots = std::max<uint32_t>(1, stable_local_mr_reuse_chunk_slots_);
+  const bool prewarm_requested = state->prewarm_requested_enabled();
+  const bool prewarm_complete = state->prewarm_complete_for_test();
+  auto chunk_or =
+      state->ensure_chunk(dev, dev->get_rail_id(), view->backing.slot_bytes, chunk_slots, view->addr, view->bytes);
+  if (!chunk_or.ok()) {
+    return chunk_or.status();
+  }
+  if (chunk_or->mr == nullptr) {
+    return absl::InternalError("stable-backed source view chunk MR is null");
+  }
+  VLOG(2) << "communicator.read_plan_stable_source_prepare"
+          << " tensor_key=" << tensor_key << " backing_id=" << view->backing.backing_id
+          << " rail_id=" << chunk_or->rail_id << " nic=" << chunk_or->nic_name
+          << " chunk_index=" << chunk_or->chunk_index << " cache_hit=" << chunk_or->cache_hit
+          << " waited_on_inflight=" << chunk_or->waited_on_inflight << " registered_now=" << chunk_or->registered_now
+          << " prewarm_requested=" << prewarm_requested << " prewarm_complete=" << prewarm_complete;
+  return StableSourceViewMrEnsureResult{
+      .mr = chunk_or->mr,
+      .backing_use = stable_use,
+      .backing_id = view->backing.backing_id,
+      .chunk_index = chunk_or->chunk_index,
+      .cache_hit = chunk_or->cache_hit,
+      .waited_on_inflight = chunk_or->waited_on_inflight,
+      .registered_now = chunk_or->registered_now,
+      .prewarm_requested = prewarm_requested,
+      .prewarm_complete = prewarm_complete,
+  };
+}
+
 std::shared_ptr<Communicator::TransferProgressState> Communicator::create_transfer_progress_state(
     std::string transfer_id,
     std::string request_key,
@@ -2729,6 +2803,7 @@ absl::StatusOr<std::shared_ptr<RdmaReadSession>> Communicator::admit_read_plan_r
     v1::RdmaConfig::StagedRdmaBackend staged_backend = v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED;
     bool direct_eligible = false;
     ibv_mr* direct_mr = nullptr;
+    std::shared_ptr<void> direct_keepalive;
   };
 
   std::vector<PlannedSourceSlice> resolved_slices;
@@ -2752,6 +2827,7 @@ absl::StatusOr<std::shared_ptr<RdmaReadSession>> Communicator::admit_read_plan_r
     }
     read_guards->push_back(*read_guard_or);
     tensor->wait_read_ready();
+    auto stable_source_view = lookup_stable_local_backing_source_view(tensor_key);
 
     auto dev = task.request.rail_id >= 0 ? tensor->get_dev_by_rail(task.request.rail_id) : nullptr;
     if (dev == nullptr) {
@@ -2762,6 +2838,15 @@ absl::StatusOr<std::shared_ptr<RdmaReadSession>> Communicator::admit_read_plan_r
       }
     }
     const bool tensor_on_cpu = tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU;
+    if (dev == nullptr && tensor_on_cpu && stable_source_view != nullptr) {
+      const int requested_rail = task.request.rail_id >= 0
+          ? task.request.rail_id
+          : (session->dev != nullptr ? session->dev->get_rail_id() : -1);
+      dev = get_net_dev(COMMUNICATE_ENGINE_DEV_CPU, 0, tensor_key, requested_rail);
+      if (dev != nullptr) {
+        tensor->add_dev(dev);
+      }
+    }
     if (tensor_on_cpu && session->dev != nullptr &&
         (dev == nullptr || session->dev->get_name() != dev->get_name() ||
          session->dev->get_rail_id() != dev->get_rail_id())) {
@@ -2770,6 +2855,9 @@ absl::StatusOr<std::shared_ptr<RdmaReadSession>> Communicator::admit_read_plan_r
               << " selected_nic=" << (dev != nullptr ? dev->get_name() : "<none>")
               << " session_rail=" << session->dev->get_rail_id() << " session_nic=" << session->dev->get_name();
       dev = session->dev;
+      if (stable_source_view != nullptr && tensor->get_dev_by_rail(dev->get_rail_id()) == nullptr) {
+        tensor->add_dev(dev);
+      }
     }
     if (dev == nullptr) {
       return absl::FailedPreconditionError(absl::StrCat("read_plan tensor missing RDMA device: ", tensor_key));
@@ -2805,6 +2893,7 @@ absl::StatusOr<std::shared_ptr<RdmaReadSession>> Communicator::admit_read_plan_r
     const bool direct_requested = tensor->direct_rdma_enabled();
     bool direct_eligible = false;
     ibv_mr* direct_mr = nullptr;
+    std::shared_ptr<void> direct_keepalive;
     DirectFallbackReason fallback_reason = DirectFallbackReason::kNone;
     if (direct_requested) {
       const bool direct_mem_supported = tensor_on_cpu || tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_GPU;
@@ -2813,7 +2902,18 @@ absl::StatusOr<std::shared_ptr<RdmaReadSession>> Communicator::admit_read_plan_r
       } else if (tensor->needs_staging()) {
         fallback_reason = DirectFallbackReason::kNeedsStaging;
       } else {
-        if (tensor_on_cpu) {
+        if (tensor_on_cpu && stable_source_view != nullptr) {
+          auto ensure_result_or = ensure_stable_local_backing_source_view_mr(tensor_key, stable_source_view, dev);
+          if (!ensure_result_or.ok()) {
+            return ensure_result_or.status();
+          }
+          direct_mr = ensure_result_or->mr;
+          direct_keepalive = std::move(ensure_result_or->backing_use);
+          direct_eligible = direct_mr != nullptr;
+          if (!direct_eligible) {
+            fallback_reason = DirectFallbackReason::kMrUnavailable;
+          }
+        } else if (tensor_on_cpu) {
           auto ensure_result_or = ensure_tensor_registered_on_dev(tensor, dev);
           if (!ensure_result_or.ok()) {
             fallback_reason = DirectFallbackReason::kMrUnavailable;
@@ -2863,6 +2963,7 @@ absl::StatusOr<std::shared_ptr<RdmaReadSession>> Communicator::admit_read_plan_r
             .staged_backend = staged_backend,
             .direct_eligible = direct_eligible,
             .direct_mr = direct_mr,
+            .direct_keepalive = direct_keepalive,
         });
     if (source.bytes > std::numeric_limits<uint64_t>::max() - total_bytes) {
       return absl::InvalidArgumentError("read_plan source byte count overflow");
@@ -2927,6 +3028,7 @@ absl::StatusOr<std::shared_ptr<RdmaReadSession>> Communicator::admit_read_plan_r
                 source.staged_backend,
                 use_direct,
                 source.direct_mr,
+                source.direct_keepalive,
                 session->source_stage_profile),
             .chunk_size = chunk_size,
             .zero_copy = use_direct,
@@ -3271,6 +3373,72 @@ absl::Status Communicator::deactivate_stable_local_backing(std::string_view back
     state->begin_retire_and_wait();
   }
   VLOG(2) << "stable_local_backing.deactivate_done" << " backing_id=" << backing_id;
+  return absl::OkStatus();
+}
+
+absl::Status Communicator::register_stable_local_backing_source_view(const StableLocalBackingSourceView& view) {
+  if (!enable_rdma_ || rdma_context_ == nullptr) {
+    return absl::FailedPreconditionError("stable-backed source views require RDMA");
+  }
+  if (view.tensor_key.empty()) {
+    return absl::InvalidArgumentError("stable-backed source view requires tensor_key");
+  }
+  if (view.addr == 0 || view.bytes == 0) {
+    return absl::InvalidArgumentError("stable-backed source view requires non-empty address range");
+  }
+  if (view.backing.kind != StableLocalBackingKind::kHostSharedRegion || view.backing.backing_id.empty() ||
+      view.backing.backing_base_addr == 0 || view.backing.backing_bytes == 0 ||
+      view.backing.dev_type != COMMUNICATE_ENGINE_DEV_CPU || view.backing.slot_bytes == 0) {
+    return absl::InvalidArgumentError("stable-backed source view requires CPU HOST_SHARED backing with slot geometry");
+  }
+  if (view.keepalive == nullptr) {
+    return absl::InvalidArgumentError("stable-backed source view requires keepalive");
+  }
+
+  std::shared_ptr<StableLocalBackingState> state;
+  {
+    absl::MutexLock lock(&stable_local_backings_mu_);
+    auto it = stable_local_backings_.find(view.backing.backing_id);
+    if (it != stable_local_backings_.end()) {
+      state = it->second;
+    }
+  }
+  if (state == nullptr) {
+    return absl::FailedPreconditionError("stable-backed source view backing is not active");
+  }
+  auto merge_status = state->merge_activation_backing(view.backing, nullptr);
+  if (!merge_status.ok()) {
+    return merge_status;
+  }
+  const uint32_t chunk_slots = std::max<uint32_t>(1, stable_local_mr_reuse_chunk_slots_);
+  auto chunk_or = state->resolve_chunk_for_region(view.backing.slot_bytes, chunk_slots, view.addr, view.bytes);
+  if (!chunk_or.ok()) {
+    return chunk_or.status();
+  }
+
+  auto tensor = std::make_shared<PartitionTensor>(
+      view.tensor_key,
+      view.addr,
+      view.bytes,
+      COMMUNICATE_ENGINE_DEV_CPU,
+      /*dev=*/nullptr);
+  tensor->set_read_ready();
+  tensor->set_direct_rdma_enabled(true);
+  store_.register_tensor(tensor);
+  {
+    absl::MutexLock lock(&stable_source_views_mu_);
+    stable_source_views_[view.tensor_key] =
+        std::make_shared<StableLocalBackingSourceViewState>(StableLocalBackingSourceViewState{
+            .addr = view.addr,
+            .bytes = view.bytes,
+            .backing = view.backing,
+            .keepalive = view.keepalive,
+        });
+  }
+  VLOG(2) << "stable_local_backing.source_view_register"
+          << " key=" << view.tensor_key << " backing_id=" << view.backing.backing_id << " addr=0x" << std::hex
+          << view.addr << std::dec << " bytes=" << view.bytes << " slot_bytes=" << view.backing.slot_bytes
+          << " chunk_index=" << chunk_or->chunk_index << " chunk_bytes=" << chunk_or->chunk_bytes;
   return absl::OkStatus();
 }
 
@@ -4743,6 +4911,7 @@ absl::Status Communicator::handle_rdma_read_request(
       staged_backend,
       use_direct,
       direct_mr,
+      nullptr,
       session->source_stage_profile);
   session->window =
       std::make_unique<StagingWindow>(*ledger_ptr, stage_fn, total_bytes, chunk_size, start_offset, window_segments);
@@ -5057,6 +5226,10 @@ absl::Status Communicator::unregister_tensor(const std::string& tensor_key) {
     VLOG(1) << "[unregister_tensor] key not found, treating as idempotent OK: " << tensor_key;
   } else {
     store_.unregister_tensor(tensor_key);
+  }
+  {
+    absl::MutexLock lock(&stable_source_views_mu_);
+    stable_source_views_.erase(tensor_key);
   }
 
   {

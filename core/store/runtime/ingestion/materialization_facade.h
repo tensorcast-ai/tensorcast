@@ -22,6 +22,7 @@
 #include "core/store/materialization/contracts/byte_range/byte_range_map.h"
 #include "core/store/materialization/control/materialization_backend.h"
 #include "core/store/materialization/dataplane/contracts/loader.h"
+#include "core/store/materialization/dataplane/contracts/source.h"
 #include "core/store/materialization/runtime/pipeline/ingestion_pipeline.h"
 #include "core/store/replica/collective_disk_loader.h"
 #include "core/store/runtime/context/runtime_context.h"
@@ -85,6 +86,19 @@ class MaterializationFacadeTestPeer;
 class MaterializationFacade : public materialization::control::MaterializationBackend {
  public:
   using SealProgressCallback = std::function<void(uint64_t hashed_leaf_count, uint64_t total_hash_leaves)>;
+
+  struct MappedReplicaTarget {
+    std::string logical_artifact_id;
+    std::string physical_artifact_id;
+    DeviceKey target_device;
+    loading::ReplicaTarget target;
+    std::uint64_t size_bytes{0};
+  };
+
+  struct IngestMappedSourcesIntoReplicasResult {
+    std::vector<loading::ReplicaHandle> replica_handles;
+    loading::MaterializeIntoTargetResult materialize_result;
+  };
 
   struct SealAssemblyCutInput {
     struct BoundCanonicalSpan {
@@ -160,6 +174,13 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       const DeviceKey& target_device,
       const loading::ReplicaTarget& target,
       std::unique_ptr<IArtifactLoader> loader,
+      const loader::ByteRangeMap& mapping,
+      const loading::MaterializeHints& hints,
+      loading::MaterializationSource source_kind);
+
+  absl::StatusOr<IngestMappedSourcesIntoReplicasResult> ingest_mapped_sources_into_replicas(
+      std::vector<MappedReplicaTarget> targets,
+      std::vector<std::shared_ptr<loader::SeekableSource>> sources,
       const loader::ByteRangeMap& mapping,
       const loading::MaterializeHints& hints,
       loading::MaterializationSource source_kind);

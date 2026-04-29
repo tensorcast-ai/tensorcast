@@ -5043,6 +5043,172 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       target_device, target_layout, std::move(sources), mapping, hints, source_kind);
 }
 
+absl::StatusOr<MaterializationFacade::IngestMappedSourcesIntoReplicasResult> MaterializationFacade::
+    ingest_mapped_sources_into_replicas(
+        std::vector<MappedReplicaTarget> targets,
+        std::vector<std::shared_ptr<loader::SeekableSource>> sources,
+        const loader::ByteRangeMap& mapping,
+        const loading::MaterializeHints& hints,
+        loading::MaterializationSource source_kind) {
+  if (targets.empty()) {
+    return absl::InvalidArgumentError("ingest_mapped_sources_into_replicas requires at least one target");
+  }
+  if (sources.empty()) {
+    return absl::InvalidArgumentError("ingest_mapped_sources_into_replicas requires at least one source");
+  }
+  if (sources.size() < mapping.num_sources) {
+    return absl::InvalidArgumentError("ingest_mapped_sources_into_replicas sources do not satisfy map.num_sources");
+  }
+
+  const DeviceKey target_device = targets.front().target_device;
+  const common::memory::MemoryLocation target_location = targets.front().target.location.type;
+  if (target_location != common::memory::MemoryLocation::CPU &&
+      target_location != common::memory::MemoryLocation::GPU) {
+    return absl::InvalidArgumentError("ingest_mapped_sources_into_replicas requires CPU or GPU targets");
+  }
+
+  struct PreparedReplicaTarget {
+    std::string logical_artifact_id;
+    loading::ReplicaKey key;
+    std::shared_ptr<replica::Replica> replica;
+    common::memory::MemoryLocation target_location{common::memory::MemoryLocation::NONE};
+    std::uint64_t size_bytes{0};
+  };
+
+  auto registry = &config_.replica_runtime->registry();
+  std::vector<PreparedReplicaTarget> prepared;
+  prepared.reserve(targets.size());
+  loading::IntoTargetLayout target_layout;
+  target_layout.storages.reserve(targets.size());
+  std::uint64_t total_bytes = 0;
+
+  for (const auto& target : targets) {
+    if (target.logical_artifact_id.empty()) {
+      return absl::InvalidArgumentError("ingest_mapped_sources_into_replicas requires logical_artifact_id");
+    }
+    if (target.physical_artifact_id.empty()) {
+      return absl::InvalidArgumentError("ingest_mapped_sources_into_replicas requires physical_artifact_id");
+    }
+    if (target.size_bytes == 0) {
+      return absl::InvalidArgumentError("ingest_mapped_sources_into_replicas requires non-empty target size");
+    }
+    if (target.target.location.type != target_location) {
+      return absl::InvalidArgumentError("ingest_mapped_sources_into_replicas target locations must match");
+    }
+    const DeviceKey target_location_device = target.target.location.to_device_key();
+    if (target.target_device.type != target_device.type || target.target_device.ordinal != target_device.ordinal ||
+        target.target_device.uuid != target_device.uuid || target_location_device.type != target.target_device.type ||
+        target_location_device.ordinal != target.target_device.ordinal ||
+        target_location_device.uuid != target.target_device.uuid) {
+      return absl::InvalidArgumentError("ingest_mapped_sources_into_replicas target device mismatch");
+    }
+    if (total_bytes > std::numeric_limits<std::uint64_t>::max() - target.size_bytes) {
+      return absl::OutOfRangeError("ingest_mapped_sources_into_replicas target size overflow");
+    }
+
+    loading::ReplicaKey key{
+        .artifact_id = target.physical_artifact_id,
+        .view_id = std::nullopt,
+        .device = target.target_device,
+        .replica = 0,
+    };
+    auto existing_or = registry->find(key);
+    if (existing_or.ok()) {
+      return absl::AlreadyExistsError("ingest_mapped_sources_into_replicas target replica already exists");
+    }
+    if (!absl::IsNotFound(existing_or.status())) {
+      return existing_or.status();
+    }
+
+    loading::InlineBufferSource inline_source{.data = nullptr, .size_bytes = target.size_bytes};
+    replica::ReplicaConfig cfg{
+        .source = inline_source,
+        .artifact_identifier = key.artifact_id,
+        .device_type = target.target_device.type,
+        .local_device_id = target.target_device.type == DeviceType::GPU ? target.target_device.ordinal : -1,
+        .pinned_buffer_pool = config_.runtime_context->pinned_buffer_pool(),
+        .async_runtime = gsl::not_null<std::shared_ptr<common::AsyncRuntime>>{config_.runtime_context->async_runtime()},
+        .artifact_chunk_bytes = config_.artifact_chunk_bytes,
+        .expected_artifact_size = target.size_bytes,
+        .byte_mapping_config = config_.options->byte_mapping,
+        .materialization_strategy = config_.options->materialization_strategy,
+        .memory_tier_config = config_.options->memory_tier_config,
+    };
+    cfg.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : config_.pinned_memory_timeout;
+    cfg.streaming_buffer_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
+    cfg.cpu_shared_memory_enabled = config_.runtime_context->options().cpu_shared_memory_enabled;
+
+    auto replica_or = replica::Replica::create(cfg);
+    if (!replica_or.ok()) {
+      return replica_or.status();
+    }
+    auto replica = std::shared_ptr<replica::Replica>(std::move(replica_or.value()));
+    auto allocate_status = replica->get_memory_manager().allocate_memory(target_location);
+    if (!allocate_status.ok()) {
+      return allocate_status;
+    }
+    auto ptrs = replica->get_data_pointer(target_location);
+    if (ptrs.empty() || ptrs.front() == nullptr) {
+      return absl::FailedPreconditionError("ingest_mapped_sources_into_replicas target pointer unavailable");
+    }
+
+    target_layout.storages.push_back(
+        loading::IntoTargetStorage{
+            .base_ptr = gsl::not_null<void*>{ptrs.front()},
+            .length = target.size_bytes,
+            .keepalive = replica,
+        });
+    total_bytes += target.size_bytes;
+    prepared.push_back(
+        PreparedReplicaTarget{
+            .logical_artifact_id = target.logical_artifact_id,
+            .key = std::move(key),
+            .replica = std::move(replica),
+            .target_location = target_location,
+            .size_bytes = target.size_bytes,
+        });
+  }
+
+  if (mapping.total_bytes != total_bytes) {
+    return absl::InvalidArgumentError("ingest_mapped_sources_into_replicas mapping total_bytes mismatch");
+  }
+  target_layout.total_size = total_bytes;
+
+  auto materialize_or = materialize_mapped_sources_into_target(
+      target_device, target_layout, std::move(sources), mapping, hints, source_kind);
+  if (!materialize_or.ok()) {
+    return materialize_or.status();
+  }
+
+  std::vector<loading::ReplicaKey> inserted_keys;
+  inserted_keys.reserve(prepared.size());
+  IngestMappedSourcesIntoReplicasResult result;
+  result.materialize_result = std::move(*materialize_or);
+  result.replica_handles.reserve(prepared.size());
+  for (const auto& entry : prepared) {
+    auto mark_status = entry.replica->mark_loaded(entry.target_location);
+    if (!mark_status.ok()) {
+      for (const auto& inserted_key : inserted_keys) {
+        (void)registry->erase(inserted_key);
+      }
+      return mark_status;
+    }
+    entry.replica->set_ready_signal(entry.target_location, absl::OkStatus());
+    auto emplace_status = registry->emplace(entry.key, gsl::not_null{entry.replica});
+    if (!emplace_status.ok()) {
+      for (const auto& inserted_key : inserted_keys) {
+        (void)registry->erase(inserted_key);
+      }
+      return emplace_status;
+    }
+    inserted_keys.push_back(entry.key);
+    loading::ReplicaHandle handle = build_local_replica_handle(entry.key, entry.replica, entry.target_location);
+    handle.source = source_kind;
+    result.replica_handles.push_back(std::move(handle));
+  }
+  return result;
+}
+
 absl::StatusOr<ArtifactLoweringResult> MaterializationFacade::execute_artifact_lowering_plan(
     ArtifactLoweringPlan plan) {
   auto validation_status = validate_artifact_lowering_plan(plan);
