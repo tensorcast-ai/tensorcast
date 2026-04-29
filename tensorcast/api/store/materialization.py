@@ -83,6 +83,19 @@ class _MaterializationSummary(TypedDict):
     selection: str | None
 
 
+def _resolve_broadcast_hints(
+    *,
+    ctx: CallContext | None,
+    broadcast_session_id: str | None,
+    broadcast_strict_parent: bool,
+) -> tuple[str | None, bool]:
+    if broadcast_session_id is not None:
+        return str(broadcast_session_id), bool(broadcast_strict_parent)
+    if ctx is None or ctx.broadcast is None:
+        return None, bool(broadcast_strict_parent)
+    return ctx.broadcast.session_id, ctx.broadcast.strict_parent
+
+
 @dataclass(frozen=True, slots=True)
 class _RegionBackedLayout:
     layout: store_daemon_pb2.TargetLayout
@@ -2103,6 +2116,11 @@ class MaterializationPipeline:
         broadcast_session_id: str | None = None,
         broadcast_strict_parent: bool = True,
     ) -> tuple[MaterializationPayload, int]:
+        broadcast_session_id, broadcast_strict_parent = _resolve_broadcast_hints(
+            ctx=ctx,
+            broadcast_session_id=broadcast_session_id,
+            broadcast_strict_parent=broadcast_strict_parent,
+        )
         options_snapshot = self._build_get_options(options_override)
         retrieval_policy = options_snapshot.source or RetrievalPolicy()
         wait_for_shared_disk_ms = int(options_snapshot.wait_for_shared_disk_ms)

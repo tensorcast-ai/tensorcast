@@ -18,6 +18,7 @@ from tensorcast.api._materialize import (
     _resolve_collective_load_group,
 )
 from tensorcast.api.context import (
+    BroadcastContext,
     CallContext,
     CollectiveLoadGroup,
     TransportSchedulingGroup,
@@ -496,3 +497,63 @@ def test_materialize_subset_forwards_transport_hints():
     assert materialized.replica_uuid == "transport"
     assert captured["transport_request_id"] == "transport-req-1"
     assert captured["transport_scheduling_group"] == group
+
+
+def test_get_forwards_broadcast_context_hint():
+    runtime = _RuntimeStub()
+    views = ViewOrchestrator(runtime)
+    pipeline = MaterializationPipeline(runtime, views)
+    payload = _make_payload({"a": torch.ones(1)}, replica_uuid="broadcast")
+    captured: dict[str, object] = {}
+    ctx = CallContext(
+        broadcast=BroadcastContext(
+            session_id="broadcast-session-1",
+            strict_parent=False,
+        )
+    )
+
+    def fake_materialize(**kwargs):
+        captured.update(kwargs)
+        return payload
+
+    pipeline.set_materialize_fn(fake_materialize)
+    result = pipeline.get(artifact_id="aid", ctx=ctx)
+    runtime.close()
+
+    assert torch.equal(result["a"], torch.ones(1))
+    assert captured["broadcast_session_id"] == "broadcast-session-1"
+    assert captured["broadcast_strict_parent"] is False
+
+
+def test_materialize_subset_explicit_broadcast_hint_overrides_context():
+    runtime = _RuntimeStub()
+    views = ViewOrchestrator(runtime)
+    pipeline = MaterializationPipeline(runtime, views)
+    payload = _make_payload({"a": torch.ones(1)}, replica_uuid="broadcast")
+    captured: dict[str, object] = {}
+    ctx = CallContext(
+        broadcast=BroadcastContext(
+            session_id="ctx-session",
+            strict_parent=False,
+        )
+    )
+
+    def fake_materialize(**kwargs):
+        captured.update(kwargs)
+        return payload
+
+    pipeline.set_materialize_fn(fake_materialize)
+    materialized, _ = pipeline.materialize_subset(
+        artifact_id="aid",
+        key=None,
+        device=0,
+        tensor_names=None,
+        ctx=ctx,
+        broadcast_session_id="explicit-session",
+        broadcast_strict_parent=True,
+    )
+    runtime.close()
+
+    assert materialized.replica_uuid == "broadcast"
+    assert captured["broadcast_session_id"] == "explicit-session"
+    assert captured["broadcast_strict_parent"] is True

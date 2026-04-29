@@ -886,6 +886,14 @@ class Artifact:
             replica_uuid=replica_uuid,
             options=options,
             ctx=ctx,
+            broadcast_session_id=(
+                ctx.broadcast.session_id if ctx is not None and ctx.broadcast else None
+            ),
+            broadcast_strict_parent=(
+                ctx.broadcast.strict_parent
+                if ctx is not None and ctx.broadcast
+                else True
+            ),
         )
         materialize_end = time.perf_counter()
         state: dict[str, torch.Tensor] | None = None
