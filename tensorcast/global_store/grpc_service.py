@@ -56,6 +56,7 @@ from tensorcast.global_store.repositories import (
     AssemblyLayoutBindingRepository,
     AssemblyReadinessCutRepository,
     AssemblySlotOccupancyRepository,
+    BroadcastRepository,
     ChunkDirectoryRepository,
     ClusterInfoRepository,
     InstanceRepository,
@@ -100,6 +101,7 @@ from tensorcast.global_store.rpc.assembly_readiness_cut_rpc_handler import (
 from tensorcast.global_store.rpc.assembly_slot_occupancy_rpc_handler import (
     AssemblySlotOccupancyRpcHandler,
 )
+from tensorcast.global_store.rpc.broadcast_rpc_handler import BroadcastRpcHandler
 from tensorcast.global_store.rpc.chunk_rpc_handler import ChunkRpcHandler
 from tensorcast.global_store.rpc.disk_location_rpc_handler import DiskLocationRpcHandler
 from tensorcast.global_store.rpc.instance_rpc_handler import InstanceRpcHandler
@@ -135,6 +137,7 @@ from tensorcast.global_store.rpc_servicer_mixins import (
 )
 from tensorcast.global_store.services import (
     ArtifactService,
+    BroadcastService,
     ChunkService,
     InstanceService,
     PlacementService,
@@ -259,6 +262,7 @@ class GlobalStoreServicer(
         self.assembly_slot_occupancy_repository = AssemblySlotOccupancyRepository(
             self.connection
         )
+        self.broadcast_repository = BroadcastRepository(self.connection)
         self.proof_repository = ProofRepository(self.connection)
         self.operation_repository = OperationRepository(self.connection)
         self.shard_home_lease_repository = ShardHomeLeaseRepository(self.connection)
@@ -545,6 +549,15 @@ class GlobalStoreServicer(
         self.shard_home_lease_rpc_handler = ShardHomeLeaseRpcHandler(
             shard_home_lease_service=self.shard_home_lease_service,
             datetime_to_timestamp=datetime_to_timestamp,
+            logger=logger,
+        )
+        self.broadcast_service = BroadcastService(
+            broadcast_repository=self.broadcast_repository,
+            replica_repository=self.replica_repository,
+            worker_repository=self.worker_repository,
+        )
+        self.broadcast_rpc_handler = BroadcastRpcHandler(
+            broadcast_service=self.broadcast_service,
             logger=logger,
         )
 

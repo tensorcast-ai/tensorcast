@@ -46,6 +46,12 @@ service ClusterRuntimeService {
   rpc CompleteReplicaTransport(CompleteReplicaTransportRequest) returns (CompleteReplicaTransportResponse) {}
   rpc QueryTransportWindow(QueryTransportWindowRequest) returns (QueryTransportWindowResponse) {}
 
+  // Tree broadcast planning
+  rpc CreateBroadcastSession(CreateBroadcastSessionRequest) returns (CreateBroadcastSessionResponse) {}
+  rpc GetBroadcastSession(GetBroadcastSessionRequest) returns (GetBroadcastSessionResponse) {}
+  rpc ListBroadcastEdges(ListBroadcastEdgesRequest) returns (ListBroadcastEdgesResponse) {}
+  rpc CancelBroadcastSession(CancelBroadcastSessionRequest) returns (CancelBroadcastSessionResponse) {}
+
   // Chunk directory operations
   rpc QueryChunkLocations(QueryChunkLocationsRequest) returns (QueryChunkLocationsResponse) {}
   rpc BatchUpdateChunkStates(BatchUpdateChunkStatesRequest) returns (BatchUpdateChunkStatesResponse) {}
@@ -151,6 +157,35 @@ enum ConnectionStatus {
   CONNECTION_STATUS_RECONNECTING = 1;
   CONNECTION_STATUS_DISCONNECTED = 2;
   CONNECTION_STATUS_CONNECTED = 3;
+}
+
+enum BroadcastSessionState {
+  BROADCAST_SESSION_STATE_UNSPECIFIED = 0;
+  BROADCAST_SESSION_STATE_PLANNING = 1;
+  BROADCAST_SESSION_STATE_ACTIVE = 2;
+  BROADCAST_SESSION_STATE_COMPLETED = 3;
+  BROADCAST_SESSION_STATE_FAILED = 4;
+  BROADCAST_SESSION_STATE_CANCELLED = 5;
+}
+
+enum BroadcastTargetState {
+  BROADCAST_TARGET_STATE_UNSPECIFIED = 0;
+  BROADCAST_TARGET_STATE_PENDING = 1;
+  BROADCAST_TARGET_STATE_ASSIGNED = 2;
+  BROADCAST_TARGET_STATE_MATERIALIZING = 3;
+  BROADCAST_TARGET_STATE_COMPLETED = 4;
+  BROADCAST_TARGET_STATE_FAILED = 5;
+  BROADCAST_TARGET_STATE_CANCELLED = 6;
+}
+
+enum BroadcastEdgeState {
+  BROADCAST_EDGE_STATE_UNSPECIFIED = 0;
+  BROADCAST_EDGE_STATE_PLANNED = 1;
+  BROADCAST_EDGE_STATE_ASSIGNED = 2;
+  BROADCAST_EDGE_STATE_MATERIALIZING = 3;
+  BROADCAST_EDGE_STATE_COMPLETED = 4;
+  BROADCAST_EDGE_STATE_FAILED = 5;
+  BROADCAST_EDGE_STATE_CANCELLED = 6;
 }
 
 enum ReconcileRequestKind {
@@ -1057,6 +1092,102 @@ message TransportWindowRow {
 message QueryTransportWindowResponse {
   Status status = 1;
   repeated TransportWindowRow rows = 2;
+}
+
+message BroadcastTargetIdentity {
+  string worker_id = 1;
+  string daemon_id = 2;
+}
+
+message BroadcastSessionInfo {
+  string session_id = 1;
+  string artifact_id = 2;
+  optional string requested_view_id = 3;
+  uint64 epoch = 4;
+  uint32 fanout = 5;
+  uint32 max_attempts = 6;
+  bool strict_parent = 7;
+  BroadcastSessionState state = 8;
+  string root_replica_id = 9;
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp updated_at = 11;
+  google.protobuf.Timestamp completed_at = 12;
+}
+
+message BroadcastTargetInfo {
+  string session_id = 1;
+  string target_worker_id = 2;
+  string target_daemon_id = 3;
+  BroadcastTargetState state = 4;
+  uint32 level = 5;
+  uint32 attempt = 6;
+  string assigned_edge_id = 7;
+  string completed_replica_id = 8;
+  string failure_reason = 9;
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp updated_at = 11;
+  google.protobuf.Timestamp completed_at = 12;
+}
+
+message BroadcastEdgeInfo {
+  string edge_id = 1;
+  string session_id = 2;
+  string parent_worker_id = 3;
+  string parent_replica_id = 4;
+  string child_worker_id = 5;
+  uint32 level = 6;
+  uint32 attempt = 7;
+  BroadcastEdgeState state = 8;
+  string transport_request_id = 9;
+  string failure_reason = 10;
+  google.protobuf.Timestamp created_at = 11;
+  google.protobuf.Timestamp updated_at = 12;
+  google.protobuf.Timestamp completed_at = 13;
+}
+
+message CreateBroadcastSessionRequest {
+  string session_id = 1;
+  string artifact_id = 2;
+  optional string requested_view_id = 3;
+  uint64 epoch = 4;
+  uint32 fanout = 5;
+  bool strict_parent = 6;
+  uint32 max_attempts = 7;
+  string root_replica_id = 8;
+  repeated BroadcastTargetIdentity targets = 9;
+}
+
+message CreateBroadcastSessionResponse {
+  Status status = 1;
+  BroadcastSessionInfo session = 2;
+  repeated BroadcastEdgeInfo edges = 3;
+}
+
+message GetBroadcastSessionRequest {
+  string session_id = 1;
+}
+
+message GetBroadcastSessionResponse {
+  Status status = 1;
+  BroadcastSessionInfo session = 2;
+}
+
+message ListBroadcastEdgesRequest {
+  string session_id = 1;
+}
+
+message ListBroadcastEdgesResponse {
+  Status status = 1;
+  repeated BroadcastEdgeInfo edges = 2;
+}
+
+message CancelBroadcastSessionRequest {
+  string session_id = 1;
+}
+
+message CancelBroadcastSessionResponse {
+  Status status = 1;
+  bool cancelled = 2;
 }
 
 // ========== Health Check ==========
