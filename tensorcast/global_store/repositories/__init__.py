@@ -9,6 +9,7 @@ from .assembly_attempt_repository import AssemblyAttemptRepository
 from .assembly_layout_binding_repository import AssemblyLayoutBindingRepository
 from .assembly_readiness_cut_repository import AssemblyReadinessCutRepository
 from .assembly_slot_occupancy_repository import AssemblySlotOccupancyRepository
+from .broadcast_repository import BroadcastRepository
 from .chunk_directory_repository import ChunkDirectoryRepository
 from .cluster_info_repository import ClusterInfoRepository
 from .idempotency_repository import IdempotencyRepository
@@ -39,6 +40,7 @@ __all__ = [
     "AssemblyLayoutBindingRepository",
     "AssemblyReadinessCutRepository",
     "AssemblySlotOccupancyRepository",
+    "BroadcastRepository",
     "InstanceRepository",
     "IdempotencyRepository",
     "MemoryTierSnapshotRepository",

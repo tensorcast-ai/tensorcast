@@ -19,6 +19,7 @@ from tensorcast.global_store.repositories import (
     AssemblyLayoutBindingRepository,
     AssemblyReadinessCutRepository,
     AssemblySlotOccupancyRepository,
+    BroadcastRepository,
     InstanceRepository,
     LayoutSpecRepository,
     LeafRepository,
@@ -211,6 +212,7 @@ def repositories(db_connection):
         "assembly_layout_binding": AssemblyLayoutBindingRepository(db_connection),
         "assembly_readiness_cut": AssemblyReadinessCutRepository(db_connection),
         "assembly_slot_occupancy": AssemblySlotOccupancyRepository(db_connection),
+        "broadcast": BroadcastRepository(db_connection),
         "proof": ProofRepository(db_connection),
     }
 
