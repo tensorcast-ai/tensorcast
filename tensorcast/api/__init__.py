@@ -31,6 +31,7 @@ from tensorcast.api.context import (
     GovernanceContext,
     QosClass,
     SpanAttributeValue,
+    TransportSchedulingGroup,
     context,
 )
 from tensorcast.api.directory import (
@@ -198,6 +199,7 @@ __all__ = [
     "DirectorySnapshot",
     "FinalizeClass",
     "GovernanceContext",
+    "TransportSchedulingGroup",
     "InstanceExecutionRoute",
     "Operation",
     "OperationError",

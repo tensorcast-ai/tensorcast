@@ -10,6 +10,7 @@ from typing import Any
 import tensorcast as tc
 from tensorcast.api._materialize import MaterializationPayload
 from tensorcast.api._device import device_uuid_for
+from tensorcast.api.context import TransportSchedulingGroup
 from tensorcast.api.store.artifact import Artifact
 from tensorcast.common.selection_identity import (
     compute_selection_hash,
@@ -89,6 +90,39 @@ class _Store:
         self._runtime = _Runtime()
         self._materialization = _Pipeline()
         self.closed = False
+
+
+def test_transport_scheduling_group_rejects_invalid_values() -> None:
+    invalid_cases = [
+        {"group_kind": "", "group_id": "model:v1", "total_parts": 2, "part_id": "d0"},
+        {"group_kind": "weight_broadcast", "group_id": "", "total_parts": 2, "part_id": "d0"},
+        {"group_kind": "weight_broadcast", "group_id": "model:v1", "total_parts": 0, "part_id": "d0"},
+        {"group_kind": "weight_broadcast", "group_id": "model:v1", "total_parts": 2, "part_id": ""},
+        {"group_kind": "weight_broadcast", "group_id": "model:v1", "total_parts": 2, "part_id": "d0", "priority": -1},
+        {"group_kind": "weight_broadcast", "group_id": "model:v1", "total_parts": 2, "part_id": "d0", "epoch": -1},
+    ]
+
+    for kwargs in invalid_cases:
+        try:
+            TransportSchedulingGroup(**kwargs)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected invalid transport group: {kwargs}")
+
+
+def test_context_accepts_typed_transport_group() -> None:
+    group = tc.TransportSchedulingGroup(
+        group_kind="weight_broadcast",
+        group_id="model-a:v42",
+        epoch=42,
+        total_parts=8,
+        part_id="daemon-3",
+    )
+
+    ctx = tc.context(request_id="req-1", transport_group=group)
+
+    assert ctx.transport_group == group
+    assert tc.TransportSchedulingGroup is TransportSchedulingGroup
 
 
 def test_prefetch_uses_deterministic_operation_id() -> None:

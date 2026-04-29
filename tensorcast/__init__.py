@@ -143,6 +143,7 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     ),
     "CallContext": ("tensorcast.api", "CallContext"),
     "CollectiveLoadGroup": ("tensorcast.api", "CollectiveLoadGroup"),
+    "TransportSchedulingGroup": ("tensorcast.api", "TransportSchedulingGroup"),
     "GovernanceContext": ("tensorcast.api", "GovernanceContext"),
     "DirectorySnapshot": ("tensorcast.api", "DirectorySnapshot"),
     "CapabilityDirectoryClient": (
@@ -423,6 +424,7 @@ if TYPE_CHECKING:
         CapabilityDirectoryClient,
         CapabilityDirectoryOptions,
         CollectiveLoadGroup,
+        TransportSchedulingGroup,
         DirectorySnapshot,
         ExecutionTopologyContext,
         GetArtifactOptions,
@@ -520,6 +522,7 @@ __all__ = [
     "binding_realization_plan_to_proto",
     "CallContext",
     "CollectiveLoadGroup",
+    "TransportSchedulingGroup",
     "ExecutionDiagnostics",
     "BindingUpdateEpoch",
     "HashBackend",
