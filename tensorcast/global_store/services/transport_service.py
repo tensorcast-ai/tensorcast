@@ -565,6 +565,11 @@ class TransportService:
             if cleared:
                 return None
 
+        if self._is_terminal_failed_transport(existing):
+            raise NotFoundError(
+                "broadcast transport request is terminal and no retry edge is active"
+            )
+
         replica = self.replica_repository.find_by_id(
             existing.replica_id,
             existing.artifact_id,

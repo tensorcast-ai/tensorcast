@@ -758,24 +758,22 @@ def test_broadcast_max_attempt_exhaustion_marks_session_failed(servicer, test_co
         child_worker_id=child_worker,
         max_attempts=1,
     )
-    transport_response = servicer.RequestReplicaTransport(
-        global_store_pb2.RequestReplicaTransportRequest(
-            artifact_id=artifact_id,
-            source_node_id="requester-node",
-            source_address="10.70.9.9",
-            source_port=59004,
-            requested_byte_space=common_pb2.ByteSpaceRef(
-                kind=common_pb2.BYTE_SPACE_KIND_CANONICAL,
-            ),
-            requester_worker_id=child_worker,
-            request_id="request-max-attempts",
-            broadcast=global_store_pb2.BroadcastTransportHint(
-                session_id="session-max-attempts",
-                strict_parent=True,
-            ),
+    request = global_store_pb2.RequestReplicaTransportRequest(
+        artifact_id=artifact_id,
+        source_node_id="requester-node",
+        source_address="10.70.9.9",
+        source_port=59004,
+        requested_byte_space=common_pb2.ByteSpaceRef(
+            kind=common_pb2.BYTE_SPACE_KIND_CANONICAL,
         ),
-        test_context,
+        requester_worker_id=child_worker,
+        request_id="request-max-attempts",
+        broadcast=global_store_pb2.BroadcastTransportHint(
+            session_id="session-max-attempts",
+            strict_parent=True,
+        ),
     )
+    transport_response = servicer.RequestReplicaTransport(request, test_context)
     assert transport_response.status == global_store_pb2.STATUS_OK
 
     complete_response = servicer.CompleteReplicaTransport(
@@ -792,6 +790,16 @@ def test_broadcast_max_attempt_exhaustion_marks_session_failed(servicer, test_co
     assert session is not None
     assert session.state is BroadcastSessionState.FAILED
     assert target.state is BroadcastTargetState.FAILED
+
+    replay_response = servicer.RequestReplicaTransport(request, test_context)
+    session_after_replay = servicer.broadcast_service.get_session(
+        "session-max-attempts"
+    )
+
+    assert replay_response.status != global_store_pb2.STATUS_OK
+    assert replay_response.transport_id != transport_response.transport_id
+    assert session_after_replay is not None
+    assert session_after_replay.state is BroadcastSessionState.FAILED
 
 
 def test_duplicate_broadcast_completion_is_noop(servicer, test_context):
