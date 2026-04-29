@@ -7,7 +7,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from uuid import UUID, uuid4
 
-from tensorcast.global_store.exceptions import DatabaseError
+from duckdb import DuckDBPyConnection
+
+from tensorcast.global_store.exceptions import (
+    DatabaseError,
+    NotFoundError,
+    ValidationError,
+)
 from tensorcast.global_store.models import (
     BroadcastEdge,
     BroadcastEdgeState,
@@ -16,6 +22,7 @@ from tensorcast.global_store.models import (
     BroadcastTarget,
     BroadcastTargetState,
     Replica,
+    TransportCompletionOutcome,
     Worker,
 )
 from tensorcast.global_store.repositories import (
@@ -148,6 +155,160 @@ class BroadcastService:
             session_id,
             BroadcastSessionState.CANCELLED,
         )
+
+    def claim_transport_edge(
+        self,
+        *,
+        session_id: str,
+        artifact_id: str,
+        requested_view_id: str | None,
+        requester_worker_id: str,
+        request_id: str,
+        heartbeat_timeout_seconds: float,
+        cursor: DuckDBPyConnection,
+    ) -> tuple[Replica, BroadcastEdge]:
+        """Claim the planned broadcast parent for one target worker transport."""
+        session = self._broadcast_repository.find_session(session_id, cursor=cursor)
+        if session is None:
+            raise NotFoundError(f"broadcast session not found: {session_id}")
+        if session.state is not BroadcastSessionState.ACTIVE:
+            raise ValidationError(f"broadcast session is not active: {session_id}")
+        if session.artifact_id != artifact_id:
+            raise ValidationError("broadcast session artifact does not match request")
+        if (session.requested_view_id or "") != (requested_view_id or ""):
+            raise ValidationError("broadcast session byte space does not match request")
+
+        target = self._broadcast_repository.find_target(
+            session.session_id,
+            requester_worker_id,
+            cursor=cursor,
+        )
+        if target is None:
+            raise NotFoundError(
+                f"broadcast target not found for worker: {requester_worker_id}"
+            )
+        if target.state is BroadcastTargetState.COMPLETED:
+            raise ValidationError("broadcast target is already completed")
+
+        edge = self._broadcast_repository.find_active_edge_for_child(
+            session.session_id,
+            requester_worker_id,
+            cursor=cursor,
+        )
+        if edge is None:
+            self._plan_more_edges(session, cursor=cursor)
+            edge = self._broadcast_repository.find_active_edge_for_child(
+                session.session_id,
+                requester_worker_id,
+                cursor=cursor,
+            )
+        if edge is None:
+            raise NotFoundError(
+                f"no broadcast edge available for worker: {requester_worker_id}"
+            )
+
+        selection = self._replica_repository.claim_replica_for_transport(
+            replica_id=edge.parent_replica_id,
+            artifact_id=artifact_id,
+            view_id=requested_view_id,
+            heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+            cursor=cursor,
+        )
+        if selection.replica is None:
+            raise NotFoundError("broadcast parent replica is not transport eligible")
+
+        materialized = self._broadcast_repository.mark_edge_materializing(
+            edge.edge_id,
+            request_id,
+            cursor=cursor,
+        )
+        if not materialized:
+            self._replica_repository.decrement_requests_with_cursor(
+                selection.replica.replica_id,
+                cursor,
+            )
+            raise ValidationError("broadcast edge is no longer claimable")
+
+        claimed_edge = self._broadcast_repository.find_edge(edge.edge_id, cursor=cursor)
+        if claimed_edge is None:
+            raise NotFoundError(f"broadcast edge not found: {edge.edge_id}")
+        return selection.replica, claimed_edge
+
+    def complete_transport_edge(
+        self,
+        *,
+        session_id: str,
+        edge_id: str,
+        transport_outcome: TransportCompletionOutcome,
+        outcome_detail: str | None,
+        cursor: DuckDBPyConnection,
+    ) -> None:
+        """Advance broadcast edge state from a completed transport outcome."""
+        session = self._broadcast_repository.find_session(session_id, cursor=cursor)
+        if session is None:
+            raise NotFoundError(f"broadcast session not found: {session_id}")
+        edge = self._broadcast_repository.find_edge(edge_id, cursor=cursor)
+        if edge is None:
+            raise NotFoundError(f"broadcast edge not found: {edge_id}")
+
+        if transport_outcome is TransportCompletionOutcome.SUCCESS:
+            child_replica = self._replica_repository.find_exportable_replica_for_worker(
+                artifact_id=session.artifact_id,
+                view_id=session.requested_view_id,
+                worker_id=edge.child_worker_id,
+                heartbeat_timeout_seconds=self._ROOT_HEARTBEAT_TIMEOUT_SECONDS,
+                cursor=cursor,
+            )
+            if child_replica is None:
+                self._broadcast_repository.mark_edge_failed(
+                    edge.edge_id,
+                    "child_replica_not_exportable_after_success",
+                    cursor=cursor,
+                )
+                return
+            self._broadcast_repository.mark_edge_completed(
+                edge.edge_id,
+                child_replica.replica_id,
+                cursor=cursor,
+            )
+            self._plan_more_edges(session, cursor=cursor)
+            self._mark_session_complete_if_done(session.session_id, cursor=cursor)
+            return
+
+        reason = (
+            outcome_detail or transport_outcome.value or "transport_failed"
+        ).strip()
+        if not reason:
+            reason = "transport_failed"
+        self._broadcast_repository.mark_edge_failed(
+            edge.edge_id,
+            reason,
+            cursor=cursor,
+        )
+        if int(edge.attempt) < int(session.max_attempts):
+            target = self._broadcast_repository.find_target(
+                edge.session_id,
+                edge.child_worker_id,
+                cursor=cursor,
+            )
+            if target is not None:
+                target.state = BroadcastTargetState.PENDING
+                target.assigned_edge_id = None
+                target.completed_replica_id = None
+                target.completed_at = None
+                self._broadcast_repository.upsert_target(target, cursor=cursor)
+                self._plan_more_edges(session, cursor=cursor)
+
+    def _mark_session_complete_if_done(self, session_id: str, *, cursor=None) -> None:
+        if self._broadcast_repository.count_incomplete_targets(
+            session_id,
+            cursor=cursor,
+        ) == 0:
+            self._broadcast_repository.update_session_state(
+                session_id,
+                BroadcastSessionState.COMPLETED,
+                cursor=cursor,
+            )
 
     def _resolve_targets(
         self,

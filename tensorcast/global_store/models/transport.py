@@ -19,6 +19,14 @@ class TransportCompletionOutcome(str, Enum):
 
 
 @dataclass(frozen=True)
+class BroadcastTransportHint:
+    """Optional broadcast-tree transport routing hint."""
+
+    session_id: str
+    strict_parent: bool = True
+
+
+@dataclass(frozen=True)
 class TransportSchedulingGroup:
     """Optional scheduling-group metadata attached to transport requests."""
 
@@ -50,6 +58,8 @@ class Transport:
     requester_worker_id: str | None = None
     request_id: str | None = None
     request_fingerprint: str | None = None
+    broadcast_session_id: str | None = None
+    broadcast_edge_id: str | None = None
 
     # Optional scheduling-group metadata
     group_id: str | None = None

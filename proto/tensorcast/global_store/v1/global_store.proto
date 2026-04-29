@@ -1031,6 +1031,7 @@ message RequestReplicaTransportRequest {
   TransportSchedulingGroup scheduling_group = 8;
   string requester_worker_id = 9;
   string request_id = 10;
+  BroadcastTransportHint broadcast = 11;
 }
 
 message RequestReplicaTransportResponse {
@@ -1046,6 +1047,11 @@ message TransportSchedulingGroup {
   string part_id = 4;
   uint32 priority = 5;
   uint64 epoch = 6;
+}
+
+message BroadcastTransportHint {
+  string session_id = 1;
+  bool strict_parent = 2;
 }
 
 enum TransportCompletionOutcome {

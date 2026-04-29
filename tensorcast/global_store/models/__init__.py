@@ -25,6 +25,7 @@ from .persistence import (
 from .replica import ByteSpaceKind, ByteSpaceRef, ExportState, MemoryType, Replica
 from .shard_home_lease import ShardHomeLease
 from .transport import (
+    BroadcastTransportHint,
     Transport,
     TransportCompletionOutcome,
     TransportSchedulingGroup,
@@ -40,6 +41,7 @@ __all__ = [
     "BroadcastTargetState",
     "Instance",
     "Replica",
+    "BroadcastTransportHint",
     "Transport",
     "TransportCompletionOutcome",
     "TransportSchedulingGroup",

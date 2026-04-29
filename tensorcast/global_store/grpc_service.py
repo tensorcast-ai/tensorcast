@@ -466,10 +466,16 @@ class GlobalStoreServicer(
             control_reducer=self.worker_control_reducer,
             logger=logger,
         )
+        self.broadcast_service = BroadcastService(
+            broadcast_repository=self.broadcast_repository,
+            replica_repository=self.replica_repository,
+            worker_repository=self.worker_repository,
+        )
         self.transport_service = TransportService(
             self.replica_repository,
             self.transport_repository,
             self.pending_transport_request_repository,
+            broadcast_service=self.broadcast_service,
         )
         self.transport_rpc_handler = TransportRpcHandler(
             transport_service=self.transport_service,
@@ -550,11 +556,6 @@ class GlobalStoreServicer(
             shard_home_lease_service=self.shard_home_lease_service,
             datetime_to_timestamp=datetime_to_timestamp,
             logger=logger,
-        )
-        self.broadcast_service = BroadcastService(
-            broadcast_repository=self.broadcast_repository,
-            replica_repository=self.replica_repository,
-            worker_repository=self.worker_repository,
         )
         self.broadcast_rpc_handler = BroadcastRpcHandler(
             broadcast_service=self.broadcast_service,

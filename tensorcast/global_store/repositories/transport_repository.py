@@ -37,6 +37,8 @@ class TransportWindowRow:
     completion_outcome: str
     request_id: str
     requester_worker_id: str
+    broadcast_session_id: str
+    broadcast_edge_id: str
     group_id: str
     group_kind: str
     group_part_id: str
@@ -55,7 +57,8 @@ class TransportRepository(BaseRepository):
         "request_id, request_fingerprint, "
         "requester_worker_id, group_id, group_kind, group_total_parts, "
         "group_part_id, group_priority, group_epoch, completion_outcome, "
-        "completion_detail, created_at, completed_at, status"
+        "completion_detail, created_at, completed_at, status, "
+        "broadcast_session_id, broadcast_edge_id"
     )
 
     def find_by_id(self, transport_id: UUID, cursor=None) -> Transport | None:
@@ -134,9 +137,10 @@ class TransportRepository(BaseRepository):
                 request_id, request_fingerprint, requester_worker_id,
                 group_id, group_kind, group_total_parts, group_part_id,
                 group_priority, group_epoch,
+                broadcast_session_id, broadcast_edge_id,
                 status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 str(transport.transport_id),
@@ -157,6 +161,8 @@ class TransportRepository(BaseRepository):
                 self._normalize_optional_text(transport.group_part_id),
                 self._normalize_optional_int(transport.group_priority),
                 self._normalize_optional_int(transport.group_epoch),
+                self._normalize_optional_text(transport.broadcast_session_id),
+                self._normalize_optional_text(transport.broadcast_edge_id),
                 "in_progress",
             ],
         )
@@ -205,9 +211,10 @@ class TransportRepository(BaseRepository):
                     request_id, request_fingerprint, requester_worker_id,
                     group_id, group_kind, group_total_parts, group_part_id,
                     group_priority, group_epoch,
+                    broadcast_session_id, broadcast_edge_id,
                     status
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     str(transport.transport_id),
@@ -228,6 +235,8 @@ class TransportRepository(BaseRepository):
                     self._normalize_optional_text(transport.group_part_id),
                     self._normalize_optional_int(transport.group_priority),
                     self._normalize_optional_int(transport.group_epoch),
+                    self._normalize_optional_text(transport.broadcast_session_id),
+                    self._normalize_optional_text(transport.broadcast_edge_id),
                     "in_progress",
                 ],
             )
@@ -460,6 +469,8 @@ class TransportRepository(BaseRepository):
                     COALESCE(t.completion_outcome, '') AS completion_outcome,
                     COALESCE(t.request_id, '') AS request_id,
                     COALESCE(t.requester_worker_id, '') AS requester_worker_id,
+                    COALESCE(t.broadcast_session_id, '') AS broadcast_session_id,
+                    COALESCE(t.broadcast_edge_id, '') AS broadcast_edge_id,
                     COALESCE(t.group_id, '') AS group_id,
                     COALESCE(t.group_kind, '') AS group_kind,
                     COALESCE(t.group_part_id, '') AS group_part_id,
@@ -477,8 +488,8 @@ class TransportRepository(BaseRepository):
             ).fetchall()
             result: list[TransportWindowRow] = []
             for row in rows:
-                created_at = self._coerce_datetime(row[11])
-                completed_at = self._coerce_datetime_optional(row[12])
+                created_at = self._coerce_datetime(row[13])
+                completed_at = self._coerce_datetime_optional(row[14])
                 result.append(
                     TransportWindowRow(
                         transport_id=str(row[0] or ""),
@@ -493,15 +504,23 @@ class TransportRepository(BaseRepository):
                             str(row[6] or "")
                         )
                         or "",
-                        group_id=self._normalize_optional_text(str(row[7] or "")) or "",
-                        group_kind=self._normalize_optional_text(str(row[8] or ""))
+                        broadcast_session_id=self._normalize_optional_text(
+                            str(row[7] or "")
+                        )
                         or "",
-                        group_part_id=self._normalize_optional_text(str(row[9] or ""))
+                        broadcast_edge_id=self._normalize_optional_text(
+                            str(row[8] or "")
+                        )
                         or "",
-                        group_total_parts=int(row[10] or 0),
+                        group_id=self._normalize_optional_text(str(row[9] or "")) or "",
+                        group_kind=self._normalize_optional_text(str(row[10] or ""))
+                        or "",
+                        group_part_id=self._normalize_optional_text(str(row[11] or ""))
+                        or "",
+                        group_total_parts=int(row[12] or 0),
                         created_at=created_at,
                         completed_at=completed_at,
-                        replica_memory_size_bytes=int(row[13] or 0),
+                        replica_memory_size_bytes=int(row[15] or 0),
                     )
                 )
             return result
@@ -736,6 +755,10 @@ class TransportRepository(BaseRepository):
             group_part_id=self._normalize_optional_text(get("group_part_id")),
             group_priority=self._normalize_optional_int(get("group_priority")),
             group_epoch=self._normalize_optional_int(get("group_epoch")),
+            broadcast_session_id=self._normalize_optional_text(
+                get("broadcast_session_id")
+            ),
+            broadcast_edge_id=self._normalize_optional_text(get("broadcast_edge_id")),
             completion_outcome=outcome,
             completion_detail=self._normalize_optional_text(get("completion_detail")),
             created_at=get("created_at"),

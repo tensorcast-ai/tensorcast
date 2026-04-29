@@ -29,6 +29,7 @@ from tensorcast.global_store.metrics import (
     record_transport_source_assignment,
 )
 from tensorcast.global_store.models import (
+    BroadcastTransportHint,
     PendingTransportRequest,
     PendingTransportState,
     Replica,
@@ -49,6 +50,7 @@ from tensorcast.global_store.repositories.replica_repository import (
 from tensorcast.global_store.repositories.transport_repository import (
     TransportWindowRow,
 )
+from tensorcast.global_store.services.broadcast_service import BroadcastService
 from tensorcast.logger import init_logger
 
 logger = init_logger(__name__)
@@ -63,11 +65,13 @@ class TransportService:
         replica_repository: ReplicaRepository,
         transport_repository: TransportRepository,
         pending_transport_request_repository: PendingTransportRequestRepository,
+        broadcast_service: BroadcastService | None = None,
     ):
         """Initialize service with repositories."""
         self.replica_repository = replica_repository
         self.transport_repository = transport_repository
         self.pending_transport_request_repository = pending_transport_request_repository
+        self.broadcast_service = broadcast_service
         self.config = get_config()
         # Serialize queue-wide dispatch to avoid multi-thread transaction storms.
         self._dispatch_loop_lock = threading.Lock()
@@ -136,6 +140,7 @@ class TransportService:
         source_port: int,
         requester_worker_id: str | None,
         scheduling_group: TransportSchedulingGroup | None,
+        broadcast_hint: BroadcastTransportHint | None = None,
     ) -> str:
         group_kind = (
             str(scheduling_group.group_kind).strip().lower()
@@ -152,6 +157,14 @@ class TransportService:
             "source_address": source_address,
             "source_port": int(source_port),
             "requester_worker_id": (requester_worker_id or "").strip(),
+            "broadcast": (
+                {
+                    "session_id": broadcast_hint.session_id,
+                    "strict_parent": bool(broadcast_hint.strict_parent),
+                }
+                if broadcast_hint is not None
+                else None
+            ),
             "scheduling_group": (
                 {
                     "group_id": scheduling_group.group_id,
@@ -181,6 +194,8 @@ class TransportService:
         request_fingerprint: str | None,
         requester_worker_id: str | None,
         scheduling_group: TransportSchedulingGroup | None,
+        broadcast_session_id: str | None = None,
+        broadcast_edge_id: str | None = None,
     ) -> Transport:
         transport = Transport(
             replica_id=replica.replica_id,
@@ -193,6 +208,8 @@ class TransportService:
             request_id=request_id,
             request_fingerprint=request_fingerprint,
             requester_worker_id=requester_worker_id,
+            broadcast_session_id=broadcast_session_id,
+            broadcast_edge_id=broadcast_edge_id,
         )
         transport.set_scheduling_group(scheduling_group)
         return transport
@@ -310,6 +327,7 @@ class TransportService:
         view_id: str | None = None,
         scheduling_group: TransportSchedulingGroup | None = None,
         requester_worker_id: str | None = None,
+        broadcast_hint: BroadcastTransportHint | None = None,
     ) -> tuple[Replica, UUID]:
         """
         Request an artifact transport via unified pending-queue dispatch.
@@ -343,12 +361,26 @@ class TransportService:
             source_port=source_port,
             requester_worker_id=normalized_requester_worker_id,
             scheduling_group=scheduling_group,
+            broadcast_hint=broadcast_hint,
         )
         existing = self._resolve_existing_request(
             normalized_request_id, request_fingerprint
         )
         if existing is not None:
             return existing
+
+        if broadcast_hint is not None:
+            return self._request_transport_broadcast(
+                artifact_id=artifact_id,
+                view_id=view_id,
+                source_node_id=source_node_id,
+                source_address=source_address,
+                source_port=source_port,
+                requester_worker_id=normalized_requester_worker_id,
+                request_fingerprint=request_fingerprint,
+                request_id=normalized_request_id,
+                broadcast_hint=broadcast_hint,
+            )
 
         return self._request_transport_group_dispatch(
             artifact_id=artifact_id,
@@ -362,6 +394,98 @@ class TransportService:
             request_fingerprint=request_fingerprint,
             request_id=normalized_request_id,
         )
+
+    def _request_transport_broadcast(
+        self,
+        *,
+        artifact_id: str,
+        view_id: str | None,
+        source_node_id: str,
+        source_address: str,
+        source_port: int,
+        requester_worker_id: str | None,
+        request_fingerprint: str,
+        request_id: str,
+        broadcast_hint: BroadcastTransportHint,
+    ) -> tuple[Replica, UUID]:
+        start_time = time.time()
+        if self.broadcast_service is None:
+            raise ValidationError(
+                "broadcast transport requested but service is unavailable"
+            )
+        if requester_worker_id is None:
+            raise ValidationError("broadcast transport requires requester_worker_id")
+
+        try:
+            with self._dispatch_loop_lock, self.replica_repository.transaction() as tx:
+                existing = self.transport_repository.find_by_request_id(
+                    request_id,
+                    cursor=tx,
+                )
+                if existing is not None:
+                    if (
+                        existing.request_fingerprint is not None
+                        and existing.request_fingerprint != request_fingerprint
+                    ):
+                        raise ValidationError(
+                            f"request_id={request_id} already used with different payload"
+                        )
+                    replica = self.replica_repository.find_by_id(
+                        existing.replica_id,
+                        existing.artifact_id,
+                        cursor=tx,
+                    )
+                    if replica is not None:
+                        return replica, existing.transport_id
+
+                replica, edge = self.broadcast_service.claim_transport_edge(
+                    session_id=broadcast_hint.session_id,
+                    artifact_id=artifact_id,
+                    requested_view_id=view_id,
+                    requester_worker_id=requester_worker_id,
+                    request_id=request_id,
+                    heartbeat_timeout_seconds=self.config.heartbeat_timeout_ms / 1000,
+                    cursor=tx,
+                )
+                transport = self._build_transport(
+                    replica=replica,
+                    artifact_id=artifact_id,
+                    requested_view_id=view_id,
+                    source_node_id=source_node_id,
+                    source_address=source_address,
+                    source_port=source_port,
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                    requester_worker_id=requester_worker_id,
+                    scheduling_group=None,
+                    broadcast_session_id=broadcast_hint.session_id,
+                    broadcast_edge_id=edge.edge_id,
+                )
+                resolved_transport, created = (
+                    self.transport_repository.create_if_absent_with_cursor(
+                        transport,
+                        tx,
+                    )
+                )
+                if not created:
+                    self.replica_repository.decrement_requests_with_cursor(
+                        replica.replica_id,
+                        tx,
+                    )
+                else:
+                    inc_active_transports()
+                    record_transport_source_assignment(
+                        artifact_id=artifact_id,
+                        replica_id=str(replica.replica_id),
+                        source_created_at=replica.created_at,
+                    )
+                inc_transport_request(artifact_id, "success")
+                observe_transport_wait(artifact_id, time.time() - start_time)
+                return replica, resolved_transport.transport_id
+        except DatabaseError as exc:
+            if isinstance(exc.__cause__, (NotFoundError, ValidationError)):
+                raise exc.__cause__ from exc
+            raise
 
     def _request_transport_group_dispatch(
         self,
@@ -1099,6 +1223,18 @@ class TransportService:
             self.replica_repository.decrement_requests_with_cursor(
                 transport.replica_id, tx
             )
+            if (
+                self.broadcast_service is not None
+                and transport.broadcast_session_id
+                and transport.broadcast_edge_id
+            ):
+                self.broadcast_service.complete_transport_edge(
+                    session_id=transport.broadcast_session_id,
+                    edge_id=transport.broadcast_edge_id,
+                    transport_outcome=outcome,
+                    outcome_detail=outcome_detail,
+                    cursor=tx,
+                )
             replica_after = self.replica_repository.find_by_id(
                 transport.replica_id, transport.artifact_id, cursor=tx
             )
