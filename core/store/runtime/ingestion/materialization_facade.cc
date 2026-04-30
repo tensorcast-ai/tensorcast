@@ -4297,6 +4297,23 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
          local_mapped_required_by_plan);
     const uint64_t planned_generic_after_local_mapped =
         planned_generic_backend_bytes_after_local_mapped(source_bound_strategy->summary);
+    const auto setup_done = std::chrono::steady_clock::now();
+    LOG(INFO) << "tc_profile materialize_mapped_into_target source_setup"
+              << " artifact_id=" << request_hints.artifact_id << " target_device=" << target_device.ordinal
+              << " source_kind=" << static_cast<int>(source_kind)
+              << " source_byte_space=" << static_cast<int>(source_byte_space) << " total_size=" << total_size
+              << " effective_map_bytes=" << effective_map.total_bytes
+              << " effective_data_bytes=" << effective_data_map.total_bytes
+              << " collective_data_bytes=" << collective_effective_data_map.total_bytes
+              << " generic_data_bytes=" << generic_effective_data_map.total_bytes
+              << " effective_local_typed_bytes=" << effective_local_typed_bytes
+              << " source_bound_plan_uses_local_mapped=" << source_bound_plan_uses_local_mapped
+              << " local_mapped_selected=" << local_mapped_selected
+              << " collective_eligible=" << source_binding.collective_eligible
+              << " init_sec=" << std::chrono::duration<double>(init_done - source_total_start).count()
+              << " open_sec=" << std::chrono::duration<double>(source_open_done - init_done).count()
+              << " setup_after_open_sec=" << std::chrono::duration<double>(setup_done - source_open_done).count()
+              << " total_setup_sec=" << std::chrono::duration<double>(setup_done - source_total_start).count();
 
     if (source_binding.collective_eligible) {
       if (auto* disk_loader = dynamic_cast<DiskLoader*>(loader.get()); disk_loader != nullptr) {
@@ -4312,6 +4329,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
               .strategy_config = strategy_config,
           };
+          const auto collective_start = std::chrono::steady_clock::now();
           auto collective_result = execute_collective_mapped_target_load(
               config_.hooks,
               replica::CollectiveMappedTargetLoadRequest{
@@ -4326,6 +4344,15 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               config_.runtime_context->pinned_buffer_pool(),
               timeout,
               collective_options);
+          const auto collective_done = std::chrono::steady_clock::now();
+          LOG(INFO) << "tc_profile materialize_mapped_into_target collective_call"
+                    << " artifact_id=" << request_hints.artifact_id << " target_device=" << target_device.ordinal
+                    << " handled=" << collective_result.handled << " status_ok=" << collective_result.status.ok()
+                    << " unique_source_bytes=" << collective_result.metrics.unique_source_bytes
+                    << " peer_transfer_bytes=" << collective_result.metrics.peer_transfer_bytes
+                    << " batch_count=" << collective_result.metrics.batch_count
+                    << " skip_reason=" << collective_result.skip_reason
+                    << " sec=" << std::chrono::duration<double>(collective_done - collective_start).count();
           if (collective_result.handled) {
             if (!collective_result.status.ok()) {
               return absl::DataLossError(
@@ -4337,7 +4364,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
             uint64_t local_mapped_bytes = 0;
             uint64_t generic_backend_bytes = generic_residual_bytes;
             loader::ByteRangeMap generic_backend_data_map = generic_effective_data_map;
+            double local_mapped_sec = 0.0;
             if (generic_residual_bytes > 0 && local_mapped_selected) {
+              const auto local_start = std::chrono::steady_clock::now();
               auto local_result = replica::try_local_mapped_target_load(
                   replica::LocalMappedTargetLoadRequest{
                       .artifact_id = request_hints.artifact_id,
@@ -4351,6 +4380,14 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                   config_.runtime_context->pinned_buffer_pool(),
                   timeout,
                   collective_options);
+              const auto local_done = std::chrono::steady_clock::now();
+              local_mapped_sec = std::chrono::duration<double>(local_done - local_start).count();
+              LOG(INFO) << "tc_profile materialize_mapped_into_target local_mapped_continuation_call"
+                        << " artifact_id=" << request_hints.artifact_id << " target_device=" << target_device.ordinal
+                        << " handled=" << local_result.handled << " status_ok=" << local_result.status.ok()
+                        << " handled_bytes=" << local_result.handled_bytes
+                        << " residual_bytes=" << local_result.residual_data_map.total_bytes
+                        << " skip_reason=" << local_result.skip_reason << " sec=" << local_mapped_sec;
               if (local_result.handled) {
                 if (!local_result.status.ok()) {
                   return absl::Status(
@@ -4384,7 +4421,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                         local_result.skip_reason.empty() ? "unavailable" : local_result.skip_reason));
               }
             }
+            double continuation_sec = 0.0;
             if (generic_backend_bytes > 0 || effective_local_typed_bytes > 0) {
+              const auto continuation_start = std::chrono::steady_clock::now();
               loader::TargetLayoutGpuSink continuation_sink(
                   loader::TargetLayoutGpuSink::Options{
                       .storages = storages,
@@ -4409,6 +4448,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                           "materialize_mapped_into_target local typed execution failed: ", fill_status.message()));
                 }
               }
+              continuation_sec =
+                  std::chrono::duration<double>(std::chrono::steady_clock::now() - continuation_start).count();
             }
             const uint64_t collective_bytes = byte_range_map_covered_bytes(collective_effective_data_map);
             const strategy::ExecutionCommitReport collective_report{
@@ -4446,6 +4487,18 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                       << " fallback_bytes=" << collective_report.fallback_bytes
                       << " collective_handled=" << collective_report.collective_handled
                       << " dominant_executor=" << collective_report.dominant_executor;
+            LOG(INFO) << "tc_profile materialize_mapped_into_target collective_path timings"
+                      << " artifact_id=" << request_hints.artifact_id << " target_device=" << target_device.ordinal
+                      << " setup_sec=" << std::chrono::duration<double>(setup_done - source_total_start).count()
+                      << " collective_sec=" << std::chrono::duration<double>(collective_done - collective_start).count()
+                      << " local_mapped_sec=" << local_mapped_sec << " continuation_sec=" << continuation_sec
+                      << " total_sec="
+                      << std::chrono::duration<double>(std::chrono::steady_clock::now() - source_total_start).count()
+                      << " committed_bytes=" << collective_report.committed_bytes
+                      << " collective_bytes=" << collective_report.actual_collective_committed_bytes
+                      << " local_mapped_bytes=" << local_mapped_bytes
+                      << " generic_backend_bytes=" << generic_backend_bytes
+                      << " effective_local_typed_bytes=" << effective_local_typed_bytes;
             return loading::MaterializeIntoTargetResult{
                 .source = source_kind,
                 .requested_bytes = collective_report.requested_bytes,
@@ -4502,6 +4555,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
               .strategy_config = strategy_config,
           };
+          const auto local_start = std::chrono::steady_clock::now();
           auto local_result = replica::try_local_mapped_target_load(
               replica::LocalMappedTargetLoadRequest{
                   .artifact_id = request_hints.artifact_id,
@@ -4515,6 +4569,14 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               config_.runtime_context->pinned_buffer_pool(),
               timeout,
               local_options);
+          const auto local_done = std::chrono::steady_clock::now();
+          const double local_mapped_sec = std::chrono::duration<double>(local_done - local_start).count();
+          LOG(INFO) << "tc_profile materialize_mapped_into_target local_mapped_call"
+                    << " artifact_id=" << request_hints.artifact_id << " target_device=" << target_device.ordinal
+                    << " handled=" << local_result.handled << " status_ok=" << local_result.status.ok()
+                    << " handled_bytes=" << local_result.handled_bytes
+                    << " residual_bytes=" << local_result.residual_data_map.total_bytes
+                    << " skip_reason=" << local_result.skip_reason << " sec=" << local_mapped_sec;
           if (local_result.handled) {
             if (!local_result.status.ok()) {
               return absl::Status(
@@ -4539,7 +4601,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                   "materialize_mapped_into_target local mapped execution produced generic residual but mixed execution "
                   "is disabled");
             }
+            double continuation_sec = 0.0;
             if (generic_backend_bytes > 0 || effective_local_typed_bytes > 0) {
+              const auto continuation_start = std::chrono::steady_clock::now();
               loader::TargetLayoutGpuSink continuation_sink(
                   loader::TargetLayoutGpuSink::Options{
                       .storages = storages,
@@ -4562,6 +4626,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                     absl::StrCat(
                         "materialize_mapped_into_target local typed execution failed: ", fill_status.message()));
               }
+              continuation_sec =
+                  std::chrono::duration<double>(std::chrono::steady_clock::now() - continuation_start).count();
             }
             const strategy::ExecutionCommitReport local_report{
                 .source = source_kind,
@@ -4590,6 +4656,16 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                       << " collective_handled=" << local_report.collective_handled
                       << " collective_skip_reason=" << local_report.collective_skip_reason
                       << " dominant_executor=" << local_report.dominant_executor;
+            LOG(INFO) << "tc_profile materialize_mapped_into_target local_path timings"
+                      << " artifact_id=" << request_hints.artifact_id << " target_device=" << target_device.ordinal
+                      << " setup_sec=" << std::chrono::duration<double>(setup_done - source_total_start).count()
+                      << " local_mapped_sec=" << local_mapped_sec << " continuation_sec=" << continuation_sec
+                      << " total_sec="
+                      << std::chrono::duration<double>(std::chrono::steady_clock::now() - source_total_start).count()
+                      << " committed_bytes=" << local_report.committed_bytes
+                      << " local_mapped_bytes=" << local_mapped_bytes
+                      << " generic_backend_bytes=" << generic_backend_bytes
+                      << " effective_local_typed_bytes=" << effective_local_typed_bytes;
             return loading::MaterializeIntoTargetResult{
                 .source = source_kind,
                 .requested_bytes = local_report.requested_bytes,

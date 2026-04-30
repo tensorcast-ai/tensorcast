@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import logging
+import time
 import uuid
 import weakref
 from types import MappingProxyType
@@ -47,6 +49,8 @@ from tensorcast.types import (
     SourceBoundCapability,
     SourceBoundPlanDiagnostics,
 )
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from tensorcast.api.store import Store
@@ -122,6 +126,14 @@ def restore_owned_binding_tensors(
     runtime: "StoreRuntimeContext",
     device_id: int,
 ) -> dict[str, torch.Tensor]:
+    profile_start = time.perf_counter()
+    profile_last = profile_start
+    logger.info(
+        "tc_profile_py restore_owned_binding_tensors enter device_id=%d payloads=%d has_mem_handle=%s",
+        device_id,
+        len(getattr(response, "payloads", ())),
+        response.HasField("mem_handle"),
+    )
     if not response.HasField("mem_handle"):
         raise ArtifactError(
             "CreateOwnedBinding returned empty mem_handle",
@@ -142,6 +154,16 @@ def restore_owned_binding_tensors(
             status_code="DATA_LOSS",
             retryable=False,
         )
+    now = time.perf_counter()
+    logger.info(
+        "tc_profile_py restore_owned_binding_tensors parsed_handle handle_bytes=%d "
+        "lease_token_bytes=%d step_sec=%.6f total_sec=%.6f",
+        len(cuda_ipc_handle),
+        len(bytes(mem_handle.lease_token)),
+        now - profile_last,
+        now - profile_start,
+    )
+    profile_last = now
     server_config = runtime.capabilities.server_config
     if server_config is None:
         server_config = runtime.ensure_client().get_server_config()
@@ -155,6 +177,15 @@ def restore_owned_binding_tensors(
             status_code="FAILED_PRECONDITION",
             retryable=False,
         )
+    now = time.perf_counter()
+    logger.info(
+        "tc_profile_py restore_owned_binding_tensors resolved_server_config "
+        "local_handle_socket_path=%s step_sec=%.6f total_sec=%.6f",
+        bool(local_handle_socket_path),
+        now - profile_last,
+        now - profile_start,
+    )
+    profile_last = now
     device_uuid = None
     try:
         device_uuid = device_uuid_for(device_id)
@@ -164,6 +195,16 @@ def restore_owned_binding_tensors(
         _tensor_payload_from_proto(desc, default_device_uuid=device_uuid)
         for desc in response.payloads
     ]
+    now = time.perf_counter()
+    logger.info(
+        "tc_profile_py restore_owned_binding_tensors built_descriptors "
+        "device_uuid=%s descriptor_count=%d step_sec=%.6f total_sec=%.6f",
+        device_uuid,
+        len(descriptors),
+        now - profile_last,
+        now - profile_start,
+    )
+    profile_last = now
     meta_state_dict = {
         desc.name: (
             list(desc.shape),
@@ -174,8 +215,28 @@ def restore_owned_binding_tensors(
         for desc in descriptors
     }
     tensor_offsets = {desc.name: int(desc.buffer_offset) for desc in descriptors}
+    now = time.perf_counter()
+    logger.info(
+        "tc_profile_py restore_owned_binding_tensors built_metadata "
+        "tensor_count=%d step_sec=%.6f total_sec=%.6f",
+        len(meta_state_dict),
+        now - profile_last,
+        now - profile_start,
+    )
+    profile_last = now
+    logger.info("tc_profile_py restore_owned_binding_tensors get_cuda_memory_ptr_start")
     cuda_memory_ptr = get_cuda_memory_ptr(device_id, cuda_ipc_handle)
-    return restore_tensors(
+    now = time.perf_counter()
+    logger.info(
+        "tc_profile_py restore_owned_binding_tensors get_cuda_memory_ptr_done "
+        "ptr=%d step_sec=%.6f total_sec=%.6f",
+        int(cuda_memory_ptr),
+        now - profile_last,
+        now - profile_start,
+    )
+    profile_last = now
+    logger.info("tc_profile_py restore_owned_binding_tensors restore_tensors_start")
+    tensors = restore_tensors(
         meta_state_dict,
         {int(device_id): int(cuda_memory_ptr)},
         {int(device_id): tensor_offsets},
@@ -183,6 +244,15 @@ def restore_owned_binding_tensors(
         lease_token=lease_token,
         local_handle_socket_path=local_handle_socket_path,
     )
+    now = time.perf_counter()
+    logger.info(
+        "tc_profile_py restore_owned_binding_tensors restore_tensors_done "
+        "tensor_count=%d step_sec=%.6f total_sec=%.6f",
+        len(tensors),
+        now - profile_last,
+        now - profile_start,
+    )
+    return tensors
 
 
 def _collective_group_to_proto(

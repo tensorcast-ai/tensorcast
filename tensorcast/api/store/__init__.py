@@ -1261,7 +1261,26 @@ class Store:
                 )
             copy_plan_proto = _copy_plan_to_proto(normalized_mapping)
         runtime = self._runtime
+        profile_start = time.perf_counter()
+        profile_last = profile_start
+        logger.info(
+            "tc_profile_py store.create_binding enter ownership=%s device=%s "
+            "layout_id=%s tensor_count=%d target_index_bytes=%d mapped=%s",
+            ownership,
+            device,
+            layout.binding_layout_id,
+            len(layout.target_layout.offsets),
+            len(layout.target_index_bytes),
+            bool(layout.dst_specs or normalized_mapping),
+        )
         client = runtime.ensure_client()
+        now = time.perf_counter()
+        logger.info(
+            "tc_profile_py store.create_binding ensure_client step_sec=%.6f total_sec=%.6f",
+            now - profile_last,
+            now - profile_start,
+        )
+        profile_last = now
         timeout_s = _ctx_timeout_s(ctx)
         mode = str(ownership).strip().lower()
         if mode == "daemon":
@@ -1280,25 +1299,75 @@ class Store:
             device_obj = torch.device(device)
             device_id = resolve_device(device_obj, allow_cpu=False)
             protocol_device_id = protocol_device_id_for(device_id)
+            now = time.perf_counter()
+            logger.info(
+                "tc_profile_py store.create_binding resolved_device device_id=%d "
+                "protocol_device_id=%d step_sec=%.6f total_sec=%.6f",
+                device_id,
+                protocol_device_id,
+                now - profile_last,
+                now - profile_start,
+            )
+            profile_last = now
+            target_layout_proto = _target_layout_with_protocol_device_id(
+                layout,
+                device_id=protocol_device_id,
+            )
+            now = time.perf_counter()
+            logger.info(
+                "tc_profile_py store.create_binding built_target_layout "
+                "step_sec=%.6f total_sec=%.6f",
+                now - profile_last,
+                now - profile_start,
+            )
+            profile_last = now
+            device_uuid = device_uuid_for(device_id)
+            now = time.perf_counter()
+            logger.info(
+                "tc_profile_py store.create_binding resolved_device_uuid "
+                "device_uuid=%s step_sec=%.6f total_sec=%.6f",
+                device_uuid,
+                now - profile_last,
+                now - profile_start,
+            )
+            profile_last = now
+            logger.info("tc_profile_py store.create_binding rpc_start")
             response = client.create_binding(
                 ownership=store_daemon_pb2.BindingOwnership.BINDING_OWNERSHIP_DAEMON,
-                target_layout=_target_layout_with_protocol_device_id(
-                    layout,
-                    device_id=protocol_device_id,
-                ),
+                target_layout=target_layout_proto,
                 target_index_bytes=layout.target_index_bytes,
-                device_uuid=device_uuid_for(device_id),
+                device_uuid=device_uuid,
                 binding_layout_id=layout.binding_layout_id,
                 copy_plan=copy_plan_proto,
                 dst_specs=layout.dst_specs if layout.dst_specs else None,
                 timeout_s=timeout_s if timeout_s is not None else 600.0,
             )
+            now = time.perf_counter()
+            logger.info(
+                "tc_profile_py store.create_binding rpc_done binding_id=%s "
+                "payloads=%d step_sec=%.6f total_sec=%.6f",
+                getattr(response, "binding_id", None),
+                len(getattr(response, "payloads", ())),
+                now - profile_last,
+                now - profile_start,
+            )
+            profile_last = now
             try:
+                logger.info("tc_profile_py store.create_binding restore_tensors_start")
                 tensors = restore_owned_binding_tensors(
                     response=response,
                     runtime=runtime,
                     device_id=device_id,
                 )
+                now = time.perf_counter()
+                logger.info(
+                    "tc_profile_py store.create_binding restore_tensors_done "
+                    "tensor_count=%d step_sec=%.6f total_sec=%.6f",
+                    len(tensors),
+                    now - profile_last,
+                    now - profile_start,
+                )
+                profile_last = now
                 current_value_metadata = parse_binding_value_or_raise(
                     response.current_value
                     if hasattr(response, "current_value")
@@ -1307,6 +1376,14 @@ class Store:
                     expected_binding_id=str(response.binding_id),
                     expected_binding_layout_id=layout.binding_layout_id,
                 )
+                now = time.perf_counter()
+                logger.info(
+                    "tc_profile_py store.create_binding parse_current_done "
+                    "step_sec=%.6f total_sec=%.6f",
+                    now - profile_last,
+                    now - profile_start,
+                )
+                profile_last = now
             except Exception:
                 with contextlib.suppress(Exception):
                     client.close_owned_binding(binding_id=str(response.binding_id))
@@ -1321,6 +1398,12 @@ class Store:
                 device=device_obj,
                 device_id=device_id,
                 target_publication_token=None,
+            )
+            now = time.perf_counter()
+            logger.info(
+                "tc_profile_py store.create_binding return step_sec=%.6f total_sec=%.6f",
+                now - profile_last,
+                now - profile_start,
             )
             return Binding(slot)
 
