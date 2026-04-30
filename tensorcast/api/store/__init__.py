@@ -1799,7 +1799,7 @@ class Store:
                 contract_family=contract_family,
                 artifact_id=artifact_id,
                 key=key,
-                policy=policy,
+                policy=policy if policy is not None else "pinned",
                 device=device,
                 source_version_key=source_version_key,
                 serving_version_key=serving_version_key,
