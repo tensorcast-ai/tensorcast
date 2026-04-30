@@ -109,8 +109,8 @@ std::optional<store::loading::CollectiveLoadGroupHint> resolve_collective_group_
 
 std::optional<store::loading::TransportSchedulingGroupHint> resolve_transport_scheduling_group_hint(
     const v2::TransportSchedulingGroupHint* group) {
-  if (group == nullptr || group->group_kind().empty() || group->group_id().empty() ||
-      group->part_id().empty() || group->total_parts() == 0) {
+  if (group == nullptr || group->group_kind().empty() || group->group_id().empty() || group->part_id().empty() ||
+      group->total_parts() == 0) {
     return std::nullopt;
   }
   return store::loading::TransportSchedulingGroupHint{

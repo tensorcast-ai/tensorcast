@@ -173,7 +173,9 @@ TEST_CASE("MaterializeOrchestrator accepts local route returned by Global Store"
   CHECK(gs_client->completed_transport_outcomes[0] == TransportCompletionOutcome::kSuccess);
 }
 
-TEST_CASE("GlobalStoreClient request transport keeps legacy positional arguments", "[store][materialize][reselection]") {
+TEST_CASE(
+    "GlobalStoreClient request transport keeps legacy positional arguments",
+    "[store][materialize][reselection]") {
   RecordingGlobalStoreClient gs_client;
   gs_client.connected = true;
   gs_client.allow_replica_transport = true;
@@ -200,9 +202,7 @@ TEST_CASE(
   bool completed_before_register = false;
   FakeMaterializationBackend backend;
   backend.register_status = absl::UnavailableError("best-effort register failed");
-  backend.on_register = [&]() {
-    completed_before_register = !gs_client->completed_transport_ids.empty();
-  };
+  backend.on_register = [&]() { completed_before_register = !gs_client->completed_transport_ids.empty(); };
 
   MaterializeHints hints;
   hints.artifact_id = "artifact-non-broadcast-register-fails";
@@ -526,8 +526,7 @@ TEST_CASE(
       gsl::not_null<components::IGlobalStoreClient*>{gs_client.get()},
       local_identity);
 
-  auto result =
-      orchestrator.run("artifact-broadcast-terminal-register-fails", make_gpu_target(0), hints, std::nullopt);
+  auto result = orchestrator.run("artifact-broadcast-terminal-register-fails", make_gpu_target(0), hints, std::nullopt);
   REQUIRE_FALSE(result.ok());
   CHECK(absl::IsInvalidArgument(result.status()));
   REQUIRE(gs_client->completed_transport_ids.size() == 1);

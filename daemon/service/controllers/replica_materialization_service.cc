@@ -58,8 +58,8 @@ using materialization_policy::NormalizedMaterializationRequestContext;
 using materialization_policy::resolve_broadcast_materialization_hint;
 using materialization_policy::resolve_collective_group_hint;
 using materialization_policy::resolve_materialization_request_context;
-using materialization_policy::resolve_transport_scheduling_group_hint;
 using materialization_policy::resolve_transform_placement;
+using materialization_policy::resolve_transport_scheduling_group_hint;
 using materialization_policy::to_hint_export_policy;
 using materialization_post_seal::check_post_seal_view_reuse_safe;
 using materialization_replica_handle::bind_replica_handle_for_response;
@@ -691,8 +691,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     hints.transport_request_id = req.transport_request_id();
   }
   if (req.has_transport_scheduling_group()) {
-    auto group_hint =
-        resolve_transport_scheduling_group_hint(&req.transport_scheduling_group());
+    auto group_hint = resolve_transport_scheduling_group_hint(&req.transport_scheduling_group());
     if (group_hint.has_value()) {
       hints.transport_scheduling_group = std::move(*group_hint);
     }

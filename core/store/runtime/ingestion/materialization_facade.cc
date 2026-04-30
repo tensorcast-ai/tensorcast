@@ -1264,8 +1264,7 @@ std::optional<components::TransportSchedulingGroupHint> to_transport_scheduling_
   return out;
 }
 
-std::optional<components::BroadcastTransportHint> to_broadcast_transport_hint(
-    const loading::MaterializeHints& hints) {
+std::optional<components::BroadcastTransportHint> to_broadcast_transport_hint(const loading::MaterializeHints& hints) {
   if (!hints.broadcast.has_value() || hints.broadcast->session_id.empty()) {
     return std::nullopt;
   }
