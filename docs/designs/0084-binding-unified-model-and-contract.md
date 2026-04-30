@@ -3,7 +3,7 @@ slug: binding-unified-model-and-contract
 title: Binding Unified Model and Contract
 status: accepted
 created: 2026-03-12
-last_updated: 2026-04-14
+last_updated: 2026-04-30
 areas: ["sdk", "daemon", "core", "proto"]
 related_code:
   - tensorcast/api/store/artifact.py
@@ -67,6 +67,8 @@ Follow-up note:
 - `0115` now proposes daemon-attested mounted-source artifacts (`msa1:`) as the
   long-term mounted ingress,
 - they are admissible ingress for binding-native realization,
+- they may also admit optimistic same-daemon local-ready serving when a typed
+  policy and family admission allow it,
 - they are artifact identities in the profile sense,
 - they keep `msa1:` as the primary mounted identity even when a trusted
   `mi2:` hint is already known,
@@ -78,8 +80,10 @@ This yields one coherent rule set:
 - `swap(...)` installs an existing artifact-backed value into the same stable
   location
 - `begin_update(...)` opens a local mutable window after retire/drain
-- `seal_current(...)` closes that window and produces a new **binding-local**
-  sealed value
+- `freeze_current(...)` closes that window and produces a new immutable
+  **binding-local** value without minting a content identity
+- `seal_current(...)` is the strict helper that freezes and performs
+  identity-forming promotion on the blocking path
 - promotion of a locally sealed value into the artifact plane is an explicit
   assembly concern from `0085`, including the single-slot case
 
@@ -170,8 +174,9 @@ This is required because the repository already persists `layout_id` in
 
 ## Local Seal Is Not Artifact Promotion
 
-`seal_current(...)` produces an immutable local value hosted by one binding. It
-does **not** by itself create:
+`freeze_current(...)` produces an immutable local value hosted by one binding.
+`seal_current(...)` may compose that freeze with strict identity-forming
+promotion, but the local freeze itself does **not** by itself create:
 
 - a globally routable `artifact_id`
 - a key-mappable version
@@ -249,6 +254,8 @@ At any instant, a binding is in exactly one of these categories:
    - the value may be either:
      - **artifact-backed**
      - **local-only**
+     - **local-ready pending verification** when an optimistic serving policy
+       has admitted same-daemon runtime activation before promotion
 
 ## Identity Layers
 
@@ -313,7 +320,7 @@ flattened enum to represent all combinations.
 
 ## Current Value Categories
 
-`SealedBindingValue` has two categories:
+`SealedBindingValue` has three categories:
 
 1. **artifact-backed sealed value**
    - created by artifact-seeded constructors or `swap(...)`
@@ -324,6 +331,15 @@ flattened enum to represent all combinations.
    - has no artifact id yet
    - may contribute to assembly in `0085` / `0105`
    - must not use artifact-key publish or retrieval paths directly
+3. **local-ready pending-verification value**
+   - created by `freeze_current(...)` in an explicitly admitted optimistic
+     serving path
+   - has a daemon-authored `binding_value_id`, `seal_generation`,
+     `local_serving_ref`, source artifact reference, and verification metadata
+   - may be used only by same-daemon serving runtime state while
+     `verification_state=pending`
+   - must not use artifact-key publish, durable key activation, Global Store
+     routing, or canonical cache paths until promotion succeeds
 
 This distinction is the main long-term consistency boundary.
 
@@ -340,6 +356,11 @@ class SealedBindingValue:
     source_artifact_id: str | None
     selection: ArtifactSelection | None
     is_artifact_backed: bool
+    verification_state: str
+    verification_job_id: str | None
+    source_artifact_ref: str | None
+    local_serving_ref: str | None
+    serving_artifact_id: str | None
     is_current: bool
     is_published: bool
 
@@ -352,6 +373,16 @@ class SealedBindingValue:
         expected_active_generation: int | None = None,
         ctx: CallContext | None = None,
     ) -> None: ...
+
+
+class BindingPromotionStatus:
+    verification_job_id: str
+    binding_id: str
+    binding_value_id: str
+    state: str
+    current_value: SealedBindingValue | None
+    serving_artifact_id: str | None
+    failure_reason: str | None
 
 
 class Binding:
@@ -391,6 +422,29 @@ class Binding:
         ctx: CallContext | None = None,
     ) -> SealedBindingValue: ...
 
+    def freeze_current(
+        self,
+        *,
+        update_epoch: BindingUpdateEpoch | str | int,
+        wait_events: Sequence[object] | None = None,
+        ctx: CallContext | None = None,
+    ) -> SealedBindingValue: ...
+
+    def start_promote_current_value(
+        self,
+        *,
+        binding_value_id: str | None = None,
+        ctx: CallContext | None = None,
+    ) -> BindingPromotionStatus: ...
+
+    def get_promotion_status(
+        self,
+        *,
+        verification_job_id: str | None = None,
+        binding_value_id: str | None = None,
+        ctx: CallContext | None = None,
+    ) -> BindingPromotionStatus: ...
+
     def publish_replica(self, *, ctx: CallContext | None = None) -> SealedBindingValue: ...
     def retire(
         self,
@@ -426,6 +480,11 @@ Important surface rules:
   `current_value` and are `None` when the current value is local-only or absent
 - `Binding.publish_replica()` is legal only when `current_value` is
   artifact-backed
+- `freeze_current(...)` is a mutation fence and local-ready operation; it does
+  not mint artifact identity
+- `start_promote_current_value(...)` creates or returns an idempotent promotion
+  job, but daemon scheduling may delay identity-forming work until critical load
+  activity has cleared
 - distributed contribution lives on `SealedBindingValue` in `0085`, not on
   mutable `Binding`
 
@@ -644,7 +703,9 @@ stateDiagram-v2
   ReadyArtifact --> Mutable: begin_update on local-only binding
   ReadyLocal --> Mutable: begin_update
   Retiring --> Mutable: begin_update after drain
-  Mutable --> ReadyLocal: seal_current succeeds
+  Mutable --> ReadyLocal: freeze_current or seal_current succeeds
+  ReadyLocal --> ReadyArtifact: async promotion succeeds
+  ReadyLocal --> Dirty: async promotion fails and policy invalidates value
   ReadyArtifact --> ReadyArtifact: swap succeeds
   ReadyLocal --> ReadyArtifact: swap succeeds
   ReadyArtifact --> Dirty: swap or seal path fails after bytes changed
@@ -663,7 +724,9 @@ State meanings:
 - `ReadyArtifact`
   - one current sealed value exists and is artifact-backed, but not published
 - `ReadyLocal`
-  - one current sealed value exists, but it is local-only
+  - one current sealed value exists, but it is local-only; it may be
+    local-ready for same-daemon serving only when an explicit optimistic policy
+    has admitted it and verification state is surfaced
 - `Published`
   - the current sealed value is artifact-backed and routable
 - `Retiring`
@@ -682,7 +745,8 @@ bit”. In `Dirty`, no current sealed value exists.
 
 ## Pointer Stability
 
-A successful `swap(...)` or `seal_current(...)` guarantees:
+A successful `swap(...)`, `freeze_current(...)`, or `seal_current(...)`
+guarantees:
 
 - the bound tensors keep the same storage pointers
 - `binding_layout_id` is unchanged
@@ -695,8 +759,8 @@ The binding cannot expose multiple current values at once.
 Therefore:
 
 - entering `Mutable` invalidates the binding’s current value
-- a later successful `seal_current(...)` or `swap(...)` replaces the current
-  value atomically
+- a later successful `freeze_current(...)`, `seal_current(...)`, or `swap(...)`
+  replaces the current value atomically
 - entering `Dirty` also invalidates the binding’s current value and clears
   artifact-backed convenience mirrors until a later successful `swap(...)` or
   `seal_current(...)`
@@ -806,8 +870,9 @@ The design is accepted when:
 - `Binding` remains the single stable local location abstraction
 - `binding_layout_id` replaces local misuse of `layout_id`
 - `swap(...)` still preserves existing artifact-backed inference flows
-- `seal_current(...)` produces a local sealed value without silently creating a
-  second artifact identity plane
+- `freeze_current(...)` produces a local sealed value without silently creating
+  a second artifact identity plane; `seal_current(...)` remains the strict
+  blocking helper that may additionally promote to artifact-backed identity
 - `Binding.artifact_id` and `Binding.selection` are absent when the current value
   is local-only or absent
 - publish and key activation remain daemon-mediated and valid only for

@@ -6,8 +6,9 @@ import random
 import re
 import threading
 import time
+from collections.abc import Iterable, Mapping
 from concurrent.futures import CancelledError
-from typing import Mapping, NoReturn, cast
+from typing import NoReturn, cast
 
 import grpc
 
@@ -85,8 +86,10 @@ def _extract_collective_failure_class_metadata(
         metadata = exc.trailing_metadata()
     except Exception:  # noqa: BLE001
         return None
-    if metadata is None:
+    raw_metadata = metadata
+    if raw_metadata is None:
         return None
+    metadata = cast(Iterable[tuple[str, object]], raw_metadata)
     for key, value in metadata:
         if str(key).lower() != _COLLECTIVE_FAILURE_CLASS_METADATA_KEY:
             continue

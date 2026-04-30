@@ -19,6 +19,12 @@ class BindingValueMetadata:
     source_artifact_id: str | None
     selection: common_pb2.ArtifactSelection | None
     is_artifact_backed: bool
+    verification_state: int
+    verification_job_id: str | None
+    source_artifact_ref: str | None
+    local_serving_ref: str | None
+    serving_artifact_id: str | None
+    verification_failure_reason: str | None
 
 
 def clone_selection(
@@ -73,6 +79,12 @@ def binding_value_from_proto(
     source_artifact_id = None
     if value.HasField("source_artifact_id"):
         source_artifact_id = str(value.source_artifact_id)
+    serving_artifact_id = None
+    if value.HasField("serving_artifact_id"):
+        serving_artifact_id = str(value.serving_artifact_id)
+    verification_failure_reason = None
+    if value.HasField("verification_failure_reason"):
+        verification_failure_reason = str(value.verification_failure_reason)
     is_artifact_backed = bool(value.is_artifact_backed)
     if is_artifact_backed:
         if source_artifact_id is None:
@@ -99,6 +111,12 @@ def binding_value_from_proto(
         source_artifact_id=source_artifact_id,
         selection=selection,
         is_artifact_backed=is_artifact_backed,
+        verification_state=int(value.verification_state),
+        verification_job_id=str(value.verification_job_id or "") or None,
+        source_artifact_ref=str(value.source_artifact_ref or "") or None,
+        local_serving_ref=str(value.local_serving_ref or "") or None,
+        serving_artifact_id=serving_artifact_id,
+        verification_failure_reason=verification_failure_reason,
     )
 
 
@@ -118,6 +136,12 @@ def mint_artifact_backed_value(
         source_artifact_id=str(source_artifact_id),
         selection=clone_selection(selection),
         is_artifact_backed=True,
+        verification_state=store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_VERIFIED,
+        verification_job_id=None,
+        source_artifact_ref=str(source_artifact_id),
+        local_serving_ref=None,
+        serving_artifact_id=str(source_artifact_id),
+        verification_failure_reason=None,
     )
 
 
@@ -135,6 +159,12 @@ def mint_local_value(
         source_artifact_id=None,
         selection=None,
         is_artifact_backed=False,
+        verification_state=store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY,
+        verification_job_id=None,
+        source_artifact_ref=None,
+        local_serving_ref=None,
+        serving_artifact_id=None,
+        verification_failure_reason=None,
     )
 
 

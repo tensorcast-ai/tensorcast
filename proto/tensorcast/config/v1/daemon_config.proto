@@ -201,6 +201,43 @@ message Promotion {
   uint32 max_concurrency = 4;
 }
 
+message OptimisticLocalReady {
+  enum Mode {
+    MODE_UNSPECIFIED = 0;
+    MODE_DISABLED = 1;
+    MODE_STRICT_CANONICAL_BLOCKING = 2;
+    MODE_OPTIMISTIC_ASYNC_MI2 = 3;
+    MODE_OPTIMISTIC_LOCAL_ONLY = 4;
+  }
+
+  enum PromotionTrigger {
+    PROMOTION_TRIGGER_UNSPECIFIED = 0;
+    PROMOTION_TRIGGER_AFTER_FREEZE = 1;
+    PROMOTION_TRIGGER_AFTER_READY = 2;
+    PROMOTION_TRIGGER_AFTER_FIRST_TOKEN = 3;
+    PROMOTION_TRIGGER_DELAYED = 4;
+  }
+
+  enum FailureAction {
+    FAILURE_ACTION_UNSPECIFIED = 0;
+    FAILURE_ACTION_MARK_UNVERIFIED = 1;
+    FAILURE_ACTION_FAIL_HEALTH = 2;
+    FAILURE_ACTION_DRAIN = 3;
+    FAILURE_ACTION_WARN_ONLY = 4;
+  }
+
+  Mode mode = 1;
+  repeated string trusted_root_policy_ids = 2;
+  repeated string model_families = 3;
+  repeated string topology_constraints = 4;
+  PromotionTrigger promotion_trigger = 5;
+  uint32 per_device_promotion_concurrency = 6;
+  string scheduling_class = 7;
+  uint32 retry_budget = 8;
+  google.protobuf.Duration timeout = 9;
+  FailureAction failure_action = 10;
+}
+
 message PinnedMemory {
   message PinnedClass {
     string name = 1;
@@ -227,6 +264,7 @@ message DaemonConfig {
   Engine engine = 5;
   tensorcast.config.v1.Observability observability = 6;
   Promotion promotion = 25;
+  OptimisticLocalReady optimistic_local_ready = 32;
   // Stable identity for this daemon instance used by the control plane.
   // Must not be derived from network address and should remain stable across restarts.
   string daemon_id = 10;

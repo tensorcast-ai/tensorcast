@@ -4,7 +4,7 @@ title: Source-to-Serving Builder and Representation Publication Lineage
 status: accepted
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests"]
 created: 2026-03-24
-last_updated: 2026-03-31
+last_updated: 2026-04-30
 related_code:
   - docs/designs/0110-artifact-representation-contract-and-transform-unification.md
   - docs/designs/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
@@ -47,6 +47,10 @@ durable serving artifacts and a typed representation-publication bridge for
 - `0110` remains the sole owner of normalized transform semantics.
 - `0105` remains the sole owner of externally visible publish lineage through
   `PublishedModelVersion`.
+- optimistic node-local bootstrap may expose a same-daemon local-ready serving
+  value before `PublishedModelVersion` exists, but that value is not external
+  publication lineage and must remain pending verification or explicitly
+  local-only.
 - this design defines the bridge between them:
   - source-to-serving builder modes,
   - same-binding admission for representation-changing builder families,
@@ -252,6 +256,8 @@ Kept:
   lineage carrier.
 - final success still requires closeout-contract satisfaction and readable
   result-artifact availability.
+- optimistic local-ready serving is a pre-closeout runtime state, not a
+  `PublishedModelVersion` substitute.
 
 Revised:
 
@@ -299,8 +305,10 @@ Kept:
 Revised:
 
 - a builder may use artifact-backed `bind(...)` or layout-seeded
-  `begin_update(...)` plus `seal_current(...)` internally,
-- but `seal_current(...)` alone is never a publication-ready result,
+  `begin_update(...)` plus `freeze_current(...)` or `seal_current(...)`
+  internally,
+- but neither `freeze_current(...)` nor `seal_current(...)` alone is a
+  publication-ready result,
 - and serving-artifact publication must still flow through explicit artifact or
   assembly promotion semantics rather than through `binding.publish_replica()`.
 
@@ -814,9 +822,14 @@ A node-local bootstrap builder remains valid as a migration or bootstrap path:
    bytes are ready and realize on the same binding-hosted byte path,
 5. run any admitted builder-side finalize under TensorCast orchestration,
 6. validate the resulting canonical serving bytes,
-7. seal and complete `representation_publish` closeout,
-8. switch runtime only after a durable serving artifact exists,
-9. keep runtime on the same serving-binding current without a second model-sized
+7. freeze or seal the binding current value,
+8. in strict mode, complete promotion and `representation_publish` closeout
+   before runtime activation,
+9. in optimistic mode, install same-daemon local-ready runtime state and cross
+   the local-ready barrier before any identity-forming promotion work starts,
+10. start asynchronous promotion and closeout after that barrier, then switch
+   canonical metadata only after success,
+11. keep runtime on the same serving-binding current without a second model-sized
    bind or copy.
 
 Repository rule:
@@ -870,10 +883,13 @@ that family and topology slice. If it has not, the family is not admitted to
 5. run framework finalize on that same binding-hosted storage,
 6. validate canonical serving tensor invariants and semantic probes against the
    resulting binding-backed bytes,
-7. seal the current value,
-8. promote the same finalized bytes into a durable serving artifact by ordinary
+7. freeze the current value for optimistic local-ready mode or seal/promote it
+   on the strict blocking path,
+8. in optimistic mode, expose only same-daemon local-ready runtime state until
+   all local ranks have crossed the local-ready barrier,
+9. promote the same finalized bytes into a durable serving artifact by ordinary
    registration or assembly promotion,
-9. complete `representation_publish` closeout through `0105`.
+10. complete `representation_publish` closeout through `0105`.
 
 #### Retired scratch bridge
 
@@ -891,12 +907,44 @@ This is the key constraint that keeps framework intrusion bounded:
 
 Normative rules:
 
-- `seal_current(...)` alone is never a publication-ready result. It is sealed
-  binding-local state until a durable serving artifact exists.
+- `freeze_current(...)` and `seal_current(...)` alone are never
+  publication-ready results. They are binding-local state until a durable
+  serving artifact exists.
+- optimistic runtime activation must surface `verification_state=pending` and
+  must not activate durable keys, Global Store visibility, or cross-daemon reuse
+  until `mi2` promotion succeeds.
+- optimistic promotion start is not part of builder readiness. The integration
+  may schedule it only after local-ready state is installed and the local-ready
+  barrier has completed for the local TP group.
 - correctness, typed lineage, and serving-only runtime handoff take precedence
   over fast-path optimization.
 - admitted `BINDING_FINALIZE` paths must avoid introducing a second
   model-sized canonical-byte host after finalize completes.
+
+### 4.5 Optimistic local-ready version
+
+An optimistic local-ready version is a runtime projection over a frozen
+binding-hosted serving value. It carries enough provenance for local health and
+debuggability, but it is not a `PublishedModelVersion`.
+
+Required fields:
+
+- `source_artifact_ref` and mounted-source verification state;
+- `binding_value_ref` or equivalent frozen-value reference;
+- `local_serving_ref` derived from source `msa1`, representation contract,
+  serving build digest, binding layout, tensor schema, topology, and daemon
+  session;
+- `verification_state = pending | verified | failed | local_only`;
+- optional `verification_job_id`;
+- optional `serving_artifact_id` only after asynchronous promotion succeeds.
+
+The local-ready object may be used by same-daemon runtime state and observability
+surfaces. It must not be used as canonical publication lineage.
+
+It also must not be written to the canonical serving cache or loader serving
+artifact config. Those records represent `PublishedModelVersion`-compatible
+canonical serving lineage and are updated only after asynchronous promotion and
+closeout succeed.
 
 ## 5. Publication handshake and lineage
 
@@ -944,6 +992,14 @@ Additional interpretation for binding-hosted builder paths:
   artifact-backed serving current without inventing a second publication truth,
 - and this upgrade remains an assembly / closeout action rather than a
   binding-local publish shortcut.
+
+Optimistic interpretation:
+
+- before promotion, the builder may return a local-ready version instead of a
+  `PublishedModelVersion`;
+- once background promotion succeeds, the same frozen value may feed the normal
+  `RepresentationPublishContract` and produce `PublishedModelVersion`;
+- if promotion fails, no canonical publication result is produced.
 
 ### 5.3 `RepresentationPublishContract`
 

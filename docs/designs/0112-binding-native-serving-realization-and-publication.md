@@ -4,7 +4,7 @@ title: Binding-Native Serving Realization and Publication
 status: implemented
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests", "proto"]
 created: 2026-03-27
-last_updated: 2026-04-15
+last_updated: 2026-04-30
 related_code:
   - docs/designs/0084-binding-unified-model-and-contract.md
   - docs/designs/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
@@ -60,6 +60,9 @@ bootstrap flows so that:
   memory,
 - serving-artifact identity is minted from the sealed binding current value
   rather than from a second `put(tensors)` registration path,
+- optimistic local-ready serving may activate a frozen same-daemon binding
+  value before that value has been promoted to `mi2`, provided the value remains
+  visibly pending verification and local-only,
 - `representation_publish` is completed from a first-class serving publication
   subject instead of requiring a pre-existing serving artifact id in all cases,
 - and `canonical_full` assembly sealing consumes explicit canonical source
@@ -84,6 +87,9 @@ Execution-policy note:
 - `0115` now owns the long-term mounted-source artifact attestation contract,
   including format-aware mounted-source resolve, `msa1:` identity, and typed
   trusted policy,
+- `0115` also owns the authority boundary that lets trusted `msa1:` evidence
+  admit optimistic same-daemon local-ready serving without making `msa1:` a
+  content-verified publication identity,
 - and the mounted closure evidence now tracks directly through this design plus
   `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`.
 
@@ -589,13 +595,50 @@ The same-binding flow must expose three distinct states:
 - local sealed binding current value,
 - durable serving artifact promoted from that current value.
 
+Optimistic local-ready serving adds one visibility state without changing those
+objects:
+
+- `FROZEN_LOCAL_READY`: the daemon has frozen the realized binding current value
+  and the integration has passed structural, manifest, representation-contract,
+  and family semantic validation, but `mi2` promotion has not completed yet.
+
 Normative rules:
 
-1. runtime may attach to binding-backed tensors before promotion completes,
-   but serving-only activation or final publication success still depends on the
-   durable serving artifact.
+1. runtime may attach to binding-backed tensors before promotion completes.
+   In strict canonical mode, serving-only activation still waits for the durable
+   serving artifact. In optimistic mode, same-daemon serving-only activation may
+   proceed from `FROZEN_LOCAL_READY`, but final publication success, durable key
+   activation, Global Store routing, and cross-daemon reuse still depend on the
+   promoted `mi2` serving artifact.
 2. `seal_current(...)` is not enough for serving publication success.
 3. promotion must not require a second model-sized byte registration path.
+4. optimistic promotion must start only after local-ready runtime state is
+   installed and all local tensor-parallel ranks admitted to the bootstrap have
+   crossed the local-ready barrier. A fast rank must not begin identity-forming
+   hash or commit work while slower ranks are still refilling, freezing, or
+   finalizing their binding current values.
+5. no serving artifact config, canonical bootstrap cache entry, durable key
+   activation, or Global Store route may be written from `FROZEN_LOCAL_READY`.
+   Those updates happen only after promotion has produced `mi2` and
+   `representation_publish` closeout has succeeded.
+
+The optimistic state machine is:
+
+```mermaid
+stateDiagram-v2
+  [*] --> Mutable
+  Mutable --> FrozenLocalReady: freeze_current / validation passed
+  FrozenLocalReady --> Mi2Verified: async promote_frozen_value_to_mi2 succeeds
+  FrozenLocalReady --> VerificationFailed: async promotion fails
+  Mi2Verified --> Published: representation_publish closeout succeeds
+  VerificationFailed --> Retired: failure policy drains or retires value
+```
+
+`freeze_current` is a mutation fence and local-readiness operation. It must not
+mint a content identity. `seal_current` remains available as the strict helper
+that freezes and performs identity-forming promotion on the blocking path.
+Implementations may expose `FROZEN_LOCAL_READY` as `READY_LOCAL` plus explicit
+verification metadata rather than adding a new flattened daemon state enum.
 
 ## 4. Canonical-full contribution becomes source-evidence contribution
 
@@ -656,9 +699,12 @@ For `BINDING_FINALIZE`:
    storage
 4. the integration layer attaches framework views onto the binding tensors
 5. framework-specific finalize runs in-place on the binding-backed tensors
-6. TensorCast seals the binding current value
-7. TensorCast promotes the sealed current value into a durable serving artifact
-8. TensorCast completes `representation_publish`
+6. TensorCast freezes or seals the binding current value
+7. strict mode promotes the frozen current value into a durable serving artifact
+   before readiness; optimistic mode schedules that promotion asynchronously
+   after local-ready state is installed and the local-ready barrier completes
+8. TensorCast completes `representation_publish` after promotion produces
+   `mi2`
 9. canonical-full contribution uses the same current-value-derived source
    subject
 10. runtime handoff continues to use the same binding-backed tensors without a
@@ -1020,6 +1066,8 @@ Required test areas:
 - collective mapped-target disk load for TP bootstrap,
 - same-binding serving handoff preserving tensor pointer stability,
 - manifest and representation contract preflight during promotion,
+- optimistic local-ready barrier ordering before async promotion starts,
+- no canonical cache/config/key update while verification is pending,
 - Step3p5 trace-plan gap lowering vs early rejection,
 - explicit bridge helper naming and bridge-path coverage.
 

@@ -90,6 +90,9 @@ It projects that model honestly.
 - Keep binding-backed contribution, direct `register_view`, and future frontends
   on the same structural commit helper path.
 - Make the closeout boundary explicit relative to `0111` and `0104`.
+- Allow typed child contracts such as `0111` to expose a pending local-ready
+  runtime state, while keeping final closeout, durable key activation, and
+  externally visible lineage anchored in the attempt closeout result.
 
 ## Non-Goals
 
@@ -220,6 +223,8 @@ For assembly attempts:
 - final published success belongs to `PublishedModelVersion`, including future
   serving-representation lineage when typed `0111`
   `RepresentationPublishContract` closeout becomes dependency-ready.
+- pending local runtime readiness, when a child contract supports it, belongs to
+  that child contract and operation status; it is not final published success.
 
 No row, proto, or helper may silently answer more than one of those questions by
 accident.
@@ -462,7 +467,28 @@ Normative rules:
    must live in the `0111` child contract rather than being reintroduced as
    untyped top-level payload,
 4. final success must be checked against the closeout contract that the attempt
-   actually snapped at creation time.
+   actually snapped at creation time,
+5. pending child closeout is allowed only as an explicit phase with a typed
+   status; it must not activate immutable keys, durable mappings, or
+   cross-daemon publication before closeout succeeds.
+
+### 3.1 Pending child closeout
+
+Some child contracts, notably `0111` optimistic same-daemon serving, may expose
+runtime readiness before their canonical publication result exists. This design
+allows that as a child-contract state, not as a completed assembly attempt.
+
+Rules:
+
+- `Operation` status may expose `phase=local_ready_pending_closeout` with a
+  child-owned payload such as verification job id and local serving ref;
+- `wait` remains observation only and must not implicitly finish closeout;
+- closeout success remains the only transition that produces
+  `PublishedModelVersion`;
+- key activation, durable key mapping, Global Store visibility, and
+  cross-daemon reuse remain blocked until the closeout result exists;
+- failure of the pending child closeout must be recorded and surfaced instead of
+  being collapsed into success.
 
 ## 4. Intent And Immutable Attempt Record
 
@@ -703,6 +729,7 @@ Surface rules:
 - public continuation aligns with `0100`,
 - final success is reported only through the attempt workflow result and
   `PublishedModelVersion`,
+- pending local-ready child states are observable but are not final success,
 - daemon-owned bridge lowering is authoritative for binding-backed attempt
   contributions,
 - and final success requires both closeout-contract satisfaction and readable

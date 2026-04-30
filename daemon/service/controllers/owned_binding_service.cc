@@ -1212,6 +1212,51 @@ void fill_binding_value(const BindingRegistry::Record& record, v2::BindingValue&
     value.mutable_selection()->CopyFrom(record.current_selection);
   }
   value.set_is_artifact_backed(!record.current_artifact_id.empty());
+  value.set_verification_state(record.verification_state);
+  value.set_verification_job_id(record.verification_job_id);
+  value.set_source_artifact_ref(record.source_artifact_ref);
+  value.set_local_serving_ref(record.local_serving_ref);
+  if (!record.serving_artifact_id.empty()) {
+    value.set_serving_artifact_id(record.serving_artifact_id);
+  }
+  if (!record.verification_failure_reason.empty()) {
+    value.set_verification_failure_reason(record.verification_failure_reason);
+  }
+}
+
+void clear_verification_metadata(BindingRegistry::Record* record) {
+  record->verification_state = v2::BINDING_VALUE_VERIFICATION_STATE_UNSPECIFIED;
+  record->verification_job_id.clear();
+  record->source_artifact_ref.clear();
+  record->local_serving_ref.clear();
+  record->serving_artifact_id.clear();
+  record->verification_failure_reason.clear();
+}
+
+void set_artifact_verification_metadata(BindingRegistry::Record* record, std::string_view artifact_id) {
+  clear_verification_metadata(record);
+  if (artifact_id.empty()) {
+    return;
+  }
+  record->serving_artifact_id = std::string(artifact_id);
+  record->verification_state = common::infer_artifact_id_kind(artifact_id) == tensorcast::common::ArtifactIdKind::kMi2
+      ? v2::BINDING_VALUE_VERIFICATION_STATE_VERIFIED
+      : v2::BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY;
+}
+
+void set_local_ready_verification_metadata(
+    BindingRegistry::Record* record,
+    v2::BindingValueVerificationState state,
+    std::string_view source_artifact_ref,
+    std::string_view serving_artifact_id = std::string_view()) {
+  record->verification_state = state;
+  record->source_artifact_ref = std::string(source_artifact_ref);
+  record->local_serving_ref = absl::StrCat("binding-local:", record->binding_id, ":", record->current_binding_value_id);
+  record->serving_artifact_id = std::string(serving_artifact_id);
+  record->verification_failure_reason.clear();
+  if (record->verification_state == v2::BINDING_VALUE_VERIFICATION_STATE_VERIFIED) {
+    record->verification_job_id.clear();
+  }
 }
 
 void mark_ready_artifact(
@@ -1229,6 +1274,7 @@ void mark_ready_artifact(
   record->current_binding_value_id = mint_binding_value_id();
   record->seal_generation += 1;
   record->sealed_commit_result.reset();
+  set_artifact_verification_metadata(record, artifact_id);
 }
 
 void mark_allocated(BindingRegistry::Record* record) {
@@ -1240,6 +1286,7 @@ void mark_allocated(BindingRegistry::Record* record) {
   record->state = v2::BINDING_STATE_ALLOCATED;
   record->active_update_epoch.clear();
   record->sealed_commit_result.reset();
+  clear_verification_metadata(record);
 }
 
 void mark_mutable(BindingRegistry::Record* record, std::string_view update_epoch) {
@@ -1251,6 +1298,7 @@ void mark_mutable(BindingRegistry::Record* record, std::string_view update_epoch
   record->state = v2::BINDING_STATE_MUTABLE;
   record->active_update_epoch = std::string(update_epoch);
   record->sealed_commit_result.reset();
+  clear_verification_metadata(record);
 }
 
 void mark_ready_local(BindingRegistry::Record* record) {
@@ -1263,6 +1311,7 @@ void mark_ready_local(BindingRegistry::Record* record) {
   record->current_binding_value_id = mint_binding_value_id();
   record->seal_generation += 1;
   record->sealed_commit_result.reset();
+  clear_verification_metadata(record);
 }
 
 void mark_dirty(BindingRegistry::Record* record) {
@@ -1274,6 +1323,7 @@ void mark_dirty(BindingRegistry::Record* record) {
   record->state = v2::BINDING_STATE_DIRTY;
   record->active_update_epoch.clear();
   record->sealed_commit_result.reset();
+  clear_verification_metadata(record);
 }
 
 std::string next_update_epoch(BindingRegistry::Record* record) {
@@ -1828,6 +1878,48 @@ grpc::Status evaluate_strict_collective_preflight_for_testing(
 OwnedBindingService::OwnedBindingService(Dep d)
     : d_(std::move(d)), contribution_keepalive_tracker_(std::make_shared<ContributionLeaseKeepaliveTracker>()) {}
 
+std::string OwnedBindingService::promotion_job_key(std::string_view binding_id, std::string_view binding_value_id)
+    const {
+  return absl::StrCat(binding_id, ":", binding_value_id);
+}
+
+void OwnedBindingService::fill_promotion_status_from_job(
+    const std::shared_ptr<PromotionJobRecord>& job,
+    v2::BindingPromotionStatus& status) const {
+  if (job == nullptr) {
+    return;
+  }
+  status.CopyFrom(job->status);
+}
+
+void OwnedBindingService::cancel_promotion_jobs_for_value(
+    std::string_view binding_id,
+    std::string_view binding_value_id,
+    std::string_view reason) {
+  if (binding_id.empty() || binding_value_id.empty()) {
+    return;
+  }
+  absl::MutexLock lock(&promotion_jobs_mu_);
+  const std::string key = promotion_job_key(binding_id, binding_value_id);
+  const auto id_it = promotion_job_ids_by_value_.find(key);
+  if (id_it == promotion_job_ids_by_value_.end()) {
+    return;
+  }
+  const auto job_it = promotion_jobs_by_id_.find(id_it->second);
+  if (job_it == promotion_jobs_by_id_.end()) {
+    promotion_job_ids_by_value_.erase(id_it);
+    return;
+  }
+  const auto current_state = job_it->second->status.state();
+  if (current_state == v2::BINDING_PROMOTION_JOB_STATE_SUCCEEDED ||
+      current_state == v2::BINDING_PROMOTION_JOB_STATE_FAILED ||
+      current_state == v2::BINDING_PROMOTION_JOB_STATE_CANCELED) {
+    return;
+  }
+  job_it->second->status.set_state(v2::BINDING_PROMOTION_JOB_STATE_CANCELED);
+  job_it->second->status.set_failure_reason(std::string(reason));
+}
+
 grpc::Status OwnedBindingService::create_binding(
     RpcContext& rctx,
     const v2::CreateBindingRequest& req,
@@ -2238,6 +2330,8 @@ grpc::Status OwnedBindingService::commit_binding_artifact(
       !contribution_status.ok()) {
     return to_grpc_status(contribution_status);
   }
+  cancel_promotion_jobs_for_value(
+      record->binding_id, current_binding_value_id, "binding current value replaced by artifact commit");
   {
     absl::MutexLock lock(&record->mu);
     if (record->closed) {
@@ -2295,6 +2389,7 @@ grpc::Status OwnedBindingService::begin_binding_update(
       !contribution_status.ok()) {
     return to_grpc_status(contribution_status);
   }
+  cancel_promotion_jobs_for_value(record->binding_id, current_binding_value_id, "binding update started");
   {
     absl::MutexLock lock(&record->mu);
     if (record->closed) {
@@ -2646,6 +2741,81 @@ grpc::Status OwnedBindingService::submit_binding_contribution(
   return Status::OK;
 }
 
+grpc::Status OwnedBindingService::freeze_binding_current_value(
+    RpcContext& rctx,
+    const v2::FreezeBindingCurrentValueRequest& req,
+    v2::FreezeBindingCurrentValueResponse& resp) {
+  if (req.binding_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "binding_id is required"};
+  }
+  if (req.update_epoch().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "update_epoch is required"};
+  }
+  auto record_or = d_.bindings.get(req.binding_id());
+  if (!record_or.ok()) {
+    return to_grpc_status(record_or.status());
+  }
+  const auto record = *record_or;
+
+  int device_id = -1;
+  v2::TargetLayout target_layout;
+  std::string source_artifact_ref;
+  common::memory::GpuDeviceMemory* allocation = nullptr;
+  cuda::IpcHandleBytes handle_bytes;
+  {
+    absl::MutexLock lock(&record->mu);
+    if (record->closed) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is closed"};
+    }
+    if (record->state != v2::BINDING_STATE_MUTABLE) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is not mutable"};
+    }
+    if (record->active_update_epoch != req.update_epoch()) {
+      mark_dirty(record.get());
+      return {StatusCode::FAILED_PRECONDITION, "update_epoch mismatch"};
+    }
+    device_id = record->device_id;
+    target_layout = record->target_layout;
+    source_artifact_ref =
+        req.source_artifact_ref().empty() ? record->source_selection.artifact_id() : req.source_artifact_ref();
+    allocation = record->allocation.get();
+    handle_bytes = record->handle_bytes;
+  }
+  if (allocation == nullptr) {
+    return {StatusCode::FAILED_PRECONDITION, "binding allocation is unavailable"};
+  }
+  auto storage_layout_or =
+      build_owned_storage_layout(target_layout, device_id, gsl::not_null<void*>{allocation->get()}, handle_bytes);
+  if (!storage_layout_or.ok()) {
+    return to_grpc_status(storage_layout_or.status());
+  }
+  auto aliases_or = build_binding_tensor_aliases(*record);
+  if (!aliases_or.ok()) {
+    return to_grpc_status(aliases_or.status());
+  }
+
+  {
+    absl::MutexLock lock(&record->mu);
+    if (record->closed) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is closed"};
+    }
+    if (record->state != v2::BINDING_STATE_MUTABLE) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is not mutable"};
+    }
+    if (record->active_update_epoch != req.update_epoch()) {
+      mark_dirty(record.get());
+      return {StatusCode::FAILED_PRECONDITION, "update_epoch mismatch"};
+    }
+    mark_ready_local(record.get());
+    set_local_ready_verification_metadata(
+        record.get(), v2::BINDING_VALUE_VERIFICATION_STATE_PENDING, source_artifact_ref);
+    resp.set_state(record->state);
+    fill_binding_value(*record, *resp.mutable_current_value());
+  }
+  rctx.mark_success();
+  return Status::OK;
+}
+
 grpc::Status OwnedBindingService::seal_binding(
     RpcContext& rctx,
     const v2::SealBindingRequest& req,
@@ -2741,6 +2911,8 @@ grpc::Status OwnedBindingService::seal_binding(
     }
     mark_ready_local(record.get());
     record->sealed_commit_result = *sealed_commit_or;
+    set_local_ready_verification_metadata(
+        record.get(), v2::BINDING_VALUE_VERIFICATION_STATE_VERIFIED, source_artifact_id, sealed_commit_or->artifact_id);
     resp.set_state(record->state);
     fill_binding_value(*record, *resp.mutable_current_value());
   }
@@ -2748,8 +2920,7 @@ grpc::Status OwnedBindingService::seal_binding(
   return Status::OK;
 }
 
-grpc::Status OwnedBindingService::promote_binding_current_value(
-    RpcContext& rctx,
+grpc::Status OwnedBindingService::promote_binding_current_value_impl(
     const v2::PromoteBindingCurrentValueRequest& req,
     v2::PromoteBindingCurrentValueResponse& resp) {
   if (req.binding_id().empty()) {
@@ -2818,6 +2989,9 @@ grpc::Status OwnedBindingService::promote_binding_current_value(
       if (record->current_binding_value_id != req.binding_value_id()) {
         return {StatusCode::FAILED_PRECONDITION, "binding current value changed during promotion"};
       }
+      record->verification_state = v2::BINDING_VALUE_VERIFICATION_STATE_VERIFIED;
+      record->serving_artifact_id = current_artifact_id;
+      record->verification_failure_reason.clear();
       resp.set_state(record->state);
       fill_binding_value(*record, *resp.mutable_current_value());
     }
@@ -2825,12 +2999,14 @@ grpc::Status OwnedBindingService::promote_binding_current_value(
     resp.mutable_execution_diagnostics()->CopyFrom(
         build_binding_closeout_diagnostics(v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_NOT_APPLICABLE));
     resp.set_existed(true);
-    rctx.mark_success();
     return Status::OK;
   }
 
   if (allocation == nullptr) {
     return {StatusCode::FAILED_PRECONDITION, "binding allocation is unavailable"};
+  }
+  if (d_.lip_manager == nullptr) {
+    return {StatusCode::FAILED_PRECONDITION, "LipManager is unavailable"};
   }
   auto storage_layout_or =
       build_owned_storage_layout(target_layout, device_id, gsl::not_null<void*>{allocation->get()}, handle_bytes);
@@ -2858,7 +3034,11 @@ grpc::Status OwnedBindingService::promote_binding_current_value(
       std::move(storage_layout_or->publish_segments),
       std::move(storage_layout_or->publish_storages),
       std::move(*aliases_or),
-      sealed_commit_result);
+      sealed_commit_result,
+      LipManager::BuildCommitLeaseOptions{
+          .direct_gpu_hash_ptr = gsl::not_null<void*>{allocation->get()},
+          .require_gpu_identity_hash = true,
+      });
   if (!out_or.ok()) {
     return to_grpc_status(out_or.status());
   }
@@ -2874,12 +3054,16 @@ grpc::Status OwnedBindingService::promote_binding_current_value(
     if (record->current_binding_value_id != req.binding_value_id()) {
       return {StatusCode::FAILED_PRECONDITION, "binding current value changed during promotion"};
     }
-    mark_ready_artifact(
-        record.get(),
-        out_or->artifact_id,
-        selection,
-        /*target_publication_token=*/"",
-        out_or->canonical_index_json);
+    record->current_artifact_id = out_or->artifact_id;
+    record->current_artifact_canonical_index_json = out_or->canonical_index_json;
+    record->current_selection = selection;
+    record->target_publication_token.clear();
+    record->state = v2::BINDING_STATE_READY_ARTIFACT;
+    record->active_update_epoch.clear();
+    record->sealed_commit_result = *out_or;
+    record->verification_state = v2::BINDING_VALUE_VERIFICATION_STATE_VERIFIED;
+    record->verification_failure_reason.clear();
+    record->serving_artifact_id = out_or->artifact_id;
     resp.set_state(record->state);
     fill_binding_value(*record, *resp.mutable_current_value());
   }
@@ -2900,8 +3084,209 @@ grpc::Status OwnedBindingService::promote_binding_current_value(
                                        : v2::IdentityMintStrategy::IDENTITY_MINT_STRATEGY_CLOSEOUT_MINT,
       hash_commit_result));
   resp.set_existed(false);
+  return Status::OK;
+}
+
+grpc::Status OwnedBindingService::promote_binding_current_value(
+    RpcContext& rctx,
+    const v2::PromoteBindingCurrentValueRequest& req,
+    v2::PromoteBindingCurrentValueResponse& resp) {
+  auto status = promote_binding_current_value_impl(req, resp);
+  if (status.ok()) {
+    rctx.mark_success();
+  }
+  return status;
+}
+
+void OwnedBindingService::run_async_promotion_job(std::string job_id, v2::PromoteBindingCurrentValueRequest req) {
+  {
+    absl::MutexLock lock(&promotion_jobs_mu_);
+    const auto it = promotion_jobs_by_id_.find(job_id);
+    if (it == promotion_jobs_by_id_.end()) {
+      return;
+    }
+    if (it->second->status.state() == v2::BINDING_PROMOTION_JOB_STATE_CANCELED) {
+      return;
+    }
+    it->second->status.set_state(v2::BINDING_PROMOTION_JOB_STATE_RUNNING);
+  }
+
+  v2::PromoteBindingCurrentValueResponse promote_resp;
+  const grpc::Status status = promote_binding_current_value_impl(req, promote_resp);
+
+  absl::MutexLock lock(&promotion_jobs_mu_);
+  const auto it = promotion_jobs_by_id_.find(job_id);
+  if (it == promotion_jobs_by_id_.end()) {
+    return;
+  }
+  auto& job_status = it->second->status;
+  if (job_status.state() == v2::BINDING_PROMOTION_JOB_STATE_CANCELED) {
+    return;
+  }
+  if (!status.ok()) {
+    job_status.set_state(v2::BINDING_PROMOTION_JOB_STATE_FAILED);
+    job_status.set_failure_reason(status.error_message());
+    auto record_or = d_.bindings.get(req.binding_id());
+    if (record_or.ok()) {
+      const auto record = *record_or;
+      absl::MutexLock record_lock(&record->mu);
+      if (record->current_binding_value_id == req.binding_value_id()) {
+        record->verification_state = v2::BINDING_VALUE_VERIFICATION_STATE_FAILED;
+        record->verification_job_id = job_id;
+        record->verification_failure_reason = status.error_message();
+      }
+    }
+    LOG(WARNING) << "async binding promotion failed binding_id=" << req.binding_id()
+                 << " binding_value_id=" << req.binding_value_id() << ": " << status.error_message();
+    return;
+  }
+  job_status.set_state(v2::BINDING_PROMOTION_JOB_STATE_SUCCEEDED);
+  job_status.set_existed(promote_resp.existed());
+  job_status.mutable_current_value()->CopyFrom(promote_resp.current_value());
+  if (promote_resp.has_artifact_descriptor()) {
+    job_status.mutable_artifact_descriptor()->CopyFrom(promote_resp.artifact_descriptor());
+    job_status.set_serving_artifact_id(promote_resp.artifact_descriptor().artifact_id());
+  }
+}
+
+grpc::Status OwnedBindingService::start_promote_binding_current_value(
+    RpcContext& rctx,
+    const v2::StartPromoteBindingCurrentValueRequest& req,
+    v2::StartPromoteBindingCurrentValueResponse& resp) {
+  if (req.binding_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "binding_id is required"};
+  }
+  if (req.binding_value_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "binding_value_id is required"};
+  }
+  auto record_or = d_.bindings.get(req.binding_id());
+  if (!record_or.ok()) {
+    return to_grpc_status(record_or.status());
+  }
+  const auto record = *record_or;
+  const std::string key = promotion_job_key(req.binding_id(), req.binding_value_id());
+  {
+    absl::MutexLock lock(&promotion_jobs_mu_);
+    const auto id_it = promotion_job_ids_by_value_.find(key);
+    if (id_it != promotion_job_ids_by_value_.end()) {
+      const auto job_it = promotion_jobs_by_id_.find(id_it->second);
+      if (job_it != promotion_jobs_by_id_.end()) {
+        fill_promotion_status_from_job(job_it->second, *resp.mutable_status());
+        rctx.mark_success();
+        return Status::OK;
+      }
+      promotion_job_ids_by_value_.erase(id_it);
+    }
+  }
+
+  std::string source_artifact_ref;
+  std::string local_serving_ref;
+  v2::BindingValue current_value;
+  {
+    absl::MutexLock lock(&record->mu);
+    if (record->closed) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is closed"};
+    }
+    if (record->state == v2::BINDING_STATE_MUTABLE) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is mutable"};
+    }
+    if (record->state == v2::BINDING_STATE_DIRTY) {
+      return {StatusCode::FAILED_PRECONDITION, "binding is dirty"};
+    }
+    if (record->current_binding_value_id.empty()) {
+      return {StatusCode::FAILED_PRECONDITION, "binding has no current value"};
+    }
+    if (record->current_binding_value_id != req.binding_value_id()) {
+      return {StatusCode::FAILED_PRECONDITION, "binding current value changed"};
+    }
+    source_artifact_ref = record->source_artifact_ref;
+    local_serving_ref = record->local_serving_ref;
+    fill_binding_value(*record, current_value);
+  }
+
+  if (current_value.verification_state() == v2::BINDING_VALUE_VERIFICATION_STATE_VERIFIED &&
+      current_value.has_serving_artifact_id()) {
+    auto desc_or = d_.engine.get_artifact_descriptor(current_value.serving_artifact_id());
+    if (!desc_or.ok()) {
+      return to_grpc_status(desc_or.status());
+    }
+    auto* status = resp.mutable_status();
+    const std::string job_id = absl::StrCat("bpj:", req.binding_id(), ":", req.binding_value_id(), ":verified");
+    status->set_verification_job_id(job_id);
+    status->set_binding_id(req.binding_id());
+    status->set_binding_value_id(req.binding_value_id());
+    status->set_state(v2::BINDING_PROMOTION_JOB_STATE_SUCCEEDED);
+    status->mutable_current_value()->CopyFrom(current_value);
+    status->set_serving_artifact_id(current_value.serving_artifact_id());
+    status->mutable_artifact_descriptor()->CopyFrom(*desc_or);
+    status->set_existed(true);
+    rctx.mark_success();
+    return Status::OK;
+  }
+
+  const std::string job_id = absl::StrCat("bpj:", mint_random_id(12));
+  auto job = std::make_shared<PromotionJobRecord>();
+  job->status.set_verification_job_id(job_id);
+  job->status.set_binding_id(req.binding_id());
+  job->status.set_binding_value_id(req.binding_value_id());
+  job->status.set_state(v2::BINDING_PROMOTION_JOB_STATE_PENDING);
+  job->status.mutable_current_value()->CopyFrom(current_value);
+  {
+    absl::MutexLock lock(&promotion_jobs_mu_);
+    promotion_jobs_by_id_.insert_or_assign(job_id, job);
+    promotion_job_ids_by_value_.insert_or_assign(key, job_id);
+  }
+  {
+    absl::MutexLock lock(&record->mu);
+    if (record->current_binding_value_id == req.binding_value_id()) {
+      record->verification_state = v2::BINDING_VALUE_VERIFICATION_STATE_PENDING;
+      record->verification_job_id = job_id;
+      record->source_artifact_ref = source_artifact_ref;
+      record->local_serving_ref = local_serving_ref;
+      record->verification_failure_reason.clear();
+      fill_binding_value(*record, *job->status.mutable_current_value());
+    }
+  }
+  v2::PromoteBindingCurrentValueRequest promote_req;
+  promote_req.set_binding_id(req.binding_id());
+  promote_req.set_binding_value_id(req.binding_value_id());
+  d_.async_runtime.blocking_executor()->add(
+      [this, job_id, promote_req]() mutable { run_async_promotion_job(job_id, std::move(promote_req)); });
+  {
+    absl::MutexLock lock(&promotion_jobs_mu_);
+    fill_promotion_status_from_job(job, *resp.mutable_status());
+  }
   rctx.mark_success();
   return Status::OK;
+}
+
+grpc::Status OwnedBindingService::get_binding_promotion_status(
+    RpcContext& rctx,
+    const v2::GetBindingPromotionStatusRequest& req,
+    v2::GetBindingPromotionStatusResponse& resp) {
+  {
+    absl::MutexLock lock(&promotion_jobs_mu_);
+    if (!req.verification_job_id().empty()) {
+      const auto it = promotion_jobs_by_id_.find(req.verification_job_id());
+      if (it != promotion_jobs_by_id_.end()) {
+        fill_promotion_status_from_job(it->second, *resp.mutable_status());
+        rctx.mark_success();
+        return Status::OK;
+      }
+    } else if (!req.binding_id().empty() && !req.binding_value_id().empty()) {
+      const auto key = promotion_job_key(req.binding_id(), req.binding_value_id());
+      const auto id_it = promotion_job_ids_by_value_.find(key);
+      if (id_it != promotion_job_ids_by_value_.end()) {
+        const auto job_it = promotion_jobs_by_id_.find(id_it->second);
+        if (job_it != promotion_jobs_by_id_.end()) {
+          fill_promotion_status_from_job(job_it->second, *resp.mutable_status());
+          rctx.mark_success();
+          return Status::OK;
+        }
+      }
+    }
+  }
+  return {StatusCode::NOT_FOUND, "binding promotion job not found"};
 }
 
 grpc::Status OwnedBindingService::refill_owned_binding(
@@ -3078,6 +3463,8 @@ grpc::Status OwnedBindingService::refill_owned_binding(
   }
   if (prepared_plan.execution_only_mutable) {
     std::string update_epoch;
+    cancel_promotion_jobs_for_value(
+        record->binding_id, current_binding_value_id, "binding refill entered mutable execution-only state");
     {
       absl::MutexLock lock(&record->mu);
       if (record->closed) {

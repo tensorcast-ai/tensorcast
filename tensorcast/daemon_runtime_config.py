@@ -103,6 +103,54 @@ def _validate_public_disk_source_config(msg: cfg_pb.DaemonConfig) -> None:
                 )
 
 
+def _validate_optimistic_local_ready_config(msg: cfg_pb.DaemonConfig) -> None:
+    if not hasattr(msg, "optimistic_local_ready") or not hasattr(
+        cfg_pb, "OptimisticLocalReady"
+    ):
+        return
+    optimistic = msg.optimistic_local_ready
+    if optimistic.mode in (
+        cfg_pb.OptimisticLocalReady.MODE_OPTIMISTIC_ASYNC_MI2,
+        cfg_pb.OptimisticLocalReady.MODE_OPTIMISTIC_LOCAL_ONLY,
+    ):
+        public_policy_ids = {
+            str(policy.policy_id)
+            for policy in msg.public_disk_source.trusted_root_policies
+            if str(policy.policy_id or "").strip()
+        }
+        missing = [
+            str(policy_id)
+            for policy_id in optimistic.trusted_root_policy_ids
+            if str(policy_id) not in public_policy_ids
+        ]
+        if missing:
+            raise ValueError(
+                "optimistic_local_ready.trusted_root_policy_ids contains unknown "
+                f"policy ids: {', '.join(missing)}"
+            )
+        if not optimistic.trusted_root_policy_ids:
+            raise ValueError(
+                "optimistic_local_ready.trusted_root_policy_ids is required "
+                "when optimistic mode is enabled"
+            )
+        if not optimistic.model_families:
+            raise ValueError(
+                "optimistic_local_ready.model_families is required when "
+                "optimistic mode is enabled"
+            )
+    if optimistic.mode == cfg_pb.OptimisticLocalReady.MODE_OPTIMISTIC_LOCAL_ONLY and (
+        optimistic.failure_action
+        not in (
+            cfg_pb.OptimisticLocalReady.FAILURE_ACTION_MARK_UNVERIFIED,
+            cfg_pb.OptimisticLocalReady.FAILURE_ACTION_WARN_ONLY,
+        )
+    ):
+        raise ValueError(
+            "optimistic_local_only cannot use health/drain failure actions "
+            "because no canonical verification job is expected"
+        )
+
+
 def _to_seconds_string(value: Any) -> str:
     """Normalize various duration inputs to protobuf JSON seconds string.
 
@@ -322,6 +370,29 @@ def _normalize_defaults_inplace(msg: cfg_pb.DaemonConfig) -> None:
         if not trusted_root.HasField("lightweight_attestation_enabled"):
             trusted_root.lightweight_attestation_enabled = True
 
+    if hasattr(msg, "optimistic_local_ready") and hasattr(
+        cfg_pb, "OptimisticLocalReady"
+    ):
+        optimistic = msg.optimistic_local_ready
+        if optimistic.mode == cfg_pb.OptimisticLocalReady.MODE_UNSPECIFIED:
+            optimistic.mode = cfg_pb.OptimisticLocalReady.MODE_DISABLED
+        if (
+            optimistic.promotion_trigger
+            == cfg_pb.OptimisticLocalReady.PROMOTION_TRIGGER_UNSPECIFIED
+        ):
+            optimistic.promotion_trigger = (
+                cfg_pb.OptimisticLocalReady.PROMOTION_TRIGGER_AFTER_FREEZE
+            )
+        if optimistic.per_device_promotion_concurrency == 0:
+            optimistic.per_device_promotion_concurrency = 1
+        if (
+            optimistic.failure_action
+            == cfg_pb.OptimisticLocalReady.FAILURE_ACTION_UNSPECIFIED
+        ):
+            optimistic.failure_action = (
+                cfg_pb.OptimisticLocalReady.FAILURE_ACTION_MARK_UNVERIFIED
+            )
+
 
 def _parse_override_value(value: str) -> Any:
     if value == "":
@@ -452,6 +523,7 @@ def load_daemon_config(path: str | Path) -> cfg_pb.DaemonConfig:
     ParseDict(raw, msg, ignore_unknown_fields=False)
     _normalize_defaults_inplace(msg)
     _validate_public_disk_source_config(msg)
+    _validate_optimistic_local_ready_config(msg)
     return msg
 
 

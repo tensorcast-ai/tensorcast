@@ -51,6 +51,56 @@ class SourceBoundCapability(IntFlag):
     )
 
 
+class BindingValueVerificationState(str, Enum):
+    PENDING = "pending"
+    VERIFIED = "verified"
+    FAILED = "failed"
+    LOCAL_ONLY = "local_only"
+
+    @classmethod
+    def from_proto(cls, value: int) -> "BindingValueVerificationState | None":
+        if value == store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_PENDING:
+            return cls.PENDING
+        if value == store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_VERIFIED:
+            return cls.VERIFIED
+        if value == store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_FAILED:
+            return cls.FAILED
+        if value == store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY:
+            return cls.LOCAL_ONLY
+        return None
+
+    def to_proto(self) -> int:
+        if self is BindingValueVerificationState.PENDING:
+            return store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_PENDING
+        if self is BindingValueVerificationState.VERIFIED:
+            return store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_VERIFIED
+        if self is BindingValueVerificationState.FAILED:
+            return store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_FAILED
+        return store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY
+
+
+class BindingPromotionStatusState(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELED = "canceled"
+
+    @classmethod
+    def from_proto(cls, value: int) -> "BindingPromotionStatusState | None":
+        if value == store_daemon_pb2.BINDING_PROMOTION_JOB_STATE_PENDING:
+            return cls.PENDING
+        if value == store_daemon_pb2.BINDING_PROMOTION_JOB_STATE_RUNNING:
+            return cls.RUNNING
+        if value == store_daemon_pb2.BINDING_PROMOTION_JOB_STATE_SUCCEEDED:
+            return cls.SUCCEEDED
+        if value == store_daemon_pb2.BINDING_PROMOTION_JOB_STATE_FAILED:
+            return cls.FAILED
+        if value == store_daemon_pb2.BINDING_PROMOTION_JOB_STATE_CANCELED:
+            return cls.CANCELED
+        return None
+
+
 class MountedSourceFormatKind(str, Enum):
     PARTITIONED = "partitioned"
     SAFETENSORS = "safetensors"
@@ -63,7 +113,7 @@ class MountedSourceFormatKind(str, Enum):
             return cls.SAFETENSORS
         return None
 
-    def to_proto(self) -> int:
+    def to_proto(self) -> store_daemon_pb2.DiskSourceFormatKind:
         if self is MountedSourceFormatKind.PARTITIONED:
             return store_daemon_pb2.DISK_SOURCE_FORMAT_KIND_PARTITIONED
         return store_daemon_pb2.DISK_SOURCE_FORMAT_KIND_SAFETENSORS
@@ -81,7 +131,7 @@ class MountedSourceMetadataCapability(str, Enum):
             return cls.BYTE_ONLY
         return None
 
-    def to_proto(self) -> int:
+    def to_proto(self) -> store_daemon_pb2.DiskMetadataCapability:
         if self is MountedSourceMetadataCapability.BYTE_ONLY:
             return store_daemon_pb2.DISK_METADATA_CAPABILITY_BYTE_ONLY
         return store_daemon_pb2.DISK_METADATA_CAPABILITY_TENSOR_AWARE
@@ -102,7 +152,7 @@ class MountedSourceResolutionStrategy(str, Enum):
             return cls.ATTESTED_WITH_TRUSTED_DESCRIPTOR_HINT
         return None
 
-    def to_proto(self) -> int:
+    def to_proto(self) -> store_daemon_pb2.DiskResolutionStrategy:
         if (
             self
             is MountedSourceResolutionStrategy.ATTESTED_WITH_TRUSTED_DESCRIPTOR_HINT
@@ -120,7 +170,7 @@ class MountedSourceValidationMode(str, Enum):
             return cls.VALIDATE_BEFORE_READ
         return None
 
-    def to_proto(self) -> int:
+    def to_proto(self) -> store_daemon_pb2.DiskValidationMode:
         return store_daemon_pb2.DISK_VALIDATION_MODE_VALIDATE_BEFORE_READ
 
 
@@ -2512,6 +2562,8 @@ class DeregisterArtifactOutcome(BaseModel):
 __all__ = [
     "ServerConfig",
     "SourceBoundCapability",
+    "BindingValueVerificationState",
+    "BindingPromotionStatusState",
     "MountedSourceFormatKind",
     "MountedSourceMetadataCapability",
     "MountedSourceResolutionStrategy",

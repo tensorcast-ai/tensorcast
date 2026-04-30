@@ -114,12 +114,27 @@ class MaterializationController {
       const v2::SubmitBindingContributionRequest& req,
       v2::SubmitBindingContributionResponse& resp);
 
+  grpc::Status freeze_binding_current_value(
+      RpcContext& rctx,
+      const v2::FreezeBindingCurrentValueRequest& req,
+      v2::FreezeBindingCurrentValueResponse& resp);
+
   grpc::Status seal_binding(RpcContext& rctx, const v2::SealBindingRequest& req, v2::SealBindingResponse& resp);
 
   grpc::Status promote_binding_current_value(
       RpcContext& rctx,
       const v2::PromoteBindingCurrentValueRequest& req,
       v2::PromoteBindingCurrentValueResponse& resp);
+
+  grpc::Status start_promote_binding_current_value(
+      RpcContext& rctx,
+      const v2::StartPromoteBindingCurrentValueRequest& req,
+      v2::StartPromoteBindingCurrentValueResponse& resp);
+
+  grpc::Status get_binding_promotion_status(
+      RpcContext& rctx,
+      const v2::GetBindingPromotionStatusRequest& req,
+      v2::GetBindingPromotionStatusResponse& resp);
 
   grpc::Status refill_owned_binding(
       RpcContext& rctx,

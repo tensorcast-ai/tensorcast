@@ -26,6 +26,13 @@ def resolve_device(device: int | torch.device, *, allow_cpu: bool = False) -> in
 
 
 def device_uuid_for(device_id: int) -> str:
+    if device_id >= 0 and torch.cuda.is_available():
+        try:
+            uuid = getattr(torch.cuda.get_device_properties(device_id), "uuid", None)
+            if uuid:
+                return str(uuid)
+        except Exception:
+            pass
     device_uuid_map = get_device_uuid_map()
     try:
         return device_uuid_map[device_id]

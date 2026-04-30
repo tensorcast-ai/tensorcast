@@ -4,7 +4,7 @@ title: Trusted Mounted Source Artifact Attestation And Format-Aware Resolve
 status: draft
 areas: ["daemon", "core", "sdk", "proto", "config", "docs"]
 created: 2026-04-13
-last_updated: 2026-04-15
+last_updated: 2026-04-30
 related_code:
   - docs/designs/0004-unified-runtime-config.md
   - docs/designs/0007-content-addressed-artifact-id.md
@@ -30,6 +30,7 @@ related_code:
   - tensorcast/types.py
   - tensorcast/api/store/__init__.py
 links:
+  plan: ../plans/0115-optimistic-msa1-local-ready-async-mi2.md
   related:
     - ./0004-unified-runtime-config.md
     - ./0007-content-addressed-artifact-id.md
@@ -59,6 +60,9 @@ The long-term contract should instead be:
 - and any already-known `mi2:` from a trusted descriptor is surfaced as an
   optional content hint rather than replacing the mounted artifact's primary
   identity.
+- optimistic binding-native serving may use an `msa1:`-backed local-ready
+  serving value before `mi2:` promotion, but that local-ready value is
+  same-daemon, session-local, and not a canonical publication identity.
 
 This is the correct long-term optimization boundary:
 
@@ -76,8 +80,10 @@ The key correction is:
 - keep mounted resolve artifact-first through `msa1:`,
 - keep source freshness and source authority explicit through mounted snapshot
   validation,
-- and keep final content truth explicit through later `mi2:` promotion rather
-  than by overloading the resolve path.
+- allow local-ready serving to proceed on trusted `msa1:` evidence when a
+  binding-native family has been admitted for optimistic startup,
+- and keep canonical, durable, or cross-daemon content truth explicit through
+  later `mi2:` promotion rather than by overloading the resolve path.
 
 ```mermaid
 flowchart LR
@@ -92,8 +98,11 @@ flowchart LR
   G --> H
   H --> I["ArtifactSelection / Binding / Materialize"]
   I --> J["Revalidate snapshot before read"]
-  J --> K["Explicit verify / import / seal"]
-  K --> L["Final published identity = mi2:..."]
+  J --> K{"Optimistic local serving<br>policy admitted?"}
+  K -- yes --> L["Freeze local serving value<br>verification_state=pending"]
+  K -- no --> M["Explicit verify / import / seal"]
+  L --> M
+  M --> N["Canonical/durable identity = mi2:..."]
 ```
 
 # Goals / Non-Goals
@@ -116,6 +125,9 @@ flowchart LR
 - Keep mounted-source profile, authority, and validation semantics explicit.
 - Make snapshot revalidation a hard invariant so mounted bytes cannot silently
   drift underneath an artifact id.
+- Permit a separately configured optimistic local-ready serving mode where an
+  admitted same-daemon binding-native flow may serve from frozen realized bytes
+  while `msa1 -> mi2` promotion runs asynchronously.
 - Keep trust and policy in typed daemon config under `0004`.
 - Reuse the repository's existing profile/authority split from `0092` rather
   than introducing a second long-term object model.
@@ -130,6 +142,8 @@ flowchart LR
 - Do not make resolve-time mounted attestation a durable registration path.
 - Do not mint primary `mi2:` identity from the default mounted resolve fast
   path.
+- Do not treat optimistic local-ready serving as Global Store publication,
+  durable key activation, cross-daemon routing, or content verification.
 - Do not preserve compatibility shims such as `disksrc:` or
   `cgid:disk_source~...`.
 - Do not keep long-term request-level trust toggles that bypass typed mounted
@@ -420,7 +434,8 @@ This is the core reason `msa1:` is better than a public source-handle plane:
 | Global Store artifact-info RPCs | rejected |
 | key activation / durable key mapping | rejected |
 | cross-daemon retrieval as if GS-backed | rejected |
-| final publication identity | rejected until explicit promotion to `mi2:` |
+| optimistic same-daemon local serving | allowed only by typed policy, with pending `mi2` verification |
+| canonical / durable publication identity | rejected until explicit promotion to `mi2:` |
 
 The profile and authority model, not just the string prefix, must control
 surface admission.
@@ -640,7 +655,7 @@ The following remain closed to `msa1:`:
 - Global Store artifact-info RPCs
 - key activation and durable key mapping
 - cross-daemon retrieval as though `msa1:` were GS-backed
-- final publication identity
+- canonical or durable final publication identity
 
 This keeps authority boundaries explicit.
 
@@ -658,6 +673,35 @@ If the source is attested as `msa1:`, the binding current value is already
 artifact-backed in the profile sense, even though it is not yet content-verified
 or globally routable.
 
+### 9.5 Optimistic local-ready serving
+
+Optimistic local-ready serving is a performance mode layered above the mounted
+source contract. It does not change what `msa1:` means.
+
+An admitted binding-native flow may mark a realized serving value ready before
+`mi2:` promotion only when all of the following are true:
+
+- the source artifact is a trusted `msa1:` and its snapshot evidence has been
+  revalidated for the read;
+- the model family and topology are explicitly admitted for same-binding
+  optimistic startup;
+- the realized value is frozen against further mutation;
+- serving schema, representation contract, serving build digest, and family
+  semantic validation have passed;
+- the daemon records `verification_state=pending` and either schedules
+  asynchronous promotion to `mi2:` or explicitly marks the value local-only by
+  policy.
+
+For tensor-parallel local bootstrap, the integration must not start `mi2`
+promotion when the first rank freezes. All local ranks in the serving TP group
+must first finish their local-ready transition: realization, tensor attachment,
+runtime-only allocation, finalize/validation, `freeze_current`, and local
+runtime-state installation. The local-ready barrier is therefore part of the
+optimistic serving contract, not merely a profiling convenience.
+
+While verification is pending, the value is not content-verified, not GS
+routable, not durable-key activatable, and not a canonical publication result.
+
 ## 10. Promotion To `mi2:`
 
 `mi2:` remains the only content-verified identity.
@@ -667,6 +711,19 @@ Mounted-source artifacts may later promote from `msa1:` to `mi2:` through:
 - explicit import,
 - explicit verification,
 - or seal from realized bytes.
+
+For optimistic local-ready serving, this promotion may run asynchronously after
+the serving value is already live. Success may attach a canonical
+`serving_artifact_id = mi2:...` and complete normal publication closeout.
+Failure must not be silently ignored: the daemon must record a failed
+verification state and apply the configured failure policy.
+
+Starting promotion and running promotion are separate scheduling events.
+`StartPromoteBindingCurrentValue` must create or return an observable idempotent
+job for the frozen `binding_id + binding_value_id`; the daemon may delay actual
+hash/commit work until critical load operations such as binding refill,
+freeze, or large binding allocation are no longer active. Status polling must
+remain cheap and must not perform promotion work itself.
 
 A trusted descriptor may also populate `trusted_content_artifact_id = mi2:...`
 earlier, but that hint does not change the mounted artifact's primary identity.
@@ -857,8 +914,10 @@ This design assumes a hard cut at the contract level:
   resolve, hash, and load code paths,
 - mounted serving evidence shows reduced cold resolve latency on audited trusted
   mounts,
-- and final publish or seal still converges to `mi2:` as the only content
-  identity.
+- optimistic local-ready serving, when enabled, reports pending verification
+  until asynchronous promotion succeeds or fails,
+- and canonical/durable publish or seal still converges to `mi2:` as the only
+  content identity.
 
 # References
 

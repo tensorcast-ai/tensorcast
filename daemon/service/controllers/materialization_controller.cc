@@ -217,6 +217,13 @@ grpc::Status MaterializationController::submit_binding_contribution(
   return owner_binding_service_.submit_binding_contribution(rctx, req, resp);
 }
 
+grpc::Status MaterializationController::freeze_binding_current_value(
+    RpcContext& rctx,
+    const v2::FreezeBindingCurrentValueRequest& req,
+    v2::FreezeBindingCurrentValueResponse& resp) {
+  return owner_binding_service_.freeze_binding_current_value(rctx, req, resp);
+}
+
 grpc::Status MaterializationController::seal_binding(
     RpcContext& rctx,
     const v2::SealBindingRequest& req,
@@ -229,6 +236,20 @@ grpc::Status MaterializationController::promote_binding_current_value(
     const v2::PromoteBindingCurrentValueRequest& req,
     v2::PromoteBindingCurrentValueResponse& resp) {
   return owner_binding_service_.promote_binding_current_value(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::start_promote_binding_current_value(
+    RpcContext& rctx,
+    const v2::StartPromoteBindingCurrentValueRequest& req,
+    v2::StartPromoteBindingCurrentValueResponse& resp) {
+  return owner_binding_service_.start_promote_binding_current_value(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::get_binding_promotion_status(
+    RpcContext& rctx,
+    const v2::GetBindingPromotionStatusRequest& req,
+    v2::GetBindingPromotionStatusResponse& resp) {
+  return owner_binding_service_.get_binding_promotion_status(rctx, req, resp);
 }
 
 grpc::Status MaterializationController::refill_owned_binding(

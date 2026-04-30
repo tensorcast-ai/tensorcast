@@ -843,6 +843,52 @@ class OwnedBindingSlot:
         self._target_publication_operation_id = None
         self._dirty = False
 
+    def freeze_current(
+        self,
+        *,
+        update_epoch: "BindingUpdateEpoch | str | int",
+        source_artifact_ref: str | None = None,
+        ctx: CallContext | None = None,
+    ) -> None:
+        self._ensure_open()
+        update_epoch_token = self._normalize_update_epoch(update_epoch)
+        timeout_s = _ctx_timeout_s(ctx)
+        try:
+            response = self._runtime.ensure_client().freeze_binding_current_value(
+                binding_id=self._binding_id,
+                update_epoch=update_epoch_token,
+                source_artifact_ref=source_artifact_ref,
+                timeout_s=timeout_s if timeout_s is not None else 30.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._enter_dirty_state()
+            error = _map_slot_error(exc)
+            raise ArtifactError(
+                str(error),
+                status_code=error.status_code,
+                retryable=error.retryable,
+            ) from exc
+        metadata = parse_binding_value_or_raise(
+            response.current_value if hasattr(response, "current_value") else None,
+            rpc_name="FreezeBindingCurrentValue",
+            expected_binding_id=self._binding_id,
+            expected_binding_layout_id=self._binding_layout_id,
+        )
+        if metadata is None:
+            self._enter_dirty_state()
+            raise ArtifactError(
+                "FreezeBindingCurrentValue returned empty current_value",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        self._active_update_epoch = None
+        self._seal_generation_counter = int(metadata.seal_generation)
+        self._current_value_metadata = metadata
+        self._selection = None
+        self._target_publication_token = None
+        self._target_publication_operation_id = None
+        self._dirty = False
+
     def promote_current_value(
         self,
         *,
@@ -891,6 +937,88 @@ class OwnedBindingSlot:
         )
         self._last_source_bound_plan_diagnostics = None
         return response
+
+    def start_promote_current_value(
+        self,
+        *,
+        binding_value_id: str,
+        ctx: CallContext | None = None,
+    ) -> store_daemon_pb2.BindingPromotionStatus:
+        self._ensure_open()
+        timeout_s = _ctx_timeout_s(ctx)
+        try:
+            response = (
+                self._runtime.ensure_client().start_promote_binding_current_value(
+                    binding_id=self._binding_id,
+                    binding_value_id=str(binding_value_id),
+                    timeout_s=timeout_s if timeout_s is not None else 30.0,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            error = _map_slot_error(exc)
+            raise ArtifactError(
+                str(error),
+                status_code=error.status_code,
+                retryable=error.retryable,
+            ) from exc
+        if not response.HasField("status"):
+            raise ArtifactError(
+                "StartPromoteBindingCurrentValue returned empty status",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        metadata = parse_binding_value_or_raise(
+            response.status.current_value
+            if response.status.HasField("current_value")
+            else None,
+            rpc_name="StartPromoteBindingCurrentValue",
+            expected_binding_id=self._binding_id,
+            expected_binding_layout_id=self._binding_layout_id,
+        )
+        if metadata is not None:
+            self._current_value_metadata = metadata
+        return response.status
+
+    def get_promotion_status(
+        self,
+        *,
+        verification_job_id: str | None = None,
+        binding_value_id: str,
+        ctx: CallContext | None = None,
+    ) -> store_daemon_pb2.BindingPromotionStatus:
+        self._ensure_open()
+        timeout_s = _ctx_timeout_s(ctx)
+        try:
+            response = self._runtime.ensure_client().get_binding_promotion_status(
+                verification_job_id=verification_job_id,
+                binding_id=self._binding_id,
+                binding_value_id=str(binding_value_id),
+                timeout_s=timeout_s if timeout_s is not None else 30.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            error = _map_slot_error(exc)
+            raise ArtifactError(
+                str(error),
+                status_code=error.status_code,
+                retryable=error.retryable,
+            ) from exc
+        if not response.HasField("status"):
+            raise ArtifactError(
+                "GetBindingPromotionStatus returned empty status",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        metadata = parse_binding_value_or_raise(
+            response.status.current_value
+            if response.status.HasField("current_value")
+            else None,
+            rpc_name="GetBindingPromotionStatus",
+            expected_binding_id=self._binding_id,
+            expected_binding_layout_id=self._binding_layout_id,
+        )
+        if metadata is not None:
+            self._current_value_metadata = metadata
+        return response.status
 
     def realize_from(
         self,

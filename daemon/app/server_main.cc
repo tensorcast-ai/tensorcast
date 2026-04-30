@@ -1206,6 +1206,77 @@ int main(int argc, char** argv) {
   daemon_opts.cpu_shared_memory_enabled = opts.cpu_shared_memory_enabled;
   daemon_opts.external_target_verification_enabled = cfg.engine().enable_external_target_verification();
   daemon_opts.max_concurrency = std::max<uint32_t>(1, opts.promotion.max_concurrency);
+  const auto& optimistic = cfg.optimistic_local_ready();
+  switch (optimistic.mode()) {
+    case tensorcast::config::v1::OptimisticLocalReady::MODE_STRICT_CANONICAL_BLOCKING:
+      daemon_opts.optimistic_local_ready.mode =
+          daemon::DaemonOptions::OptimisticLocalReady::Mode::kStrictCanonicalBlocking;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::MODE_OPTIMISTIC_ASYNC_MI2:
+      daemon_opts.optimistic_local_ready.mode = daemon::DaemonOptions::OptimisticLocalReady::Mode::kOptimisticAsyncMi2;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::MODE_OPTIMISTIC_LOCAL_ONLY:
+      daemon_opts.optimistic_local_ready.mode = daemon::DaemonOptions::OptimisticLocalReady::Mode::kOptimisticLocalOnly;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::MODE_DISABLED:
+    case tensorcast::config::v1::OptimisticLocalReady::MODE_UNSPECIFIED:
+    default:
+      daemon_opts.optimistic_local_ready.mode = daemon::DaemonOptions::OptimisticLocalReady::Mode::kDisabled;
+      break;
+  }
+  daemon_opts.optimistic_local_ready.trusted_root_policy_ids.assign(
+      optimistic.trusted_root_policy_ids().begin(), optimistic.trusted_root_policy_ids().end());
+  daemon_opts.optimistic_local_ready.model_families.assign(
+      optimistic.model_families().begin(), optimistic.model_families().end());
+  daemon_opts.optimistic_local_ready.topology_constraints.assign(
+      optimistic.topology_constraints().begin(), optimistic.topology_constraints().end());
+  switch (optimistic.promotion_trigger()) {
+    case tensorcast::config::v1::OptimisticLocalReady::PROMOTION_TRIGGER_AFTER_READY:
+      daemon_opts.optimistic_local_ready.promotion_trigger =
+          daemon::DaemonOptions::OptimisticLocalReady::PromotionTrigger::kAfterReady;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::PROMOTION_TRIGGER_AFTER_FIRST_TOKEN:
+      daemon_opts.optimistic_local_ready.promotion_trigger =
+          daemon::DaemonOptions::OptimisticLocalReady::PromotionTrigger::kAfterFirstToken;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::PROMOTION_TRIGGER_DELAYED:
+      daemon_opts.optimistic_local_ready.promotion_trigger =
+          daemon::DaemonOptions::OptimisticLocalReady::PromotionTrigger::kDelayed;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::PROMOTION_TRIGGER_AFTER_FREEZE:
+    case tensorcast::config::v1::OptimisticLocalReady::PROMOTION_TRIGGER_UNSPECIFIED:
+    default:
+      daemon_opts.optimistic_local_ready.promotion_trigger =
+          daemon::DaemonOptions::OptimisticLocalReady::PromotionTrigger::kAfterFreeze;
+      break;
+  }
+  daemon_opts.optimistic_local_ready.per_device_promotion_concurrency =
+      std::max<uint32_t>(1, optimistic.per_device_promotion_concurrency());
+  daemon_opts.optimistic_local_ready.scheduling_class = optimistic.scheduling_class();
+  daemon_opts.optimistic_local_ready.retry_budget = optimistic.retry_budget();
+  if (optimistic.has_timeout()) {
+    daemon_opts.optimistic_local_ready.timeout = duration_to_millis(optimistic.timeout());
+  }
+  switch (optimistic.failure_action()) {
+    case tensorcast::config::v1::OptimisticLocalReady::FAILURE_ACTION_FAIL_HEALTH:
+      daemon_opts.optimistic_local_ready.failure_action =
+          daemon::DaemonOptions::OptimisticLocalReady::FailureAction::kFailHealth;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::FAILURE_ACTION_DRAIN:
+      daemon_opts.optimistic_local_ready.failure_action =
+          daemon::DaemonOptions::OptimisticLocalReady::FailureAction::kDrain;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::FAILURE_ACTION_WARN_ONLY:
+      daemon_opts.optimistic_local_ready.failure_action =
+          daemon::DaemonOptions::OptimisticLocalReady::FailureAction::kWarnOnly;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::FAILURE_ACTION_MARK_UNVERIFIED:
+    case tensorcast::config::v1::OptimisticLocalReady::FAILURE_ACTION_UNSPECIFIED:
+    default:
+      daemon_opts.optimistic_local_ready.failure_action =
+          daemon::DaemonOptions::OptimisticLocalReady::FailureAction::kMarkUnverified;
+      break;
+  }
   const auto& post_seal = cfg.post_seal();
   daemon_opts.post_seal_policy.migrate_views = post_seal.migrate_views();
   daemon_opts.post_seal_policy.migrate_transpose_only = post_seal.migrate_transpose_only();

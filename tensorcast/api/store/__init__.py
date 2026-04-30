@@ -156,7 +156,9 @@ from tensorcast.types import (
     AssemblyContractFamily,
     AssemblyReadinessPolicy,
     AssemblyRequirementSetRef,
+    BindingPromotionStatusState,
     BindingValueRef,
+    BindingValueVerificationState,
     BuilderMode,
     DeregisterArtifactOutcome,
     ExecutionDiagnostics,
@@ -3317,14 +3319,10 @@ class Store:
         if artifact_kind is not ArtifactIdKind.MSA1:
             raise ValueError("artifact must be an msa1 mounted-source artifact id")
         try:
-            request_kwargs: dict[str, object] = {
-                "artifact_id": source_artifact_id,
-                "verify_checksums": bool(verify_checksums),
-            }
-            if timeout_s is not None:
-                request_kwargs["timeout_s"] = float(timeout_s)
             response = self._runtime.ensure_client().promote_mounted_source_artifact(
-                **request_kwargs,
+                artifact_id=source_artifact_id,
+                verify_checksums=bool(verify_checksums),
+                timeout_s=float(timeout_s) if timeout_s is not None else None,
             )
         except Exception as exc:  # noqa: BLE001
             raise ArtifactError(
@@ -4439,8 +4437,10 @@ __all__ = [
     "AssemblyCloseoutContract",
     "AssemblyReadinessPolicy",
     "AssemblyRequirementSetRef",
+    "BindingPromotionStatusState",
     "Binding",
     "BindingValueRef",
+    "BindingValueVerificationState",
     "BindingLayout",
     "BindingUpdateEpoch",
     "BuilderMode",
