@@ -259,6 +259,54 @@ def test_create_session_duplicate_auto_root_returns_existing_without_counter_cha
     assert len(service.list_edges("session-auto")) == 1
 
 
+def test_create_session_auto_root_uses_configured_heartbeat_timeout(repositories):
+    worker_repo = repositories["worker"]
+    replica_repo = repositories["replica"]
+    broadcast_repo = repositories["broadcast"]
+    service = BroadcastService(
+        broadcast_repository=broadcast_repo,
+        replica_repository=replica_repo,
+        worker_repository=worker_repo,
+        root_heartbeat_timeout_seconds=30.0,
+    )
+    root = _worker("worker-root-timeout", "daemon-root-timeout", "node1")
+    child = _worker("worker-child-timeout", "daemon-child-timeout", "node2")
+    for worker in (root, child):
+        worker_repo.create(worker)
+        assert worker_repo.update_heartbeat(worker.worker_id, 4096, True)
+    root_replica = replica_repo.create(_exportable_replica("mi2:model-timeout", root))
+
+    cursor = worker_repo.get_cursor()
+    try:
+        cursor.execute(
+            """
+            UPDATE worker_liveness
+            SET last_heartbeat = now() - INTERVAL '6 seconds'
+            WHERE worker_id = ?
+            """,
+            [root.worker_id],
+        )
+    finally:
+        cursor.close()
+
+    session = service.create_session(
+        session_id="session-timeout",
+        artifact_id="mi2:model-timeout",
+        requested_view_id=None,
+        epoch=1,
+        fanout=1,
+        target_daemon_ids=["daemon-child-timeout"],
+        root_replica_id="",
+        strict_parent=True,
+        max_attempts=3,
+    )
+
+    assert session.root_replica_id == root_replica.replica_id
+    assert replica_repo.get_current_requests(root_replica.replica_id) == 0
+    assert len(broadcast_repo.list_targets("session-timeout")) == 1
+    assert len(service.list_edges("session-timeout")) == 1
+
+
 def test_create_session_auto_root_failure_releases_counter_and_rolls_back(
     repositories,
     monkeypatch,

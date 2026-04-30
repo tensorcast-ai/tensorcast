@@ -35,7 +35,7 @@ from tensorcast.global_store.repositories import (
 class BroadcastService:
     """Coordinates broadcast session topology state."""
 
-    _ROOT_HEARTBEAT_TIMEOUT_SECONDS = 5.0
+    _DEFAULT_ROOT_HEARTBEAT_TIMEOUT_SECONDS = 30.0
 
     def __init__(
         self,
@@ -43,10 +43,17 @@ class BroadcastService:
         broadcast_repository: BroadcastRepository,
         replica_repository: ReplicaRepository,
         worker_repository: WorkerRepository,
+        root_heartbeat_timeout_seconds: float | None = None,
     ) -> None:
         self._broadcast_repository = broadcast_repository
         self._replica_repository = replica_repository
         self._worker_repository = worker_repository
+        timeout = (
+            self._DEFAULT_ROOT_HEARTBEAT_TIMEOUT_SECONDS
+            if root_heartbeat_timeout_seconds is None
+            else float(root_heartbeat_timeout_seconds)
+        )
+        self._root_heartbeat_timeout_seconds = max(0.0, timeout)
 
     def create_session(
         self,
@@ -289,7 +296,7 @@ class BroadcastService:
                 artifact_id=session.artifact_id,
                 view_id=session.requested_view_id,
                 worker_id=edge.child_worker_id,
-                heartbeat_timeout_seconds=self._ROOT_HEARTBEAT_TIMEOUT_SECONDS,
+                heartbeat_timeout_seconds=self._root_heartbeat_timeout_seconds,
                 cursor=cursor,
             )
             if child_replica is None:
@@ -471,7 +478,7 @@ class BroadcastService:
 
         result = self._replica_repository.find_available_for_transport(
             artifact_id=artifact_id,
-            heartbeat_timeout_seconds=self._ROOT_HEARTBEAT_TIMEOUT_SECONDS,
+            heartbeat_timeout_seconds=self._root_heartbeat_timeout_seconds,
             view_id=requested_view_id,
         )
         if result.replica is None:

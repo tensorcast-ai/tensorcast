@@ -63,6 +63,7 @@ using materialization_policy::resolve_transform_placement;
 using materialization_policy::to_hint_export_policy;
 using materialization_post_seal::check_post_seal_view_reuse_safe;
 using materialization_replica_handle::bind_replica_handle_for_response;
+using materialization_replica_handle::register_session_and_refs;
 using materialization_request_common::LeaseContext;
 using materialization_request_common::LipFastPathRequest;
 using materialization_request_common::materialize_with_shared_disk_retry;
@@ -943,22 +944,37 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
                  << handle.replica_key << " cpu_state=" << static_cast<int>(handle.cpu_state)
                  << " gpu_state=" << static_cast<int>(handle.gpu_state);
   }
-  auto bind_status = bind_materialized_handle(
-      d_.engine,
-      d_.sessions,
-      d_.refs,
-      d_.lifecycle,
-      d_.handle_leases,
-      handle,
-      req.replica_uuid(),
-      effective_pid,
-      loopback_peer,
-      cpu_target,
-      "engine path",
-      *resp.mutable_mem_handle());
-  if (!bind_status.ok()) {
-    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-    return to_grpc_status(bind_status);
+  if (no_lease) {
+    auto session_status = register_session_and_refs(
+        d_.sessions,
+        d_.refs,
+        handle.replica_key,
+        handle.ready_signal,
+        req.replica_uuid(),
+        effective_pid,
+        /*allow_pid_ref=*/false);
+    if (!session_status.ok()) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(session_status);
+    }
+  } else {
+    auto bind_status = bind_materialized_handle(
+        d_.engine,
+        d_.sessions,
+        d_.refs,
+        d_.lifecycle,
+        d_.handle_leases,
+        handle,
+        req.replica_uuid(),
+        effective_pid,
+        loopback_peer,
+        cpu_target,
+        "engine path",
+        *resp.mutable_mem_handle());
+    if (!bind_status.ok()) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(bind_status);
+    }
   }
   resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   if (handle.view_index_json.has_value()) {

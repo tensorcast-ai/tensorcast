@@ -470,6 +470,7 @@ class GlobalStoreServicer(
             broadcast_repository=self.broadcast_repository,
             replica_repository=self.replica_repository,
             worker_repository=self.worker_repository,
+            root_heartbeat_timeout_seconds=self.config.heartbeat_timeout_ms / 1000.0,
         )
         self.transport_service = TransportService(
             self.replica_repository,
