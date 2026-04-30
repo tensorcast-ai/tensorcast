@@ -87,7 +87,7 @@ class _ClientStub:
         self.get_index_calls = 0
         self.import_calls: list[tuple[str, bool]] = []
         self.resolve_public_disk_calls: list[tuple[str, bool]] = []
-        self.promote_mounted_source_calls: list[tuple[str, bool, float]] = []
+        self.promote_mounted_source_calls: list[tuple[str, bool, float | None]] = []
         self.publish_calls: list[tuple[str, str]] = []
 
     def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
@@ -172,10 +172,14 @@ class _ClientStub:
         *,
         artifact_id: str,
         verify_checksums: bool = True,
-        timeout_s: float = 30.0,
+        timeout_s: float | None = None,
     ):
         self.promote_mounted_source_calls.append(
-            (artifact_id, bool(verify_checksums), float(timeout_s))
+            (
+                artifact_id,
+                bool(verify_checksums),
+                float(timeout_s) if timeout_s is not None else None,
+            )
         )
         return store_daemon_pb2.PromoteMountedSourceArtifactResponse(
             artifact_id=self.disk_artifact_id or "mi2:idx:data",
@@ -755,7 +759,7 @@ def test_store_promote_mounted_source_returns_mi2_artifact():
 
     assert artifact.artifact_id == "mi2:idx:promoted"
     assert client.promote_mounted_source_calls == [
-        ("msa1:test-session~policy~safetensors~source", True, 30.0)
+        ("msa1:test-session~policy~safetensors~source", True, None)
     ]
 
 
@@ -775,7 +779,7 @@ def test_store_promote_mounted_source_accepts_artifact_handle():
 
     assert promoted.artifact_id == "mi2:idx:promoted"
     assert client.promote_mounted_source_calls == [
-        ("msa1:test-session~policy~safetensors~source", False, 30.0)
+        ("msa1:test-session~policy~safetensors~source", False, None)
     ]
 
 

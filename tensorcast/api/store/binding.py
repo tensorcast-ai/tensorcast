@@ -9,7 +9,7 @@ import uuid
 import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -867,13 +867,14 @@ class Binding:
         resolved_binding_value_id = str(
             binding_value_id or current_value.binding_value_id
         )
-        if not isinstance(self._slot, OwnedBindingSlot):
+        promote = getattr(self._slot, "promote_current_value", None)
+        if not callable(promote):
             raise ArtifactError(
                 "promote_current_value() requires a daemon-owned binding",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-        response = self._slot.promote_current_value(
+        response = promote(
             binding_value_id=resolved_binding_value_id,
             ctx=ctx,
         )
@@ -899,15 +900,19 @@ class Binding:
         resolved_binding_value_id = str(
             binding_value_id or current_value.binding_value_id
         )
-        if not isinstance(self._slot, OwnedBindingSlot):
+        start_promote = getattr(self._slot, "start_promote_current_value", None)
+        if not callable(start_promote):
             raise ArtifactError(
                 "start_promote_current_value() requires a daemon-owned binding",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-        return self._slot.start_promote_current_value(
-            binding_value_id=resolved_binding_value_id,
-            ctx=ctx,
+        return cast(
+            store_daemon_pb2.BindingPromotionStatus,
+            start_promote(
+                binding_value_id=resolved_binding_value_id,
+                ctx=ctx,
+            ),
         )
 
     def get_promotion_status(
@@ -922,16 +927,20 @@ class Binding:
             binding_value_id
             or (current_value.binding_value_id if current_value is not None else "")
         )
-        if not isinstance(self._slot, OwnedBindingSlot):
+        get_status = getattr(self._slot, "get_promotion_status", None)
+        if not callable(get_status):
             raise ArtifactError(
                 "get_promotion_status() requires a daemon-owned binding",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-        return self._slot.get_promotion_status(
-            verification_job_id=verification_job_id,
-            binding_value_id=resolved_binding_value_id,
-            ctx=ctx,
+        return cast(
+            store_daemon_pb2.BindingPromotionStatus,
+            get_status(
+                verification_job_id=verification_job_id,
+                binding_value_id=resolved_binding_value_id,
+                ctx=ctx,
+            ),
         )
 
     def close(self) -> None:
