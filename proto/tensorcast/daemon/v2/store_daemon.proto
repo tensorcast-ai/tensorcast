@@ -26,8 +26,7 @@ service StoreDaemonService {
   rpc FreezeBindingCurrentValue(FreezeBindingCurrentValueRequest) returns (FreezeBindingCurrentValueResponse) {}
   rpc SealBinding(SealBindingRequest) returns (SealBindingResponse) {}
   rpc PromoteBindingCurrentValue(PromoteBindingCurrentValueRequest) returns (PromoteBindingCurrentValueResponse) {}
-  rpc StartPromoteBindingCurrentValue(StartPromoteBindingCurrentValueRequest)
-      returns (StartPromoteBindingCurrentValueResponse) {}
+  rpc StartPromoteBindingCurrentValue(StartPromoteBindingCurrentValueRequest) returns (StartPromoteBindingCurrentValueResponse) {}
   rpc GetBindingPromotionStatus(GetBindingPromotionStatusRequest) returns (GetBindingPromotionStatusResponse) {}
   rpc RefillOwnedBinding(RefillOwnedBindingRequest) returns (RefillOwnedBindingResponse) {}
   rpc CloseOwnedBinding(CloseOwnedBindingRequest) returns (CloseOwnedBindingResponse) {}
