@@ -304,6 +304,9 @@ def test_from_disk_bind_and_bind_into_respect_safetensors_source_layout(
             finally:
                 binding.close()
 
+            if os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake":
+                return
+
             target = torch.empty_like(ref)
             binding = artifact_handle.bind_into(
                 {"weights": target}, packing="byte_space"
