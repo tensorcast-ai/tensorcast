@@ -789,15 +789,11 @@ class BroadcastRepository(BaseRepository):
         return BroadcastTarget(
             session_id=str(row[idx["session_id"]]),
             target_worker_id=str(row[idx["target_worker_id"]]),
-            target_daemon_id=cls._normalize_optional_text(
-                row[idx["target_daemon_id"]]
-            ),
+            target_daemon_id=cls._normalize_optional_text(row[idx["target_daemon_id"]]),
             state=BroadcastTargetState(str(row[idx["state"]])),
             level=int(raw_level) if raw_level is not None else None,
             attempt=int(row[idx["attempt"]]),
-            assigned_edge_id=cls._normalize_optional_text(
-                row[idx["assigned_edge_id"]]
-            ),
+            assigned_edge_id=cls._normalize_optional_text(row[idx["assigned_edge_id"]]),
             completed_replica_id=cls._uuid_or_none(row[idx["completed_replica_id"]]),
             failure_reason=cls._normalize_optional_text(row[idx["failure_reason"]]),
             created_at=cls._coerce_datetime_optional(row[idx["created_at"]]),

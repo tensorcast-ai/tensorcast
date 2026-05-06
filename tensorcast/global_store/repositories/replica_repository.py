@@ -613,7 +613,9 @@ class ReplicaRepository(BaseRepository):
                 + "AND mr.artifact_id = ? "
                 + "AND COALESCE(mr.view_id, '') = COALESCE(?, '')"
             )
-            result = cursor.execute(query, [str(replica_id), artifact_id, view_id or ""])
+            result = cursor.execute(
+                query, [str(replica_id), artifact_id, view_id or ""]
+            )
             row = result.fetchone()
             if row is None:
                 return TransportSelectionResult(replica=None, exportable_replicas=0)
