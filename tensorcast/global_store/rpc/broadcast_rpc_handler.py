@@ -21,7 +21,6 @@ from tensorcast.global_store.services import BroadcastService
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2
 
-
 _SESSION_STATE_TO_PROTO = {
     BroadcastSessionState.PLANNING: global_store_pb2.BROADCAST_SESSION_STATE_PLANNING,
     BroadcastSessionState.ACTIVE: global_store_pb2.BROADCAST_SESSION_STATE_ACTIVE,
