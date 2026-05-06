@@ -451,10 +451,7 @@ class TransportService:
                     )
                 except (NotFoundError, ValidationError) as exc:
                     claim_error = exc
-                    replica = None
-                    edge = None
-
-                if claim_error is None:
+                else:
                     transport = self._build_transport(
                         replica=replica,
                         artifact_id=artifact_id,

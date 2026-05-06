@@ -1273,21 +1273,22 @@ class NodeAgentExecutor:
         else:
             target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU
             device_uuid = device_uuid_for(device_id)
-        transport_kwargs: dict[str, object] = {}
+        transport_request_id: str | None = None
+        transport_scheduling_group: (
+            store_daemon_pb2.TransportSchedulingGroupHint | None
+        ) = None
         transport_group = call_ctx.transport_group if call_ctx is not None else None
         if transport_group is not None:
-            transport_kwargs["transport_request_id"] = (
-                _transport_request_id_for_selection(
-                    group=transport_group,
-                    daemon_id=self._daemon_id,
-                    selection=selection,
-                    device_id=device_id,
-                    device_uuid=device_uuid,
-                )
+            transport_request_id = _transport_request_id_for_selection(
+                group=transport_group,
+                daemon_id=self._daemon_id,
+                selection=selection,
+                device_id=device_id,
+                device_uuid=device_uuid,
             )
-            transport_group_proto = _transport_group_to_daemon_proto(transport_group)
-            if transport_group_proto is not None:
-                transport_kwargs["transport_scheduling_group"] = transport_group_proto
+            transport_scheduling_group = _transport_group_to_daemon_proto(
+                transport_group
+            )
         self._client.materialize_by_artifact_id_v2(
             selection=selection,
             replica_uuid=replica_uuid,
@@ -1297,7 +1298,8 @@ class NodeAgentExecutor:
             target_device_type=target_device_type,
             lease_mode=store_daemon_pb2.LeaseMode.LEASE_MODE_NO_LEASE,
             timeout_s=timeout_s,
-            **transport_kwargs,
+            transport_request_id=transport_request_id,
+            transport_scheduling_group=transport_scheduling_group,
         )
 
     def _pin(
