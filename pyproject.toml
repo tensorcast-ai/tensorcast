@@ -1,7 +1,7 @@
 [build-system]
 # Note: The torch version here is the default. When building releases,
 # use tools/release.sh with --torch-version to specify different versions
-requires = ["setuptools>=68.0.0", "pyyaml", "torch==2.9.1", "toml"]
+requires = ["setuptools>=68.0.0", "pyyaml", "torch==2.8.0+cu128", "toml"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -20,7 +20,7 @@ dependencies = [
     "pytz>=2025.2",
     "prometheus-client>=0.21.1",
     "py-grpc-prometheus>=0.8.0",
-    "torch==2.9.1",
+    "torch==2.8.0+cu128",
     "protobuf==6.31.1",
     # OpenTelemetry is a required dependency. No automatic downgrade.
     "opentelemetry-api>=1.36.0",
@@ -29,7 +29,7 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-grpc>=1.36.0",
     "opentelemetry-instrumentation-grpc>=0.57b0",
     "uvicorn>=0.32.0",
-    "pyyaml==6.0.1",
+    "pyyaml>=6.0.2",
     "duckdb>=1.2.1",
     "pydantic>=2.0.0",
     "psutil>=7.0.0",
@@ -43,7 +43,7 @@ dev = [
     "clang-format>=20.1.0",
     "clang-tidy>=20.1.0",
     "einops>=0.8.1",
-    "grpcio-tools==1.75.1",
+    "grpcio-tools<=1.73.1",
     "httpx>=0.28.1",
     "hypothesis>=6.135.26",
     "ipdb>=0.13.13",
@@ -255,8 +255,8 @@ default = true
 name = "pypi-public"
 url = "https://pypi.org/simple"
 
-# [tool.uv.sources]
-# torch = { index = "pytorch" }
+[tool.uv.sources]
+torch = { index = "pytorch" }
 
 [[tool.uv.index]]
 name = "pytorch"
