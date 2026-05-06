@@ -136,6 +136,11 @@ struct TransportSchedulingGroupHint {
   uint64_t epoch{0};
 };
 
+struct BroadcastTransportHint {
+  std::string session_id;
+  bool strict_parent{true};
+};
+
 enum class TransportCompletionOutcome : uint8_t {
   kUnspecified = 0,
   kSuccess = 1,
@@ -574,7 +579,8 @@ class IGlobalStoreClient {
       uint32_t wait_timeout_ms = 30000,
       const std::optional<TransportSchedulingGroupHint>& scheduling_group = std::nullopt,
       std::string_view requester_worker_id = {},
-      std::string_view request_id = {}) = 0;
+      std::string_view request_id = {},
+      const std::optional<BroadcastTransportHint>& broadcast_hint = std::nullopt) = 0;
 
   virtual absl::StatusOr<TransportSession> request_view_transport(
       std::string_view artifact_id,
@@ -586,7 +592,8 @@ class IGlobalStoreClient {
       uint32_t wait_timeout_ms = 30000,
       const std::optional<TransportSchedulingGroupHint>& scheduling_group = std::nullopt,
       std::string_view requester_worker_id = {},
-      std::string_view request_id = {}) = 0;
+      std::string_view request_id = {},
+      const std::optional<BroadcastTransportHint>& broadcast_hint = std::nullopt) = 0;
 
   virtual absl::Status complete_replica_transport(
       std::string_view transport_id,
@@ -596,6 +603,14 @@ class IGlobalStoreClient {
   virtual absl::StatusOr<std::vector<RemoteReplicaInfo>> get_artifact_replicas(
       std::string_view artifact_id,
       std::optional<std::string_view> view_id = std::nullopt) = 0;
+
+  virtual absl::StatusOr<global_store::CreateBroadcastSessionResponse> create_broadcast_session(
+      const global_store::CreateBroadcastSessionRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) {
+    (void)request;
+    (void)rpc_options;
+    return absl::UnimplementedError("CreateBroadcastSession not available");
+  }
 
   virtual absl::StatusOr<std::vector<ChunkLocationInfo>> query_chunk_locations(
       std::string_view artifact_id,
@@ -1007,7 +1022,8 @@ class GlobalStoreClient : public IGlobalStoreClient {
       uint32_t wait_timeout_ms = 30000,
       const std::optional<TransportSchedulingGroupHint>& scheduling_group = std::nullopt,
       std::string_view requester_worker_id = {},
-      std::string_view request_id = {}) override;
+      std::string_view request_id = {},
+      const std::optional<BroadcastTransportHint>& broadcast_hint = std::nullopt) override;
   absl::StatusOr<TransportSession> request_view_transport(
       std::string_view artifact_id,
       std::string_view view_id,
@@ -1018,7 +1034,8 @@ class GlobalStoreClient : public IGlobalStoreClient {
       uint32_t wait_timeout_ms = 30000,
       const std::optional<TransportSchedulingGroupHint>& scheduling_group = std::nullopt,
       std::string_view requester_worker_id = {},
-      std::string_view request_id = {}) override;
+      std::string_view request_id = {},
+      const std::optional<BroadcastTransportHint>& broadcast_hint = std::nullopt) override;
 
   absl::Status complete_replica_transport(
       std::string_view transport_id,
@@ -1028,6 +1045,10 @@ class GlobalStoreClient : public IGlobalStoreClient {
   absl::StatusOr<std::vector<RemoteReplicaInfo>> get_artifact_replicas(
       std::string_view artifact_id,
       std::optional<std::string_view> view_id = std::nullopt) override;
+
+  absl::StatusOr<global_store::CreateBroadcastSessionResponse> create_broadcast_session(
+      const global_store::CreateBroadcastSessionRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
 
   absl::StatusOr<std::vector<ChunkLocationInfo>> query_chunk_locations(
       std::string_view artifact_id,

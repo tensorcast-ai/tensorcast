@@ -26,6 +26,7 @@ from tensorcast.global_store.rpc.assembly_readiness_cut_rpc_handler import (
 from tensorcast.global_store.rpc.assembly_slot_occupancy_rpc_handler import (
     AssemblySlotOccupancyRpcHandler,
 )
+from tensorcast.global_store.rpc.broadcast_rpc_handler import BroadcastRpcHandler
 from tensorcast.global_store.rpc.chunk_rpc_handler import ChunkRpcHandler
 from tensorcast.global_store.rpc.disk_location_rpc_handler import DiskLocationRpcHandler
 from tensorcast.global_store.rpc.instance_rpc_handler import InstanceRpcHandler
@@ -275,6 +276,7 @@ class ClusterRuntimeRpcServicerMixin:
     worker_state_sync_rpc_handler: WorkerStateSyncRpcHandler
     chunk_rpc_handler: ChunkRpcHandler
     shard_home_lease_rpc_handler: ShardHomeLeaseRpcHandler
+    broadcast_rpc_handler: BroadcastRpcHandler
 
     def RegisterReplica(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.replica_registration_rpc_handler.register_replica(request, context)
@@ -322,6 +324,22 @@ class ClusterRuntimeRpcServicerMixin:
 
     def QueryTransportWindow(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.transport_rpc_handler.query_transport_window(request, context)
+
+    def CreateBroadcastSession(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.broadcast_rpc_handler.create_broadcast_session(request, context)
+
+    def GetBroadcastSession(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.broadcast_rpc_handler.get_broadcast_session(request, context)
+
+    def ListBroadcastEdges(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.broadcast_rpc_handler.list_broadcast_edges(request, context)
+
+    def CancelBroadcastSession(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.broadcast_rpc_handler.cancel_broadcast_session(request, context)
 
     def RegisterWorker(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.worker_rpc_handler.register_worker(request, context)

@@ -244,6 +244,26 @@ TEST_CASE("MaterializeReplica honors NO_LEASE semantics", "[daemon][materialize]
     REQUIRE(resp.has_ticket());
     REQUIRE(resp.ticket().replica_uuid() == "op-by-key-no-lease");
   }
+
+  {
+    tensorcast::daemon::v2::MaterializeReplicaRequest req;
+    req.mutable_selection()->set_artifact_id(artifact_id);
+    req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_CPU);
+    req.mutable_source_policy()->set_preference(
+        tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+    req.set_wait_for_completion(false);
+    req.set_replica_uuid("op-by-key-no-lease-cpu");
+    req.set_pid(0);
+    req.set_lease_mode(tensorcast::daemon::v2::LeaseMode::LEASE_MODE_NO_LEASE);
+
+    grpc::ServerContext ctx;
+    tensorcast::daemon::v2::MaterializeReplicaResponse resp;
+    const auto st = svc.MaterializeReplica(&ctx, &req, &resp);
+    REQUIRE(st.ok());
+    REQUIRE_FALSE(resp.has_mem_handle());
+    REQUIRE(resp.has_ticket());
+    REQUIRE(resp.ticket().replica_uuid() == "op-by-key-no-lease-cpu");
+  }
 }
 
 TEST_CASE("MaterializeReplica short-circuits local cache before disk resolution", "[daemon][materialize]") {

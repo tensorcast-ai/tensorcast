@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from tensorcast.api._materialize import MaterializationPayload, TensorPayloadDescriptor
+from tensorcast.api.context import BroadcastContext, CallContext
 from tensorcast.api.store import Store
 from tensorcast.api.store.artifact import Artifact
 from tensorcast.api.store.cache import ArtifactCache, ArtifactCacheEntry
@@ -357,6 +358,30 @@ def test_tensor_dict_with_diagnostics_reports_source_and_bytes():
     assert diagnostics.materialize_sec >= 0.0
     assert diagnostics.tensor_bind_sec >= 0.0
     assert diagnostics.total_sec >= diagnostics.materialize_sec
+
+
+def test_tensor_dict_with_diagnostics_forwards_broadcast_context_hint():
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+    )
+    ctx = CallContext(
+        broadcast=BroadcastContext(
+            session_id="broadcast-session-1",
+            strict_parent=False,
+        )
+    )
+
+    result = artifact.tensor_dict_with_diagnostics(device="cpu", ctx=ctx)
+
+    assert set(result.tensors) == {"foo"}
+    assert pipeline.calls[0]["broadcast_session_id"] == "broadcast-session-1"
+    assert pipeline.calls[0]["broadcast_strict_parent"] is False
 
 
 def test_bind_coerces_serving_manifest_into_runtime_policy(

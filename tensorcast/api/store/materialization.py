@@ -32,7 +32,7 @@ from tensorcast.api._materialize import (
     MaterializationPayload,
     materialize_artifact_v2,
 )
-from tensorcast.api.context import CallContext
+from tensorcast.api.context import CallContext, TransportSchedulingGroup
 from tensorcast.api.store.async_ops import ArtifactFuture, TrackedExecutor
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import (
@@ -81,6 +81,19 @@ class _MaterializationSummary(TypedDict):
     count: int | None
     bytes: int | None
     selection: str | None
+
+
+def _resolve_broadcast_hints(
+    *,
+    ctx: CallContext | None,
+    broadcast_session_id: str | None,
+    broadcast_strict_parent: bool,
+) -> tuple[str | None, bool]:
+    if broadcast_session_id is not None:
+        return str(broadcast_session_id), bool(broadcast_strict_parent)
+    if ctx is None or ctx.broadcast is None:
+        return None, bool(broadcast_strict_parent)
+    return ctx.broadcast.session_id, ctx.broadcast.strict_parent
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,6 +393,10 @@ class MaterializationPipeline:
         options: GetArtifactOptions | None = None,
         ctx: CallContext | None = None,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        transport_request_id: str | None = None,
+        transport_scheduling_group: TransportSchedulingGroup | None = None,
+        broadcast_session_id: str | None = None,
+        broadcast_strict_parent: bool = True,
     ) -> tuple[MaterializationPayload, int]:
         return self._perform_get_with_retry(
             method="get",
@@ -398,6 +415,10 @@ class MaterializationPipeline:
             allow_cpu=True,
             ctx=ctx,
             lease_mode=lease_mode,
+            transport_request_id=transport_request_id,
+            transport_scheduling_group=transport_scheduling_group,
+            broadcast_session_id=broadcast_session_id,
+            broadcast_strict_parent=broadcast_strict_parent,
         )
 
     def get_view(
@@ -1816,6 +1837,10 @@ class MaterializationPipeline:
         view_data_hash: str | None = None,
         view_index_hint: bytes | None = None,
         replica_uuid: str | None = None,
+        transport_request_id: str | None = None,
+        transport_scheduling_group: TransportSchedulingGroup | None = None,
+        broadcast_session_id: str | None = None,
+        broadcast_strict_parent: bool = True,
     ) -> MaterializationPayload:
         return self._materialize_payload(
             artifact_id=artifact_id,
@@ -1835,6 +1860,10 @@ class MaterializationPipeline:
             view_data_hash=view_data_hash,
             view_index_hint=view_index_hint,
             replica_uuid=replica_uuid,
+            transport_request_id=transport_request_id,
+            transport_scheduling_group=transport_scheduling_group,
+            broadcast_session_id=broadcast_session_id,
+            broadcast_strict_parent=broadcast_strict_parent,
         )
 
     def _materialize_payload(
@@ -1857,6 +1886,10 @@ class MaterializationPipeline:
         view_data_hash: str | None = None,
         view_index_hint: bytes | None = None,
         replica_uuid: str | None = None,
+        transport_request_id: str | None = None,
+        transport_scheduling_group: TransportSchedulingGroup | None = None,
+        broadcast_session_id: str | None = None,
+        broadcast_strict_parent: bool = True,
     ) -> MaterializationPayload:
         client = self._runtime.ensure_client()
         resolved_artifact_id = artifact_id
@@ -1908,6 +1941,10 @@ class MaterializationPipeline:
             ctx=ctx,
             timeout_s=timeout_s,
             lease_mode=lease_mode,
+            transport_request_id=transport_request_id,
+            transport_scheduling_group=transport_scheduling_group,
+            broadcast_session_id=broadcast_session_id,
+            broadcast_strict_parent=broadcast_strict_parent,
         )
         disallowed_sources: set[store_daemon_pb2.MaterializationSource] = set()
         if not allow_p2p:
@@ -2074,7 +2111,16 @@ class MaterializationPipeline:
         allow_cpu: bool = False,
         ctx: CallContext | None = None,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        transport_request_id: str | None = None,
+        transport_scheduling_group: TransportSchedulingGroup | None = None,
+        broadcast_session_id: str | None = None,
+        broadcast_strict_parent: bool = True,
     ) -> tuple[MaterializationPayload, int]:
+        broadcast_session_id, broadcast_strict_parent = _resolve_broadcast_hints(
+            ctx=ctx,
+            broadcast_session_id=broadcast_session_id,
+            broadcast_strict_parent=broadcast_strict_parent,
+        )
         options_snapshot = self._build_get_options(options_override)
         retrieval_policy = options_snapshot.source or RetrievalPolicy()
         wait_for_shared_disk_ms = int(options_snapshot.wait_for_shared_disk_ms)
@@ -2229,6 +2275,10 @@ class MaterializationPipeline:
                         lease_mode=lease_mode,
                         ctx=ctx,
                         timeout_s=rpc_timeout_s,
+                        transport_request_id=transport_request_id,
+                        transport_scheduling_group=transport_scheduling_group,
+                        broadcast_session_id=broadcast_session_id,
+                        broadcast_strict_parent=broadcast_strict_parent,
                     )
                     summary = self._summarize_materialized(materialized, tensor_names)
                     selection_label = summary["selection"]
@@ -2329,6 +2379,10 @@ class MaterializationPipeline:
                                     lease_mode=lease_mode,
                                     ctx=ctx,
                                     timeout_s=wait_timeout_s,
+                                    transport_request_id=transport_request_id,
+                                    transport_scheduling_group=transport_scheduling_group,
+                                    broadcast_session_id=broadcast_session_id,
+                                    broadcast_strict_parent=broadcast_strict_parent,
                                 )
                             except Exception as exc:  # noqa: BLE001
                                 error = map_materialization_error(exc)
@@ -2460,6 +2514,10 @@ class MaterializationPipeline:
         view_index_hint: bytes | None = None,
         replica_uuid: str | None = None,
         allow_cpu: bool = False,
+        transport_request_id: str | None = None,
+        transport_scheduling_group: TransportSchedulingGroup | None = None,
+        broadcast_session_id: str | None = None,
+        broadcast_strict_parent: bool = True,
     ) -> tuple[MaterializationPayload, int]:
         artifact_id, key = self._resolve_identifiers(artifact_id, key)
         options = self._build_get_options(options_override)
@@ -2483,6 +2541,10 @@ class MaterializationPipeline:
                 ctx=ctx,
                 timeout_s=timeout_s,
                 lease_mode=lease_mode,
+                transport_request_id=transport_request_id,
+                transport_scheduling_group=transport_scheduling_group,
+                broadcast_session_id=broadcast_session_id,
+                broadcast_strict_parent=broadcast_strict_parent,
             )
         except Exception as exc:  # noqa: BLE001
             if "selection.logical_layout_hash does not match resolved selection" in str(

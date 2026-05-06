@@ -17,6 +17,7 @@ from tensorcast.global_store.exceptions import (
     ValidationError,
 )
 from tensorcast.global_store.models import (
+    BroadcastTransportHint,
     Replica,
     TransportCompletionOutcome,
     TransportSchedulingGroup,
@@ -125,6 +126,20 @@ class TransportRpcHandler:
                     status=global_store_pb2.Status.STATUS_ERROR
                 )
 
+            broadcast_hint: BroadcastTransportHint | None = None
+            if request.HasField("broadcast"):
+                session_id = request.broadcast.session_id.strip()
+                if not session_id:
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    context.set_details("broadcast.session_id is required")
+                    return global_store_pb2.RequestReplicaTransportResponse(
+                        status=global_store_pb2.Status.STATUS_ERROR
+                    )
+                broadcast_hint = BroadcastTransportHint(
+                    session_id=session_id,
+                    strict_parent=bool(request.broadcast.strict_parent),
+                )
+
             replica, transport_id = self._transport_service.request_transport(
                 artifact_id=request.artifact_id,
                 view_id=requested_view_id,
@@ -135,6 +150,7 @@ class TransportRpcHandler:
                 scheduling_group=scheduling_group,
                 requester_worker_id=requester_worker_id,
                 request_id=request_id,
+                broadcast_hint=broadcast_hint,
             )
 
             remote_info = self._replica_to_memory_info(replica)

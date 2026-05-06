@@ -132,6 +132,17 @@ void apply_transport_scheduling_group_hint(
   group->set_epoch(scheduling_group->epoch);
 }
 
+void apply_broadcast_transport_hint(
+    const std::optional<BroadcastTransportHint>& broadcast_hint,
+    global_store::RequestReplicaTransportRequest* request) {
+  if (!broadcast_hint.has_value() || broadcast_hint->session_id.empty()) {
+    return;
+  }
+  auto* broadcast = request->mutable_broadcast();
+  broadcast->set_session_id(broadcast_hint->session_id);
+  broadcast->set_strict_parent(broadcast_hint->strict_parent);
+}
+
 std::string build_transport_request_id(std::string_view operation_kind) {
   static std::atomic<std::uint64_t> transport_request_sequence{1};
   const std::uint64_t sequence = transport_request_sequence.fetch_add(1, std::memory_order_relaxed);
@@ -2377,7 +2388,8 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
     uint32_t wait_timeout_ms,
     const std::optional<TransportSchedulingGroupHint>& scheduling_group,
     std::string_view requester_worker_id,
-    std::string_view request_id) {
+    std::string_view request_id,
+    const std::optional<BroadcastTransportHint>& broadcast_hint) {
   const std::string effective_request_id =
       request_id.empty() ? build_transport_request_id("canonical") : std::string(request_id);
   global_store::RequestReplicaTransportRequest request;
@@ -2386,6 +2398,7 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
   request.set_source_address(std::string(source_address));
   request.set_source_port(source_port);
   apply_transport_scheduling_group_hint(scheduling_group, &request);
+  apply_broadcast_transport_hint(broadcast_hint, &request);
   if (!requester_worker_id.empty()) {
     request.set_requester_worker_id(std::string(requester_worker_id));
   }
@@ -2460,7 +2473,8 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_view_transport(
     uint32_t wait_timeout_ms,
     const std::optional<TransportSchedulingGroupHint>& scheduling_group,
     std::string_view requester_worker_id,
-    std::string_view request_id) {
+    std::string_view request_id,
+    const std::optional<BroadcastTransportHint>& broadcast_hint) {
   if (view_id.empty()) {
     return absl::InvalidArgumentError("view_id must be non-empty for view transport");
   }
@@ -2473,6 +2487,7 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_view_transport(
   request.set_source_address(std::string(source_address));
   request.set_source_port(source_port);
   apply_transport_scheduling_group_hint(scheduling_group, &request);
+  apply_broadcast_transport_hint(broadcast_hint, &request);
   if (!requester_worker_id.empty()) {
     request.set_requester_worker_id(std::string(requester_worker_id));
   }
@@ -2548,6 +2563,24 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_view_transport(
             << " view_id=" << view_id;
 
   return session;
+}
+
+absl::StatusOr<global_store::CreateBroadcastSessionResponse> GlobalStoreClient::create_broadcast_session(
+    const global_store::CreateBroadcastSessionRequest& request,
+    const RpcOptions& rpc_options) {
+  global_store::CreateBroadcastSessionResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->CreateBroadcastSession(ctx, req, resp);
+      },
+      "CreateBroadcastSession",
+      rpc_options);
+  if (!status.ok()) {
+    return status;
+  }
+  return response;
 }
 
 absl::Status GlobalStoreClient::complete_replica_transport(

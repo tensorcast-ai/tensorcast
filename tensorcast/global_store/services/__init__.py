@@ -3,6 +3,7 @@
 """Global Store services."""
 
 from .artifact_service import ArtifactService
+from .broadcast_service import BroadcastService
 from .chunk_service import ChunkService
 from .instance_service import InstanceService
 from .memory_tier_service import MemoryTierService
@@ -17,6 +18,7 @@ from .worker_service import WorkerService
 __all__ = [
     "ChunkService",
     "ArtifactService",
+    "BroadcastService",
     "TransportService",
     "WorkerService",
     "InstanceService",

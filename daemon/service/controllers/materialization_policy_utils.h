@@ -54,6 +54,12 @@ absl::StatusOr<RetrievalPolicy> resolve_retrieval_policy_compat(const v2::Source
 std::optional<store::loading::CollectiveLoadGroupHint> resolve_collective_group_hint(
     const v2::CollectiveLoadGroup* group);
 
+std::optional<store::loading::TransportSchedulingGroupHint> resolve_transport_scheduling_group_hint(
+    const v2::TransportSchedulingGroupHint* group);
+
+std::optional<store::loading::BroadcastHint> resolve_broadcast_materialization_hint(
+    const v2::BroadcastMaterializationHint* hint);
+
 absl::StatusOr<ExecutionTopologyContext> resolve_source_execution_topology(const v2::SourceExecutionTopology* topology);
 
 absl::StatusOr<v2::CollectivePolicy> resolve_collective_policy(

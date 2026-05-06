@@ -257,6 +257,16 @@ std::optional<components::TransportSchedulingGroupHint> to_transport_scheduling_
   return out;
 }
 
+std::optional<components::BroadcastTransportHint> to_broadcast_transport_hint(const MaterializeHints& hints) {
+  if (!hints.broadcast.has_value() || hints.broadcast->session_id.empty()) {
+    return std::nullopt;
+  }
+  components::BroadcastTransportHint out;
+  out.session_id = hints.broadcast->session_id;
+  out.strict_parent = hints.broadcast->strict_parent;
+  return out;
+}
+
 bool should_log_reselection_attempt(int reselection_attempt) {
   return reselection_attempt <= 5 || (reselection_attempt % 10) == 0;
 }
@@ -367,6 +377,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
   const auto request_deadline = resolve_request_deadline(hints);
   const int max_reselection_attempts = resolve_max_reselection_attempts(hints);
   const auto scheduling_group_hint = to_transport_scheduling_group_hint(hints);
+  const auto broadcast_hint = to_broadcast_transport_hint(hints);
   const std::string_view requester_worker_id = hints.transport_requester_worker_id.empty()
       ? std::string_view(local_identity_.worker_id)
       : std::string_view(hints.transport_requester_worker_id);
@@ -391,7 +402,8 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
           view_probe_timeout_ms,
           scheduling_group_hint,
           requester_worker_id,
-          transport_request_id);
+          transport_request_id,
+          broadcast_hint);
       if (!view_transport_or.ok() &&
           (absl::IsNotFound(view_transport_or.status()) || absl::IsUnimplemented(view_transport_or.status()) ||
            absl::IsDeadlineExceeded(view_transport_or.status()))) {
@@ -415,7 +427,8 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
             wait_timeout_ms,
             scheduling_group_hint,
             requester_worker_id,
-            transport_request_id);
+            transport_request_id,
+            broadcast_hint);
         used_canonical_transport_fallback = true;
         return canonical_transport_or;
       }
@@ -430,7 +443,8 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
         wait_timeout_ms,
         scheduling_group_hint,
         requester_worker_id,
-        transport_request_id);
+        transport_request_id,
+        broadcast_hint);
   };
 
   while (gs_connected && allow_p2p) {
@@ -499,16 +513,67 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
 
     auto load_or = backend_->ingest_from_p2p(std::string(artifact_id), p2p_src, target, hints);
     if (load_or.ok()) {
+      const auto& handle = *load_or;
+      if (!broadcast_hint.has_value()) {
+        absl::Status comp_status = gs_client_->complete_replica_transport(
+            session.transport_id, components::TransportCompletionOutcome::kSuccess);
+        if (!comp_status.ok()) {
+          LOG(WARNING) << "complete_replica_transport returned error: " << comp_status;
+        }
+        absl::Status reg_status = backend_->register_replica_with_global_store(handle.key(), {});
+        if (!reg_status.ok()) {
+          LOG(WARNING) << "register_replica_with_global_store returned error: " << reg_status;
+        }
+
+        if (used_canonical_transport_fallback && view_id.has_value()) {
+          LOG(INFO) << "materialize_view loaded via canonical transport fallback: artifact_id=" << artifact_id
+                    << " view_id=" << *view_id;
+        }
+        if (reselection_attempt > 0) {
+          record_source_reselection_success("p2p_load", view_id.has_value(), reselection_attempt);
+        }
+        return load_or;
+      }
+
+      absl::Status reg_status = backend_->register_replica_with_global_store(handle.key(), {});
+      if (!reg_status.ok()) {
+        LOG(WARNING) << "register_replica_with_global_store returned error: " << reg_status;
+        absl::Status comp_status = gs_client_->complete_replica_transport(
+            session.transport_id, components::TransportCompletionOutcome::kFailed, reg_status.ToString());
+        if (!comp_status.ok()) {
+          LOG(WARNING) << "complete_replica_transport after broadcast registration failure returned error: "
+                       << comp_status;
+        }
+        last_p2p_status = reg_status;
+        if (can_retry_source_selection(
+                last_p2p_status, reselection_attempt, request_deadline, max_reselection_attempts)) {
+          record_stale_source_detected("broadcast_register_failure", view_id.has_value(), reselection_attempt);
+          reselection_attempt += 1;
+          record_source_reselection_attempt("broadcast_register_failure", view_id.has_value(), reselection_attempt);
+          if (should_log_reselection_attempt(reselection_attempt)) {
+            const std::chrono::milliseconds retry_remaining = remaining_request_budget(request_deadline);
+            const std::string remaining_label = retry_remaining == std::chrono::milliseconds::max()
+                ? "unbounded"
+                : std::to_string(retry_remaining.count());
+            LOG(WARNING) << "Retrying source selection after broadcast registration failure: artifact_id="
+                         << artifact_id << " attempt=" << reselection_attempt << "/" << max_reselection_attempts
+                         << " remaining_budget_ms=" << remaining_label << " status=" << last_p2p_status;
+          }
+          continue;
+        }
+        if (should_retry_source_selection(last_p2p_status)) {
+          last_p2p_status =
+              source_reselection_exhausted_status(artifact_id, reselection_attempt, request_deadline, last_p2p_status);
+          record_source_reselection_exhausted("broadcast_register_failure", view_id.has_value(), reselection_attempt);
+        }
+        break;
+      }
+
       // Notify GS that transport finished
       absl::Status comp_status = gs_client_->complete_replica_transport(
           session.transport_id, components::TransportCompletionOutcome::kSuccess);
       if (!comp_status.ok()) {
         LOG(WARNING) << "complete_replica_transport returned error: " << comp_status;
-      }
-      const auto& handle = *load_or;
-      absl::Status reg_status = backend_->register_replica_with_global_store(handle.key(), {});
-      if (!reg_status.ok()) {
-        LOG(WARNING) << "register_replica_with_global_store returned error: " << reg_status;
       }
 
       if (used_canonical_transport_fallback && view_id.has_value()) {

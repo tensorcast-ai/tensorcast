@@ -584,6 +584,160 @@ class ReplicaRepository(BaseRepository):
             if owns_cursor:
                 cursor.close()
 
+    def claim_replica_for_transport(
+        self,
+        *,
+        replica_id: UUID,
+        artifact_id: str,
+        view_id: str | None,
+        heartbeat_timeout_seconds: float,
+        cursor=None,
+    ) -> TransportSelectionResult:
+        """Claim one exact replica if it is currently transport eligible."""
+        owns_cursor = cursor is None
+        if owns_cursor:
+            cursor = self.get_cursor()
+        try:
+            query = (
+                "SELECT "
+                + self._REPLICA_PROJECTION
+                + ", COALESCE(w.worker_id, '') AS gs_worker_id, "
+                + "wl.accepting_new_requests AS worker_accepting, "
+                + "wl.last_heartbeat AS worker_last_heartbeat, "
+                + "w.inactive_at AS worker_inactive_at "
+                + "FROM artifact_replicas mr "
+                + "LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id "
+                + "LEFT JOIN workers w ON mr.worker_id = w.worker_id "
+                + "LEFT JOIN worker_liveness wl ON wl.worker_id = w.worker_id "
+                + "WHERE mr.replica_id = ? "
+                + "AND mr.artifact_id = ? "
+                + "AND COALESCE(mr.view_id, '') = COALESCE(?, '')"
+            )
+            result = cursor.execute(
+                query, [str(replica_id), artifact_id, view_id or ""]
+            )
+            row = result.fetchone()
+            if row is None:
+                return TransportSelectionResult(replica=None, exportable_replicas=0)
+
+            assert result.description is not None
+            columns = [desc[0] for desc in result.description]
+            candidate = self._build_transport_candidate(
+                row,
+                columns,
+                now_ts=time.time(),
+                heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+            )
+            transport_ok, _ = self._evaluate_transport_metadata(candidate.replica)
+            exportable_replicas = 1 if transport_ok else 0
+            eligible, reason = self._evaluate_transport_candidate(candidate)
+            if not eligible:
+                inc_transport_filter(artifact_id, reason)
+                return TransportSelectionResult(
+                    replica=None,
+                    exportable_replicas=exportable_replicas,
+                )
+
+            claim = cursor.execute(
+                """
+                UPDATE replica_counters
+                SET current_requests = current_requests + 1,
+                    last_assigned_at = now()
+                WHERE replica_id = ?
+                  AND current_requests < (
+                    SELECT max_concurrency FROM artifact_replicas WHERE replica_id = ?
+                  )
+                RETURNING current_requests
+                """,
+                [str(replica_id), str(replica_id)],
+            ).fetchone()
+            if not claim:
+                return TransportSelectionResult(
+                    replica=None,
+                    exportable_replicas=exportable_replicas,
+                )
+
+            full_result = cursor.execute(
+                self._replica_select_sql("JOIN") + " WHERE mr.replica_id = ?",
+                [str(replica_id)],
+            )
+            full_row = full_result.fetchone()
+            if full_row is None:
+                return TransportSelectionResult(
+                    replica=None,
+                    exportable_replicas=exportable_replicas,
+                )
+            assert full_result.description is not None
+            full_columns = [desc[0] for desc in full_result.description]
+            return TransportSelectionResult(
+                replica=self._row_to_model(full_row, full_columns),
+                exportable_replicas=exportable_replicas,
+            )
+        finally:
+            if owns_cursor:
+                cursor.close()
+
+    def find_exportable_replica_for_worker(
+        self,
+        *,
+        artifact_id: str,
+        view_id: str | None,
+        worker_id: str,
+        heartbeat_timeout_seconds: float,
+        cursor=None,
+    ) -> Replica | None:
+        """Return the best registered child replica after materialization completes."""
+        owns_cursor = cursor is None
+        if owns_cursor:
+            cursor = self.get_cursor()
+        try:
+            query = (
+                "SELECT "
+                + self._REPLICA_PROJECTION
+                + ", COALESCE(w.worker_id, '') AS gs_worker_id, "
+                + "wl.accepting_new_requests AS worker_accepting, "
+                + "wl.last_heartbeat AS worker_last_heartbeat, "
+                + "w.inactive_at AS worker_inactive_at "
+                + "FROM artifact_replicas mr "
+                + "LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id "
+                + "LEFT JOIN workers w ON mr.worker_id = w.worker_id "
+                + "LEFT JOIN worker_liveness wl ON wl.worker_id = w.worker_id "
+                + "WHERE mr.artifact_id = ? "
+                + "AND COALESCE(mr.view_id, '') = COALESCE(?, '') "
+                + "AND mr.worker_id = ? "
+                + "ORDER BY "
+                + "CASE "
+                + "WHEN mr.memory_type = 'GPU' THEN 0 "
+                + "WHEN mr.memory_type = 'RAM' THEN 1 "
+                + "WHEN mr.memory_type = 'DISK' THEN 2 "
+                + "ELSE 3 "
+                + "END, "
+                + "COALESCE(rc.current_requests, 0) ASC, "
+                + "mr.updated_at DESC"
+            )
+            result = cursor.execute(query, [artifact_id, view_id or "", worker_id])
+            rows = result.fetchall()
+            if not rows:
+                return None
+
+            assert result.description is not None
+            columns = [desc[0] for desc in result.description]
+            now_ts = time.time()
+            for row in rows:
+                candidate = self._build_transport_candidate(
+                    row,
+                    columns,
+                    now_ts=now_ts,
+                    heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+                )
+                eligible, _ = self._evaluate_transport_candidate(candidate)
+                if eligible:
+                    return candidate.replica
+            return None
+        finally:
+            if owns_cursor:
+                cursor.close()
+
     @staticmethod
     def _memory_priority(memory_type: MemoryType) -> int:
         if memory_type is MemoryType.GPU:

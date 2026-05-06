@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "absl/status/status.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_split.h"
 #include "core/store/materialization/dataplane/view/view_identity.h"
@@ -103,6 +104,37 @@ std::optional<store::loading::CollectiveLoadGroupHint> resolve_collective_group_
       .group_id = group->group_id(),
       .world_size = world_size,
       .rank = rank,
+  };
+}
+
+std::optional<store::loading::TransportSchedulingGroupHint> resolve_transport_scheduling_group_hint(
+    const v2::TransportSchedulingGroupHint* group) {
+  if (group == nullptr || group->group_kind().empty() || group->group_id().empty() || group->part_id().empty() ||
+      group->total_parts() == 0) {
+    return std::nullopt;
+  }
+  return store::loading::TransportSchedulingGroupHint{
+      .group_kind = group->group_kind(),
+      .group_id = group->group_id(),
+      .total_parts = group->total_parts(),
+      .part_id = group->part_id(),
+      .priority = group->priority(),
+      .epoch = group->epoch(),
+  };
+}
+
+std::optional<store::loading::BroadcastHint> resolve_broadcast_materialization_hint(
+    const v2::BroadcastMaterializationHint* hint) {
+  if (hint == nullptr) {
+    return std::nullopt;
+  }
+  std::string session_id = std::string(absl::StripAsciiWhitespace(hint->session_id()));
+  if (session_id.empty()) {
+    return std::nullopt;
+  }
+  return store::loading::BroadcastHint{
+      .session_id = std::move(session_id),
+      .strict_parent = hint->strict_parent(),
   };
 }
 

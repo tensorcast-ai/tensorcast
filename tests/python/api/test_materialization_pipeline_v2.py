@@ -17,7 +17,12 @@ from tensorcast.api._materialize import (
     TensorPayloadDescriptor,
     _resolve_collective_load_group,
 )
-from tensorcast.api.context import CallContext, CollectiveLoadGroup
+from tensorcast.api.context import (
+    BroadcastContext,
+    CallContext,
+    CollectiveLoadGroup,
+    TransportSchedulingGroup,
+)
 from tensorcast.api.store.cache import ArtifactCache, ArtifactCacheEntry
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.retry import build_retry_policies
@@ -457,3 +462,98 @@ def test_materialize_subset_preserves_generation():
     runtime.close()
 
     assert materialized.generation == 5
+
+
+def test_materialize_subset_forwards_transport_hints():
+    runtime = _RuntimeStub()
+    views = ViewOrchestrator(runtime)
+    pipeline = MaterializationPipeline(runtime, views)
+    payload = _make_payload({"a": torch.ones(1)}, replica_uuid="transport")
+    captured: dict[str, object] = {}
+    group = TransportSchedulingGroup(
+        group_kind="weight_broadcast",
+        group_id="model-a:v42",
+        total_parts=16,
+        part_id="daemon-1",
+        priority=7,
+        epoch=42,
+    )
+
+    def fake_materialize(**kwargs):
+        captured.update(kwargs)
+        return payload
+
+    pipeline.set_materialize_fn(fake_materialize)
+    materialized, _ = pipeline.materialize_subset(
+        artifact_id="aid",
+        key=None,
+        device=0,
+        tensor_names=None,
+        transport_request_id="transport-req-1",
+        transport_scheduling_group=group,
+    )
+    runtime.close()
+
+    assert materialized.replica_uuid == "transport"
+    assert captured["transport_request_id"] == "transport-req-1"
+    assert captured["transport_scheduling_group"] == group
+
+
+def test_get_forwards_broadcast_context_hint():
+    runtime = _RuntimeStub()
+    views = ViewOrchestrator(runtime)
+    pipeline = MaterializationPipeline(runtime, views)
+    payload = _make_payload({"a": torch.ones(1)}, replica_uuid="broadcast")
+    captured: dict[str, object] = {}
+    ctx = CallContext(
+        broadcast=BroadcastContext(
+            session_id="broadcast-session-1",
+            strict_parent=False,
+        )
+    )
+
+    def fake_materialize(**kwargs):
+        captured.update(kwargs)
+        return payload
+
+    pipeline.set_materialize_fn(fake_materialize)
+    result = pipeline.get(artifact_id="aid", ctx=ctx)
+    runtime.close()
+
+    assert torch.equal(result["a"], torch.ones(1))
+    assert captured["broadcast_session_id"] == "broadcast-session-1"
+    assert captured["broadcast_strict_parent"] is False
+
+
+def test_materialize_subset_explicit_broadcast_hint_overrides_context():
+    runtime = _RuntimeStub()
+    views = ViewOrchestrator(runtime)
+    pipeline = MaterializationPipeline(runtime, views)
+    payload = _make_payload({"a": torch.ones(1)}, replica_uuid="broadcast")
+    captured: dict[str, object] = {}
+    ctx = CallContext(
+        broadcast=BroadcastContext(
+            session_id="ctx-session",
+            strict_parent=False,
+        )
+    )
+
+    def fake_materialize(**kwargs):
+        captured.update(kwargs)
+        return payload
+
+    pipeline.set_materialize_fn(fake_materialize)
+    materialized, _ = pipeline.materialize_subset(
+        artifact_id="aid",
+        key=None,
+        device=0,
+        tensor_names=None,
+        ctx=ctx,
+        broadcast_session_id="explicit-session",
+        broadcast_strict_parent=True,
+    )
+    runtime.close()
+
+    assert materialized.replica_uuid == "broadcast"
+    assert captured["broadcast_session_id"] == "explicit-session"
+    assert captured["broadcast_strict_parent"] is True

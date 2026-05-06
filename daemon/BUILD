@@ -2007,6 +2007,22 @@ cc_test(
 )
 
 cc_test(
+    name = "grpc_service_impl_broadcast_session_test",
+    srcs = ["service/grpc_service_impl_broadcast_session_test.cc"],
+    deps = [
+        ":daemon_service_harness_lib",
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//core/store:store_engine_options",
+        "//core/store:testing_global_store_client_stub",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "//proto/tensorcast/global_store/v1:global_store_cc",
+        "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "daemon_shutdown_drain_test",
     srcs = ["app/daemon_shutdown_drain_test.cc"],
     deps = [

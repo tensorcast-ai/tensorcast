@@ -31,6 +31,8 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   std::vector<std::string> replica_requests;
   std::vector<std::optional<components::TransportSchedulingGroupHint>> view_request_groups;
   std::vector<std::optional<components::TransportSchedulingGroupHint>> replica_request_groups;
+  std::vector<std::optional<components::BroadcastTransportHint>> view_request_broadcast_hints;
+  std::vector<std::optional<components::BroadcastTransportHint>> replica_request_broadcast_hints;
   std::vector<std::string> view_request_request_ids;
   std::vector<std::string> replica_request_request_ids;
   std::vector<std::string> view_request_requester_worker_ids;
@@ -523,9 +525,11 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       uint32_t wait_timeout_ms,
       const std::optional<components::TransportSchedulingGroupHint>& scheduling_group,
       std::string_view requester_worker_id,
-      std::string_view request_id) override {
+      std::string_view request_id,
+      const std::optional<components::BroadcastTransportHint>& broadcast_hint) override {
     replica_requests.emplace_back(std::string(artifact_id));
     replica_request_groups.push_back(scheduling_group);
+    replica_request_broadcast_hints.push_back(broadcast_hint);
     replica_request_request_ids.emplace_back(std::string(request_id));
     replica_request_requester_worker_ids.emplace_back(std::string(requester_worker_id));
     replica_request_wait_timeouts_ms.push_back(wait_timeout_ms);
@@ -555,9 +559,11 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       uint32_t wait_timeout_ms,
       const std::optional<components::TransportSchedulingGroupHint>& scheduling_group,
       std::string_view requester_worker_id,
-      std::string_view request_id) override {
+      std::string_view request_id,
+      const std::optional<components::BroadcastTransportHint>& broadcast_hint) override {
     view_requests.emplace_back(std::string(view_id));
     view_request_groups.push_back(scheduling_group);
+    view_request_broadcast_hints.push_back(broadcast_hint);
     view_request_request_ids.emplace_back(std::string(request_id));
     view_request_requester_worker_ids.emplace_back(std::string(requester_worker_id));
     view_request_wait_timeouts_ms.push_back(wait_timeout_ms);

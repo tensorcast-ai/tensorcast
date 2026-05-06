@@ -4,6 +4,7 @@
 
 import base64
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
@@ -19,6 +20,7 @@ from tensorcast.global_store.exceptions import (
     ValidationError,
 )
 from tensorcast.global_store.models import (
+    BroadcastTransportHint,
     ByteSpaceRef,
     ExportState,
     MemoryType,
@@ -49,6 +51,85 @@ from tensorcast.proto.layout.v1 import layout_pb2
 
 class TestServices:
     """Test service layer."""
+
+    def test_transport_fingerprint_preserves_legacy_non_broadcast_shape(self):
+        expected_payload = {
+            "artifact_id": "mi2:legacy-fingerprint",
+            "view_id": "",
+            "source_node_id": "source-node",
+            "source_address": "10.1.2.3",
+            "source_port": 9090,
+            "requester_worker_id": "",
+            "scheduling_group": None,
+        }
+        expected = hashlib.sha256(
+            json.dumps(
+                expected_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+        actual = TransportService._build_request_fingerprint(
+            artifact_id="mi2:legacy-fingerprint",
+            view_id=None,
+            source_node_id="source-node",
+            source_address="10.1.2.3",
+            source_port=9090,
+            requester_worker_id=None,
+            scheduling_group=None,
+            broadcast_hint=None,
+        )
+
+        assert actual == expected
+
+    def test_transport_fingerprint_includes_broadcast_hint(self):
+        without_broadcast = TransportService._build_request_fingerprint(
+            artifact_id="mi2:broadcast-fingerprint",
+            view_id=None,
+            source_node_id="source-node",
+            source_address="10.1.2.3",
+            source_port=9090,
+            requester_worker_id="worker-child",
+            scheduling_group=None,
+            broadcast_hint=None,
+        )
+        with_broadcast = TransportService._build_request_fingerprint(
+            artifact_id="mi2:broadcast-fingerprint",
+            view_id=None,
+            source_node_id="source-node",
+            source_address="10.1.2.3",
+            source_port=9090,
+            requester_worker_id="worker-child",
+            scheduling_group=None,
+            broadcast_hint=BroadcastTransportHint(
+                session_id="session-a",
+                strict_parent=True,
+            ),
+        )
+        expected_payload = {
+            "artifact_id": "mi2:broadcast-fingerprint",
+            "view_id": "",
+            "source_node_id": "source-node",
+            "source_address": "10.1.2.3",
+            "source_port": 9090,
+            "requester_worker_id": "worker-child",
+            "broadcast": {
+                "session_id": "session-a",
+                "strict_parent": True,
+            },
+            "scheduling_group": None,
+        }
+        expected = hashlib.sha256(
+            json.dumps(
+                expected_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+        assert with_broadcast == expected
+        assert with_broadcast != without_broadcast
 
     def test_worker_service_registration(self, services):
         """Test worker registration logic."""

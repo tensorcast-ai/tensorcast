@@ -26,11 +26,13 @@ from tensorcast.api._indices import (
 )
 from tensorcast.api._register import RegisteredLease, RegistrationResult
 from tensorcast.api.context import (
+    BroadcastContext,
     CallContext,
     CollectiveLoadGroup,
     GovernanceContext,
     QosClass,
     SpanAttributeValue,
+    TransportSchedulingGroup,
     context,
 )
 from tensorcast.api.directory import (
@@ -193,11 +195,13 @@ __all__ = [
     "BindingRealizationEntry",
     "BindingRealizationPlan",
     "Artifact",
+    "BroadcastContext",
     "CallContext",
     "CollectiveLoadGroup",
     "DirectorySnapshot",
     "FinalizeClass",
     "GovernanceContext",
+    "TransportSchedulingGroup",
     "InstanceExecutionRoute",
     "Operation",
     "OperationError",

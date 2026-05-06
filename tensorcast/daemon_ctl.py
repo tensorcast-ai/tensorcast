@@ -1245,6 +1245,68 @@ class DaemonCtl:
                 ) from e
         return response
 
+    def create_broadcast_session(
+        self,
+        *,
+        artifact_id: str,
+        session_id: str | None = None,
+        requested_view_id: str | None = None,
+        epoch: int = 0,
+        fanout: int = 0,
+        target_worker_ids: Iterable[str] | None = None,
+        target_daemon_ids: Iterable[str] | None = None,
+        root_replica_id: str | None = None,
+        strict_parent: bool = True,
+        max_attempts: int = 3,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.CreateBroadcastSessionResponse:
+        if not session_id:
+            raise ValueError("session_id is required")
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        if int(fanout) <= 0:
+            raise ValueError("fanout must be > 0")
+        if int(max_attempts) <= 0:
+            raise ValueError("max_attempts must be > 0")
+        request = store_daemon_pb2.CreateBroadcastSessionRequest(
+            session_id=str(session_id),
+            artifact_id=str(artifact_id),
+            epoch=int(epoch),
+            fanout=int(fanout),
+            strict_parent=bool(strict_parent),
+            max_attempts=int(max_attempts),
+        )
+        if requested_view_id:
+            request.requested_view_id = str(requested_view_id)
+        if target_worker_ids is not None:
+            request.target_worker_ids.extend(str(item) for item in target_worker_ids)
+        if target_daemon_ids is not None:
+            request.target_daemon_ids.extend(str(item) for item in target_daemon_ids)
+        if root_replica_id:
+            request.root_replica_id = str(root_replica_id)
+        with self._client_span("Client/CreateBroadcastSession") as span:
+            try:
+                response: store_daemon_pb2.CreateBroadcastSessionResponse = (
+                    self._unary_call(
+                        self.stub_v2.CreateBroadcastSession,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                raise RuntimeError(
+                    _grpc_message(e, fallback="CreateBroadcastSession RPC failed")
+                ) from e
+        return response
+
     def commit_binding_artifact(
         self,
         *,
@@ -1988,6 +2050,11 @@ class DaemonCtl:
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
+        transport_request_id: str | None = None,
+        transport_scheduling_group: store_daemon_pb2.TransportSchedulingGroupHint
+        | None = None,
+        broadcast_session_id: str | None = None,
+        broadcast_strict_parent: bool = True,
         timeout_s: float | int | None = None,
         timing_out: dict[str, float] | None = None,
     ) -> store_daemon_pb2.MaterializeReplicaResponse: ...
@@ -2011,6 +2078,11 @@ class DaemonCtl:
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
+        transport_request_id: str | None = None,
+        transport_scheduling_group: store_daemon_pb2.TransportSchedulingGroupHint
+        | None = None,
+        broadcast_session_id: str | None = None,
+        broadcast_strict_parent: bool = True,
         timeout_s: float | int | None = None,
         timing_out: dict[str, float] | None = None,
     ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus]: ...
@@ -2033,6 +2105,11 @@ class DaemonCtl:
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
+        transport_request_id: str | None = None,
+        transport_scheduling_group: store_daemon_pb2.TransportSchedulingGroupHint
+        | None = None,
+        broadcast_session_id: str | None = None,
+        broadcast_strict_parent: bool = True,
         timeout_s: float | int | None = None,
         timing_out: dict[str, float] | None = None,
     ) -> bytes: ...
@@ -2054,6 +2131,11 @@ class DaemonCtl:
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
+        transport_request_id: str | None = None,
+        transport_scheduling_group: store_daemon_pb2.TransportSchedulingGroupHint
+        | None = None,
+        broadcast_session_id: str | None = None,
+        broadcast_strict_parent: bool = True,
         timeout_s: float | int | None = None,
         timing_out: dict[str, float] | None = None,
     ) -> (
@@ -2090,6 +2172,13 @@ class DaemonCtl:
             )
             if collective_load_group is not None:
                 request.collective_load_group.CopyFrom(collective_load_group)
+            if transport_request_id:
+                request.transport_request_id = str(transport_request_id)
+            if transport_scheduling_group is not None:
+                request.transport_scheduling_group.CopyFrom(transport_scheduling_group)
+            if broadcast_session_id:
+                request.broadcast.session_id = str(broadcast_session_id)
+                request.broadcast.strict_parent = bool(broadcast_strict_parent)
             if wait_for_shared_disk_ms:
                 request.wait_for_shared_disk_ms = int(wait_for_shared_disk_ms)
             request.source_policy.CopyFrom(resolved_source_policy)

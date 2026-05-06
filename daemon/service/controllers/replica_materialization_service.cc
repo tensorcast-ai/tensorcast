@@ -55,12 +55,15 @@ using materialization_policy::build_view_spec_proto;
 using materialization_policy::compute_view_id_from_spec;
 using materialization_policy::convert_view_spec;
 using materialization_policy::NormalizedMaterializationRequestContext;
+using materialization_policy::resolve_broadcast_materialization_hint;
 using materialization_policy::resolve_collective_group_hint;
 using materialization_policy::resolve_materialization_request_context;
 using materialization_policy::resolve_transform_placement;
+using materialization_policy::resolve_transport_scheduling_group_hint;
 using materialization_policy::to_hint_export_policy;
 using materialization_post_seal::check_post_seal_view_reuse_safe;
 using materialization_replica_handle::bind_replica_handle_for_response;
+using materialization_replica_handle::register_session_and_refs;
 using materialization_request_common::LeaseContext;
 using materialization_request_common::LipFastPathRequest;
 using materialization_request_common::materialize_with_shared_disk_retry;
@@ -684,6 +687,21 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   hints.verify = verify_checksums ? store::loading::MaterializeHints::Verify::CHECKSUM
                                   : store::loading::MaterializeHints::Verify::NONE;
   apply_request_context_to_hints(request_context, &hints);
+  if (!req.transport_request_id().empty()) {
+    hints.transport_request_id = req.transport_request_id();
+  }
+  if (req.has_transport_scheduling_group()) {
+    auto group_hint = resolve_transport_scheduling_group_hint(&req.transport_scheduling_group());
+    if (group_hint.has_value()) {
+      hints.transport_scheduling_group = std::move(*group_hint);
+    }
+  }
+  if (req.has_broadcast()) {
+    auto broadcast_hint = resolve_broadcast_materialization_hint(&req.broadcast());
+    if (broadcast_hint.has_value()) {
+      hints.broadcast = std::move(*broadcast_hint);
+    }
+  }
   if (prefer_direct_disk_for_local_import) {
     hints.set_retrieval_policy(
         store::loading::RetrievalPolicy{
@@ -925,22 +943,37 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
                  << handle.replica_key << " cpu_state=" << static_cast<int>(handle.cpu_state)
                  << " gpu_state=" << static_cast<int>(handle.gpu_state);
   }
-  auto bind_status = bind_materialized_handle(
-      d_.engine,
-      d_.sessions,
-      d_.refs,
-      d_.lifecycle,
-      d_.handle_leases,
-      handle,
-      req.replica_uuid(),
-      effective_pid,
-      loopback_peer,
-      cpu_target,
-      "engine path",
-      *resp.mutable_mem_handle());
-  if (!bind_status.ok()) {
-    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-    return to_grpc_status(bind_status);
+  if (no_lease) {
+    auto session_status = register_session_and_refs(
+        d_.sessions,
+        d_.refs,
+        handle.replica_key,
+        handle.ready_signal,
+        req.replica_uuid(),
+        effective_pid,
+        /*allow_pid_ref=*/false);
+    if (!session_status.ok()) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(session_status);
+    }
+  } else {
+    auto bind_status = bind_materialized_handle(
+        d_.engine,
+        d_.sessions,
+        d_.refs,
+        d_.lifecycle,
+        d_.handle_leases,
+        handle,
+        req.replica_uuid(),
+        effective_pid,
+        loopback_peer,
+        cpu_target,
+        "engine path",
+        *resp.mutable_mem_handle());
+    if (!bind_status.ok()) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(bind_status);
+    }
   }
   resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   if (handle.view_index_json.has_value()) {

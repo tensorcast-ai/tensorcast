@@ -1264,6 +1264,16 @@ std::optional<components::TransportSchedulingGroupHint> to_transport_scheduling_
   return out;
 }
 
+std::optional<components::BroadcastTransportHint> to_broadcast_transport_hint(const loading::MaterializeHints& hints) {
+  if (!hints.broadcast.has_value() || hints.broadcast->session_id.empty()) {
+    return std::nullopt;
+  }
+  components::BroadcastTransportHint out;
+  out.session_id = hints.broadcast->session_id;
+  out.strict_parent = hints.broadcast->strict_parent;
+  return out;
+}
+
 loading::ReplicaHandle build_local_replica_handle(
     const loading::ReplicaKey& key,
     const std::shared_ptr<replica::Replica>& replica,
@@ -3753,6 +3763,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   }
 
   const auto scheduling_group_hint = to_transport_scheduling_group_hint(hints);
+  const auto broadcast_hint = to_broadcast_transport_hint(hints);
   const std::string_view requester_worker_id = hints.transport_requester_worker_id.empty()
       ? std::string_view(local_identity.worker_id)
       : std::string_view(hints.transport_requester_worker_id);
@@ -3768,7 +3779,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         resolve_transport_wait_timeout_ms(hints),
         scheduling_group_hint,
         requester_worker_id,
-        transport_request_id);
+        transport_request_id,
+        broadcast_hint);
     if (transport_or.ok()) {
       const auto& session = *transport_or;
       const auto& remote = session.remote_replica;
@@ -4571,6 +4583,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     requested_view_id = *request_hints.variant->view_id;
   }
   const auto scheduling_group_hint = to_transport_scheduling_group_hint(request_hints);
+  const auto broadcast_hint = to_broadcast_transport_hint(request_hints);
   const std::string_view requester_worker_id = request_hints.transport_requester_worker_id.empty()
       ? std::string_view(local_identity.worker_id)
       : std::string_view(request_hints.transport_requester_worker_id);
@@ -4593,7 +4606,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
             view_probe_timeout_ms,
             scheduling_group_hint,
             requester_worker_id,
-            transport_request_id);
+            transport_request_id,
+            broadcast_hint);
         if (!view_transport_or.ok() &&
             (absl::IsNotFound(view_transport_or.status()) || absl::IsUnimplemented(view_transport_or.status()) ||
              absl::IsDeadlineExceeded(view_transport_or.status()))) {
@@ -4620,7 +4634,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               wait_timeout_ms,
               scheduling_group_hint,
               requester_worker_id,
-              transport_request_id);
+              transport_request_id,
+              broadcast_hint);
         }
         return view_transport_or;
       }
@@ -4633,7 +4648,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
           wait_timeout_ms,
           scheduling_group_hint,
           requester_worker_id,
-          transport_request_id);
+          transport_request_id,
+          broadcast_hint);
     };
 
     auto transport_or = request_transport();

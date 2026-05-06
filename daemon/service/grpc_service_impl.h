@@ -226,6 +226,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::UnlockTransportChunksRequest* req,
       v2::UnlockTransportChunksResponse* resp) override;
 
+  grpc::Status CreateBroadcastSession(
+      grpc::ServerContext* ctx,
+      const v2::CreateBroadcastSessionRequest* req,
+      v2::CreateBroadcastSessionResponse* resp) override;
+
   grpc::Status BeginRegisterArtifact(
       grpc::ServerContext* ctx,
       const v2::BeginRegisterArtifactRequest* req,

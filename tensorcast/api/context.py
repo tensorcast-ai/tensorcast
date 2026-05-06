@@ -19,6 +19,62 @@ class CollectiveLoadGroup:
 
 
 @dataclass(frozen=True, slots=True)
+class TransportSchedulingGroup:
+    """Control-plane transport scheduling group for coordinated P2P source selection."""
+
+    group_id: str
+    group_kind: str
+    total_parts: int
+    part_id: str
+    priority: int = 0
+    epoch: int = 0
+    request_id: str | None = None
+
+    def __post_init__(self) -> None:
+        group_kind = str(self.group_kind).strip()
+        group_id = str(self.group_id).strip()
+        part_id = str(self.part_id).strip()
+        total_parts = int(self.total_parts)
+        priority = int(self.priority)
+        epoch = int(self.epoch)
+        request_id = None if self.request_id is None else str(self.request_id).strip()
+        if not group_kind:
+            raise ValueError("TransportSchedulingGroup.group_kind must be non-empty")
+        if not group_id:
+            raise ValueError("TransportSchedulingGroup.group_id must be non-empty")
+        if total_parts <= 0:
+            raise ValueError("TransportSchedulingGroup.total_parts must be positive")
+        if not part_id:
+            raise ValueError("TransportSchedulingGroup.part_id must be non-empty")
+        if priority < 0:
+            raise ValueError("TransportSchedulingGroup.priority must be non-negative")
+        if epoch < 0:
+            raise ValueError("TransportSchedulingGroup.epoch must be non-negative")
+        object.__setattr__(self, "group_kind", group_kind)
+        object.__setattr__(self, "group_id", group_id)
+        object.__setattr__(self, "total_parts", total_parts)
+        object.__setattr__(self, "part_id", part_id)
+        object.__setattr__(self, "priority", priority)
+        object.__setattr__(self, "epoch", epoch)
+        object.__setattr__(self, "request_id", request_id or None)
+
+
+@dataclass(frozen=True, slots=True)
+class BroadcastContext:
+    """Broadcast session hint for a materialization call."""
+
+    session_id: str
+    strict_parent: bool = True
+
+    def __post_init__(self) -> None:
+        session_id = str(self.session_id).strip()
+        if not session_id:
+            raise ValueError("BroadcastContext.session_id must be non-empty")
+        object.__setattr__(self, "session_id", session_id)
+        object.__setattr__(self, "strict_parent", bool(self.strict_parent))
+
+
+@dataclass(frozen=True, slots=True)
 class GovernanceContext:
     """Typed low-cardinality governance hints propagated with a plan."""
 
@@ -37,6 +93,8 @@ class CallContext:
     idempotency_key: str | None = None
     tags: Mapping[str, SpanAttributeValue] | None = None
     collective: CollectiveLoadGroup | None = None
+    transport_group: TransportSchedulingGroup | None = None
+    broadcast: BroadcastContext | None = None
     governance: GovernanceContext | None = None
 
 
@@ -48,6 +106,8 @@ def context(
     idempotency_key: str | None = None,
     tags: Mapping[str, SpanAttributeValue] | None = None,
     collective: CollectiveLoadGroup | None = None,
+    transport_group: TransportSchedulingGroup | None = None,
+    broadcast: BroadcastContext | None = None,
     governance: GovernanceContext | None = None,
 ) -> CallContext:
     return CallContext(
@@ -57,15 +117,19 @@ def context(
         idempotency_key=idempotency_key,
         tags=tags,
         collective=collective,
+        transport_group=transport_group,
+        broadcast=broadcast,
         governance=governance,
     )
 
 
 __all__ = [
     "CallContext",
+    "BroadcastContext",
     "CollectiveLoadGroup",
     "GovernanceContext",
     "QosClass",
     "SpanAttributeValue",
+    "TransportSchedulingGroup",
     "context",
 ]

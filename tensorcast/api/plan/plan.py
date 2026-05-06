@@ -1258,6 +1258,17 @@ class Plan:
             proto.deadline_ms = int(self._ctx.deadline_ms)
         if self._ctx.tags:
             proto.tags.update({str(k): str(v) for k, v in self._ctx.tags.items()})
+        if self._ctx.transport_group is not None:
+            group = self._ctx.transport_group
+            transport_group = proto.transport_group
+            transport_group.group_kind = group.group_kind
+            transport_group.group_id = group.group_id
+            transport_group.total_parts = int(group.total_parts)
+            transport_group.part_id = group.part_id
+            transport_group.priority = int(group.priority)
+            transport_group.epoch = int(group.epoch)
+            if group.request_id:
+                transport_group.request_id = group.request_id
         return proto
 
     def _governance_proto(self) -> plan_pb2.GovernanceContext | None:
@@ -1399,6 +1410,9 @@ class Plan:
             deadline_ms=self._ctx.deadline_ms,
             idempotency_key=derived_key,
             tags=self._ctx.tags,
+            collective=self._ctx.collective,
+            transport_group=self._ctx.transport_group,
+            governance=self._ctx.governance,
         )
 
     def _execute_step(
