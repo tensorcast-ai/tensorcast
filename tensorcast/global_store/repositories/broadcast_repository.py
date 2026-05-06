@@ -55,6 +55,7 @@ class BroadcastRepository(BaseRepository):
         owns_cursor = cursor is None
         if owns_cursor:
             cursor = self.get_cursor()
+        assert cursor is not None
         try:
             cursor.execute(
                 """
@@ -93,6 +94,7 @@ class BroadcastRepository(BaseRepository):
         owns_cursor = cursor is None
         if owns_cursor:
             cursor = self.get_cursor()
+        assert cursor is not None
         try:
             query = cursor.execute(
                 f"""
@@ -123,6 +125,7 @@ class BroadcastRepository(BaseRepository):
         owns_cursor = cursor is None
         if owns_cursor:
             cursor = self.get_cursor()
+        assert cursor is not None
         try:
             completed_sql = (
                 ", completed_at = CURRENT_TIMESTAMP"
@@ -161,6 +164,7 @@ class BroadcastRepository(BaseRepository):
         owns_cursor = cursor is None
         if owns_cursor:
             cursor = self.get_cursor()
+        assert cursor is not None
         try:
             updated_at = datetime.now()
             cursor.execute(
@@ -215,6 +219,7 @@ class BroadcastRepository(BaseRepository):
         owns_cursor = cursor is None
         if owns_cursor:
             cursor = self.get_cursor()
+        assert cursor is not None
         try:
             query = cursor.execute(
                 f"""
@@ -244,6 +249,7 @@ class BroadcastRepository(BaseRepository):
         owns_cursor = cursor is None
         if owns_cursor:
             cursor = self.get_cursor()
+        assert cursor is not None
         try:
             query = cursor.execute(
                 f"""
@@ -274,6 +280,7 @@ class BroadcastRepository(BaseRepository):
         owns_cursor = cursor is None
         if owns_cursor:
             cursor = self.get_cursor()
+        assert cursor is not None
         try:
             query = cursor.execute(
                 f"""
@@ -363,6 +370,7 @@ class BroadcastRepository(BaseRepository):
         owns_cursor = cursor is None
         if owns_cursor:
             cursor = self.get_cursor()
+        assert cursor is not None
         try:
             query = cursor.execute(
                 f"""
@@ -392,6 +400,7 @@ class BroadcastRepository(BaseRepository):
         owns_cursor = cursor is None
         if owns_cursor:
             cursor = self.get_cursor()
+        assert cursor is not None
         try:
             query = cursor.execute(
                 f"""
@@ -422,6 +431,7 @@ class BroadcastRepository(BaseRepository):
         owns_cursor = cursor is None
         if owns_cursor:
             cursor = self.get_cursor()
+        assert cursor is not None
         try:
             query = cursor.execute(
                 f"""
@@ -681,6 +691,7 @@ class BroadcastRepository(BaseRepository):
         owns_cursor = cursor is None
         if owns_cursor:
             cursor = self.get_cursor()
+        assert cursor is not None
         try:
             row = cursor.execute(
                 """
