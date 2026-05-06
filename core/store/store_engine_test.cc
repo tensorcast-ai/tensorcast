@@ -473,6 +473,12 @@ TEST_CASE("StoreEngine assembles and seals dense pieces", "[store_engine][assemb
   REQUIRE(gs_stub->artifact_binding.has_value());
   CHECK(gs_stub->artifact_binding->from_artifact_id == assembly_id);
   CHECK(gs_stub->artifact_binding->to_artifact_id == seal.sealed_artifact_id);
+  REQUIRE(gs_stub->upserted_artifact_metadata_descriptors.size() == 1);
+  REQUIRE(gs_stub->upserted_artifact_metadata_indices.size() == 1);
+  CHECK(gs_stub->upserted_artifact_metadata_descriptors[0].artifact_id() == seal.sealed_artifact_id);
+  CHECK(gs_stub->upserted_artifact_metadata_descriptors[0].index_multihash() == seal.index_multihash);
+  CHECK(gs_stub->upserted_artifact_metadata_descriptors[0].data_multihash() == seal.data_multihash);
+  CHECK(gs_stub->upserted_artifact_metadata_indices[0] == index_json);
 
   auto seal_again_or = store.seal_assembly(assembly_id, /*publish_canonical=*/false);
   REQUIRE(seal_again_or.ok());

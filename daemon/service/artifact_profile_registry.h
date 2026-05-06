@@ -42,6 +42,7 @@ class ArtifactProfileRegistry {
     kUnknown = 0,
     kOrdinaryArtifact = 1,
     kByteArtifact = 2,
+    kMountedSourceArtifact = 3,
   };
 
   enum class ArtifactFamily {
@@ -53,6 +54,7 @@ class ArtifactProfileRegistry {
     kUnknown = 0,
     kGlobalStoreBacked = 1,
     kRoutedHomeEpoch = 2,
+    kDaemonSessionLocal = 3,
   };
 
   struct ProfileTraits {

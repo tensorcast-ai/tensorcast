@@ -4,7 +4,7 @@ title: Step3p5 Closure and Single-SOT Convergence for 0107-0112
 status: accepted
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests", "benchmarks", "serving"]
 created: 2026-03-31
-last_updated: 2026-03-31
+last_updated: 2026-04-15
 related_code:
   - docs/designs/0001-docs-system-design.md
   - docs/designs/0107-retrieval-policy-plane-cleanup.md
@@ -25,10 +25,9 @@ related_code:
   - daemon/state/lip_manager.cc
   - /data/workspace/internal-vllm/docs/design/tensorcast_step3p5_from_disk_cold_start_performance_followup.md
 links:
-  plan: ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
   related:
     - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
-    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ../benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md
   dependencies:
     - ./0001-docs-system-design.md
     - ./0107-retrieval-policy-plane-cleanup.md
@@ -62,10 +61,12 @@ The key policy is:
   planes, contracts, and invariants they introduced;
 - the remaining undo items, delete gates, capability handoff rules, and
   execution-order constraints remain owned by this `0113` closure design;
-- the single active total execution checklist now lives in:
-  - `docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`
+- the historical `0114` execution checklist is now retired and the surviving
+  closeout evidence lives in:
+  - `docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md`
+  - `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`
 - `docs/plans/0113-step3p5-closure-and-sot-convergence.md` remains a historical
-  closure-handoff record rather than the active total plan;
+  closure-handoff record rather than an active total plan;
 - the old split execution notes under `0108` through `0112` are folded back
   into their owning designs and deleted so they do not continue to compete as
   parallel SOT.
@@ -83,7 +84,7 @@ The remaining closure work has seven slices:
 ```mermaid
 flowchart LR
   A["0107-0112 Designs<br>durable architecture truth"] --> B["0113 Closure Design<br>execution ownership and delete gates"]
-  B --> C["0114 Total Plan<br>single active checklist"]
+  B --> C["0114 Design + 2026-04-15 Benchmark<br>surviving closeout record"]
   C --> D["Contract Cutover<br>first-class source-bound collective ingress"]
   C --> E["Diagnostics Freeze<br>typed quality and admission signals"]
   C --> F["Identity Cutover<br>single-mint and no second-stage hash"]
@@ -228,12 +229,15 @@ Normative rules after this change:
 1. `0107` through `0112` remain the design-level architecture authority.
 2. `0113` remains the closure-design authority for capability handoff, identity
    constraints, and delete gates across those designs.
-3. `0114` plan is the single active total execution checklist for the residual
-   work across those designs.
-4. The deleted `0108`-`0112` companion plans and the retained `0113` plan are
-   historical only; they are no longer active total SOT.
-5. New closure work should update `0113` design and `0114` plan rather than
-   creating another sibling active plan unless the architecture itself changes.
+3. `0114` design plus the mounted `2026-04-15` benchmark note are the
+   surviving closeout record for the residual work that previously depended on
+   the standalone `0114` execution checklist.
+4. The deleted `0108`-`0112` companion plans, the retired `0114` plan, and the
+   retained `0113` plan are historical only; they are no longer active total
+   SOT.
+5. New closure work should update the owning designs and benchmark evidence
+   rather than creating another sibling active plan unless the architecture
+   itself changes.
 6. Later architecture-correction designs may still revise the target shape of
    the shared trunk when new evidence shows the accepted architecture is not yet
    globally optimal.
@@ -258,7 +262,7 @@ Normative completion rules:
    `operation_id` payloads;
 3. same-binding closeout must have one chosen single-mint end state for steady
    bytes instead of an open-ended "remove some hash later" direction;
-4. `fast_path_validated` must have one stable meaning across `0111`, `0113`,
+4. `same_binding_fast_path_validated` must have one stable meaning across `0111`, `0113`,
    TensorCast code, and downstream docs;
 5. TensorCast must expose a stable capability or version surface that lets
    downstream integrations switch to the new contract without guessing repo
@@ -309,7 +313,7 @@ Normative completion rules:
 - silent fallback is forbidden; any non-collective result on a request that
   asked for collective must be represented through typed policy and typed
   outcome facts.
-- `fast_path_validated` remains a correctness and admission fact for the
+- `same_binding_fast_path_validated` remains a correctness and admission fact for the
   same-binding path only. It does not certify collective use, direct-write use,
   dominant executor quality, or GPU-only or single-round hash behavior.
 - execution-quality and identity-quality facts must travel through a separate
@@ -384,7 +388,8 @@ Normative completion rules:
 - additive semantic changes to that readiness surface must advance
   `source_bound_contract_version`.
 - the current readiness surface for the collective-first binding-realization
-  convergence tracked in `0114` plan is version `3`, covering true residual
+  convergence tracked in the surviving `0114` design and mounted benchmark note
+  is version `4`, covering true residual
   semantics, split planner/execution diagnostics, and strict source-bound
   preflight.
 - downstream integrations must switch against that stable surface instead of
@@ -462,6 +467,23 @@ proto, or helper added while implementing `0113`:
 No implementation under `0113` should introduce mixed-style compatibility names
 or helper-only aliases that bypass these conventions.
 
+# Current Closure Status
+
+As of 2026-04-28, the current closure packet is
+`docs/benchmarks/20260427-step3p5-fp8-mounted-tp8-cold-start-evidence.md`.
+
+That packet proves:
+
+- first-class `collective_first_v4` source-bound ingress is the active mounted
+  TP8 contract;
+- strict collective failures now surface through typed trailing metadata rather
+  than compatibility string markers;
+- same-binding closeout remains on the single-mint `seal_reuse` path; and
+- the latest same-host follow-up moved the dominant `w13_weight` family into
+  `expert_dim0_concat`, improving TensorCast ready time to `326.319s`, but
+  broader Step3p5 TP8 performance signoff is still open because same-host
+  `safetensors` reached `158.172s` and `fastsafetensors` reached `162.179s`.
+
 # Trade-offs & Risks
 
 - Deleting old plans reduces local phase-by-phase history in one place.
@@ -491,7 +513,7 @@ or helper-only aliases that bypass these conventions.
   - first-class source-bound collective ingress,
   - typed collective policy and typed failure class,
   - stable execution, hash, and identity diagnostics for downstream consumers,
-  - correctness-only `fast_path_validated` semantics,
+  - correctness-only `same_binding_fast_path_validated` semantics,
   - single-mint closeout,
   - source-bound executor convergence,
   - capability or version handoff for downstream integration switching,
@@ -507,5 +529,6 @@ or helper-only aliases that bypass these conventions.
 - [`docs/designs/0111-source-to-serving-builder-and-representation-publication.md`](/data/workspace/tensorcast-280/docs/designs/0111-source-to-serving-builder-and-representation-publication.md)
 - [`docs/designs/0112-binding-native-serving-realization-and-publication.md`](/data/workspace/tensorcast-280/docs/designs/0112-binding-native-serving-realization-and-publication.md)
 - [`docs/plans/0113-step3p5-closure-and-sot-convergence.md`](/data/workspace/tensorcast-280/docs/plans/0113-step3p5-closure-and-sot-convergence.md)
-- [`docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md`](/data/workspace/tensorcast-280/docs/plans/0114-collective-first-binding-realization-for-tp-serving-startup.md)
+- [`docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md`](/data/workspace/tensorcast-280/docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md)
+- [`docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`](/data/workspace/tensorcast-280/docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md)
 - [`/data/workspace/internal-vllm/docs/design/tensorcast_step3p5_from_disk_cold_start_performance_followup.md`](/data/workspace/internal-vllm/docs/design/tensorcast_step3p5_from_disk_cold_start_performance_followup.md)

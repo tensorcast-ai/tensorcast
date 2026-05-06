@@ -142,9 +142,11 @@ def test_resolve_public_disk_source_uses_import_timeout_and_retries(
             source=store_daemon_pb2.PublicDiskSourceHandle(
                 path="/tmp/model",
                 canonical_index_bytes=b"{}",
-                artifact_id="",
+                artifact_id="msa1:test-session~trusted_storage_root_test~partitioned~deadbeef",
                 generation=0,
                 verify_checksums=False,
+                policy_id="trusted_storage_root_test",
+                exact_size_bytes=2,
             )
         )
 
@@ -164,6 +166,93 @@ def test_resolve_public_disk_source_uses_import_timeout_and_retries(
     assert response.source.path == "/tmp/model"
     assert seen["timeout"] == 45.0
     assert seen["retries"] == 3
+
+
+def test_promote_mounted_source_artifact_uses_explicit_timeout(monkeypatch) -> None:
+    ctl = daemon_ctl.DaemonCtl.__new__(daemon_ctl.DaemonCtl)
+    ctl.server_address = "127.0.0.1:50052"
+    ctl.stub_v2 = SimpleNamespace(PromoteMountedSourceArtifact=object())
+
+    seen: dict[str, object] = {}
+
+    def _fake_unary(method, request, *, timeout, retries, span):
+        seen["method"] = method
+        seen["request"] = request
+        seen["timeout"] = timeout
+        seen["retries"] = retries
+        seen["span"] = span
+        return store_daemon_pb2.PromoteMountedSourceArtifactResponse(
+            artifact_id="mi2:test:test",
+            canonical_index_bytes=b"{}",
+            generation=7,
+            import_state=store_daemon_pb2.IMPORT_ARTIFACT_STATE_READY,
+            source_artifact_id="msa1:test-session~policy~partitioned~deadbeef",
+        )
+
+    @contextmanager
+    def _fake_span(_name: str):
+        yield SimpleNamespace(record_exception=lambda *_args, **_kwargs: None)
+
+    ctl._unary_call = _fake_unary
+    ctl._client_span = _fake_span
+
+    response = daemon_ctl.DaemonCtl.promote_mounted_source_artifact(
+        ctl,
+        artifact_id="msa1:test-session~policy~partitioned~deadbeef",
+        verify_checksums=False,
+        timeout_s=9.5,
+    )
+
+    assert response.artifact_id == "mi2:test:test"
+    assert response.source_artifact_id == "msa1:test-session~policy~partitioned~deadbeef"
+    assert seen["timeout"] == 9.5
+    assert seen["retries"] == 1
+
+
+def test_promote_mounted_source_artifact_uses_import_timeout_and_retries(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TENSORCAST_IMPORT_ARTIFACT_TIMEOUT_SECONDS", "123.5")
+    monkeypatch.setenv("TENSORCAST_IMPORT_ARTIFACT_RETRIES", "2")
+    daemon_ctl._import_artifact_from_path_timeout_seconds.cache_clear()
+    daemon_ctl._import_artifact_from_path_retries.cache_clear()
+
+    ctl = daemon_ctl.DaemonCtl.__new__(daemon_ctl.DaemonCtl)
+    ctl.server_address = "127.0.0.1:50052"
+    ctl.stub_v2 = SimpleNamespace(PromoteMountedSourceArtifact=object())
+
+    seen: dict[str, object] = {}
+
+    def _fake_unary(method, request, *, timeout, retries, span):
+        seen["method"] = method
+        seen["request"] = request
+        seen["timeout"] = timeout
+        seen["retries"] = retries
+        seen["span"] = span
+        return store_daemon_pb2.PromoteMountedSourceArtifactResponse(
+            artifact_id="mi2:test:test",
+            canonical_index_bytes=b"{}",
+            generation=9,
+            import_state=store_daemon_pb2.IMPORT_ARTIFACT_STATE_READY,
+            source_artifact_id="msa1:test-session~policy~partitioned~deadbeef",
+        )
+
+    @contextmanager
+    def _fake_span(_name: str):
+        yield SimpleNamespace(record_exception=lambda *_args, **_kwargs: None)
+
+    ctl._unary_call = _fake_unary
+    ctl._client_span = _fake_span
+
+    response = daemon_ctl.DaemonCtl.promote_mounted_source_artifact(
+        ctl,
+        artifact_id="msa1:test-session~policy~partitioned~deadbeef",
+        verify_checksums=False,
+    )
+
+    assert response.artifact_id == "mi2:test:test"
+    assert seen["timeout"] == 123.5
+    assert seen["retries"] == 2
 
 
 def test_get_server_config_parses_source_bound_contract_surface(monkeypatch) -> None:

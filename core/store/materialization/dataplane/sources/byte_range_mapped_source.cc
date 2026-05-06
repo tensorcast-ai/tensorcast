@@ -279,6 +279,7 @@ ByteRangeMappedSource::~ByteRangeMappedSource() {
           << " direct_write_calls=" << direct_write_calls << " direct_write_bytes=" << direct_write_bytes
           << " direct_write_fallback_calls=" << direct_write_fallbacks;
 
+  const auto metrics_start = std::chrono::steady_clock::now();
   auto& handles = metrics_handles();
   record_counter(handles.base_read_calls, options_.path, base_read_calls);
   record_counter(handles.base_read_bytes, options_.path, base_read_bytes);
@@ -293,6 +294,11 @@ ByteRangeMappedSource::~ByteRangeMappedSource() {
   record_counter(handles.direct_write_bytes, options_.path, direct_write_bytes);
   record_counter(handles.direct_write_fallback_calls, options_.path, direct_write_fallbacks);
   record_histogram(handles.amplification_ratio, options_.path, amplification);
+  const auto metrics_done = std::chrono::steady_clock::now();
+  LOG(INFO) << "tc_profile ByteRangeMappedSource destructor timings"
+            << " path=" << options_.path << " output_bytes=" << output_bytes << " base_read_bytes=" << base_read_bytes
+            << " base_read_calls=" << base_read_calls
+            << " metrics_sec=" << std::chrono::duration<double>(metrics_done - metrics_start).count();
 }
 
 uint64_t ByteRangeMappedSource::total_bytes() const {

@@ -58,7 +58,20 @@ StoreEngineOptions::MaterializationStrategyConfig make_strategy_config() {
   strategy_config.enable_owner_file_collective = true;
   strategy_config.allow_mixed_execution = true;
   strategy_config.owner_file_collective_batch_bytes = 512;
+  strategy_config.owner_file_collective_min_dedup_saving_bytes = 0;
   return strategy_config;
+}
+
+SourceBoundSourceFacts safetensors_disk_source() {
+  return SourceBoundSourceFacts{.disk_source_available = true, .disk_source_is_safetensors = true};
+}
+
+SourceBoundSourceFacts partitioned_disk_source() {
+  return SourceBoundSourceFacts{.disk_source_available = true, .disk_source_is_safetensors = false};
+}
+
+SourceBoundSourceFacts no_disk_source() {
+  return SourceBoundSourceFacts{};
 }
 
 TEST_CASE("Source-bound strategy planner emits pure_collective mode", "[source_bound_strategy_planner]") {
@@ -66,7 +79,7 @@ TEST_CASE("Source-bound strategy planner emits pure_collective mode", "[source_b
   work_plan.items.push_back(
       RepresentationWorkItem{
           .kind = RepresentationWorkItemKind::kTensorCopy,
-          .partition_kind = WorkPartitionKind::kDim0Partitioned,
+          .partition_kind = WorkPartitionKind::kReplicated,
           .committed_bytes = 8,
       });
   auto plan = make_plan(std::move(work_plan));
@@ -81,7 +94,7 @@ TEST_CASE("Source-bound strategy planner emits pure_collective mode", "[source_b
       SourceBoundPolicy::kRequirePureCollective,
       make_strategy_config(),
       make_collective_topology(),
-      /*disk_source_available=*/true);
+      safetensors_disk_source());
   REQUIRE(strategy_plan_or.ok());
   CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kPureCollective);
   CHECK(strategy_plan_or->lane_plan.require_collective_success);
@@ -95,7 +108,7 @@ TEST_CASE("Source-bound strategy planner emits collective_first_mixed mode", "[s
   work_plan.items.push_back(
       RepresentationWorkItem{
           .kind = RepresentationWorkItemKind::kTensorCopy,
-          .partition_kind = WorkPartitionKind::kDim0Partitioned,
+          .partition_kind = WorkPartitionKind::kReplicated,
           .committed_bytes = 8,
       });
   work_plan.items.push_back(
@@ -123,7 +136,7 @@ TEST_CASE("Source-bound strategy planner emits collective_first_mixed mode", "[s
       SourceBoundPolicy::kCollectiveFirst,
       strategy_config,
       make_collective_topology(),
-      /*disk_source_available=*/true);
+      safetensors_disk_source());
   REQUIRE(strategy_plan_or.ok());
   CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kCollectiveFirstMixed);
   CHECK(strategy_plan_or->summary.execution_plan_kind == "collective_first_mixed");
@@ -140,7 +153,7 @@ TEST_CASE(
   work_plan.items.push_back(
       RepresentationWorkItem{
           .kind = RepresentationWorkItemKind::kTensorCopy,
-          .partition_kind = WorkPartitionKind::kDim0Partitioned,
+          .partition_kind = WorkPartitionKind::kReplicated,
           .committed_bytes = 8,
       });
   work_plan.items.push_back(
@@ -160,7 +173,7 @@ TEST_CASE(
       SourceBoundPolicy::kCollectiveFirst,
       make_strategy_config(),
       make_collective_topology(),
-      /*disk_source_available=*/true);
+      safetensors_disk_source());
   REQUIRE(strategy_plan_or.ok());
   CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kGenericOnly);
   REQUIRE(strategy_plan_or->lane_plan.reject_reason_buckets.contains("mixed_generic_residual_policy_disabled"));
@@ -174,7 +187,7 @@ TEST_CASE(
   work_plan.items.push_back(
       RepresentationWorkItem{
           .kind = RepresentationWorkItemKind::kTensorCopy,
-          .partition_kind = WorkPartitionKind::kDim0Partitioned,
+          .partition_kind = WorkPartitionKind::kReplicated,
           .committed_bytes = 8,
       });
   work_plan.items.push_back(
@@ -197,7 +210,7 @@ TEST_CASE(
       SourceBoundPolicy::kCollectiveFirst,
       strategy_config,
       make_collective_topology(),
-      /*disk_source_available=*/true);
+      safetensors_disk_source());
   REQUIRE(strategy_plan_or.ok());
   CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kCollectiveFirstMixed);
   CHECK_FALSE(strategy_plan_or->lane_plan.reject_reason_buckets.contains("mixed_generic_residual_policy_disabled"));
@@ -210,7 +223,7 @@ TEST_CASE(
   work_plan.items.push_back(
       RepresentationWorkItem{
           .kind = RepresentationWorkItemKind::kTensorCopy,
-          .partition_kind = WorkPartitionKind::kDim0Partitioned,
+          .partition_kind = WorkPartitionKind::kReplicated,
           .committed_bytes = 8,
       });
   auto plan = make_plan(std::move(work_plan));
@@ -227,7 +240,7 @@ TEST_CASE(
       SourceBoundPolicy::kCollectiveFirst,
       strategy_config,
       make_collective_topology(),
-      /*disk_source_available=*/true);
+      safetensors_disk_source());
   REQUIRE(strategy_plan_or.ok());
   CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kGenericOnly);
   CHECK(strategy_plan_or->summary.execution_plan_kind == "generic_only");
@@ -255,7 +268,7 @@ TEST_CASE("Source-bound strategy planner emits local_typed_only mode", "[source_
       SourceBoundPolicy::kDisableCollective,
       make_strategy_config(),
       loading::ExecutionTopologyContext{},
-      /*disk_source_available=*/false);
+      no_disk_source());
   REQUIRE(strategy_plan_or.ok());
   CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kLocalTypedOnly);
   CHECK(strategy_plan_or->summary.execution_plan_kind == "local_typed_only");
@@ -282,16 +295,76 @@ TEST_CASE("Source-bound strategy planner tracks deferred typed bytes", "[source_
       SourceBoundPolicy::kCollectiveFirst,
       make_strategy_config(),
       make_collective_topology(),
-      /*disk_source_available=*/true);
+      safetensors_disk_source());
   REQUIRE(strategy_plan_or.ok());
-  CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kGenericOnly);
+  CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kLocalMappedTyped);
+  CHECK(strategy_plan_or->summary.execution_plan_kind == "local_mapped_typed");
   CHECK(strategy_plan_or->lane_plan.deferred_typed_bytes == 4);
-  REQUIRE(strategy_plan_or->lane_plan.reject_reason_buckets.contains("concat_not_admitted"));
-  CHECK(strategy_plan_or->lane_plan.reject_reason_buckets.at("concat_not_admitted") == 4);
+  REQUIRE(strategy_plan_or->lane_plan.reject_reason_buckets.contains("typed_work_without_source_overlap"));
+  CHECK(strategy_plan_or->lane_plan.reject_reason_buckets.at("typed_work_without_source_overlap") == 4);
 }
 
 TEST_CASE(
-    "Source-bound strategy planner admits dim0 concat work when shared lowering already proves compatibility",
+    "Source-bound strategy planner uses generic lane for deferred typed work on non-safetensors disk source",
+    "[source_bound_strategy_planner]") {
+  RepresentationWorkPlan work_plan;
+  work_plan.items.push_back(
+      RepresentationWorkItem{
+          .kind = RepresentationWorkItemKind::kConcatAssemble,
+          .committed_bytes = 4,
+      });
+  auto plan = make_plan(std::move(work_plan));
+
+  SourceBoundLoweringArtifacts lowering_artifacts;
+  lowering_artifacts.executor_generic_data_map = make_data_map(4);
+
+  auto strategy_plan_or = build_source_bound_execution_strategy_plan(
+      plan,
+      lowering_artifacts,
+      SourceBoundPolicy::kCollectiveFirst,
+      make_strategy_config(),
+      make_collective_topology(),
+      partitioned_disk_source());
+  REQUIRE(strategy_plan_or.ok());
+  CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kGenericOnly);
+  CHECK(strategy_plan_or->summary.execution_plan_kind == "generic_only");
+  CHECK_FALSE(strategy_plan_or->lane_plan.local_mapped_typed_selected);
+  REQUIRE(strategy_plan_or->lane_plan.reject_reason_buckets.contains("non_safetensors_source"));
+  CHECK(strategy_plan_or->lane_plan.reject_reason_buckets.at("non_safetensors_source") == 4);
+}
+
+TEST_CASE(
+    "Source-bound strategy planner uses generic lane for deferred typed work only by explicit preference",
+    "[source_bound_strategy_planner]") {
+  RepresentationWorkPlan work_plan;
+  work_plan.items.push_back(
+      RepresentationWorkItem{
+          .kind = RepresentationWorkItemKind::kConcatAssemble,
+          .committed_bytes = 4,
+      });
+  auto plan = make_plan(std::move(work_plan));
+
+  SourceBoundLoweringArtifacts lowering_artifacts;
+  lowering_artifacts.executor_generic_data_map = make_data_map(4);
+  auto strategy_config = make_strategy_config();
+  strategy_config.executor_preference =
+      StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference::kGenericByteRange;
+
+  auto strategy_plan_or = build_source_bound_execution_strategy_plan(
+      plan,
+      lowering_artifacts,
+      SourceBoundPolicy::kCollectiveFirst,
+      strategy_config,
+      make_collective_topology(),
+      safetensors_disk_source());
+  REQUIRE(strategy_plan_or.ok());
+  CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kGenericOnly);
+  CHECK(strategy_plan_or->summary.execution_plan_kind == "generic_only");
+  CHECK(strategy_plan_or->lane_plan.deferred_typed_bytes == 4);
+}
+
+TEST_CASE(
+    "Source-bound strategy planner leaves dim0 concat work on executor lane without source overlap",
     "[source_bound_strategy_planner]") {
   RepresentationWorkPlan work_plan;
   RepresentationWorkItem concat_item;
@@ -356,11 +429,92 @@ TEST_CASE(
       SourceBoundPolicy::kCollectiveFirst,
       make_strategy_config(),
       make_collective_topology(),
-      /*disk_source_available=*/true);
+      safetensors_disk_source());
   REQUIRE(strategy_plan_or.ok());
-  CHECK(strategy_plan_or->summary.planned_collective_candidate_bytes == 8);
-  CHECK(strategy_plan_or->summary.planned_non_admitted_typed_bytes == 0);
+  CHECK(strategy_plan_or->summary.planned_collective_candidate_bytes == 0);
+  CHECK(strategy_plan_or->summary.planned_non_admitted_typed_bytes == 8);
   CHECK_FALSE(strategy_plan_or->summary.planner_reject_reason_buckets.contains("concat_not_admitted"));
+  REQUIRE(strategy_plan_or->summary.planner_reject_reason_buckets.contains("typed_work_without_source_overlap"));
+  CHECK(strategy_plan_or->summary.planner_reject_reason_buckets.at("typed_work_without_source_overlap") == 8);
+}
+
+TEST_CASE(
+    "Source-bound strategy planner keeps expert dim0 concat on executor lane without source overlap",
+    "[source_bound_strategy_planner]") {
+  RepresentationWorkPlan work_plan;
+  work_plan.items.push_back(
+      RepresentationWorkItem{
+          .kind = RepresentationWorkItemKind::kExpertDim0Concat,
+          .partition_kind = WorkPartitionKind::kUnknown,
+          .committed_bytes = 128,
+      });
+  auto plan = make_plan(std::move(work_plan));
+
+  SourceBoundLoweringArtifacts lowering_artifacts;
+  lowering_artifacts.executor_generic_data_map = make_data_map(128);
+
+  auto strategy_config = make_strategy_config();
+  strategy_config.owner_file_collective_min_dedup_saving_bytes = 1;
+
+  auto strategy_plan_or = build_source_bound_execution_strategy_plan(
+      plan,
+      lowering_artifacts,
+      SourceBoundPolicy::kCollectiveFirst,
+      strategy_config,
+      make_collective_topology(),
+      safetensors_disk_source());
+  REQUIRE(strategy_plan_or.ok());
+  CHECK(strategy_plan_or->summary.planned_collective_candidate_bytes == 0);
+  CHECK(strategy_plan_or->summary.planned_non_admitted_typed_bytes == 128);
+  CHECK(strategy_plan_or->summary.estimated_collective_dedup_saving_bytes == 0);
+  CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kLocalMappedTyped);
+  REQUIRE(strategy_plan_or->summary.planner_reject_reason_buckets.contains("typed_work_without_source_overlap"));
+  CHECK(strategy_plan_or->summary.planner_reject_reason_buckets.at("typed_work_without_source_overlap") == 128);
+}
+
+TEST_CASE(
+    "Source-bound strategy planner does not admit below-threshold owner-file overlap into collective",
+    "[source_bound_strategy_planner]") {
+  RepresentationWorkPlan work_plan;
+  work_plan.items.push_back(
+      RepresentationWorkItem{
+          .kind = RepresentationWorkItemKind::kTensorCopy,
+          .partition_kind = WorkPartitionKind::kReplicated,
+          .committed_bytes = 8,
+      });
+  work_plan.items.push_back(
+      RepresentationWorkItem{
+          .kind = RepresentationWorkItemKind::kTensorCopy,
+          .partition_kind = WorkPartitionKind::kDim1Partitioned,
+          .committed_bytes = 128,
+      });
+  auto plan = make_plan(std::move(work_plan));
+
+  SourceBoundLoweringArtifacts lowering_artifacts;
+  lowering_artifacts.collective_data_map = make_data_map(8);
+  lowering_artifacts.executor_generic_data_map = make_data_map(136);
+
+  auto strategy_config = make_strategy_config();
+  strategy_config.owner_file_collective_min_dedup_saving_bytes = 1024;
+
+  auto strategy_plan_or = build_source_bound_execution_strategy_plan(
+      plan,
+      lowering_artifacts,
+      SourceBoundPolicy::kCollectiveFirst,
+      strategy_config,
+      make_collective_topology(),
+      safetensors_disk_source());
+  REQUIRE(strategy_plan_or.ok());
+  CHECK_FALSE(strategy_plan_or->summary.collective_lane_eligible);
+  CHECK(strategy_plan_or->summary.planned_collective_candidate_bytes == 8);
+  CHECK(strategy_plan_or->summary.planned_collective_admitted_bytes == 0);
+  CHECK(strategy_plan_or->lane_plan.deferred_typed_bytes == 128);
+  CHECK(strategy_plan_or->lane_plan.selection_reason == "generic_only;local_mapped_typed");
+  REQUIRE(
+      strategy_plan_or->summary.planner_reject_reason_buckets.contains("collective_source_overlap_below_threshold"));
+  CHECK(strategy_plan_or->summary.planner_reject_reason_buckets.at("collective_source_overlap_below_threshold") == 8);
+  REQUIRE(strategy_plan_or->summary.planner_reject_reason_buckets.contains("typed_work_without_source_overlap"));
+  CHECK(strategy_plan_or->summary.planner_reject_reason_buckets.at("typed_work_without_source_overlap") == 128);
 }
 
 TEST_CASE(
@@ -370,7 +524,7 @@ TEST_CASE(
   work_plan.items.push_back(
       RepresentationWorkItem{
           .kind = RepresentationWorkItemKind::kTensorCopy,
-          .partition_kind = WorkPartitionKind::kDim0Partitioned,
+          .partition_kind = WorkPartitionKind::kReplicated,
           .committed_bytes = 8,
       });
   work_plan.items.push_back(
@@ -390,7 +544,7 @@ TEST_CASE(
       SourceBoundPolicy::kRequirePureCollective,
       make_strategy_config(),
       make_collective_topology(),
-      /*disk_source_available=*/true);
+      safetensors_disk_source());
   REQUIRE(strategy_plan_or.ok());
   CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kRejected);
   CHECK(strategy_plan_or->summary.execution_plan_kind == "reject");
@@ -405,7 +559,7 @@ TEST_CASE(
   work_plan.items.push_back(
       RepresentationWorkItem{
           .kind = RepresentationWorkItemKind::kTensorCopy,
-          .partition_kind = WorkPartitionKind::kDim0Partitioned,
+          .partition_kind = WorkPartitionKind::kReplicated,
           .committed_bytes = 8,
       });
   work_plan.items.push_back(
@@ -425,7 +579,7 @@ TEST_CASE(
       SourceBoundPolicy::kCollectiveFirst,
       make_strategy_config(),
       make_collective_topology(),
-      /*disk_source_available=*/true);
+      safetensors_disk_source());
   REQUIRE(strategy_plan_or.ok());
   CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kRejected);
   CHECK(strategy_plan_or->summary.execution_plan_kind == "reject");

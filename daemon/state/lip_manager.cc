@@ -2,6 +2,7 @@
 
 #include "daemon/state/lip_manager.h"
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 
@@ -911,6 +912,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::build_commit_lease_result(
     absl::Span<const RegisterTensorAliasMeta> aliases,
     const std::optional<CommitLeaseResult>& identity_override,
     BuildCommitLeaseOptions options) {
+  const auto total_start = std::chrono::steady_clock::now();
   std::string canonical_index_json = index_data;
   if (!storages.empty() && !aliases.empty()) {
     auto rebuilt_or = build_canonical_index_from_metadata(
@@ -929,6 +931,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::build_commit_lease_result(
       canonical_index_json = rebuilt;
     }
   }
+  const auto canonical_done = std::chrono::steady_clock::now();
 
   if (canonical_index_json.empty() && index_key_hex.empty()) {
     return absl::FailedPreconditionError("canonical index is required for LIP commit");
@@ -986,6 +989,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::build_commit_lease_result(
             .dst = seg.artifact_offset,
         });
   }
+  const auto mappings_done = std::chrono::steady_clock::now();
 
   class LipSeekableSource final : public store::loader::SeekableSource {
    public:
@@ -1085,6 +1089,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::build_commit_lease_result(
     return index_mh_or.status();
   }
   index_multihash = *index_mh_or;
+  const auto index_hash_done = std::chrono::steady_clock::now();
 
   if (identity_override.has_value()) {
     out = *identity_override;
@@ -1160,6 +1165,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::build_commit_lease_result(
     out.artifact_id = client_artifact_id;
     out.id_kind = common::ArtifactIdKind::kCgid;
   }
+  const auto identity_done = std::chrono::steady_clock::now();
 
   if (out.schema_version.empty()) {
     out.schema_version = "v3";
@@ -1193,6 +1199,25 @@ absl::StatusOr<CommitLeaseResult> LipManager::build_commit_lease_result(
       out.verification_json = jv.dump();
     }
   }
+  const auto verification_done = std::chrono::steady_clock::now();
+  const size_t mapping_count = mapping_cache.size();
+  mapping_cache.clear();
+  const auto mappings_closed = std::chrono::steady_clock::now();
+  LOG(INFO) << "tc_profile build_commit_lease_result timings device_id=" << device_id << " owner_pid=" << owner_pid
+            << " total_size=" << total_size << " segments=" << segments.size() << " storages=" << storages.size()
+            << " aliases=" << aliases.size() << " mappings=" << mapping_count
+            << " identity_override=" << identity_override.has_value() << " id_kind=" << static_cast<int>(id_kind)
+            << " direct_gpu_hash=" << options.direct_gpu_hash_ptr.has_value()
+            << " require_gpu_identity_hash=" << options.require_gpu_identity_hash
+            << " canonical_sec=" << std::chrono::duration<double>(canonical_done - total_start).count()
+            << " mappings_open_sec=" << std::chrono::duration<double>(mappings_done - canonical_done).count()
+            << " index_hash_sec=" << std::chrono::duration<double>(index_hash_done - mappings_done).count()
+            << " identity_sec=" << std::chrono::duration<double>(identity_done - index_hash_done).count()
+            << " verification_sec=" << std::chrono::duration<double>(verification_done - identity_done).count()
+            << " mappings_close_sec=" << std::chrono::duration<double>(mappings_closed - verification_done).count()
+            << " total_sec=" << std::chrono::duration<double>(mappings_closed - total_start).count()
+            << " hash_backend=" << static_cast<int>(out.hash_info.backend) << " hash_bytes=" << out.hash_info.bytes
+            << " hash_wall_time_ms=" << out.hash_info.wall_time_ms;
 
   return out;
 }
@@ -1213,6 +1238,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
     std::vector<RegisterTensorAliasMeta>&& aliases,
     const std::optional<CommitLeaseResult>& identity_override,
     BuildCommitLeaseOptions options) {
+  const auto total_start = std::chrono::steady_clock::now();
   auto out_or = build_commit_lease_result(
       device_id,
       owner_pid,
@@ -1230,6 +1256,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
     return out_or.status();
   }
   CommitLeaseResult out = *out_or;
+  const auto build_done = std::chrono::steady_clock::now();
   std::string canonical_index_json = index_data;
   if (!storages.empty() && !aliases.empty()) {
     auto rebuilt_or = build_canonical_index_from_metadata(
@@ -1239,6 +1266,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
     }
     canonical_index_json = *rebuilt_or;
   }
+  const auto canonical_done = std::chrono::steady_clock::now();
 
   // Enforce device-unique commit for VRAM_LEASED: (artifact_id, device_id)
   {
@@ -1282,6 +1310,16 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
     ArtifactDeviceKey key{.artifact_id = lease.artifact_id, .view_id = lease.view_id, .device_id = lease.device_id};
     put_lease(registration_id, key, std::move(lease));
   }
+  const auto lease_done = std::chrono::steady_clock::now();
+  LOG(INFO) << "tc_profile commit_lease_in_place timings registration_id=" << registration_id
+            << " device_id=" << device_id << " owner_pid=" << owner_pid << " total_size=" << total_size
+            << " identity_override=" << identity_override.has_value()
+            << " build_result_sec=" << std::chrono::duration<double>(build_done - total_start).count()
+            << " rebuild_canonical_sec=" << std::chrono::duration<double>(canonical_done - build_done).count()
+            << " lease_register_sec=" << std::chrono::duration<double>(lease_done - canonical_done).count()
+            << " total_sec=" << std::chrono::duration<double>(lease_done - total_start).count()
+            << " hash_backend=" << static_cast<int>(out.hash_info.backend) << " hash_bytes=" << out.hash_info.bytes
+            << " hash_wall_time_ms=" << out.hash_info.wall_time_ms;
 
   return out;
 }

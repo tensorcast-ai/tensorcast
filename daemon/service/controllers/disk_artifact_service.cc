@@ -13,9 +13,14 @@
 #include <utility>
 
 #include "absl/log/log.h"
+#include "absl/random/random.h"
 #include "absl/status/status.h"
+#include "absl/strings/escaping.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
+#include "core/common/artifact_hash.h"
+#include "core/common/artifact_identity.h"
+#include "daemon/service/controllers/materialization_request_common_utils.h"
 #include "daemon/util/grpc_peer_utils.h"
 #include "daemon/util/path_utils.h"
 #include "daemon/util/status_utils.h"
@@ -29,6 +34,19 @@ namespace {
 
 constexpr double kDefaultImportCacheTtlSeconds = 600.0;
 constexpr size_t kDefaultImportCacheMaxEntries = 1024;
+
+using PublicDiskSourcePolicy = DaemonOptions::PublicDiskSourcePolicy;
+using TrustedRootPolicy = PublicDiskSourcePolicy::TrustedRootPolicy;
+
+std::string mint_random_hex_token(size_t bytes_len) {
+  absl::BitGen gen;
+  std::string bytes;
+  bytes.resize(bytes_len);
+  for (size_t i = 0; i < bytes_len; ++i) {
+    bytes[i] = static_cast<char>(absl::Uniform<unsigned int>(gen, 0, 256));
+  }
+  return absl::BytesToHexString(bytes);
+}
 
 std::optional<double> parse_positive_double_env(const char* name) {
   const char* raw = std::getenv(name);
@@ -59,6 +77,226 @@ std::optional<size_t> parse_positive_size_env(const char* name) {
     return std::nullopt;
   }
   return static_cast<size_t>(value);
+}
+
+bool path_has_prefix(const std::filesystem::path& path, const std::filesystem::path& prefix) {
+  auto path_it = path.begin();
+  for (auto prefix_it = prefix.begin(); prefix_it != prefix.end(); ++prefix_it, ++path_it) {
+    if (path_it == path.end() || *path_it != *prefix_it) {
+      return false;
+    }
+  }
+  return true;
+}
+
+absl::StatusOr<std::filesystem::path> weakly_canonical_or_normalized(const std::filesystem::path& input) {
+  std::error_code ec;
+  auto normalized = std::filesystem::weakly_canonical(input, ec);
+  if (!ec) {
+    return normalized;
+  }
+  normalized = input.lexically_normal();
+  if (normalized.empty()) {
+    return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to canonicalize path: ", input.string()));
+  }
+  return normalized;
+}
+
+std::string default_public_disk_source_policy_id(const std::filesystem::path& root_path) {
+  if (root_path.empty()) {
+    return "trusted_absolute_local_path";
+  }
+  const std::string root = root_path.string();
+  const std::vector<uint8_t> digest = common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(root.data()), root.size()));
+  const std::string hex =
+      absl::BytesToHexString(absl::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
+  return absl::StrCat("trusted_storage_root_", hex.substr(0, 16));
+}
+
+bool format_allowed(
+    const TrustedRootPolicy& policy,
+    materialization_disk_resolve::MountedSourceFormatKind format_kind) {
+  if (policy.allowed_formats.empty()) {
+    return true;
+  }
+  const auto expected = format_kind == materialization_disk_resolve::MountedSourceFormatKind::kPartitioned
+      ? PublicDiskSourcePolicy::Format::kPartitioned
+      : PublicDiskSourcePolicy::Format::kSafetensors;
+  return std::find(policy.allowed_formats.begin(), policy.allowed_formats.end(), expected) !=
+      policy.allowed_formats.end();
+}
+
+bool metadata_capability_allowed(
+    const TrustedRootPolicy& policy,
+    materialization_disk_resolve::MountedSourceMetadataCapability metadata_capability) {
+  if (policy.allowed_metadata_capabilities.empty()) {
+    return true;
+  }
+  const auto expected =
+      metadata_capability == materialization_disk_resolve::MountedSourceMetadataCapability::kTensorAware
+      ? PublicDiskSourcePolicy::MetadataCapability::kTensorAware
+      : PublicDiskSourcePolicy::MetadataCapability::kByteOnly;
+  return std::find(
+             policy.allowed_metadata_capabilities.begin(), policy.allowed_metadata_capabilities.end(), expected) !=
+      policy.allowed_metadata_capabilities.end();
+}
+
+materialization_disk_resolve::MountedSourceAttestationPolicy build_attestation_policy(const TrustedRootPolicy& policy) {
+  materialization_disk_resolve::MountedSourceAttestationPolicy out;
+  out.policy_id = policy.policy_id;
+  out.allow_partitioned = format_allowed(policy, materialization_disk_resolve::MountedSourceFormatKind::kPartitioned);
+  out.allow_safetensors = format_allowed(policy, materialization_disk_resolve::MountedSourceFormatKind::kSafetensors);
+  out.allow_tensor_aware =
+      metadata_capability_allowed(policy, materialization_disk_resolve::MountedSourceMetadataCapability::kTensorAware);
+  out.allow_byte_only =
+      metadata_capability_allowed(policy, materialization_disk_resolve::MountedSourceMetadataCapability::kByteOnly);
+  out.descriptor_reuse_mode = policy.descriptor_reuse_mode == PublicDiskSourcePolicy::DescriptorReuseMode::kDisabled
+      ? materialization_disk_resolve::MountedSourceDescriptorReuseMode::kDisabled
+      : materialization_disk_resolve::MountedSourceDescriptorReuseMode::kTrustedHintOnly;
+  out.validation_mode = materialization_disk_resolve::MountedSourceValidationMode::kValidateBeforeRead;
+  out.lightweight_attestation_enabled = policy.lightweight_attestation_enabled;
+  return out;
+}
+
+struct ResolvedDiskPathPolicy {
+  std::filesystem::path normalized_path;
+  TrustedRootPolicy policy;
+  bool used_absolute_fallback{false};
+};
+
+absl::StatusOr<ResolvedDiskPathPolicy> resolve_disk_path_policy(
+    std::string_view request_path,
+    const PublicDiskSourcePolicy& policy) {
+  const std::filesystem::path input(request_path);
+  if (request_path.empty()) {
+    return absl::InvalidArgumentError("path is required");
+  }
+
+  if (!input.is_absolute()) {
+    if (policy.trusted_root_policies.empty()) {
+      return absl::InvalidArgumentError("relative disk path requires a configured trusted root policy");
+    }
+    if (policy.trusted_root_policies.size() != 1) {
+      return absl::InvalidArgumentError(
+          "relative disk path is ambiguous across multiple trusted root policies; use an absolute path");
+    }
+    const auto& trusted_root = policy.trusted_root_policies.front();
+    auto normalized_or = normalize_disk_path(request_path, trusted_root.root_path);
+    if (!normalized_or.ok()) {
+      return normalized_or.status();
+    }
+    return ResolvedDiskPathPolicy{
+        .normalized_path = *normalized_or,
+        .policy = trusted_root,
+        .used_absolute_fallback = false,
+    };
+  }
+
+  auto normalized_abs_or = weakly_canonical_or_normalized(input);
+  if (!normalized_abs_or.ok()) {
+    return normalized_abs_or.status();
+  }
+
+  const TrustedRootPolicy* best_match = nullptr;
+  std::size_t best_depth = 0;
+  for (const auto& trusted_root : policy.trusted_root_policies) {
+    if (trusted_root.root_path.empty()) {
+      continue;
+    }
+    if (!path_has_prefix(*normalized_abs_or, trusted_root.root_path)) {
+      continue;
+    }
+    const std::size_t depth =
+        static_cast<std::size_t>(std::distance(trusted_root.root_path.begin(), trusted_root.root_path.end()));
+    if (best_match == nullptr || depth > best_depth) {
+      best_match = &trusted_root;
+      best_depth = depth;
+    }
+  }
+
+  if (best_match != nullptr) {
+    auto normalized_or = normalize_disk_path(request_path, best_match->root_path);
+    if (!normalized_or.ok()) {
+      return normalized_or.status();
+    }
+    return ResolvedDiskPathPolicy{
+        .normalized_path = *normalized_or,
+        .policy = *best_match,
+        .used_absolute_fallback = false,
+    };
+  }
+
+  if (policy.unmatched_path_mode == PublicDiskSourcePolicy::UnmatchedPathMode::kAllowAbsoluteFallback) {
+    TrustedRootPolicy fallback_policy;
+    fallback_policy.policy_id = default_public_disk_source_policy_id(std::filesystem::path());
+    auto normalized_or = normalize_disk_path(request_path, std::filesystem::path());
+    if (!normalized_or.ok()) {
+      return normalized_or.status();
+    }
+    return ResolvedDiskPathPolicy{
+        .normalized_path = *normalized_or,
+        .policy = std::move(fallback_policy),
+        .used_absolute_fallback = true,
+    };
+  }
+
+  return absl::PermissionDeniedError(absl::StrCat("disk path is outside configured trusted roots: ", request_path));
+}
+
+std::string artifact_id_kind_attr(std::string_view artifact_id) {
+  switch (common::infer_artifact_id_kind(artifact_id)) {
+    case common::ArtifactIdKind::kMi2:
+      return "mi2";
+    case common::ArtifactIdKind::kCgid:
+      return "cgid";
+    case common::ArtifactIdKind::kMsa1:
+      return "msa1";
+    case common::ArtifactIdKind::kUnspecified:
+    default:
+      return "unknown";
+  }
+}
+
+std::string trusted_content_hint_kind_attr(const std::optional<std::string>& artifact_id) {
+  if (!artifact_id.has_value() || artifact_id->empty()) {
+    return "none";
+  }
+  return artifact_id_kind_attr(*artifact_id);
+}
+
+std::string metadata_capability_attr(materialization_disk_resolve::MountedSourceMetadataCapability capability) {
+  switch (capability) {
+    case materialization_disk_resolve::MountedSourceMetadataCapability::kTensorAware:
+      return "tensor_aware";
+    case materialization_disk_resolve::MountedSourceMetadataCapability::kByteOnly:
+      return "byte_only";
+    case materialization_disk_resolve::MountedSourceMetadataCapability::kUnspecified:
+    default:
+      return "unspecified";
+  }
+}
+
+std::string resolution_strategy_attr(materialization_disk_resolve::MountedSourceResolutionStrategy strategy) {
+  switch (strategy) {
+    case materialization_disk_resolve::MountedSourceResolutionStrategy::kAttestedOnly:
+      return "attested_only";
+    case materialization_disk_resolve::MountedSourceResolutionStrategy::kAttestedWithTrustedDescriptorHint:
+      return "attested_with_trusted_descriptor_hint";
+    case materialization_disk_resolve::MountedSourceResolutionStrategy::kUnspecified:
+    default:
+      return "unspecified";
+  }
+}
+
+std::string validation_mode_attr(materialization_disk_resolve::MountedSourceValidationMode mode) {
+  switch (mode) {
+    case materialization_disk_resolve::MountedSourceValidationMode::kValidateBeforeRead:
+      return "validate_before_read";
+    case materialization_disk_resolve::MountedSourceValidationMode::kUnspecified:
+    default:
+      return "unspecified";
+  }
 }
 
 v2::ImportArtifactPhase to_proto_phase(materialization_disk_resolve::ImportArtifactPhase phase) {
@@ -122,18 +360,80 @@ void fill_import_response(
   resp.set_import_state(v2::IMPORT_ARTIFACT_STATE_READY);
 }
 
-void fill_public_disk_source_response(
+void fill_promote_mounted_source_response(
     const materialization_disk_resolve::ImportArtifactFromPathResult& imported,
+    std::string_view source_artifact_id,
+    v2::PromoteMountedSourceArtifactResponse& resp) {
+  resp.set_artifact_id(imported.artifact_id);
+  resp.set_canonical_index_bytes(imported.canonical_index_json);
+  resp.set_generation(imported.generation);
+  resp.set_import_state(v2::IMPORT_ARTIFACT_STATE_READY);
+  resp.set_source_artifact_id(std::string(source_artifact_id));
+}
+
+void fill_public_disk_source_response(
+    const materialization_disk_resolve::ResolveMountedSourceResult& resolved,
     bool verify_checksums,
     v2::ResolvePublicDiskSourceResponse& resp) {
   auto* source = resp.mutable_source();
-  source->set_path(imported.normalized_path.string());
-  source->set_canonical_index_bytes(imported.canonical_index_json);
-  source->set_generation(imported.generation);
+  source->set_path(resolved.normalized_path.string());
+  source->set_canonical_index_bytes(resolved.canonical_index_json);
+  source->set_artifact_id(resolved.artifact_id);
+  source->set_generation(resolved.generation);
   source->set_verify_checksums(verify_checksums);
-  if (!imported.artifact_id.empty()) {
-    source->set_artifact_id(imported.artifact_id);
+  if (resolved.trusted_content_artifact_id.has_value()) {
+    source->set_trusted_content_artifact_id(*resolved.trusted_content_artifact_id);
   }
+  if (resolved.source_index_json.has_value()) {
+    source->set_source_index_bytes(*resolved.source_index_json);
+  }
+  switch (resolved.format_kind) {
+    case materialization_disk_resolve::MountedSourceFormatKind::kPartitioned:
+      source->set_format_kind(v2::DISK_SOURCE_FORMAT_KIND_PARTITIONED);
+      break;
+    case materialization_disk_resolve::MountedSourceFormatKind::kSafetensors:
+      source->set_format_kind(v2::DISK_SOURCE_FORMAT_KIND_SAFETENSORS);
+      break;
+    case materialization_disk_resolve::MountedSourceFormatKind::kUnspecified:
+    default:
+      source->set_format_kind(v2::DISK_SOURCE_FORMAT_KIND_UNSPECIFIED);
+      break;
+  }
+  switch (resolved.metadata_capability) {
+    case materialization_disk_resolve::MountedSourceMetadataCapability::kTensorAware:
+      source->set_metadata_capability(v2::DISK_METADATA_CAPABILITY_TENSOR_AWARE);
+      break;
+    case materialization_disk_resolve::MountedSourceMetadataCapability::kByteOnly:
+      source->set_metadata_capability(v2::DISK_METADATA_CAPABILITY_BYTE_ONLY);
+      break;
+    case materialization_disk_resolve::MountedSourceMetadataCapability::kUnspecified:
+    default:
+      source->set_metadata_capability(v2::DISK_METADATA_CAPABILITY_UNSPECIFIED);
+      break;
+  }
+  switch (resolved.resolution_strategy) {
+    case materialization_disk_resolve::MountedSourceResolutionStrategy::kAttestedOnly:
+      source->set_resolution_strategy(v2::DISK_RESOLUTION_STRATEGY_ATTESTED_ONLY);
+      break;
+    case materialization_disk_resolve::MountedSourceResolutionStrategy::kAttestedWithTrustedDescriptorHint:
+      source->set_resolution_strategy(v2::DISK_RESOLUTION_STRATEGY_ATTESTED_WITH_TRUSTED_DESCRIPTOR_HINT);
+      break;
+    case materialization_disk_resolve::MountedSourceResolutionStrategy::kUnspecified:
+    default:
+      source->set_resolution_strategy(v2::DISK_RESOLUTION_STRATEGY_UNSPECIFIED);
+      break;
+  }
+  switch (resolved.validation_mode) {
+    case materialization_disk_resolve::MountedSourceValidationMode::kValidateBeforeRead:
+      source->set_validation_mode(v2::DISK_VALIDATION_MODE_VALIDATE_BEFORE_READ);
+      break;
+    case materialization_disk_resolve::MountedSourceValidationMode::kUnspecified:
+    default:
+      source->set_validation_mode(v2::DISK_VALIDATION_MODE_UNSPECIFIED);
+      break;
+  }
+  source->set_policy_id(resolved.policy_id);
+  source->set_exact_size_bytes(resolved.exact_size_bytes);
 }
 
 grpc::Status to_import_grpc_status(const absl::Status& status) {
@@ -192,10 +492,34 @@ ArtifactSourceRegistry::FingerprintMap to_registry_fingerprints(
   return out;
 }
 
+void upsert_local_import_binding(
+    ArtifactSourceRegistry& source_registry,
+    const materialization_disk_resolve::ImportArtifactFromPathResult& imported) {
+  source_registry.upsert_binding(
+      imported.artifact_id,
+      ArtifactSourceRegistry::Entry{
+          .source_kind = ArtifactSourceRegistry::SourceKind::kLocalImport,
+          .canonical_source_path = imported.normalized_path.string(),
+          .canonical_index_json = imported.canonical_index_json,
+          .source_index_json = imported.source_index_json,
+          .source_disk_path = imported.normalized_path.string(),
+          .descriptor_present = imported.descriptor_present,
+          .index_multihash = imported.index_multihash,
+          .data_multihash = imported.data_multihash,
+          .generation = imported.generation,
+          .tensor_aware_metadata = imported.metadata_capability ==
+              materialization_disk_resolve::MountedSourceMetadataCapability::kTensorAware,
+          .file_fingerprints = to_registry_fingerprints(imported.file_fingerprints),
+          .created_at = absl::Now(),
+          .updated_at = absl::Now(),
+      });
+}
+
 } // namespace
 
 DiskArtifactService::DiskArtifactService(Dep d)
     : d_(std::move(d)),
+      daemon_session_token_(mint_random_hex_token(8)),
       import_cache_ttl_(import_cache_ttl_from_env()),
       import_cache_max_entries_(import_cache_max_entries_from_env()) {
   if (!d_.storage_path.empty()) {
@@ -204,6 +528,29 @@ DiskArtifactService::DiskArtifactService(Dep d)
     if (ec) {
       ec.clear();
       storage_path_ = d_.storage_path.lexically_normal();
+    }
+  }
+  if (d_.public_disk_source_policy.trusted_root_policies.empty()) {
+    if (!storage_path_.empty()) {
+      d_.public_disk_source_policy.trusted_root_policies.push_back(
+          TrustedRootPolicy{
+              .policy_id = mounted_source_policy_id(),
+              .root_path = storage_path_,
+          });
+    } else {
+      d_.public_disk_source_policy.unmatched_path_mode =
+          PublicDiskSourcePolicy::UnmatchedPathMode::kAllowAbsoluteFallback;
+    }
+  }
+  for (auto& trusted_root : d_.public_disk_source_policy.trusted_root_policies) {
+    if (!trusted_root.root_path.empty()) {
+      auto normalized_or = weakly_canonical_or_normalized(trusted_root.root_path);
+      if (normalized_or.ok()) {
+        trusted_root.root_path = *normalized_or;
+      }
+    }
+    if (trusted_root.policy_id.empty()) {
+      trusted_root.policy_id = default_public_disk_source_policy_id(trusted_root.root_path);
     }
   }
 }
@@ -241,6 +588,18 @@ std::string DiskArtifactService::import_cache_key_for_path(
     const std::filesystem::path& normalized_path,
     bool verify_checksums) const {
   return absl::StrCat(normalized_path.string(), "|verify=", verify_checksums ? "1" : "0");
+}
+
+std::string DiskArtifactService::mounted_source_policy_id() const {
+  if (storage_path_.empty()) {
+    return "trusted_absolute_local_path";
+  }
+  const std::string storage_root = storage_path_.string();
+  const std::vector<uint8_t> digest = common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(storage_root.data()), storage_root.size()));
+  const std::string hex =
+      absl::BytesToHexString(absl::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
+  return absl::StrCat("trusted_storage_root_", hex.substr(0, 16));
 }
 
 void DiskArtifactService::prune_expired_cache_locked(absl::Time now) {
@@ -364,7 +723,7 @@ absl::StatusOr<materialization_disk_resolve::ImportArtifactFromPathResult> DiskA
   };
 
   auto imported_or = materialization_disk_resolve::import_artifact_from_path(
-      normalized_path.string(), storage_path_, verify_checksums, publish_progress);
+      normalized_path.string(), std::filesystem::path(), verify_checksums, publish_progress);
 
   bool terminal_emitted = false;
   {
@@ -431,14 +790,14 @@ grpc::Status DiskArtifactService::import_artifact_from_path(
     return {StatusCode::PERMISSION_DENIED, "ImportArtifactFromPath is local-only (loopback/UDS)"};
   }
 
-  auto normalized_or = normalize_disk_import_path(req.path(), storage_path_);
-  if (!normalized_or.ok()) {
+  auto path_policy_or = resolve_disk_path_policy(req.path(), d_.public_disk_source_policy);
+  if (!path_policy_or.ok()) {
     materialization_disk_resolve::record_disk_import_outcome("invalid_argument");
-    return to_grpc_status(normalized_or.status());
+    return to_grpc_status(path_policy_or.status());
   }
 
   span->SetAttribute("tc.store.verify_checksums", verify_checksums);
-  auto imported_or = import_artifact_from_path_cached(*normalized_or, verify_checksums);
+  auto imported_or = import_artifact_from_path_cached(path_policy_or->normalized_path, verify_checksums);
   if (!imported_or.ok()) {
     return to_import_grpc_status(imported_or.status());
   }
@@ -448,6 +807,9 @@ grpc::Status DiskArtifactService::import_artifact_from_path(
   if (!metadata_status.ok()) {
     return to_grpc_status(metadata_status);
   }
+  const size_t promotions_noted = d_.source_registry.note_promoted_artifact_for_source(
+      imported.normalized_path.string(), to_registry_fingerprints(imported.file_fingerprints), imported.artifact_id);
+  (void)promotions_noted;
   fill_import_response(imported, resp);
   if (rctx.allow_high_card_attrs()) {
     span->SetAttribute("tc.disk.path", imported.normalized_path.string());
@@ -455,22 +817,7 @@ grpc::Status DiskArtifactService::import_artifact_from_path(
   }
   span->SetAttribute("tc.artifact.generation", static_cast<std::int64_t>(imported.generation));
 
-  d_.source_registry.upsert_binding(
-      imported.artifact_id,
-      ArtifactSourceRegistry::Entry{
-          .source_kind = ArtifactSourceRegistry::SourceKind::kLocalImport,
-          .canonical_source_path = imported.normalized_path.string(),
-          .canonical_index_json = imported.canonical_index_json,
-          .source_index_json = imported.source_index_json,
-          .source_disk_path = imported.normalized_path.string(),
-          .descriptor_present = imported.descriptor_present,
-          .index_multihash = imported.index_multihash,
-          .data_multihash = imported.data_multihash,
-          .generation = imported.generation,
-          .file_fingerprints = to_registry_fingerprints(imported.file_fingerprints),
-          .created_at = absl::Now(),
-          .updated_at = absl::Now(),
-      });
+  upsert_local_import_binding(d_.source_registry, imported);
 
   rctx.mark_success();
   return grpc::Status::OK;
@@ -497,24 +844,131 @@ grpc::Status DiskArtifactService::resolve_public_disk_source(
     return {StatusCode::PERMISSION_DENIED, "ResolvePublicDiskSource is local-only (loopback/UDS)"};
   }
 
-  auto normalized_or = normalize_disk_import_path(req.path(), storage_path_);
-  if (!normalized_or.ok()) {
+  auto path_policy_or = resolve_disk_path_policy(req.path(), d_.public_disk_source_policy);
+  if (!path_policy_or.ok()) {
     materialization_disk_resolve::record_disk_import_outcome("invalid_argument");
-    return to_grpc_status(normalized_or.status());
+    return to_grpc_status(path_policy_or.status());
   }
 
   span->SetAttribute("tc.store.verify_checksums", verify_checksums);
-  auto imported_or = import_artifact_from_path_cached(*normalized_or, verify_checksums);
+  span->SetAttribute("tc.disk.hash_data_skipped", true);
+  auto resolved_or = materialization_disk_resolve::resolve_mounted_source_artifact(
+      path_policy_or->normalized_path,
+      verify_checksums,
+      daemon_session_token_,
+      build_attestation_policy(path_policy_or->policy));
+  if (!resolved_or.ok()) {
+    return to_import_grpc_status(resolved_or.status());
+  }
+  auto existing_entry = d_.source_registry.lookup_binding(resolved_or->artifact_id);
+  if (existing_entry.has_value() && existing_entry->promoted_content_artifact_id.has_value() &&
+      !resolved_or->trusted_content_artifact_id.has_value()) {
+    resolved_or->trusted_content_artifact_id = existing_entry->promoted_content_artifact_id;
+    resolved_or->resolution_strategy =
+        materialization_disk_resolve::MountedSourceResolutionStrategy::kAttestedWithTrustedDescriptorHint;
+  }
+
+  fill_public_disk_source_response(*resolved_or, verify_checksums, resp);
+  if (rctx.allow_high_card_attrs()) {
+    span->SetAttribute("tc.disk.path", resolved_or->normalized_path.string());
+    span->SetAttribute("tc.artifact.id", resolved_or->artifact_id);
+    span->SetAttribute("tc.disk.policy_id", resolved_or->policy_id);
+  }
+  span->SetAttribute("tc.artifact.generation", static_cast<std::int64_t>(resolved_or->generation));
+  span->SetAttribute("tc.artifact.id_kind", artifact_id_kind_attr(resolved_or->artifact_id));
+  span->SetAttribute(
+      "tc.artifact.trusted_content_hint_kind",
+      trusted_content_hint_kind_attr(resolved_or->trusted_content_artifact_id));
+  span->SetAttribute("tc.disk.metadata_capability", metadata_capability_attr(resolved_or->metadata_capability));
+  span->SetAttribute("tc.disk.resolution_strategy", resolution_strategy_attr(resolved_or->resolution_strategy));
+  span->SetAttribute("tc.disk.validation_mode", validation_mode_attr(resolved_or->validation_mode));
+  d_.source_registry.upsert_binding(
+      resolved_or->artifact_id,
+      ArtifactSourceRegistry::Entry{
+          .source_kind = ArtifactSourceRegistry::SourceKind::kMountedSourceArtifact,
+          .canonical_source_path = resolved_or->normalized_path.string(),
+          .canonical_index_json = resolved_or->canonical_index_json,
+          .source_index_json = resolved_or->source_index_json,
+          .source_disk_path = resolved_or->normalized_path.string(),
+          .descriptor_present = resolved_or->descriptor_present,
+          .index_multihash = resolved_or->canonical_index_multihash,
+          .data_multihash = std::nullopt,
+          .trusted_content_artifact_id = resolved_or->trusted_content_artifact_id,
+          .promoted_content_artifact_id =
+              existing_entry.has_value() ? existing_entry->promoted_content_artifact_id : std::nullopt,
+          .policy_id = resolved_or->policy_id,
+          .snapshot_digest = resolved_or->snapshot_digest,
+          .generation = resolved_or->generation,
+          .tensor_aware_metadata = resolved_or->metadata_capability ==
+              materialization_disk_resolve::MountedSourceMetadataCapability::kTensorAware,
+          .validate_before_read = resolved_or->validation_mode ==
+              materialization_disk_resolve::MountedSourceValidationMode::kValidateBeforeRead,
+          .file_fingerprints = to_registry_fingerprints(resolved_or->file_fingerprints),
+          .created_at = absl::Now(),
+          .updated_at = absl::Now(),
+      });
+  rctx.mark_success();
+  return grpc::Status::OK;
+}
+
+grpc::Status DiskArtifactService::promote_mounted_source_artifact(
+    RpcContext& rctx,
+    const v2::PromoteMountedSourceArtifactRequest& req,
+    v2::PromoteMountedSourceArtifactResponse& resp) {
+  auto& span = rctx.span();
+  const bool verify_checksums = req.verify_checksums();
+  if (req.artifact_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
+  }
+  if (!common::is_msa1_artifact_id(req.artifact_id())) {
+    return {StatusCode::INVALID_ARGUMENT, "artifact_id must be an msa1 mounted-source artifact id"};
+  }
+  if (d_.shutdown_signal.is_shutting_down()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  const bool loopback_peer = is_loopback_grpc_peer(rctx.server_context().peer());
+  if (!loopback_peer) {
+    return {StatusCode::PERMISSION_DENIED, "PromoteMountedSourceArtifact is local-only (loopback/UDS)"};
+  }
+
+  auto resolution_or = materialization_request_common::resolve_artifact_and_disk_source(
+      d_.global_store_client,
+      &d_.source_registry,
+      storage_path_,
+      req.artifact_id(),
+      /*allow_disk=*/true,
+      /*allow_local_import_fallback=*/true,
+      /*loopback_peer=*/true);
+  if (!resolution_or.ok()) {
+    return to_import_grpc_status(resolution_or.status());
+  }
+  if (!resolution_or->normalized_disk_path.has_value()) {
+    return {StatusCode::FAILED_PRECONDITION, "mounted-source artifact has no local disk path in this daemon session"};
+  }
+
+  span->SetAttribute("tc.store.verify_checksums", verify_checksums);
+  span->SetAttribute("tc.artifact.id", req.artifact_id());
+  span->SetAttribute("tc.artifact.id_kind", artifact_id_kind_attr(req.artifact_id()));
+  auto imported_or = import_artifact_from_path_cached(*resolution_or->normalized_disk_path, verify_checksums);
   if (!imported_or.ok()) {
     return to_import_grpc_status(imported_or.status());
   }
 
-  fill_public_disk_source_response(*imported_or, verify_checksums, resp);
-  if (rctx.allow_high_card_attrs()) {
-    span->SetAttribute("tc.disk.path", imported_or->normalized_path.string());
-    span->SetAttribute("tc.artifact.id", imported_or->artifact_id);
+  const auto& imported = *imported_or;
+  auto metadata_status = ensure_artifact_metadata_registered(imported);
+  if (!metadata_status.ok()) {
+    return to_grpc_status(metadata_status);
   }
-  span->SetAttribute("tc.artifact.generation", static_cast<std::int64_t>(imported_or->generation));
+  const size_t promotions_noted = d_.source_registry.note_promoted_artifact_for_source(
+      imported.normalized_path.string(),
+      to_registry_fingerprints(imported.file_fingerprints),
+      imported.artifact_id,
+      ArtifactSourceRegistry::PromotionOrigin::kMountedVerify);
+  (void)promotions_noted;
+  upsert_local_import_binding(d_.source_registry, imported);
+  fill_promote_mounted_source_response(imported, req.artifact_id(), resp);
+  span->SetAttribute("tc.artifact.promoted_id", imported.artifact_id);
+  span->SetAttribute("tc.artifact.promoted_id_kind", artifact_id_kind_attr(imported.artifact_id));
   rctx.mark_success();
   return grpc::Status::OK;
 }
@@ -584,15 +1038,17 @@ grpc::Status DiskArtifactService::import_artifact_from_path_stream(
     return {StatusCode::PERMISSION_DENIED, update.message};
   }
 
-  auto normalized_or = normalize_disk_import_path(req.path(), storage_path_);
-  if (!normalized_or.ok()) {
+  auto path_policy_or = resolve_disk_path_policy(req.path(), d_.public_disk_source_policy);
+  if (!path_policy_or.ok()) {
     materialization_disk_resolve::record_disk_import_outcome("invalid_argument");
-    return send_error_and_return(to_grpc_status(normalized_or.status()));
+    return send_error_and_return(to_grpc_status(path_policy_or.status()));
   }
 
   span->SetAttribute("tc.store.verify_checksums", verify_checksums);
   auto imported_or = import_artifact_from_path_cached(
-      *normalized_or, verify_checksums, [&](const materialization_disk_resolve::ImportProgressUpdate& update) {
+      path_policy_or->normalized_path,
+      verify_checksums,
+      [&](const materialization_disk_resolve::ImportProgressUpdate& update) {
         if (update.done || update.error) {
           return;
         }
@@ -607,6 +1063,9 @@ grpc::Status DiskArtifactService::import_artifact_from_path_stream(
   if (!metadata_status.ok()) {
     return send_error_and_return(to_grpc_status(metadata_status));
   }
+  const size_t promotions_noted = d_.source_registry.note_promoted_artifact_for_source(
+      imported.normalized_path.string(), to_registry_fingerprints(imported.file_fingerprints), imported.artifact_id);
+  (void)promotions_noted;
   v2::ImportArtifactFromPathResponse final_resp;
   fill_import_response(imported, final_resp);
   if (rctx.allow_high_card_attrs()) {
@@ -615,22 +1074,7 @@ grpc::Status DiskArtifactService::import_artifact_from_path_stream(
   }
   span->SetAttribute("tc.artifact.generation", static_cast<std::int64_t>(imported.generation));
 
-  d_.source_registry.upsert_binding(
-      imported.artifact_id,
-      ArtifactSourceRegistry::Entry{
-          .source_kind = ArtifactSourceRegistry::SourceKind::kLocalImport,
-          .canonical_source_path = imported.normalized_path.string(),
-          .canonical_index_json = imported.canonical_index_json,
-          .source_index_json = imported.source_index_json,
-          .source_disk_path = imported.normalized_path.string(),
-          .descriptor_present = imported.descriptor_present,
-          .index_multihash = imported.index_multihash,
-          .data_multihash = imported.data_multihash,
-          .generation = imported.generation,
-          .file_fingerprints = to_registry_fingerprints(imported.file_fingerprints),
-          .created_at = absl::Now(),
-          .updated_at = absl::Now(),
-      });
+  upsert_local_import_binding(d_.source_registry, imported);
 
   materialization_disk_resolve::ImportProgressUpdate done;
   done.phase = materialization_disk_resolve::ImportArtifactPhase::kDone;
@@ -656,6 +1100,47 @@ grpc::Status DiskArtifactService::get_artifact_index_by_id(
   }
   if (d_.shutdown_signal.is_shutting_down()) {
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+
+  auto local_entry = d_.source_registry.lookup_binding(req.artifact_id());
+  if (common::is_msa1_artifact_id(req.artifact_id()) && !local_entry.has_value()) {
+    materialization_disk_resolve::record_mounted_source_validation_outcome("stale_session");
+    return {StatusCode::FAILED_PRECONDITION, "mounted-source artifact_id is not valid in this daemon session"};
+  }
+  if (local_entry.has_value() &&
+      local_entry->source_kind == ArtifactSourceRegistry::SourceKind::kMountedSourceArtifact &&
+      local_entry->validate_before_read) {
+    materialization_disk_resolve::SourceFingerprintMap expected_fingerprints;
+    expected_fingerprints.reserve(local_entry->file_fingerprints.size());
+    for (const auto& [relative_path, fingerprint] : local_entry->file_fingerprints) {
+      expected_fingerprints.insert_or_assign(
+          relative_path,
+          materialization_disk_resolve::SourceFileFingerprint{
+              .inode = fingerprint.inode,
+              .size = fingerprint.size,
+              .mtime_ns = fingerprint.mtime_ns,
+          });
+    }
+    auto validation_status = materialization_disk_resolve::validate_mounted_source_snapshot(
+        std::filesystem::path(local_entry->canonical_source_path),
+        local_entry->canonical_index_json,
+        local_entry->source_index_json,
+        expected_fingerprints);
+    if (!validation_status.ok()) {
+      materialization_disk_resolve::record_mounted_source_validation_outcome("mismatch");
+      const bool erased = d_.source_registry.erase_binding(req.artifact_id());
+      (void)erased;
+      return to_import_grpc_status(validation_status);
+    }
+    materialization_disk_resolve::record_mounted_source_validation_outcome("ok");
+    resp.set_tensor_index_data(local_entry->canonical_index_json);
+    rctx.mark_success();
+    return grpc::Status::OK;
+  }
+  if (local_entry.has_value() && !local_entry->canonical_index_json.empty()) {
+    resp.set_tensor_index_data(local_entry->canonical_index_json);
+    rctx.mark_success();
+    return grpc::Status::OK;
   }
 
   auto bytes_or = d_.engine.get_canonical_index_by_id(req.artifact_id());

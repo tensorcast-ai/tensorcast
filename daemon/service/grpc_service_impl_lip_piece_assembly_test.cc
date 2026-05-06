@@ -131,6 +131,7 @@ TEST_CASE("LIP pieces can be registered and assembled via remote keys", "[daemon
       /*node_address=*/"127.0.0.1",
       /*grpc_port=*/0,
       /*p2p_port=*/listen_port);
+  harness->kernel().worker_identity_store().set_registered("worker-0", "node-0");
   gs_stub->remote_node_id = "node-0";
   gs_stub->remote_node_address = "127.0.0.1";
   gs_stub->remote_node_port = listen_port;

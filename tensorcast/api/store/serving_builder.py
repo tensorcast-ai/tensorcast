@@ -29,7 +29,6 @@ from tensorcast.types import (
     BuilderMode,
     FinalizeClass,
     PureTransformPublicationSpec,
-    RealizationProtocol,
     RepresentationPublishContract,
     RepresentationPublishSpec,
     ServingAdmissionFacts,
@@ -213,14 +212,6 @@ def _coerce_serving_support_level(
     if isinstance(value, ServingSupportLevel):
         return value
     return ServingSupportLevel(str(value).strip())
-
-
-def _coerce_realization_protocol(
-    value: RealizationProtocol | str,
-) -> RealizationProtocol:
-    if isinstance(value, RealizationProtocol):
-        return value
-    return RealizationProtocol(str(value).strip())
 
 
 def _resolve_manifest_tensor_name(
@@ -885,17 +876,14 @@ def prepare_binding_finalize_serving_registration(
 def build_binding_finalize_admission_facts(
     *,
     support_level: ServingSupportLevel | str,
-    realization_protocol: RealizationProtocol
-    | str = RealizationProtocol.SCRATCH_THEN_COMMIT,
     topology_admission_digest: str | None = None,
-    fast_path_validated: bool = False,
+    same_binding_fast_path_validated: bool,
 ) -> ServingAdmissionFacts:
     return ServingAdmissionFacts(
         finalize_class=FinalizeClass.REPRESENTATION_CHANGING,
-        realization_protocol=_coerce_realization_protocol(realization_protocol),
         support_level=_coerce_serving_support_level(support_level),
         topology_admission_digest=topology_admission_digest,
-        fast_path_validated=bool(fast_path_validated),
+        same_binding_fast_path_validated=bool(same_binding_fast_path_validated),
     )
 
 
@@ -1239,11 +1227,6 @@ def build_binding_finalize_publication_bundle(
     build_intent: ServingBuildIntent,
     source_artifact: RegisteredArtifact | CanonicalIndex | object | None = None,
     contract_family: AssemblyContractFamily | str | None = None,
-    serving_artifact: RegisteredArtifact
-    | ArtifactDescriptor
-    | "StoreArtifactDescriptor"
-    | str
-    | None = None,
     publication_subject: ServingPublicationSubject | BindingValueRef | None = None,
     canonical_index: CanonicalIndex,
     representation_contract_hash: str | None = None,
@@ -1270,11 +1253,26 @@ def build_binding_finalize_publication_bundle(
             status_code="FAILED_PRECONDITION",
             retryable=False,
         )
+    if publication_subject is None:
+        raise ArtifactError(
+            "BINDING_FINALIZE publication requires a binding_value_ref publication_subject",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
+    if (
+        isinstance(publication_subject, ServingPublicationSubject)
+        and publication_subject.binding_value_ref is None
+    ):
+        raise ArtifactError(
+            "BINDING_FINALIZE publication requires a binding_value_ref publication_subject",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
     return build_serving_publication_bundle(
         build_intent=build_intent,
         source_artifact=source_artifact,
         contract_family=contract_family,
-        serving_artifact=serving_artifact,
+        serving_artifact=None,
         publication_subject=publication_subject,
         canonical_index=canonical_index,
         representation_contract_hash=representation_contract_hash,
@@ -1360,42 +1358,6 @@ def build_serving_publication_bundle_from_registered_artifact(
     )
 
 
-def build_binding_finalize_publication_bundle_from_registered_artifact(
-    *,
-    build_intent: ServingBuildIntent,
-    source_artifact: RegisteredArtifact | CanonicalIndex | object | None = None,
-    contract_family: AssemblyContractFamily | str | None = None,
-    serving_artifact: RegisteredArtifact,
-    representation_contract_hash: str | None = None,
-    source_version_key: str | None = None,
-    serving_version_key: str | None = None,
-    logical_topology_json: str | None = None,
-    serving_manifest_ref: str | None = None,
-    layout_id: str | None = None,
-    requirements: AssemblyRequirementSetRef | None = None,
-    readiness_policy: AssemblyReadinessPolicy | None = None,
-    structural_view_ids: tuple[str, ...] = (),
-    admission_facts: ServingAdmissionFacts | None = None,
-) -> RepresentationPublishSpec:
-    return build_binding_finalize_publication_bundle(
-        build_intent=build_intent,
-        source_artifact=source_artifact,
-        contract_family=contract_family,
-        serving_artifact=serving_artifact,
-        canonical_index=_canonical_index_from_input(serving_artifact),
-        representation_contract_hash=representation_contract_hash,
-        source_version_key=source_version_key,
-        serving_version_key=serving_version_key,
-        logical_topology_json=logical_topology_json,
-        serving_manifest_ref=serving_manifest_ref,
-        layout_id=layout_id,
-        requirements=requirements,
-        readiness_policy=readiness_policy,
-        structural_view_ids=structural_view_ids,
-        admission_facts=admission_facts,
-    )
-
-
 __all__ = [
     "PreparedServingRegistration",
     "PureTransformPublicationSpec",
@@ -1416,7 +1378,6 @@ __all__ = [
     "build_serving_publication_bundle_from_registered_artifact",
     "build_binding_finalize_admission_facts",
     "build_binding_finalize_publication_bundle",
-    "build_binding_finalize_publication_bundle_from_registered_artifact",
     "build_pure_transform_serving_args",
     "build_pure_transform_publication_spec",
     "build_pure_transform_transform_spec",

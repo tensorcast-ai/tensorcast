@@ -150,9 +150,11 @@ class FakeBindingClient:
             source=store_daemon_pb2.PublicDiskSourceHandle(
                 path=str(kwargs["path"]),
                 canonical_index_bytes=self._index_bytes,
-                artifact_id="",
+                artifact_id="msa1:test-session~trusted_storage_root_test~partitioned~deadbeef",
                 generation=0,
                 verify_checksums=bool(kwargs.get("verify_checksums", True)),
+                policy_id="trusted_storage_root_test",
+                exact_size_bytes=64,
             )
         )
 
@@ -1248,7 +1250,7 @@ def test_binding_realize_from_accepts_public_disk_source_handle(
     disk_source = store_mod.PublicDiskSourceHandle(
         path="/tmp/public-disk-source",
         canonical_index_bytes=_make_index_bytes(),
-        artifact_id=None,
+        artifact_id="msa1:test-session~trusted_storage_root_test~partitioned~deadbeef",
         verify_checksums=False,
     )
 
@@ -1265,7 +1267,10 @@ def test_binding_realize_from_accepts_public_disk_source_handle(
 
     assert isinstance(update_epoch, BindingUpdateEpoch)
     assert len(client.refill_calls) == 1
-    assert client.refill_calls[0]["artifact_id"] == ""
+    assert (
+        client.refill_calls[0]["artifact_id"]
+        == "msa1:test-session~trusted_storage_root_test~partitioned~deadbeef"
+    )
     public_disk_source = client.refill_calls[0]["public_disk_source"]
     assert public_disk_source.path == "/tmp/public-disk-source"
     assert public_disk_source.verify_checksums is False
@@ -1284,8 +1289,23 @@ def test_store_resolve_public_disk_source_returns_public_handle(
     assert isinstance(source, store_mod.PublicDiskSourceHandle)
     assert source.path == "/tmp/public-disk-source"
     assert source.canonical_index_bytes == _make_index_bytes()
+    assert (
+        source.artifact_id
+        == "msa1:test-session~trusted_storage_root_test~partitioned~deadbeef"
+    )
     assert source.verify_checksums is False
     assert client.resolve_public_disk_calls[-1]["path"] == "/tmp/public-disk-source"
+
+
+def test_store_artifact_accepts_msa1_attested_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, _client = _setup_store(monkeypatch)
+
+    source = store.resolve_public_disk_source("/tmp/public-disk-source")
+    artifact = store.artifact(artifact_id=source.artifact_id)
+
+    assert artifact.artifact_id == source.artifact_id
 
 
 def test_binding_begin_update_clears_current_value_and_seal_preserves_ptrs(
@@ -1837,6 +1857,7 @@ def test_complete_binding_finalize_publication_from_binding_uses_current_value_c
         ),
         admission_facts=store_mod.build_binding_finalize_admission_facts(
             support_level=store_mod.ServingSupportLevel.BUILDER_PUBLICATION_READY,
+            same_binding_fast_path_validated=True,
         ),
         contract_family="canonical_full",
         representation_contract_hash="bafkboundrepr",
@@ -1976,6 +1997,12 @@ class _FakeBindingSlot:
             source_artifact_id="artifact-1",
             selection=self.selection,
             is_artifact_backed=True,
+            verification_state=store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_VERIFIED,
+            verification_job_id=None,
+            source_artifact_ref=None,
+            local_serving_ref=None,
+            serving_artifact_id="artifact-1",
+            verification_failure_reason=None,
         )
         self.published_lease_id: str | None = None
         self.swap_calls: list[dict[str, object]] = []
@@ -1992,6 +2019,12 @@ class _FakeBindingSlot:
             source_artifact_id=self.artifact_id,
             selection=self.selection,
             is_artifact_backed=True,
+            verification_state=store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_VERIFIED,
+            verification_job_id=None,
+            source_artifact_ref=None,
+            local_serving_ref=None,
+            serving_artifact_id=self.artifact_id,
+            verification_failure_reason=None,
         )
 
     def publish_replica(self, *, ttl_ms: int = 0, ctx: object | None = None) -> None:
@@ -2031,9 +2064,107 @@ class _FakeWaitEventSlot(_FakeBindingSlot):
             source_artifact_id=None,
             selection=None,
             is_artifact_backed=False,
+            verification_state=store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_VERIFIED,
+            verification_job_id=None,
+            source_artifact_ref=None,
+            local_serving_ref=f"binding-local:{self.binding_id}:value-local",
+            serving_artifact_id=None,
+            verification_failure_reason=None,
         )
         self.artifact_id = None
         self.selection = None
+
+
+class _FakeOptimisticBindingSlot(_FakeBindingSlot):
+    def __init__(self) -> None:
+        super().__init__()
+        self.freeze_calls: list[dict[str, object]] = []
+        self.start_promote_calls: list[dict[str, object]] = []
+        self.get_promotion_status_calls: list[dict[str, object]] = []
+
+    def freeze_current(
+        self,
+        *,
+        update_epoch: object,
+        source_artifact_ref: str | None = None,
+        ctx: object | None = None,
+    ) -> None:
+        self.freeze_calls.append(
+            {
+                "update_epoch": update_epoch,
+                "source_artifact_ref": source_artifact_ref,
+                "ctx": ctx,
+            }
+        )
+        self.artifact_id = None
+        self.selection = None
+        self.current_value_metadata = types.SimpleNamespace(
+            binding_id=self.binding_id,
+            binding_layout_id=self.binding_layout_id,
+            binding_value_id="value-local-ready",
+            seal_generation=2,
+            source_artifact_id=None,
+            selection=None,
+            is_artifact_backed=False,
+            verification_state=store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_PENDING,
+            verification_job_id=None,
+            source_artifact_ref=source_artifact_ref,
+            local_serving_ref=f"binding-local:{self.binding_id}:value-local-ready",
+            serving_artifact_id=None,
+            verification_failure_reason=None,
+        )
+
+    def start_promote_current_value(
+        self,
+        *,
+        binding_value_id: str,
+        ctx: object | None = None,
+    ) -> store_daemon_pb2.BindingPromotionStatus:
+        self.start_promote_calls.append(
+            {"binding_value_id": binding_value_id, "ctx": ctx}
+        )
+        self.current_value_metadata.verification_job_id = "bpj:test"
+        status = store_daemon_pb2.BindingPromotionStatus(
+            verification_job_id="bpj:test",
+            binding_id=self.binding_id,
+            binding_value_id=binding_value_id,
+            state=store_daemon_pb2.BINDING_PROMOTION_JOB_STATE_PENDING,
+        )
+        status.current_value.CopyFrom(
+            store_daemon_pb2.BindingValue(
+                binding_id=self.binding_id,
+                binding_layout_id=self.binding_layout_id,
+                binding_value_id=binding_value_id,
+                seal_generation=self.current_value_metadata.seal_generation,
+                is_artifact_backed=False,
+                verification_state=store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_PENDING,
+                verification_job_id="bpj:test",
+                source_artifact_ref=self.current_value_metadata.source_artifact_ref,
+                local_serving_ref=self.current_value_metadata.local_serving_ref,
+            )
+        )
+        return status
+
+    def get_promotion_status(
+        self,
+        *,
+        verification_job_id: str | None,
+        binding_value_id: str,
+        ctx: object | None = None,
+    ) -> store_daemon_pb2.BindingPromotionStatus:
+        self.get_promotion_status_calls.append(
+            {
+                "verification_job_id": verification_job_id,
+                "binding_value_id": binding_value_id,
+                "ctx": ctx,
+            }
+        )
+        return store_daemon_pb2.BindingPromotionStatus(
+            verification_job_id=str(verification_job_id or "bpj:test"),
+            binding_id=self.binding_id,
+            binding_value_id=binding_value_id,
+            state=store_daemon_pb2.BINDING_PROMOTION_JOB_STATE_PENDING,
+        )
 
 
 def test_binding_wait_events_are_synchronized_before_transitions() -> None:
@@ -2059,6 +2190,46 @@ def test_binding_wait_events_reject_invalid_objects() -> None:
     with pytest.raises(ArtifactError) as excinfo:
         binding.begin_update(wait_events=[object()])
     assert excinfo.value.status_code == "INVALID_ARGUMENT"
+
+
+def test_binding_freeze_current_and_async_promotion_surface_pending_metadata() -> None:
+    slot = _FakeOptimisticBindingSlot()
+    binding = Binding(slot)
+    epoch = BindingUpdateEpoch(binding_id=slot.binding_id, update_epoch="epoch-1")
+
+    sealed = binding.freeze_current(
+        update_epoch=epoch,
+        source_artifact_ref="msa1:test-session~policy~partitioned~source",
+    )
+    status = binding.start_promote_current_value()
+    polled = binding.get_promotion_status(verification_job_id="bpj:test")
+
+    assert slot.freeze_calls == [
+        {
+            "update_epoch": epoch,
+            "source_artifact_ref": "msa1:test-session~policy~partitioned~source",
+            "ctx": None,
+        }
+    ]
+    assert sealed.is_artifact_backed is False
+    assert sealed.is_verification_pending is True
+    assert sealed.source_artifact_ref == "msa1:test-session~policy~partitioned~source"
+    assert sealed.local_serving_ref == "binding-local:binding-1:value-local-ready"
+    assert slot.start_promote_calls == [
+        {"binding_value_id": "value-local-ready", "ctx": None}
+    ]
+    assert status.verification_job_id == "bpj:test"
+    assert status.state == store_daemon_pb2.BINDING_PROMOTION_JOB_STATE_PENDING
+    assert binding.current_value is not None
+    assert binding.current_value.verification_job_id == "bpj:test"
+    assert slot.get_promotion_status_calls == [
+        {
+            "verification_job_id": "bpj:test",
+            "binding_value_id": "value-local-ready",
+            "ctx": None,
+        }
+    ]
+    assert polled.verification_job_id == "bpj:test"
 
 
 def test_binding_swap_encodes_transport_group_tags_into_operation_id() -> None:

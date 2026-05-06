@@ -64,6 +64,30 @@ using namespace tensorcast;
 
 namespace {
 
+absl::StatusOr<std::filesystem::path> normalize_storage_root_for_config(const std::filesystem::path& storage_root) {
+  std::error_code ec;
+  const bool exists = std::filesystem::exists(storage_root, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat storage root: ", storage_root.string()));
+  }
+  if (!exists) {
+    return absl::InvalidArgumentError(absl::StrCat("storage root does not exist: ", storage_root.string()));
+  }
+  const bool is_dir = std::filesystem::is_directory(storage_root, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat storage root: ", storage_root.string()));
+  }
+  if (!is_dir) {
+    return absl::InvalidArgumentError(absl::StrCat("storage root must be a directory: ", storage_root.string()));
+  }
+  auto normalized = std::filesystem::weakly_canonical(storage_root, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(
+        ec.value(), absl::StrCat("Failed to canonicalize storage root: ", storage_root.string()));
+  }
+  return normalized;
+}
+
 absl::Status probe_memfd_shared_mapping() {
   constexpr size_t kProbeBytes = 4096;
   int fd = static_cast<int>(::syscall(SYS_memfd_create, "tensorcast_probe", MFD_CLOEXEC | MFD_ALLOW_SEALING));
@@ -1120,6 +1144,60 @@ int main(int argc, char** argv) {
     daemon_opts.eviction_check_interval = std::chrono::milliseconds(d.seconds() * 1000 + d.nanos() / 1000000);
   }
   daemon_opts.storage_path = storage_root;
+  const auto& public_disk_source = cfg.public_disk_source();
+  daemon_opts.public_disk_source_policy.unmatched_path_mode = public_disk_source.unmatched_path_mode() ==
+          tensorcast::config::v1::DaemonConfig::PublicDiskSource::UNMATCHED_PATH_MODE_ALLOW_ABSOLUTE_FALLBACK
+      ? daemon::DaemonOptions::PublicDiskSourcePolicy::UnmatchedPathMode::kAllowAbsoluteFallback
+      : daemon::DaemonOptions::PublicDiskSourcePolicy::UnmatchedPathMode::kReject;
+  for (const auto& trusted_root : public_disk_source.trusted_root_policies()) {
+    daemon::DaemonOptions::PublicDiskSourcePolicy::TrustedRootPolicy policy;
+    policy.policy_id = trusted_root.policy_id();
+    if (!trusted_root.root_path().empty()) {
+      auto normalized_root_or = normalize_storage_root_for_config(std::filesystem::path(trusted_root.root_path()));
+      if (!normalized_root_or.ok()) {
+        LOG(ERROR) << "INVALID_ARGUMENT: public_disk_source.trusted_root_policies.root_path invalid ("
+                   << trusted_root.root_path() << "): " << normalized_root_or.status();
+        return 2;
+      }
+      policy.root_path = *normalized_root_or;
+    }
+    for (const auto format : trusted_root.allowed_formats()) {
+      switch (format) {
+        case tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_FORMAT_PARTITIONED:
+          policy.allowed_formats.push_back(daemon::DaemonOptions::PublicDiskSourcePolicy::Format::kPartitioned);
+          break;
+        case tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_FORMAT_SAFETENSORS:
+          policy.allowed_formats.push_back(daemon::DaemonOptions::PublicDiskSourcePolicy::Format::kSafetensors);
+          break;
+        case tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_FORMAT_UNSPECIFIED:
+        default:
+          break;
+      }
+    }
+    for (const auto capability : trusted_root.allowed_metadata_capabilities()) {
+      switch (capability) {
+        case tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_TENSOR_AWARE:
+          policy.allowed_metadata_capabilities.push_back(
+              daemon::DaemonOptions::PublicDiskSourcePolicy::MetadataCapability::kTensorAware);
+          break;
+        case tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_BYTE_ONLY:
+          policy.allowed_metadata_capabilities.push_back(
+              daemon::DaemonOptions::PublicDiskSourcePolicy::MetadataCapability::kByteOnly);
+          break;
+        case tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_UNSPECIFIED:
+        default:
+          break;
+      }
+    }
+    policy.descriptor_reuse_mode = trusted_root.descriptor_reuse_mode() ==
+            tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_DESCRIPTOR_REUSE_MODE_DISABLED
+        ? daemon::DaemonOptions::PublicDiskSourcePolicy::DescriptorReuseMode::kDisabled
+        : daemon::DaemonOptions::PublicDiskSourcePolicy::DescriptorReuseMode::kTrustedHintOnly;
+    policy.validation_mode = daemon::DaemonOptions::PublicDiskSourcePolicy::ValidationMode::kValidateBeforeRead;
+    policy.lightweight_attestation_enabled =
+        !trusted_root.has_lightweight_attestation_enabled() || trusted_root.lightweight_attestation_enabled();
+    daemon_opts.public_disk_source_policy.trusted_root_policies.push_back(std::move(policy));
+  }
   daemon_opts.local_handle_socket_path = cfg.lifecycle().handle_leases().local_handle_socket_path();
   if (cfg.lifecycle().handle_leases().has_ttl()) {
     daemon_opts.handle_lease_ttl = duration_to_millis(cfg.lifecycle().handle_leases().ttl());
@@ -1128,6 +1206,77 @@ int main(int argc, char** argv) {
   daemon_opts.cpu_shared_memory_enabled = opts.cpu_shared_memory_enabled;
   daemon_opts.external_target_verification_enabled = cfg.engine().enable_external_target_verification();
   daemon_opts.max_concurrency = std::max<uint32_t>(1, opts.promotion.max_concurrency);
+  const auto& optimistic = cfg.optimistic_local_ready();
+  switch (optimistic.mode()) {
+    case tensorcast::config::v1::OptimisticLocalReady::MODE_STRICT_CANONICAL_BLOCKING:
+      daemon_opts.optimistic_local_ready.mode =
+          daemon::DaemonOptions::OptimisticLocalReady::Mode::kStrictCanonicalBlocking;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::MODE_OPTIMISTIC_ASYNC_MI2:
+      daemon_opts.optimistic_local_ready.mode = daemon::DaemonOptions::OptimisticLocalReady::Mode::kOptimisticAsyncMi2;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::MODE_OPTIMISTIC_LOCAL_ONLY:
+      daemon_opts.optimistic_local_ready.mode = daemon::DaemonOptions::OptimisticLocalReady::Mode::kOptimisticLocalOnly;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::MODE_DISABLED:
+    case tensorcast::config::v1::OptimisticLocalReady::MODE_UNSPECIFIED:
+    default:
+      daemon_opts.optimistic_local_ready.mode = daemon::DaemonOptions::OptimisticLocalReady::Mode::kDisabled;
+      break;
+  }
+  daemon_opts.optimistic_local_ready.trusted_root_policy_ids.assign(
+      optimistic.trusted_root_policy_ids().begin(), optimistic.trusted_root_policy_ids().end());
+  daemon_opts.optimistic_local_ready.model_families.assign(
+      optimistic.model_families().begin(), optimistic.model_families().end());
+  daemon_opts.optimistic_local_ready.topology_constraints.assign(
+      optimistic.topology_constraints().begin(), optimistic.topology_constraints().end());
+  switch (optimistic.promotion_trigger()) {
+    case tensorcast::config::v1::OptimisticLocalReady::PROMOTION_TRIGGER_AFTER_READY:
+      daemon_opts.optimistic_local_ready.promotion_trigger =
+          daemon::DaemonOptions::OptimisticLocalReady::PromotionTrigger::kAfterReady;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::PROMOTION_TRIGGER_AFTER_FIRST_TOKEN:
+      daemon_opts.optimistic_local_ready.promotion_trigger =
+          daemon::DaemonOptions::OptimisticLocalReady::PromotionTrigger::kAfterFirstToken;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::PROMOTION_TRIGGER_DELAYED:
+      daemon_opts.optimistic_local_ready.promotion_trigger =
+          daemon::DaemonOptions::OptimisticLocalReady::PromotionTrigger::kDelayed;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::PROMOTION_TRIGGER_AFTER_FREEZE:
+    case tensorcast::config::v1::OptimisticLocalReady::PROMOTION_TRIGGER_UNSPECIFIED:
+    default:
+      daemon_opts.optimistic_local_ready.promotion_trigger =
+          daemon::DaemonOptions::OptimisticLocalReady::PromotionTrigger::kAfterFreeze;
+      break;
+  }
+  daemon_opts.optimistic_local_ready.per_device_promotion_concurrency =
+      std::max<uint32_t>(1, optimistic.per_device_promotion_concurrency());
+  daemon_opts.optimistic_local_ready.scheduling_class = optimistic.scheduling_class();
+  daemon_opts.optimistic_local_ready.retry_budget = optimistic.retry_budget();
+  if (optimistic.has_timeout()) {
+    daemon_opts.optimistic_local_ready.timeout = duration_to_millis(optimistic.timeout());
+  }
+  switch (optimistic.failure_action()) {
+    case tensorcast::config::v1::OptimisticLocalReady::FAILURE_ACTION_FAIL_HEALTH:
+      daemon_opts.optimistic_local_ready.failure_action =
+          daemon::DaemonOptions::OptimisticLocalReady::FailureAction::kFailHealth;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::FAILURE_ACTION_DRAIN:
+      daemon_opts.optimistic_local_ready.failure_action =
+          daemon::DaemonOptions::OptimisticLocalReady::FailureAction::kDrain;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::FAILURE_ACTION_WARN_ONLY:
+      daemon_opts.optimistic_local_ready.failure_action =
+          daemon::DaemonOptions::OptimisticLocalReady::FailureAction::kWarnOnly;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::FAILURE_ACTION_MARK_UNVERIFIED:
+    case tensorcast::config::v1::OptimisticLocalReady::FAILURE_ACTION_UNSPECIFIED:
+    default:
+      daemon_opts.optimistic_local_ready.failure_action =
+          daemon::DaemonOptions::OptimisticLocalReady::FailureAction::kMarkUnverified;
+      break;
+  }
   const auto& post_seal = cfg.post_seal();
   daemon_opts.post_seal_policy.migrate_views = post_seal.migrate_views();
   daemon_opts.post_seal_policy.migrate_transpose_only = post_seal.migrate_transpose_only();

@@ -92,7 +92,7 @@ engine:
     owner_file_collective_shared_fs_only: true
     owner_file_collective_max_owner_skew_ratio: 1.5
     owner_file_collective_min_dedup_saving_bytes: 64MB
-    owner_file_collective_group_assemble_timeout: 2s
+    owner_file_collective_group_assemble_timeout: 15s
     owner_file_collective_allow_mixed_residual: false
     owner_file_collective_planner_cache_entries: 256
 ```
@@ -379,7 +379,9 @@ As with local-batched, collective execution is still tensor-aware:
 
 - replicated tensors,
 - dim0-partitioned tensors,
-- dim1-partitioned tensors
+- dim1-partitioned tensors,
+- and mapped-target rect2d tensor slices when the local typed executor owns the
+  destination shard
 
 are handled separately with different execution routines.
 
@@ -434,13 +436,22 @@ The key differences from ordinary `tensor_dict` startup are:
 - collective mapped execution is only possible when a derived representation
   work plan and
   collective group are both present,
-- owner-file or collective mapped execution is only eligible when the emitted
-  work plan already has zero residual generic fallback,
-- runtime execution must not partially execute mapped work and then implicitly
-  derive new residual fallback at execution time,
-- otherwise the residual executor is still the byte-range fallback path, but it
+- the overlap/dedup gate admits only replicated source-overlap work to the
+  owner-file collective lane,
+- same-host disjoint TP shards are routed to the local tensor-aware mapped
+  executor when the work plan exposes enough tensor metadata,
+- that local executor handles full/dim0/dim1 jobs plus 2D rectangular
+  source/destination slices, and subtracts its covered destination ranges before
+  building any byte-range residual,
+- any remaining residual executor is still the byte-range fallback path, but it
   now reports through typed source-bound executor names rather than the generic
   replica-path label.
+
+The Step3p5 TP8 same-host closure case
+`/data/tc/0113-tp8-rect2d-final-20260428-125500` is the reference profile for
+this mixed mapped strategy: `137` local rect2d jobs absorbed the previous
+`873,562,112` byte residual tail, `actual_generic_backend_bytes=0`, and ready
+time improved to `136.271s`.
 
 ## Runtime Binding And Ordinary Disk Startup
 

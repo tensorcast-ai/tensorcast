@@ -10,7 +10,7 @@ related_code:
   - tensorcast/daemon_config.py
   - tensorcast/common/config/normalize.py
 created: 2025-09-09
-last_updated: 2026-03-11
+last_updated: 2026-04-30
 ---
 
 # Summary
@@ -44,6 +44,14 @@ Authoritative package namespace: `tensorcast.config.v1`. Separate top‑level me
   - `high_availability`: `global_store_endpoints`, heartbeat/periodic sync/retry.
   - `communicator`: `tensorcast.communicator.v1.CommunicatorConfig` (reused schema).
   - `engine`: `*_bytes`, streaming and CPU VS sizing, `streaming_buffer_chunks`, and typed materialization-strategy policy including executor budgets, thresholds, and diagnostics controls.
+  - `public_disk_source`: typed trusted-source policies for metadata-first
+    mounted-source resolve, including stable policy ids, root allow-lists,
+    format allow-lists, descriptor-reuse rules, snapshot/fallback behavior, and
+    any explicitly-scoped compatibility switches.
+  - `optimistic_local_ready`: typed policy for same-daemon local-ready serving
+    before content verification completes, including admitted roots, model
+    families, topology requirements, promotion scheduling, GPU hash concurrency,
+    and verification-failure behavior.
   - `envs`: launcher-only environment variables applied by the CLI/SDK when spawning the daemon binary. `LD_LIBRARY_PATH` is merged deterministically as inherited entries, then `envs.LD_LIBRARY_PATH`, then auto-discovered TensorCast/PyTorch/CUDA library directories.
   - `pinned_memory`: daemon-wide pinned budget, class pools, and allocation timeout.
   - `observability`: OTel (lang‑agnostic), logging (enum level, sinks), tracing; `otel_cxx` holds C++‑specific toggles.
@@ -108,6 +116,20 @@ Tests cover normalization of enum aliases in both Global Store and Client loader
 - Distributed namespace profiles (for example byte artifact routing invariants such as shard count/hash version/lease
   staleness policy) must be modeled as typed config fields and remain cluster-consistent; incompatible rolling changes
   must have an explicit cutover strategy instead of mixed semantics.
+- Trusted mounted-source behavior must also be modeled as typed daemon config.
+  Root matching, format allow-lists, descriptor reuse, source-snapshot policy,
+  and unmatched-path behavior must not be hidden in path conventions,
+  environment variables, or call-site-local heuristics.
+- Optimistic local-ready serving must also be modeled as typed daemon and
+  integration config. Whether startup may proceed before `mi2` promotion,
+  whether background promotion is required, when promotion starts, and how
+  verification failure affects health or draining must not be hidden in
+  environment variables or model-loader call-site defaults.
+- Production optimistic local-ready policy must make promotion scheduling
+  explicit. The safe default is promotion after the integration has reached
+  local-ready or true model-ready state, not immediately after the first rank
+  freezes. Promotion concurrency, queueing, active-load gating, and failure
+  action are config-governed operational policy, not hardcoded SDK behavior.
 
 # Schema Outline & Conventions
 
@@ -157,6 +179,26 @@ Tests cover normalization of enum aliases in both Global Store and Client loader
   - Enum aliases (e.g., `grpc`, `info`) are accepted and canonicalized.
   - Durations use canonical Protobuf strings; C++ additionally accepts `ms/s/m/h` shorthand.
 - Environment variables and ad‑hoc flags that previously affected runtime behavior are removed or ignored in favor of config fields; launcher-only daemon environment is configured explicitly via `DaemonConfig.envs`.
+- Daemon trusted public disk source policy, when enabled, is represented in the
+  config schema with deterministic validation rules (for example rejecting
+  ambiguous overlapping roots and invalid format allow-lists).
+- Daemon optimistic local-ready policy, when enabled, is represented in the
+  config schema with deterministic validation rules:
+  - mode is one of `disabled`, `strict_canonical_blocking`,
+    `optimistic_async_mi2`, or `optimistic_local_only`;
+  - admitted model families and trusted roots are explicit;
+  - async promotion concurrency, stream priority, trigger
+    (`after_freeze`, `after_ready`, `after_first_token`, or delayed), and retry
+    budget are explicit;
+  - production profiles use `after_ready` or an equivalent integration
+    local-ready barrier before identity-forming work starts; `after_freeze` is
+    a compatibility or experiment trigger unless the integration can prove it
+    is post-barrier;
+  - daemon-side promotion scheduling can enforce conservative defaults such as
+    per-device concurrency `1`, global concurrency `1`, and deferral while
+    active refill/freeze/binding-allocation work is present;
+  - verification failure action is explicit (`mark_unverified`, `fail_health`,
+    `drain`, or `warn_only` for non-production profiles).
 - Example configurations in `examples/config/store_daemon_config.yaml` and `examples/config/global_store_config.yaml` stay in sync with config changes (add/remove fields or default updates).
 - Documentation for daemon, global store, and client reflects the single‑file configuration model.
 

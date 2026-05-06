@@ -17,6 +17,8 @@
 #include "absl/strings/str_cat.h"
 #include "core/common/artifact_hash.h"
 #include "core/cuda/cuda_api.h"
+#include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/materialization/dataplane/metadata/disk_artifact_context.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
 #include "nlohmann/json.hpp"
 
@@ -146,15 +148,19 @@ absl::StatusOr<std::string> load_canonical_index_with_disk_fallback(
     if (!normalized_disk_path.has_value()) {
       return absl::FailedPreconditionError("disk source path required when Global Store is unavailable");
     }
-    auto idx_status = ensure_tensor_index_present(*normalized_disk_path);
-    if (!idx_status.ok()) {
-      return idx_status;
+    auto context_or = store::loader::get_disk_artifact_context(*normalized_disk_path);
+    if (!context_or.ok()) {
+      return context_or.status();
     }
-    auto local_or = store::loader::read_from_artifact_dir(*normalized_disk_path, device_ordinal);
-    if (!local_or.ok()) {
-      return local_or.status();
+    if (!(*context_or)->is_safetensors() && !(*context_or)->tensor_index_json_present() &&
+        !(*context_or)->tensor_index_cbor_present()) {
+      return store::loading::build_synthetic_payload_canonical_index_json((*context_or)->total_size());
     }
-    return local_or->canonical_index_json;
+    auto index_or = (*context_or)->get_index_info(device_ordinal);
+    if (!index_or.ok()) {
+      return index_or.status();
+    }
+    return index_or->canonical_index_json;
   };
 
   const bool prefer_disk_index = normalized_disk_path.has_value() && !gs_connected;

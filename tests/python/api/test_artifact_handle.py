@@ -71,22 +71,31 @@ class _ClientStub:
         *,
         disk_generation: int | None = None,
         disk_artifact_id: str | None = None,
+        mounted_generation: int | None = None,
+        mounted_artifact_id: str | None = None,
+        trusted_content_artifact_id: str | None = None,
         startup_in_progress_failures: int = 0,
     ) -> None:
         self.canonical_index_bytes = canonical_index_bytes
         self.disk_generation = disk_generation
         self.disk_artifact_id = disk_artifact_id
+        self.mounted_generation = mounted_generation
+        self.mounted_artifact_id = mounted_artifact_id
+        self.trusted_content_artifact_id = trusted_content_artifact_id
         self.startup_in_progress_failures = startup_in_progress_failures
         self.unloaded: list[tuple[str, str]] = []
         self.get_index_calls = 0
-        self.resolve_calls: list[tuple[str, bool]] = []
+        self.import_calls: list[tuple[str, bool]] = []
+        self.resolve_public_disk_calls: list[tuple[str, bool]] = []
+        self.promote_mounted_source_calls: list[tuple[str, bool, float | None]] = []
+        self.publish_calls: list[tuple[str, str]] = []
 
     def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
         self.get_index_calls += 1
         return self.canonical_index_bytes
 
     def import_artifact_from_path_v2(self, *, path: str, verify_checksums: bool = True):
-        self.resolve_calls.append((path, bool(verify_checksums)))
+        self.import_calls.append((path, bool(verify_checksums)))
         generation = self.disk_generation if self.disk_generation is not None else 0
 
         class _Resp:
@@ -124,6 +133,61 @@ class _ClientStub:
         event.result.CopyFrom(final_resp)
         yield event
 
+    def resolve_public_disk_source(self, *, path: str, verify_checksums: bool = True):
+        self.resolve_public_disk_calls.append((path, bool(verify_checksums)))
+        if self.startup_in_progress_failures > 0:
+            self.startup_in_progress_failures -= 1
+            raise RuntimeError(
+                "Local StoreDaemon (daemon) is not available. Msg: "
+                "daemon startup still in progress: prewarming"
+            )
+        mounted_generation = (
+            self.mounted_generation
+            if self.mounted_generation is not None
+            else self.disk_generation
+        )
+        mounted_artifact_id = (
+            self.mounted_artifact_id or "msa1:test-session~policy~safetensors~deadbeef"
+        )
+        trusted_content_artifact_id = (
+            self.trusted_content_artifact_id or self.disk_artifact_id or ""
+        )
+        return store_daemon_pb2.ResolvePublicDiskSourceResponse(
+            source=store_daemon_pb2.PublicDiskSourceHandle(
+                path=path,
+                canonical_index_bytes=self.canonical_index_bytes,
+                artifact_id=mounted_artifact_id,
+                generation=mounted_generation or 0,
+                verify_checksums=bool(verify_checksums),
+                trusted_content_artifact_id=trusted_content_artifact_id,
+            )
+        )
+
+    def publish_replica_key(self, *, key: str, descriptor) -> bool:
+        self.publish_calls.append((key, str(descriptor.artifact_id)))
+        return True
+
+    def promote_mounted_source_artifact(
+        self,
+        *,
+        artifact_id: str,
+        verify_checksums: bool = True,
+        timeout_s: float | None = None,
+    ):
+        self.promote_mounted_source_calls.append(
+            (
+                artifact_id,
+                bool(verify_checksums),
+                float(timeout_s) if timeout_s is not None else None,
+            )
+        )
+        return store_daemon_pb2.PromoteMountedSourceArtifactResponse(
+            artifact_id=self.disk_artifact_id or "mi2:idx:data",
+            canonical_index_bytes=self.canonical_index_bytes,
+            generation=self.disk_generation or 0,
+            source_artifact_id=artifact_id,
+        )
+
     def unload_replica(self, replica_uuid: str, *, disk_path: str = "") -> bool:
         self.unloaded.append((replica_uuid, disk_path))
         return True
@@ -155,9 +219,7 @@ class _RuntimeStub:
     ) -> None:
         self._artifact_cache.invalidate_artifact(artifact_id or "", reason=reason)
 
-    def resolve_key_mapping_cached(
-        self, *, key: str
-    ) -> tuple[str | None, str | None]:
+    def resolve_key_mapping_cached(self, *, key: str) -> tuple[str | None, str | None]:
         return self._key_cache.get(key, (None, None))
 
     def cache_key_mapping(
@@ -287,9 +349,9 @@ def test_subset_derives_view_metadata_eagerly():
     assert derived._view_metadata is not None
     assert derived._view_metadata.tensor_names == ("bar",)
     assert derived._view_metadata.selected_index is not None
-    assert tuple(entry.name for entry in derived._view_metadata.selected_index.entries) == (
-        "bar",
-    )
+    assert tuple(
+        entry.name for entry in derived._view_metadata.selected_index.entries
+    ) == ("bar",)
     assert derived._view_metadata.view_index_bytes
     assert derived._view_metadata.view_data_hash is None
     assert derived._view_metadata.view_id
@@ -575,10 +637,25 @@ def test_from_dict_accepts_key_and_artifact_id():
     assert restored.tensor_names == ("foo",)
 
 
+def test_artifact_ref_accepts_msa1_prefix():
+    canonical_bytes, _payload = _build_payload({"foo": torch.ones(1)})
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    store = Store("daemon", runtime=runtime)
+
+    artifact = store.artifact("msa1:test-session~policy~safetensors~deadbeef")
+
+    assert artifact.artifact_id == "msa1:test-session~policy~safetensors~deadbeef"
+    assert artifact.key is None
+
+
 def test_from_disk_resolves_once_and_caches_generation():
     canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
     client = _ClientStub(
-        canonical_bytes, disk_generation=11, disk_artifact_id="mi2:idx:data"
+        canonical_bytes,
+        disk_generation=11,
+        mounted_generation=11,
+        disk_artifact_id="mi2:idx:data",
+        mounted_artifact_id="msa1:test-session~policy~safetensors~deadbeef",
     )
     runtime = _RuntimeStub(client)
     store = Store("daemon", runtime=runtime)
@@ -587,12 +664,15 @@ def test_from_disk_resolves_once_and_caches_generation():
     desc = artifact.describe()
     repeat = artifact.describe()
 
-    assert desc.artifact_id == "mi2:idx:data"
+    assert desc.artifact_id == "msa1:test-session~policy~safetensors~deadbeef"
     assert desc.generation == 11
     assert repeat.generation == 11
-    assert client.resolve_calls == [("/tmp/artifact", True)]
+    assert client.resolve_public_disk_calls == [("/tmp/artifact", True)]
+    assert client.import_calls == []
     assert client.get_index_calls == 0
-    cached = runtime.get_artifact_index_cached("mi2:idx:data")
+    cached = runtime.get_artifact_index_cached(
+        "msa1:test-session~policy~safetensors~deadbeef"
+    )
     assert cached is not None
     assert cached.canonical_index_bytes == canonical_bytes
     assert cached.generation == 11
@@ -611,7 +691,28 @@ def test_from_disk_progress_mode_uses_stream_resolution():
     artifact = store.from_disk("/tmp/artifact", show_progress=True)
 
     assert artifact.artifact_id == "mi2:idx:data"
-    assert client.resolve_calls == [("/tmp/artifact", True)]
+    assert client.import_calls == [("/tmp/artifact", True)]
+    assert client.resolve_public_disk_calls == []
+
+
+def test_from_disk_default_stays_fast_path_even_when_stderr_is_tty(monkeypatch):
+    canonical_bytes, _payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(
+        canonical_bytes,
+        disk_generation=5,
+        disk_artifact_id="mi2:idx:data",
+        mounted_artifact_id="msa1:test-session~policy~safetensors~deadbeef",
+    )
+    runtime = _RuntimeStub(client)
+    store = Store("daemon", runtime=runtime)
+
+    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
+
+    artifact = store.from_disk("/tmp/artifact")
+
+    assert artifact.artifact_id == "msa1:test-session~policy~safetensors~deadbeef"
+    assert client.resolve_public_disk_calls == [("/tmp/artifact", True)]
+    assert client.import_calls == []
 
 
 def test_from_disk_retries_daemon_startup_in_progress(monkeypatch):
@@ -620,6 +721,7 @@ def test_from_disk_retries_daemon_startup_in_progress(monkeypatch):
         canonical_bytes,
         disk_generation=7,
         disk_artifact_id="mi2:idx:data",
+        mounted_artifact_id="msa1:test-session~policy~safetensors~retry",
         startup_in_progress_failures=2,
     )
     runtime = _RuntimeStub(client)
@@ -630,9 +732,96 @@ def test_from_disk_retries_daemon_startup_in_progress(monkeypatch):
 
     artifact = store.from_disk("/tmp/artifact")
 
-    assert artifact.artifact_id == "mi2:idx:data"
+    assert artifact.artifact_id == "msa1:test-session~policy~safetensors~retry"
     assert len(sleeps) == 2
-    assert client.resolve_calls == [("/tmp/artifact", True)]
+    assert client.resolve_public_disk_calls == [
+        ("/tmp/artifact", True),
+        ("/tmp/artifact", True),
+        ("/tmp/artifact", True),
+    ]
+    assert client.import_calls == []
+
+
+def test_store_promote_mounted_source_returns_mi2_artifact():
+    canonical_bytes, _payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(
+        canonical_bytes,
+        disk_generation=13,
+        disk_artifact_id="mi2:idx:promoted",
+        mounted_artifact_id="msa1:test-session~policy~safetensors~source",
+    )
+    runtime = _RuntimeStub(client)
+    store = Store("daemon", runtime=runtime)
+
+    artifact = store.promote_mounted_source(
+        "msa1:test-session~policy~safetensors~source"
+    )
+
+    assert artifact.artifact_id == "mi2:idx:promoted"
+    assert client.promote_mounted_source_calls == [
+        ("msa1:test-session~policy~safetensors~source", True, None)
+    ]
+
+
+def test_store_promote_mounted_source_accepts_artifact_handle():
+    canonical_bytes, _payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(
+        canonical_bytes,
+        disk_generation=14,
+        disk_artifact_id="mi2:idx:promoted",
+        mounted_artifact_id="msa1:test-session~policy~safetensors~source",
+    )
+    runtime = _RuntimeStub(client)
+    store = Store("daemon", runtime=runtime)
+    source = store.from_disk("/tmp/artifact")
+
+    promoted = store.promote_mounted_source(source, verify_checksums=False)
+
+    assert promoted.artifact_id == "mi2:idx:promoted"
+    assert client.promote_mounted_source_calls == [
+        ("msa1:test-session~policy~safetensors~source", False, None)
+    ]
+
+
+def test_store_promote_mounted_source_passes_timeout_override():
+    canonical_bytes, _payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(
+        canonical_bytes,
+        disk_generation=15,
+        disk_artifact_id="mi2:idx:promoted",
+        mounted_artifact_id="msa1:test-session~policy~safetensors~source",
+    )
+    runtime = _RuntimeStub(client)
+    store = Store("daemon", runtime=runtime)
+
+    promoted = store.promote_mounted_source(
+        "msa1:test-session~policy~safetensors~source",
+        timeout_s=180.0,
+    )
+
+    assert promoted.artifact_id == "mi2:idx:promoted"
+    assert client.promote_mounted_source_calls == [
+        ("msa1:test-session~policy~safetensors~source", True, 180.0)
+    ]
+
+
+def test_import_from_disk_uses_import_stream_and_publishes_key():
+    canonical_bytes, _payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(
+        canonical_bytes,
+        disk_generation=9,
+        disk_artifact_id="mi2:idx:data",
+    )
+    runtime = _RuntimeStub(client)
+    store = Store("daemon", runtime=runtime)
+
+    artifact = store.import_from_disk("/tmp/artifact", key="model:key")
+
+    assert artifact.artifact_id == "mi2:idx:data"
+    assert artifact.key == "model:key"
+    assert client.import_calls == [("/tmp/artifact", True)]
+    assert client.resolve_public_disk_calls == []
+    assert client.publish_calls == [("model:key", "mi2:idx:data")]
 
 
 def test_ensure_metadata_sets_under_lock(monkeypatch):

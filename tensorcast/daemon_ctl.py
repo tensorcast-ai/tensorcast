@@ -1344,6 +1344,44 @@ class DaemonCtl:
                 ) from e
         return response
 
+    def freeze_binding_current_value(
+        self,
+        *,
+        binding_id: str,
+        update_epoch: str,
+        source_artifact_ref: str | None = None,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.FreezeBindingCurrentValueResponse:
+        if not binding_id:
+            raise ValueError("binding_id is required")
+        if not update_epoch:
+            raise ValueError("update_epoch is required")
+        with self._client_span("Client/FreezeBindingCurrentValue") as span:
+            request = store_daemon_pb2.FreezeBindingCurrentValueRequest(
+                binding_id=str(binding_id),
+                update_epoch=str(update_epoch),
+                source_artifact_ref=str(source_artifact_ref or ""),
+            )
+            try:
+                response: store_daemon_pb2.FreezeBindingCurrentValueResponse = (
+                    self._unary_call(
+                        self.stub_v2.FreezeBindingCurrentValue,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(
+                        e,
+                        fallback="FreezeBindingCurrentValue RPC failed",
+                    )
+                ) from e
+        return response
+
     def promote_binding_current_value(
         self,
         *,
@@ -1376,6 +1414,80 @@ class DaemonCtl:
                     _grpc_message(
                         e,
                         fallback="PromoteBindingCurrentValue RPC failed",
+                    )
+                ) from e
+        return response
+
+    def start_promote_binding_current_value(
+        self,
+        *,
+        binding_id: str,
+        binding_value_id: str,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.StartPromoteBindingCurrentValueResponse:
+        if not binding_id:
+            raise ValueError("binding_id is required")
+        if not binding_value_id:
+            raise ValueError("binding_value_id is required")
+        with self._client_span("Client/StartPromoteBindingCurrentValue") as span:
+            request = store_daemon_pb2.StartPromoteBindingCurrentValueRequest(
+                binding_id=str(binding_id),
+                binding_value_id=str(binding_value_id),
+            )
+            try:
+                response: store_daemon_pb2.StartPromoteBindingCurrentValueResponse = (
+                    self._unary_call(
+                        self.stub_v2.StartPromoteBindingCurrentValue,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(
+                        e,
+                        fallback="StartPromoteBindingCurrentValue RPC failed",
+                    )
+                ) from e
+        return response
+
+    def get_binding_promotion_status(
+        self,
+        *,
+        verification_job_id: str | None = None,
+        binding_id: str | None = None,
+        binding_value_id: str | None = None,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.GetBindingPromotionStatusResponse:
+        if not verification_job_id and not (binding_id and binding_value_id):
+            raise ValueError(
+                "verification_job_id or binding_id + binding_value_id is required"
+            )
+        with self._client_span("Client/GetBindingPromotionStatus") as span:
+            request = store_daemon_pb2.GetBindingPromotionStatusRequest(
+                verification_job_id=str(verification_job_id or ""),
+                binding_id=str(binding_id or ""),
+                binding_value_id=str(binding_value_id or ""),
+            )
+            try:
+                response: store_daemon_pb2.GetBindingPromotionStatusResponse = (
+                    self._unary_call(
+                        self.stub_v2.GetBindingPromotionStatus,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(
+                        e,
+                        fallback="GetBindingPromotionStatus RPC failed",
                     )
                 ) from e
         return response
@@ -2262,6 +2374,48 @@ class DaemonCtl:
             except grpc.RpcError as e:  # noqa: BLE001
                 span.record_exception(e)
                 _raise_import_artifact_from_path_rpc_error(self.server_address, e)
+            return response
+
+    def promote_mounted_source_artifact(
+        self,
+        *,
+        artifact_id: str,
+        verify_checksums: bool = True,
+        timeout_s: float | None = None,
+    ) -> store_daemon_pb2.PromoteMountedSourceArtifactResponse:
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        resolved_timeout_s = (
+            _import_artifact_from_path_timeout_seconds()
+            if timeout_s is None
+            else (None if float(timeout_s) == 0.0 else float(timeout_s))
+        )
+        resolved_retries = (
+            _import_artifact_from_path_retries() if timeout_s is None else 1
+        )
+        with self._client_span("Client/PromoteMountedSourceArtifact") as span:
+            request = store_daemon_pb2.PromoteMountedSourceArtifactRequest(
+                artifact_id=str(artifact_id),
+                verify_checksums=bool(verify_checksums),
+            )
+            try:
+                response: store_daemon_pb2.PromoteMountedSourceArtifactResponse = (
+                    self._unary_call(
+                        self.stub_v2.PromoteMountedSourceArtifact,
+                        request,
+                        timeout=resolved_timeout_s,
+                        span=span,
+                        retries=resolved_retries,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise RuntimeError(
+                    _grpc_message(
+                        e,
+                        fallback="PromoteMountedSourceArtifact RPC failed",
+                    )
+                ) from e
             return response
 
     def confirm_replica_loaded(

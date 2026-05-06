@@ -9,7 +9,11 @@ from typing import Callable
 
 import grpc
 
-from tensorcast.common.identity import ArtifactIdKind, infer_artifact_id_kind
+from tensorcast.common.identity import (
+    ArtifactIdKind,
+    infer_artifact_id_kind,
+    is_msa1_artifact_id,
+)
 from tensorcast.global_store import metrics as gs_metrics
 from tensorcast.global_store.exceptions import ValidationError
 from tensorcast.global_store.models import Replica
@@ -194,6 +198,10 @@ class ReplicaRegistrationRpcHandler:
                 descriptor = (
                     request.descriptor if request.HasField("descriptor") else None
                 )
+                if artifact_id and is_msa1_artifact_id(artifact_id):
+                    raise ValidationError(
+                        "msa1 artifact_id is daemon-session-local and cannot be registered in Global Store replica metadata"
+                    )
 
                 kind = infer_artifact_id_kind(artifact_id) if artifact_id else None
                 if descriptor is not None and descriptor.id_kind:
@@ -335,7 +343,11 @@ class ReplicaRegistrationRpcHandler:
 
         except ValidationError as exc:
             self._logger.error("Validation error: %s", exc)
-            grpc_code = grpc.StatusCode.INVALID_ARGUMENT
+            grpc_code = (
+                grpc.StatusCode.FAILED_PRECONDITION
+                if "daemon-session-local" in str(exc)
+                else grpc.StatusCode.INVALID_ARGUMENT
+            )
             grpc_details = str(exc)
             self._apply_grpc_status(
                 context=context,

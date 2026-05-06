@@ -4,7 +4,7 @@ title: Collective-First Binding Realization for TP Serving Startup
 status: implemented
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests", "benchmarks", "serving"]
 created: 2026-03-31
-last_updated: 2026-04-01
+last_updated: 2026-04-15
 related_code:
   - docs/designs/0084-binding-unified-model-and-contract.md
   - docs/designs/0107-retrieval-policy-plane-cleanup.md
@@ -25,7 +25,6 @@ related_code:
   - core/store/replica/collective_disk_loader.cc
   - /data/workspace/internal-vllm/docs/design/tensorcast_collective_first_binding_realization_plan.md
 links:
-  plan: ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
   dependencies:
     - ./0084-binding-unified-model-and-contract.md
     - ./0107-retrieval-policy-plane-cleanup.md
@@ -40,7 +39,7 @@ links:
     - ./0112-binding-native-serving-realization-and-publication.md
   related:
     - ./0113-step3p5-closure-and-sot-convergence.md
-    - ../plans/0114-collective-first-binding-realization-for-tp-serving-startup.md
+    - ../benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md
 ---
 
 # Summary
@@ -99,8 +98,32 @@ shared abstractions it touches:
 - `0113` remains the owner of the cross-design closure constraints, capability
   and version handoff, and delete-gate invariants for the residual Step3p5
   work,
-- and the paired `0114` plan is the single active total execution plan for this
-  work family.
+- and the closure evidence for this path now lives directly in this design plus
+  `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`.
+
+## Implementation Status
+
+`0114` is now closed at its owner boundary.
+
+What this design needed from the live system is now present:
+
+- downstream `internal-vllm` `/weight_version` summary records
+  `source_bound_contract_version=4`,
+  `source_bound_contract_path=collective_first_v4`,
+  `execution_plan_kind=collective_first_mixed`,
+  `planner_version=source_bound_collective_first.v4`,
+  and the realized collective policy and executor facts,
+- the mounted qwen2.5 TP4 packet is current rather than a stale `v3` or
+  generic-dominant sample,
+- `planned_collective_admitted_bytes` and
+  `actual_collective_committed_bytes` align at `16382928896`,
+- `actual_generic_backend_bytes=0`,
+- `dominant_executor=OwnerFileCollectiveExecutor`,
+- and the same-binding serving path reaches `/health`, `/v1/models`, and
+  `/v1/completions`.
+
+The standalone `0114` plan is therefore retired. No separate "active total
+execution plan" document is still needed for this path family.
 
 ## Current vs Target Flow
 
@@ -1024,7 +1047,7 @@ This design is complete only when all of the following are true.
    and diagnostics until a later lowering decides how to execute it.
 6. planner and actual execution diagnostics are split clearly enough that
    downstream operators can distinguish lane intent from backend reality.
-7. `source_bound_contract_version = 3` marks the additive contract landing for
+7. `source_bound_contract_version = 4` marks the additive contract landing for
    true residual semantics, strict preflight, and split planner/execution
    diagnostics on this path.
 8. downstream `internal-vllm` integration remains on the shared TensorCast

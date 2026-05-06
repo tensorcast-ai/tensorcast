@@ -9,7 +9,7 @@ import uuid
 import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -422,10 +422,32 @@ class SealedBindingValue:
         repr=False,
         compare=False,
     )
+    verification_state: int = (
+        store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_UNSPECIFIED
+    )
+    verification_job_id: str | None = None
+    source_artifact_ref: str | None = None
+    local_serving_ref: str | None = None
+    serving_artifact_id: str | None = None
+    verification_failure_reason: str | None = None
 
     @property
     def artifact_id(self) -> str | None:
         return self.source_artifact_id
+
+    @property
+    def is_verified(self) -> bool:
+        return (
+            self.verification_state
+            == store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_VERIFIED
+        )
+
+    @property
+    def is_verification_pending(self) -> bool:
+        return (
+            self.verification_state
+            == store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_PENDING
+        )
 
     @property
     def is_current(self) -> bool:
@@ -636,6 +658,12 @@ class Binding:
             source_artifact_id=metadata.source_artifact_id,
             selection=clone_selection(metadata.selection),
             is_artifact_backed=metadata.is_artifact_backed,
+            verification_state=metadata.verification_state,
+            verification_job_id=metadata.verification_job_id,
+            source_artifact_ref=metadata.source_artifact_ref,
+            local_serving_ref=metadata.local_serving_ref,
+            serving_artifact_id=metadata.serving_artifact_id,
+            verification_failure_reason=metadata.verification_failure_reason,
             _binding_ref=weakref.ref(self),
         )
 
@@ -792,6 +820,37 @@ class Binding:
             )
         return current_value
 
+    def freeze_current(
+        self,
+        *,
+        update_epoch: BindingUpdateEpoch | str | int,
+        source_artifact_ref: str | None = None,
+        wait_events: tuple[object, ...] | list[object] | None = None,
+        ctx: CallContext | None = None,
+    ) -> SealedBindingValue:
+        _wait_for_events(wait_events)
+        self._stop_keepalive()
+        freeze = getattr(self._slot, "freeze_current", None)
+        if not callable(freeze):
+            raise ArtifactError(
+                "freeze_current() requires a daemon-owned binding",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        freeze(
+            update_epoch=update_epoch,
+            source_artifact_ref=source_artifact_ref,
+            ctx=ctx,
+        )
+        current_value = self.current_value
+        if current_value is None:
+            raise ArtifactError(
+                "freeze_current() completed without a current local-ready value",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        return current_value
+
     def promote_current_value(
         self,
         *,
@@ -823,6 +882,65 @@ class Binding:
             response.artifact_descriptor
             if hasattr(response, "artifact_descriptor")
             else None
+        )
+
+    def start_promote_current_value(
+        self,
+        *,
+        binding_value_id: str | None = None,
+        ctx: CallContext | None = None,
+    ) -> store_daemon_pb2.BindingPromotionStatus:
+        current_value = self.current_value
+        if current_value is None:
+            raise ArtifactError(
+                "start_promote_current_value() requires a current value",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        resolved_binding_value_id = str(
+            binding_value_id or current_value.binding_value_id
+        )
+        start_promote = getattr(self._slot, "start_promote_current_value", None)
+        if not callable(start_promote):
+            raise ArtifactError(
+                "start_promote_current_value() requires a daemon-owned binding",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        return cast(
+            store_daemon_pb2.BindingPromotionStatus,
+            start_promote(
+                binding_value_id=resolved_binding_value_id,
+                ctx=ctx,
+            ),
+        )
+
+    def get_promotion_status(
+        self,
+        *,
+        verification_job_id: str | None = None,
+        binding_value_id: str | None = None,
+        ctx: CallContext | None = None,
+    ) -> store_daemon_pb2.BindingPromotionStatus:
+        current_value = self.current_value
+        resolved_binding_value_id = str(
+            binding_value_id
+            or (current_value.binding_value_id if current_value is not None else "")
+        )
+        get_status = getattr(self._slot, "get_promotion_status", None)
+        if not callable(get_status):
+            raise ArtifactError(
+                "get_promotion_status() requires a daemon-owned binding",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        return cast(
+            store_daemon_pb2.BindingPromotionStatus,
+            get_status(
+                verification_job_id=verification_job_id,
+                binding_value_id=resolved_binding_value_id,
+                ctx=ctx,
+            ),
         )
 
     def close(self) -> None:

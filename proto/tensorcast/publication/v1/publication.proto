@@ -15,12 +15,6 @@ enum FinalizeClass {
   FINALIZE_CLASS_UNKNOWN_BLOCKED = 3;
 }
 
-enum RealizationProtocol {
-  REALIZATION_PROTOCOL_UNSPECIFIED = 0;
-  REALIZATION_PROTOCOL_SAME_BINDING_FAST_PATH = 1;
-  REALIZATION_PROTOCOL_SCRATCH_THEN_COMMIT = 2;
-}
-
 enum ServingSupportLevel {
   SERVING_SUPPORT_LEVEL_UNSPECIFIED = 0;
   SERVING_SUPPORT_LEVEL_BLOCKED = 1;
@@ -31,10 +25,9 @@ enum ServingSupportLevel {
 
 message ServingAdmissionFacts {
   FinalizeClass finalize_class = 1;
-  RealizationProtocol realization_protocol = 2;
   ServingSupportLevel support_level = 3;
   string topology_admission_digest = 4;
-  bool fast_path_validated = 5;
+  bool same_binding_fast_path_validated = 5;
 }
 
 message ServingBuildIntent {

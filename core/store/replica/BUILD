@@ -166,6 +166,7 @@ sc_cc_library(
         "//core/store/materialization/dataplane:multi_safetensors_source",
         "//core/store/materialization/dataplane:pump",
         "//core/store/materialization/dataplane:streaming_buffer_adapter",
+        "//core/store/materialization/dataplane:target_layout_gpu_sink",
         "//core/store/materialization/dataplane:view_plan_source",
         "//core/store/runtime/ingestion:materialization_strategy_types",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -291,7 +292,11 @@ cc_test(
     srcs = ["collective_disk_loader_test.cc"],
     deps = [
         ":collective_disk_loader",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/store/materialization/dataplane:disk_artifact_context",
         "//core/testing:catch_main",
+        "//core/testing:test_helpers",
         "@catch2//:catch2_main",
     ],
 )

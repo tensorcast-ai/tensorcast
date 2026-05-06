@@ -42,10 +42,17 @@ class BindingRegistry {
     std::string target_index_json;
     std::string target_layout_hash;
     std::string current_artifact_id;
+    std::string current_artifact_canonical_index_json;
     std::string target_publication_token;
     std::string current_binding_value_id;
     uint64_t seal_generation{0};
     std::optional<CommitLeaseResult> sealed_commit_result;
+    v2::BindingValueVerificationState verification_state{v2::BINDING_VALUE_VERIFICATION_STATE_UNSPECIFIED};
+    std::string verification_job_id;
+    std::string source_artifact_ref;
+    std::string local_serving_ref;
+    std::string serving_artifact_id;
+    std::string verification_failure_reason;
     uint64_t update_epoch_counter{0};
     std::string active_update_epoch;
     v2::CopyPlan copy_plan;

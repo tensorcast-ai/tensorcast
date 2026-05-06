@@ -38,6 +38,38 @@ def test_binding_value_from_proto_validates_artifact_backed_identity() -> None:
     assert metadata.is_artifact_backed is True
 
 
+def test_binding_value_from_proto_preserves_optimistic_verification_metadata() -> None:
+    value = store_daemon_pb2.BindingValue(
+        binding_id="binding-1",
+        binding_layout_id="layout-1",
+        binding_value_id="value-1",
+        seal_generation=3,
+        is_artifact_backed=False,
+        verification_state=store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_PENDING,
+        verification_job_id="bpj:test",
+        source_artifact_ref="msa1:test-session~policy~partitioned~source",
+        local_serving_ref="binding-local:binding-1:value-1",
+        verification_failure_reason="",
+    )
+
+    metadata = binding_value_from_proto(
+        value,
+        expected_binding_id="binding-1",
+        expected_binding_layout_id="layout-1",
+    )
+
+    assert metadata is not None
+    assert metadata.is_artifact_backed is False
+    assert (
+        metadata.verification_state
+        == store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_PENDING
+    )
+    assert metadata.verification_job_id == "bpj:test"
+    assert metadata.source_artifact_ref == "msa1:test-session~policy~partitioned~source"
+    assert metadata.local_serving_ref == "binding-local:binding-1:value-1"
+    assert metadata.serving_artifact_id is None
+
+
 def test_binding_value_from_proto_rejects_binding_identity_mismatch() -> None:
     value = store_daemon_pb2.BindingValue(
         binding_id="binding-other",

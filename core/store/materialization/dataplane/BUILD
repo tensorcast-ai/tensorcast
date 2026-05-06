@@ -75,10 +75,10 @@ sc_cc_library(
     hdrs = ["metadata/disk_dir_hash.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":disk_artifact_context",
         ":file_partition_source",
         ":multi_safetensors_source",
         ":source_hash",
-        "@nlohmann_json//:json",
     ],
 )
 

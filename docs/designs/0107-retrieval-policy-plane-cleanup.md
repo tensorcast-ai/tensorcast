@@ -4,7 +4,7 @@ title: Retrieval Policy Plane Cleanup, Execution Topology Context, And Transport
 areas: ["sdk", "daemon", "core", "proto", "docs", "tests"]
 status: implemented
 created: 2026-03-18
-last_updated: 2026-03-31
+last_updated: 2026-04-15
 related_code:
   - tensorcast/api/store/types.py
   - tensorcast/api/_config.py
@@ -104,9 +104,9 @@ Residual execution tracking:
   landed and remains authoritative;
 - downstream strategy-plane, owner-file collective, and same-binding serving
   follow-up now track through the surviving owners:
-  - `0108` plus its companion plan,
-  - `0109` plus `0109-01`,
-  - `0112` plus `0112-01`;
+  - `0108` plus its closure benchmarks,
+  - `0109` plus its mounted closure benchmark,
+  - `0112` plus its mounted closure benchmark;
 - the deleted `0108`-series execution notes and later closure-only design notes
   are no longer active SOT.
 
@@ -767,8 +767,7 @@ Mitigations:
 - `docs/designs/0108-tensor-aware-materialization-strategy-plane.md`
 - `docs/designs/0109-batched-owner-file-collective-executor.md`
 - `docs/designs/0112-binding-native-serving-realization-and-publication.md`
-- `docs/plans/0109-01-batched-owner-file-collective-rollout-and-residual-policy.md`
-- `docs/plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md`
+- `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`
 - `docs/designs/0104-artifact-realization-and-cluster-rollout.md`
 - `docs/architecture/api/api-design.md`
 - `docs/architecture/api/materialization-flow.md`

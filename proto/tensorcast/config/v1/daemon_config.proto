@@ -201,6 +201,43 @@ message Promotion {
   uint32 max_concurrency = 4;
 }
 
+message OptimisticLocalReady {
+  enum Mode {
+    MODE_UNSPECIFIED = 0;
+    MODE_DISABLED = 1;
+    MODE_STRICT_CANONICAL_BLOCKING = 2;
+    MODE_OPTIMISTIC_ASYNC_MI2 = 3;
+    MODE_OPTIMISTIC_LOCAL_ONLY = 4;
+  }
+
+  enum PromotionTrigger {
+    PROMOTION_TRIGGER_UNSPECIFIED = 0;
+    PROMOTION_TRIGGER_AFTER_FREEZE = 1;
+    PROMOTION_TRIGGER_AFTER_READY = 2;
+    PROMOTION_TRIGGER_AFTER_FIRST_TOKEN = 3;
+    PROMOTION_TRIGGER_DELAYED = 4;
+  }
+
+  enum FailureAction {
+    FAILURE_ACTION_UNSPECIFIED = 0;
+    FAILURE_ACTION_MARK_UNVERIFIED = 1;
+    FAILURE_ACTION_FAIL_HEALTH = 2;
+    FAILURE_ACTION_DRAIN = 3;
+    FAILURE_ACTION_WARN_ONLY = 4;
+  }
+
+  Mode mode = 1;
+  repeated string trusted_root_policy_ids = 2;
+  repeated string model_families = 3;
+  repeated string topology_constraints = 4;
+  PromotionTrigger promotion_trigger = 5;
+  uint32 per_device_promotion_concurrency = 6;
+  string scheduling_class = 7;
+  uint32 retry_budget = 8;
+  google.protobuf.Duration timeout = 9;
+  FailureAction failure_action = 10;
+}
+
 message PinnedMemory {
   message PinnedClass {
     string name = 1;
@@ -227,6 +264,7 @@ message DaemonConfig {
   Engine engine = 5;
   tensorcast.config.v1.Observability observability = 6;
   Promotion promotion = 25;
+  OptimisticLocalReady optimistic_local_ready = 32;
   // Stable identity for this daemon instance used by the control plane.
   // Must not be derived from network address and should remain stable across restarts.
   string daemon_id = 10;
@@ -273,6 +311,51 @@ message DaemonConfig {
     optional bool shard_home_eligible = 3;
   }
   CapabilityDirectory capability_directory = 24;
+
+  enum PublicDiskSourceFormat {
+    PUBLIC_DISK_SOURCE_FORMAT_UNSPECIFIED = 0;
+    PUBLIC_DISK_SOURCE_FORMAT_PARTITIONED = 1;
+    PUBLIC_DISK_SOURCE_FORMAT_SAFETENSORS = 2;
+  }
+
+  enum PublicDiskSourceMetadataCapability {
+    PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_UNSPECIFIED = 0;
+    PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_TENSOR_AWARE = 1;
+    PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_BYTE_ONLY = 2;
+  }
+
+  enum PublicDiskSourceDescriptorReuseMode {
+    PUBLIC_DISK_SOURCE_DESCRIPTOR_REUSE_MODE_UNSPECIFIED = 0;
+    PUBLIC_DISK_SOURCE_DESCRIPTOR_REUSE_MODE_DISABLED = 1;
+    PUBLIC_DISK_SOURCE_DESCRIPTOR_REUSE_MODE_TRUSTED_HINT_ONLY = 2;
+  }
+
+  enum PublicDiskSourceValidationMode {
+    PUBLIC_DISK_SOURCE_VALIDATION_MODE_UNSPECIFIED = 0;
+    PUBLIC_DISK_SOURCE_VALIDATION_MODE_VALIDATE_BEFORE_READ = 1;
+  }
+
+  message PublicDiskSource {
+    enum UnmatchedPathMode {
+      UNMATCHED_PATH_MODE_UNSPECIFIED = 0;
+      UNMATCHED_PATH_MODE_REJECT = 1;
+      UNMATCHED_PATH_MODE_ALLOW_ABSOLUTE_FALLBACK = 2;
+    }
+
+    message TrustedRootPolicy {
+      string policy_id = 1;
+      string root_path = 2;
+      repeated PublicDiskSourceFormat allowed_formats = 3;
+      repeated PublicDiskSourceMetadataCapability allowed_metadata_capabilities = 4;
+      PublicDiskSourceDescriptorReuseMode descriptor_reuse_mode = 5;
+      optional bool lightweight_attestation_enabled = 6;
+      PublicDiskSourceValidationMode validation_mode = 7;
+    }
+
+    repeated TrustedRootPolicy trusted_root_policies = 1;
+    UnmatchedPathMode unmatched_path_mode = 2;
+  }
+  PublicDiskSource public_disk_source = 31;
 
   reserved 8;
   reserved "checkpoint";

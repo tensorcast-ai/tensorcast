@@ -23,8 +23,11 @@ service StoreDaemonService {
   rpc CreateOwnedBinding(CreateOwnedBindingRequest) returns (CreateOwnedBindingResponse) {}
   rpc CommitBindingArtifact(CommitBindingArtifactRequest) returns (CommitBindingArtifactResponse) {}
   rpc BeginBindingUpdate(BeginBindingUpdateRequest) returns (BeginBindingUpdateResponse) {}
+  rpc FreezeBindingCurrentValue(FreezeBindingCurrentValueRequest) returns (FreezeBindingCurrentValueResponse) {}
   rpc SealBinding(SealBindingRequest) returns (SealBindingResponse) {}
   rpc PromoteBindingCurrentValue(PromoteBindingCurrentValueRequest) returns (PromoteBindingCurrentValueResponse) {}
+  rpc StartPromoteBindingCurrentValue(StartPromoteBindingCurrentValueRequest) returns (StartPromoteBindingCurrentValueResponse) {}
+  rpc GetBindingPromotionStatus(GetBindingPromotionStatusRequest) returns (GetBindingPromotionStatusResponse) {}
   rpc RefillOwnedBinding(RefillOwnedBindingRequest) returns (RefillOwnedBindingResponse) {}
   rpc CloseOwnedBinding(CloseOwnedBindingRequest) returns (CloseOwnedBindingResponse) {}
   rpc ConfirmReplica(ConfirmReplicaRequest) returns (ConfirmReplicaResponse) {}
@@ -101,6 +104,7 @@ service StoreDaemonService {
   // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
   rpc ImportArtifactFromPathStream(ImportArtifactFromPathRequest) returns (stream ImportArtifactFromPathStreamEvent) {}
   rpc ResolvePublicDiskSource(ResolvePublicDiskSourceRequest) returns (ResolvePublicDiskSourceResponse) {}
+  rpc PromoteMountedSourceArtifact(PromoteMountedSourceArtifactRequest) returns (PromoteMountedSourceArtifactResponse) {}
   rpc QueryReplicaStatus(QueryReplicaStatusRequest) returns (QueryReplicaStatusResponse) {}
   rpc WaitReplicaStatus(WaitReplicaStatusRequest) returns (WaitReplicaStatusResponse) {}
   rpc ReleaseReplica(ReleaseReplicaRequest) returns (ReleaseReplicaResponse) {}
@@ -705,6 +709,37 @@ message PublicDiskSourceHandle {
   string artifact_id = 3;
   uint64 generation = 4;
   bool verify_checksums = 5;
+  string trusted_content_artifact_id = 6;
+  bytes source_index_bytes = 7;
+  DiskSourceFormatKind format_kind = 8;
+  DiskMetadataCapability metadata_capability = 9;
+  DiskResolutionStrategy resolution_strategy = 10;
+  DiskValidationMode validation_mode = 11;
+  string policy_id = 12;
+  uint64 exact_size_bytes = 13;
+}
+
+enum DiskSourceFormatKind {
+  DISK_SOURCE_FORMAT_KIND_UNSPECIFIED = 0;
+  DISK_SOURCE_FORMAT_KIND_PARTITIONED = 1;
+  DISK_SOURCE_FORMAT_KIND_SAFETENSORS = 2;
+}
+
+enum DiskMetadataCapability {
+  DISK_METADATA_CAPABILITY_UNSPECIFIED = 0;
+  DISK_METADATA_CAPABILITY_TENSOR_AWARE = 1;
+  DISK_METADATA_CAPABILITY_BYTE_ONLY = 2;
+}
+
+enum DiskResolutionStrategy {
+  DISK_RESOLUTION_STRATEGY_UNSPECIFIED = 0;
+  DISK_RESOLUTION_STRATEGY_ATTESTED_ONLY = 1;
+  DISK_RESOLUTION_STRATEGY_ATTESTED_WITH_TRUSTED_DESCRIPTOR_HINT = 2;
+}
+
+enum DiskValidationMode {
+  DISK_VALIDATION_MODE_UNSPECIFIED = 0;
+  DISK_VALIDATION_MODE_VALIDATE_BEFORE_READ = 1;
 }
 
 message BindingRealizationRange {
@@ -1277,6 +1312,23 @@ enum BindingState {
   BINDING_STATE_DIRTY = 5;
 }
 
+enum BindingValueVerificationState {
+  BINDING_VALUE_VERIFICATION_STATE_UNSPECIFIED = 0;
+  BINDING_VALUE_VERIFICATION_STATE_PENDING = 1;
+  BINDING_VALUE_VERIFICATION_STATE_VERIFIED = 2;
+  BINDING_VALUE_VERIFICATION_STATE_FAILED = 3;
+  BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY = 4;
+}
+
+enum BindingPromotionJobState {
+  BINDING_PROMOTION_JOB_STATE_UNSPECIFIED = 0;
+  BINDING_PROMOTION_JOB_STATE_PENDING = 1;
+  BINDING_PROMOTION_JOB_STATE_RUNNING = 2;
+  BINDING_PROMOTION_JOB_STATE_SUCCEEDED = 3;
+  BINDING_PROMOTION_JOB_STATE_FAILED = 4;
+  BINDING_PROMOTION_JOB_STATE_CANCELED = 5;
+}
+
 message BindingValue {
   string binding_id = 1;
   string binding_layout_id = 2;
@@ -1285,6 +1337,12 @@ message BindingValue {
   optional string source_artifact_id = 5;
   tensorcast.common.v1.ArtifactSelection selection = 6;
   bool is_artifact_backed = 7;
+  BindingValueVerificationState verification_state = 8;
+  string verification_job_id = 9;
+  string source_artifact_ref = 10;
+  string local_serving_ref = 11;
+  optional string serving_artifact_id = 12;
+  optional string verification_failure_reason = 13;
 }
 
 message CreateBindingRequest {
@@ -1371,6 +1429,19 @@ message SealBindingResponse {
   BindingValue current_value = 2;
 }
 
+message FreezeBindingCurrentValueRequest {
+  string binding_id = 1;
+  string update_epoch = 2;
+  // Optional source ref carried as metadata on the local-ready value. When
+  // unset, the daemon uses the binding source selection artifact id.
+  string source_artifact_ref = 3;
+}
+
+message FreezeBindingCurrentValueResponse {
+  BindingState state = 1;
+  BindingValue current_value = 2;
+}
+
 message PromoteBindingCurrentValueRequest {
   string binding_id = 1;
   string binding_value_id = 2;
@@ -1382,6 +1453,37 @@ message PromoteBindingCurrentValueResponse {
   BindingValue current_value = 3;
   bool existed = 4;
   ExecutionDiagnostics execution_diagnostics = 5;
+}
+
+message StartPromoteBindingCurrentValueRequest {
+  string binding_id = 1;
+  string binding_value_id = 2;
+}
+
+message BindingPromotionStatus {
+  string verification_job_id = 1;
+  string binding_id = 2;
+  string binding_value_id = 3;
+  BindingPromotionJobState state = 4;
+  BindingValue current_value = 5;
+  optional string serving_artifact_id = 6;
+  tensorcast.common.v1.ArtifactDescriptor artifact_descriptor = 7;
+  optional string failure_reason = 8;
+  bool existed = 9;
+}
+
+message StartPromoteBindingCurrentValueResponse {
+  BindingPromotionStatus status = 1;
+}
+
+message GetBindingPromotionStatusRequest {
+  string verification_job_id = 1;
+  string binding_id = 2;
+  string binding_value_id = 3;
+}
+
+message GetBindingPromotionStatusResponse {
+  BindingPromotionStatus status = 1;
 }
 
 message RefillOwnedBindingRequest {
@@ -2064,6 +2166,19 @@ message ResolvePublicDiskSourceRequest {
 
 message ResolvePublicDiskSourceResponse {
   PublicDiskSourceHandle source = 1;
+}
+
+message PromoteMountedSourceArtifactRequest {
+  string artifact_id = 1;
+  bool verify_checksums = 2;
+}
+
+message PromoteMountedSourceArtifactResponse {
+  string artifact_id = 1;
+  bytes canonical_index_bytes = 2;
+  uint64 generation = 3;
+  ImportArtifactState import_state = 4;
+  string source_artifact_id = 5;
 }
 
 enum ImportArtifactPhase {

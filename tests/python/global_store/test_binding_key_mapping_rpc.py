@@ -91,6 +91,36 @@ def test_upsert_artifact_binding_conflict_returns_failed_precondition(
     assert "artifact binding conflict" in (conflict_context.details or "")
 
 
+def test_upsert_artifact_binding_rejects_msa1(servicer, test_context):
+    response = servicer.UpsertArtifactBinding(
+        global_store_pb2.UpsertArtifactBindingRequest(
+            binding=global_store_pb2.ArtifactBinding(
+                from_artifact_id="msa1:test-session~policy~partitioned~deadbeef",
+                to_artifact_id="mi2:index:data",
+                kind=global_store_pb2.ARTIFACT_BINDING_KIND_SEAL,
+            )
+        ),
+        test_context,
+    )
+
+    assert response.status == global_store_pb2.Status.STATUS_ERROR
+    assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+    assert "daemon-session-local" in (test_context.details or "")
+
+
+def test_get_artifact_binding_rejects_msa1(servicer, test_context):
+    response = servicer.GetArtifactBinding(
+        global_store_pb2.GetArtifactBindingRequest(
+            artifact_id="msa1:test-session~policy~partitioned~deadbeef"
+        ),
+        test_context,
+    )
+
+    assert response.status == global_store_pb2.Status.STATUS_ERROR
+    assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+    assert "daemon-session-local" in (test_context.details or "")
+
+
 def test_upsert_key_mapping_conflict_exposes_reason(
     servicer,
     test_context,
@@ -131,6 +161,20 @@ def test_upsert_key_mapping_conflict_exposes_reason(
     assert conflict_resp.status == global_store_pb2.Status.STATUS_ERROR
     assert "aid-1" in conflict_resp.conflict_reason
     assert conflict_context.code is None
+
+
+def test_upsert_key_mapping_rejects_msa1(servicer, test_context):
+    response = servicer.UpsertKeyMapping(
+        global_store_pb2.UpsertKeyMappingRequest(
+            key="model:latest",
+            artifact_id="msa1:test-session~policy~partitioned~deadbeef",
+        ),
+        test_context,
+    )
+
+    assert response.status == global_store_pb2.Status.STATUS_ERROR
+    assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+    assert "daemon-session-local" in (test_context.details or "")
 
 
 def test_resolve_key_mapping_ttl_then_alias_sets_cache_policy(
@@ -287,6 +331,42 @@ def test_swap_key_mapping_requires_artifact_index_ready(
     assert swap_resp.status == global_store_pb2.Status.STATUS_ERROR
     assert swap_context.code == grpc.StatusCode.FAILED_PRECONDITION
     assert "artifact/index not ready" in (swap_context.details or "")
+
+
+def test_swap_key_mapping_rejects_msa1(
+    servicer,
+    test_context,
+    memory_info,
+    registered_worker,
+):
+    _register_artifact_with_index(
+        servicer=servicer,
+        context_factory=type(test_context),
+        artifact_id="aid-ready-swap",
+        worker_id=registered_worker,
+        mem_info=memory_info,
+    )
+    upsert_resp = servicer.UpsertKeyMapping(
+        global_store_pb2.UpsertKeyMappingRequest(
+            key="model:swap-msa1",
+            artifact_id="aid-ready-swap",
+        ),
+        type(test_context)(),
+    )
+    assert upsert_resp.status == global_store_pb2.Status.STATUS_OK
+
+    swap_context = type(test_context)()
+    swap_resp = servicer.SwapKeyMapping(
+        global_store_pb2.SwapKeyMappingRequest(
+            key="model:swap-msa1",
+            new_artifact_id="msa1:test-session~policy~partitioned~deadbeef",
+        ),
+        swap_context,
+    )
+
+    assert swap_resp.status == global_store_pb2.Status.STATUS_ERROR
+    assert swap_context.code == grpc.StatusCode.FAILED_PRECONDITION
+    assert "daemon-session-local" in (swap_context.details or "")
 
 
 def test_resolve_key_mapping_alias_cache_ttl_can_be_configured(test_context):

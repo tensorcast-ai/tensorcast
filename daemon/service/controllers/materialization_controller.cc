@@ -78,6 +78,7 @@ MaterializationController::MaterializationController(Dep d)
               .shutdown_signal = d.shutdown_signal,
               .global_store_client = d.global_store_client,
               .storage_path = d.storage_path,
+              .public_disk_source_policy = d.public_disk_source_policy,
           }),
       replica_materialization_service_(
           ReplicaMaterializationService::Dep{
@@ -216,6 +217,13 @@ grpc::Status MaterializationController::submit_binding_contribution(
   return owner_binding_service_.submit_binding_contribution(rctx, req, resp);
 }
 
+grpc::Status MaterializationController::freeze_binding_current_value(
+    RpcContext& rctx,
+    const v2::FreezeBindingCurrentValueRequest& req,
+    v2::FreezeBindingCurrentValueResponse& resp) {
+  return owner_binding_service_.freeze_binding_current_value(rctx, req, resp);
+}
+
 grpc::Status MaterializationController::seal_binding(
     RpcContext& rctx,
     const v2::SealBindingRequest& req,
@@ -228,6 +236,20 @@ grpc::Status MaterializationController::promote_binding_current_value(
     const v2::PromoteBindingCurrentValueRequest& req,
     v2::PromoteBindingCurrentValueResponse& resp) {
   return owner_binding_service_.promote_binding_current_value(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::start_promote_binding_current_value(
+    RpcContext& rctx,
+    const v2::StartPromoteBindingCurrentValueRequest& req,
+    v2::StartPromoteBindingCurrentValueResponse& resp) {
+  return owner_binding_service_.start_promote_binding_current_value(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::get_binding_promotion_status(
+    RpcContext& rctx,
+    const v2::GetBindingPromotionStatusRequest& req,
+    v2::GetBindingPromotionStatusResponse& resp) {
+  return owner_binding_service_.get_binding_promotion_status(rctx, req, resp);
 }
 
 grpc::Status MaterializationController::refill_owned_binding(
@@ -296,6 +318,13 @@ grpc::Status MaterializationController::resolve_public_disk_source(
     const v2::ResolvePublicDiskSourceRequest& req,
     v2::ResolvePublicDiskSourceResponse& resp) {
   return disk_artifact_service_.resolve_public_disk_source(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::promote_mounted_source_artifact(
+    RpcContext& rctx,
+    const v2::PromoteMountedSourceArtifactRequest& req,
+    v2::PromoteMountedSourceArtifactResponse& resp) {
+  return disk_artifact_service_.promote_mounted_source_artifact(rctx, req, resp);
 }
 
 grpc::Status MaterializationController::import_artifact_from_path_stream(

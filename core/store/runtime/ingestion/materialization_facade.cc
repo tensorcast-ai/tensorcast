@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -124,6 +125,25 @@ uint64_t saturating_multiply_u64(uint64_t lhs, uint64_t rhs) {
     return std::numeric_limits<uint64_t>::max();
   }
   return lhs * rhs;
+}
+
+uint64_t estimate_collective_dedup_saving_bytes(
+    const std::optional<RepresentationWorkPlan>& work_plan,
+    uint32_t world_size) {
+  if (!work_plan.has_value() || world_size <= 1) {
+    return 0;
+  }
+  uint64_t saving = 0;
+  const uint64_t peer_count = static_cast<uint64_t>(world_size - 1);
+  for (const auto& item : work_plan->items) {
+    if (item.kind != RepresentationWorkItemKind::kTensorCopy || item.partition_kind != WorkPartitionKind::kReplicated) {
+      continue;
+    }
+    const uint64_t item_saving = saturating_multiply_u64(item.committed_bytes, peer_count);
+    saving = std::numeric_limits<uint64_t>::max() - saving < item_saving ? std::numeric_limits<uint64_t>::max()
+                                                                         : saving + item_saving;
+  }
+  return saving;
 }
 
 std::string format_execution_strategy_candidates(const std::vector<strategy::ExecutionStrategyCandidate>& candidates) {
@@ -371,6 +391,7 @@ bool work_plan_requires_explicit_executor_data_map(const RepresentationWorkPlan&
   return std::any_of(plan.items.begin(), plan.items.end(), [](const RepresentationWorkItem& item) {
     return item.kind == RepresentationWorkItemKind::kTensorCopy ||
         item.kind == RepresentationWorkItemKind::kConcatAssemble ||
+        item.kind == RepresentationWorkItemKind::kExpertDim0Concat ||
         item.kind == RepresentationWorkItemKind::kResidualByteRange;
   });
 }
@@ -380,10 +401,26 @@ bool source_bound_execution_mode_uses_collective(strategy::SourceBoundExecutionM
       mode == strategy::SourceBoundExecutionMode::kCollectiveFirstMixed;
 }
 
+bool source_bound_execution_mode_uses_local_mapped(strategy::SourceBoundExecutionMode mode) {
+  return mode == strategy::SourceBoundExecutionMode::kLocalMappedTyped;
+}
+
 bool source_bound_execution_mode_requires_executor_source_map(strategy::SourceBoundExecutionMode mode) {
   return mode == strategy::SourceBoundExecutionMode::kPureCollective ||
       mode == strategy::SourceBoundExecutionMode::kCollectiveFirstMixed ||
-      mode == strategy::SourceBoundExecutionMode::kGenericOnly;
+      mode == strategy::SourceBoundExecutionMode::kGenericOnly ||
+      mode == strategy::SourceBoundExecutionMode::kLocalMappedTyped;
+}
+
+uint64_t planned_generic_backend_bytes_after_local_mapped(const strategy::SourceBoundExecutionPlanSummary& summary) {
+  const uint64_t non_admitted_collective_bytes =
+      summary.planned_collective_candidate_bytes > summary.planned_collective_admitted_bytes
+      ? summary.planned_collective_candidate_bytes - summary.planned_collective_admitted_bytes
+      : 0;
+  if (summary.planned_generic_residual_bytes > std::numeric_limits<uint64_t>::max() - non_admitted_collective_bytes) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return non_admitted_collective_bytes + summary.planned_generic_residual_bytes;
 }
 
 std::string format_reject_reason_buckets(const absl::flat_hash_map<std::string, uint64_t>& buckets) {
@@ -1107,6 +1144,7 @@ absl::StatusOr<loader::ByteRangeMap> build_local_typed_pad_map(
       }
       case RepresentationWorkItemKind::kTensorCopy:
       case RepresentationWorkItemKind::kConcatAssemble:
+      case RepresentationWorkItemKind::kExpertDim0Concat:
       case RepresentationWorkItemKind::kResidualByteRange:
         break;
     }
@@ -1426,6 +1464,35 @@ absl::StatusOr<std::pair<std::string, std::string>> parse_mi2_multihashes(std::s
     return absl::InvalidArgumentError("sealed_artifact_id must include index and data multihash components");
   }
   return std::make_pair(std::string(index_mh), std::string(data_mh));
+}
+
+absl::Status publish_sealed_artifact_metadata(
+    components::IGlobalStoreClient& global_store_client,
+    std::string_view sealed_artifact_id,
+    std::string_view schema_version,
+    std::string_view encoding,
+    uint64_t total_size,
+    std::string_view canonical_index_json) {
+  if (sealed_artifact_id.empty()) {
+    return absl::InvalidArgumentError("publish_sealed_artifact_metadata requires sealed_artifact_id");
+  }
+  if (canonical_index_json.empty()) {
+    return absl::InvalidArgumentError("publish_sealed_artifact_metadata requires canonical_index_json");
+  }
+  auto multihashes_or = parse_mi2_multihashes(sealed_artifact_id);
+  if (!multihashes_or.ok()) {
+    return multihashes_or.status();
+  }
+
+  common::v1::ArtifactDescriptor descriptor;
+  descriptor.set_artifact_id(std::string(sealed_artifact_id));
+  descriptor.set_index_multihash(multihashes_or->first);
+  descriptor.set_data_multihash(multihashes_or->second);
+  descriptor.set_schema_version(std::string(schema_version));
+  descriptor.set_encoding(std::string(encoding));
+  descriptor.set_total_size(total_size);
+  descriptor.set_id_kind(tensorcast::common::v1::ArtifactIdKind::ARTIFACT_ID_KIND_MI2);
+  return global_store_client.upsert_artifact_metadata(descriptor, canonical_index_json);
 }
 
 absl::StatusOr<DeviceKey> select_seal_target_device(components::DeviceManager& device_manager) {
@@ -2953,9 +3020,13 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
         (ctx.hints.variant ? ctx.hints.variant->placement : loading::TransformPlacement::kServer) ==
             loading::TransformPlacement::kServer;
 
-    std::string representation_reason = "missing_variant_or_source_layout";
-    if (ctx.hints.variant.has_value() && ctx.disk.source_index_json.has_value() &&
-        ctx.verification.canonical_index_json.has_value()) {
+    const bool variant_required_for_representation = ctx.resolved_view_plan.has_value();
+    std::string representation_reason =
+        variant_required_for_representation ? "missing_variant_or_source_layout" : "missing_source_layout";
+    const bool can_build_representation = ctx.disk.source_index_json.has_value() &&
+        ctx.verification.canonical_index_json.has_value() &&
+        (ctx.hints.variant.has_value() || !variant_required_for_representation);
+    if (can_build_representation) {
       const std::string_view target_index_json = ctx.resolved_view_plan.has_value()
           ? std::string_view(ctx.resolved_view_plan->view_index_json)
           : std::string_view(*ctx.verification.canonical_index_json);
@@ -2963,7 +3034,7 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
         auto representation_or = materialization::contracts::build_index_backed_representation_work(
             *ctx.disk.source_index_json,
             target_index_json,
-            *ctx.hints.variant,
+            ctx.hints.variant,
             canonical_byte_space_ref(),
             "ephemeral_into_target");
         if (representation_or.ok()) {
@@ -3052,7 +3123,7 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
     const auto group = environment.execution_topology.collective_load_group;
     const uint32_t world_size = group.has_value() ? group->world_size : 0;
     const uint64_t dedup_saving_bytes =
-        world_size > 1 ? saturating_multiply_u64(environment.requested_bytes, world_size - 1) : 0;
+        estimate_collective_dedup_saving_bytes(plan.representation_work_plan, world_size);
     shared_source_proven =
         environment.execution_topology.source_locality == loading::SourceLocalityHint::kSharedSource ||
         environment.execution_topology.source_sharing_domain.has_value();
@@ -3948,6 +4019,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       ? std::optional<std::string_view>(*request_hints.disk_metadata->source_index_json)
       : std::nullopt;
   const auto& strategy_config = config_.options->materialization_strategy;
+  const bool source_bound_plan_uses_local_mapped =
+      source_bound_execution_mode_uses_local_mapped(source_bound_lane_plan.mode) ||
+      source_bound_lane_plan.local_mapped_typed_selected;
 
   if (executor_private_map.segments.empty() && has_fill_items &&
       !work_plan_has_scalar_fill_items(representation_work_plan)) {
@@ -4210,6 +4284,37 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       return absl::OkStatus();
     };
 
+    const bool local_mapped_required_by_plan = source_bound_plan_uses_local_mapped;
+    const bool local_mapped_executor_available =
+        strategy_config.enable_tensor_aware_mapped_executor && strategy_config.allow_mixed_execution;
+    if (local_mapped_required_by_plan && !local_mapped_executor_available) {
+      return absl::FailedPreconditionError(
+          "materialize_mapped_into_target source_bound_strategy_plan requires local mapped typed execution but the "
+          "tensor-aware mapped executor is unavailable");
+    }
+    const bool local_mapped_selected = local_mapped_executor_available &&
+        (strategy_config.executor_preference == StrategyConfig::ExecutorPreference::kTensorAwareLocal ||
+         local_mapped_required_by_plan);
+    const uint64_t planned_generic_after_local_mapped =
+        planned_generic_backend_bytes_after_local_mapped(source_bound_strategy->summary);
+    const auto setup_done = std::chrono::steady_clock::now();
+    LOG(INFO) << "tc_profile materialize_mapped_into_target source_setup"
+              << " artifact_id=" << request_hints.artifact_id << " target_device=" << target_device.ordinal
+              << " source_kind=" << static_cast<int>(source_kind)
+              << " source_byte_space=" << static_cast<int>(source_byte_space) << " total_size=" << total_size
+              << " effective_map_bytes=" << effective_map.total_bytes
+              << " effective_data_bytes=" << effective_data_map.total_bytes
+              << " collective_data_bytes=" << collective_effective_data_map.total_bytes
+              << " generic_data_bytes=" << generic_effective_data_map.total_bytes
+              << " effective_local_typed_bytes=" << effective_local_typed_bytes
+              << " source_bound_plan_uses_local_mapped=" << source_bound_plan_uses_local_mapped
+              << " local_mapped_selected=" << local_mapped_selected
+              << " collective_eligible=" << source_binding.collective_eligible
+              << " init_sec=" << std::chrono::duration<double>(init_done - source_total_start).count()
+              << " open_sec=" << std::chrono::duration<double>(source_open_done - init_done).count()
+              << " setup_after_open_sec=" << std::chrono::duration<double>(setup_done - source_open_done).count()
+              << " total_setup_sec=" << std::chrono::duration<double>(setup_done - source_total_start).count();
+
     if (source_binding.collective_eligible) {
       if (auto* disk_loader = dynamic_cast<DiskLoader*>(loader.get()); disk_loader != nullptr) {
         auto shared_or = disk_loader->shared_context();
@@ -4224,6 +4329,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
               .strategy_config = strategy_config,
           };
+          const auto collective_start = std::chrono::steady_clock::now();
           auto collective_result = execute_collective_mapped_target_load(
               config_.hooks,
               replica::CollectiveMappedTargetLoadRequest{
@@ -4238,6 +4344,15 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               config_.runtime_context->pinned_buffer_pool(),
               timeout,
               collective_options);
+          const auto collective_done = std::chrono::steady_clock::now();
+          LOG(INFO) << "tc_profile materialize_mapped_into_target collective_call"
+                    << " artifact_id=" << request_hints.artifact_id << " target_device=" << target_device.ordinal
+                    << " handled=" << collective_result.handled << " status_ok=" << collective_result.status.ok()
+                    << " unique_source_bytes=" << collective_result.metrics.unique_source_bytes
+                    << " peer_transfer_bytes=" << collective_result.metrics.peer_transfer_bytes
+                    << " batch_count=" << collective_result.metrics.batch_count
+                    << " skip_reason=" << collective_result.skip_reason
+                    << " sec=" << std::chrono::duration<double>(collective_done - collective_start).count();
           if (collective_result.handled) {
             if (!collective_result.status.ok()) {
               return absl::DataLossError(
@@ -4246,16 +4361,78 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                       collective_result.status.message()));
             }
             const uint64_t generic_residual_bytes = byte_range_map_covered_bytes(generic_effective_data_map);
-            if (generic_residual_bytes > 0 || effective_local_typed_bytes > 0) {
+            uint64_t local_mapped_bytes = 0;
+            uint64_t generic_backend_bytes = generic_residual_bytes;
+            loader::ByteRangeMap generic_backend_data_map = generic_effective_data_map;
+            double local_mapped_sec = 0.0;
+            if (generic_residual_bytes > 0 && local_mapped_selected) {
+              const auto local_start = std::chrono::steady_clock::now();
+              auto local_result = replica::try_local_mapped_target_load(
+                  replica::LocalMappedTargetLoadRequest{
+                      .artifact_id = request_hints.artifact_id,
+                      .disk_context = *shared_or,
+                      .representation_work_plan = representation_work_plan,
+                      .data_lane_map = generic_effective_data_map,
+                      .target_layout = target_layout,
+                      .strategy_config = strategy_config,
+                      .device_id = target_device.ordinal,
+                  },
+                  config_.runtime_context->pinned_buffer_pool(),
+                  timeout,
+                  collective_options);
+              const auto local_done = std::chrono::steady_clock::now();
+              local_mapped_sec = std::chrono::duration<double>(local_done - local_start).count();
+              LOG(INFO) << "tc_profile materialize_mapped_into_target local_mapped_continuation_call"
+                        << " artifact_id=" << request_hints.artifact_id << " target_device=" << target_device.ordinal
+                        << " handled=" << local_result.handled << " status_ok=" << local_result.status.ok()
+                        << " handled_bytes=" << local_result.handled_bytes
+                        << " residual_bytes=" << local_result.residual_data_map.total_bytes
+                        << " skip_reason=" << local_result.skip_reason << " sec=" << local_mapped_sec;
+              if (local_result.handled) {
+                if (!local_result.status.ok()) {
+                  return absl::Status(
+                      local_result.status.code(),
+                      absl::StrCat(
+                          "materialize_mapped_into_target local mapped continuation failed: ",
+                          local_result.status.message()));
+                }
+                local_mapped_bytes = local_result.handled_bytes;
+                generic_backend_data_map = std::move(local_result.residual_data_map);
+                generic_backend_bytes = byte_range_map_covered_bytes(generic_backend_data_map);
+                if (generic_backend_bytes > planned_generic_after_local_mapped) {
+                  return absl::FailedPreconditionError(
+                      absl::StrCat(
+                          "materialize_mapped_into_target local mapped continuation produced unplanned generic "
+                          "residual bytes: actual=",
+                          generic_backend_bytes,
+                          " planned=",
+                          planned_generic_after_local_mapped));
+                }
+                if (generic_backend_bytes > 0 && !strategy_config.allow_mixed_execution) {
+                  return absl::FailedPreconditionError(
+                      "materialize_mapped_into_target local mapped continuation produced generic residual but mixed "
+                      "execution is disabled");
+                }
+              } else {
+                return absl::FailedPreconditionError(
+                    absl::StrCat(
+                        "materialize_mapped_into_target selected local mapped continuation but admission returned "
+                        "handled=false: ",
+                        local_result.skip_reason.empty() ? "unavailable" : local_result.skip_reason));
+              }
+            }
+            double continuation_sec = 0.0;
+            if (generic_backend_bytes > 0 || effective_local_typed_bytes > 0) {
+              const auto continuation_start = std::chrono::steady_clock::now();
               loader::TargetLayoutGpuSink continuation_sink(
                   loader::TargetLayoutGpuSink::Options{
                       .storages = storages,
                       .chunk_size = config_.artifact_chunk_bytes,
                       .device_id = target_device.ordinal,
                   });
-              if (generic_residual_bytes > 0) {
+              if (generic_backend_bytes > 0) {
                 auto generic_status = execute_sparse_generic_backend_map(
-                    *base_source, generic_effective_data_map, continuation_sink, slice_bytes);
+                    *base_source, generic_backend_data_map, continuation_sink, slice_bytes);
                 if (!generic_status.ok()) {
                   return absl::DataLossError(
                       absl::StrCat(
@@ -4271,35 +4448,57 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                           "materialize_mapped_into_target local typed execution failed: ", fill_status.message()));
                 }
               }
+              continuation_sec =
+                  std::chrono::duration<double>(std::chrono::steady_clock::now() - continuation_start).count();
             }
             const uint64_t collective_bytes = byte_range_map_covered_bytes(collective_effective_data_map);
             const strategy::ExecutionCommitReport collective_report{
                 .source = source_kind,
                 .requested_bytes = total_size,
                 .committed_bytes = collective_bytes + generic_residual_bytes + effective_local_typed_bytes,
-                .fallback_bytes = generic_residual_bytes,
+                .fallback_bytes = generic_backend_bytes,
                 .residual_bytes = semantic_residual_bytes,
                 .actual_collective_committed_bytes = collective_bytes,
-                .actual_local_typed_bytes = effective_local_typed_bytes,
-                .actual_generic_backend_bytes = generic_residual_bytes,
+                .actual_local_typed_bytes = local_mapped_bytes + effective_local_typed_bytes,
+                .actual_generic_backend_bytes = generic_backend_bytes,
                 .collective_metrics = collective_result.metrics,
                 .collective_skip_reason = {},
                 .collective_handled = true,
                 .direct_write_supported = false,
                 .source_ordered = false,
-                .dominant_executor = "OwnerFileCollectiveExecutor",
+                .dominant_executor = local_mapped_bytes > 0
+                    ? (generic_backend_bytes > 0
+                           ? "OwnerFileCollectiveExecutor+TensorMappedLocalExecutor+GenericByteRangeExecutor"
+                           : "OwnerFileCollectiveExecutor+TensorMappedLocalExecutor")
+                    : "OwnerFileCollectiveExecutor",
                 .selection_reason = !source_bound_lane_plan.selection_reason.empty()
-                    ? source_bound_lane_plan.selection_reason
-                    : "collective_first_mixed",
+                    ? (local_mapped_bytes > 0
+                           ? absl::StrCat(source_bound_lane_plan.selection_reason, ";local_mapped_tensor_aware")
+                           : source_bound_lane_plan.selection_reason)
+                    : (local_mapped_bytes > 0 ? "collective_first_mixed;local_mapped_tensor_aware"
+                                              : "collective_first_mixed"),
             };
             LOG(INFO) << "materialize_mapped_into_target execution_commit"
                       << " source_kind=" << static_cast<int>(collective_report.source)
                       << " committed_bytes=" << collective_report.committed_bytes
                       << " actual_collective_committed_bytes=" << collective_report.actual_collective_committed_bytes
                       << " actual_local_typed_bytes=" << collective_report.actual_local_typed_bytes
+                      << " actual_generic_backend_bytes=" << collective_report.actual_generic_backend_bytes
                       << " fallback_bytes=" << collective_report.fallback_bytes
                       << " collective_handled=" << collective_report.collective_handled
                       << " dominant_executor=" << collective_report.dominant_executor;
+            LOG(INFO) << "tc_profile materialize_mapped_into_target collective_path timings"
+                      << " artifact_id=" << request_hints.artifact_id << " target_device=" << target_device.ordinal
+                      << " setup_sec=" << std::chrono::duration<double>(setup_done - source_total_start).count()
+                      << " collective_sec=" << std::chrono::duration<double>(collective_done - collective_start).count()
+                      << " local_mapped_sec=" << local_mapped_sec << " continuation_sec=" << continuation_sec
+                      << " total_sec="
+                      << std::chrono::duration<double>(std::chrono::steady_clock::now() - source_total_start).count()
+                      << " committed_bytes=" << collective_report.committed_bytes
+                      << " collective_bytes=" << collective_report.actual_collective_committed_bytes
+                      << " local_mapped_bytes=" << local_mapped_bytes
+                      << " generic_backend_bytes=" << generic_backend_bytes
+                      << " effective_local_typed_bytes=" << effective_local_typed_bytes;
             return loading::MaterializeIntoTargetResult{
                 .source = source_kind,
                 .requested_bytes = collective_report.requested_bytes,
@@ -4343,6 +4542,168 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               : absl::StrCat(
                     "collective requested but the selected source could not be handled without generic fallback: ",
                     collective_skip_reason));
+    }
+
+    if (!strategy_uses_collective_lane && source_kind == loading::MaterializationSource::kDisk &&
+        local_mapped_selected && effective_data_map.total_bytes > 0) {
+      if (auto* disk_loader = dynamic_cast<DiskLoader*>(loader.get()); disk_loader != nullptr) {
+        auto shared_or = disk_loader->shared_context();
+        if (shared_or.ok()) {
+          const replica::CollectiveMappedTargetLoadOptions local_options{
+              .chunk_bytes = std::min<uint64_t>(slice_bytes, total_size),
+              .merge_max_gap_bytes = config_.options->byte_mapping.disk_source_merge_max_gap_bytes,
+              .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
+              .strategy_config = strategy_config,
+          };
+          const auto local_start = std::chrono::steady_clock::now();
+          auto local_result = replica::try_local_mapped_target_load(
+              replica::LocalMappedTargetLoadRequest{
+                  .artifact_id = request_hints.artifact_id,
+                  .disk_context = *shared_or,
+                  .representation_work_plan = representation_work_plan,
+                  .data_lane_map = effective_data_map,
+                  .target_layout = target_layout,
+                  .strategy_config = strategy_config,
+                  .device_id = target_device.ordinal,
+              },
+              config_.runtime_context->pinned_buffer_pool(),
+              timeout,
+              local_options);
+          const auto local_done = std::chrono::steady_clock::now();
+          const double local_mapped_sec = std::chrono::duration<double>(local_done - local_start).count();
+          LOG(INFO) << "tc_profile materialize_mapped_into_target local_mapped_call"
+                    << " artifact_id=" << request_hints.artifact_id << " target_device=" << target_device.ordinal
+                    << " handled=" << local_result.handled << " status_ok=" << local_result.status.ok()
+                    << " handled_bytes=" << local_result.handled_bytes
+                    << " residual_bytes=" << local_result.residual_data_map.total_bytes
+                    << " skip_reason=" << local_result.skip_reason << " sec=" << local_mapped_sec;
+          if (local_result.handled) {
+            if (!local_result.status.ok()) {
+              return absl::Status(
+                  local_result.status.code(),
+                  absl::StrCat(
+                      "materialize_mapped_into_target local mapped execution failed: ", local_result.status.message()));
+            }
+            const uint64_t local_mapped_bytes = local_result.handled_bytes;
+            const loader::ByteRangeMap local_residual_data_map = std::move(local_result.residual_data_map);
+            const uint64_t generic_backend_bytes = byte_range_map_covered_bytes(local_residual_data_map);
+            if (generic_backend_bytes > planned_generic_after_local_mapped) {
+              return absl::FailedPreconditionError(
+                  absl::StrCat(
+                      "materialize_mapped_into_target local mapped execution produced unplanned generic residual "
+                      "bytes: actual=",
+                      generic_backend_bytes,
+                      " planned=",
+                      planned_generic_after_local_mapped));
+            }
+            if (generic_backend_bytes > 0 && !strategy_config.allow_mixed_execution) {
+              return absl::FailedPreconditionError(
+                  "materialize_mapped_into_target local mapped execution produced generic residual but mixed execution "
+                  "is disabled");
+            }
+            double continuation_sec = 0.0;
+            if (generic_backend_bytes > 0 || effective_local_typed_bytes > 0) {
+              const auto continuation_start = std::chrono::steady_clock::now();
+              loader::TargetLayoutGpuSink continuation_sink(
+                  loader::TargetLayoutGpuSink::Options{
+                      .storages = storages,
+                      .chunk_size = config_.artifact_chunk_bytes,
+                      .device_id = target_device.ordinal,
+                  });
+              if (generic_backend_bytes > 0) {
+                auto generic_status = execute_sparse_generic_backend_map(
+                    *base_source, local_residual_data_map, continuation_sink, slice_bytes);
+                if (!generic_status.ok()) {
+                  return absl::DataLossError(
+                      absl::StrCat(
+                          "materialize_mapped_into_target local mapped residual generic execution failed: ",
+                          generic_status.message()));
+                }
+              }
+              auto fill_status = execute_local_typed_work(continuation_sink);
+              if (!fill_status.ok()) {
+                return absl::DataLossError(
+                    absl::StrCat(
+                        "materialize_mapped_into_target local typed execution failed: ", fill_status.message()));
+              }
+              continuation_sec =
+                  std::chrono::duration<double>(std::chrono::steady_clock::now() - continuation_start).count();
+            }
+            const strategy::ExecutionCommitReport local_report{
+                .source = source_kind,
+                .requested_bytes = total_size,
+                .committed_bytes = local_mapped_bytes + generic_backend_bytes + effective_local_typed_bytes,
+                .fallback_bytes = generic_backend_bytes,
+                .residual_bytes = semantic_residual_bytes,
+                .actual_collective_committed_bytes = 0,
+                .actual_local_typed_bytes = local_mapped_bytes + effective_local_typed_bytes,
+                .actual_generic_backend_bytes = generic_backend_bytes,
+                .collective_metrics = local_result.metrics,
+                .collective_skip_reason = collective_skip_reason,
+                .collective_handled = false,
+                .direct_write_supported = false,
+                .source_ordered = false,
+                .dominant_executor = generic_backend_bytes > 0 ? "TensorMappedLocalExecutor+GenericByteRangeExecutor"
+                                                               : "TensorMappedLocalExecutor",
+                .selection_reason = !source_bound_lane_plan.selection_reason.empty()
+                    ? absl::StrCat(source_bound_lane_plan.selection_reason, ";local_mapped_tensor_aware")
+                    : "local_mapped_tensor_aware",
+            };
+            LOG(INFO) << "materialize_mapped_into_target execution_commit"
+                      << " source_kind=" << static_cast<int>(local_report.source)
+                      << " committed_bytes=" << local_report.committed_bytes
+                      << " actual_local_typed_bytes=" << local_report.actual_local_typed_bytes
+                      << " collective_handled=" << local_report.collective_handled
+                      << " collective_skip_reason=" << local_report.collective_skip_reason
+                      << " dominant_executor=" << local_report.dominant_executor;
+            LOG(INFO) << "tc_profile materialize_mapped_into_target local_path timings"
+                      << " artifact_id=" << request_hints.artifact_id << " target_device=" << target_device.ordinal
+                      << " setup_sec=" << std::chrono::duration<double>(setup_done - source_total_start).count()
+                      << " local_mapped_sec=" << local_mapped_sec << " continuation_sec=" << continuation_sec
+                      << " total_sec="
+                      << std::chrono::duration<double>(std::chrono::steady_clock::now() - source_total_start).count()
+                      << " committed_bytes=" << local_report.committed_bytes
+                      << " local_mapped_bytes=" << local_mapped_bytes
+                      << " generic_backend_bytes=" << generic_backend_bytes
+                      << " effective_local_typed_bytes=" << effective_local_typed_bytes;
+            return loading::MaterializeIntoTargetResult{
+                .source = source_kind,
+                .requested_bytes = local_report.requested_bytes,
+                .committed_bytes = local_report.committed_bytes,
+                .fallback_bytes = local_report.fallback_bytes,
+                .residual_bytes = local_report.residual_bytes,
+                .actual_collective_committed_bytes = local_report.actual_collective_committed_bytes,
+                .actual_local_typed_bytes = local_report.actual_local_typed_bytes,
+                .actual_generic_backend_bytes = local_report.actual_generic_backend_bytes,
+                .collective_unique_source_bytes = local_report.collective_metrics.unique_source_bytes,
+                .collective_peer_transfer_bytes = local_report.collective_metrics.peer_transfer_bytes,
+                .collective_peak_temporary_bytes = local_report.collective_metrics.peak_temporary_bytes,
+                .collective_batch_count = local_report.collective_metrics.batch_count,
+                .collective_dedup_saving_bytes = local_report.collective_metrics.dedup_saving_bytes,
+                .collective_skip_reason = local_report.collective_skip_reason,
+                .collective_handled = local_report.collective_handled,
+                .direct_write_supported = local_report.direct_write_supported,
+                .source_ordered = local_report.source_ordered,
+                .dominant_executor = local_report.dominant_executor,
+                .selection_reason = local_report.selection_reason,
+            };
+          }
+          return absl::FailedPreconditionError(
+              absl::StrCat(
+                  "materialize_mapped_into_target selected local mapped execution but admission returned "
+                  "handled=false: ",
+                  local_result.skip_reason.empty() ? "unavailable" : local_result.skip_reason));
+        } else {
+          return absl::FailedPreconditionError(
+              absl::StrCat(
+                  "materialize_mapped_into_target selected local mapped execution but disk shared context is "
+                  "unavailable: ",
+                  shared_or.status().message()));
+        }
+      } else {
+        return absl::FailedPreconditionError(
+            "materialize_mapped_into_target selected local mapped execution but disk loader is unavailable");
+      }
     }
 
     loader::TargetLayoutGpuSink::Options sink_opts{
@@ -4497,8 +4858,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   };
 
   const bool local_canonical_override = prefer_local_canonical_source_for_mapped(strategy_config);
-  const bool try_local_canonical_source =
-      !strategy_uses_collective_lane && (!source_index_json.has_value() || local_canonical_override);
+  const bool try_local_canonical_source = !strategy_uses_collective_lane && !source_bound_plan_uses_local_mapped &&
+      (!source_index_json.has_value() || local_canonical_override);
   if (try_local_canonical_source) {
     auto local_source_or = make_local_canonical_source(
         config_.replica_runtime->registry(), request_hints.artifact_id, target_device, canonical_total_size);
@@ -4530,6 +4891,11 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   const bool allow_p2p = retrieval_policy.allow_p2p;
   const bool allow_disk = retrieval_policy.allow_disk;
   const bool has_disk_source = disk_source.has_value();
+  if (source_bound_plan_uses_local_mapped && (!allow_disk || !has_disk_source)) {
+    return absl::FailedPreconditionError(
+        "materialize_mapped_into_target source_bound_strategy_plan requires local mapped typed execution but disk "
+        "execution is unavailable");
+  }
   if (strategy_uses_collective_lane && (!allow_disk || !has_disk_source)) {
     return absl::FailedPreconditionError(
         "materialize_mapped_into_target explicit source_bound_strategy_plan selected a collective lane but disk "
@@ -4544,7 +4910,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     local_identity.p2p_port = options.p2p_port;
   }
 
-  if (prefer_disk && has_disk_source && allow_disk) {
+  if ((prefer_disk || source_bound_plan_uses_local_mapped) && has_disk_source && allow_disk) {
     loading::DiskSource disk_src = *disk_source;
     disk_src.require_descriptor = tensorcast::common::is_mi2_artifact_id(request_hints.artifact_id);
     auto disk_or = run_source(
@@ -4554,7 +4920,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     if (disk_or.ok()) {
       return disk_or;
     }
-    if (!gs_connected || !allow_p2p) {
+    if (!gs_connected || !allow_p2p || source_bound_plan_uses_local_mapped) {
       return disk_or.status();
     }
   }
@@ -6208,6 +6574,21 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
       result.index_multihash, result.data_multihash, result.total_size);
   result.verification_record = build_seal_verification_record(result.index_multihash);
 
+  // Seal creates a new canonical mi2 identity. Publish the canonical index for
+  // that sealed identity immediately so follow-on layout/proof flows can
+  // resolve GetArtifactIndexById(sealed_artifact_id) without depending on a
+  // later replica registration side effect.
+  absl::Status metadata_status = publish_sealed_artifact_metadata(
+      *gs_client,
+      result.sealed_artifact_id,
+      result.schema_version,
+      result.encoding,
+      result.total_size,
+      canonical_index_json);
+  if (!metadata_status.ok()) {
+    return metadata_status;
+  }
+
   if (!publish_canonical) {
     return result;
   }
@@ -6687,6 +7068,17 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
   result.verified_content_descriptor = build_sealed_artifact_verified_content_descriptor(
       result.index_multihash, result.data_multihash, result.total_size);
   result.verification_record = build_seal_verification_record(result.index_multihash);
+
+  absl::Status metadata_status = publish_sealed_artifact_metadata(
+      *gs_client,
+      result.sealed_artifact_id,
+      result.schema_version,
+      result.encoding,
+      result.total_size,
+      canonical_index_json);
+  if (!metadata_status.ok()) {
+    return metadata_status;
+  }
 
   if (!publish_canonical) {
     return result;

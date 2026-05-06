@@ -110,10 +110,25 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   grpc::Status SealBinding(grpc::ServerContext* ctx, const v2::SealBindingRequest* req, v2::SealBindingResponse* resp)
       override;
 
+  grpc::Status FreezeBindingCurrentValue(
+      grpc::ServerContext* ctx,
+      const v2::FreezeBindingCurrentValueRequest* req,
+      v2::FreezeBindingCurrentValueResponse* resp) override;
+
   grpc::Status PromoteBindingCurrentValue(
       grpc::ServerContext* ctx,
       const v2::PromoteBindingCurrentValueRequest* req,
       v2::PromoteBindingCurrentValueResponse* resp) override;
+
+  grpc::Status StartPromoteBindingCurrentValue(
+      grpc::ServerContext* ctx,
+      const v2::StartPromoteBindingCurrentValueRequest* req,
+      v2::StartPromoteBindingCurrentValueResponse* resp) override;
+
+  grpc::Status GetBindingPromotionStatus(
+      grpc::ServerContext* ctx,
+      const v2::GetBindingPromotionStatusRequest* req,
+      v2::GetBindingPromotionStatusResponse* resp) override;
 
   grpc::Status StartAssemblyAttempt(
       grpc::ServerContext* ctx,
@@ -268,6 +283,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       grpc::ServerContext* ctx,
       const v2::ResolvePublicDiskSourceRequest* req,
       v2::ResolvePublicDiskSourceResponse* resp) override;
+
+  grpc::Status PromoteMountedSourceArtifact(
+      grpc::ServerContext* ctx,
+      const v2::PromoteMountedSourceArtifactRequest* req,
+      v2::PromoteMountedSourceArtifactResponse* resp) override;
 
   grpc::Status ImportArtifactFromPathStream(
       grpc::ServerContext* ctx,

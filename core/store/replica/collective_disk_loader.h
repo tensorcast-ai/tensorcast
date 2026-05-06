@@ -63,6 +63,25 @@ struct CollectiveMappedTargetLoadResult {
   std::string skip_reason;
 };
 
+struct LocalMappedTargetLoadRequest {
+  std::string artifact_id;
+  std::shared_ptr<const loader::DiskArtifactContext> disk_context;
+  materialization::contracts::RepresentationWorkPlan representation_work_plan;
+  loader::ByteRangeMap data_lane_map;
+  loading::IntoTargetLayout target_layout;
+  StoreEngineOptions::MaterializationStrategyConfig strategy_config;
+  int device_id{-1};
+};
+
+struct LocalMappedTargetLoadResult {
+  bool handled{false};
+  absl::Status status{absl::OkStatus()};
+  runtime::ingestion::strategy::CollectiveExecutionMetrics metrics;
+  loader::ByteRangeMap residual_data_map;
+  uint64_t handled_bytes{0};
+  std::string skip_reason;
+};
+
 struct LocalBatchedDiskLoadRequest {
   loading::ReplicaKey replica_key;
   std::shared_ptr<const loader::DiskArtifactContext> disk_context;
@@ -104,6 +123,12 @@ CollectiveDiskLoadResult try_collective_disk_load(
 
 CollectiveMappedTargetLoadResult try_collective_mapped_target_load(
     const CollectiveMappedTargetLoadRequest& request,
+    const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
+    std::chrono::milliseconds pinned_timeout,
+    const CollectiveMappedTargetLoadOptions& options);
+
+LocalMappedTargetLoadResult try_local_mapped_target_load(
+    const LocalMappedTargetLoadRequest& request,
     const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
     std::chrono::milliseconds pinned_timeout,
     const CollectiveMappedTargetLoadOptions& options);

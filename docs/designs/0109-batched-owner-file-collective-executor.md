@@ -4,7 +4,7 @@ title: Batched Owner-File Collective Executor
 status: implemented
 areas: ["core", "daemon", "sdk", "serving", "benchmarks"]
 created: 2026-03-24
-last_updated: 2026-03-31
+last_updated: 2026-04-15
 related_code:
   - core/store/runtime/ingestion/materialization_facade.cc
   - core/store/runtime/ingestion/materialization_strategy_types.h
@@ -26,7 +26,7 @@ links:
   related:
     - ./0107-retrieval-policy-plane-cleanup.md
     - ./0112-binding-native-serving-realization-and-publication.md
-    - ../plans/0109-01-batched-owner-file-collective-rollout-and-residual-policy.md
+    - ../benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md
     - ../internals/disk-load-strategy.md
     - ../internals/model-loading.md
     - ../benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md
@@ -121,28 +121,51 @@ The implemented steady-state scope remains intentionally zero-residual-only:
 - collective runtime therefore remains collective-lane-only rather than
   becoming the owner of mixed-execution semantics
 
-Residual execution tracking after this phase-1 landing is now centralized:
+Residual execution tracking is now closed back into the surviving design and
+benchmark record:
 
-- the deleted earlier `0109` companion plan is no longer the active execution
-  owner;
-- mixed-residual policy, benchmark recapture, serving graduation evidence, and
-  prototype-deletion gates now live in
-  `docs/plans/0109-01-batched-owner-file-collective-rollout-and-residual-policy.md`;
-- `0108` remains the sole strategy-plane owner, and `0112` remains the
-  same-binding serving-path owner; this design owns only the executor-specific
-  collective behavior on top of that shared trunk.
+- the standalone `0109-01` rollout plan is retired,
+- the current mounted collective evidence lives in
+  `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`,
+- `0108` remains the sole strategy-plane owner,
+- `0112` remains the same-binding serving-path owner,
+- and this design now records only the executor-specific policy and runtime
+  semantics that survived closure.
 
-## Remaining Active Work
+## Closure Evidence
 
-The remaining `0109`-owned work is executor-specific rather than architectural:
+The `2026-04-15` mounted qwen2.5 TP4 rerun on the current `v4` contract shows:
 
-- decide and document the mixed-residual policy for owner-file collective
-  requests,
-- recapture shared-source benchmark and serving evidence for the bounded batched
-  executor,
-- freeze the defaulting and backout policy for shared-source workloads,
-- and retire any remaining stale rollout notes that still describe deleted
-  preload-based collective scaffolding as part of the steady path.
+- `bootstrap_source_bound_contract_version=4`
+- `bootstrap_source_bound_contract_path=collective_first_v4`
+- `bootstrap_realize_collective_policy=collective_first`
+- `planned_collective_admitted_bytes=16382928896`
+- `actual_collective_committed_bytes=16382928896`
+- `actual_generic_backend_bytes=0`
+- `dominant_executor=OwnerFileCollectiveExecutor`
+- `collective_unique_source_bytes=75762083840`
+- `collective_peer_transfer_bytes=49148786688`
+- `collective_peak_temporary_bytes=268435456`
+- `collective_batch_count=437`
+- `collective_dedup_saving_bytes=0`
+- and serving correctness probes `/health`, `/v1/models`, and
+  `/v1/completions` all returned `200`.
+
+The companion benchmark note also records the same-host TP4 `safetensors`
+baseline:
+
+- weight loading `6.26s` to `6.28s`,
+- ready wall time about `31s`,
+- versus TensorCast mounted ready wall time about `59s`.
+
+That comparison closes the remaining policy ambiguity:
+
+- host-local workloads do **not** graduate to collective default,
+- shared-source workloads remain collective-eligible only under explicit
+  shared-source proof plus the typed daemon policy,
+- and the current qwen2.5 mounted packet is sufficient to validate the
+  collective-dominant executor path without granting a broader "all local loads
+  should default to collective" conclusion.
 
 # Sequencing Note
 
@@ -855,6 +878,25 @@ Its eager memory behavior does not survive:
 - no whole-owner-payload VRAM preload,
 - no second full copy of large file ownership on GPU.
 
+## 4. Closure status (2026-04-27)
+
+The current mounted TP8 closure packet is
+`docs/benchmarks/20260427-step3p5-fp8-mounted-tp8-cold-start-evidence.md`.
+
+That packet freezes the `0109` policy conclusion:
+
+- `owner_file_collective_shared_fs_only=true` is the intended steady-state
+  policy, not temporary rollout debt;
+- `owner_file_collective_allow_mixed_residual=false` is the intended
+  fail-closed steady-state policy, not a provisional blocker waiting to be
+  relaxed;
+- current TP8 startup still reaches
+  `dominant_executor=OwnerFileCollectiveExecutor` with
+  `actual_generic_backend_bytes=0`, so the mounted case does not justify
+  widening mixed residual merely to keep startup alive; and
+- the remaining open item is performance quality in the TensorCast bootstrap
+  runtime, not policy ambiguity in `0109`.
+
 # Configuration
 
 This design should not add new environment-only toggles.
@@ -1110,7 +1152,7 @@ In short:
 - [`docs/designs/0107-retrieval-policy-plane-cleanup.md`](/data/workspace/tensorcast-280/docs/designs/0107-retrieval-policy-plane-cleanup.md)
 - [`docs/designs/0108-tensor-aware-materialization-strategy-plane.md`](/data/workspace/tensorcast-280/docs/designs/0108-tensor-aware-materialization-strategy-plane.md)
 - [`docs/designs/0112-binding-native-serving-realization-and-publication.md`](/data/workspace/tensorcast-280/docs/designs/0112-binding-native-serving-realization-and-publication.md)
-- [`docs/plans/0109-01-batched-owner-file-collective-rollout-and-residual-policy.md`](/data/workspace/tensorcast-280/docs/plans/0109-01-batched-owner-file-collective-rollout-and-residual-policy.md)
+- [`docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`](/data/workspace/tensorcast-280/docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md)
 - [`docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md`](/data/workspace/tensorcast-280/docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md)
 - [`docs/internals/disk-load-strategy.md`](/data/workspace/tensorcast-280/docs/internals/disk-load-strategy.md)
 - [`core/store/replica/collective_disk_loader.cc`](/data/workspace/tensorcast-280/core/store/replica/collective_disk_loader.cc)

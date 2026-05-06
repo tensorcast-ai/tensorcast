@@ -10,6 +10,7 @@ from typing import Callable, Mapping
 import grpc
 from google.protobuf import timestamp_pb2
 
+from tensorcast.common.identity import is_msa1_artifact_id
 from tensorcast.global_store.repositories.artifact_disk_location_repository import (
     ArtifactDiskLocationRepository,
 )
@@ -59,6 +60,14 @@ class DiskLocationRpcHandler:
                 return global_store_pb2.UpsertArtifactDiskLocationResponse(
                     status=global_store_pb2.Status.STATUS_ERROR
                 )
+            if is_msa1_artifact_id(artifact_id):
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                context.set_details(
+                    "msa1 artifact_id is daemon-session-local and cannot be stored in Global Store disk-location metadata"
+                )
+                return global_store_pb2.UpsertArtifactDiskLocationResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
             if cluster_id != self._cluster_id:
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details("cluster_id does not match server cluster_id")
@@ -100,6 +109,14 @@ class DiskLocationRpcHandler:
             if not artifact_id:
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details("artifact_id is required")
+                return global_store_pb2.ListArtifactDiskLocationsResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+            if is_msa1_artifact_id(artifact_id):
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                context.set_details(
+                    "msa1 artifact_id is daemon-session-local and is not valid on Global Store disk-location surfaces"
+                )
                 return global_store_pb2.ListArtifactDiskLocationsResponse(
                     status=global_store_pb2.Status.STATUS_ERROR
                 )

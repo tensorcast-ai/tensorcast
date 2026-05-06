@@ -6,8 +6,9 @@ import random
 import re
 import threading
 import time
+from collections.abc import Iterable, Mapping
 from concurrent.futures import CancelledError
-from typing import Mapping, NoReturn, cast
+from typing import NoReturn, cast
 
 import grpc
 
@@ -47,6 +48,7 @@ _TRANSIENT_MESSAGE_TOKENS = (
     "connection refused",
     "broken pipe",
 )
+_COLLECTIVE_FAILURE_CLASS_METADATA_KEY = "tc.collective_failure_class"
 _COLLECTIVE_FAILURE_CLASS_PATTERN = re.compile(
     r"\s*\[tc\.collective_failure_class=(not_eligible|execution_failed)\]\s*",
     re.IGNORECASE,
@@ -68,6 +70,35 @@ def _append_hint(message: str, hint: str) -> str:
     return _append_debug_hint(f"{message}\nHint: {hint}")
 
 
+def _normalize_collective_failure_class(
+    value: object,
+) -> CollectiveFailureClassName | None:
+    normalized = str(value).strip().lower()
+    if normalized in {"not_eligible", "execution_failed"}:
+        return cast(CollectiveFailureClassName, normalized)
+    return None
+
+
+def _extract_collective_failure_class_metadata(
+    exc: grpc.RpcError,
+) -> CollectiveFailureClassName | None:
+    try:
+        metadata = exc.trailing_metadata()
+    except Exception:  # noqa: BLE001
+        return None
+    raw_metadata = metadata
+    if raw_metadata is None:
+        return None
+    metadata = cast(Iterable[tuple[str, object]], raw_metadata)
+    for key, value in metadata:
+        if str(key).lower() != _COLLECTIVE_FAILURE_CLASS_METADATA_KEY:
+            continue
+        normalized = _normalize_collective_failure_class(value)
+        if normalized is not None:
+            return normalized
+    return None
+
+
 def _extract_collective_failure_class(
     message: str,
 ) -> tuple[str, CollectiveFailureClassName | None]:
@@ -75,7 +106,7 @@ def _extract_collective_failure_class(
     if match is None:
         return message, None
     cleaned = _COLLECTIVE_FAILURE_CLASS_PATTERN.sub(" ", message, count=1)
-    return cleaned.strip(), cast(CollectiveFailureClassName, match.group(1).lower())
+    return cleaned.strip(), _normalize_collective_failure_class(match.group(1))
 
 
 def _global_store_not_connected_hint() -> str:
@@ -221,7 +252,10 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
         details = _grpc_details(exc)
         status_name = status_code.name if status_code is not None else "UNKNOWN"
         mapped = details or "retrieval failed"
-        mapped, collective_failure_class = _extract_collective_failure_class(mapped)
+        collective_failure_class = _extract_collective_failure_class_metadata(exc)
+        mapped, message_failure_class = _extract_collective_failure_class(mapped)
+        if collective_failure_class is None:
+            collective_failure_class = message_failure_class
         lowered = mapped.lower()
         if "selection.logical_layout_hash does not match resolved selection" in mapped:
             return ArtifactError(

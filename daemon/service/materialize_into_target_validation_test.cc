@@ -22,9 +22,11 @@
 #include "core/cuda/cuda_ipc.h"
 #include "core/cuda/device_guard.h"
 #include "core/store/device_registry.h"
+#include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/view/view_identity.h"
 #include "core/store/store_engine.h"
 #include "core/store/testing/recording_global_store_client.h"
+#include "daemon/service/controllers/materialization_disk_resolve_utils.h"
 #include "daemon/service/rpc_context.h"
 #include "daemon/state/background_scheduler.h"
 #include "daemon/state/device_resolver.h"
@@ -62,6 +64,21 @@ bool write_file(const std::filesystem::path& path, std::string_view payload) {
   }
   out.write(payload.data(), static_cast<std::streamsize>(payload.size()));
   return out.good();
+}
+
+tensorcast::daemon::ArtifactSourceRegistry::FingerprintMap to_registry_fingerprints(
+    const tensorcast::daemon::materialization_disk_resolve::SourceFingerprintMap& fingerprints) {
+  tensorcast::daemon::ArtifactSourceRegistry::FingerprintMap out;
+  for (const auto& [relative_path, fingerprint] : fingerprints) {
+    out.insert_or_assign(
+        relative_path,
+        tensorcast::daemon::ArtifactSourceRegistry::SourceFileFingerprint{
+            .inode = fingerprint.inode,
+            .size = fingerprint.size,
+            .mtime_ns = fingerprint.mtime_ns,
+        });
+  }
+  return out;
 }
 
 absl::StatusOr<std::string> compute_view_id(
@@ -412,6 +429,132 @@ TEST_CASE(
   const bool expected_status = status.error_code() == grpc::StatusCode::NOT_FOUND ||
       status.error_code() == grpc::StatusCode::FAILED_PRECONDITION;
   REQUIRE(expected_status);
+}
+
+TEST_CASE(
+    "MaterializeIntoTarget rejects tensor-aware selection from byte-only mounted sources",
+    "[daemon][materialize][into_target][byte_only]") {
+  ValidationFixture fix;
+  auto registered_or = register_single_gpu_region(fix, 8);
+  REQUIRE(registered_or.ok());
+  auto registered = std::move(*registered_or);
+
+  const auto artifact_id = "msa1:test-session~policy~partitioned~deadbeef";
+  const auto artifact_dir = test_tmpdir() / "artifact_target_byte_only_selection";
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  REQUIRE(write_file(artifact_dir / "tensor.data", "ABCDEFGH"));
+
+  auto metadata_or = tensorcast::daemon::materialization_disk_resolve::build_mounted_source_metadata(artifact_dir);
+  REQUIRE(metadata_or.ok());
+  fix.disk_imports.upsert_binding(
+      artifact_id,
+      tensorcast::daemon::ArtifactSourceRegistry::Entry{
+          .source_kind = tensorcast::daemon::ArtifactSourceRegistry::SourceKind::kMountedSourceArtifact,
+          .canonical_source_path = artifact_dir.string(),
+          .canonical_index_json = metadata_or->index_info.canonical_index_json,
+          .source_index_json = metadata_or->index_info.source_index_json,
+          .source_disk_path = artifact_dir.string(),
+          .tensor_aware_metadata = false,
+          .validate_before_read = true,
+          .file_fingerprints = to_registry_fingerprints(metadata_or->file_fingerprints),
+      });
+
+  MaterializeIntoTargetRequest req;
+  req.mutable_selection()->set_artifact_id(artifact_id);
+  req.mutable_selection()->add_tensor_names("payload");
+  req.set_device_uuid(registered.device_uuid);
+  req.set_pid(registered.owner_pid);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_VIEW);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(8);
+  storage->set_vram_region_id(registered.region_id);
+  storage->set_mapping_base_offset(0);
+
+  auto* offset = layout->add_offsets();
+  offset->set_name("payload");
+  offset->set_storage_id("storage-0");
+  offset->set_storage_offset(0);
+  offset->set_logical_length(8);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  INFO("status=" << status.error_code() << " message=" << status.error_message());
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message().find("tensor-aware mounted-source metadata") != std::string::npos);
+}
+
+TEST_CASE(
+    "MaterializeIntoTarget rejects stale msa1 after mounted source mutation",
+    "[daemon][materialize][into_target][msa1][mutation]") {
+  ValidationFixture fix;
+  auto registered_or = register_single_gpu_region(fix, 8);
+  REQUIRE(registered_or.ok());
+  auto registered = std::move(*registered_or);
+
+  const auto artifact_id = "msa1:test-session~policy~partitioned~deadbeef";
+  const auto artifact_dir = test_tmpdir() / "artifact_target_mutated_msa1";
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  REQUIRE(write_file(artifact_dir / "tensor.data", "ABCDEFGH"));
+
+  auto metadata_or = tensorcast::daemon::materialization_disk_resolve::build_mounted_source_metadata(artifact_dir);
+  REQUIRE(metadata_or.ok());
+  fix.disk_imports.upsert_binding(
+      artifact_id,
+      tensorcast::daemon::ArtifactSourceRegistry::Entry{
+          .source_kind = tensorcast::daemon::ArtifactSourceRegistry::SourceKind::kMountedSourceArtifact,
+          .canonical_source_path = artifact_dir.string(),
+          .canonical_index_json = metadata_or->index_info.canonical_index_json,
+          .source_index_json = metadata_or->index_info.source_index_json,
+          .source_disk_path = artifact_dir.string(),
+          .tensor_aware_metadata = false,
+          .validate_before_read = true,
+          .file_fingerprints = to_registry_fingerprints(metadata_or->file_fingerprints),
+      });
+
+  REQUIRE(std::filesystem::remove(artifact_dir / "tensor.data"));
+
+  MaterializeIntoTargetRequest req;
+  req.mutable_selection()->set_artifact_id(artifact_id);
+  req.set_device_uuid(registered.device_uuid);
+  req.set_pid(registered.owner_pid);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(8);
+  storage->set_vram_region_id(registered.region_id);
+  storage->set_mapping_base_offset(0);
+
+  auto* offset = layout->add_offsets();
+  offset->set_name("payload");
+  offset->set_storage_id("storage-0");
+  offset->set_storage_offset(0);
+  offset->set_logical_length(8);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+  REQUIRE(status.error_message().find("SOURCE_MUTATED") != std::string::npos);
 }
 
 TEST_CASE("MaterializeIntoTarget accepts ordered full selection", "[daemon][materialize][into_target]") {

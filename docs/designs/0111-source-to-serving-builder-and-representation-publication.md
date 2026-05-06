@@ -4,7 +4,7 @@ title: Source-to-Serving Builder and Representation Publication Lineage
 status: accepted
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests"]
 created: 2026-03-24
-last_updated: 2026-03-31
+last_updated: 2026-04-30
 related_code:
   - docs/designs/0110-artifact-representation-contract-and-transform-unification.md
   - docs/designs/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
@@ -47,10 +47,13 @@ durable serving artifacts and a typed representation-publication bridge for
 - `0110` remains the sole owner of normalized transform semantics.
 - `0105` remains the sole owner of externally visible publish lineage through
   `PublishedModelVersion`.
+- optimistic node-local bootstrap may expose a same-daemon local-ready serving
+  value before `PublishedModelVersion` exists, but that value is not external
+  publication lineage and must remain pending verification or explicitly
+  local-only.
 - this design defines the bridge between them:
   - source-to-serving builder modes,
-  - admitted builder realization protocols for bootstrap and difficult
-    families,
+  - same-binding admission for representation-changing builder families,
   - serving-artifact identity and manifest rules,
   - a builder-layer publication digest that stays separate from `0110`
     semantic identity,
@@ -70,10 +73,9 @@ The design is intentionally Torch-first in grounding, but not Torch-layer-owned.
   TensorCast owns serving-artifact identity and the representation-publication
   bridge, while a separate shared Torch integration layer owns trace capture,
   binding orchestration, and thin framework-adapter surfaces. In particular, a
-  node-local builder may realize the future serving representation either on
-  binding-managed storage or on an admitted scratch host before closeout, but
-  artifact identity and externally visible lineage still arise only through
-  `0105`.
+  node-local representation-changing builder must realize the future serving
+  representation on binding-managed storage before closeout; artifact identity
+  and externally visible lineage still arise only through `0105`.
 
 # Implementation Status
 
@@ -100,9 +102,9 @@ The original split remains correct:
 
 What was underspecified is different:
 
-- which builder-side realization protocol is admitted for a family,
-- which bootstrap paths are preferred fast paths versus universal correctness
-  rules,
+- which family and topology slice has proven same-binding publication,
+- which bootstrap paths are builder-time implementation details versus
+  universal correctness rules,
 - and which topology-sensitive facts belong in semantic identity versus
   builder/publication admission identity.
 
@@ -122,10 +124,10 @@ This revision therefore extends `0111`; it does not replace its core model.
 The new material in this revision adds only the missing bridge facts above those
 layers:
 
-- realization protocol,
+- same-binding validation for `BINDING_FINALIZE`,
 - topology-sensitive builder/publication admission,
-- and explicit separation between universal correctness guarantees and preferred
-  fast-path properties.
+- and explicit separation between universal correctness guarantees and runtime
+  execution-quality diagnostics.
 
 ```mermaid
 flowchart LR
@@ -153,7 +155,7 @@ flowchart LR
   - families whose serving representation is fully expressible by `0110`
     transform contracts,
   - families that still need builder-side finalize on framework-owned runtime
-    storage or admitted scratch hosts.
+    views attached to TensorCast-owned binding storage.
 - Standardize a TensorCast-owned serving-artifact manifest so runtime preflight
   and publication lineage do not depend on integration-private JSON shapes.
 - Keep `representation_contract_hash` as the `0110` semantic-core input and add
@@ -169,9 +171,8 @@ flowchart LR
   - builder/publication identity,
   - runtime-only finalize safety,
   - semantic validation before publication.
-- Allow a node-local builder to realize serving artifacts through admitted
-  builder-owned protocols while keeping same-binding / no-second-copy
-  realization as the preferred fast path where validated.
+- Allow a node-local builder to realize representation-changing serving
+  artifacts only through validated same-binding execution.
 - Preserve a bootstrap path where a node-local builder may compile source bytes
   into serving bytes before steady-state runtime has switched to plain serving
   artifact bind or swap.
@@ -255,6 +256,8 @@ Kept:
   lineage carrier.
 - final success still requires closeout-contract satisfaction and readable
   result-artifact availability.
+- optimistic local-ready serving is a pre-closeout runtime state, not a
+  `PublishedModelVersion` substitute.
 
 Revised:
 
@@ -302,8 +305,10 @@ Kept:
 Revised:
 
 - a builder may use artifact-backed `bind(...)` or layout-seeded
-  `begin_update(...)` plus `seal_current(...)` internally,
-- but `seal_current(...)` alone is never a publication-ready result,
+  `begin_update(...)` plus `freeze_current(...)` or `seal_current(...)`
+  internally,
+- but neither `freeze_current(...)` nor `seal_current(...)` alone is a
+  publication-ready result,
 - and serving-artifact publication must still flow through explicit artifact or
   assembly promotion semantics rather than through `binding.publish_replica()`.
 
@@ -414,11 +419,10 @@ class BuilderMode(StrEnum):
 
 - the family still requires framework-owned finalize logic that changes
   canonical serving bytes, storage identity, or parameter layout,
-- finalize runs under TensorCast-owned builder orchestration and may use more
-  than one admitted realization protocol,
+- finalize runs under TensorCast-owned builder orchestration on validated
+  same-binding storage,
 - publication is only legal after finalize completes, invariants pass, and the
-  finalized result has been committed or promoted into a durable serving
-  artifact.
+  finalized binding value has been promoted into a durable serving artifact.
 
 Normative rules:
 
@@ -428,51 +432,32 @@ Normative rules:
 3. runtime steady-state bind or swap should consume the resulting serving
    artifact only, regardless of which builder mode created it.
 
-### 1.3 Realization protocols
+### 1.3 `BINDING_FINALIZE` same-binding admission
 
-`BuilderMode` is not the same thing as builder-side realization protocol.
+`BuilderMode` is not an arbitrary execution-protocol selector.
 
-The repository should model realization separately because the same semantic
-builder mode can be executed through more than one admissible TensorCast-owned
-shape.
-
-Representative protocol:
-
-```python
-class RealizationProtocol(StrEnum):
-    SAME_BINDING_FAST_PATH = "same_binding_fast_path"
-    SCRATCH_THEN_COMMIT = "scratch_then_commit"
-```
-
-`SAME_BINDING_FAST_PATH` means:
+`BINDING_FINALIZE` is now same-binding-only:
 
 - one serving-layout binding is the host of the future canonical serving bytes,
 - canonical serving tensors attach to that binding before bytes are ready,
 - source materialization, admitted finalize, validation, seal, and closeout all
   proceed on the same binding-hosted byte path,
+- publication carries a `binding_value_ref` subject, not a registered serving
+  artifact subject,
 - and a successful bootstrap may keep runtime attached to those same bytes
   without a second model-sized bind or copy.
 
-`SCRATCH_THEN_COMMIT` means:
-
-- TensorCast still owns the source-to-serving builder workflow and final serving
-  publication truth,
-- but the family may require an admitted builder-local scratch realization before
-  the final serving bytes are committed into the serving binding or durable
-  serving artifact,
-- and the success path is still required to produce one postprocess-complete
-  serving artifact before steady-state runtime switches to it.
-
 Normative rules:
 
-1. realization protocol is an explicit builder/publication fact above semantic
-   transform truth,
-2. `BuilderMode` does not by itself imply one realization protocol,
-3. `SAME_BINDING_FAST_PATH` is preferred where valid, but it is not a universal
-   requirement for every admitted family,
-4. `SCRATCH_THEN_COMMIT` is still a builder path, not a regression to
-   source-runtime truth,
-5. runtime steady-state bind or swap still consumes the resulting serving
+1. `PURE_TRANSFORM` may publish from a registered artifact or from a binding
+   subject because it does not represent a framework finalize that changes
+   canonical serving bytes.
+2. `BINDING_FINALIZE` must publish from a sealed binding value and must carry
+   `same_binding_fast_path_validated=True`.
+3. Tensor-entry or scratch-host `BINDING_FINALIZE` publication is not admitted.
+4. A family that cannot validate the same-binding path is not admitted to
+   `BINDING_FINALIZE` publication.
+5. Runtime steady-state bind or swap still consumes the resulting serving
    artifact only.
 
 ## 2. Shared Torch integration layer (follow-on, not owned here)
@@ -553,24 +538,27 @@ Rules:
 This keeps `0111` focused: it owns builder/publication consequences of finalize
 classification, not the full shared Torch adapter API.
 
-### 2.4 Finalize classification versus realization facts
+### 2.4 Finalize classification versus same-binding admission
 
 `FinalizeClass` remains necessary, but it does not by itself answer every
 builder-side realization question.
 
-In particular, `REPRESENTATION_CHANGING` families may still differ in whether:
+For `REPRESENTATION_CHANGING`, the repository admits one realization shape. The
+remaining admission question is whether the family has provided enough evidence
+for same-binding execution:
 
 - finalized canonical storage remains on the same binding-hosted byte path,
 - final tensor schema is already stable before finalize starts,
-- and `SAME_BINDING_FAST_PATH` has been validated as a correctness-preserving
-  optimization for that family.
+- and same-binding finalize has been validated as correctness-preserving for
+  that family and topology slice.
 
-Those differences are not reasons to collapse `FinalizeClass` and
-`RealizationProtocol` into one enum. They are reasons to keep them separate:
+Those differences are not reasons to add a broad fallback protocol. They are
+the admission evidence required before `BINDING_FINALIZE` can run:
 
 - `FinalizeClass` stays framework-facing and semantic,
-- `RealizationProtocol` stays builder-facing and execution-shape-specific,
-- and family admission may depend on both.
+- `same_binding_fast_path_validated` stays builder-facing and correctness
+  proof oriented,
+- and family admission depends on both.
 
 ### 2.5 Admission truth versus build identity
 
@@ -593,21 +581,21 @@ Representative carrier:
 @dataclass(frozen=True)
 class ServingAdmissionFacts:
     finalize_class: FinalizeClass
-    realization_protocol: RealizationProtocol
     support_level: ServingSupportLevel
     topology_admission_digest: str | None = None
-    fast_path_validated: bool = False
+    same_binding_fast_path_validated: bool = False
 ```
 
 Semantics:
 
-- `ServingAdmissionFacts` answers whether a family, protocol, and topology slice
-  is admitted to builder publication or serving-only runtime,
+- `ServingAdmissionFacts` answers whether a family and topology slice is
+  admitted to builder publication or serving-only runtime,
 - it may be derived from shared framework facts plus a repo-owned family
   registry,
-- `support_level`, allowlist membership, and `fast_path_validated` are rollout
-  truth and may evolve without changing canonical serving bytes,
-- `fast_path_validated` is a correctness and admission fact for the
+- `support_level`, allowlist membership, and
+  `same_binding_fast_path_validated` are rollout/admission truth and may evolve
+  without changing canonical serving bytes,
+- `same_binding_fast_path_validated` is a correctness and admission fact for the
   same-binding path only; it does not certify collective use, dominant executor
   quality, direct-write use, or GPU-only or single-round hash behavior,
 - execution-quality facts such as collective outcome, executor choice, hash
@@ -644,7 +632,7 @@ Semantics:
 - `builder_mode` states whether framework finalize is part of the build,
 - `ServingBuildIntent` carries stable build/publication identity inputs above
   the semantic core,
-- `ServingAdmissionFacts` carries protocol, support-level, and topology
+- `ServingAdmissionFacts` carries support-level, topology, and same-binding
   admission truth above that build identity,
 - `representation_contract_hash` is read from `transform_contract` and remains
   the `0110` semantic-core hash,
@@ -657,8 +645,9 @@ Semantics:
 - execution-quality facts remain outside `ServingBuildIntent` and
   `ServingAdmissionFacts`; they belong to runtime diagnostics surfaces such as
   the residual Step3p5 closure tracked by `0113`,
-- and rollout-only facts such as `support_level` or `fast_path_validated` must
-  not silently perturb the phase-1 digest.
+- and rollout-only facts such as `support_level` or
+  `same_binding_fast_path_validated` must not silently perturb the phase-1
+  digest.
 
 ### 3.2 `ServingArtifactManifest`
 
@@ -746,7 +735,7 @@ Representative examples:
 - redundant-expert configuration,
 - backend family or kernel-family choices that affect admitted builder pipeline
   execution but not the semantic serving tensor contract,
-- family-specific validation of `SAME_BINDING_FAST_PATH`.
+- family-specific validation of the same-binding finalize path.
 
 Category 3: runtime-ephemeral topology and transport choices.
 
@@ -778,7 +767,7 @@ Repository rule:
 - `serving_build_digest` is the `0111`-owned digest over builder/publication
   identity fields above the semantic core,
 - rollout-only facts such as `support_level`, allowlist membership, and
-  `fast_path_validated` must not perturb the phase-1 digest,
+  `same_binding_fast_path_validated` must not perturb the phase-1 digest,
 - the framework layer supplies semantic declarations and versions,
 - but the framework must not privately define a second canonical semantic hash
   algorithm or a second canonical builder/publication digest.
@@ -827,19 +816,21 @@ Advantages:
 A node-local bootstrap builder remains valid as a migration or bootstrap path:
 
 1. start from source artifact,
-2. select an admitted realization protocol for the family,
+2. validate same-binding admission for the family and topology slice,
 3. create or resolve a serving-layout binding on the local target device,
-4. either:
-   - attach canonical serving tensors or framework views onto that binding
-     before bytes are ready and realize on the same binding-hosted byte path,
-   - or realize on admitted scratch storage and commit the finalized result into
-     the serving binding or durable serving artifact before runtime handoff,
+4. attach canonical serving tensors or framework views onto that binding before
+   bytes are ready and realize on the same binding-hosted byte path,
 5. run any admitted builder-side finalize under TensorCast orchestration,
 6. validate the resulting canonical serving bytes,
-7. seal and complete `representation_publish` closeout,
-8. switch runtime only after a durable serving artifact exists,
-9. keep runtime on the same serving-binding current without a second model-sized
-   bind or copy only when the family has validated the same-binding fast path.
+7. freeze or seal the binding current value,
+8. in strict mode, complete promotion and `representation_publish` closeout
+   before runtime activation,
+9. in optimistic mode, install same-daemon local-ready runtime state and cross
+   the local-ready barrier before any identity-forming promotion work starts,
+10. start asynchronous promotion and closeout after that barrier, then switch
+   canonical metadata only after success,
+11. keep runtime on the same serving-binding current without a second model-sized
+   bind or copy.
 
 Repository rule:
 
@@ -847,8 +838,8 @@ Repository rule:
 - bootstrap may use a long-lived local binding as the host of the future
   serving representation, but that binding remains binding-plane state until
   closeout succeeds,
-- admitted bootstrap builder paths may differ in realization protocol while
-  still sharing the same semantic build mode and publication lineage trunk,
+- admitted bootstrap builder paths share the same same-binding publication
+  shape while still varying in family-specific finalize and validation logic,
 - any temporary target publication or local attach helper used during bootstrap
   remains volatile internal state owned by `0103`, not external serving
   lineage,
@@ -875,13 +866,13 @@ The key requirement is not the helper name. The key requirement is that:
 canonical serving bytes, storage identity, or parameter layout under
 TensorCast-owned builder orchestration.
 
-What varies by family is not the semantic mode, but the admitted realization
-protocol.
+What varies by family is whether same-binding execution has been validated for
+that family and topology slice. If it has not, the family is not admitted to
+`BINDING_FINALIZE` publication.
 
-#### Preferred protocol: `SAME_BINDING_FAST_PATH`
+#### Required same-binding path
 
-When a family can validate the fast path, `BINDING_FINALIZE` should run in the
-preferred TensorCast-owned same-binding shape:
+`BINDING_FINALIZE` runs in the TensorCast-owned same-binding shape:
 
 1. create or resolve binding-managed storage,
 2. derive one serving-layout binding that is already the future canonical
@@ -892,27 +883,22 @@ preferred TensorCast-owned same-binding shape:
 5. run framework finalize on that same binding-hosted storage,
 6. validate canonical serving tensor invariants and semantic probes against the
    resulting binding-backed bytes,
-7. seal the current value,
-8. promote the same finalized bytes into a durable serving artifact by ordinary
+7. freeze the current value for optimistic local-ready mode or seal/promote it
+   on the strict blocking path,
+8. in optimistic mode, expose only same-daemon local-ready runtime state until
+   all local ranks have crossed the local-ready barrier,
+9. promote the same finalized bytes into a durable serving artifact by ordinary
    registration or assembly promotion,
-9. complete `representation_publish` closeout through `0105`.
+10. complete `representation_publish` closeout through `0105`.
 
-#### Admitted bridge protocol: `SCRATCH_THEN_COMMIT`
+#### Retired scratch bridge
 
-Some families may still require an admitted bridge protocol:
+Builder-local scratch realization followed by commit into a serving target is
+not an admitted `BINDING_FINALIZE` protocol. A family that still requires that
+shape must fail admission until it can produce a same-binding plan and
+validation evidence.
 
-1. create or resolve the future serving binding,
-2. realize source bytes into builder-local scratch storage or a scratch model
-   host under TensorCast orchestration,
-3. run framework finalize on that scratch host,
-4. validate canonical serving tensor invariants and semantic probes against the
-   finalized bytes,
-5. commit the finalized canonical serving bytes into the serving binding or into
-   a durable serving artifact on the serving-layout target path,
-6. complete `representation_publish` closeout through `0105`,
-7. switch runtime only after the postprocess-complete serving artifact exists.
-
-This is the key compromise that keeps framework intrusion bounded:
+This is the key constraint that keeps framework intrusion bounded:
 
 - the framework does not have to reimplement TensorCast data movement,
 - TensorCast does not have to hardcode every family-specific finalize kernel,
@@ -921,13 +907,44 @@ This is the key compromise that keeps framework intrusion bounded:
 
 Normative rules:
 
-- `seal_current(...)` alone is never a publication-ready result. It is scratch
-  state until a durable serving artifact exists.
+- `freeze_current(...)` and `seal_current(...)` alone are never
+  publication-ready results. They are binding-local state until a durable
+  serving artifact exists.
+- optimistic runtime activation must surface `verification_state=pending` and
+  must not activate durable keys, Global Store visibility, or cross-daemon reuse
+  until `mi2` promotion succeeds.
+- optimistic promotion start is not part of builder readiness. The integration
+  may schedule it only after local-ready state is installed and the local-ready
+  barrier has completed for the local TP group.
 - correctness, typed lineage, and serving-only runtime handoff take precedence
   over fast-path optimization.
-- the success path should prefer avoiding a second model-sized canonical-byte
-  copy after finalize completes, but that preference must not be written as a
-  universal correctness requirement for every admitted family.
+- admitted `BINDING_FINALIZE` paths must avoid introducing a second
+  model-sized canonical-byte host after finalize completes.
+
+### 4.5 Optimistic local-ready version
+
+An optimistic local-ready version is a runtime projection over a frozen
+binding-hosted serving value. It carries enough provenance for local health and
+debuggability, but it is not a `PublishedModelVersion`.
+
+Required fields:
+
+- `source_artifact_ref` and mounted-source verification state;
+- `binding_value_ref` or equivalent frozen-value reference;
+- `local_serving_ref` derived from source `msa1`, representation contract,
+  serving build digest, binding layout, tensor schema, topology, and daemon
+  session;
+- `verification_state = pending | verified | failed | local_only`;
+- optional `verification_job_id`;
+- optional `serving_artifact_id` only after asynchronous promotion succeeds.
+
+The local-ready object may be used by same-daemon runtime state and observability
+surfaces. It must not be used as canonical publication lineage.
+
+It also must not be written to the canonical serving cache or loader serving
+artifact config. Those records represent `PublishedModelVersion`-compatible
+canonical serving lineage and are updated only after asynchronous promotion and
+closeout succeed.
 
 ## 5. Publication handshake and lineage
 
@@ -975,6 +992,14 @@ Additional interpretation for binding-hosted builder paths:
   artifact-backed serving current without inventing a second publication truth,
 - and this upgrade remains an assembly / closeout action rather than a
   binding-local publish shortcut.
+
+Optimistic interpretation:
+
+- before promotion, the builder may return a local-ready version instead of a
+  `PublishedModelVersion`;
+- once background promotion succeeds, the same frozen value may feed the normal
+  `RepresentationPublishContract` and produce `PublishedModelVersion`;
+- if promotion fails, no canonical publication result is produced.
 
 ### 5.3 `RepresentationPublishContract`
 
@@ -1137,22 +1162,20 @@ runtime?
 - Answered by `ServingSupportLevel`, `BuilderMode`, `FinalizeClass`, semantic
   validation, and runtime preflight rules.
 
-Question 2: has the preferred same-binding fast path been validated for that
-family?
+Question 2: has the required same-binding path been validated for that family
+and topology slice?
 
 - Answered by family-specific realization evidence.
-- This is a performance/correctness optimization question above admission, not a
-  replacement for admission.
+- This is a correctness and admission question, not a performance preference.
 
 Repository rule:
 
-- a family may be admitted to `BINDING_FINALIZE` publication or even
-  serving-only runtime before `SAME_BINDING_FAST_PATH` is validated,
+- a family may not be admitted to `BINDING_FINALIZE` publication before the
+  same-binding path is validated,
 - admission state and fast-path validation state still do not by themselves
   redefine artifact identity,
-- but documentation and rollout state must say that explicitly rather than
-  implying that every admitted family already satisfies one-attach / one-byte
-  fast-path properties.
+- but documentation and rollout state must say explicitly which family and
+  topology slice supplied the same-binding proof.
 
 # Invariants And Error Model
 
@@ -1175,8 +1198,8 @@ Repository rule:
   `serving_build_digest`,
 - runtime-only finalize preserves canonical serving tensor invariants,
 - rollout-only admission facts such as `support_level` and
-  `fast_path_validated` do not silently perturb artifact identity,
-- realization protocol and topology-sensitive admission facts stay above the
+  `same_binding_fast_path_validated` do not silently perturb artifact identity,
+- same-binding proof and topology-sensitive admission facts stay above the
   semantic core instead of being silently collapsed into
   `representation_contract_hash`,
 - and steady-state runtime reload must consume serving artifacts rather than
@@ -1285,7 +1308,6 @@ Proposed interface names follow repository naming rules.
 | `FrameworkServingFacts` | Python dataclass | `PascalCase` | pass |
 | `RepresentationPublishContract` | Python dataclass | `PascalCase` | pass |
 | `BuilderMode` | Python enum | `PascalCase` | pass |
-| `RealizationProtocol` | Python enum | `PascalCase` | pass |
 | `FinalizeClass` | Python enum | `PascalCase` | pass |
 | `ServingSupportLevel` | Python enum | `PascalCase` | pass |
 | `representation_contract_hash` | field | `snake_case` | pass |
@@ -1304,8 +1326,8 @@ Proposed interface names follow repository naming rules.
 - preserves `0105` as the single publication-lineage trunk,
 - keeps framework intrusion focused on semantic declaration rather than data
   movement while leaving the shared Torch layer out of this design's scope,
-- gives the repository a practical bridge for current Torch integrations that
-  still need builder-side finalize,
+- makes representation-changing Torch integrations converge on one
+  binding-native publication path,
 - and standardizes runtime preflight and serving-artifact identity before broad
   catalog work lands.
 
@@ -1318,19 +1340,19 @@ Proposed interface names follow repository naming rules.
 - bootstrap builder paths may linger too long if steady-state serving bind or
   swap is not pushed to completion,
 - node-local builder paths may accidentally grow a second model-sized serving
-  copy if `SAME_BINDING_FAST_PATH` is claimed without family-specific evidence,
+  copy if same-binding validation is claimed without family-specific evidence,
 - and topology-sensitive builder/publication facts may drift if they are pushed
   into private integration state instead of TensorCast-owned admission fields.
 
 ## Mitigations
 
 - require explicit `FinalizeClass` and admission levels,
-- require realization protocol to be explicit for bootstrap-style builder paths,
+- require same-binding proof for bootstrap-style `BINDING_FINALIZE` paths,
 - make TensorCast own manifest schema, semantic-core identity import, and
   builder/publication identity semantics,
 - keep `BINDING_FINALIZE` behind semantic validation and explicit publication
   gates,
-- treat same-binding / one-byte bootstrap as a preferred fast path that must be
+- treat same-binding / one-byte bootstrap as a required path that must be
   validated rather than presumed,
 - and keep runtime steady-state contracts clear:
   serving artifact bind or swap is the target, and bootstrap remains only a
@@ -1361,18 +1383,16 @@ This design is accepted only when all of the following are true:
    generic closeout fields or integration-private JSON,
 6. the shared framework layer only needs to provide semantic facts and does not
    require frameworks to reimplement TensorCast materialization plumbing,
-7. builder mode, finalize classification, and realization protocol are explicit
-   and participate in admission or rollout description at the right layer,
+7. builder mode, finalize classification, and same-binding admission proof are
+   explicit and participate in admission or rollout description at the right
+   layer,
 8. runtime-only finalize safety is validated through canonical serving tensor
    invariants,
 9. binding-hosted bootstrap realization and steady-state serving bind or swap
    are documented as different operational modes with different correctness
    guarantees,
-10. successful node-local bootstrap may either:
-    - leave runtime attached to the same binding-hosted bytes on validated fast
-      paths,
-    - or complete an admitted scratch-to-commit handoff before runtime treats
-      the serving artifact as live,
+10. successful node-local `BINDING_FINALIZE` bootstrap leaves runtime attached
+    to the same binding-hosted bytes after validated publication,
 11. topology-sensitive builder/publication admission facts stay distinct from
     semantic-core transform identity,
 12. repo-owned admission or rollout facts stay distinct from both semantic

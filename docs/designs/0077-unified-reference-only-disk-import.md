@@ -4,7 +4,7 @@ title: Unified Reference-Only Disk Import And Source Authority Unification
 areas: ["daemon", "core", "sdk"]
 status: draft
 created: 2026-02-14
-last_updated: 2026-03-27
+last_updated: 2026-04-14
 related_code:
   - proto/tensorcast/daemon/v2/store_daemon.proto
   - daemon/service/controllers/materialization_disk_resolve_utils.{h,cc}
@@ -54,6 +54,22 @@ compatibility wrappers. It also removes uncontrolled sidecar/backfill branching
 by narrowing metadata backfill to one daemon-owned, non-identity-bearing
 optimization.
 
+Scope boundary note:
+
+- this document owns **import** and daemon-owned registration semantics only,
+- it does **not** own the later mounted-source artifact attestation path used by
+  binding-native mounted serving,
+- and a public `ResolvePublicDiskSource`-style API, if present, must remain a
+  separate mounted-source artifact attestation contract rather than a
+  compatibility alias for import (`0115`).
+
+Long-term correction from `0115`:
+
+- mounted-source resolve is `msa1:`-first and lightweight by default,
+- it may attach a trusted `mi2:` hint when already known,
+- but it must not mint primary `mi2:` identity from the default resolve fast
+  path.
+
 # Problem Statement
 
 Current behavior still carries multiple disk semantics and owners:
@@ -88,6 +104,8 @@ This causes cross-module drift, duplicate code paths, and operational ambiguity 
 - Cross-node discovery for daemon-local imports.
 - Compatibility wrappers for resolve/path-return legacy contracts.
 - Runtime mode flags that re-enable removed behaviors.
+- Metadata-first public mounted-source resolve for binding-native serving; that
+  follow-up contract is owned separately from import.
 
 # Architecture & Interfaces
 
@@ -99,6 +117,21 @@ This causes cross-module drift, duplicate code paths, and operational ambiguity 
 3. Source authority is daemon-internal only; retrieval/materialization accepts `artifact_id`, not `disk_path`.
 4. Core owns canonicalization and hashing logic; daemon orchestrates and persists decisions.
 5. There is exactly one import metadata authority inside daemon runtime state.
+
+## Scope boundary with metadata-first public disk resolve
+
+`0077` governs `from_disk(...)` / `ImportArtifactFromPath*` only.
+
+Normative boundary:
+
+- import returns durable import results and stays `mi2:`-based,
+- public metadata-first mounted-source resolve may attest a mounted source into
+  a daemon-local artifact family without immediately producing final `mi2:`,
+- public mounted resolve keeps primary `artifact_id = msa1:...` even when a
+  trusted `mi2:` hint is already known,
+- the two flows may share format helpers and canonicalization utilities,
+  but they must not share contract semantics, caching semantics, or authority
+  assumptions.
 
 ## Bounded metadata backfill
 
@@ -135,7 +168,7 @@ Implementation detail: existing `LocalDiskImportCatalog` can be refactored into 
 
 ## RPC And API Contract
 
-Replace resolve-style path APIs with import APIs:
+For import surfaces, replace resolve-style path APIs with import APIs:
 
 - `ImportArtifactFromPath` (unary)
 - `ImportArtifactFromPathStream` (server stream)
@@ -157,6 +190,12 @@ SDK:
 - `Store.from_disk(path)` remains entrypoint.
 - SDK must consume only import contracts and cache by `artifact_id`.
 - SDK/daemon client methods for `ResolveArtifactFromDisk*` are removed, not wrapped.
+- A later public `ResolvePublicDiskSource(...)` API may exist as a separate
+  mounted-source artifact attestation contract, but it is not an import alias
+  and must not be implemented as a compatibility wrapper around
+  `ImportArtifactFromPath*`.
+- That mounted resolve contract must remain lightweight by default and must not
+  require import-style payload hashing to form its primary identity.
 
 ## Stream Progress Contract
 

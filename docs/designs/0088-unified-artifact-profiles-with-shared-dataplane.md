@@ -421,7 +421,7 @@ They must first produce a canonical internal lowering object:
 
 Minimum contents of `ArtifactLoweringPlan`:
 
-- resolved source handle or adapter,
+- resolved source artifact or adapter,
 - canonical payload metadata required by the core executor,
 - byte-range map,
 - target layout or replica target,

@@ -204,6 +204,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .capability_tokens = kernel->capability_tokens(),
       .cpu_shared_memory_enabled = options.cpu_shared_memory_enabled,
       .storage_path = options.storage_path,
+      .public_disk_source_policy = options.public_disk_source_policy,
   };
   auto materialization_controller = std::make_unique<MaterializationController>(mdep);
 

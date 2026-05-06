@@ -12,6 +12,10 @@ lint:
     RPC_REQUEST_RESPONSE_UNIQUE:
       - tensorcast/global_store/v1/global_store.proto
       - tensorcast/daemon/v2/store_daemon.proto
+    RPC_REQUEST_STANDARD_NAME:
+      - tensorcast/daemon/v2/store_daemon.proto
+    RPC_RESPONSE_STANDARD_NAME:
+      - tensorcast/daemon/v2/store_daemon.proto
 breaking:
   use:
     - FILE

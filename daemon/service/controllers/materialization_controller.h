@@ -70,6 +70,7 @@ class MaterializationController {
     bool cpu_shared_memory_enabled{true};
     bool external_target_verification_enabled{false};
     std::filesystem::path storage_path;
+    DaemonOptions::PublicDiskSourcePolicy public_disk_source_policy{};
     DaemonOptions::PostSealPolicy post_seal_policy{};
     std::function<absl::Status()> await_state_sync_barrier;
   };
@@ -113,12 +114,27 @@ class MaterializationController {
       const v2::SubmitBindingContributionRequest& req,
       v2::SubmitBindingContributionResponse& resp);
 
+  grpc::Status freeze_binding_current_value(
+      RpcContext& rctx,
+      const v2::FreezeBindingCurrentValueRequest& req,
+      v2::FreezeBindingCurrentValueResponse& resp);
+
   grpc::Status seal_binding(RpcContext& rctx, const v2::SealBindingRequest& req, v2::SealBindingResponse& resp);
 
   grpc::Status promote_binding_current_value(
       RpcContext& rctx,
       const v2::PromoteBindingCurrentValueRequest& req,
       v2::PromoteBindingCurrentValueResponse& resp);
+
+  grpc::Status start_promote_binding_current_value(
+      RpcContext& rctx,
+      const v2::StartPromoteBindingCurrentValueRequest& req,
+      v2::StartPromoteBindingCurrentValueResponse& resp);
+
+  grpc::Status get_binding_promotion_status(
+      RpcContext& rctx,
+      const v2::GetBindingPromotionStatusRequest& req,
+      v2::GetBindingPromotionStatusResponse& resp);
 
   grpc::Status refill_owned_binding(
       RpcContext& rctx,
@@ -165,6 +181,11 @@ class MaterializationController {
       RpcContext& rctx,
       const v2::ResolvePublicDiskSourceRequest& req,
       v2::ResolvePublicDiskSourceResponse& resp);
+
+  grpc::Status promote_mounted_source_artifact(
+      RpcContext& rctx,
+      const v2::PromoteMountedSourceArtifactRequest& req,
+      v2::PromoteMountedSourceArtifactResponse& resp);
 
   grpc::Status import_artifact_from_path_stream(
       RpcContext& rctx,

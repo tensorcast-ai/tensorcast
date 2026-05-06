@@ -251,6 +251,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .cpu_shared_memory_enabled = app->options_.daemon_options.cpu_shared_memory_enabled,
       .external_target_verification_enabled = app->options_.daemon_options.external_target_verification_enabled,
       .storage_path = app->options_.daemon_options.storage_path,
+      .public_disk_source_policy = app->options_.daemon_options.public_disk_source_policy,
       .post_seal_policy = app->options_.daemon_options.post_seal_policy,
       .await_state_sync_barrier = [app_ptr = app.get()]() { return app_ptr->await_worker_state_sync_barrier(); },
   };

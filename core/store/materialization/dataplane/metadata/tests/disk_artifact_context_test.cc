@@ -105,6 +105,35 @@ TEST_CASE("DiskArtifactContext reuses cached safetensors scan and index info", "
   std::filesystem::remove_all(dir, ec);
 }
 
+TEST_CASE("DiskArtifactContext orders multipart partitions numerically", "[disk_artifact_context][partitioned]") {
+  using tensorcast::store::loader::get_disk_artifact_context;
+  using tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing;
+
+  reset_disk_artifact_context_cache_for_testing();
+
+  auto dir = make_temp_dir("disk-artifact-context-partitions");
+  {
+    std::ofstream out(dir / "tensor.data_10", std::ios::binary | std::ios::trunc);
+    REQUIRE(out.is_open());
+    out << "BBBB";
+  }
+  {
+    std::ofstream out(dir / "tensor.data_2", std::ios::binary | std::ios::trunc);
+    REQUIRE(out.is_open());
+    out << "AA";
+  }
+
+  auto ctx_or = get_disk_artifact_context(dir);
+  REQUIRE(ctx_or.ok());
+  REQUIRE_FALSE((*ctx_or)->is_safetensors());
+  REQUIRE((*ctx_or)->partition_paths().size() == 2);
+  CHECK((*ctx_or)->partition_paths()[0].filename() == std::filesystem::path("tensor.data_2"));
+  CHECK((*ctx_or)->partition_paths()[1].filename() == std::filesystem::path("tensor.data_10"));
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
 TEST_CASE(
     "DiskArtifactContext uses logical standard-partition sizes from tensor_index",
     "[disk_artifact_context][standard]") {
@@ -123,6 +152,46 @@ TEST_CASE(
   CHECK((*ctx_or)->partition_sizes().size() == 1);
   CHECK((*ctx_or)->partition_sizes()[0] == 128);
   CHECK((*ctx_or)->total_size() == 128);
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE(
+    "DiskArtifactContext orders safetensors lexicographically and ignores nested files",
+    "[disk_artifact_context][safetensors][scope]") {
+  using tensorcast::store::loader::get_disk_artifact_context;
+  using tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing;
+
+  reset_disk_artifact_context_cache_for_testing();
+
+  auto dir = make_temp_dir("disk-artifact-context-safetensors-order");
+  std::filesystem::create_directories(dir / "nested");
+  create_st_file(
+      dir / "b.safetensors",
+      "{\"b\":{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[0,4]}}",
+      std::vector<unsigned char>(4, 2));
+  create_st_file(
+      dir / "a.safetensors",
+      "{\"a\":{\"dtype\":\"U8\",\"shape\":[2],\"data_offsets\":[0,2]}}",
+      std::vector<unsigned char>(2, 1));
+  create_st_file(
+      dir / "nested" / "z.safetensors",
+      "{\"z\":{\"dtype\":\"U8\",\"shape\":[8],\"data_offsets\":[0,8]}}",
+      std::vector<unsigned char>(8, 3));
+  {
+    std::ofstream out(dir / "nested" / "tensor.data_0", std::ios::binary | std::ios::trunc);
+    REQUIRE(out.is_open());
+    out << "ignored";
+  }
+
+  auto ctx_or = get_disk_artifact_context(dir);
+  REQUIRE(ctx_or.ok());
+  REQUIRE((*ctx_or)->is_safetensors());
+  REQUIRE((*ctx_or)->partition_paths().size() == 2);
+  CHECK((*ctx_or)->partition_paths()[0].filename() == std::filesystem::path("a.safetensors"));
+  CHECK((*ctx_or)->partition_paths()[1].filename() == std::filesystem::path("b.safetensors"));
+  CHECK((*ctx_or)->total_size() == 6);
 
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
@@ -157,6 +226,36 @@ TEST_CASE(
   CHECK((*ctx_or)->partition_sizes()[0] == kSecondTensorOffset);
   CHECK((*ctx_or)->partition_sizes()[1] == kSecondTensorSize);
   CHECK((*ctx_or)->total_size() == kSecondTensorOffset + kSecondTensorSize);
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE(
+    "DiskArtifactContext prefers partitioned layout over safetensors when mixed",
+    "[disk_artifact_context][mixed]") {
+  using tensorcast::store::loader::get_disk_artifact_context;
+  using tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing;
+
+  reset_disk_artifact_context_cache_for_testing();
+
+  auto dir = make_temp_dir("disk-artifact-context-mixed");
+  {
+    std::ofstream out(dir / "tensor.data", std::ios::binary | std::ios::trunc);
+    REQUIRE(out.is_open());
+    out << "payload";
+  }
+  create_st_file(
+      dir / "weights.safetensors",
+      "{\"w\":{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[0,4]}}",
+      std::vector<unsigned char>(4, 4));
+
+  auto ctx_or = get_disk_artifact_context(dir);
+  REQUIRE(ctx_or.ok());
+  REQUIRE_FALSE((*ctx_or)->is_safetensors());
+  REQUIRE((*ctx_or)->partition_paths().size() == 1);
+  CHECK((*ctx_or)->partition_paths()[0].filename() == std::filesystem::path("tensor.data"));
+  CHECK((*ctx_or)->total_size() == 7);
 
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);

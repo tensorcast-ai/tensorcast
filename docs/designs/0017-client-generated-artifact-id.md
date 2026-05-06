@@ -17,8 +17,15 @@ related_code:
 
 Introduce an alternative artifact identity kind, CGID (Client‑Generated ID), for high‑churn, runtime artifacts such as cache blocks (paged KV motivating case). CGID complements, not replaces, the existing content‑addressed identity (mi2) defined in 0007. It removes server‑side hashing from hot registration paths while preserving simple routing, zero‑copy/P2P transport, and explicit lifecycle (register → serve → deregister).
 
+Follow-up note:
+- this document introduces `cgid:` as the client-generated artifact family,
+- it does not claim that `mi2:` and `cgid:` are the only artifact identity
+  families forever,
+- `0115` now reserves `msa1:` for daemon-attested mounted-source artifacts as a
+  separate identity family rather than overloading CGID.
+
 Key outcomes
-- Dual identity kinds: `artifact_id` can be either `mi2:...` (content‑addressed) or `cgid:...` (client‑generated).
+- Dual identity kinds in this design cut: `artifact_id` can be either `mi2:...` (content‑addressed) or `cgid:...` (client‑generated).
 - Low‑overhead registration: CGID path skips `index_multihash`/`data_multihash` computation; daemon trusts a client‑supplied identifier.
 - Same verbs and flows: Keep `register/put` and handle-based materialization from the API design doc; a single optional `artifact_id` parameter (when set to a `cgid:`) selects the CGID path.
 - Short‑lived/ephemeral by default: CGID artifacts are intended for runtime residency with TTL/explicit deregistration; no tree‑hash leaves or de‑dup semantics.
@@ -41,7 +48,7 @@ Non‑Goals
 
 ## 1. Identity kinds and grammar
 
-- Identity kinds: `IDKind = { MI2, CGID }`.
+- Identity kinds in this design cut: `IDKind = { MI2, CGID }`.
 - `artifact_id` grammar (closed set of prefixes):
   - `mi2:` — unchanged (see 0007)
   - `cgid:` — client‑generated, opaque id. Validation:
@@ -54,6 +61,12 @@ Non‑Goals
       a logical block (or other collision‑resistant hash used by the engine).
     - Byte artifact namespace profile: `cgid:byte_artifact~<namespace>~<engine>~<model_id_enc>~<layout_id>~<engine_key_enc>`
       (see `0087`).
+    - Profile-scope note: obeying CGID grammar does not, by itself, opt a
+      profile into every generic artifact-plane behavior below. Profile docs may
+      narrow routing, persistence, and API acceptance. `cgid:byte_artifact~...`
+      is the first required exception. `0115` now defines mounted trusted disk
+      sources through a separate daemon-attested family (`msa1:`), not through a
+      CGID compatibility profile.
 
 Semantics
 - `cgid:` denotes an ephemeral identity: no de‑dup, no tree‑hash, no GS leaves. Routing and transport are keyed by the id string and device residency.
@@ -84,9 +97,13 @@ Rules
 - If `artifact_id` is not provided, SDK takes the mi2 path (content‑addressed) as today.
 - Supplying an `artifact_id` that does not start with `cgid:` is invalid (SDK or daemon rejects to avoid forged mi2 ids).
 - `ttl_ms` continues to control lease keepalive for LIP replicas; CGID favors short to medium TTL.
-- `get/get_into` accept either `artifact_id` (which can be `mi2:` or `cgid:`) or `key`, unchanged from the current Store API design.
+- `get/get_into` accept either `artifact_id` (which can be `mi2:` or a generic
+  or explicitly opted-in `cgid:`) or `key`.
 - Namespace note: `cgid:byte_artifact~...` is governed by byte artifact profile authority/routing (home shard + fencing) and is
   not a normal GS per-blob catalog entry.
+- Profile note: profile-specific exceptions may be rejected by generic
+  artifact-id APIs even though they share the `cgid:` prefix. That is an
+  explicit profile contract, not a violation of the shared grammar.
 
 ## 3. Daemon changes (registration/commit identity)
 
@@ -129,6 +146,10 @@ Persistence model
 - Namespace override (required): this per-blob persistence model does **not** apply to `cgid:byte_artifact~...`.
   Byte artifact ids MUST NOT be inserted into `artifacts` / `artifact_replicas`; GS authority for that namespace is limited
   to shard-lease metadata (see `0087`).
+- Additional profile override: daemon-local authority profiles may also opt out
+  of GS per-blob persistence. `0115` defines mounted-source artifacts through a
+  separate `msa1:` family with daemon-session-local authority, and that family
+  is excluded from normal GS artifact catalogs for the same reason.
 
 Minimal schema evolution (illustrative; exact patch in the plan that changes `schema.sql`):
 ```sql
@@ -144,24 +165,36 @@ ALTER TABLE replicas
 ```
 
 Routing behavior
-- `GetArtifactInfoById` must accept both id kinds. When the id has prefix `cgid:`, fields specific to mi2 (leaves, digests) are empty/omitted; callers should not request `include_leaves`.
+- `GetArtifactInfoById` must accept both id kinds for generic artifact-plane
+  identities. When the id has prefix `cgid:`, fields specific to mi2 (leaves,
+  digests) are empty/omitted; callers should not request `include_leaves`.
 - For `cgid:byte_artifact~...`, route/authority is profile-specific and does not rely on GS per-blob `GetArtifactInfoById`
   as source of truth.
+- Future profile-specific exceptions may follow the same rule. In particular,
+  `0115` keeps mounted trusted public disk sources in a daemon-session-local
+  artifact profile under `msa1:`, which is not a generic routable GS artifact.
 
 ## 5. Error model & invariants
 
 Invariants
-- `artifact_id` prefix determines validation and downstream capabilities.
+- `artifact_id` prefix determines baseline validation and downstream
+  capabilities.
 - `cgid:` artifacts are not verifiable by tree hash within TensorCast; integrity is the caller’s responsibility. Transport correctness is still enforced (locks, PAD zero‑fill, range checks).
 - Canonical index bytes, when present, must remain self‑consistent with the provided storage/alias metadata; the daemon continues to enforce index layout rules in registration.
 - CGID descriptors intentionally propagate empty digest fields; consumers should treat `index_multihash` / `data_multihash` as unset when `id_kind` is `CGID`.
 - Namespace profiles may further constrain authority and persistence. `cgid:byte_artifact~...` is the required exception in
   which per-blob GS cataloging is disabled.
+- Profile-defined exceptions may also narrow API acceptance. A CGID-shaped value
+  is not automatically valid in every artifact-id surface if its profile
+  contract says otherwise.
 
 Errors
 - `INVALID_ARGUMENT`: client supplied an `artifact_id`/`client_artifact_id` that does not start with `cgid:` or violates grammar.
 - `FAILED_PRECONDITION`: caller requests mi2‑only features (e.g., `include_leaves`) for a `cgid:` id.
 - `UNAVAILABLE`: no resident replica for a transient `cgid:` id and disk fallback is disabled/not applicable.
+- Profile-specific exception: APIs may also return `INVALID_ARGUMENT` or
+  `FAILED_PRECONDITION` when a profile-scoped CGID is used outside the surfaces
+  that own that profile.
 
 ## 6. Observability & policy
 
@@ -172,9 +205,13 @@ Errors
 # Compatibility & Acceptance Criteria
 
 Compatibility
-- SDK verbs (`register/put/get/get_into`) are unchanged; `artifact_id` parameters accept either `mi2:` or `cgid:`. Keys can continue to map to either kind.
+- SDK verbs (`register/put/get/get_into`) are unchanged for `mi2:` and generic
+  or opted-in `cgid:` artifact identities. Keys can continue to map to either
+  identity kind.
 - Existing mi2 behavior and data remain intact.
 - LIP and coalesced memory plans, CUDA IPC export, and P2P transport are unaffected.
+- Profile-scoped exceptions may deliberately opt out of generic SDK artifact-id
+  acceptance while still reusing the shared CGID grammar and validators.
 
 Acceptance criteria
 - Registering with `artifact_id="cgid:..."` returns the same `artifact_id` and does not compute/return mi2 digests.
@@ -182,6 +219,9 @@ Acceptance criteria
 - GS can list/resolve replicas for generic `cgid:` namespaces (non-byte artifact) and omit mi2‑specific fields without
   breaking consumers.
 - `cgid:byte_artifact~...` is excluded from GS per-blob catalogs and uses shard-lease authority + home routing semantics.
+- If a future daemon-local artifact family such as `msa1:` is introduced,
+  generic artifact APIs must still respect that profile's authority contract
+  rather than assuming GS-backed or cross-daemon behavior automatically.
 - Mixed deployments (some clients using mi2, some using CGID) operate without behavioral regressions.
 
 # Trade‑offs & Risks

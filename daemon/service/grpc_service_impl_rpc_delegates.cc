@@ -95,6 +95,17 @@ Status StoreDaemonServiceImpl::SealBinding(
   return materialization_controller_->seal_binding(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::FreezeBindingCurrentValue(
+    grpc::ServerContext* ctx,
+    const v2::FreezeBindingCurrentValueRequest* req,
+    v2::FreezeBindingCurrentValueResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"FreezeBindingCurrentValue", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->freeze_binding_current_value(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::PromoteBindingCurrentValue(
     grpc::ServerContext* ctx,
     const v2::PromoteBindingCurrentValueRequest* req,
@@ -104,6 +115,28 @@ Status StoreDaemonServiceImpl::PromoteBindingCurrentValue(
   }
   RpcContext rctx{"PromoteBindingCurrentValue", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->promote_binding_current_value(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::StartPromoteBindingCurrentValue(
+    grpc::ServerContext* ctx,
+    const v2::StartPromoteBindingCurrentValueRequest* req,
+    v2::StartPromoteBindingCurrentValueResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"StartPromoteBindingCurrentValue", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->start_promote_binding_current_value(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::GetBindingPromotionStatus(
+    grpc::ServerContext* ctx,
+    const v2::GetBindingPromotionStatusRequest* req,
+    v2::GetBindingPromotionStatusResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"GetBindingPromotionStatus", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->get_binding_promotion_status(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::SubmitBindingContribution(
@@ -195,6 +228,17 @@ Status StoreDaemonServiceImpl::ResolvePublicDiskSource(
   }
   RpcContext rctx{"ResolvePublicDiskSource", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->resolve_public_disk_source(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::PromoteMountedSourceArtifact(
+    grpc::ServerContext* ctx,
+    const v2::PromoteMountedSourceArtifactRequest* req,
+    v2::PromoteMountedSourceArtifactResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"PromoteMountedSourceArtifact", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->promote_mounted_source_artifact(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::ImportArtifactFromPathStream(

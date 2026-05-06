@@ -51,6 +51,129 @@ class SourceBoundCapability(IntFlag):
     )
 
 
+class BindingValueVerificationState(str, Enum):
+    PENDING = "pending"
+    VERIFIED = "verified"
+    FAILED = "failed"
+    LOCAL_ONLY = "local_only"
+
+    @classmethod
+    def from_proto(cls, value: int) -> "BindingValueVerificationState | None":
+        if value == store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_PENDING:
+            return cls.PENDING
+        if value == store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_VERIFIED:
+            return cls.VERIFIED
+        if value == store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_FAILED:
+            return cls.FAILED
+        if value == store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY:
+            return cls.LOCAL_ONLY
+        return None
+
+    def to_proto(self) -> int:
+        if self is BindingValueVerificationState.PENDING:
+            return store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_PENDING
+        if self is BindingValueVerificationState.VERIFIED:
+            return store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_VERIFIED
+        if self is BindingValueVerificationState.FAILED:
+            return store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_FAILED
+        return store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY
+
+
+class BindingPromotionStatusState(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELED = "canceled"
+
+    @classmethod
+    def from_proto(cls, value: int) -> "BindingPromotionStatusState | None":
+        if value == store_daemon_pb2.BINDING_PROMOTION_JOB_STATE_PENDING:
+            return cls.PENDING
+        if value == store_daemon_pb2.BINDING_PROMOTION_JOB_STATE_RUNNING:
+            return cls.RUNNING
+        if value == store_daemon_pb2.BINDING_PROMOTION_JOB_STATE_SUCCEEDED:
+            return cls.SUCCEEDED
+        if value == store_daemon_pb2.BINDING_PROMOTION_JOB_STATE_FAILED:
+            return cls.FAILED
+        if value == store_daemon_pb2.BINDING_PROMOTION_JOB_STATE_CANCELED:
+            return cls.CANCELED
+        return None
+
+
+class MountedSourceFormatKind(str, Enum):
+    PARTITIONED = "partitioned"
+    SAFETENSORS = "safetensors"
+
+    @classmethod
+    def from_proto(cls, value: int) -> "MountedSourceFormatKind | None":
+        if value == store_daemon_pb2.DISK_SOURCE_FORMAT_KIND_PARTITIONED:
+            return cls.PARTITIONED
+        if value == store_daemon_pb2.DISK_SOURCE_FORMAT_KIND_SAFETENSORS:
+            return cls.SAFETENSORS
+        return None
+
+    def to_proto(self) -> store_daemon_pb2.DiskSourceFormatKind:
+        if self is MountedSourceFormatKind.PARTITIONED:
+            return store_daemon_pb2.DISK_SOURCE_FORMAT_KIND_PARTITIONED
+        return store_daemon_pb2.DISK_SOURCE_FORMAT_KIND_SAFETENSORS
+
+
+class MountedSourceMetadataCapability(str, Enum):
+    TENSOR_AWARE = "tensor_aware"
+    BYTE_ONLY = "byte_only"
+
+    @classmethod
+    def from_proto(cls, value: int) -> "MountedSourceMetadataCapability | None":
+        if value == store_daemon_pb2.DISK_METADATA_CAPABILITY_TENSOR_AWARE:
+            return cls.TENSOR_AWARE
+        if value == store_daemon_pb2.DISK_METADATA_CAPABILITY_BYTE_ONLY:
+            return cls.BYTE_ONLY
+        return None
+
+    def to_proto(self) -> store_daemon_pb2.DiskMetadataCapability:
+        if self is MountedSourceMetadataCapability.BYTE_ONLY:
+            return store_daemon_pb2.DISK_METADATA_CAPABILITY_BYTE_ONLY
+        return store_daemon_pb2.DISK_METADATA_CAPABILITY_TENSOR_AWARE
+
+
+class MountedSourceResolutionStrategy(str, Enum):
+    ATTESTED_ONLY = "attested_only"
+    ATTESTED_WITH_TRUSTED_DESCRIPTOR_HINT = "attested_with_trusted_descriptor_hint"
+
+    @classmethod
+    def from_proto(cls, value: int) -> "MountedSourceResolutionStrategy | None":
+        if value == store_daemon_pb2.DISK_RESOLUTION_STRATEGY_ATTESTED_ONLY:
+            return cls.ATTESTED_ONLY
+        if (
+            value
+            == store_daemon_pb2.DISK_RESOLUTION_STRATEGY_ATTESTED_WITH_TRUSTED_DESCRIPTOR_HINT
+        ):
+            return cls.ATTESTED_WITH_TRUSTED_DESCRIPTOR_HINT
+        return None
+
+    def to_proto(self) -> store_daemon_pb2.DiskResolutionStrategy:
+        if (
+            self
+            is MountedSourceResolutionStrategy.ATTESTED_WITH_TRUSTED_DESCRIPTOR_HINT
+        ):
+            return store_daemon_pb2.DISK_RESOLUTION_STRATEGY_ATTESTED_WITH_TRUSTED_DESCRIPTOR_HINT
+        return store_daemon_pb2.DISK_RESOLUTION_STRATEGY_ATTESTED_ONLY
+
+
+class MountedSourceValidationMode(str, Enum):
+    VALIDATE_BEFORE_READ = "validate_before_read"
+
+    @classmethod
+    def from_proto(cls, value: int) -> "MountedSourceValidationMode | None":
+        if value == store_daemon_pb2.DISK_VALIDATION_MODE_VALIDATE_BEFORE_READ:
+            return cls.VALIDATE_BEFORE_READ
+        return None
+
+    def to_proto(self) -> store_daemon_pb2.DiskValidationMode:
+        return store_daemon_pb2.DISK_VALIDATION_MODE_VALIDATE_BEFORE_READ
+
+
 class CollectivePolicy(str, Enum):
     REQUIRE_COLLECTIVE = "require_collective"
     COLLECTIVE_FIRST = "collective_first"
@@ -414,6 +537,8 @@ class ArtifactDescriptor(BaseModel):
                 return ArtifactIdKind.MI2
             if upper == "CGID":
                 return ArtifactIdKind.CGID
+            if upper == "MSA1":
+                return ArtifactIdKind.MSA1
         if isinstance(value, int):
             if value == 1:
                 return ArtifactIdKind.MI2
@@ -591,11 +716,6 @@ class BuilderMode(str, Enum):
     BINDING_FINALIZE = "binding_finalize"
 
 
-class RealizationProtocol(str, Enum):
-    SAME_BINDING_FAST_PATH = "same_binding_fast_path"
-    SCRATCH_THEN_COMMIT = "scratch_then_commit"
-
-
 class FinalizeClass(str, Enum):
     RUNTIME_ONLY = "runtime_only"
     REPRESENTATION_CHANGING = "representation_changing"
@@ -616,20 +736,6 @@ _PUBLICATION_BUILDER_MODE_TO_PROTO: dict[BuilderMode, publication_pb2.BuilderMod
 _PUBLICATION_BUILDER_MODE_FROM_PROTO: dict[int, BuilderMode] = {
     int(publication_pb2.BUILDER_MODE_PURE_TRANSFORM): BuilderMode.PURE_TRANSFORM,
     int(publication_pb2.BUILDER_MODE_BINDING_FINALIZE): BuilderMode.BINDING_FINALIZE,
-}
-_PUBLICATION_REALIZATION_PROTOCOL_TO_PROTO: dict[
-    RealizationProtocol, publication_pb2.RealizationProtocol
-] = {
-    RealizationProtocol.SAME_BINDING_FAST_PATH: publication_pb2.REALIZATION_PROTOCOL_SAME_BINDING_FAST_PATH,
-    RealizationProtocol.SCRATCH_THEN_COMMIT: publication_pb2.REALIZATION_PROTOCOL_SCRATCH_THEN_COMMIT,
-}
-_PUBLICATION_REALIZATION_PROTOCOL_FROM_PROTO: dict[int, RealizationProtocol] = {
-    int(publication_pb2.REALIZATION_PROTOCOL_SAME_BINDING_FAST_PATH): (
-        RealizationProtocol.SAME_BINDING_FAST_PATH
-    ),
-    int(publication_pb2.REALIZATION_PROTOCOL_SCRATCH_THEN_COMMIT): (
-        RealizationProtocol.SCRATCH_THEN_COMMIT
-    ),
 }
 _PUBLICATION_FINALIZE_CLASS_TO_PROTO: dict[
     FinalizeClass, publication_pb2.FinalizeClass
@@ -1193,10 +1299,9 @@ class ServingAdmissionFacts(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     finalize_class: FinalizeClass
-    realization_protocol: RealizationProtocol
     support_level: ServingSupportLevel
     topology_admission_digest: str | None = None
-    fast_path_validated: bool = False
+    same_binding_fast_path_validated: bool = False
 
     @field_validator("topology_admission_digest", mode="before")
     @classmethod
@@ -1208,10 +1313,13 @@ class ServingAdmissionFacts(BaseModel):
     @model_validator(mode="after")
     def _validate_admission_facts(self) -> "ServingAdmissionFacts":
         if (
-            self.realization_protocol == RealizationProtocol.SAME_BINDING_FAST_PATH
-            and not self.fast_path_validated
+            self.finalize_class == FinalizeClass.REPRESENTATION_CHANGING
+            and not self.same_binding_fast_path_validated
         ):
-            raise ValueError("same_binding_fast_path requires fast_path_validated=True")
+            raise ValueError(
+                "representation_changing admission requires "
+                "same_binding_fast_path_validated=True"
+            )
         return self
 
     def validate_for_representation_publish(self, *, builder_mode: BuilderMode) -> None:
@@ -1240,6 +1348,13 @@ class ServingAdmissionFacts(BaseModel):
             raise ValueError(
                 "BINDING_FINALIZE publication requires finalize_class=REPRESENTATION_CHANGING"
             )
+        if (
+            builder_mode == BuilderMode.BINDING_FINALIZE
+            and not self.same_binding_fast_path_validated
+        ):
+            raise ValueError(
+                "BINDING_FINALIZE publication requires same_binding_fast_path_validated=True"
+            )
 
     def admits_builder_publication(self) -> bool:
         return self.support_level in {
@@ -1265,13 +1380,12 @@ class ServingAdmissionFacts(BaseModel):
     def to_publication_proto(self) -> publication_pb2.ServingAdmissionFacts:
         proto = publication_pb2.ServingAdmissionFacts(
             finalize_class=_PUBLICATION_FINALIZE_CLASS_TO_PROTO[self.finalize_class],
-            realization_protocol=_PUBLICATION_REALIZATION_PROTOCOL_TO_PROTO[
-                self.realization_protocol
-            ],
             support_level=_PUBLICATION_SERVING_SUPPORT_LEVEL_TO_PROTO[
                 self.support_level
             ],
-            fast_path_validated=bool(self.fast_path_validated),
+            same_binding_fast_path_validated=bool(
+                self.same_binding_fast_path_validated
+            ),
         )
         if self.topology_admission_digest is not None:
             proto.topology_admission_digest = str(self.topology_admission_digest)
@@ -1284,12 +1398,6 @@ class ServingAdmissionFacts(BaseModel):
     ) -> "ServingAdmissionFacts":
         if int(proto.finalize_class) == int(publication_pb2.FINALIZE_CLASS_UNSPECIFIED):
             raise ValueError("ServingAdmissionFacts.finalize_class must be specified")
-        if int(proto.realization_protocol) == int(
-            publication_pb2.REALIZATION_PROTOCOL_UNSPECIFIED
-        ):
-            raise ValueError(
-                "ServingAdmissionFacts.realization_protocol must be specified"
-            )
         if int(proto.support_level) == int(
             publication_pb2.SERVING_SUPPORT_LEVEL_UNSPECIFIED
         ):
@@ -1298,16 +1406,15 @@ class ServingAdmissionFacts(BaseModel):
             finalize_class=_PUBLICATION_FINALIZE_CLASS_FROM_PROTO[
                 int(proto.finalize_class)
             ],
-            realization_protocol=_PUBLICATION_REALIZATION_PROTOCOL_FROM_PROTO[
-                int(proto.realization_protocol)
-            ],
             support_level=_PUBLICATION_SERVING_SUPPORT_LEVEL_FROM_PROTO[
                 int(proto.support_level)
             ],
             topology_admission_digest=(
                 str(proto.topology_admission_digest or "") or None
             ),
-            fast_path_validated=bool(proto.fast_path_validated),
+            same_binding_fast_path_validated=bool(
+                proto.same_binding_fast_path_validated
+            ),
         )
 
 
@@ -1905,6 +2012,20 @@ class RepresentationPublishSpec(BaseModel):
             raise ValueError(
                 "binding-native representation publish specs must not set serving_artifact_id before closeout promotion"
             )
+        if (
+            self.serving_manifest.builder_mode == BuilderMode.BINDING_FINALIZE
+            and self.representation_publish_contract.binding_value_ref is None
+        ):
+            raise ValueError(
+                "BINDING_FINALIZE representation publish requires a binding_value_ref subject"
+            )
+        if (
+            self.serving_manifest.builder_mode == BuilderMode.BINDING_FINALIZE
+            and self.admission_facts is None
+        ):
+            raise ValueError(
+                "BINDING_FINALIZE representation publish requires admission_facts"
+            )
         if self.closeout_contract.kind != "representation_publish":
             raise ValueError(
                 "RepresentationPublishSpec.closeout_contract must use kind='representation_publish'"
@@ -2046,9 +2167,17 @@ class PublicDiskSourceHandle(BaseModel):
 
     path: str
     canonical_index_bytes: bytes
-    artifact_id: str | None = None
+    artifact_id: str
     generation: int = 0
     verify_checksums: bool = True
+    trusted_content_artifact_id: str | None = None
+    source_index_bytes: bytes | None = None
+    format_kind: MountedSourceFormatKind | None = None
+    metadata_capability: MountedSourceMetadataCapability | None = None
+    resolution_strategy: MountedSourceResolutionStrategy | None = None
+    validation_mode: MountedSourceValidationMode | None = None
+    policy_id: str | None = None
+    exact_size_bytes: int = 0
 
     @model_validator(mode="after")
     def _validate_handle(self) -> "PublicDiskSourceHandle":
@@ -2056,21 +2185,44 @@ class PublicDiskSourceHandle(BaseModel):
             raise ValueError("path must not be empty")
         if not self.canonical_index_bytes:
             raise ValueError("canonical_index_bytes must not be empty")
-        if self.artifact_id is not None and not self.artifact_id:
+        if not self.artifact_id:
             raise ValueError("artifact_id must not be empty")
         if int(self.generation) < 0:
             raise ValueError("generation must be non-negative")
+        if (
+            self.trusted_content_artifact_id is not None
+            and not self.trusted_content_artifact_id
+        ):
+            raise ValueError("trusted_content_artifact_id must not be empty")
+        if self.policy_id is not None and not self.policy_id:
+            raise ValueError("policy_id must not be empty")
+        if int(self.exact_size_bytes) < 0:
+            raise ValueError("exact_size_bytes must be non-negative")
         return self
 
     def to_proto(self) -> store_daemon_pb2.PublicDiskSourceHandle:
         proto = store_daemon_pb2.PublicDiskSourceHandle(
             path=str(self.path),
             canonical_index_bytes=bytes(self.canonical_index_bytes),
+            artifact_id=str(self.artifact_id),
             generation=int(self.generation),
             verify_checksums=bool(self.verify_checksums),
+            exact_size_bytes=int(self.exact_size_bytes),
         )
-        if self.artifact_id is not None:
-            proto.artifact_id = str(self.artifact_id)
+        if self.trusted_content_artifact_id is not None:
+            proto.trusted_content_artifact_id = str(self.trusted_content_artifact_id)
+        if self.source_index_bytes is not None:
+            proto.source_index_bytes = bytes(self.source_index_bytes)
+        if self.format_kind is not None:
+            proto.format_kind = self.format_kind.to_proto()
+        if self.metadata_capability is not None:
+            proto.metadata_capability = self.metadata_capability.to_proto()
+        if self.resolution_strategy is not None:
+            proto.resolution_strategy = self.resolution_strategy.to_proto()
+        if self.validation_mode is not None:
+            proto.validation_mode = self.validation_mode.to_proto()
+        if self.policy_id is not None:
+            proto.policy_id = str(self.policy_id)
         return proto
 
     @classmethod
@@ -2081,9 +2233,29 @@ class PublicDiskSourceHandle(BaseModel):
         return cls(
             path=str(proto.path),
             canonical_index_bytes=bytes(proto.canonical_index_bytes),
-            artifact_id=str(proto.artifact_id or "") or None,
+            artifact_id=str(proto.artifact_id or ""),
             generation=int(proto.generation),
             verify_checksums=bool(proto.verify_checksums),
+            trusted_content_artifact_id=(
+                str(proto.trusted_content_artifact_id or "") or None
+            ),
+            source_index_bytes=(
+                bytes(proto.source_index_bytes)
+                if bytes(proto.source_index_bytes)
+                else None
+            ),
+            format_kind=MountedSourceFormatKind.from_proto(int(proto.format_kind)),
+            metadata_capability=MountedSourceMetadataCapability.from_proto(
+                int(proto.metadata_capability)
+            ),
+            resolution_strategy=MountedSourceResolutionStrategy.from_proto(
+                int(proto.resolution_strategy)
+            ),
+            validation_mode=MountedSourceValidationMode.from_proto(
+                int(proto.validation_mode)
+            ),
+            policy_id=str(proto.policy_id or "") or None,
+            exact_size_bytes=int(proto.exact_size_bytes),
         )
 
 
@@ -2390,6 +2562,12 @@ class DeregisterArtifactOutcome(BaseModel):
 __all__ = [
     "ServerConfig",
     "SourceBoundCapability",
+    "BindingValueVerificationState",
+    "BindingPromotionStatusState",
+    "MountedSourceFormatKind",
+    "MountedSourceMetadataCapability",
+    "MountedSourceResolutionStrategy",
+    "MountedSourceValidationMode",
     "CollectivePolicy",
     "CollectiveFailureClass",
     "HashBackend",
@@ -2418,7 +2596,6 @@ __all__ = [
     "CommitResult",
     "PublishedModelVersion",
     "PureTransformPublicationSpec",
-    "RealizationProtocol",
     "RepresentationPublishContract",
     "RepresentationPublishSpec",
     "PublicDiskSourceHandle",

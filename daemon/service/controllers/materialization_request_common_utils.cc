@@ -271,6 +271,54 @@ absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
   ArtifactResolution resolution;
   resolution.resolved_artifact_id = std::move(artifact_id);
 
+  if (common::is_msa1_artifact_id(resolution.resolved_artifact_id)) {
+    if (source_registry == nullptr) {
+      materialization_disk_resolve::record_mounted_source_validation_outcome("registry_unavailable");
+      return absl::FailedPreconditionError("mounted-source registry unavailable");
+    }
+    auto entry = source_registry->lookup_binding(resolution.resolved_artifact_id);
+    if (!entry.has_value() || entry->source_kind != ArtifactSourceRegistry::SourceKind::kMountedSourceArtifact) {
+      materialization_disk_resolve::record_mounted_source_validation_outcome("stale_session");
+      return absl::FailedPreconditionError(
+          "mounted-source artifact_id is not valid in this daemon session; re-resolve the source path");
+    }
+    materialization_disk_resolve::SourceFingerprintMap expected_fingerprints;
+    expected_fingerprints.reserve(entry->file_fingerprints.size());
+    for (const auto& [relative_path, fingerprint] : entry->file_fingerprints) {
+      expected_fingerprints.insert_or_assign(
+          relative_path,
+          materialization_disk_resolve::SourceFileFingerprint{
+              .inode = fingerprint.inode,
+              .size = fingerprint.size,
+              .mtime_ns = fingerprint.mtime_ns,
+          });
+    }
+    auto validation_status = materialization_disk_resolve::validate_mounted_source_snapshot(
+        std::filesystem::path(entry->canonical_source_path),
+        entry->canonical_index_json,
+        entry->source_index_json,
+        expected_fingerprints);
+    if (!validation_status.ok()) {
+      materialization_disk_resolve::record_mounted_source_validation_outcome("mismatch");
+      const bool erased = source_registry->erase_binding(resolution.resolved_artifact_id);
+      (void)erased;
+      return validation_status;
+    }
+    materialization_disk_resolve::record_mounted_source_validation_outcome("ok");
+
+    resolution.gs_connected = false;
+    resolution.local_import = entry;
+    if (allow_disk) {
+      resolution.normalized_disk_path = std::filesystem::path(entry->canonical_source_path);
+      resolution.disk_source = store::loading::DiskSource{
+          .path = *resolution.normalized_disk_path,
+          .expected_size = disk_expected_size,
+          .require_descriptor = false,
+      };
+    }
+    return resolution;
+  }
+
   auto binding_or = resolve_artifact_binding(global_store_client, resolution.resolved_artifact_id);
   if (!binding_or.ok()) {
     return binding_or.status();

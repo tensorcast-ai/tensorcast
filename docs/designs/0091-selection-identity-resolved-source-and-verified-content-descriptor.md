@@ -4,7 +4,7 @@ title: Phase 1 - Shared Selection Identity, Content Identity, Resolved Source, a
 status: completed
 areas: ["core", "daemon", "sdk", "docs", "tests"]
 created: 2026-03-08
-last_updated: 2026-03-09
+last_updated: 2026-04-14
 related_code:
   - docs/designs/0092-artifact-profiles-shared-dataplane-and-truth-layering.md
   - docs/designs/0078-selection-first-artifact-retrieval.md
@@ -283,6 +283,13 @@ Minimum required fields:
 - `size_is_authoritative`
 - optional provenance flags describing whether the source was resolved locally, remotely, or from an already-verified
   source
+
+Follow-up note:
+
+- the source provenance carrier does not need to be limited to GS-backed or
+  client-generated artifact ids,
+- `0115` now uses this seam for daemon-attested mounted-source artifacts
+  (`msa1:`) as well.
 
 Normative rules:
 

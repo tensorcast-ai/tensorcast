@@ -528,6 +528,7 @@ sc_cc_library(
     hdrs = ["config/daemon_config_io.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":artifact_hash_lib",
         "//core/communicator:config_io_lib",
         "//proto/tensorcast/config/v1:config_cc",
         "@abseil-cpp//absl/strings",

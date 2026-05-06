@@ -154,6 +154,7 @@ struct DiskMetadata {
   std::optional<uint64_t> logical_total_size;
   std::optional<uint64_t> source_total_size_bytes;
   std::optional<bool> is_safetensors;
+  std::optional<bool> tensor_aware;
 };
 
 struct TransportSchedulingGroupHint {

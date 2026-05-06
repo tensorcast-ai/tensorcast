@@ -4,7 +4,7 @@ title: Binding-Native Serving Realization and Publication
 status: implemented
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests", "proto"]
 created: 2026-03-27
-last_updated: 2026-04-10
+last_updated: 2026-04-30
 related_code:
   - docs/designs/0084-binding-unified-model-and-contract.md
   - docs/designs/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
@@ -33,7 +33,7 @@ related_code:
 links:
   related:
     - ./0108-tensor-aware-materialization-strategy-plane.md
-    - ../plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md
+    - ../benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md
   dependencies:
     - ./0084-binding-unified-model-and-contract.md
     - ./0085-distributed-binding-assembly-and-coordinator.md
@@ -60,6 +60,9 @@ bootstrap flows so that:
   memory,
 - serving-artifact identity is minted from the sealed binding current value
   rather than from a second `put(tensors)` registration path,
+- optimistic local-ready serving may activate a frozen same-daemon binding
+  value before that value has been promoted to `mi2`, provided the value remains
+  visibly pending verification and local-only,
 - `representation_publish` is completed from a first-class serving publication
   subject instead of requiring a pre-existing serving artifact id in all cases,
 - and `canonical_full` assembly sealing consumes explicit canonical source
@@ -81,8 +84,14 @@ Execution-policy note:
   same-binding serving-path closure,
 - `0108` now owns the shared strategy and explicit lane-planning rules that the
   source-bound path consumes,
-- and the remaining mounted rollout and delete-gate cleanup now track through
-  `docs/plans/0112-01-binding-native-serving-mounted-rollout-and-delete-gate-cleanup.md`.
+- `0115` now owns the long-term mounted-source artifact attestation contract,
+  including format-aware mounted-source resolve, `msa1:` identity, and typed
+  trusted policy,
+- `0115` also owns the authority boundary that lets trusted `msa1:` evidence
+  admit optimistic same-daemon local-ready serving without making `msa1:` a
+  content-verified publication identity,
+- and the mounted closure evidence now tracks directly through this design plus
+  `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`.
 
 # Implementation Status
 
@@ -104,6 +113,10 @@ closed end-to-end:
 - public disk ingress now exists through `PublicDiskSourceHandle`,
   `ResolvePublicDiskSource`, `Store.resolve_public_disk_source(...)`, and
   `Store.realize_into_binding(...)`.
+- follow-up direction from `0115`: this ingress should converge from a public
+  source-handle-shaped contract to daemon-attested mounted-source artifacts
+  (`msa1:`), so binding-native flows stay artifact-first without requiring
+  cold-path `mi2:` hashing.
 - same-binding README guidance now points users at the binding-native path
   rather than presenting tensor-publication helpers as the preferred surface.
 - the audited Step3p5 path now reaches `stage=ready` through public disk
@@ -137,8 +150,8 @@ blocker work. It is:
 
 - shared strategy-plane follow-up owned by `0108`,
 - owner-file collective executor rollout owned by `0109`,
-- and mounted rollout plus delete-gate cleanup tracked by the `0112-01`
-  companion plan.
+- and retained mounted evidence recorded directly in this design plus
+  `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`.
 
 In particular:
 
@@ -146,8 +159,39 @@ In particular:
   startup and now also records the audited Step3p5 same-binding closure result,
 - while the shared runtime strategy trunk that feeds that path is owned by
   `0108`,
-- and the remaining path-level rollout and delete-gate work is tracked by
-  `0112-01`.
+- and the remaining mounted operator evidence is now captured directly in the
+  surviving design and benchmark record rather than in a standalone companion
+  plan.
+
+## Additional mounted closure evidence
+
+The `2026-04-15` local qwen2.5 TP4 mounted rerun on the current public operator
+path adds the second representative `BINDING_FINALIZE` family that was still
+missing when this design first narrowed its scope.
+
+The current `/weight_version` packet shows:
+
+- `bootstrap_source_bound_contract_version=4`
+- `bootstrap_source_bound_contract_path=collective_first_v4`
+- `bootstrap_realize_collective_policy=collective_first`
+- `bootstrap_realize_collective_used=true`
+- `bootstrap_realize_actual_collective_committed_bytes=16382928896`
+- `bootstrap_realize_actual_generic_backend_bytes=0`
+- `bootstrap_realize_dominant_executor=OwnerFileCollectiveExecutor`
+- `bootstrap_publish_hash_rounds=0`
+- `bootstrap_publish_hash_location=seal`
+- `bootstrap_publish_hash_backend=gpu`
+- `bootstrap_publish_hash_identity_forming=true`
+
+The same live run also reached:
+
+- `GET /health = 200`
+- `GET /v1/models = 200`
+- `POST /v1/completions = 200`
+
+This means the second-family `BINDING_FINALIZE` packet is no longer deferred.
+What remains outside `0112` scope is performance interpretation and broader
+defaulting policy, not same-binding correctness or missing operator evidence.
 
 # Closure Summary
 
@@ -179,7 +223,7 @@ restoring or redesigning fallback behavior.
 
 This repo-local blocker is now closed.
 
-TensorCast now exposes a metadata-first public disk source handle, and
+TensorCast now exposes a metadata-first public disk ingress, and
 `Binding.realize_from(...)` / `Store.realize_into_binding(...)` can consume it
 directly. Integrations no longer need to call `from_disk()` just to re-enter
 the ordinary target materialization path.
@@ -201,18 +245,17 @@ The validated cold-start chain is:
 6. seal canonical-full from explicit binding-backed source evidence,
 7. reach ordinary serving runtime without runtime fallback.
 
-The broader repo still retains legacy helper surfaces for unaudited families,
-so the design is not yet globally complete. But the audited Step3p5 family is
-no longer routing through `SCRATCH_THEN_COMMIT`, tensor-publication helpers, or
-runtime bridge behavior.
+The broader repo now uses the same rule for all `BINDING_FINALIZE` families:
+same-binding publication is the only admitted path. The audited Step3p5 family
+therefore no longer routes through tensor-publication helpers or runtime bridge
+behavior.
 
-## 5. Demote tensor-publication helpers to explicit legacy bridge status
+## 5. Remove tensor-publication helpers for `BINDING_FINALIZE`
 
 This blocker is now closed.
 
-Ambiguous tensor-entry helper names have been removed from the public surface.
-The remaining tensor-entry helpers now carry explicit `*_bridge(...)` naming,
-so same-binding code no longer has a silent path back to the older
+Tensor-entry `BINDING_FINALIZE` helper names have been removed from the public
+surface. Same-binding code no longer has a path back to the older
 register-then-closeout model.
 
 ## 6. Step3p5 runtime bridge is now closed
@@ -241,8 +284,7 @@ baseline" is no longer the current state. The closure packet now shows:
 What remains after that audited closure is not new `0112` architecture work.
 The remaining work is:
 
-- broader mounted evidence hardening and delete-gate cleanup under the
-  `0112-01` companion plan,
+- retained mounted evidence in the benchmark note cited above,
 - shared strategy or local-executor follow-up under `0108`,
 - and owner-file collective executor rollout under `0109`.
 
@@ -271,16 +313,13 @@ shape, but the execution path is still split across two inconsistent models.
 5. promote the same finalized bytes into a durable serving artifact,
 6. complete `representation_publish`.
 
-See `0111` section 4.4, especially the preferred
-`SAME_BINDING_FAST_PATH` wording.
+See `0111` section 4.4 for the required same-binding path.
 
-However, the current implementation still combines that intended shape with an
-older scratch-style publication flow:
+The old implementation combined that intended shape with an older
+tensor-entry publication flow:
 
-- vLLM and the SDK can still build finalized serving tensors in memory and call
-  `Store.register_binding_finalize_publication(...)` or
-  `Store.complete_binding_finalize_publication(...)`, which first registers a
-  new serving artifact from those tensors and only then performs
+- vLLM and the SDK could build finalized serving tensors in memory, register a
+  new serving artifact from those tensors, and only then perform
   `representation_publish`.
 - canonical-full contribution still re-materializes publication tensors into a
   temporary binding-backed contribution object instead of contributing the
@@ -310,9 +349,9 @@ That boundary is correct.
 What is missing is a first-class promotion path from
 `SealedBindingValue -> serving artifact` inside the serving publication domain.
 
-Instead, the current `BINDING_FINALIZE` helper path commonly does this:
+Instead, the old `BINDING_FINALIZE` helper path commonly did this:
 
-1. realize bytes into binding-backed or scratch tensors,
+1. realize bytes into binding-backed tensors and then rebuild a tensor mapping,
 2. finalize,
 3. build a second tensor mapping,
 4. `put(...)` or register those finalized tensors,
@@ -408,7 +447,7 @@ Neither is acceptable as a long-term design.
   first-class.
 - Keep `0105`'s cut-driven seal model intact: seal consumes snapped attempt
   truth and explicit source evidence, not workspace reconstruction or fallback.
-- Preserve `0111`'s distinction between builder mode, realization protocol,
+- Preserve `0111`'s distinction between builder mode, same-binding admission,
   semantic identity, and publication lineage.
 - Push source-to-target copy and fill into TensorCast whenever the operation is
   representable by TensorCast's internal realization contracts.
@@ -428,8 +467,8 @@ Neither is acceptable as a long-term design.
   source-to-serving publication lineage.
 - This design does not require every framework-specific finalize kernel to move
   into TensorCast immediately.
-- This design does not make `SCRATCH_THEN_COMMIT` invalid overnight; it remains
-  an admitted bridge protocol, but not the preferred long-term shape.
+- This design does not preserve tensor-entry or scratch-host
+  `BINDING_FINALIZE` publication.
 - This design does not redefine offline builder publication.
 
 # Core Principles
@@ -537,7 +576,7 @@ This operation:
 7. returns a durable `RegisteredArtifact` or equivalent descriptor.
 
 This is the key architectural replacement for the current
-`register_binding_finalize_publication(tensors=...)` path.
+tensor-entry `BINDING_FINALIZE` publication path.
 
 Normative rules:
 
@@ -556,13 +595,50 @@ The same-binding flow must expose three distinct states:
 - local sealed binding current value,
 - durable serving artifact promoted from that current value.
 
+Optimistic local-ready serving adds one visibility state without changing those
+objects:
+
+- `FROZEN_LOCAL_READY`: the daemon has frozen the realized binding current value
+  and the integration has passed structural, manifest, representation-contract,
+  and family semantic validation, but `mi2` promotion has not completed yet.
+
 Normative rules:
 
-1. runtime may attach to binding-backed tensors before promotion completes,
-   but serving-only activation or final publication success still depends on the
-   durable serving artifact.
+1. runtime may attach to binding-backed tensors before promotion completes.
+   In strict canonical mode, serving-only activation still waits for the durable
+   serving artifact. In optimistic mode, same-daemon serving-only activation may
+   proceed from `FROZEN_LOCAL_READY`, but final publication success, durable key
+   activation, Global Store routing, and cross-daemon reuse still depend on the
+   promoted `mi2` serving artifact.
 2. `seal_current(...)` is not enough for serving publication success.
 3. promotion must not require a second model-sized byte registration path.
+4. optimistic promotion must start only after local-ready runtime state is
+   installed and all local tensor-parallel ranks admitted to the bootstrap have
+   crossed the local-ready barrier. A fast rank must not begin identity-forming
+   hash or commit work while slower ranks are still refilling, freezing, or
+   finalizing their binding current values.
+5. no serving artifact config, canonical bootstrap cache entry, durable key
+   activation, or Global Store route may be written from `FROZEN_LOCAL_READY`.
+   Those updates happen only after promotion has produced `mi2` and
+   `representation_publish` closeout has succeeded.
+
+The optimistic state machine is:
+
+```mermaid
+stateDiagram-v2
+  [*] --> Mutable
+  Mutable --> FrozenLocalReady: freeze_current / validation passed
+  FrozenLocalReady --> Mi2Verified: async promote_frozen_value_to_mi2 succeeds
+  FrozenLocalReady --> VerificationFailed: async promotion fails
+  Mi2Verified --> Published: representation_publish closeout succeeds
+  VerificationFailed --> Retired: failure policy drains or retires value
+```
+
+`freeze_current` is a mutation fence and local-readiness operation. It must not
+mint a content identity. `seal_current` remains available as the strict helper
+that freezes and performs identity-forming promotion on the blocking path.
+Implementations may expose `FROZEN_LOCAL_READY` as `READY_LOCAL` plus explicit
+verification metadata rather than adding a new flattened daemon state enum.
 
 ## 4. Canonical-full contribution becomes source-evidence contribution
 
@@ -610,9 +686,9 @@ It is a correctness rule.
 
 # Realization Data Flow
 
-## Preferred same-binding flow
+## Required same-binding flow
 
-For `BINDING_FINALIZE + SAME_BINDING_FAST_PATH`:
+For `BINDING_FINALIZE`:
 
 1. compile recipe into:
    - final serving canonical layout
@@ -623,27 +699,23 @@ For `BINDING_FINALIZE + SAME_BINDING_FAST_PATH`:
    storage
 4. the integration layer attaches framework views onto the binding tensors
 5. framework-specific finalize runs in-place on the binding-backed tensors
-6. TensorCast seals the binding current value
-7. TensorCast promotes the sealed current value into a durable serving artifact
-8. TensorCast completes `representation_publish`
+6. TensorCast freezes or seals the binding current value
+7. strict mode promotes the frozen current value into a durable serving artifact
+   before readiness; optimistic mode schedules that promotion asynchronously
+   after local-ready state is installed and the local-ready barrier completes
+8. TensorCast completes `representation_publish` after promotion produces
+   `mi2`
 9. canonical-full contribution uses the same current-value-derived source
    subject
 10. runtime handoff continues to use the same binding-backed tensors without a
     second model-sized copy
 
-## Admitted bridge flow
+## Removed bridge flow
 
-`SCRATCH_THEN_COMMIT` remains admitted when a family cannot yet validate the
-same-binding path.
-
-However, even that bridge flow should converge toward the same publication
-contract:
-
-- scratch storage is a temporary builder host,
-- commit into the final serving binding or serving target still happens before
-  promotion,
-- and durable publication still operates on the final serving host rather than
-  on an unrelated extra registration copy.
+Builder-local scratch realization followed by commit into a serving target is
+not admitted for `BINDING_FINALIZE`. A family that cannot validate the
+same-binding path must fail admission rather than publish through a slower
+generic bridge.
 
 # Public Realization Contract
 
@@ -716,13 +788,13 @@ Execution responsibility:
 
 The integration layer only prepares the plan and invokes framework finalize.
 
-Normative execution rule for the preferred same-binding builder path:
+Normative execution rule for the same-binding builder path:
 
 - `Binding.realize_from(...)` / `Store.realize_into_binding(...)` are
   execution-only ingress points;
 - they write source bytes into binding-backed target storage but do not
   implicitly seal, mint identity, or return a publication-ready current value;
-- audited `BINDING_FINALIZE + SAME_BINDING_FAST_PATH` flows must therefore use
+- audited `BINDING_FINALIZE` flows must therefore use
   the explicit binding update window:
   `begin_update(...) -> realize_from(...) -> framework finalize -> seal_current(...)`;
 - the public ingress remains one ingress, but its correct long-term semantics
@@ -736,25 +808,34 @@ Normative execution rule for the preferred same-binding builder path:
 Bootstrap from checkpoint directories should not require a permanent detour
 through a fully materialized source artifact in Python memory.
 
-Long-term, TensorCast should expose a metadata-first source resolution path:
+Long-term, TensorCast should expose and consume a metadata-first mounted-source
+artifact attestation path, not a permanent public source-handle plane and not
+an import-style artifact minting detour.
 
-- `DiskResolvedSource`
-  or equivalent public handle
+That mounted-source artifact should carry:
 
-That handle should carry:
-
+- primary `artifact_id = msa1:...`,
+- optional `trusted_content_artifact_id = mi2:...` when already known from a
+  trusted descriptor or explicit verification path,
 - canonical index bytes,
-- optional artifact descriptor if available,
-- stable disk-source locator for the daemon,
-- and checksum / mutation policy inputs.
+- format-aware mounted-source facts,
+- explicit metadata capability (`TENSOR_AWARE` or `BYTE_ONLY`),
+- stable daemon-local validation and mutation policy inputs,
+- and enough source provenance to feed the shared lowering truth seam.
 
 `realize_into_binding(...)` can then accept either:
 
 - an artifact-backed source ref,
-- or a disk-resolved source handle.
+- or a mounted-source artifact resolved from a local path.
 
-Until that public handle exists, `Store.from_disk(...)` remains an
-artifact-import bridge, not the intended `0112` ingress model.
+`0115` now defines the detailed mounted-source resolve contract for that
+artifact, including partitioned vs safetensors source semantics, the
+daemon-session-local authority boundary for `msa1:`, strict snapshot
+revalidation before read, and the rule that default mounted resolve stays
+lightweight instead of hashing payload bytes into primary `mi2:` identity.
+
+`Store.from_disk(...)` remains an artifact-import bridge, not the intended
+`0112` ingress model.
 
 ## Reuse current disk loaders
 
@@ -890,13 +971,8 @@ The current helpers should be classified as follows:
   - preferred same-binding closeout entry for `PURE_TRANSFORM`
   - subject-first closeout on the sealed binding current value
 - `Store.complete_binding_finalize_publication_from_binding(...)`
-  - preferred same-binding closeout entry for `BINDING_FINALIZE`
+  - required same-binding closeout entry for `BINDING_FINALIZE`
   - subject-first closeout on the sealed binding current value
-- `Store.register_binding_finalize_publication(tensors=...)`
-  - explicit bridge path
-  - not the long-term same-binding publication architecture
-- `Store.complete_binding_finalize_publication(tensors=...)`
-  - same explicit bridge status
 - `Store.from_disk(...)`
   - remains an import-oriented API
   - not the intended Phase 5 public realization ingress for same-binding
@@ -911,8 +987,9 @@ The current helpers should be classified as follows:
    SDK contract.
 2. remove the remaining canonical-full CPU fallback and make missing local
    canonical source fail closed.
-3. add the public metadata-first disk source handle and route
-   `realize_into_binding(...)` through it.
+3. complete the public metadata-first mounted-source artifact semantics from
+   `0115` and route `realize_into_binding(...)` through that artifact-first
+   contract rather than through artifact-id-only assumptions.
 4. switch audited integrations such as `/data/workspace/internal-vllm` to the
    same-binding host-and-publication model end to end.
 5. rename tensor-entry publication helpers to explicit `*_bridge(...)`
@@ -965,8 +1042,8 @@ The final preferred same-binding path must satisfy all of the following:
   the only serving publication subject,
 - the audited Step3p5 loading chain completes without runtime fallback or
   bridge behavior,
-- same-binding / binding-finalize audited families no longer route to
-  `SCRATCH_THEN_COMMIT`,
+- same-binding / binding-finalize audited families no longer route to tensor
+  entry or bridge publication,
 - no `registration_commit.stable_dram.stage_gpu_copy` on the binding-finalize
   publication critical path,
 - no `registration_commit.hash.data.cpu` on the same path,
@@ -989,6 +1066,8 @@ Required test areas:
 - collective mapped-target disk load for TP bootstrap,
 - same-binding serving handoff preserving tensor pointer stability,
 - manifest and representation contract preflight during promotion,
+- optimistic local-ready barrier ordering before async promotion starts,
+- no canonical cache/config/key update while verification is pending,
 - Step3p5 trace-plan gap lowering vs early rejection,
 - explicit bridge helper naming and bridge-path coverage.
 

@@ -440,6 +440,12 @@ TEST_CASE("ArtifactProfileRegistry exposes explicit family and authority traits"
       Registry::traits_for_artifact_id("mi2:weights/example").authority_model ==
       Registry::AuthorityModel::kGlobalStoreBacked);
   CHECK(Registry::traits_for_artifact_id("mi2:weights/example").family == Registry::ArtifactFamily::kOrdinary);
+  CHECK(
+      Registry::classify_artifact_id("msa1:session~policy~partitioned~deadbeef") ==
+      Registry::Profile::kMountedSourceArtifact);
+  CHECK(
+      Registry::traits_for_artifact_id("msa1:session~policy~partitioned~deadbeef").authority_model ==
+      Registry::AuthorityModel::kDaemonSessionLocal);
   CHECK(Registry::classify_artifact_id("not-an-artifact-id") == Registry::Profile::kUnknown);
   CHECK_FALSE(
       Registry::runtime_for_profile(Registry::Profile::kOrdinaryArtifact)

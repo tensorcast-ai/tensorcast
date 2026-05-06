@@ -6,7 +6,6 @@ import atexit
 import contextlib
 import logging
 import os
-import sys
 import threading
 import time
 import weakref
@@ -107,7 +106,6 @@ from tensorcast.api.store.serving_builder import (
     RegisteredServingPublication,
     build_binding_finalize_admission_facts,
     build_binding_finalize_publication_bundle,
-    build_binding_finalize_publication_bundle_from_registered_artifact,
     build_pure_transform_publication_bundle,
     build_pure_transform_publication_bundle_from_registered_artifact,
     build_pure_transform_publication_spec,
@@ -158,7 +156,9 @@ from tensorcast.types import (
     AssemblyContractFamily,
     AssemblyReadinessPolicy,
     AssemblyRequirementSetRef,
+    BindingPromotionStatusState,
     BindingValueRef,
+    BindingValueVerificationState,
     BuilderMode,
     DeregisterArtifactOutcome,
     ExecutionDiagnostics,
@@ -172,7 +172,6 @@ from tensorcast.types import (
     PartialSealResult,
     PublicDiskSourceHandle,
     PublishedModelVersion,
-    RealizationProtocol,
     RegionMemoryKind,
     RepresentationPublishContract,
     RepresentationPublishSpec,
@@ -917,22 +916,19 @@ def _parse_artifact_ref(
     ref_value = str(ref)
     if not ref_value:
         raise ValueError("ref must be non-empty")
-    if ref_value.startswith(("mi2:", "cgid:")):
+    if ref_value.startswith(("mi2:", "cgid:", "msa1:")):
         return ref_value, None
     if ref_value.startswith("disk:"):
         raise ValueError(
-            "disk: ref is no longer supported; use Store.from_disk(...) to import "
-            "and then reference the artifact by id or key."
+            "disk: ref is no longer supported; use Store.from_disk(...) for the "
+            "mounted-source fast path or Store.import_from_disk(...) for explicit "
+            "mi2 import, then reference the artifact by id or key."
         )
     return None, ref_value
 
 
 def _should_show_from_disk_progress(show_progress: bool | None) -> bool:
-    if show_progress is not None:
-        return bool(show_progress)
-    with contextlib.suppress(Exception):
-        return bool(sys.stderr.isatty())
-    return False
+    return bool(show_progress) if show_progress is not None else False
 
 
 _IMPORT_STREAM_ERROR_STATUS: dict[int, ArtifactStatusCode] = {
@@ -1267,7 +1263,26 @@ class Store:
                 )
             copy_plan_proto = _copy_plan_to_proto(normalized_mapping)
         runtime = self._runtime
+        profile_start = time.perf_counter()
+        profile_last = profile_start
+        logger.info(
+            "tc_profile_py store.create_binding enter ownership=%s device=%s "
+            "layout_id=%s tensor_count=%d target_index_bytes=%d mapped=%s",
+            ownership,
+            device,
+            layout.binding_layout_id,
+            len(layout.target_layout.offsets),
+            len(layout.target_index_bytes),
+            bool(layout.dst_specs or normalized_mapping),
+        )
         client = runtime.ensure_client()
+        now = time.perf_counter()
+        logger.info(
+            "tc_profile_py store.create_binding ensure_client step_sec=%.6f total_sec=%.6f",
+            now - profile_last,
+            now - profile_start,
+        )
+        profile_last = now
         timeout_s = _ctx_timeout_s(ctx)
         mode = str(ownership).strip().lower()
         if mode == "daemon":
@@ -1286,25 +1301,75 @@ class Store:
             device_obj = torch.device(device)
             device_id = resolve_device(device_obj, allow_cpu=False)
             protocol_device_id = protocol_device_id_for(device_id)
+            now = time.perf_counter()
+            logger.info(
+                "tc_profile_py store.create_binding resolved_device device_id=%d "
+                "protocol_device_id=%d step_sec=%.6f total_sec=%.6f",
+                device_id,
+                protocol_device_id,
+                now - profile_last,
+                now - profile_start,
+            )
+            profile_last = now
+            target_layout_proto = _target_layout_with_protocol_device_id(
+                layout,
+                device_id=protocol_device_id,
+            )
+            now = time.perf_counter()
+            logger.info(
+                "tc_profile_py store.create_binding built_target_layout "
+                "step_sec=%.6f total_sec=%.6f",
+                now - profile_last,
+                now - profile_start,
+            )
+            profile_last = now
+            device_uuid = device_uuid_for(device_id)
+            now = time.perf_counter()
+            logger.info(
+                "tc_profile_py store.create_binding resolved_device_uuid "
+                "device_uuid=%s step_sec=%.6f total_sec=%.6f",
+                device_uuid,
+                now - profile_last,
+                now - profile_start,
+            )
+            profile_last = now
+            logger.info("tc_profile_py store.create_binding rpc_start")
             response = client.create_binding(
                 ownership=store_daemon_pb2.BindingOwnership.BINDING_OWNERSHIP_DAEMON,
-                target_layout=_target_layout_with_protocol_device_id(
-                    layout,
-                    device_id=protocol_device_id,
-                ),
+                target_layout=target_layout_proto,
                 target_index_bytes=layout.target_index_bytes,
-                device_uuid=device_uuid_for(device_id),
+                device_uuid=device_uuid,
                 binding_layout_id=layout.binding_layout_id,
                 copy_plan=copy_plan_proto,
                 dst_specs=layout.dst_specs if layout.dst_specs else None,
                 timeout_s=timeout_s if timeout_s is not None else 600.0,
             )
+            now = time.perf_counter()
+            logger.info(
+                "tc_profile_py store.create_binding rpc_done binding_id=%s "
+                "payloads=%d step_sec=%.6f total_sec=%.6f",
+                getattr(response, "binding_id", None),
+                len(getattr(response, "payloads", ())),
+                now - profile_last,
+                now - profile_start,
+            )
+            profile_last = now
             try:
+                logger.info("tc_profile_py store.create_binding restore_tensors_start")
                 tensors = restore_owned_binding_tensors(
                     response=response,
                     runtime=runtime,
                     device_id=device_id,
                 )
+                now = time.perf_counter()
+                logger.info(
+                    "tc_profile_py store.create_binding restore_tensors_done "
+                    "tensor_count=%d step_sec=%.6f total_sec=%.6f",
+                    len(tensors),
+                    now - profile_last,
+                    now - profile_start,
+                )
+                profile_last = now
                 current_value_metadata = parse_binding_value_or_raise(
                     response.current_value
                     if hasattr(response, "current_value")
@@ -1313,6 +1378,14 @@ class Store:
                     expected_binding_id=str(response.binding_id),
                     expected_binding_layout_id=layout.binding_layout_id,
                 )
+                now = time.perf_counter()
+                logger.info(
+                    "tc_profile_py store.create_binding parse_current_done "
+                    "step_sec=%.6f total_sec=%.6f",
+                    now - profile_last,
+                    now - profile_start,
+                )
+                profile_last = now
             except Exception:
                 with contextlib.suppress(Exception):
                     client.close_owned_binding(binding_id=str(response.binding_id))
@@ -1327,6 +1400,12 @@ class Store:
                 device=device_obj,
                 device_id=device_id,
                 target_publication_token=None,
+            )
+            now = time.perf_counter()
+            logger.info(
+                "tc_profile_py store.create_binding return step_sec=%.6f total_sec=%.6f",
+                now - profile_last,
+                now - profile_start,
             )
             return Binding(slot)
 
@@ -1675,62 +1754,6 @@ class Store:
             publication=publication,
         )
 
-    def register_binding_finalize_publication(
-        self,
-        tensors: TensorDict,
-        *,
-        build_intent: ServingBuildIntent,
-        admission_facts: ServingAdmissionFacts,
-        source_artifact: Artifact
-        | RegisteredArtifact
-        | CanonicalIndex
-        | object
-        | None = None,
-        contract_family: AssemblyContractFamily | str | None = None,
-        artifact_id: str | None = None,
-        key: str | None = None,
-        policy: StorePolicy | str | None = None,
-        device: int | torch.device | None = None,
-        representation_contract_hash: str | None = None,
-        source_version_key: str | None = None,
-        serving_version_key: str | None = None,
-        logical_topology_json: str | None = None,
-        serving_manifest_ref: str | None = None,
-    ) -> RegisteredServingPublication:
-        prepared = prepare_binding_finalize_serving_registration(
-            build_intent=build_intent,
-            tensors=tensors,
-            representation_contract_hash=representation_contract_hash,
-            logical_topology_json=logical_topology_json,
-            serving_manifest_ref=serving_manifest_ref,
-        )
-        registered_artifact = self.put(
-            prepared.tensors,
-            artifact_id=artifact_id,
-            key=key,
-            policy=policy,
-            device=device,
-        )
-        publication = (
-            build_binding_finalize_publication_bundle_from_registered_artifact(
-                build_intent=build_intent,
-                admission_facts=admission_facts,
-                source_artifact=source_artifact,
-                contract_family=contract_family,
-                serving_artifact=registered_artifact,
-                representation_contract_hash=prepared.representation_contract_hash,
-                source_version_key=source_version_key,
-                serving_version_key=serving_version_key,
-                logical_topology_json=logical_topology_json,
-                serving_manifest_ref=prepared.serving_manifest_ref,
-            )
-        )
-        return RegisteredServingPublication(
-            registered_artifact=registered_artifact,
-            prepared_registration=prepared,
-            publication=publication,
-        )
-
     def complete_pure_transform_publication(
         self,
         tensors: TensorDict,
@@ -1776,7 +1799,7 @@ class Store:
                 contract_family=contract_family,
                 artifact_id=artifact_id,
                 key=key,
-                policy=policy,
+                policy=policy if policy is not None else "pinned",
                 device=device,
                 source_version_key=source_version_key,
                 serving_version_key=serving_version_key,
@@ -2074,80 +2097,6 @@ class Store:
                     result, "serving_manifest_ref", None
                 )
             return result
-
-    def complete_binding_finalize_publication(
-        self,
-        tensors: TensorDict,
-        *,
-        build_intent: ServingBuildIntent,
-        admission_facts: ServingAdmissionFacts,
-        source_artifact: Artifact
-        | RegisteredArtifact
-        | CanonicalIndex
-        | object
-        | None = None,
-        contract_family: AssemblyContractFamily | str | None = None,
-        artifact_id: str | None = None,
-        key: str | None = None,
-        policy: StorePolicy | str | None = None,
-        device: int | torch.device | None = None,
-        representation_contract_hash: str | None = None,
-        source_version_key: str | None = None,
-        serving_version_key: str | None = None,
-        logical_topology_json: str | None = None,
-        serving_manifest_ref: str | None = None,
-        structural_view_ids: Sequence[str] | None = None,
-        source_contribution_device: str | int | None = None,
-        source_contribution_artifacts: Sequence[Artifact] | None = None,
-        layout_id: str | None = None,
-        layout_artifact_id: str | None = None,
-        readiness_policy: AssemblyReadinessPolicy | None = None,
-        timeout_s: float | None = None,
-        ctx: CallContext | None = None,
-    ) -> PublishedModelVersion:
-        with tensorcast_profile_stage(
-            "tensorcast",
-            "publication.register_binding_finalize_publication",
-            logger=logger,
-            extra={
-                "tensor_count": len(tensors),
-                "device": None if device is None else str(device),
-                "contract_family": contract_family,
-            },
-        ) as profile:
-            publication = self.register_binding_finalize_publication(
-                tensors,
-                build_intent=build_intent,
-                admission_facts=admission_facts,
-                source_artifact=source_artifact,
-                contract_family=contract_family,
-                artifact_id=artifact_id,
-                key=key,
-                policy=policy,
-                device=device,
-                representation_contract_hash=representation_contract_hash,
-                source_version_key=source_version_key,
-                serving_version_key=serving_version_key,
-                logical_topology_json=logical_topology_json,
-                serving_manifest_ref=serving_manifest_ref,
-            )
-            if profile is not None:
-                profile["serving_artifact_id"] = getattr(
-                    publication.publication, "serving_artifact_id", None
-                )
-        return self._complete_registered_representation_publication(
-            publication=publication,
-            contract_family=contract_family,
-            source_artifact=source_artifact,
-            structural_view_ids=structural_view_ids,
-            source_contribution_device=source_contribution_device,
-            source_contribution_artifacts=source_contribution_artifacts,
-            layout_id=layout_id,
-            layout_artifact_id=layout_artifact_id,
-            readiness_policy=readiness_policy,
-            timeout_s=timeout_s,
-            ctx=ctx,
-        )
 
     def complete_binding_finalize_publication_from_binding(
         self,
@@ -3019,7 +2968,75 @@ class Store:
             key=key,
         )
 
-    def from_disk(
+    def _artifact_from_disk_metadata(
+        self,
+        *,
+        disk_path: str,
+        artifact_id: str,
+        canonical_index_bytes: bytes,
+        generation: int | None,
+        key: str | None,
+        event_name: str,
+        resolution_mode: str,
+        trusted_content_artifact_id: str | None = None,
+    ) -> Artifact:
+        if not artifact_id:
+            raise ArtifactError(
+                "disk resolution returned empty artifact_id",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        if not canonical_index_bytes:
+            raise ArtifactError(
+                "disk resolution returned empty canonical index bytes",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        canonical_index = canonical_index_from_bytes(canonical_index_bytes)
+        entry = ArtifactCacheEntry(
+            artifact_id=artifact_id,
+            canonical_index_bytes=canonical_index_bytes,
+            parsed_index=canonical_index,
+            generation=generation,
+            expires_at=time.monotonic(),
+        )
+        self._runtime.cache_artifact_index(entry)
+        artifact_id_kind = infer_artifact_id_kind(artifact_id)
+        trusted_hint_kind = (
+            infer_artifact_id_kind(trusted_content_artifact_id)
+            if trusted_content_artifact_id
+            else None
+        )
+        emit_tensorcast_profile_event(
+            "tensorcast",
+            event_name,
+            logger=logger,
+            payload={
+                "path": disk_path,
+                "artifact_id": artifact_id,
+                "artifact_id_kind": (
+                    artifact_id_kind.value.lower() if artifact_id_kind else None
+                ),
+                "trusted_content_artifact_id": trusted_content_artifact_id,
+                "trusted_content_hint_kind": (
+                    trusted_hint_kind.value.lower() if trusted_hint_kind else None
+                ),
+                "tensor_count": len(canonical_index.entries),
+                "total_size_bytes": canonical_index.total_size_bytes,
+                "daemon_endpoint": self._runtime.daemon_endpoint,
+                "resolution_mode": resolution_mode,
+            },
+        )
+        return Artifact(
+            store_ref=weakref.ref(self),
+            artifact_id=artifact_id,
+            key=key,
+            canonical_index_bytes=canonical_index_bytes or None,
+            canonical_index=canonical_index,
+            generation=generation,
+        )
+
+    def import_from_disk(
         self,
         path: str,
         *,
@@ -3036,7 +3053,7 @@ class Store:
         deadline = time.monotonic() + 30.0
         with tensorcast_profile_stage(
             "tensorcast",
-            "store.from_disk",
+            "store.import_from_disk",
             logger=logger,
             extra={
                 "path": disk_path,
@@ -3097,6 +3114,7 @@ class Store:
                         profile["processed_bytes"] = processed_bytes
                         profile["total_bytes"] = total_bytes
                         profile["message_samples"] = messages[:20]
+                        profile["resolution_mode"] = "import"
                 except RuntimeError as exc:
                     remaining = deadline - time.monotonic()
                     if not _is_import_startup_in_progress_error(exc) or remaining <= 0:
@@ -3105,7 +3123,7 @@ class Store:
                     if profile is not None:
                         profile["startup_retry_count"] = startup_retry_count
                     logger.info(
-                        "store.from_disk_retry_startup",
+                        "store.import_from_disk_retry_startup",
                         extra={
                             "tc.store.daemon": self._runtime.daemon_endpoint,
                             "path": disk_path,
@@ -3115,42 +3133,19 @@ class Store:
                     )
                     time.sleep(min(1.0, remaining))
         artifact_id = response.artifact_id or ""
-        if not artifact_id:
-            raise ArtifactError(
-                "ImportArtifactFromPath returned empty artifact_id",
-                status_code="DATA_LOSS",
-                retryable=False,
-            )
         canonical_index_bytes = bytes(response.canonical_index_bytes)
-        if not canonical_index_bytes:
-            raise ArtifactError(
-                "ImportArtifactFromPath returned empty canonical index bytes",
-                status_code="DATA_LOSS",
-                retryable=False,
-            )
         canonical_index = canonical_index_from_bytes(canonical_index_bytes)
         generation_value: int | None = (
             int(response.generation) if response.generation else None
         )
-        entry = ArtifactCacheEntry(
+        artifact = self._artifact_from_disk_metadata(
+            disk_path=disk_path,
             artifact_id=artifact_id,
             canonical_index_bytes=canonical_index_bytes,
-            parsed_index=canonical_index,
             generation=generation_value,
-            expires_at=time.monotonic(),
-        )
-        self._runtime.cache_artifact_index(entry)
-        emit_tensorcast_profile_event(
-            "tensorcast",
-            "store.from_disk.summary",
-            logger=logger,
-            payload={
-                "path": disk_path,
-                "artifact_id": artifact_id,
-                "tensor_count": len(canonical_index.entries),
-                "total_size_bytes": canonical_index.total_size_bytes,
-                "daemon_endpoint": self._runtime.daemon_endpoint,
-            },
+            key=key,
+            event_name="store.import_from_disk.summary",
+            resolution_mode="import",
         )
         if key:
             index_multihash, data_multihash = _split_mi2_artifact_id(artifact_id)
@@ -3176,13 +3171,101 @@ class Store:
                     )
                 else:
                     self._runtime.cache_key_mapping(key, artifact_id=artifact_id)
-        return Artifact(
-            store_ref=weakref.ref(self),
-            artifact_id=artifact_id,
-            key=key,
-            canonical_index_bytes=canonical_index_bytes or None,
-            canonical_index=canonical_index,
+        return artifact
+
+    def from_disk(
+        self,
+        path: str,
+        *,
+        key: str | None = None,
+        verify_checksums: bool = True,
+        show_progress: bool | None = None,
+    ) -> Artifact:
+        disk_path = os.fspath(path)
+        if not disk_path:
+            raise ValueError("path is required")
+        use_progress = _should_show_from_disk_progress(show_progress)
+        if key is not None or use_progress:
+            return self.import_from_disk(
+                disk_path,
+                key=key,
+                verify_checksums=verify_checksums,
+                show_progress=show_progress,
+            )
+        client = self._runtime.ensure_client()
+        response = None
+        deadline = time.monotonic() + 30.0
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "store.from_disk",
+            logger=logger,
+            extra={
+                "path": disk_path,
+                "verify_checksums": bool(verify_checksums),
+                "show_progress": use_progress,
+                "daemon_endpoint": self._runtime.daemon_endpoint,
+            },
+        ) as profile:
+            startup_retry_count = 0
+            while response is None:
+                try:
+                    response = client.resolve_public_disk_source(
+                        path=disk_path,
+                        verify_checksums=bool(verify_checksums),
+                    )
+                    if profile is not None:
+                        profile["resolution_mode"] = "attested_mounted_source"
+                except RuntimeError as exc:
+                    remaining = deadline - time.monotonic()
+                    if not _is_import_startup_in_progress_error(exc) or remaining <= 0:
+                        raise
+                    startup_retry_count += 1
+                    if profile is not None:
+                        profile["startup_retry_count"] = startup_retry_count
+                    logger.info(
+                        "store.from_disk_retry_startup",
+                        extra={
+                            "tc.store.daemon": self._runtime.daemon_endpoint,
+                            "path": disk_path,
+                            "remaining_s": round(remaining, 3),
+                        },
+                        exc_info=exc,
+                    )
+                    time.sleep(min(1.0, remaining))
+        has_source = (
+            response.HasField("source")
+            if hasattr(response, "HasField")
+            else getattr(response, "source", None) is not None
+        )
+        if not has_source:
+            raise ArtifactError(
+                "ResolvePublicDiskSource returned empty source",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        source = PublicDiskSourceHandle.from_proto(response.source)
+        if profile is not None:
+            profile["artifact_id"] = source.artifact_id
+            profile["trusted_content_artifact_id"] = (
+                source.trusted_content_artifact_id or ""
+            )
+            profile["metadata_capability"] = (
+                str(source.metadata_capability)
+                if source.metadata_capability is not None
+                else ""
+            )
+        generation_value: int | None = (
+            int(source.generation) if source.generation else None
+        )
+        return self._artifact_from_disk_metadata(
+            disk_path=disk_path,
+            artifact_id=source.artifact_id,
+            canonical_index_bytes=bytes(source.canonical_index_bytes),
             generation=generation_value,
+            key=None,
+            event_name="store.from_disk.summary",
+            resolution_mode="attested_mounted_source",
+            trusted_content_artifact_id=source.trusted_content_artifact_id,
         )
 
     def resolve_public_disk_source(
@@ -3217,6 +3300,50 @@ class Store:
                 retryable=False,
             )
         return PublicDiskSourceHandle.from_proto(response.source)
+
+    def promote_mounted_source(
+        self,
+        artifact: Artifact | str,
+        *,
+        verify_checksums: bool = True,
+        timeout_s: float | None = None,
+    ) -> Artifact:
+        source_artifact_id = (
+            artifact.artifact_id if isinstance(artifact, Artifact) else str(artifact)
+        )
+        if not source_artifact_id:
+            raise ValueError("artifact is required")
+        artifact_kind = infer_artifact_id_kind(source_artifact_id)
+        if artifact_kind is ArtifactIdKind.MI2:
+            return self.artifact(source_artifact_id)
+        if artifact_kind is not ArtifactIdKind.MSA1:
+            raise ValueError("artifact must be an msa1 mounted-source artifact id")
+        try:
+            response = self._runtime.ensure_client().promote_mounted_source_artifact(
+                artifact_id=source_artifact_id,
+                verify_checksums=bool(verify_checksums),
+                timeout_s=float(timeout_s) if timeout_s is not None else None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise ArtifactError(
+                f"PromoteMountedSourceArtifact RPC failed for {source_artifact_id}",
+                status_code="UNAVAILABLE",
+                retryable=True,
+            ) from exc
+        promoted_artifact_id = str(response.artifact_id or "")
+        canonical_index_bytes = bytes(response.canonical_index_bytes)
+        generation_value: int | None = (
+            int(response.generation) if response.generation else None
+        )
+        return self._artifact_from_disk_metadata(
+            disk_path=source_artifact_id,
+            artifact_id=promoted_artifact_id,
+            canonical_index_bytes=canonical_index_bytes,
+            generation=generation_value,
+            key=None,
+            event_name="store.promote_mounted_source.summary",
+            resolution_mode="mounted_source_promotion",
+        )
 
     def realize_into_binding(
         self,
@@ -3741,100 +3868,6 @@ def complete_pure_transform_publication_from_binding(
     )
 
 
-def register_binding_finalize_publication(
-    tensors: TensorDict,
-    *,
-    build_intent: ServingBuildIntent,
-    admission_facts: ServingAdmissionFacts,
-    source_artifact: Artifact
-    | RegisteredArtifact
-    | CanonicalIndex
-    | object
-    | None = None,
-    contract_family: AssemblyContractFamily | str | None = None,
-    artifact_id: str | None = None,
-    key: str | None = None,
-    policy: StorePolicy | str | None = None,
-    device: int | torch.device | None = None,
-    representation_contract_hash: str | None = None,
-    source_version_key: str | None = None,
-    serving_version_key: str | None = None,
-    logical_topology_json: str | None = None,
-    serving_manifest_ref: str | None = None,
-) -> RegisteredServingPublication:
-    return _coerce_store().register_binding_finalize_publication(
-        tensors,
-        build_intent=build_intent,
-        admission_facts=admission_facts,
-        source_artifact=source_artifact,
-        contract_family=contract_family,
-        artifact_id=artifact_id,
-        key=key,
-        policy=policy,
-        device=device,
-        representation_contract_hash=representation_contract_hash,
-        source_version_key=source_version_key,
-        serving_version_key=serving_version_key,
-        logical_topology_json=logical_topology_json,
-        serving_manifest_ref=serving_manifest_ref,
-    )
-
-
-def complete_binding_finalize_publication(
-    tensors: TensorDict,
-    *,
-    build_intent: ServingBuildIntent,
-    admission_facts: ServingAdmissionFacts,
-    source_artifact: Artifact
-    | RegisteredArtifact
-    | CanonicalIndex
-    | object
-    | None = None,
-    contract_family: AssemblyContractFamily | str | None = None,
-    artifact_id: str | None = None,
-    key: str | None = None,
-    policy: StorePolicy | str | None = None,
-    device: int | torch.device | None = None,
-    representation_contract_hash: str | None = None,
-    source_version_key: str | None = None,
-    serving_version_key: str | None = None,
-    logical_topology_json: str | None = None,
-    serving_manifest_ref: str | None = None,
-    structural_view_ids: Sequence[str] | None = None,
-    source_contribution_device: str | int | None = None,
-    source_contribution_artifacts: Sequence[Artifact] | None = None,
-    layout_id: str | None = None,
-    layout_artifact_id: str | None = None,
-    readiness_policy: AssemblyReadinessPolicy | None = None,
-    timeout_s: float | None = None,
-    ctx: CallContext | None = None,
-) -> PublishedModelVersion:
-    return _coerce_store().complete_binding_finalize_publication(
-        tensors,
-        build_intent=build_intent,
-        admission_facts=admission_facts,
-        source_artifact=source_artifact,
-        contract_family=contract_family,
-        artifact_id=artifact_id,
-        key=key,
-        policy=policy,
-        device=device,
-        representation_contract_hash=representation_contract_hash,
-        source_version_key=source_version_key,
-        serving_version_key=serving_version_key,
-        logical_topology_json=logical_topology_json,
-        serving_manifest_ref=serving_manifest_ref,
-        structural_view_ids=structural_view_ids,
-        source_contribution_device=source_contribution_device,
-        source_contribution_artifacts=source_contribution_artifacts,
-        layout_id=layout_id,
-        layout_artifact_id=layout_artifact_id,
-        readiness_policy=readiness_policy,
-        timeout_s=timeout_s,
-        ctx=ctx,
-    )
-
-
 def complete_binding_finalize_publication_from_binding(
     binding: Binding | SealedBindingValue,
     *,
@@ -4340,6 +4373,34 @@ def from_disk(
     )
 
 
+def import_from_disk(
+    path: str,
+    *,
+    key: str | None = None,
+    verify_checksums: bool = True,
+    show_progress: bool | None = None,
+) -> Artifact:
+    return _coerce_store().import_from_disk(
+        path,
+        key=key,
+        verify_checksums=verify_checksums,
+        show_progress=show_progress,
+    )
+
+
+def promote_mounted_source(
+    artifact: Artifact | str,
+    *,
+    verify_checksums: bool = True,
+    timeout_s: float | None = None,
+) -> Artifact:
+    return _coerce_store().promote_mounted_source(
+        artifact,
+        verify_checksums=verify_checksums,
+        timeout_s=timeout_s,
+    )
+
+
 def resolve_public_disk_source(
     path: str,
     *,
@@ -4376,8 +4437,10 @@ __all__ = [
     "AssemblyCloseoutContract",
     "AssemblyReadinessPolicy",
     "AssemblyRequirementSetRef",
+    "BindingPromotionStatusState",
     "Binding",
     "BindingValueRef",
+    "BindingValueVerificationState",
     "BindingLayout",
     "BindingUpdateEpoch",
     "BuilderMode",
@@ -4386,7 +4449,10 @@ __all__ = [
     "CopyPlan",
     "CopyPlanEntry",
     "FinalizeClass",
+    "HostSharedRegionAttachment",
+    "HostSharedRegionClass",
     "LeaseHandle",
+    "LocalRegionHandle",
     "MaterializationPayload",
     "MaterializationDiagnostics",
     "MaterializationBatcher",
@@ -4396,12 +4462,12 @@ __all__ = [
     "PublicDiskSourceHandle",
     "PreparedServingRegistration",
     "PublishedModelVersion",
+    "RegionMemoryKind",
     "ExecutionDiagnostics",
     "SourceBoundPlanDiagnostics",
     "HashBackend",
     "HashLocation",
     "IdentityMintStrategy",
-    "RealizationProtocol",
     "RegisteredServingPublication",
     "RegisteredArtifact",
     "RepresentationPublishContract",
@@ -4434,7 +4500,6 @@ __all__ = [
     "build_owned_layout",
     "build_binding_finalize_admission_facts",
     "build_binding_finalize_publication_bundle",
-    "build_binding_finalize_publication_bundle_from_registered_artifact",
     "build_owned_layout",
     "build_serving_publication_bundle",
     "build_serving_publication_bundle_from_registered_artifact",
@@ -4444,7 +4509,6 @@ __all__ = [
     "build_pure_transform_serving_args",
     "build_pure_transform_transform_spec",
     "build_representation_publish_requirements",
-    "complete_binding_finalize_publication",
     "complete_binding_finalize_publication_from_binding",
     "complete_pure_transform_publication",
     "complete_pure_transform_publication_from_binding",
@@ -4469,6 +4533,8 @@ __all__ = [
     "artifact_async",
     "create_binding",
     "from_disk",
+    "import_from_disk",
+    "promote_mounted_source",
     "realize_into_binding",
     "resolve_public_disk_source",
     "list_artifact_layouts",
@@ -4481,7 +4547,6 @@ __all__ = [
     "put_async",
     "query_persistence_status",
     "persistence_operation",
-    "register_binding_finalize_publication",
     "register_pure_transform_publication",
     "start_canonical_representation_publish_attempt",
     "start_assembly_attempt",

@@ -2,6 +2,7 @@
 
 #include "daemon/service/controllers/materialization_disk_resolve_utils.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -9,11 +10,13 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #include <sys/stat.h>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/escaping.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "daemon/service/controllers/materialization_index_source_utils.h"
@@ -22,6 +25,9 @@
 #include "opentelemetry/metrics/provider.h"
 
 #include "core/common/artifact_hash.h"
+#include "core/common/artifact_identity.h"
+#include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/materialization/dataplane/metadata/disk_artifact_context.h"
 #include "core/store/materialization/dataplane/metadata/disk_dir_hash.h"
 #include "core/store/materialization/dataplane/verification/verification_utils.h"
 
@@ -33,12 +39,61 @@ using materialization_index_source::DescriptorMetadata;
 using materialization_index_source::load_descriptor_metadata;
 using materialization_index_source::validate_descriptor_against_index;
 using materialization_payload::compute_generation_from_index;
+using store::loader::DiskArtifactContext;
+using store::loader::IndexInfo;
 
 constexpr std::string_view kSourceMutatedPrefix = "SOURCE_MUTATED:";
 
-bool is_supported_source_file(std::string_view filename) {
-  return filename == "tensor.data" || absl::StartsWith(filename, "tensor.data_") ||
-      absl::EndsWith(filename, ".safetensors");
+absl::Status normalize_disk_context_status(const absl::Status& status, std::string_view path) {
+  if (status.ok()) {
+    return status;
+  }
+  if (absl::IsNotFound(status)) {
+    const std::string message(status.message());
+    if (message.find("No replica partition files found") != std::string::npos) {
+      return absl::InvalidArgumentError(
+          absl::StrCat(
+              "SOURCE_FORMAT_INVALID: source must include top-level tensor.data*, or *.safetensors files: ", path));
+    }
+    return absl::NotFoundError(absl::StrCat("SOURCE_NOT_FOUND: source path not found: ", path));
+  }
+  if (absl::IsFailedPrecondition(status)) {
+    return absl::InvalidArgumentError(absl::StrCat("SOURCE_FORMAT_INVALID: ", status.message()));
+  }
+  return status;
+}
+
+std::string_view format_kind_token(MountedSourceFormatKind kind) {
+  switch (kind) {
+    case MountedSourceFormatKind::kPartitioned:
+      return "partitioned";
+    case MountedSourceFormatKind::kSafetensors:
+      return "safetensors";
+    case MountedSourceFormatKind::kUnspecified:
+    default:
+      return "unspecified";
+  }
+}
+
+absl::Status validate_attestation_policy(
+    const MountedSourceAttestationPolicy& policy,
+    const MountedSourceMetadata& metadata) {
+  if (!policy.lightweight_attestation_enabled) {
+    return absl::FailedPreconditionError("mounted-source lightweight attestation is disabled by daemon policy");
+  }
+  if (metadata.format_kind == MountedSourceFormatKind::kPartitioned && !policy.allow_partitioned) {
+    return absl::PermissionDeniedError("mounted-source policy rejects partitioned sources");
+  }
+  if (metadata.format_kind == MountedSourceFormatKind::kSafetensors && !policy.allow_safetensors) {
+    return absl::PermissionDeniedError("mounted-source policy rejects safetensors sources");
+  }
+  if (metadata.metadata_capability == MountedSourceMetadataCapability::kTensorAware && !policy.allow_tensor_aware) {
+    return absl::PermissionDeniedError("mounted-source policy rejects tensor-aware metadata");
+  }
+  if (metadata.metadata_capability == MountedSourceMetadataCapability::kByteOnly && !policy.allow_byte_only) {
+    return absl::PermissionDeniedError("mounted-source policy rejects byte-only metadata");
+  }
+  return absl::OkStatus();
 }
 
 absl::StatusOr<SourceFileFingerprint> stat_file_fingerprint(const std::filesystem::path& path) {
@@ -61,63 +116,176 @@ absl::StatusOr<SourceFileFingerprint> stat_file_fingerprint(const std::filesyste
 struct SourceScanResult {
   SourceFingerprintMap fingerprints;
   std::uint64_t total_bytes{0};
-  bool has_supported_layout{false};
 };
 
 absl::StatusOr<SourceScanResult> scan_source(const std::filesystem::path& root) {
-  std::error_code ec;
-  const bool exists = std::filesystem::exists(root, ec);
-  if (ec) {
-    return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to access source path: ", root.string()));
-  }
-  if (!exists) {
-    return absl::NotFoundError(absl::StrCat("SOURCE_NOT_FOUND: source path not found: ", root.string()));
-  }
-  const bool is_dir = std::filesystem::is_directory(root, ec);
-  if (ec) {
-    return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat source path: ", root.string()));
-  }
-  if (!is_dir) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("SOURCE_FORMAT_INVALID: source is not a directory: ", root.string()));
+  auto context_or = store::loader::get_disk_artifact_context(root);
+  if (!context_or.ok()) {
+    return normalize_disk_context_status(context_or.status(), root.string());
   }
 
   SourceScanResult out;
-  std::filesystem::recursive_directory_iterator it(root, ec);
-  if (ec) {
-    return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to enumerate source directory: ", root.string()));
-  }
-  const std::filesystem::recursive_directory_iterator end;
-  for (; it != end; it.increment(ec)) {
-    if (ec) {
-      return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to traverse source directory: ", root.string()));
-    }
-    const auto& entry = *it;
-    if (!entry.is_regular_file(ec)) {
-      if (ec) {
-        return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to inspect source entry: ", entry.path().string()));
-      }
-      continue;
-    }
-    auto fp_or = stat_file_fingerprint(entry.path());
+  out.total_bytes = (*context_or)->total_size();
+  for (const auto& path : (*context_or)->partition_paths()) {
+    auto fp_or = stat_file_fingerprint(path);
     if (!fp_or.ok()) {
       return fp_or.status();
     }
-    const auto rel = entry.path().lexically_relative(root).string();
-    out.total_bytes += fp_or->size;
+    const auto rel = path.lexically_relative(root).string();
     out.fingerprints.insert_or_assign(rel, *fp_or);
-    if (is_supported_source_file(entry.path().filename().string())) {
-      out.has_supported_layout = true;
+  }
+  return out;
+}
+
+absl::StatusOr<MountedSourceMetadata> build_mounted_source_metadata_from_context(
+    const std::filesystem::path& normalized_path,
+    const std::shared_ptr<const DiskArtifactContext>& context) {
+  MountedSourceMetadata metadata;
+  metadata.normalized_path = normalized_path;
+  metadata.format_kind =
+      context->is_safetensors() ? MountedSourceFormatKind::kSafetensors : MountedSourceFormatKind::kPartitioned;
+
+  if (!context->is_safetensors() && !context->tensor_index_json_present() && !context->tensor_index_cbor_present()) {
+    metadata.metadata_capability = MountedSourceMetadataCapability::kByteOnly;
+    metadata.exact_size_bytes = context->total_size();
+    metadata.index_info.canonical_index_json =
+        store::loading::build_synthetic_payload_canonical_index_json(metadata.exact_size_bytes);
+    metadata.index_info.total_size_bytes = metadata.exact_size_bytes;
+    metadata.index_info.is_safetensors = false;
+    metadata.index_info.source_total_size_bytes = metadata.exact_size_bytes;
+  } else {
+    auto index_or = context->get_index_info(/*target_device_id=*/0);
+    if (!index_or.ok()) {
+      return index_or.status();
+    }
+    metadata.index_info = *index_or;
+    metadata.metadata_capability = MountedSourceMetadataCapability::kTensorAware;
+  }
+
+  metadata.canonical_index_multihash = metadata.index_info.index_multihash;
+  if (metadata.canonical_index_multihash.empty()) {
+    auto index_mh_or = common::compute_index_multihash(
+        std::optional<std::string>(metadata.index_info.canonical_index_json), /*index_key_hex=*/"");
+    if (!index_mh_or.ok()) {
+      return index_mh_or.status();
+    }
+    metadata.canonical_index_multihash = *index_mh_or;
+  }
+  if (metadata.index_info.source_index_json.has_value()) {
+    auto source_index_mh_or =
+        common::compute_index_multihash(metadata.index_info.source_index_json, /*index_key_hex=*/"");
+    if (!source_index_mh_or.ok()) {
+      return source_index_mh_or.status();
+    }
+    metadata.source_index_multihash = *source_index_mh_or;
+  }
+
+  if (metadata.exact_size_bytes == 0) {
+    metadata.exact_size_bytes = metadata.index_info.total_size_bytes;
+    if (metadata.exact_size_bytes == 0 && metadata.index_info.source_total_size_bytes > 0) {
+      metadata.exact_size_bytes = metadata.index_info.source_total_size_bytes;
+    }
+    if (metadata.exact_size_bytes == 0) {
+      metadata.exact_size_bytes = context->total_size();
+    }
+  }
+  metadata.generation = compute_generation_from_index(metadata.index_info.canonical_index_json);
+
+  auto scan_or = scan_source(normalized_path);
+  if (!scan_or.ok()) {
+    return scan_or.status();
+  }
+  metadata.file_fingerprints = std::move(scan_or->fingerprints);
+  return metadata;
+}
+
+std::string build_mounted_snapshot_digest(const MountedSourceMetadata& metadata, std::string_view policy_id) {
+  std::vector<std::pair<std::string, SourceFileFingerprint>> ordered_fingerprints;
+  ordered_fingerprints.reserve(metadata.file_fingerprints.size());
+  for (const auto& entry : metadata.file_fingerprints) {
+    ordered_fingerprints.push_back(entry);
+  }
+  std::ranges::sort(ordered_fingerprints, [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+
+  std::string payload;
+  absl::StrAppend(
+      &payload,
+      metadata.normalized_path.string(),
+      "\npolicy=",
+      policy_id,
+      "\nformat=",
+      format_kind_token(metadata.format_kind),
+      "\ncapability=",
+      static_cast<int>(metadata.metadata_capability),
+      "\nindex=",
+      metadata.canonical_index_multihash,
+      "\nsource_index=",
+      metadata.source_index_multihash.value_or(""),
+      "\nsize=",
+      metadata.exact_size_bytes);
+  for (const auto& [relative_path, fingerprint] : ordered_fingerprints) {
+    absl::StrAppend(
+        &payload,
+        "\nfile=",
+        relative_path,
+        "|inode=",
+        fingerprint.inode,
+        "|size=",
+        fingerprint.size,
+        "|mtime_ns=",
+        fingerprint.mtime_ns);
+  }
+
+  const auto digest = common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  return absl::BytesToHexString(absl::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
+}
+
+std::string mint_msa1_artifact_id(
+    std::string_view daemon_session_token,
+    std::string_view policy_id,
+    const MountedSourceMetadata& metadata) {
+  return absl::StrCat(
+      common::kMsa1Prefix,
+      daemon_session_token,
+      "~",
+      policy_id,
+      "~",
+      format_kind_token(metadata.format_kind),
+      "~",
+      build_mounted_snapshot_digest(metadata, policy_id));
+}
+
+std::optional<std::string> maybe_trusted_descriptor_hint(
+    const DescriptorMetadata& descriptor,
+    const IndexInfo& index_info,
+    bool verify_checksums,
+    std::string_view canonical_index_multihash) {
+  if (!descriptor.found) {
+    return std::nullopt;
+  }
+
+  if (verify_checksums) {
+    auto status = validate_descriptor_against_index(descriptor, index_info, /*verify_checksums=*/true);
+    if (!status.ok()) {
+      return std::nullopt;
     }
   }
 
-  if (!out.has_supported_layout) {
-    return absl::InvalidArgumentError(
-        absl::StrCat(
-            "SOURCE_FORMAT_INVALID: source must include at least one *.safetensors or tensor.data* file: ",
-            root.string()));
+  if (!descriptor.index_multihash.has_value() || descriptor.index_multihash->empty() ||
+      !descriptor.data_multihash.has_value() || descriptor.data_multihash->empty() ||
+      !descriptor.artifact_id.has_value() || descriptor.artifact_id->empty()) {
+    return std::nullopt;
   }
-  return out;
+  if (*descriptor.index_multihash != canonical_index_multihash) {
+    return std::nullopt;
+  }
+  const std::string expected_artifact_id =
+      absl::StrCat(common::kMi2Prefix, *descriptor.index_multihash, ":", *descriptor.data_multihash);
+  if (*descriptor.artifact_id != expected_artifact_id) {
+    return std::nullopt;
+  }
+  return *descriptor.artifact_id;
 }
 
 ImportArtifactErrorCode status_to_error_code(const absl::Status& status) {
@@ -232,8 +400,72 @@ void record_disk_import_outcome(std::string_view outcome) {
   record_metric("import", outcome);
 }
 
+void record_mounted_source_validation_outcome(std::string_view outcome) {
+  record_metric("mounted_source_validation", outcome);
+}
+
 ImportArtifactErrorCode classify_import_error(const absl::Status& status) {
   return status_to_error_code(status);
+}
+
+absl::StatusOr<MountedSourceMetadata> build_mounted_source_metadata(const std::filesystem::path& normalized_path) {
+  auto context_or = store::loader::get_disk_artifact_context(normalized_path);
+  if (!context_or.ok()) {
+    return normalize_disk_context_status(context_or.status(), normalized_path.string());
+  }
+  return build_mounted_source_metadata_from_context(normalized_path, *context_or);
+}
+
+absl::StatusOr<ResolveMountedSourceResult> resolve_mounted_source_artifact(
+    const std::filesystem::path& normalized_path,
+    bool verify_checksums,
+    std::string_view daemon_session_token,
+    const MountedSourceAttestationPolicy& policy) {
+  auto metadata_or = build_mounted_source_metadata(normalized_path);
+  if (!metadata_or.ok()) {
+    return metadata_or.status();
+  }
+  auto policy_status = validate_attestation_policy(policy, *metadata_or);
+  if (!policy_status.ok()) {
+    return policy_status;
+  }
+  auto descriptor_or = load_descriptor_metadata(normalized_path);
+  if (!descriptor_or.ok()) {
+    return descriptor_or.status();
+  }
+  if (verify_checksums && descriptor_or->found) {
+    auto descriptor_status =
+        validate_descriptor_against_index(*descriptor_or, metadata_or->index_info, /*verify_checksums=*/true);
+    if (!descriptor_status.ok()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("SOURCE_FORMAT_INVALID: descriptor/index mismatch: ", descriptor_status.message()));
+    }
+  }
+
+  ResolveMountedSourceResult result;
+  result.normalized_path = normalized_path;
+  result.canonical_index_json = metadata_or->index_info.canonical_index_json;
+  result.source_index_json = metadata_or->index_info.source_index_json;
+  result.canonical_index_multihash = metadata_or->canonical_index_multihash;
+  result.source_index_multihash = metadata_or->source_index_multihash;
+  result.generation = metadata_or->generation;
+  result.descriptor_present = descriptor_or->found;
+  result.file_fingerprints = metadata_or->file_fingerprints;
+  result.format_kind = metadata_or->format_kind;
+  result.metadata_capability = metadata_or->metadata_capability;
+  result.validation_mode = policy.validation_mode;
+  result.policy_id = policy.policy_id;
+  result.snapshot_digest = build_mounted_snapshot_digest(*metadata_or, policy.policy_id);
+  result.exact_size_bytes = metadata_or->exact_size_bytes;
+  if (policy.descriptor_reuse_mode == MountedSourceDescriptorReuseMode::kTrustedHintOnly) {
+    result.trusted_content_artifact_id = maybe_trusted_descriptor_hint(
+        *descriptor_or, metadata_or->index_info, verify_checksums, result.canonical_index_multihash);
+  }
+  result.resolution_strategy = result.trusted_content_artifact_id.has_value()
+      ? MountedSourceResolutionStrategy::kAttestedWithTrustedDescriptorHint
+      : MountedSourceResolutionStrategy::kAttestedOnly;
+  result.artifact_id = mint_msa1_artifact_id(daemon_session_token, policy.policy_id, *metadata_or);
+  return result;
 }
 
 absl::StatusOr<ImportArtifactFromPathResult> import_artifact_from_path(
@@ -301,15 +533,15 @@ absl::StatusOr<ImportArtifactFromPathResult> import_artifact_from_path(
   const DescriptorMetadata descriptor = *descriptor_or;
 
   emit_progress(ImportArtifactPhase::kBuildCanonicalIndex);
-  auto index_or = store::loader::read_from_artifact_dir(normalized_path, /*target_device_id=*/0);
-  if (!index_or.ok()) {
+  auto metadata_or = build_mounted_source_metadata(normalized_path);
+  if (!metadata_or.ok()) {
     record_disk_import_outcome("index_failed");
-    emit_error(index_or.status());
-    return index_or.status();
+    emit_error(metadata_or.status());
+    return metadata_or.status();
   }
-  auto index = *index_or;
+  const auto& index = metadata_or->index_info;
 
-  std::string index_multihash = index.index_multihash;
+  std::string index_multihash = metadata_or->canonical_index_multihash;
   if (index_multihash.empty()) {
     auto index_mh_or =
         common::compute_index_multihash(std::optional<std::string>(index.canonical_index_json), /*index_key_hex=*/"");
@@ -373,11 +605,6 @@ absl::StatusOr<ImportArtifactFromPathResult> import_artifact_from_path(
 
   emit_progress(ImportArtifactPhase::kWriteRegistry);
 
-  auto final_scan_or = scan_source(normalized_path);
-  if (!final_scan_or.ok()) {
-    return final_scan_or.status();
-  }
-
   ImportArtifactFromPathResult result;
   result.normalized_path = normalized_path;
   result.artifact_id = artifact_id;
@@ -385,9 +612,12 @@ absl::StatusOr<ImportArtifactFromPathResult> import_artifact_from_path(
   result.source_index_json = index.source_index_json;
   result.index_multihash = std::move(index_multihash);
   result.data_multihash = data_multihash;
-  result.generation = compute_generation_from_index(index.canonical_index_json);
+  result.generation = metadata_or->generation;
   result.descriptor_present = descriptor_present;
-  result.file_fingerprints = std::move(final_scan_or->fingerprints);
+  result.format_kind = metadata_or->format_kind;
+  result.metadata_capability = metadata_or->metadata_capability;
+  result.exact_size_bytes = metadata_or->exact_size_bytes;
+  result.file_fingerprints = metadata_or->file_fingerprints;
 
   record_disk_import_outcome("ok");
   emit_progress(ImportArtifactPhase::kDone, scan_or->total_bytes, scan_or->total_bytes, /*done=*/true);
@@ -432,6 +662,35 @@ absl::Status validate_source_fingerprints(
     }
   }
   return absl::OkStatus();
+}
+
+absl::Status validate_mounted_source_snapshot(
+    const std::filesystem::path& source_root,
+    std::string_view expected_canonical_index_json,
+    const std::optional<std::string>& expected_source_index_json,
+    const SourceFingerprintMap& expected_fingerprints) {
+  auto metadata_or = build_mounted_source_metadata(source_root);
+  if (!metadata_or.ok()) {
+    if (absl::IsNotFound(metadata_or.status())) {
+      return absl::FailedPreconditionError(
+          absl::StrCat(kSourceMutatedPrefix, " source path missing: ", source_root.string()));
+    }
+    if (absl::IsPermissionDenied(metadata_or.status())) {
+      return metadata_or.status();
+    }
+    return absl::FailedPreconditionError(
+        absl::StrCat(
+            kSourceMutatedPrefix, " cannot rebuild mounted-source metadata: ", metadata_or.status().message()));
+  }
+  if (metadata_or->index_info.canonical_index_json != expected_canonical_index_json) {
+    return absl::FailedPreconditionError(
+        absl::StrCat(kSourceMutatedPrefix, " canonical index changed for ", source_root.string()));
+  }
+  if (metadata_or->index_info.source_index_json != expected_source_index_json) {
+    return absl::FailedPreconditionError(
+        absl::StrCat(kSourceMutatedPrefix, " source index changed for ", source_root.string()));
+  }
+  return validate_source_fingerprints(source_root, expected_fingerprints);
 }
 
 } // namespace tensorcast::daemon::materialization_disk_resolve

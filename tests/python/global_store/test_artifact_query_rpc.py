@@ -74,3 +74,16 @@ def test_get_artifact_info_missing_view_compacts_partial_leaf_ranges(
     assert len(ranges) == 2
     assert ranges[0].start == 1 and ranges[0].count == 2
     assert ranges[1].start == 4 and ranges[1].count == 1
+
+
+def test_get_artifact_info_rejects_msa1(servicer, test_context):
+    response = servicer.GetArtifactInfoById(
+        global_store_pb2.GetArtifactInfoByIdRequest(
+            artifact_id="msa1:test-session~policy~partitioned~deadbeef"
+        ),
+        test_context,
+    )
+
+    assert response.status == global_store_pb2.Status.STATUS_ERROR
+    assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+    assert "daemon-session-local" in (test_context.details or "")

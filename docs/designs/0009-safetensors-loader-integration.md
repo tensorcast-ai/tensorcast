@@ -12,7 +12,7 @@ related_code:
   - core/store/replica/transfer_service.*
   - tensorcast/api/_indices.py
 created: 2025-09-09
-last_updated: 2026-02-03
+last_updated: 2026-04-14
 ---
 
 # Summary
@@ -23,6 +23,12 @@ Note (2026-02-02): `docs/designs/0062-safetensors-canonical-bytespace.md` update
 header offsets are treated as a **source layout** (disk planning), while a **coalesced canonical index** is derived
 for identity and region-backed / `packing="byte_space"` compatibility. This document remains the source-layer contract
 (payload-only Source ByteSpace; headers excluded).
+
+Note (2026-04-14): `docs/designs/0115-trusted-disk-source-format-aware-source-handle-and-metadata-first-resolve.md`
+now treats these safetensors source-layer rules as normative for metadata-first
+mounted-source artifact attestation. Any trusted mounted-source attestation or
+validation policy must preserve the same payload-only byte-space semantics
+defined here.
 
 ```mermaid
 flowchart LR

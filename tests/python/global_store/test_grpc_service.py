@@ -58,6 +58,18 @@ class TestGRPCService:
 
         assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
 
+    def test_update_replica_rejects_msa1(self, servicer, test_context):
+        request = global_store_pb2.UpdateReplicaRequest(
+            artifact_id="msa1:test-session~policy~partitioned~deadbeef",
+            replica_id=str(uuid.uuid4()),
+        )
+
+        response = servicer.UpdateReplica(request, test_context)
+
+        assert response.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+        assert "daemon-session-local" in (test_context.details or "")
+
     def test_register_replica_rejects_non_v3_schema(
         self, servicer, test_context, memory_info, registered_worker
     ):
@@ -74,6 +86,22 @@ class TestGRPCService:
 
         assert response.status == global_store_pb2.Status.STATUS_ERROR
         assert test_context.code == grpc.StatusCode.INVALID_ARGUMENT
+
+    def test_register_replica_rejects_msa1(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        request = global_store_pb2.RegisterReplicaRequest(
+            artifact_id="msa1:test-session~policy~partitioned~deadbeef",
+            mem_info=memory_info,
+            max_concurrency=1,
+            worker_id=registered_worker,
+        )
+
+        response = servicer.RegisterReplica(request, test_context)
+
+        assert response.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+        assert "daemon-session-local" in (test_context.details or "")
 
     def test_register_replica_idempotent_replay(
         self, servicer, test_context, memory_info, registered_worker, monkeypatch
@@ -220,6 +248,18 @@ class TestGRPCService:
 
         assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
 
+    def test_unregister_replica_rejects_msa1(self, servicer, test_context):
+        request = global_store_pb2.UnregisterReplicaRequest(
+            artifact_id="msa1:test-session~policy~partitioned~deadbeef",
+            replica_id=str(uuid.uuid4()),
+        )
+
+        response = servicer.UnregisterReplica(request, test_context)
+
+        assert response.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+        assert "daemon-session-local" in (test_context.details or "")
+
     def test_mark_replica_unavailable_idempotent(
         self, servicer, test_context, memory_info, registered_worker
     ):
@@ -250,6 +290,20 @@ class TestGRPCService:
         )
         assert second.status == global_store_pb2.Status.STATUS_OK
         assert second.updated is True
+
+    def test_mark_replica_unavailable_rejects_msa1(self, servicer, test_context):
+        response = servicer.MarkReplicaUnavailable(
+            global_store_pb2.MarkReplicaUnavailableRequest(
+                artifact_id="msa1:test-session~policy~partitioned~deadbeef",
+                replica_id=str(uuid.uuid4()),
+            ),
+            test_context,
+        )
+
+        assert response.status == global_store_pb2.Status.STATUS_ERROR
+        assert response.updated is False
+        assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+        assert "daemon-session-local" in (test_context.details or "")
 
     def test_wait_replica_drain_timeout_snapshot(
         self, servicer, test_context, memory_info, registered_worker
@@ -356,12 +410,8 @@ class TestGRPCService:
 
     def test_worker_routing_capability_flags_filtering(self, servicer, test_context):
         flags = (
-            1
-            << global_store_pb2.WORKER_CAPABILITY_FLAG_GATEWAY_INGRESS_ENABLED
-        ) | (
-            1
-            << global_store_pb2.WORKER_CAPABILITY_FLAG_SHARD_HOME_ELIGIBLE
-        )
+            1 << global_store_pb2.WORKER_CAPABILITY_FLAG_GATEWAY_INGRESS_ENABLED
+        ) | (1 << global_store_pb2.WORKER_CAPABILITY_FLAG_SHARD_HOME_ELIGIBLE)
         register_request = global_store_pb2.RegisterWorkerRequest(
             node_id="routing_cap_worker",
             node_address="192.168.2.30",
@@ -378,8 +428,7 @@ class TestGRPCService:
         list_response = servicer.ListActiveWorkers(
             global_store_pb2.ListActiveWorkersRequest(
                 required_capability_flags=(
-                    1
-                    << global_store_pb2.WORKER_CAPABILITY_FLAG_SHARD_HOME_ELIGIBLE
+                    1 << global_store_pb2.WORKER_CAPABILITY_FLAG_SHARD_HOME_ELIGIBLE
                 )
             ),
             test_context,
@@ -1055,6 +1104,18 @@ class TestGRPCService:
         assert resp.status == global_store_pb2.Status.STATUS_OK
         assert resp.tensor_index_data == index_bytes
 
+    def test_get_artifact_index_by_id_rejects_msa1(self, servicer, test_context):
+        resp = servicer.GetArtifactIndexById(
+            global_store_pb2.GetArtifactIndexByIdRequest(
+                artifact_id="msa1:test-session~policy~partitioned~deadbeef"
+            ),
+            test_context,
+        )
+
+        assert resp.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+        assert "daemon-session-local" in (test_context.details or "")
+
     def test_register_replica_honors_descriptor_binding(
         self, servicer, test_context, memory_info, registered_worker
     ):
@@ -1218,10 +1279,7 @@ class TestGRPCService:
         transport_row = servicer.transport_repository.find_by_id(transport_id)
         assert transport_row is not None
         assert transport_row.status == "completed"
-        assert (
-            transport_row.completion_outcome.value
-            == "failed"
-        )
+        assert transport_row.completion_outcome.value == "failed"
         assert transport_row.completion_detail == "simulated_transport_failure"
 
     def test_complete_nonexistent_transport(self, servicer, test_context):

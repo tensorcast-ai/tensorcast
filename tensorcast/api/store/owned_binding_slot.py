@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import logging
+import time
 import uuid
 import weakref
 from types import MappingProxyType
@@ -47,6 +49,8 @@ from tensorcast.types import (
     SourceBoundCapability,
     SourceBoundPlanDiagnostics,
 )
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from tensorcast.api.store import Store
@@ -122,6 +126,14 @@ def restore_owned_binding_tensors(
     runtime: "StoreRuntimeContext",
     device_id: int,
 ) -> dict[str, torch.Tensor]:
+    profile_start = time.perf_counter()
+    profile_last = profile_start
+    logger.info(
+        "tc_profile_py restore_owned_binding_tensors enter device_id=%d payloads=%d has_mem_handle=%s",
+        device_id,
+        len(getattr(response, "payloads", ())),
+        response.HasField("mem_handle"),
+    )
     if not response.HasField("mem_handle"):
         raise ArtifactError(
             "CreateOwnedBinding returned empty mem_handle",
@@ -142,6 +154,16 @@ def restore_owned_binding_tensors(
             status_code="DATA_LOSS",
             retryable=False,
         )
+    now = time.perf_counter()
+    logger.info(
+        "tc_profile_py restore_owned_binding_tensors parsed_handle handle_bytes=%d "
+        "lease_token_bytes=%d step_sec=%.6f total_sec=%.6f",
+        len(cuda_ipc_handle),
+        len(bytes(mem_handle.lease_token)),
+        now - profile_last,
+        now - profile_start,
+    )
+    profile_last = now
     server_config = runtime.capabilities.server_config
     if server_config is None:
         server_config = runtime.ensure_client().get_server_config()
@@ -155,6 +177,15 @@ def restore_owned_binding_tensors(
             status_code="FAILED_PRECONDITION",
             retryable=False,
         )
+    now = time.perf_counter()
+    logger.info(
+        "tc_profile_py restore_owned_binding_tensors resolved_server_config "
+        "local_handle_socket_path=%s step_sec=%.6f total_sec=%.6f",
+        bool(local_handle_socket_path),
+        now - profile_last,
+        now - profile_start,
+    )
+    profile_last = now
     device_uuid = None
     try:
         device_uuid = device_uuid_for(device_id)
@@ -164,6 +195,16 @@ def restore_owned_binding_tensors(
         _tensor_payload_from_proto(desc, default_device_uuid=device_uuid)
         for desc in response.payloads
     ]
+    now = time.perf_counter()
+    logger.info(
+        "tc_profile_py restore_owned_binding_tensors built_descriptors "
+        "device_uuid=%s descriptor_count=%d step_sec=%.6f total_sec=%.6f",
+        device_uuid,
+        len(descriptors),
+        now - profile_last,
+        now - profile_start,
+    )
+    profile_last = now
     meta_state_dict = {
         desc.name: (
             list(desc.shape),
@@ -174,8 +215,28 @@ def restore_owned_binding_tensors(
         for desc in descriptors
     }
     tensor_offsets = {desc.name: int(desc.buffer_offset) for desc in descriptors}
+    now = time.perf_counter()
+    logger.info(
+        "tc_profile_py restore_owned_binding_tensors built_metadata "
+        "tensor_count=%d step_sec=%.6f total_sec=%.6f",
+        len(meta_state_dict),
+        now - profile_last,
+        now - profile_start,
+    )
+    profile_last = now
+    logger.info("tc_profile_py restore_owned_binding_tensors get_cuda_memory_ptr_start")
     cuda_memory_ptr = get_cuda_memory_ptr(device_id, cuda_ipc_handle)
-    return restore_tensors(
+    now = time.perf_counter()
+    logger.info(
+        "tc_profile_py restore_owned_binding_tensors get_cuda_memory_ptr_done "
+        "ptr=%d step_sec=%.6f total_sec=%.6f",
+        int(cuda_memory_ptr),
+        now - profile_last,
+        now - profile_start,
+    )
+    profile_last = now
+    logger.info("tc_profile_py restore_owned_binding_tensors restore_tensors_start")
+    tensors = restore_tensors(
         meta_state_dict,
         {int(device_id): int(cuda_memory_ptr)},
         {int(device_id): tensor_offsets},
@@ -183,6 +244,15 @@ def restore_owned_binding_tensors(
         lease_token=lease_token,
         local_handle_socket_path=local_handle_socket_path,
     )
+    now = time.perf_counter()
+    logger.info(
+        "tc_profile_py restore_owned_binding_tensors restore_tensors_done "
+        "tensor_count=%d step_sec=%.6f total_sec=%.6f",
+        len(tensors),
+        now - profile_last,
+        now - profile_start,
+    )
+    return tensors
 
 
 def _collective_group_to_proto(
@@ -773,6 +843,52 @@ class OwnedBindingSlot:
         self._target_publication_operation_id = None
         self._dirty = False
 
+    def freeze_current(
+        self,
+        *,
+        update_epoch: "BindingUpdateEpoch | str | int",
+        source_artifact_ref: str | None = None,
+        ctx: CallContext | None = None,
+    ) -> None:
+        self._ensure_open()
+        update_epoch_token = self._normalize_update_epoch(update_epoch)
+        timeout_s = _ctx_timeout_s(ctx)
+        try:
+            response = self._runtime.ensure_client().freeze_binding_current_value(
+                binding_id=self._binding_id,
+                update_epoch=update_epoch_token,
+                source_artifact_ref=source_artifact_ref,
+                timeout_s=timeout_s if timeout_s is not None else 30.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._enter_dirty_state()
+            error = _map_slot_error(exc)
+            raise ArtifactError(
+                str(error),
+                status_code=error.status_code,
+                retryable=error.retryable,
+            ) from exc
+        metadata = parse_binding_value_or_raise(
+            response.current_value if hasattr(response, "current_value") else None,
+            rpc_name="FreezeBindingCurrentValue",
+            expected_binding_id=self._binding_id,
+            expected_binding_layout_id=self._binding_layout_id,
+        )
+        if metadata is None:
+            self._enter_dirty_state()
+            raise ArtifactError(
+                "FreezeBindingCurrentValue returned empty current_value",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        self._active_update_epoch = None
+        self._seal_generation_counter = int(metadata.seal_generation)
+        self._current_value_metadata = metadata
+        self._selection = None
+        self._target_publication_token = None
+        self._target_publication_operation_id = None
+        self._dirty = False
+
     def promote_current_value(
         self,
         *,
@@ -821,6 +937,88 @@ class OwnedBindingSlot:
         )
         self._last_source_bound_plan_diagnostics = None
         return response
+
+    def start_promote_current_value(
+        self,
+        *,
+        binding_value_id: str,
+        ctx: CallContext | None = None,
+    ) -> store_daemon_pb2.BindingPromotionStatus:
+        self._ensure_open()
+        timeout_s = _ctx_timeout_s(ctx)
+        try:
+            response = (
+                self._runtime.ensure_client().start_promote_binding_current_value(
+                    binding_id=self._binding_id,
+                    binding_value_id=str(binding_value_id),
+                    timeout_s=timeout_s if timeout_s is not None else 30.0,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            error = _map_slot_error(exc)
+            raise ArtifactError(
+                str(error),
+                status_code=error.status_code,
+                retryable=error.retryable,
+            ) from exc
+        if not response.HasField("status"):
+            raise ArtifactError(
+                "StartPromoteBindingCurrentValue returned empty status",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        metadata = parse_binding_value_or_raise(
+            response.status.current_value
+            if response.status.HasField("current_value")
+            else None,
+            rpc_name="StartPromoteBindingCurrentValue",
+            expected_binding_id=self._binding_id,
+            expected_binding_layout_id=self._binding_layout_id,
+        )
+        if metadata is not None:
+            self._current_value_metadata = metadata
+        return response.status
+
+    def get_promotion_status(
+        self,
+        *,
+        verification_job_id: str | None = None,
+        binding_value_id: str,
+        ctx: CallContext | None = None,
+    ) -> store_daemon_pb2.BindingPromotionStatus:
+        self._ensure_open()
+        timeout_s = _ctx_timeout_s(ctx)
+        try:
+            response = self._runtime.ensure_client().get_binding_promotion_status(
+                verification_job_id=verification_job_id,
+                binding_id=self._binding_id,
+                binding_value_id=str(binding_value_id),
+                timeout_s=timeout_s if timeout_s is not None else 30.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            error = _map_slot_error(exc)
+            raise ArtifactError(
+                str(error),
+                status_code=error.status_code,
+                retryable=error.retryable,
+            ) from exc
+        if not response.HasField("status"):
+            raise ArtifactError(
+                "GetBindingPromotionStatus returned empty status",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        metadata = parse_binding_value_or_raise(
+            response.status.current_value
+            if response.status.HasField("current_value")
+            else None,
+            rpc_name="GetBindingPromotionStatus",
+            expected_binding_id=self._binding_id,
+            expected_binding_layout_id=self._binding_layout_id,
+        )
+        if metadata is not None:
+            self._current_value_metadata = metadata
+        return response.status
 
     def realize_from(
         self,
@@ -887,7 +1085,7 @@ class OwnedBindingSlot:
                 artifact_id=(
                     ""
                     if public_disk_source is None
-                    else str(public_disk_source.artifact_id or "")
+                    else str(public_disk_source.artifact_id)
                 )
                 if resolved is None
                 else resolved._ensure_identified(),

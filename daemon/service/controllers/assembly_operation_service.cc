@@ -71,11 +71,56 @@ std::string_view binding_seal_identity_canonical_index_json(const BindingRegistr
   if (record.sealed_commit_result.has_value() && !record.sealed_commit_result->canonical_index_json.empty()) {
     return record.sealed_commit_result->canonical_index_json;
   }
-  return record.target_index_json;
+  if (!record.current_artifact_canonical_index_json.empty()) {
+    return record.current_artifact_canonical_index_json;
+  }
+  return std::string_view();
 }
 
 std::string_view binding_tensor_canonical_index_json(const BindingRegistry::Record& record) {
   return record.target_index_json;
+}
+
+absl::Status validate_seal_identity_index_matches_expected(
+    std::string_view identity_index_json,
+    std::string_view expected_index_json,
+    std::string_view expected_label) {
+  if (identity_index_json == expected_index_json) {
+    return absl::OkStatus();
+  }
+  auto identity_or = parse_canonical_index(identity_index_json);
+  if (!identity_or.ok()) {
+    return identity_or.status();
+  }
+  auto expected_or = parse_canonical_index(expected_index_json);
+  if (!expected_or.ok()) {
+    return expected_or.status();
+  }
+  if (identity_or->logical_total_size != expected_or->logical_total_size) {
+    return absl::FailedPreconditionError(
+        absl::StrCat("canonical_full ", expected_label, " index total size does not match source identity index"));
+  }
+  if (identity_or->entries.size() != expected_or->entries.size()) {
+    return absl::FailedPreconditionError(
+        absl::StrCat("canonical_full ", expected_label, " tensor set does not match source identity index"));
+  }
+  for (const auto& [name, identity_entry] : identity_or->entries) {
+    const auto expected_it = expected_or->entries.find(name);
+    if (expected_it == expected_or->entries.end()) {
+      return absl::FailedPreconditionError(
+          absl::StrCat("canonical_full ", expected_label, " missing source tensor=", name));
+    }
+    const auto& expected_entry = expected_it->second;
+    if (identity_entry.logical_offset != expected_entry.logical_offset ||
+        identity_entry.logical_length != expected_entry.logical_length ||
+        identity_entry.dtype != expected_entry.dtype || identity_entry.shape != expected_entry.shape ||
+        identity_entry.stride != expected_entry.stride ||
+        identity_entry.storage_offset != expected_entry.storage_offset) {
+      return absl::FailedPreconditionError(
+          absl::StrCat("canonical_full ", expected_label, " entry does not match source identity tensor=", name));
+    }
+  }
+  return absl::OkStatus();
 }
 
 class OperationLeaseGuard {
@@ -236,6 +281,15 @@ v2::AssemblyCloseoutContract publication_closeout_to_v2(
 absl::Status validate_representation_publish_admission_facts(
     const tensorcast::publication::v1::RepresentationPublishSpec& spec) {
   if (!spec.has_admission_facts()) {
+    if (!spec.serving_manifest_bytes().empty()) {
+      auto manifest_or = serving_manifest::parse_serving_manifest_payload(spec.serving_manifest_bytes());
+      if (!manifest_or.ok()) {
+        return manifest_or.status();
+      }
+      if (manifest_or->builder_mode == "binding_finalize") {
+        return absl::FailedPreconditionError("binding_finalize representation_publish requires admission_facts");
+      }
+    }
     return absl::OkStatus();
   }
   if (spec.serving_manifest_bytes().empty()) {
@@ -250,9 +304,6 @@ absl::Status validate_representation_publish_admission_facts(
   const auto& admission = spec.admission_facts();
   if (admission.finalize_class() == tensorcast::publication::v1::FINALIZE_CLASS_UNSPECIFIED) {
     return absl::InvalidArgumentError("representation_publish admission_facts require finalize_class");
-  }
-  if (admission.realization_protocol() == tensorcast::publication::v1::REALIZATION_PROTOCOL_UNSPECIFIED) {
-    return absl::InvalidArgumentError("representation_publish admission_facts require realization_protocol");
   }
   if (admission.support_level() == tensorcast::publication::v1::SERVING_SUPPORT_LEVEL_UNSPECIFIED) {
     return absl::InvalidArgumentError("representation_publish admission_facts require support_level");
@@ -271,20 +322,26 @@ absl::Status validate_representation_publish_admission_facts(
     return absl::FailedPreconditionError(
         "representation_publish admission_facts require support_level=runtime_bind_swap_ready for serving_version_key activation");
   }
-  if (admission.realization_protocol() == tensorcast::publication::v1::REALIZATION_PROTOCOL_SAME_BINDING_FAST_PATH &&
-      !admission.fast_path_validated()) {
-    return absl::InvalidArgumentError(
-        "representation_publish admission_facts require fast_path_validated=true for same_binding_fast_path");
-  }
   if (manifest_or->builder_mode == "pure_transform" &&
       admission.finalize_class() == tensorcast::publication::v1::FINALIZE_CLASS_REPRESENTATION_CHANGING) {
     return absl::FailedPreconditionError(
         "representation_publish admission_facts do not allow finalize_class=representation_changing with builder_mode=pure_transform");
   }
-  if (manifest_or->builder_mode == "binding_finalize" &&
-      admission.finalize_class() != tensorcast::publication::v1::FINALIZE_CLASS_REPRESENTATION_CHANGING) {
-    return absl::FailedPreconditionError(
-        "representation_publish admission_facts require finalize_class=representation_changing with builder_mode=binding_finalize");
+  if (manifest_or->builder_mode == "binding_finalize") {
+    if (admission.finalize_class() != tensorcast::publication::v1::FINALIZE_CLASS_REPRESENTATION_CHANGING) {
+      return absl::FailedPreconditionError(
+          "representation_publish admission_facts require finalize_class=representation_changing with builder_mode=binding_finalize");
+    }
+    if (!admission.same_binding_fast_path_validated()) {
+      return absl::FailedPreconditionError(
+          "binding_finalize representation_publish requires same_binding_fast_path_validated=true");
+    }
+    if (!spec.representation_publish_contract().has_subject() ||
+        spec.representation_publish_contract().subject().ref_case() !=
+            tensorcast::publication::v1::ServingPublicationSubject::kBindingValue) {
+      return absl::FailedPreconditionError(
+          "binding_finalize representation_publish requires binding_value_ref subject");
+    }
   }
   return absl::OkStatus();
 }
@@ -556,9 +613,88 @@ absl::StatusOr<std::vector<store::StoreEngine::SealAssemblyCutInput::BoundCanoni
   return spans;
 }
 
+absl::StatusOr<std::string> build_bound_publication_canonical_index(const BindingRegistry::Record& record) {
+  if (record.ownership != v2::BINDING_OWNERSHIP_DAEMON) {
+    return absl::FailedPreconditionError("bound publication index requires daemon-owned binding");
+  }
+
+  std::vector<LeaseSegMeta> publish_segments;
+  std::vector<RegisterStorageMeta> publish_storages;
+  publish_segments.reserve(record.target_layout.storages_size());
+  publish_storages.reserve(record.target_layout.storages_size());
+  uint64_t cursor = 0;
+  for (const auto& storage : record.target_layout.storages()) {
+    if (storage.storage_id().empty()) {
+      return absl::InvalidArgumentError("storage_id is required");
+    }
+    if (storage.storage_length() == 0) {
+      return absl::InvalidArgumentError("storage_length must be non-zero");
+    }
+    if (storage.device_id() != record.device_id) {
+      return absl::InvalidArgumentError("storage.device_id does not match binding device");
+    }
+
+    RegisterStorageMeta meta;
+    meta.storage_id = storage.storage_id();
+    meta.device_id = storage.device_id();
+    meta.storage_length = storage.storage_length();
+    meta.mapping_base_offset = cursor;
+    publish_storages.push_back(std::move(meta));
+
+    LeaseSegMeta seg;
+    seg.storage_id = storage.storage_id();
+    seg.storage_offset = 0;
+    seg.artifact_offset = cursor;
+    seg.length = storage.storage_length();
+    publish_segments.push_back(std::move(seg));
+
+    cursor += storage.storage_length();
+  }
+  if (cursor == 0) {
+    return absl::InvalidArgumentError("target_layout storages must be non-empty");
+  }
+
+  const auto offsets_or = resolve_target_offsets(record.target_layout);
+  if (!offsets_or.ok()) {
+    return offsets_or.status();
+  }
+  const auto index_or = parse_canonical_index(record.target_index_json);
+  if (!index_or.ok()) {
+    return index_or.status();
+  }
+
+  std::vector<RegisterTensorAliasMeta> aliases;
+  aliases.reserve(offsets_or->size());
+  for (const auto& offset : *offsets_or) {
+    const auto entry_it = index_or->entries.find(offset.name);
+    if (entry_it == index_or->entries.end()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("binding target_index_json missing entry for tensor=", offset.name));
+    }
+    const auto& entry = entry_it->second;
+    if (entry.logical_length != offset.logical_length) {
+      return absl::InvalidArgumentError(absl::StrCat("binding logical_length mismatch for tensor=", offset.name));
+    }
+    RegisterTensorAliasMeta alias;
+    alias.name = offset.name;
+    alias.storage_id = offset.storage_id;
+    alias.storage_offset = offset.storage_offset;
+    alias.logical_length = offset.logical_length;
+    alias.shape = entry.shape;
+    alias.stride = entry.stride;
+    alias.dtype = entry.dtype;
+    aliases.push_back(std::move(alias));
+  }
+
+  return build_canonical_index_from_metadata(
+      absl::MakeSpan(publish_segments), absl::MakeSpan(publish_storages), absl::MakeSpan(aliases), record.device_id);
+}
+
 absl::StatusOr<store::StoreEngine::SealAssemblyCutInput> build_seal_cut_input(
     BindingRegistry& bindings,
-    const v2::AssemblyReadinessCut& readiness_cut) {
+    const v2::AssemblyReadinessCut& readiness_cut,
+    store::components::IGlobalStoreClient* global_store_client,
+    bool binding_subject_closeout) {
   store::StoreEngine::SealAssemblyCutInput input;
   input.structural_views.reserve(static_cast<size_t>(readiness_cut.views_size()));
   for (const auto& cut_view : readiness_cut.views()) {
@@ -606,6 +742,10 @@ absl::StatusOr<store::StoreEngine::SealAssemblyCutInput> build_seal_cut_input(
     return record_or.status();
   }
   const auto& record = *record_or;
+  std::string binding_index_json;
+  std::string expected_index_json;
+  std::string expected_index_label = "binding layout";
+  std::string identity_index_json;
   {
     absl::MutexLock lock(&record->mu);
     if (record->closed) {
@@ -619,15 +759,50 @@ absl::StatusOr<store::StoreEngine::SealAssemblyCutInput> build_seal_cut_input(
       if (!spans_or.ok()) {
         return spans_or.status();
       }
+      binding_index_json = std::string(binding_tensor_canonical_index_json(*record));
+      expected_index_json = binding_index_json;
+      if (binding_subject_closeout) {
+        auto publication_index_or = build_bound_publication_canonical_index(*record);
+        if (!publication_index_or.ok()) {
+          return publication_index_or.status();
+        }
+        expected_index_json = std::move(*publication_index_or);
+        expected_index_label = "binding publication layout";
+      }
+      const std::string_view local_identity_index_json = binding_seal_identity_canonical_index_json(*record);
+      if (!local_identity_index_json.empty()) {
+        identity_index_json = std::string(local_identity_index_json);
+      }
       if (record->sealed_commit_result.has_value() && !record->sealed_commit_result->artifact_id.empty()) {
         input.canonical_artifact_id = record->sealed_commit_result->artifact_id;
-      } else if (!record->current_artifact_id.empty()) {
+      } else if (!binding_subject_closeout && !record->current_artifact_id.empty()) {
         input.canonical_artifact_id = record->current_artifact_id;
-      } else {
-        input.canonical_index_json = std::string(binding_seal_identity_canonical_index_json(*record));
       }
       input.bound_canonical_spans = std::move(*spans_or);
     }
+  }
+  if (!input.bound_canonical_spans.empty()) {
+    if (identity_index_json.empty()) {
+      if (binding_subject_closeout || input.canonical_artifact_id.empty()) {
+        identity_index_json = expected_index_json;
+      } else {
+        if (global_store_client == nullptr || !global_store_client->is_connected()) {
+          return absl::FailedPreconditionError(
+              "canonical_full source identity index lookup requires Global Store client");
+        }
+        auto identity_index_or = global_store_client->get_artifact_index_by_id(input.canonical_artifact_id);
+        if (!identity_index_or.ok()) {
+          return identity_index_or.status();
+        }
+        identity_index_json = std::move(*identity_index_or);
+      }
+    }
+    auto compatible_status =
+        validate_seal_identity_index_matches_expected(identity_index_json, expected_index_json, expected_index_label);
+    if (!compatible_status.ok()) {
+      return compatible_status;
+    }
+    input.canonical_index_json = std::move(identity_index_json);
   }
   return input;
 }
@@ -768,6 +943,7 @@ struct BoundCloseoutSnapshot {
   int owner_pid{0};
   v2::TargetLayout target_layout;
   std::string target_index_json;
+  std::string current_artifact_id;
   cuda::IpcHandleBytes handle_bytes;
   common::memory::GpuDeviceMemory* allocation{nullptr};
   std::optional<CommitLeaseResult> sealed_commit_result;
@@ -885,6 +1061,43 @@ tensorcast::common::v1::ArtifactSelection build_closeout_bound_selection(
   return selection;
 }
 
+absl::Status validate_existing_committed_lease_for_sealed_closeout(
+    const LipLeaseEntry& lease,
+    const CommitLeaseResult& sealed_identity,
+    const BoundCloseoutSnapshot& snapshot,
+    uint64_t expected_total_size,
+    std::string_view expected_index_json) {
+  if (lease.registration_id.empty()) {
+    return absl::FailedPreconditionError("promoted binding lease is missing registration_id");
+  }
+  if (lease.artifact_id != sealed_identity.artifact_id) {
+    return absl::FailedPreconditionError("promoted binding lease artifact_id does not match sealed identity");
+  }
+  if (!lease.view_id.empty()) {
+    return absl::FailedPreconditionError("binding publication closeout requires a full-artifact promoted lease");
+  }
+  if (lease.device_id != snapshot.device_id) {
+    return absl::FailedPreconditionError("promoted binding lease device_id does not match closeout subject");
+  }
+  if (lease.owner_pid != snapshot.owner_pid) {
+    return absl::FailedPreconditionError("promoted binding lease owner_pid does not match closeout subject");
+  }
+  if (lease.total_size != expected_total_size) {
+    return absl::FailedPreconditionError("promoted binding lease total_size does not match closeout layout");
+  }
+  if (lease.id_kind != common::ArtifactIdKind::kMi2) {
+    return absl::FailedPreconditionError("promoted binding lease is not a mi2 identity lease");
+  }
+  if (lease.index_data.empty()) {
+    return absl::FailedPreconditionError("promoted binding lease is missing canonical index data");
+  }
+  if (lease.index_data != expected_index_json) {
+    return absl::FailedPreconditionError("promoted binding lease canonical index does not match closeout layout");
+  }
+  return closeout_identity::validate_registration_canonical_index_matches_commit_result(
+      expected_index_json, sealed_identity);
+}
+
 absl::StatusOr<BoundCloseoutSnapshot> capture_bound_closeout_snapshot(
     BindingRegistry* bindings,
     const pubv1::BindingValueRef& binding_value) {
@@ -927,6 +1140,7 @@ absl::StatusOr<BoundCloseoutSnapshot> capture_bound_closeout_snapshot(
     snapshot.owner_pid = record->owner_pid;
     snapshot.target_layout = record->target_layout;
     snapshot.target_index_json = std::string(binding_tensor_canonical_index_json(*record));
+    snapshot.current_artifact_id = record->current_artifact_id;
     snapshot.handle_bytes = record->handle_bytes;
     snapshot.allocation = record->allocation.get();
     snapshot.sealed_commit_result = record->sealed_commit_result;
@@ -1242,45 +1456,75 @@ absl::StatusOr<RepresentationPublishValidationResult> finalize_binding_subject_c
     }
   } rollback{.lip = lip_manager, .registration_id = registration_id};
 
-  const uint64_t epoch = static_cast<uint64_t>(absl::ToUnixMillis(absl::Now()));
-  auto out_or = lip_manager->commit_lease_in_place(
-      registration_id,
-      snapshot.device_id,
-      snapshot.owner_pid,
-      /*ttl_ms=*/0,
-      epoch,
-      storage_layout_or->total_size,
-      tensorcast::common::ArtifactIdKind::kMi2,
-      /*client_artifact_id=*/"",
-      *stable_index_or,
-      /*index_key_hex=*/"",
-      std::move(storage_layout_or->publish_segments),
-      std::move(storage_layout_or->publish_storages),
-      std::move(*aliases_or),
-      snapshot.sealed_commit_result);
-  if (!out_or.ok()) {
-    return out_or.status();
+  CommitLeaseResult closeout_commit_result;
+  std::string committed_registration_id = registration_id;
+  bool adopted_existing_committed_lease = false;
+  if (snapshot.sealed_commit_result.has_value()) {
+    const ArtifactDeviceKey sealed_key{
+        .artifact_id = snapshot.sealed_commit_result->artifact_id, .view_id = "", .device_id = snapshot.device_id};
+    auto active_lease = lip_manager->find_active_by_key(sealed_key);
+    if (active_lease.has_value()) {
+      auto lease_status = validate_existing_committed_lease_for_sealed_closeout(
+          *active_lease, *snapshot.sealed_commit_result, snapshot, storage_layout_or->total_size, *stable_index_or);
+      if (!lease_status.ok()) {
+        return lease_status;
+      }
+      closeout_commit_result = *snapshot.sealed_commit_result;
+      closeout_commit_result.total_size = storage_layout_or->total_size;
+      committed_registration_id = active_lease->registration_id;
+      adopted_existing_committed_lease = true;
+      rollback.release();
+    } else if (snapshot.current_artifact_id == snapshot.sealed_commit_result->artifact_id) {
+      return absl::FailedPreconditionError(
+          "binding value is already promoted to mi2 but its committed lease is missing");
+    }
+  }
+  if (!adopted_existing_committed_lease) {
+    const uint64_t epoch = static_cast<uint64_t>(absl::ToUnixMillis(absl::Now()));
+    auto out_or = lip_manager->commit_lease_in_place(
+        registration_id,
+        snapshot.device_id,
+        snapshot.owner_pid,
+        /*ttl_ms=*/0,
+        epoch,
+        storage_layout_or->total_size,
+        tensorcast::common::ArtifactIdKind::kMi2,
+        /*client_artifact_id=*/"",
+        *stable_index_or,
+        /*index_key_hex=*/"",
+        std::move(storage_layout_or->publish_segments),
+        std::move(storage_layout_or->publish_storages),
+        std::move(*aliases_or),
+        snapshot.sealed_commit_result,
+        LipManager::BuildCommitLeaseOptions{
+            .direct_gpu_hash_ptr = gsl::not_null<void*>{snapshot.allocation->get()},
+            .require_gpu_identity_hash = true,
+        });
+    if (!out_or.ok()) {
+      return out_or.status();
+    }
+    closeout_commit_result = *out_or;
   }
   if (snapshot.sealed_commit_result.has_value()) {
-    auto reuse_status =
-        closeout_identity::validate_reused_identity_matches_closeout_result(*snapshot.sealed_commit_result, *out_or);
+    auto reuse_status = closeout_identity::validate_reused_identity_matches_closeout_result(
+        *snapshot.sealed_commit_result, closeout_commit_result);
     if (!reuse_status.ok()) {
       return reuse_status;
     }
   }
-  auto registration_index_json_or =
-      closeout_identity::resolve_registration_canonical_index_json(snapshot.sealed_commit_result, *out_or);
+  auto registration_index_json_or = closeout_identity::resolve_registration_canonical_index_json(
+      snapshot.sealed_commit_result, closeout_commit_result);
   if (!registration_index_json_or.ok()) {
     return registration_index_json_or.status();
   }
   const std::string& registration_index_json = *registration_index_json_or;
-  auto registration_index_status =
-      closeout_identity::validate_registration_canonical_index_matches_commit_result(registration_index_json, *out_or);
+  auto registration_index_status = closeout_identity::validate_registration_canonical_index_matches_commit_result(
+      registration_index_json, closeout_commit_result);
   if (!registration_index_status.ok()) {
     return registration_index_status;
   }
 
-  auto routable_or = lip_manager->publish_committed_lease_routable(registration_id);
+  auto routable_or = lip_manager->publish_committed_lease_routable(committed_registration_id);
   if (!routable_or.ok()) {
     return routable_or.status();
   }
@@ -1290,33 +1534,35 @@ absl::StatusOr<RepresentationPublishValidationResult> finalize_binding_subject_c
     return absl::UnavailableError(
         absl::StrCat(
             "worker identity unavailable while finalizing binding closeout for artifact_id=",
-            out_or->artifact_id,
+            closeout_commit_result.artifact_id,
             "; routable replicas require completed worker lifecycle registration"));
   }
 
   const store::DeviceKey device = store::DeviceRegistry::instance().gpu_key(snapshot.device_id);
   tensorcast::common::v1::ArtifactDescriptor descriptor;
-  populate_artifact_descriptor_from_commit_lease(*out_or, &descriptor);
+  populate_artifact_descriptor_from_commit_lease(closeout_commit_result, &descriptor);
   auto replica_id_or = client->register_memory_replica_idempotent(
-      out_or->artifact_id,
+      closeout_commit_result.artifact_id,
       worker_id,
       device,
-      out_or->total_size,
-      out_or->index_multihash,
+      closeout_commit_result.total_size,
+      closeout_commit_result.index_multihash,
       routable_or->remote_memory_keys,
       routable_or->buffer_sizes,
       registration_index_json,
-      out_or->encoding,
-      out_or->schema_version,
+      closeout_commit_result.encoding,
+      closeout_commit_result.schema_version,
       /*max_concurrency=*/1,
-      out_or->verification_json.empty() ? std::nullopt : std::optional<std::string>(out_or->verification_json),
+      closeout_commit_result.verification_json.empty()
+          ? std::nullopt
+          : std::optional<std::string>(closeout_commit_result.verification_json),
       /*view_id=*/std::nullopt,
       descriptor,
       registration_id);
   if (!replica_id_or.ok()) {
     return replica_id_or.status();
   }
-  lip_manager->attach_replica_id(registration_id, *replica_id_or);
+  lip_manager->attach_replica_id(committed_registration_id, *replica_id_or);
 
   auto barrier_status = await_state_sync_barrier(state_sync_barrier);
   if (!barrier_status.ok()) {
@@ -1325,14 +1571,14 @@ absl::StatusOr<RepresentationPublishValidationResult> finalize_binding_subject_c
 
   if (!layout_id.empty()) {
     SC_TRACE_SCOPE("assembly_attempt.attach_layout_to_serving_artifact");
-    auto attach_status = client->attach_layout_to_artifact(out_or->artifact_id, std::string(layout_id));
+    auto attach_status = client->attach_layout_to_artifact(closeout_commit_result.artifact_id, std::string(layout_id));
     if (!attach_status.ok()) {
       return attach_status;
     }
   }
 
-  const auto selection =
-      build_closeout_bound_selection(out_or->artifact_id, snapshot.target_layout, snapshot.target_index_json);
+  const auto selection = build_closeout_bound_selection(
+      closeout_commit_result.artifact_id, snapshot.target_layout, snapshot.target_index_json);
   {
     const auto record = *record_or;
     absl::MutexLock lock(&record->mu);
@@ -1343,25 +1589,30 @@ absl::StatusOr<RepresentationPublishValidationResult> finalize_binding_subject_c
       return absl::FailedPreconditionError(
           "binding publication subject generation changed during closeout finalization");
     }
-    record->current_artifact_id = out_or->artifact_id;
+    record->current_artifact_id = closeout_commit_result.artifact_id;
+    record->current_artifact_canonical_index_json = registration_index_json;
     record->current_selection = selection;
     record->target_publication_token.clear();
     record->state = v2::BINDING_STATE_READY_ARTIFACT;
     record->active_update_epoch.clear();
+    record->verification_state = v2::BINDING_VALUE_VERIFICATION_STATE_VERIFIED;
+    record->serving_artifact_id = closeout_commit_result.artifact_id;
+    record->verification_failure_reason.clear();
   }
 
   if (lifecycle != nullptr) {
-    SessionLifecycleManager::CommitSubject subj{.artifact_id = out_or->artifact_id, .device_id = snapshot.device_id};
+    SessionLifecycleManager::CommitSubject subj{
+        .artifact_id = closeout_commit_result.artifact_id, .device_id = snapshot.device_id};
     auto lid_or = lifecycle->create_commit_lease(subj, snapshot.owner_pid);
     if (!lid_or.ok()) {
       LOG(WARNING) << "create_commit_lease failed during representation closeout finalization: artifact_id="
-                   << out_or->artifact_id << " dev=" << snapshot.device_id << ": " << lid_or.status();
+                   << closeout_commit_result.artifact_id << " dev=" << snapshot.device_id << ": " << lid_or.status();
     }
   }
 
-  populate_artifact_descriptor_from_commit_lease(*out_or, &prevalidated.serving_artifact);
+  populate_artifact_descriptor_from_commit_lease(closeout_commit_result, &prevalidated.serving_artifact);
   const CommitLeaseResult* hash_commit_result =
-      snapshot.sealed_commit_result.has_value() ? &*snapshot.sealed_commit_result : &*out_or;
+      snapshot.sealed_commit_result.has_value() ? &*snapshot.sealed_commit_result : &closeout_commit_result;
   prevalidated.serving_execution_diagnostics = build_execution_diagnostics(
       /*result=*/nullptr,
       v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE,
@@ -1965,7 +2216,11 @@ grpc::Status AssemblyOperationService::seal_assembly_attempt(
               }
               if (final_status.ok()) {
                 SC_TRACE_SCOPE("assembly_attempt.build_seal_cut_input");
-                auto seal_cut_input_or = build_seal_cut_input(*bindings, readiness_cut);
+                auto seal_cut_input_or = build_seal_cut_input(
+                    *bindings,
+                    readiness_cut,
+                    client_sp.get(),
+                    /*binding_subject_closeout=*/prevalidated_representation_publish.has_value());
                 if (!seal_cut_input_or.ok()) {
                   final_status = seal_cut_input_or.status();
                 } else {

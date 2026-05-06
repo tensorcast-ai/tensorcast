@@ -227,6 +227,105 @@ absl::StatusOr<store::loader::ByteRangeMap> merge_byte_range_maps(
   return merged;
 }
 
+bool work_item_has_collective_source_overlap(const store::materialization::contracts::RepresentationWorkItem& item) {
+  return item.kind == store::materialization::contracts::RepresentationWorkItemKind::kTensorCopy &&
+      item.partition_kind == store::materialization::contracts::WorkPartitionKind::kReplicated;
+}
+
+absl::StatusOr<std::vector<std::pair<uint64_t, uint64_t>>> build_collective_dst_ranges(
+    const store::materialization::contracts::RepresentationWorkPlan& work_plan) {
+  std::vector<std::pair<uint64_t, uint64_t>> ranges;
+  for (const auto& item : work_plan.items) {
+    if (!work_item_has_collective_source_overlap(item)) {
+      continue;
+    }
+    for (const auto& source : item.sources) {
+      auto spans_or = store::materialization::contracts::build_coordinate_byte_spans(
+          item.dst_spec, source.fragment.destination_range);
+      if (!spans_or.ok()) {
+        return spans_or.status();
+      }
+      for (const auto& span : *spans_or) {
+        if (span.length == 0) {
+          continue;
+        }
+        ranges.emplace_back(span.offset, span.offset + span.length);
+      }
+    }
+  }
+  std::sort(ranges.begin(), ranges.end(), [](const auto& lhs, const auto& rhs) {
+    if (lhs.first != rhs.first) {
+      return lhs.first < rhs.first;
+    }
+    return lhs.second < rhs.second;
+  });
+  std::vector<std::pair<uint64_t, uint64_t>> merged;
+  merged.reserve(ranges.size());
+  for (const auto& range : ranges) {
+    if (range.second <= range.first) {
+      continue;
+    }
+    if (merged.empty() || range.first > merged.back().second) {
+      merged.push_back(range);
+      continue;
+    }
+    merged.back().second = std::max<uint64_t>(merged.back().second, range.second);
+  }
+  return merged;
+}
+
+absl::StatusOr<store::loader::ByteRangeMap> filter_data_map_to_dst_ranges(
+    const store::loader::ByteRangeMap& data_map,
+    const std::vector<std::pair<uint64_t, uint64_t>>& dst_ranges) {
+  store::loader::ByteRangeMap filtered;
+  filtered.total_bytes = data_map.total_bytes;
+  filtered.num_sources = data_map.num_sources;
+  if (dst_ranges.empty()) {
+    return filtered;
+  }
+  size_t range_index = 0;
+  for (const auto& segment : data_map.segments) {
+    if (segment.kind != store::loader::ByteRangeSegment::Kind::kData || segment.length == 0) {
+      continue;
+    }
+    const uint64_t segment_begin = segment.dst_offset;
+    const uint64_t segment_end = segment.dst_offset + segment.length;
+    while (range_index < dst_ranges.size() && dst_ranges[range_index].second <= segment_begin) {
+      ++range_index;
+    }
+    for (size_t index = range_index; index < dst_ranges.size(); ++index) {
+      const auto& [range_begin, range_end] = dst_ranges[index];
+      if (range_begin >= segment_end) {
+        break;
+      }
+      const uint64_t overlap_begin = std::max<uint64_t>(segment_begin, range_begin);
+      const uint64_t overlap_end = std::min<uint64_t>(segment_end, range_end);
+      if (overlap_end <= overlap_begin) {
+        continue;
+      }
+      filtered.segments.push_back(
+          store::loader::ByteRangeSegment{
+              .kind = store::loader::ByteRangeSegment::Kind::kData,
+              .dst_offset = overlap_begin,
+              .length = overlap_end - overlap_begin,
+              .src_offset = segment.src_offset + (overlap_begin - segment_begin),
+              .source_index = segment.source_index,
+          });
+    }
+  }
+  std::sort(filtered.segments.begin(), filtered.segments.end(), [](const auto& lhs, const auto& rhs) {
+    return lhs.dst_offset < rhs.dst_offset;
+  });
+  for (size_t index = 1; index < filtered.segments.size(); ++index) {
+    const auto& previous = filtered.segments[index - 1];
+    const auto& current = filtered.segments[index];
+    if (current.dst_offset < previous.dst_offset + previous.length) {
+      return absl::InvalidArgumentError("collective overlap byte range map contains overlapping segments");
+    }
+  }
+  return filtered;
+}
+
 void record_error(RecordMaterializeResultFn record_result, std::string_view reason) {
   if (record_result == nullptr) {
     return;
@@ -1382,7 +1481,18 @@ build_resolved_mapped_materialization_plan(
       return compatibility_data_map_or.status();
     }
     if (!compatibility_data_map_or->segments.empty()) {
-      prepared_execution.lowering_artifacts->collective_data_map = *compatibility_data_map_or;
+      auto collective_dst_ranges_or = build_collective_dst_ranges(*resolved_plan.representation_work_plan);
+      if (!collective_dst_ranges_or.ok()) {
+        return collective_dst_ranges_or.status();
+      }
+      auto collective_data_map_or =
+          filter_data_map_to_dst_ranges(*compatibility_data_map_or, *collective_dst_ranges_or);
+      if (!collective_data_map_or.ok()) {
+        return collective_data_map_or.status();
+      }
+      if (!collective_data_map_or->segments.empty()) {
+        prepared_execution.lowering_artifacts->collective_data_map = *collective_data_map_or;
+      }
     }
     store::loader::ByteRangeMap compatibility_data_map;
     if (!compatibility_data_map_or->segments.empty()) {
