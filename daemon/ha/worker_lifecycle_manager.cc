@@ -657,10 +657,9 @@ absl::Status WorkerLifecycleManager::start() {
 }
 
 absl::Status WorkerLifecycleManager::wait_for_state_sync_barrier() {
-  const uint64_t baseline = sync_success_.load();
-  request_state_sync();
+  const uint64_t request_generation = request_state_sync();
   const auto timeout = state_sync_stall_budget().value_or(std::chrono::seconds(10));
-  if (!wait_for_state_sync_success(baseline, timeout)) {
+  if (!wait_for_state_sync_request(request_generation, timeout)) {
     return absl::DeadlineExceededError("state sync barrier timed out");
   }
   return absl::OkStatus();
@@ -792,16 +791,19 @@ std::optional<std::chrono::milliseconds> WorkerLifecycleManager::state_sync_stal
   return std::chrono::milliseconds(budget_ms);
 }
 
-void WorkerLifecycleManager::request_state_sync() {
-  uint64_t expected = 0;
-  if (!state_sync_requests_.compare_exchange_strong(expected, 1)) {
+uint64_t WorkerLifecycleManager::request_state_sync() {
+  const uint64_t request_generation = state_sync_request_generation_.fetch_add(1) + 1;
+  uint64_t observed = state_sync_requests_.load();
+  while (observed < request_generation && !state_sync_requests_.compare_exchange_weak(observed, request_generation)) {
+  }
+  if (observed != 0) {
     state_sync_enqueue_suppressed_.fetch_add(1);
     if (auto* counter = reconcile_enqueue_suppressed_counter()) {
       counter->Add(1);
     }
-    return;
   }
   state_sync_cv_.notify_all();
+  return request_generation;
 }
 
 bool WorkerLifecycleManager::wait_for_state_sync_success(uint64_t baseline, std::chrono::milliseconds timeout) {
@@ -812,6 +814,19 @@ bool WorkerLifecycleManager::wait_for_state_sync_success(uint64_t baseline, std:
   std::unique_lock<std::mutex> lock(sync_success_mu_);
   return sync_success_cv_.wait_until(
       lock, deadline, [this, baseline]() { return stop_.load() || sync_success_.load() > baseline; });
+}
+
+bool WorkerLifecycleManager::wait_for_state_sync_request(
+    uint64_t request_generation,
+    std::chrono::milliseconds timeout) {
+  if (timeout.count() <= 0) {
+    return state_sync_completed_generation_.load() >= request_generation;
+  }
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  std::unique_lock<std::mutex> lock(sync_success_mu_);
+  return sync_success_cv_.wait_until(lock, deadline, [this, request_generation]() {
+    return stop_.load() || state_sync_completed_generation_.load() >= request_generation;
+  });
 }
 
 void WorkerLifecycleManager::queue_obsolete_replicas(std::vector<std::string> obsolete) {
@@ -1022,9 +1037,9 @@ void WorkerLifecycleManager::state_sync_loop(uint64_t epoch) {
         apply_obsolete_replicas(obsolete);
       }
 
-      const uint64_t requests = state_sync_requests_.exchange(0);
-      if (requests > 0) {
-        perform_state_sync(epoch);
+      const uint64_t request_generation = state_sync_requests_.exchange(0);
+      if (request_generation > 0) {
+        perform_state_sync(epoch, request_generation);
         state_sync_ticks_.fetch_add(1);
       }
 
@@ -1077,7 +1092,7 @@ void WorkerLifecycleManager::state_sync_loop(uint64_t epoch) {
   }
 }
 
-void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
+void WorkerLifecycleManager::perform_state_sync(uint64_t epoch, uint64_t request_generation) {
   if (stop_.load() || state_sync_epoch_.load() != epoch) {
     return;
   }
@@ -1122,8 +1137,11 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
       state_checksum_ = checksum;
     }
   }
-  const int64_t reconcile_ts_s = static_cast<int64_t>(
-      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+  const int64_t reconcile_ts_ns = static_cast<int64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
+          .count());
+  const int64_t reconcile_ts_s = reconcile_ts_ns / 1000000000;
+  const int64_t reconcile_ts_nanos = reconcile_ts_ns % 1000000000;
   std::vector<commonpb::ReplicaInfo> inventory_proto;
   inventory_proto.reserve(inventory.size());
   for (const auto& entry : inventory) {
@@ -1215,7 +1233,7 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
     rep.mutable_stats()->set_is_available(entry.is_available);
     auto* registered_ts = rep.mutable_stats()->mutable_registered_ts();
     registered_ts->set_seconds(reconcile_ts_s);
-    registered_ts->set_nanos(0);
+    registered_ts->set_nanos(static_cast<int32_t>(reconcile_ts_nanos));
     inventory_proto.push_back(std::move(rep));
   }
 
@@ -1286,13 +1304,19 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
   state_sync_next_retry_ns_.store(0);
   mark_state_sync_progress();
 
-  auto record_sync_success = [this, epoch, &sync_or](int64_t last_sync_success) {
+  auto record_sync_success = [this, epoch, request_generation, &sync_or](int64_t last_sync_success) {
     {
       std::lock_guard<std::mutex> lock(state_mu_);
       if (state_sync_epoch_.load() == epoch) {
         state_version_ = sync_or->new_state_version;
         state_checksum_ = sync_or->new_state_checksum;
         last_sync_success_ts_ = last_sync_success;
+      }
+    }
+    if (request_generation > 0) {
+      uint64_t observed = state_sync_completed_generation_.load();
+      while (observed < request_generation &&
+             !state_sync_completed_generation_.compare_exchange_weak(observed, request_generation)) {
       }
     }
     sync_success_.fetch_add(1);

@@ -116,12 +116,13 @@ class WorkerLifecycleManager {
   void process_retire_queue();
   void schedule_demotion_task(const store::loading::ReplicaKey& key, std::string_view context);
   bool wait_for_state_sync_success(uint64_t baseline, std::chrono::milliseconds timeout);
+  bool wait_for_state_sync_request(uint64_t request_generation, std::chrono::milliseconds timeout);
   absl::Status reregister_worker(bool preserve_identity);
   void reconcile_memory_tier_leases_once();
   bool wait_for_stop(std::chrono::milliseconds interval);
-  void request_state_sync();
+  uint64_t request_state_sync();
   void queue_obsolete_replicas(std::vector<std::string> obsolete);
-  void perform_state_sync(uint64_t epoch);
+  void perform_state_sync(uint64_t epoch, uint64_t request_generation);
   void retire_thread(std::thread* thread);
   absl::Status unregister_worker_single_flight(std::string_view worker_id, bool is_graceful_shutdown);
   store::components::RpcOptions build_rpc_options(int timeout_ms, std::optional<int32_t> max_retries) const;
@@ -191,6 +192,8 @@ class WorkerLifecycleManager {
   std::atomic<uint64_t> hb_epoch_{0};
   std::atomic<uint64_t> reconcile_generation_{1};
   std::atomic<uint64_t> state_sync_epoch_{0};
+  std::atomic<uint64_t> state_sync_request_generation_{0};
+  std::atomic<uint64_t> state_sync_completed_generation_{0};
   std::atomic<uint64_t> state_sync_requests_{0};
   std::atomic<uint64_t> state_sync_request_id_{0};
   std::atomic<uint64_t> state_sync_enqueue_suppressed_{0};
