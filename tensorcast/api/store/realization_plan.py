@@ -100,6 +100,8 @@ def binding_realization_plan_to_proto(
     sample_copy_dsts: list[str] = []
     sample_scalar_fill_dsts: list[str] = []
     for idx, raw in enumerate(plan):
+        source_ranges: object | None
+        dst_ranges: object | None
         if isinstance(raw, BindingRealizationEntry):
             op = str(raw.op).strip().lower()
             dst_name = str(raw.dst_name)
