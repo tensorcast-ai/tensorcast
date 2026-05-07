@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cstring>
@@ -16,6 +17,7 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/check.h"
@@ -23,6 +25,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
 #include "core/checkpoint/tensor_writer.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
 #include "core/store/materialization/dataplane/metadata/safetensors_util.h"
@@ -59,6 +62,43 @@ std::filesystem::path normalize_artifact_path(const std::filesystem::path& artif
     return artifact_path.lexically_normal();
   }
   return std::filesystem::absolute(artifact_path).lexically_normal();
+}
+
+bool is_cache_relevant_file(std::string_view filename) {
+  return filename == "artifact_descriptor.json" || filename == "tensor_index.json" || filename == "tensor_index.cbor" ||
+      filename == "tensor.data" || filename.starts_with("tensor.data_") || filename.ends_with(".safetensors");
+}
+
+absl::StatusOr<std::string> artifact_directory_cache_fingerprint(const std::filesystem::path& artifact_path) {
+  std::vector<std::string> entries;
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::directory_iterator(artifact_path, ec)) {
+    if (ec) {
+      return absl::ErrnoToStatus(
+          ec.value(), absl::StrCat("Failed to enumerate artifact directory '", artifact_path.string(), "'"));
+    }
+    if (!entry.is_regular_file(ec)) {
+      if (ec) {
+        return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat '", entry.path().string(), "'"));
+      }
+      continue;
+    }
+    const std::string filename = entry.path().filename().string();
+    if (!is_cache_relevant_file(filename)) {
+      continue;
+    }
+    const uint64_t size = entry.file_size(ec);
+    if (ec) {
+      return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat size for '", entry.path().string(), "'"));
+    }
+    const auto mtime = entry.last_write_time(ec);
+    if (ec) {
+      return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat mtime for '", entry.path().string(), "'"));
+    }
+    entries.push_back(absl::StrCat(filename, ":", size, ":", mtime.time_since_epoch().count()));
+  }
+  std::ranges::sort(entries);
+  return absl::StrJoin(entries, "|");
 }
 
 std::vector<std::shared_ptr<const DiskArtifactContext>> evict_old_contexts_locked(CacheState& state)
@@ -598,7 +638,11 @@ absl::StatusOr<IndexInfo> DiskArtifactContext::get_index_info(int target_device_
 absl::StatusOr<std::shared_ptr<const DiskArtifactContext>> get_disk_artifact_context(
     const std::filesystem::path& artifact_path) {
   const std::filesystem::path normalized = normalize_artifact_path(artifact_path);
-  const std::string cache_key = normalized.string();
+  auto fingerprint_or = artifact_directory_cache_fingerprint(normalized);
+  if (!fingerprint_or.ok()) {
+    return fingerprint_or.status();
+  }
+  const std::string cache_key = absl::StrCat(normalized.string(), "\n", *fingerprint_or);
   auto& state = cache_state();
   {
     absl::MutexLock lock(&state.mutex);

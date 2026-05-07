@@ -261,11 +261,7 @@ absl::StatusOr<SourceBoundStrategyPlan> build_source_bound_execution_strategy_pl
         "mixed_generic_residual_policy_disabled",
         strategy_plan.summary.planned_generic_residual_bytes);
   }
-  const uint64_t local_mapped_candidate_bytes = strategy_plan.summary.planned_collective_candidate_bytes >
-          std::numeric_limits<uint64_t>::max() - strategy_plan.summary.planned_non_admitted_typed_bytes
-      ? std::numeric_limits<uint64_t>::max()
-      : strategy_plan.summary.planned_collective_candidate_bytes +
-          strategy_plan.summary.planned_non_admitted_typed_bytes;
+  const uint64_t local_mapped_candidate_bytes = strategy_plan.summary.planned_non_admitted_typed_bytes;
   const bool typed_work_prefers_local_mapped =
       local_mapped_candidate_bytes > 0 && strategy_config.executor_preference != ExecutorPreference::kGenericByteRange;
   const bool local_mapped_typed_available = strategy_config.enable_tensor_aware_mapped_executor &&
@@ -337,6 +333,7 @@ absl::StatusOr<SourceBoundStrategyPlan> build_source_bound_execution_strategy_pl
     strategy_plan.lane_plan.mode = SourceBoundExecutionMode::kLocalTypedOnly;
   } else if (
       typed_work_prefers_local_mapped && local_mapped_typed_available &&
+      strategy_plan.summary.planned_collective_candidate_bytes == 0 &&
       !strategy_plan.summary.collective_lane_eligible && strategy_plan.summary.planned_generic_residual_bytes == 0) {
     strategy_plan.lane_plan.mode = SourceBoundExecutionMode::kLocalMappedTyped;
   } else if (can_execute_collective_plan && collective_coverage_gap == 0) {
