@@ -134,6 +134,9 @@ class DiskArtifactContext {
 absl::StatusOr<std::shared_ptr<const DiskArtifactContext>> get_disk_artifact_context(
     const std::filesystem::path& artifact_path);
 
+absl::StatusOr<std::shared_ptr<const DiskArtifactContext>> get_uncached_disk_artifact_context(
+    const std::filesystem::path& artifact_path);
+
 DiskArtifactContextCacheStats get_disk_artifact_context_cache_stats();
 
 void reset_disk_artifact_context_cache_for_testing();

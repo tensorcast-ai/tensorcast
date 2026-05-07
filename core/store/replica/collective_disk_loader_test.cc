@@ -401,15 +401,15 @@ TEST_CASE(
   SKIP_IF_NO_CUDA();
 
   constexpr uint64_t kRows = 2;
-  constexpr uint64_t kCols = 8;
-  constexpr uint64_t kDstCols = 4;
+  constexpr uint64_t kCols = 1024;
+  constexpr uint64_t kDstCols = 512;
   constexpr uint64_t kSourceBytes = kRows * kCols;
   constexpr uint64_t kTargetBytes = kRows * kDstCols;
   auto temp_root = make_temp_dir("collective-disk-loader-wide-dim1");
   const auto safetensors_path = temp_root / "weights.safetensors";
   std::vector<unsigned char> payload(kSourceBytes, 0xAB);
   create_safetensors_file(
-      safetensors_path, "{\"src\":{\"dtype\":\"U8\",\"shape\":[2,8],\"data_offsets\":[0,16]}}", payload);
+      safetensors_path, "{\"src\":{\"dtype\":\"U8\",\"shape\":[2,1024],\"data_offsets\":[0,2048]}}", payload);
 
   auto disk_context_or = loader::get_disk_artifact_context(temp_root);
   REQUIRE(disk_context_or.ok());
@@ -418,20 +418,20 @@ TEST_CASE(
   item.kind = materialization::contracts::RepresentationWorkItemKind::kTensorCopy;
   item.partition_kind = materialization::contracts::WorkPartitionKind::kDim1Partitioned;
   item.dst_name = "dst";
-  item.dst_spec = make_u8_tensor_spec("dst", 0, {2, 4}, {4, 1});
+  item.dst_spec = make_u8_tensor_spec("dst", 0, {2, 512}, {512, 1});
   item.committed_bytes = kTargetBytes;
   item.sources.push_back(
       materialization::contracts::RepresentationWorkSourceFragment{
           .fragment =
               materialization::contracts::SourceFragment{
-                  .source_spec = make_u8_tensor_spec("src", 0, {2, 8}, {8, 1}),
+                  .source_spec = make_u8_tensor_spec("src", 0, {2, 1024}, {1024, 1}),
                   .source_range =
                       materialization::contracts::TensorCoordinateSpec{
-                          .axes = {materialization::contracts::TensorAxisRange{.dim = 1, .start = 0, .end = 4}},
+                          .axes = {materialization::contracts::TensorAxisRange{.dim = 1, .start = 0, .end = 512}},
                       },
                   .destination_range =
                       materialization::contracts::TensorCoordinateSpec{
-                          .axes = {materialization::contracts::TensorAxisRange{.dim = 1, .start = 0, .end = 4}},
+                          .axes = {materialization::contracts::TensorAxisRange{.dim = 1, .start = 0, .end = 512}},
                       },
               },
       });
@@ -454,7 +454,7 @@ TEST_CASE(
   strategy.executor_preference =
       StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference::kTensorAwareLocal;
 
-  auto pinned_pool = std::make_shared<common::memory::PinnedBufferPool>(4, 4);
+  auto pinned_pool = std::make_shared<common::memory::PinnedBufferPool>(512, 512);
   const auto result = try_local_mapped_target_load(
       LocalMappedTargetLoadRequest{
           .artifact_id = "artifact_wide_dim1",
@@ -477,13 +477,114 @@ TEST_CASE(
       },
       pinned_pool,
       std::chrono::milliseconds(1000),
-      CollectiveMappedTargetLoadOptions{.chunk_bytes = 4, .strategy_config = strategy});
+      CollectiveMappedTargetLoadOptions{.chunk_bytes = 512, .strategy_config = strategy});
 
   REQUIRE(result.handled);
   REQUIRE_FALSE(result.status.ok());
   CHECK(absl::IsFailedPrecondition(result.status));
   CHECK(result.status.message().find("row exceeds pinned buffer size") != std::string_view::npos);
 
+  loader::reset_disk_artifact_context_cache_for_testing();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "try_local_mapped_target_load copies replicated tensor bytes without generic residual",
+    "[collective_disk_loader][local_mapped][replicated][correctness]") {
+  SKIP_IF_NO_CUDA();
+
+  constexpr uint64_t kTotalBytes = 16;
+  auto temp_root = make_temp_dir("collective-disk-loader-replicated");
+  const auto safetensors_path = temp_root / "weights.safetensors";
+  std::vector<unsigned char> payload(kTotalBytes);
+  for (uint64_t index = 0; index < kTotalBytes; ++index) {
+    payload[static_cast<size_t>(index)] = static_cast<unsigned char>(0x40 + index);
+  }
+  create_safetensors_file(
+      safetensors_path, "{\"src\":{\"dtype\":\"U8\",\"shape\":[16],\"data_offsets\":[0,16]}}", payload);
+
+  auto disk_context_or = loader::get_disk_artifact_context(temp_root);
+  REQUIRE(disk_context_or.ok());
+  REQUIRE((*disk_context_or)->is_safetensors());
+
+  void* gpu_buffer = nullptr;
+  REQUIRE(tensorcast::cuda::malloc(&gpu_buffer, kTotalBytes).ok());
+  std::array<uint8_t, kTotalBytes> initial{};
+  initial.fill(0xEE);
+  REQUIRE(tensorcast::cuda::memcpy(gpu_buffer, initial.data(), initial.size(), cudaMemcpyHostToDevice).ok());
+
+  materialization::contracts::RepresentationWorkItem item;
+  item.kind = materialization::contracts::RepresentationWorkItemKind::kTensorCopy;
+  item.partition_kind = materialization::contracts::WorkPartitionKind::kReplicated;
+  item.dst_name = "dst";
+  item.dst_spec = make_u8_tensor_spec("dst", 0, {16}, {1});
+  item.committed_bytes = kTotalBytes;
+  item.sources.push_back(
+      materialization::contracts::RepresentationWorkSourceFragment{
+          .fragment =
+              materialization::contracts::SourceFragment{
+                  .source_spec = make_u8_tensor_spec("src", 0, {16}, {1}),
+                  .source_range = materialization::contracts::TensorCoordinateSpec{},
+                  .destination_range = materialization::contracts::TensorCoordinateSpec{},
+              },
+      });
+
+  loader::ByteRangeMap data_lane_map;
+  data_lane_map.total_bytes = kTotalBytes;
+  data_lane_map.num_sources = 1;
+  data_lane_map.segments = {
+      loader::ByteRangeSegment{
+          .kind = loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = kTotalBytes,
+          .src_offset = 0,
+          .source_index = 0,
+      },
+  };
+
+  StoreEngineOptions::MaterializationStrategyConfig strategy;
+  strategy.enable_tensor_aware_mapped_executor = true;
+  strategy.allow_mixed_execution = true;
+
+  auto pinned_pool = std::make_shared<common::memory::PinnedBufferPool>(16, 4);
+  const auto result = try_local_mapped_target_load(
+      LocalMappedTargetLoadRequest{
+          .artifact_id = "artifact_replicated",
+          .disk_context = *disk_context_or,
+          .representation_work_plan = materialization::contracts::RepresentationWorkPlan{.items = {item}},
+          .data_lane_map = data_lane_map,
+          .target_layout =
+              loading::IntoTargetLayout{
+                  .storages =
+                      {
+                          loading::IntoTargetStorage{
+                              .base_ptr = gsl::not_null<void*>{gpu_buffer},
+                              .length = kTotalBytes,
+                          },
+                      },
+                  .total_size = kTotalBytes,
+              },
+          .strategy_config = strategy,
+          .device_id = 0,
+      },
+      pinned_pool,
+      std::chrono::milliseconds(1000),
+      CollectiveMappedTargetLoadOptions{.chunk_bytes = 4, .strategy_config = strategy});
+
+  REQUIRE(result.handled);
+  REQUIRE(result.status.ok());
+  CHECK(result.handled_bytes == kTotalBytes);
+  CHECK(result.residual_data_map.segments.empty());
+  CHECK(result.residual_data_map.total_bytes == kTotalBytes);
+
+  std::array<uint8_t, kTotalBytes> actual{};
+  REQUIRE(tensorcast::cuda::memcpy(actual.data(), gpu_buffer, actual.size(), cudaMemcpyDeviceToHost).ok());
+  std::array<uint8_t, kTotalBytes> expected{};
+  std::copy(payload.begin(), payload.end(), expected.begin());
+  CHECK(actual == expected);
+
+  REQUIRE(tensorcast::cuda::free(gpu_buffer).ok());
   loader::reset_disk_artifact_context_cache_for_testing();
   std::error_code cleanup_ec;
   std::filesystem::remove_all(temp_root, cleanup_ec);

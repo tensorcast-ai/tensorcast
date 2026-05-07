@@ -669,7 +669,6 @@ cc_binary(
         "//proto/tensorcast/config/v1:config_cc",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
-        "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/time",
         "@gsl",
@@ -778,7 +777,6 @@ sc_header_only_library(
     deps = [
         "//core/common:trace_request_data_lib",
         "@abseil-cpp//absl/base:core_headers",
-        "@abseil-cpp//absl/log",
         "@folly//folly/io/async:request_context",
     ],
 )

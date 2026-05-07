@@ -294,7 +294,7 @@ pinned_memory:
   REQUIRE(strategy.has_owner_file_collective_shared_fs_only());
   REQUIRE(strategy.owner_file_collective_shared_fs_only());
   REQUIRE(strategy.owner_file_collective_max_owner_skew_ratio() == Catch::Approx(1.5));
-  REQUIRE(strategy.owner_file_collective_min_dedup_saving_bytes() == 64ULL * 1024ULL * 1024ULL);
+  REQUIRE(strategy.owner_file_collective_min_dedup_saving_bytes() == 512ULL * 1024ULL * 1024ULL);
   REQUIRE(strategy.has_owner_file_collective_group_assemble_timeout());
   REQUIRE(strategy.owner_file_collective_group_assemble_timeout().seconds() == 15);
   REQUIRE(strategy.has_owner_file_collective_allow_mixed_residual());

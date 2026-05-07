@@ -76,7 +76,8 @@ absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
     bool allow_disk,
     bool allow_local_import_fallback,
     bool loopback_peer,
-    std::optional<uint64_t> disk_expected_size = std::nullopt);
+    std::optional<uint64_t> disk_expected_size = std::nullopt,
+    bool lightweight_msa1_validation = false);
 
 using MaterializeAttemptFn =
     std::function<absl::StatusOr<store::loading::ReplicaHandle>(const std::optional<store::loading::DiskSource>&)>;

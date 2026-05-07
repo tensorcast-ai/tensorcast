@@ -604,6 +604,9 @@ TEST_CASE(
   auto* public_disk_source = req.mutable_public_disk_source();
   public_disk_source->set_artifact_id(artifact_id);
   public_disk_source->set_path(artifact_dir.string());
+  public_disk_source->set_canonical_index_bytes(metadata_or->index_info.canonical_index_json);
+  public_disk_source->set_metadata_capability(v2::DISK_METADATA_CAPABILITY_BYTE_ONLY);
+  public_disk_source->set_exact_size_bytes(metadata_or->exact_size_bytes);
 
   auto* realization_plan = req.mutable_realization_plan();
   realization_plan->set_version(1);

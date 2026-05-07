@@ -81,6 +81,7 @@ TEST_CASE("DiskArtifactContext reuses cached safetensors scan and index info", "
   REQUIRE(ctx1_or->get() == ctx2_or->get());
   REQUIRE((*ctx1_or)->is_safetensors());
   REQUIRE((*ctx1_or)->safetensors_segments().size() == 1);
+  auto* cached_context = ctx1_or->get();
 
   auto stats = get_disk_artifact_context_cache_stats();
   REQUIRE(stats.context_misses == 1);
@@ -100,6 +101,9 @@ TEST_CASE("DiskArtifactContext reuses cached safetensors scan and index info", "
       std::shared_ptr<const tensorcast::store::loader::DiskArtifactContext>());
   ctx2_or = absl::StatusOr<std::shared_ptr<const tensorcast::store::loader::DiskArtifactContext>>(
       std::shared_ptr<const tensorcast::store::loader::DiskArtifactContext>());
+  auto ctx3_or = get_disk_artifact_context(dir);
+  REQUIRE(ctx3_or.ok());
+  REQUIRE(ctx3_or->get() == cached_context);
   reset_disk_artifact_context_cache_for_testing();
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);

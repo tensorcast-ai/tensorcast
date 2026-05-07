@@ -448,48 +448,230 @@ uint64_t byte_range_map_covered_bytes(const loader::ByteRangeMap& map) {
   return total;
 }
 
-absl::StatusOr<loader::ByteRangeMap> filter_byte_range_map_by_kind(
+absl::Status validate_normalized_byte_range_map_linear(const loader::ByteRangeMap& map) {
+  if (map.total_bytes == 0) {
+    return map.segments.empty() ? absl::OkStatus()
+                                : absl::InvalidArgumentError("byte range map total_bytes is zero with segments");
+  }
+  if (map.num_sources == 0) {
+    return absl::InvalidArgumentError("byte range map num_sources must be > 0");
+  }
+  uint64_t cursor = 0;
+  for (const auto& segment : map.segments) {
+    if (segment.length == 0) {
+      return absl::InvalidArgumentError("normalized byte range map contains zero-length segment");
+    }
+    if (segment.dst_offset != cursor) {
+      return absl::InvalidArgumentError("normalized byte range map contains destination gap or disorder");
+    }
+    if (segment.length > map.total_bytes - cursor) {
+      return absl::InvalidArgumentError("normalized byte range map segment length out of bounds");
+    }
+    if (segment.kind == loader::ByteRangeSegment::Kind::kData && segment.source_index >= map.num_sources) {
+      return absl::InvalidArgumentError("normalized byte range map segment source_index out of range");
+    }
+    cursor += segment.length;
+  }
+  if (cursor != map.total_bytes) {
+    return absl::InvalidArgumentError("normalized byte range map does not cover total_bytes");
+  }
+  return absl::OkStatus();
+}
+
+absl::Status validate_sorted_byte_range_map_linear(const loader::ByteRangeMap& map, bool data_only) {
+  if (map.total_bytes == 0) {
+    return map.segments.empty() ? absl::OkStatus()
+                                : absl::InvalidArgumentError("byte range map total_bytes is zero with segments");
+  }
+  if (map.num_sources == 0) {
+    return absl::InvalidArgumentError("byte range map num_sources must be > 0");
+  }
+  uint64_t previous_end = 0;
+  bool have_previous = false;
+  for (const auto& segment : map.segments) {
+    if (segment.length == 0) {
+      return absl::InvalidArgumentError("byte range map contains zero-length segment");
+    }
+    if (data_only && segment.kind != loader::ByteRangeSegment::Kind::kData) {
+      return absl::InvalidArgumentError("byte range map requires data-only segments");
+    }
+    if (segment.dst_offset >= map.total_bytes || segment.length > map.total_bytes - segment.dst_offset) {
+      return absl::InvalidArgumentError("byte range map segment exceeds total_bytes");
+    }
+    if (have_previous && segment.dst_offset < previous_end) {
+      return absl::InvalidArgumentError("byte range map contains overlapping or unsorted segments");
+    }
+    if (segment.kind == loader::ByteRangeSegment::Kind::kData && segment.source_index >= map.num_sources) {
+      return absl::InvalidArgumentError("byte range map segment source_index out of range");
+    }
+    previous_end = segment.dst_offset + segment.length;
+    have_previous = true;
+  }
+  return absl::OkStatus();
+}
+
+void append_coalesced_segment(loader::ByteRangeMap* map, loader::ByteRangeSegment segment) {
+  if (segment.length == 0) {
+    return;
+  }
+  if (!map->segments.empty()) {
+    auto& previous = map->segments.back();
+    const uint64_t previous_end = previous.dst_offset + previous.length;
+    const bool adjacent = previous_end == segment.dst_offset;
+    const bool same_kind = previous.kind == segment.kind;
+    const bool same_source = segment.kind == loader::ByteRangeSegment::Kind::kPad ||
+        (previous.source_index == segment.source_index && previous.src_offset + previous.length == segment.src_offset);
+    if (adjacent && same_kind && same_source) {
+      previous.length += segment.length;
+      return;
+    }
+  }
+  map->segments.push_back(segment);
+}
+
+absl::StatusOr<loader::ByteRangeMap> filter_byte_range_map_by_kind_presorted(
     const loader::ByteRangeMap& map,
     loader::ByteRangeSegment::Kind kind) {
+  auto status = validate_sorted_byte_range_map_linear(map, /*data_only=*/false);
+  if (!status.ok()) {
+    return status;
+  }
   loader::ByteRangeMap filtered;
   filtered.total_bytes = map.total_bytes;
   filtered.num_sources = map.num_sources;
+  filtered.segments.reserve(map.segments.size());
   for (const auto& segment : map.segments) {
     if (segment.kind == kind) {
       filtered.segments.push_back(segment);
     }
   }
-  std::sort(filtered.segments.begin(), filtered.segments.end(), [](const auto& lhs, const auto& rhs) {
-    return lhs.dst_offset < rhs.dst_offset;
-  });
-  for (size_t index = 1; index < filtered.segments.size(); ++index) {
-    const auto& previous = filtered.segments[index - 1];
-    const auto& current = filtered.segments[index];
-    if (current.dst_offset < previous.dst_offset + previous.length) {
-      return absl::InvalidArgumentError("filtered byte range map contains overlapping segments");
-    }
-  }
   return filtered;
 }
 
-absl::StatusOr<loader::ByteRangeMap> merge_byte_range_maps(
+absl::StatusOr<loader::ByteRangeMap> compose_sorted_byte_range_maps(
+    const loader::ByteRangeMap& outer,
+    const loader::ByteRangeMap& inner) {
+  if (outer.total_bytes == 0) {
+    return loader::ByteRangeMap{};
+  }
+  if (inner.total_bytes == 0) {
+    return absl::InvalidArgumentError("inner map total_bytes is zero");
+  }
+  auto outer_status = validate_sorted_byte_range_map_linear(outer, /*data_only=*/false);
+  if (!outer_status.ok()) {
+    return outer_status;
+  }
+  auto inner_status = validate_normalized_byte_range_map_linear(inner);
+  if (!inner_status.ok()) {
+    return inner_status;
+  }
+
+  loader::ByteRangeMap composed;
+  composed.total_bytes = outer.total_bytes;
+  composed.num_sources = inner.num_sources;
+  composed.segments.reserve(outer.segments.size() + inner.segments.size());
+
+  std::vector<uint64_t> inner_starts;
+  inner_starts.reserve(inner.segments.size());
+  for (const auto& segment : inner.segments) {
+    inner_starts.push_back(segment.dst_offset);
+  }
+
+  auto find_inner_index = [&](uint64_t canonical_offset) -> absl::StatusOr<size_t> {
+    if (canonical_offset >= inner.total_bytes) {
+      return absl::InvalidArgumentError("outer map references canonical offsets beyond inner map total_bytes");
+    }
+    auto it = std::upper_bound(inner_starts.begin(), inner_starts.end(), canonical_offset);
+    const size_t index =
+        it == inner_starts.begin() ? 0 : static_cast<size_t>(std::distance(inner_starts.begin(), std::prev(it)));
+    if (index >= inner.segments.size()) {
+      return absl::InvalidArgumentError("inner map segment lookup out of range");
+    }
+    const auto& segment = inner.segments[index];
+    if (canonical_offset < segment.dst_offset || canonical_offset >= segment.dst_offset + segment.length) {
+      return absl::InvalidArgumentError("inner map does not cover canonical range for composition");
+    }
+    return index;
+  };
+
+  for (const auto& outer_segment : outer.segments) {
+    if (outer_segment.kind == loader::ByteRangeSegment::Kind::kPad) {
+      append_coalesced_segment(
+          &composed,
+          loader::ByteRangeSegment{
+              .kind = loader::ByteRangeSegment::Kind::kPad,
+              .dst_offset = outer_segment.dst_offset,
+              .length = outer_segment.length,
+              .src_offset = 0,
+              .source_index = 0,
+          });
+      continue;
+    }
+    if (outer_segment.length > inner.total_bytes - outer_segment.src_offset) {
+      return absl::InvalidArgumentError("outer map references canonical offsets beyond inner map total_bytes");
+    }
+
+    uint64_t remaining = outer_segment.length;
+    uint64_t dst_cursor = outer_segment.dst_offset;
+    uint64_t canonical_cursor = outer_segment.src_offset;
+    while (remaining > 0) {
+      auto index_or = find_inner_index(canonical_cursor);
+      if (!index_or.ok()) {
+        return index_or.status();
+      }
+      const auto& inner_segment = inner.segments[*index_or];
+      const uint64_t inner_offset = canonical_cursor - inner_segment.dst_offset;
+      const uint64_t take = std::min<uint64_t>(remaining, inner_segment.length - inner_offset);
+      append_coalesced_segment(
+          &composed,
+          loader::ByteRangeSegment{
+              .kind = inner_segment.kind,
+              .dst_offset = dst_cursor,
+              .length = take,
+              .src_offset = inner_segment.kind == loader::ByteRangeSegment::Kind::kPad
+                  ? 0
+                  : inner_segment.src_offset + inner_offset,
+              .source_index =
+                  inner_segment.kind == loader::ByteRangeSegment::Kind::kPad ? 0 : inner_segment.source_index,
+          });
+      remaining -= take;
+      dst_cursor += take;
+      canonical_cursor += take;
+    }
+  }
+  return composed;
+}
+
+absl::StatusOr<loader::ByteRangeMap> merge_byte_range_maps_presorted(
     const loader::ByteRangeMap& lhs,
     const loader::ByteRangeMap& rhs) {
+  auto lhs_status = validate_sorted_byte_range_map_linear(lhs, /*data_only=*/false);
+  if (!lhs_status.ok()) {
+    return lhs_status;
+  }
+  auto rhs_status = validate_sorted_byte_range_map_linear(rhs, /*data_only=*/false);
+  if (!rhs_status.ok()) {
+    return rhs_status;
+  }
+
   loader::ByteRangeMap merged;
   merged.total_bytes = std::max(lhs.total_bytes, rhs.total_bytes);
   merged.num_sources = std::max(lhs.num_sources, rhs.num_sources);
   merged.segments.reserve(lhs.segments.size() + rhs.segments.size());
-  merged.segments.insert(merged.segments.end(), lhs.segments.begin(), lhs.segments.end());
-  merged.segments.insert(merged.segments.end(), rhs.segments.begin(), rhs.segments.end());
-  std::sort(merged.segments.begin(), merged.segments.end(), [](const auto& lhs_seg, const auto& rhs_seg) {
-    return lhs_seg.dst_offset < rhs_seg.dst_offset;
-  });
-  for (size_t index = 1; index < merged.segments.size(); ++index) {
-    const auto& previous = merged.segments[index - 1];
-    const auto& current = merged.segments[index];
-    if (current.dst_offset < previous.dst_offset + previous.length) {
-      return absl::InvalidArgumentError("merged byte range map contains overlapping segments");
+
+  size_t lhs_index = 0;
+  size_t rhs_index = 0;
+  while (lhs_index < lhs.segments.size() || rhs_index < rhs.segments.size()) {
+    const bool take_lhs = rhs_index == rhs.segments.size() ||
+        (lhs_index < lhs.segments.size() && lhs.segments[lhs_index].dst_offset <= rhs.segments[rhs_index].dst_offset);
+    const auto& segment = take_lhs ? lhs.segments[lhs_index++] : rhs.segments[rhs_index++];
+    if (!merged.segments.empty()) {
+      const auto& previous = merged.segments.back();
+      if (segment.dst_offset < previous.dst_offset + previous.length) {
+        return absl::InvalidArgumentError("merged byte range map contains overlapping segments");
+      }
     }
+    merged.segments.push_back(segment);
   }
   return merged;
 }
@@ -536,47 +718,7 @@ absl::StatusOr<std::vector<loader::ByteRangeSegment>> sorted_validated_segments(
   return segments;
 }
 
-absl::StatusOr<loader::ByteRangeMap> densify_byte_range_map_with_pad(const loader::ByteRangeMap& map) {
-  if (map.total_bytes == 0) {
-    return loader::ByteRangeMap{};
-  }
-  auto segments_or = sorted_validated_segments(map);
-  if (!segments_or.ok()) {
-    return segments_or.status();
-  }
-  loader::ByteRangeMap dense;
-  dense.total_bytes = map.total_bytes;
-  dense.num_sources = map.num_sources;
-  dense.segments.reserve(segments_or->size() * 2 + 1);
-  uint64_t cursor = 0;
-  for (const auto& segment : *segments_or) {
-    if (segment.dst_offset > cursor) {
-      dense.segments.push_back(
-          loader::ByteRangeSegment{
-              .kind = loader::ByteRangeSegment::Kind::kPad,
-              .dst_offset = cursor,
-              .length = segment.dst_offset - cursor,
-              .src_offset = 0,
-              .source_index = 0,
-          });
-    }
-    dense.segments.push_back(segment);
-    cursor = segment.dst_offset + segment.length;
-  }
-  if (cursor < dense.total_bytes) {
-    dense.segments.push_back(
-        loader::ByteRangeSegment{
-            .kind = loader::ByteRangeSegment::Kind::kPad,
-            .dst_offset = cursor,
-            .length = dense.total_bytes - cursor,
-            .src_offset = 0,
-            .source_index = 0,
-        });
-  }
-  return loader::normalize_byte_range_map(std::move(dense));
-}
-
-absl::StatusOr<loader::ByteRangeMap> subtract_byte_range_maps(
+absl::StatusOr<loader::ByteRangeMap> subtract_byte_range_maps_presorted_data(
     const loader::ByteRangeMap& whole,
     const loader::ByteRangeMap& part) {
   if (whole.total_bytes != part.total_bytes) {
@@ -585,31 +727,31 @@ absl::StatusOr<loader::ByteRangeMap> subtract_byte_range_maps(
   if (whole.num_sources != part.num_sources) {
     return absl::InvalidArgumentError("byte range map subtraction requires matching num_sources");
   }
-  auto whole_segments_or = sorted_validated_segments(whole, /*data_only=*/true);
-  if (!whole_segments_or.ok()) {
-    return whole_segments_or.status();
+  auto whole_status = validate_sorted_byte_range_map_linear(whole, /*data_only=*/true);
+  if (!whole_status.ok()) {
+    return whole_status;
   }
-  auto part_segments_or = sorted_validated_segments(part, /*data_only=*/true);
-  if (!part_segments_or.ok()) {
-    return part_segments_or.status();
+  auto part_status = validate_sorted_byte_range_map_linear(part, /*data_only=*/true);
+  if (!part_status.ok()) {
+    return part_status;
   }
 
   loader::ByteRangeMap residual;
   residual.total_bytes = whole.total_bytes;
   residual.num_sources = whole.num_sources;
-  residual.segments.reserve(whole_segments_or->size());
+  residual.segments.reserve(whole.segments.size());
 
   size_t part_index = 0;
-  for (const auto& whole_segment : *whole_segments_or) {
+  for (const auto& whole_segment : whole.segments) {
     const uint64_t whole_end = whole_segment.dst_offset + whole_segment.length;
     uint64_t cursor = whole_segment.dst_offset;
-    while (part_index < part_segments_or->size() &&
-           ((*part_segments_or)[part_index].dst_offset + (*part_segments_or)[part_index].length) <= cursor) {
+    while (part_index < part.segments.size() &&
+           (part.segments[part_index].dst_offset + part.segments[part_index].length) <= cursor) {
       ++part_index;
     }
     size_t current_part = part_index;
-    while (current_part < part_segments_or->size()) {
-      const auto& part_segment = (*part_segments_or)[current_part];
+    while (current_part < part.segments.size()) {
+      const auto& part_segment = part.segments[current_part];
       if (part_segment.dst_offset >= whole_end) {
         break;
       }
@@ -649,7 +791,7 @@ absl::StatusOr<loader::ByteRangeMap> subtract_byte_range_maps(
     }
     part_index = current_part;
   }
-  if (part_index != part_segments_or->size()) {
+  if (part_index != part.segments.size()) {
     return absl::InvalidArgumentError("collective effective data map extends beyond executor data map");
   }
   return residual;
@@ -741,11 +883,11 @@ absl::StatusOr<loader::ByteRangeMap> finalize_runtime_source_map(
     bool source_is_view,
     bool use_source_layout,
     const std::optional<loader::ByteRangeMap>& source_layout_map) {
-  auto dense_or = densify_byte_range_map_with_pad(map);
-  if (!dense_or.ok()) {
-    return dense_or.status();
+  auto status = validate_sorted_byte_range_map_linear(map, /*data_only=*/false);
+  if (!status.ok()) {
+    return status;
   }
-  loader::ByteRangeMap effective_map = std::move(*dense_or);
+  loader::ByteRangeMap effective_map = map;
 
   if (source_exposes_target_byte_space) {
     for (auto& segment : effective_map.segments) {
@@ -754,14 +896,9 @@ absl::StatusOr<loader::ByteRangeMap> finalize_runtime_source_map(
         segment.source_index = 0;
       }
     }
-    auto normalized_or = loader::normalize_byte_range_map(std::move(effective_map));
-    if (!normalized_or.ok()) {
-      return normalized_or.status();
-    }
-    effective_map = std::move(*normalized_or);
   }
   if (!source_is_view && view_plan.has_value() && !view_plan->is_identity) {
-    auto composed_or = loader::compose_byte_range_maps(effective_map, view_plan->selection.map);
+    auto composed_or = compose_sorted_byte_range_maps(effective_map, view_plan->selection.map);
     if (!composed_or.ok()) {
       return composed_or.status();
     }
@@ -771,7 +908,7 @@ absl::StatusOr<loader::ByteRangeMap> finalize_runtime_source_map(
     if (!source_layout_map.has_value()) {
       return absl::InvalidArgumentError("runtime source finalization requires source layout map");
     }
-    auto composed_or = loader::compose_byte_range_maps(effective_map, *source_layout_map);
+    auto composed_or = compose_sorted_byte_range_maps(effective_map, *source_layout_map);
     if (!composed_or.ok()) {
       return composed_or.status();
     }
@@ -799,7 +936,7 @@ absl::StatusOr<EffectiveSourceMaps> derive_effective_source_maps(
     const std::optional<loader::ByteRangeMap>& source_layout_map) {
   loader::ByteRangeMap executor_input = executor_private_map;
   if (!local_typed_pad_map.segments.empty()) {
-    auto merged_or = merge_byte_range_maps(executor_input, local_typed_pad_map);
+    auto merged_or = merge_byte_range_maps_presorted(executor_input, local_typed_pad_map);
     if (!merged_or.ok()) {
       return merged_or.status();
     }
@@ -817,12 +954,12 @@ absl::StatusOr<EffectiveSourceMaps> derive_effective_source_maps(
     return executor_effective_map_or.status();
   }
   auto executor_effective_data_map_or =
-      filter_byte_range_map_by_kind(*executor_effective_map_or, loader::ByteRangeSegment::Kind::kData);
+      filter_byte_range_map_by_kind_presorted(*executor_effective_map_or, loader::ByteRangeSegment::Kind::kData);
   if (!executor_effective_data_map_or.ok()) {
     return executor_effective_data_map_or.status();
   }
   auto executor_effective_pad_map_or =
-      filter_byte_range_map_by_kind(*executor_effective_map_or, loader::ByteRangeSegment::Kind::kPad);
+      filter_byte_range_map_by_kind_presorted(*executor_effective_map_or, loader::ByteRangeSegment::Kind::kPad);
   if (!executor_effective_pad_map_or.ok()) {
     return executor_effective_pad_map_or.status();
   }
@@ -838,7 +975,7 @@ absl::StatusOr<EffectiveSourceMaps> derive_effective_source_maps(
     return collective_effective_map_or.status();
   }
   auto collective_effective_data_map_or =
-      filter_byte_range_map_by_kind(*collective_effective_map_or, loader::ByteRangeSegment::Kind::kData);
+      filter_byte_range_map_by_kind_presorted(*collective_effective_map_or, loader::ByteRangeSegment::Kind::kData);
   if (!collective_effective_data_map_or.ok()) {
     return collective_effective_data_map_or.status();
   }
@@ -848,7 +985,7 @@ absl::StatusOr<EffectiveSourceMaps> derive_effective_source_maps(
   }
 
   auto generic_effective_data_map_or =
-      subtract_byte_range_maps(*executor_effective_data_map_or, *collective_effective_data_map_or);
+      subtract_byte_range_maps_presorted_data(*executor_effective_data_map_or, *collective_effective_data_map_or);
   if (!generic_effective_data_map_or.ok()) {
     return generic_effective_data_map_or.status();
   }
@@ -3553,6 +3690,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         } else {
           const replica::CollectiveMappedTargetLoadOptions collective_options{
               .chunk_bytes = std::min<uint64_t>(slice_bytes, total_size),
+              .streaming_buffer_chunks = config_.options->streaming_buffer_chunks,
               .merge_max_gap_bytes = config_.options->byte_mapping.disk_source_merge_max_gap_bytes,
               .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
               .strategy_config = config_.options->materialization_strategy,
@@ -4133,13 +4271,18 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     const bool source_exposes_target_byte_space =
         source_is_view && request_hints.variant && request_hints.variant->view_id.has_value() && !view_plan.has_value();
     std::optional<loader::ByteRangeMap> source_layout_map;
+    double source_layout_map_sec = 0.0;
     if (use_source_layout) {
+      const auto source_layout_map_start = std::chrono::steady_clock::now();
       auto map_ptr_or = get_map_ptr(true);
       if (!map_ptr_or.ok()) {
         return map_ptr_or.status();
       }
       source_layout_map = **map_ptr_or;
+      source_layout_map_sec =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - source_layout_map_start).count();
     }
+    const auto derive_maps_start = std::chrono::steady_clock::now();
     auto effective_maps_or = derive_effective_source_maps(
         executor_private_map,
         collective_data_map,
@@ -4152,20 +4295,26 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     if (!effective_maps_or.ok()) {
       return effective_maps_or.status();
     }
+    const double derive_effective_maps_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - derive_maps_start).count();
     const EffectiveSourceMaps& effective_maps = *effective_maps_or;
     const loader::ByteRangeMap& effective_map = effective_maps.executor_effective_map;
     const loader::ByteRangeMap& effective_data_map = effective_maps.executor_effective_data_map;
     const loader::ByteRangeMap& collective_effective_data_map = effective_maps.collective_effective_data_map;
     const loader::ByteRangeMap& generic_effective_data_map = effective_maps.generic_effective_data_map;
+    const auto additional_pad_start = std::chrono::steady_clock::now();
     auto additional_pad_map_or =
         subtract_byte_range_map_by_dst_ranges(effective_maps.executor_effective_pad_map, local_typed_pad_map);
     if (!additional_pad_map_or.ok()) {
       return additional_pad_map_or.status();
     }
+    const double additional_pad_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - additional_pad_start).count();
     const loader::ByteRangeMap additional_executor_pad_map = *additional_pad_map_or;
     const uint64_t effective_local_typed_bytes =
         local_typed_bytes + byte_range_map_covered_bytes(additional_executor_pad_map);
 
+    const auto source_wrap_start = std::chrono::steady_clock::now();
     std::shared_ptr<loader::SeekableSource> base_source = std::move(*source_or);
     std::vector<std::shared_ptr<loader::SeekableSource>> sources;
     sources.emplace_back(base_source);
@@ -4183,7 +4332,10 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               " source_byte_space=",
               static_cast<int>(source_byte_space)));
     }
+    const double source_wrap_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - source_wrap_start).count();
 
+    const auto boundary_check_start = std::chrono::steady_clock::now();
     const bool map_crosses_storage_boundaries =
         byte_range_map_crosses_target_storage_boundaries(effective_map, target_layout);
     const bool source_ordered = use_source_layout && config_.options->byte_mapping.disk_source_ordered_read &&
@@ -4194,10 +4346,16 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                 << " map_segments=" << effective_map.segments.size()
                 << " target_storages=" << target_layout.storages.size();
     }
+    const double boundary_check_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - boundary_check_start).count();
     std::unique_ptr<loader::SeekableSource> plan_source;
     bool direct_write_supported = false;
+    bool plan_source_built = false;
     double map_build_sec = 0.0;
-    if (!source_ordered) {
+    auto ensure_plan_source = [&]() -> absl::Status {
+      if (source_ordered || plan_source) {
+        return absl::OkStatus();
+      }
       const auto map_build_start = std::chrono::steady_clock::now();
       loader::ByteRangeCompiler compiler(config_.options->byte_mapping, "materialize_mapped_into_target");
       auto program_or = compiler.Compile(effective_map);
@@ -4219,13 +4377,15 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         return absl::InternalError("materialize_mapped_into_target failed to build mapped source");
       }
       direct_write_supported = plan_source->supports_direct_write_at();
+      plan_source_built = true;
       map_build_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - map_build_start).count();
-    }
+      return absl::OkStatus();
+    };
     const strategy::ResolvedSourceBinding source_binding{
         .source = source_kind,
         .source_byte_space = source_byte_space,
         .source_layout_available = use_source_layout,
-        .direct_write_capable = direct_write_supported,
+        .direct_write_capable = false,
         .collective_eligible = source_kind == loading::MaterializationSource::kDisk &&
             request_hints.collective_load_group.has_value() && allow_collective_mapped_executor(strategy_config) &&
             strategy_uses_collective_lane,
@@ -4242,6 +4402,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     storages.reserve(target_layout.storages.size());
     std::vector<loader::Range> ranges;
     ranges.reserve(target_layout.storages.size());
+    const auto target_layout_setup_start = std::chrono::steady_clock::now();
     uint64_t range_cursor = 0;
     for (const auto& storage : target_layout.storages) {
       if (storage.length == 0) {
@@ -4257,6 +4418,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     if (range_cursor != total_size) {
       return absl::InvalidArgumentError("materialize_mapped_into_target storage ranges do not span total_size");
     }
+    const double target_layout_setup_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - target_layout_setup_start).count();
 
     std::string collective_skip_reason = source_binding.collective_eligible
         ? std::string{}
@@ -4312,6 +4475,11 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               << " collective_eligible=" << source_binding.collective_eligible
               << " init_sec=" << std::chrono::duration<double>(init_done - source_total_start).count()
               << " open_sec=" << std::chrono::duration<double>(source_open_done - init_done).count()
+              << " plan_source_built=" << plan_source_built << " map_build_sec=" << map_build_sec
+              << " source_layout_map_sec=" << source_layout_map_sec
+              << " derive_effective_maps_sec=" << derive_effective_maps_sec
+              << " additional_pad_sec=" << additional_pad_sec << " source_wrap_sec=" << source_wrap_sec
+              << " boundary_check_sec=" << boundary_check_sec << " target_layout_setup_sec=" << target_layout_setup_sec
               << " setup_after_open_sec=" << std::chrono::duration<double>(setup_done - source_open_done).count()
               << " total_setup_sec=" << std::chrono::duration<double>(setup_done - source_total_start).count();
 
@@ -4325,6 +4493,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         } else {
           const replica::CollectiveMappedTargetLoadOptions collective_options{
               .chunk_bytes = std::min<uint64_t>(slice_bytes, total_size),
+              .streaming_buffer_chunks = config_.options->streaming_buffer_chunks,
               .merge_max_gap_bytes = config_.options->byte_mapping.disk_source_merge_max_gap_bytes,
               .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
               .strategy_config = strategy_config,
@@ -4382,11 +4551,13 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                   collective_options);
               const auto local_done = std::chrono::steady_clock::now();
               local_mapped_sec = std::chrono::duration<double>(local_done - local_start).count();
+              const uint64_t local_residual_covered_bytes =
+                  byte_range_map_covered_bytes(local_result.residual_data_map);
               LOG(INFO) << "tc_profile materialize_mapped_into_target local_mapped_continuation_call"
                         << " artifact_id=" << request_hints.artifact_id << " target_device=" << target_device.ordinal
                         << " handled=" << local_result.handled << " status_ok=" << local_result.status.ok()
                         << " handled_bytes=" << local_result.handled_bytes
-                        << " residual_bytes=" << local_result.residual_data_map.total_bytes
+                        << " residual_bytes=" << local_residual_covered_bytes
                         << " skip_reason=" << local_result.skip_reason << " sec=" << local_mapped_sec;
               if (local_result.handled) {
                 if (!local_result.status.ok()) {
@@ -4551,6 +4722,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         if (shared_or.ok()) {
           const replica::CollectiveMappedTargetLoadOptions local_options{
               .chunk_bytes = std::min<uint64_t>(slice_bytes, total_size),
+              .streaming_buffer_chunks = config_.options->streaming_buffer_chunks,
               .merge_max_gap_bytes = config_.options->byte_mapping.disk_source_merge_max_gap_bytes,
               .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
               .strategy_config = strategy_config,
@@ -4571,12 +4743,15 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               local_options);
           const auto local_done = std::chrono::steady_clock::now();
           const double local_mapped_sec = std::chrono::duration<double>(local_done - local_start).count();
+          const uint64_t local_residual_covered_bytes = byte_range_map_covered_bytes(local_result.residual_data_map);
           LOG(INFO) << "tc_profile materialize_mapped_into_target local_mapped_call"
                     << " artifact_id=" << request_hints.artifact_id << " target_device=" << target_device.ordinal
                     << " handled=" << local_result.handled << " status_ok=" << local_result.status.ok()
+                    << " status_code=" << static_cast<int>(local_result.status.code())
+                    << " status_message=" << local_result.status.message()
                     << " handled_bytes=" << local_result.handled_bytes
-                    << " residual_bytes=" << local_result.residual_data_map.total_bytes
-                    << " skip_reason=" << local_result.skip_reason << " sec=" << local_mapped_sec;
+                    << " residual_bytes=" << local_residual_covered_bytes << " skip_reason=" << local_result.skip_reason
+                    << " sec=" << local_mapped_sec;
           if (local_result.handled) {
             if (!local_result.status.ok()) {
               return absl::Status(
@@ -4743,6 +4918,13 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
             absl::StrCat("materialize_mapped_into_target source-ordered execution failed: ", exec_status.message()));
       }
     } else if (effective_map.total_bytes > 0 && !effective_map.segments.empty()) {
+      auto ensure_status = ensure_plan_source();
+      if (!ensure_status.ok()) {
+        return ensure_status;
+      }
+      if (!plan_source) {
+        return absl::InternalError("materialize_mapped_into_target missing mapped source for streaming execution");
+      }
       const size_t num_chunks = resolve_streaming_buffer_chunks_for_transfer(
           effective_map.total_bytes, slice_bytes, config_.runtime_context->options().streaming_buffer_chunks);
       auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
@@ -4803,7 +4985,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         .collective_metrics = {},
         .collective_skip_reason = collective_skip_reason,
         .collective_handled = false,
-        .direct_write_supported = source_binding.direct_write_capable,
+        .direct_write_supported = direct_write_supported,
         .source_ordered = source_ordered,
         .dominant_executor = source_ordered ? "SourceOrderedMappedTargetExecutor" : "MappedTargetStreamingExecutor",
         .selection_reason = !source_bound_lane_plan.selection_reason.empty() ? source_bound_lane_plan.selection_reason

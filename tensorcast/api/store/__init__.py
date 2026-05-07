@@ -1244,6 +1244,7 @@ class Store:
         target_tensors: Mapping[str, torch.Tensor] | None = None,
         mapping: CopyPlan | None = None,
         ctx: CallContext | None = None,
+        restore_tensors_async: bool = False,
     ) -> Binding:
         if not isinstance(layout, BindingLayout):
             raise ArtifactError(
@@ -1354,22 +1355,8 @@ class Store:
                 now - profile_start,
             )
             profile_last = now
+            tensors = None
             try:
-                logger.info("tc_profile_py store.create_binding restore_tensors_start")
-                tensors = restore_owned_binding_tensors(
-                    response=response,
-                    runtime=runtime,
-                    device_id=device_id,
-                )
-                now = time.perf_counter()
-                logger.info(
-                    "tc_profile_py store.create_binding restore_tensors_done "
-                    "tensor_count=%d step_sec=%.6f total_sec=%.6f",
-                    len(tensors),
-                    now - profile_last,
-                    now - profile_start,
-                )
-                profile_last = now
                 current_value_metadata = parse_binding_value_or_raise(
                     response.current_value
                     if hasattr(response, "current_value")
@@ -1386,6 +1373,31 @@ class Store:
                     now - profile_start,
                 )
                 profile_last = now
+                if restore_tensors_async:
+                    logger.info(
+                        "tc_profile_py store.create_binding restore_tensors_deferred "
+                        "binding_id=%s total_sec=%.6f",
+                        getattr(response, "binding_id", None),
+                        now - profile_start,
+                    )
+                else:
+                    logger.info(
+                        "tc_profile_py store.create_binding restore_tensors_start"
+                    )
+                    tensors = restore_owned_binding_tensors(
+                        response=response,
+                        runtime=runtime,
+                        device_id=device_id,
+                    )
+                    now = time.perf_counter()
+                    logger.info(
+                        "tc_profile_py store.create_binding restore_tensors_done "
+                        "tensor_count=%d step_sec=%.6f total_sec=%.6f",
+                        len(tensors),
+                        now - profile_last,
+                        now - profile_start,
+                    )
+                    profile_last = now
             except Exception:
                 with contextlib.suppress(Exception):
                     client.close_owned_binding(binding_id=str(response.binding_id))
@@ -1400,6 +1412,8 @@ class Store:
                 device=device_obj,
                 device_id=device_id,
                 target_publication_token=None,
+                restore_response=response if restore_tensors_async else None,
+                start_restore=restore_tensors_async,
             )
             now = time.perf_counter()
             logger.info(
@@ -3999,6 +4013,7 @@ def create_binding(
     target_tensors: Mapping[str, torch.Tensor] | None = None,
     mapping: CopyPlan | None = None,
     ctx: CallContext | None = None,
+    restore_tensors_async: bool = False,
 ) -> Binding:
     return _coerce_store().create_binding(
         layout,
@@ -4007,6 +4022,7 @@ def create_binding(
         target_tensors=target_tensors,
         mapping=mapping,
         ctx=ctx,
+        restore_tensors_async=restore_tensors_async,
     )
 
 

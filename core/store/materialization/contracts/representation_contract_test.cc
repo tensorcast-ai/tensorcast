@@ -101,6 +101,7 @@ TEST_CASE("representation contract normalization is order stable", "[representat
 
   RepresentationTransformContract reordered = contract;
   std::swap(reordered.tensor_bindings[0], reordered.tensor_bindings[1]);
+  RepresentationTransformContract execution_only = reordered;
 
   auto normalized_or = normalize_representation_transform_contract(std::move(contract));
   REQUIRE(normalized_or.ok());
@@ -114,6 +115,14 @@ TEST_CASE("representation contract normalization is order stable", "[representat
   CHECK(
       normalized_or->target_representation.representation_contract_hash ==
       reordered_or->target_representation.representation_contract_hash);
+
+  auto execution_only_or = normalize_representation_transform_contract(
+      std::move(execution_only), NormalizeRepresentationTransformContractOptions{.compute_identity_hashes = false});
+  REQUIRE(execution_only_or.ok());
+  CHECK(execution_only_or->tensor_bindings == normalized_or->tensor_bindings);
+  CHECK(execution_only_or->target_representation.tensor_schema_hash.empty());
+  CHECK(execution_only_or->target_representation.representation_contract_hash.empty());
+  CHECK(validate_representation_transform_contract(*execution_only_or).ok());
 }
 
 TEST_CASE(

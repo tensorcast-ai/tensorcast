@@ -35,7 +35,8 @@ def normalize_binding_realization_plan(
 ) -> tuple[BindingRealizationEntry, ...]:
     if not isinstance(plan, Sequence) or not plan:
         raise ArtifactError(
-            "realization_plan must be a non-empty sequence of BindingRealizationEntry objects",
+            "realization_plan must be a non-empty sequence of "
+            "BindingRealizationEntry objects",
             status_code="INVALID_ARGUMENT",
             retryable=False,
         )
@@ -84,6 +85,12 @@ def binding_realization_plan_to_proto(
     *,
     target_index_bytes: bytes,
 ) -> store_daemon_pb2.BindingRealizationPlan:
+    if not isinstance(plan, Sequence) or not plan:
+        raise ArtifactError(
+            "realization_plan must be a non-empty sequence of BindingRealizationEntry objects",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
     target_index = canonical_index_from_bytes(target_index_bytes)
     dtype_by_name = {entry.name: entry.dtype for entry in target_index.entries}
     proto = store_daemon_pb2.BindingRealizationPlan(version=1)
@@ -92,68 +99,95 @@ def binding_realization_plan_to_proto(
     scalar_fill_count = 0
     sample_copy_dsts: list[str] = []
     sample_scalar_fill_dsts: list[str] = []
-    for idx, entry in enumerate(normalize_binding_realization_plan(plan)):
-        if _ranges_describe_noop(entry.dst_ranges):
+    for idx, raw in enumerate(plan):
+        if isinstance(raw, BindingRealizationEntry):
+            op = str(raw.op).strip().lower()
+            dst_name = str(raw.dst_name)
+            source_name = None if raw.source_name is None else str(raw.source_name)
+            source_ranges = raw.source_ranges
+            dst_ranges = raw.dst_ranges
+            fill_value = raw.fill_value
+        elif isinstance(raw, Mapping):
+            op = str(raw.get("op", "")).strip().lower()
+            dst_name = str(raw.get("dst_name", ""))
+            source_name = (
+                None if raw.get("source_name") is None else str(raw.get("source_name"))
+            )
+            source_ranges = raw.get("source_ranges")
+            dst_ranges = raw.get("dst_ranges")
+            fill_value = raw.get("fill_value")
+        else:
+            raise ArtifactError(
+                "realization_plan entries must be BindingRealizationEntry "
+                "objects or dicts",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if _ranges_describe_noop_for_proto(dst_ranges, idx=idx):
             continue
-        if not entry.dst_name:
+        if not dst_name:
             raise ArtifactError(
                 f"realization_plan[{idx}] dst_name is required",
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        dst_dtype = dtype_by_name.get(entry.dst_name)
+        dst_dtype = dtype_by_name.get(dst_name)
         if dst_dtype is None:
             raise ArtifactError(
-                f"realization_plan[{idx}] dst_name '{entry.dst_name}' is not present in BindingLayout",
+                f"realization_plan[{idx}] dst_name '{dst_name}' is not "
+                "present in BindingLayout",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-        proto_entry = proto.entries.add(dst_name=entry.dst_name)
-        op = str(entry.op).strip().lower()
+        proto_entry = proto.entries.add(dst_name=dst_name)
         if op == "copy":
-            if not entry.source_name:
+            if not source_name:
                 raise ArtifactError(
                     f"realization_plan[{idx}] copy requires source_name",
                     status_code="INVALID_ARGUMENT",
                     retryable=False,
                 )
             proto_entry.op_kind = store_daemon_pb2.BINDING_REALIZATION_OP_KIND_COPY
-            proto_entry.source_name = str(entry.source_name)
+            proto_entry.source_name = source_name
             copy_count += 1
             if len(sample_copy_dsts) < 8:
-                sample_copy_dsts.append(str(entry.dst_name))
+                sample_copy_dsts.append(dst_name)
         elif op == "fill":
-            if entry.source_name:
+            if source_name:
                 proto_entry.op_kind = (
                     store_daemon_pb2.BINDING_REALIZATION_OP_KIND_SCALAR_FILL
                 )
-                proto_entry.source_name = str(entry.source_name)
+                proto_entry.source_name = source_name
                 scalar_fill_count += 1
                 if len(sample_scalar_fill_dsts) < 8:
-                    sample_scalar_fill_dsts.append(str(entry.dst_name))
+                    sample_scalar_fill_dsts.append(dst_name)
             else:
                 proto_entry.op_kind = (
                     store_daemon_pb2.BINDING_REALIZATION_OP_KIND_CONST_FILL
                 )
                 proto_entry.fill_value = _coerce_fill_value_bytes(
-                    entry.fill_value,
+                    fill_value,
                     dst_dtype=dst_dtype,
                     idx=idx,
                 )
                 const_fill_count += 1
         else:
             raise ArtifactError(
-                f"realization_plan[{idx}] has unsupported op '{entry.op}'",
+                f"realization_plan[{idx}] has unsupported op '{op}'",
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        for range_spec in entry.source_ranges:
+        for range_spec in _iter_ranges_for_proto(
+            source_ranges, idx=idx, field="source_ranges"
+        ):
             proto_entry.source_ranges.add(
                 dim=int(range_spec.dim),
                 start=int(range_spec.start),
                 end=int(range_spec.end),
             )
-        for range_spec in entry.dst_ranges:
+        for range_spec in _iter_ranges_for_proto(
+            dst_ranges, idx=idx, field="dst_ranges"
+        ):
             proto_entry.dst_ranges.add(
                 dim=int(range_spec.dim),
                 start=int(range_spec.start),
@@ -179,6 +213,57 @@ def _ranges_describe_noop(ranges: Sequence[Range]) -> bool:
     if not ranges:
         return False
     return any(int(rng.end) <= int(rng.start) for rng in ranges)
+
+
+def _ranges_describe_noop_for_proto(
+    ranges: object | None,
+    *,
+    idx: int,
+) -> bool:
+    if ranges is None:
+        return False
+    for rng in _iter_ranges_for_proto(ranges, idx=idx, field="dst_ranges"):
+        if int(rng.end) <= int(rng.start):
+            return True
+    return False
+
+
+def _iter_ranges_for_proto(
+    value: object | None,
+    *,
+    idx: int,
+    field: str,
+):
+    if value is None:
+        return
+    if isinstance(value, Range):
+        yield value
+        return
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in value:
+            if isinstance(item, Range):
+                yield item
+                continue
+            if isinstance(item, Mapping):
+                yield Range(
+                    dim=int(item["dim"]),
+                    start=int(item["start"]),
+                    end=int(item["end"]),
+                )
+                continue
+            raise ArtifactError(
+                f"realization_plan[{idx}] {field} entries must be Range "
+                "objects or dicts",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        return
+    raise ArtifactError(
+        f"realization_plan[{idx}] {field} must be a Range or a sequence of "
+        "Range objects",
+        status_code="INVALID_ARGUMENT",
+        retryable=False,
+    )
 
 
 def _coerce_ranges(value: object | None) -> tuple[Range, ...]:

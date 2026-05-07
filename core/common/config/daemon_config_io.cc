@@ -585,7 +585,7 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
     ms->set_owner_file_collective_max_owner_skew_ratio(1.5);
   }
   if (ms->owner_file_collective_min_dedup_saving_bytes() == 0) {
-    ms->set_owner_file_collective_min_dedup_saving_bytes(64ULL * 1024ULL * 1024ULL);
+    ms->set_owner_file_collective_min_dedup_saving_bytes(512ULL * 1024ULL * 1024ULL);
   }
   if (!ms->has_owner_file_collective_group_assemble_timeout()) {
     auto* d = ms->mutable_owner_file_collective_group_assemble_timeout();

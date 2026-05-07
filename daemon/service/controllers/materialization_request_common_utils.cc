@@ -267,7 +267,8 @@ absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
     bool allow_disk,
     bool allow_local_import_fallback,
     bool loopback_peer,
-    std::optional<uint64_t> disk_expected_size) {
+    std::optional<uint64_t> disk_expected_size,
+    bool lightweight_msa1_validation) {
   ArtifactResolution resolution;
   resolution.resolved_artifact_id = std::move(artifact_id);
 
@@ -293,11 +294,11 @@ absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
               .mtime_ns = fingerprint.mtime_ns,
           });
     }
-    auto validation_status = materialization_disk_resolve::validate_mounted_source_snapshot(
-        std::filesystem::path(entry->canonical_source_path),
-        entry->canonical_index_json,
-        entry->source_index_json,
-        expected_fingerprints);
+    const std::filesystem::path source_path(entry->canonical_source_path);
+    auto validation_status = lightweight_msa1_validation
+        ? materialization_disk_resolve::validate_source_fingerprints(source_path, expected_fingerprints)
+        : materialization_disk_resolve::validate_mounted_source_snapshot(
+              source_path, entry->canonical_index_json, entry->source_index_json, expected_fingerprints);
     if (!validation_status.ok()) {
       materialization_disk_resolve::record_mounted_source_validation_outcome("mismatch");
       const bool erased = source_registry->erase_binding(resolution.resolved_artifact_id);

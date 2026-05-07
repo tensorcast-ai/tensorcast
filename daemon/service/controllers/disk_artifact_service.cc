@@ -492,6 +492,19 @@ ArtifactSourceRegistry::FingerprintMap to_registry_fingerprints(
   return out;
 }
 
+ArtifactSourceRegistry::SourceFormatKind to_registry_source_format(
+    materialization_disk_resolve::MountedSourceFormatKind format_kind) {
+  switch (format_kind) {
+    case materialization_disk_resolve::MountedSourceFormatKind::kPartitioned:
+      return ArtifactSourceRegistry::SourceFormatKind::kPartitioned;
+    case materialization_disk_resolve::MountedSourceFormatKind::kSafetensors:
+      return ArtifactSourceRegistry::SourceFormatKind::kSafetensors;
+    case materialization_disk_resolve::MountedSourceFormatKind::kUnspecified:
+    default:
+      return ArtifactSourceRegistry::SourceFormatKind::kUnspecified;
+  }
+}
+
 void upsert_local_import_binding(
     ArtifactSourceRegistry& source_registry,
     const materialization_disk_resolve::ImportArtifactFromPathResult& imported) {
@@ -503,6 +516,7 @@ void upsert_local_import_binding(
           .canonical_index_json = imported.canonical_index_json,
           .source_index_json = imported.source_index_json,
           .source_disk_path = imported.normalized_path.string(),
+          .source_format_kind = to_registry_source_format(imported.format_kind),
           .descriptor_present = imported.descriptor_present,
           .index_multihash = imported.index_multihash,
           .data_multihash = imported.data_multihash,
@@ -890,6 +904,7 @@ grpc::Status DiskArtifactService::resolve_public_disk_source(
           .canonical_index_json = resolved_or->canonical_index_json,
           .source_index_json = resolved_or->source_index_json,
           .source_disk_path = resolved_or->normalized_path.string(),
+          .source_format_kind = to_registry_source_format(resolved_or->format_kind),
           .descriptor_present = resolved_or->descriptor_present,
           .index_multihash = resolved_or->canonical_index_multihash,
           .data_multihash = std::nullopt,

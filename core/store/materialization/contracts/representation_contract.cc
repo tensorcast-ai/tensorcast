@@ -1224,7 +1224,8 @@ absl::StatusOr<std::string> compute_representation_contract_hash(const Represent
 }
 
 absl::StatusOr<RepresentationTransformContract> normalize_representation_transform_contract(
-    RepresentationTransformContract contract) {
+    RepresentationTransformContract contract,
+    NormalizeRepresentationTransformContractOptions options) {
   if (contract.target_representation.logical_topology.has_value()) {
     auto& dimensions = contract.target_representation.logical_topology->dimensions;
     std::sort(dimensions.begin(), dimensions.end(), [](const TopologyDimension& lhs, const TopologyDimension& rhs) {
@@ -1246,6 +1247,15 @@ absl::StatusOr<RepresentationTransformContract> normalize_representation_transfo
     contract.residual_fallback_map = std::move(*normalized_map_or);
   } else {
     contract.residual_fallback_map = loader::ByteRangeMap{};
+  }
+  if (!options.compute_identity_hashes) {
+    auto status = validate_representation_transform_contract(contract);
+    if (!status.ok()) {
+      return status;
+    }
+    contract.target_representation.tensor_schema_hash.clear();
+    contract.target_representation.representation_contract_hash.clear();
+    return contract;
   }
   auto tensor_schema_hash_or = compute_tensor_schema_hash(contract);
   if (!tensor_schema_hash_or.ok()) {
