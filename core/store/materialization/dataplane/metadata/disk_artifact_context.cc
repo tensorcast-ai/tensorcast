@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cstring>
@@ -16,6 +17,7 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/check.h"
@@ -23,6 +25,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
 #include "core/checkpoint/tensor_writer.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
 #include "core/store/materialization/dataplane/metadata/safetensors_util.h"
@@ -33,12 +36,21 @@ namespace {
 
 struct CacheState {
   absl::Mutex mutex;
-  absl::flat_hash_map<std::string, std::weak_ptr<const DiskArtifactContext>> contexts ABSL_GUARDED_BY(mutex);
+
+  struct ContextEntry {
+    std::shared_ptr<const DiskArtifactContext> context;
+    uint64_t last_access{0};
+  };
+
+  absl::flat_hash_map<std::string, ContextEntry> contexts ABSL_GUARDED_BY(mutex);
+  std::atomic<uint64_t> access_counter{0};
   std::atomic<uint64_t> context_hits{0};
   std::atomic<uint64_t> context_misses{0};
   std::atomic<uint64_t> index_hits{0};
   std::atomic<uint64_t> index_misses{0};
 };
+
+constexpr size_t kMaxCachedDiskArtifactContexts = 16;
 
 CacheState& cache_state() {
   static CacheState state;
@@ -50,6 +62,62 @@ std::filesystem::path normalize_artifact_path(const std::filesystem::path& artif
     return artifact_path.lexically_normal();
   }
   return std::filesystem::absolute(artifact_path).lexically_normal();
+}
+
+bool is_cache_relevant_file(std::string_view filename) {
+  return filename == "artifact_descriptor.json" || filename == "tensor_index.json" || filename == "tensor_index.cbor" ||
+      filename == "tensor.data" || filename.starts_with("tensor.data_") || filename.ends_with(".safetensors");
+}
+
+absl::StatusOr<std::string> artifact_directory_cache_fingerprint(const std::filesystem::path& artifact_path) {
+  std::vector<std::string> entries;
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::directory_iterator(artifact_path, ec)) {
+    if (ec) {
+      return absl::ErrnoToStatus(
+          ec.value(), absl::StrCat("Failed to enumerate artifact directory '", artifact_path.string(), "'"));
+    }
+    if (!entry.is_regular_file(ec)) {
+      if (ec) {
+        return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat '", entry.path().string(), "'"));
+      }
+      continue;
+    }
+    const std::string filename = entry.path().filename().string();
+    if (!is_cache_relevant_file(filename)) {
+      continue;
+    }
+    const uint64_t size = entry.file_size(ec);
+    if (ec) {
+      return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat size for '", entry.path().string(), "'"));
+    }
+    const auto mtime = entry.last_write_time(ec);
+    if (ec) {
+      return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat mtime for '", entry.path().string(), "'"));
+    }
+    entries.push_back(absl::StrCat(filename, ":", size, ":", mtime.time_since_epoch().count()));
+  }
+  std::ranges::sort(entries);
+  return absl::StrJoin(entries, "|");
+}
+
+std::vector<std::shared_ptr<const DiskArtifactContext>> evict_old_contexts_locked(CacheState& state)
+    ABSL_EXCLUSIVE_LOCKS_REQUIRED(state.mutex) {
+  std::vector<std::shared_ptr<const DiskArtifactContext>> evicted;
+  while (state.contexts.size() > kMaxCachedDiskArtifactContexts) {
+    auto victim = state.contexts.end();
+    for (auto it = state.contexts.begin(); it != state.contexts.end(); ++it) {
+      if (victim == state.contexts.end() || it->second.last_access < victim->second.last_access) {
+        victim = it;
+      }
+    }
+    if (victim == state.contexts.end()) {
+      break;
+    }
+    evicted.push_back(std::move(victim->second.context));
+    state.contexts.erase(victim);
+  }
+  return evicted;
 }
 
 absl::StatusOr<size_t> pread_fully(int fd, uint64_t off, void* dst, size_t bytes) {
@@ -570,18 +638,20 @@ absl::StatusOr<IndexInfo> DiskArtifactContext::get_index_info(int target_device_
 absl::StatusOr<std::shared_ptr<const DiskArtifactContext>> get_disk_artifact_context(
     const std::filesystem::path& artifact_path) {
   const std::filesystem::path normalized = normalize_artifact_path(artifact_path);
-  const std::string cache_key = normalized.string();
+  auto fingerprint_or = artifact_directory_cache_fingerprint(normalized);
+  if (!fingerprint_or.ok()) {
+    return fingerprint_or.status();
+  }
+  const std::string cache_key = absl::StrCat(normalized.string(), "\n", *fingerprint_or);
   auto& state = cache_state();
   {
     absl::MutexLock lock(&state.mutex);
     auto it = state.contexts.find(cache_key);
     if (it != state.contexts.end()) {
-      if (auto existing = it->second.lock(); existing != nullptr) {
-        LOG(INFO) << "DiskArtifactContext cache hit path=" << normalized.string();
-        state.context_hits.fetch_add(1, std::memory_order_relaxed);
-        return existing;
-      }
-      state.contexts.erase(it);
+      it->second.last_access = state.access_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+      LOG(INFO) << "DiskArtifactContext cache hit path=" << normalized.string();
+      state.context_hits.fetch_add(1, std::memory_order_relaxed);
+      return it->second.context;
     }
   }
 
@@ -591,12 +661,28 @@ absl::StatusOr<std::shared_ptr<const DiskArtifactContext>> get_disk_artifact_con
   }
   LOG(INFO) << "DiskArtifactContext cache miss path=" << normalized.string();
 
+  std::vector<std::shared_ptr<const DiskArtifactContext>> evicted_contexts;
   {
     absl::MutexLock lock(&state.mutex);
-    state.contexts[cache_key] = *built_or;
+    auto it = state.contexts.find(cache_key);
+    if (it != state.contexts.end()) {
+      it->second.last_access = state.access_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+      state.context_hits.fetch_add(1, std::memory_order_relaxed);
+      return it->second.context;
+    }
+    state.contexts[cache_key] = CacheState::ContextEntry{
+        .context = *built_or, .last_access = state.access_counter.fetch_add(1, std::memory_order_relaxed) + 1};
+    evicted_contexts = evict_old_contexts_locked(state);
   }
+  // Release retired mmap handles outside the cache mutex.
+  evicted_contexts.clear();
   state.context_misses.fetch_add(1, std::memory_order_relaxed);
   return *built_or;
+}
+
+absl::StatusOr<std::shared_ptr<const DiskArtifactContext>> get_uncached_disk_artifact_context(
+    const std::filesystem::path& artifact_path) {
+  return build_disk_artifact_context(normalize_artifact_path(artifact_path));
 }
 
 DiskArtifactContextCacheStats get_disk_artifact_context_cache_stats() {
@@ -615,6 +701,7 @@ void reset_disk_artifact_context_cache_for_testing() {
     absl::MutexLock lock(&state.mutex);
     state.contexts.clear();
   }
+  state.access_counter.store(0, std::memory_order_relaxed);
   state.context_hits.store(0, std::memory_order_relaxed);
   state.context_misses.store(0, std::memory_order_relaxed);
   state.index_hits.store(0, std::memory_order_relaxed);

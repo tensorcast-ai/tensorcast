@@ -20,6 +20,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
 #include "absl/random/random.h"
+#include "absl/status/status.h"
 #include "absl/strings/escaping.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
@@ -204,49 +205,155 @@ bool is_byte_only_disk_metadata(const std::optional<store::loading::DiskMetadata
   return disk_metadata.has_value() && disk_metadata->tensor_aware.has_value() && !*disk_metadata->tensor_aware;
 }
 
+std::optional<bool> public_disk_source_is_safetensors(const v2::PublicDiskSourceHandle& public_disk_source) {
+  switch (public_disk_source.format_kind()) {
+    case v2::DISK_SOURCE_FORMAT_KIND_PARTITIONED:
+      return false;
+    case v2::DISK_SOURCE_FORMAT_KIND_SAFETENSORS:
+      return true;
+    case v2::DISK_SOURCE_FORMAT_KIND_UNSPECIFIED:
+    default:
+      return std::nullopt;
+  }
+}
+
+std::optional<bool> registry_source_is_safetensors(const ArtifactSourceRegistry::Entry& entry) {
+  switch (entry.source_format_kind) {
+    case ArtifactSourceRegistry::SourceFormatKind::kPartitioned:
+      return false;
+    case ArtifactSourceRegistry::SourceFormatKind::kSafetensors:
+      return true;
+    case ArtifactSourceRegistry::SourceFormatKind::kUnspecified:
+    default:
+      return std::nullopt;
+  }
+}
+
+std::optional<bool> public_disk_source_is_tensor_aware(const v2::PublicDiskSourceHandle& public_disk_source) {
+  switch (public_disk_source.metadata_capability()) {
+    case v2::DISK_METADATA_CAPABILITY_BYTE_ONLY:
+      return false;
+    case v2::DISK_METADATA_CAPABILITY_TENSOR_AWARE:
+      return true;
+    case v2::DISK_METADATA_CAPABILITY_UNSPECIFIED:
+    default:
+      return std::nullopt;
+  }
+}
+
 absl::StatusOr<std::optional<store::loading::DiskMetadata>> build_binding_disk_metadata(
     const std::optional<std::filesystem::path>& normalized_disk_path,
     std::string_view resolved_artifact_id,
     int device_ordinal,
-    ArtifactSourceRegistry& disk_imports) {
+    ArtifactSourceRegistry& disk_imports,
+    const v2::PublicDiskSourceHandle* public_disk_source,
+    const std::optional<ArtifactSourceRegistry::Entry>& resolved_source_entry) {
   (void)device_ordinal;
   std::optional<store::loading::DiskMetadata> disk_metadata;
-  if (normalized_disk_path.has_value()) {
-    auto descriptor_or = load_descriptor_metadata(*normalized_disk_path);
-    if (!descriptor_or.ok()) {
-      return descriptor_or.status();
+  std::optional<ArtifactSourceRegistry::Entry> local_import = resolved_source_entry;
+  if (!local_import.has_value()) {
+    local_import = disk_imports.lookup_binding(resolved_artifact_id);
+  }
+  if (public_disk_source != nullptr && !public_disk_source->canonical_index_bytes().empty() &&
+      local_import.has_value() &&
+      local_import->source_kind == ArtifactSourceRegistry::SourceKind::kMountedSourceArtifact) {
+    if (local_import->canonical_index_json.empty()) {
+      return absl::FailedPreconditionError("public_disk_source requires daemon-resolved canonical index");
     }
-    auto mounted_metadata_or = materialization_disk_resolve::build_mounted_source_metadata(*normalized_disk_path);
-    if (!mounted_metadata_or.ok()) {
-      return mounted_metadata_or.status();
+    if (public_disk_source->canonical_index_bytes() != local_import->canonical_index_json) {
+      return absl::FailedPreconditionError(
+          "public_disk_source.canonical_index_bytes does not match daemon-resolved canonical index");
+    }
+    if (!public_disk_source->source_index_bytes().empty() &&
+        (!local_import->source_index_json.has_value() ||
+         public_disk_source->source_index_bytes() != *local_import->source_index_json)) {
+      return absl::FailedPreconditionError(
+          "public_disk_source.source_index_bytes does not match daemon-resolved source index");
+    }
+    const std::optional<bool> public_is_safetensors = public_disk_source_is_safetensors(*public_disk_source);
+    const std::optional<bool> registry_is_safetensors = registry_source_is_safetensors(*local_import);
+    if (public_is_safetensors.has_value() && registry_is_safetensors.has_value() &&
+        *public_is_safetensors != *registry_is_safetensors) {
+      return absl::FailedPreconditionError(
+          "public_disk_source.format_kind does not match daemon-resolved mounted-source format");
+    }
+    const std::optional<bool> public_tensor_aware = public_disk_source_is_tensor_aware(*public_disk_source);
+    if (public_tensor_aware.has_value() && *public_tensor_aware != local_import->tensor_aware_metadata) {
+      return absl::FailedPreconditionError(
+          "public_disk_source.metadata_capability does not match daemon-resolved mounted-source metadata");
     }
     store::loading::DiskMetadata metadata;
-    metadata.descriptor_present = descriptor_or->found;
-    metadata.schema_version = descriptor_or->schema_version;
-    metadata.index_multihash = descriptor_or->index_multihash;
-    metadata.data_multihash = descriptor_or->data_multihash;
-    metadata.canonical_index_json = mounted_metadata_or->index_info.canonical_index_json;
-    if (mounted_metadata_or->index_info.source_index_json.has_value()) {
-      metadata.source_index_json = mounted_metadata_or->index_info.source_index_json;
+    metadata.descriptor_present = local_import->descriptor_present;
+    metadata.canonical_index_json = public_disk_source->canonical_index_bytes();
+    if (!public_disk_source->source_index_bytes().empty()) {
+      metadata.source_index_json = public_disk_source->source_index_bytes();
+    } else if (local_import->source_index_json.has_value()) {
+      metadata.source_index_json = *local_import->source_index_json;
     }
-    if (!mounted_metadata_or->canonical_index_multihash.empty()) {
-      metadata.index_multihash = mounted_metadata_or->canonical_index_multihash;
+    if (local_import->index_multihash.has_value()) {
+      metadata.index_multihash = *local_import->index_multihash;
     }
-    if (mounted_metadata_or->exact_size_bytes > 0) {
-      metadata.logical_total_size = mounted_metadata_or->exact_size_bytes;
+    if (local_import->data_multihash.has_value()) {
+      metadata.data_multihash = *local_import->data_multihash;
     }
-    if (mounted_metadata_or->index_info.source_total_size_bytes > 0) {
-      metadata.source_total_size_bytes = mounted_metadata_or->index_info.source_total_size_bytes;
-    } else if (mounted_metadata_or->exact_size_bytes > 0) {
-      metadata.source_total_size_bytes = mounted_metadata_or->exact_size_bytes;
+    if (public_disk_source->exact_size_bytes() > 0) {
+      metadata.logical_total_size = public_disk_source->exact_size_bytes();
+      metadata.source_total_size_bytes = public_disk_source->exact_size_bytes();
     }
-    metadata.is_safetensors =
-        mounted_metadata_or->format_kind == materialization_disk_resolve::MountedSourceFormatKind::kSafetensors;
-    metadata.tensor_aware = mounted_metadata_or->metadata_capability ==
-        materialization_disk_resolve::MountedSourceMetadataCapability::kTensorAware;
+    if (public_is_safetensors.has_value()) {
+      metadata.is_safetensors = *public_is_safetensors;
+    } else if (registry_is_safetensors.has_value()) {
+      metadata.is_safetensors = *registry_is_safetensors;
+    }
+    if (public_tensor_aware.has_value()) {
+      metadata.tensor_aware = *public_tensor_aware;
+    } else {
+      metadata.tensor_aware = local_import->tensor_aware_metadata;
+    }
+    if (metadata.tensor_aware.value_or(false) && !metadata.is_safetensors.has_value()) {
+      return absl::FailedPreconditionError(
+          "public_disk_source tensor-aware mounted-source metadata requires a daemon-resolved source format");
+    }
     disk_metadata = std::move(metadata);
   }
-  if (auto local_import = disk_imports.lookup_binding(resolved_artifact_id); local_import.has_value()) {
+  if (normalized_disk_path.has_value()) {
+    if (!disk_metadata.has_value()) {
+      auto descriptor_or = load_descriptor_metadata(*normalized_disk_path);
+      if (!descriptor_or.ok()) {
+        return descriptor_or.status();
+      }
+      auto mounted_metadata_or = materialization_disk_resolve::build_mounted_source_metadata(*normalized_disk_path);
+      if (!mounted_metadata_or.ok()) {
+        return mounted_metadata_or.status();
+      }
+      store::loading::DiskMetadata metadata;
+      metadata.descriptor_present = descriptor_or->found;
+      metadata.schema_version = descriptor_or->schema_version;
+      metadata.index_multihash = descriptor_or->index_multihash;
+      metadata.data_multihash = descriptor_or->data_multihash;
+      metadata.canonical_index_json = mounted_metadata_or->index_info.canonical_index_json;
+      if (mounted_metadata_or->index_info.source_index_json.has_value()) {
+        metadata.source_index_json = mounted_metadata_or->index_info.source_index_json;
+      }
+      if (!mounted_metadata_or->canonical_index_multihash.empty()) {
+        metadata.index_multihash = mounted_metadata_or->canonical_index_multihash;
+      }
+      if (mounted_metadata_or->exact_size_bytes > 0) {
+        metadata.logical_total_size = mounted_metadata_or->exact_size_bytes;
+      }
+      if (mounted_metadata_or->index_info.source_total_size_bytes > 0) {
+        metadata.source_total_size_bytes = mounted_metadata_or->index_info.source_total_size_bytes;
+      } else if (mounted_metadata_or->exact_size_bytes > 0) {
+        metadata.source_total_size_bytes = mounted_metadata_or->exact_size_bytes;
+      }
+      metadata.is_safetensors =
+          mounted_metadata_or->format_kind == materialization_disk_resolve::MountedSourceFormatKind::kSafetensors;
+      metadata.tensor_aware = mounted_metadata_or->metadata_capability ==
+          materialization_disk_resolve::MountedSourceMetadataCapability::kTensorAware;
+      disk_metadata = std::move(metadata);
+    }
+  }
+  if (local_import.has_value()) {
     if (!disk_metadata.has_value()) {
       disk_metadata = store::loading::DiskMetadata{};
     }
@@ -1504,8 +1611,10 @@ std::string resolve_source_artifact_id(
 
 grpc::Status validate_public_disk_source_hints(
     const v2::PublicDiskSourceHandle& public_disk_source,
-    const materialization_request_common::ArtifactResolution& resolution,
-    std::string_view canonical_index_json) {
+    const materialization_request_common::ArtifactResolution& resolution) {
+  if (public_disk_source.canonical_index_bytes().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "public_disk_source.canonical_index_bytes is required"};
+  }
   if (!public_disk_source.artifact_id().empty() &&
       public_disk_source.artifact_id() != resolution.resolved_artifact_id) {
     return {StatusCode::FAILED_PRECONDITION, "public_disk_source.artifact_id does not match daemon-resolved artifact"};
@@ -1514,11 +1623,42 @@ grpc::Status validate_public_disk_source_hints(
       public_disk_source.path() != resolution.normalized_disk_path->string()) {
     return {StatusCode::FAILED_PRECONDITION, "public_disk_source.path does not match daemon-resolved disk path"};
   }
-  if (!public_disk_source.canonical_index_bytes().empty() &&
-      public_disk_source.canonical_index_bytes() != canonical_index_json) {
+  if (!resolution.local_import.has_value() ||
+      resolution.local_import->source_kind != ArtifactSourceRegistry::SourceKind::kMountedSourceArtifact) {
+    return {StatusCode::FAILED_PRECONDITION, "public_disk_source requires daemon-resolved mounted-source metadata"};
+  }
+  const auto& entry = *resolution.local_import;
+  if (entry.canonical_index_json.empty()) {
+    return {StatusCode::FAILED_PRECONDITION, "public_disk_source requires daemon-resolved canonical index"};
+  }
+  if (public_disk_source.canonical_index_bytes() != entry.canonical_index_json) {
     return {
         StatusCode::FAILED_PRECONDITION,
         "public_disk_source.canonical_index_bytes does not match daemon-resolved canonical index",
+    };
+  }
+  if (!public_disk_source.source_index_bytes().empty()) {
+    if (!entry.source_index_json.has_value() || public_disk_source.source_index_bytes() != *entry.source_index_json) {
+      return {
+          StatusCode::FAILED_PRECONDITION,
+          "public_disk_source.source_index_bytes does not match daemon-resolved source index",
+      };
+    }
+  }
+  const std::optional<bool> public_is_safetensors = public_disk_source_is_safetensors(public_disk_source);
+  const std::optional<bool> registry_is_safetensors = registry_source_is_safetensors(entry);
+  if (public_is_safetensors.has_value() && registry_is_safetensors.has_value() &&
+      *public_is_safetensors != *registry_is_safetensors) {
+    return {
+        StatusCode::FAILED_PRECONDITION,
+        "public_disk_source.format_kind does not match daemon-resolved mounted-source format",
+    };
+  }
+  const std::optional<bool> public_tensor_aware = public_disk_source_is_tensor_aware(public_disk_source);
+  if (public_tensor_aware.has_value() && *public_tensor_aware != entry.tensor_aware_metadata) {
+    return {
+        StatusCode::FAILED_PRECONDITION,
+        "public_disk_source.metadata_capability does not match daemon-resolved mounted-source metadata",
     };
   }
   return grpc::Status::OK;
@@ -1530,6 +1670,14 @@ grpc::Status prepare_source_bound_plan(
     const store::DeviceKey& device,
     const SourceBoundMaterializationRequest& request,
     PreparedSourceBoundPlan& out) {
+  const auto profile_start = std::chrono::steady_clock::now();
+  auto elapsed_sec = [](auto start, auto end) { return std::chrono::duration<double>(end - start).count(); };
+  double policy_sec = 0.0;
+  double resolve_sec = 0.0;
+  double disk_metadata_sec = 0.0;
+  double canonical_index_sec = 0.0;
+  double target_offsets_sec = 0.0;
+  double target_plan_sec = 0.0;
   if ((request.source_selection == nullptr && request.public_disk_source == nullptr) ||
       request.target_layout == nullptr) {
     return {StatusCode::INVALID_ARGUMENT, "source-bound materialization request is incomplete"};
@@ -1565,6 +1713,8 @@ grpc::Status prepare_source_bound_plan(
     return to_grpc_status(collective_policy_or.status());
   }
   out.collective_policy = *collective_policy_or;
+  auto policy_done = std::chrono::steady_clock::now();
+  policy_sec = elapsed_sec(profile_start, policy_done);
 
   const bool loopback_peer = is_loopback_grpc_peer(rctx.server_context().peer());
   tensorcast::common::v1::ArtifactSelection effective_source_selection;
@@ -1572,6 +1722,7 @@ grpc::Status prepare_source_bound_plan(
     effective_source_selection = *request.source_selection;
   }
   materialization_request_common::ArtifactResolution resolution;
+  const auto resolve_start = std::chrono::steady_clock::now();
   if (request.public_disk_source != nullptr) {
     if (!loopback_peer) {
       return {StatusCode::PERMISSION_DENIED, "public_disk_source is local-only (loopback/UDS)"};
@@ -1588,7 +1739,9 @@ grpc::Status prepare_source_bound_plan(
         resolved_artifact_id,
         out.request_context.retrieval_policy.allow_disk,
         /*allow_local_import_fallback=*/true,
-        /*loopback_peer=*/true);
+        /*loopback_peer=*/true,
+        /*disk_expected_size=*/std::nullopt,
+        /*lightweight_msa1_validation=*/true);
     if (!resolution_or.ok()) {
       return to_grpc_status(resolution_or.status());
     }
@@ -1609,14 +1762,33 @@ grpc::Status prepare_source_bound_plan(
     resolution = std::move(*resolution_or);
     effective_source_selection.set_artifact_id(resolution.resolved_artifact_id);
   }
+  const auto resolve_done = std::chrono::steady_clock::now();
+  resolve_sec = elapsed_sec(resolve_start, resolve_done);
   out.resolved_artifact_id = resolution.resolved_artifact_id;
   out.disk_source = resolution.disk_source;
+  if (request.public_disk_source != nullptr && request.public_disk_source->canonical_index_bytes().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "public_disk_source.canonical_index_bytes is required"};
+  }
+  if (request.public_disk_source != nullptr) {
+    auto hint_status = validate_public_disk_source_hints(*request.public_disk_source, resolution);
+    if (!hint_status.ok()) {
+      return hint_status;
+    }
+  }
+  const auto disk_metadata_start = std::chrono::steady_clock::now();
   auto disk_metadata_or = build_binding_disk_metadata(
-      resolution.normalized_disk_path, out.resolved_artifact_id, device.ordinal, d.disk_imports);
+      resolution.normalized_disk_path,
+      out.resolved_artifact_id,
+      device.ordinal,
+      d.disk_imports,
+      request.public_disk_source,
+      resolution.local_import);
   if (!disk_metadata_or.ok()) {
     return to_grpc_status(disk_metadata_or.status());
   }
   out.disk_metadata = std::move(*disk_metadata_or);
+  const auto disk_metadata_done = std::chrono::steady_clock::now();
+  disk_metadata_sec = elapsed_sec(disk_metadata_start, disk_metadata_done);
   if (is_byte_only_disk_metadata(out.disk_metadata)) {
     if (request.realization_plan != nullptr) {
       return {StatusCode::INVALID_ARGUMENT, "binding realization requires tensor-aware mounted-source metadata"};
@@ -1626,23 +1798,31 @@ grpc::Status prepare_source_bound_plan(
     }
   }
 
-  auto canonical_json_or = load_canonical_index_with_disk_fallback(
-      d.engine, out.resolved_artifact_id, resolution.normalized_disk_path, device.ordinal, resolution.gs_connected);
+  const auto canonical_index_start = std::chrono::steady_clock::now();
+  absl::StatusOr<std::string> canonical_json_or =
+      request.public_disk_source != nullptr && !request.public_disk_source->canonical_index_bytes().empty()
+      ? absl::StatusOr<std::string>(request.public_disk_source->canonical_index_bytes())
+      : load_canonical_index_with_disk_fallback(
+            d.engine,
+            out.resolved_artifact_id,
+            resolution.normalized_disk_path,
+            device.ordinal,
+            resolution.gs_connected);
   if (!canonical_json_or.ok()) {
     return to_grpc_status(canonical_json_or.status());
   }
-  if (request.public_disk_source != nullptr) {
-    auto hint_status = validate_public_disk_source_hints(*request.public_disk_source, resolution, *canonical_json_or);
-    if (!hint_status.ok()) {
-      return hint_status;
-    }
-  }
+  const auto canonical_index_done = std::chrono::steady_clock::now();
+  canonical_index_sec = elapsed_sec(canonical_index_start, canonical_index_done);
 
+  const auto target_offsets_start = std::chrono::steady_clock::now();
   auto offsets_or = resolve_target_offsets(*request.target_layout);
   if (!offsets_or.ok()) {
     return to_grpc_status(offsets_or.status());
   }
+  const auto target_offsets_done = std::chrono::steady_clock::now();
+  target_offsets_sec = elapsed_sec(target_offsets_start, target_offsets_done);
 
+  const auto target_plan_start = std::chrono::steady_clock::now();
   if (request.realization_plan != nullptr) {
     MappedTargetMaterializationPlan mapped_plan;
     auto plan_status = build_binding_realization_materialization_plan(
@@ -1719,6 +1899,18 @@ grpc::Status prepare_source_bound_plan(
     out.canonical_index_json = unmapped_plan.canonical_index_json;
     out.unmapped_plan = std::move(unmapped_plan);
   }
+  const auto target_plan_done = std::chrono::steady_clock::now();
+  target_plan_sec = elapsed_sec(target_plan_start, target_plan_done);
+  LOG(INFO) << "tc_profile prepare_source_bound_plan timings"
+            << " artifact_id=" << out.resolved_artifact_id << " target_device=" << device.ordinal
+            << " mapped=" << request.mapped << " realization_plan=" << (request.realization_plan != nullptr)
+            << " public_disk_source=" << (request.public_disk_source != nullptr) << " metadata_fast_public="
+            << (request.public_disk_source != nullptr && !request.public_disk_source->canonical_index_bytes().empty() &&
+                resolution.local_import.has_value())
+            << " policy_sec=" << policy_sec << " resolve_sec=" << resolve_sec
+            << " disk_metadata_sec=" << disk_metadata_sec << " canonical_index_sec=" << canonical_index_sec
+            << " target_offsets_sec=" << target_offsets_sec << " target_plan_sec=" << target_plan_sec
+            << " total_sec=" << elapsed_sec(profile_start, target_plan_done);
   return Status::OK;
 }
 
@@ -1729,6 +1921,8 @@ grpc::Status prepare_source_bound_execution(
     const OwnedStorageLayout& storage_layout,
     const PreparedSourceBoundPlan& prepared_plan,
     PreparedSourceBoundExecution& out) {
+  const auto profile_start = std::chrono::steady_clock::now();
+  auto elapsed_sec = [](auto start, auto end) { return std::chrono::duration<double>(end - start).count(); };
   out = PreparedSourceBoundExecution{};
 
   const std::chrono::milliseconds request_budget = resolve_owner_request_budget(rctx.server_context());
@@ -1785,6 +1979,7 @@ grpc::Status prepare_source_bound_execution(
       out.hints.variant = std::move(variant);
     }
 
+    const auto build_resolved_start = std::chrono::steady_clock::now();
     auto prepared_execution_plan_or = build_resolved_mapped_materialization_plan(
         prepared_plan.resolved_artifact_id,
         materialization_payload::compute_generation_from_index(mapped_plan.canonical_index_json),
@@ -1797,6 +1992,8 @@ grpc::Status prepare_source_bound_execution(
     if (!prepared_execution_plan_or.ok()) {
       return to_grpc_status(prepared_execution_plan_or.status());
     }
+    const auto build_resolved_done = std::chrono::steady_clock::now();
+    const auto strategy_start = std::chrono::steady_clock::now();
     auto strategy_plan_or = store::runtime::ingestion::strategy::build_source_bound_execution_strategy_plan(
         prepared_execution_plan_or->resolved_plan,
         prepared_execution_plan_or->lowering_artifacts,
@@ -1811,9 +2008,16 @@ grpc::Status prepare_source_bound_execution(
     if (!strategy_plan_or.ok()) {
       return to_grpc_status(strategy_plan_or.status());
     }
+    const auto strategy_done = std::chrono::steady_clock::now();
     prepared_execution_plan_or->strategy_plan = *strategy_plan_or;
     prepared_execution_plan_or->lowering_artifacts.reset();
     out.prepared_execution_plan = std::move(*prepared_execution_plan_or);
+    LOG(INFO) << "tc_profile prepare_source_bound_execution timings"
+              << " artifact_id=" << prepared_plan.resolved_artifact_id << " mapped=1"
+              << " target_total_size=" << storage_layout.total_size
+              << " build_resolved_plan_sec=" << elapsed_sec(build_resolved_start, build_resolved_done)
+              << " strategy_plan_sec=" << elapsed_sec(strategy_start, strategy_done)
+              << " total_sec=" << elapsed_sec(profile_start, strategy_done);
     return Status::OK;
   }
 
@@ -3293,6 +3497,13 @@ grpc::Status OwnedBindingService::refill_owned_binding(
     RpcContext& rctx,
     const v2::RefillOwnedBindingRequest& req,
     v2::RefillOwnedBindingResponse& resp) {
+  const auto profile_start = std::chrono::steady_clock::now();
+  auto elapsed_sec = [](auto start, auto end) { return std::chrono::duration<double>(end - start).count(); };
+  double prepare_plan_sec = 0.0;
+  double storage_layout_sec = 0.0;
+  double prepare_execution_sec = 0.0;
+  double strict_preflight_sec = 0.0;
+  double materialize_sec = 0.0;
   if (d_.shutdown_signal.is_shutting_down()) {
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
@@ -3353,6 +3564,7 @@ grpc::Status OwnedBindingService::refill_owned_binding(
   const bool use_realization_plan = req.has_realization_plan() && req.realization_plan().entries_size() > 0;
   const bool use_mapped_materialization = mapped || use_realization_plan;
   PreparedSourceBoundPlan prepared_plan;
+  const auto prepare_plan_start = std::chrono::steady_clock::now();
   auto prepare_status = prepare_source_bound_plan(
       d_,
       rctx,
@@ -3379,8 +3591,11 @@ grpc::Status OwnedBindingService::refill_owned_binding(
   if (!prepare_status.ok()) {
     return prepare_status;
   }
+  const auto prepare_plan_done = std::chrono::steady_clock::now();
+  prepare_plan_sec = elapsed_sec(prepare_plan_start, prepare_plan_done);
 
   OwnedStorageLayout storage_layout;
+  const auto storage_layout_start = std::chrono::steady_clock::now();
   {
     absl::MutexLock lock(&record->mu);
     auto storage_layout_or = build_owned_storage_layout(
@@ -3390,13 +3605,19 @@ grpc::Status OwnedBindingService::refill_owned_binding(
     }
     storage_layout = std::move(*storage_layout_or);
   }
+  const auto storage_layout_done = std::chrono::steady_clock::now();
+  storage_layout_sec = elapsed_sec(storage_layout_start, storage_layout_done);
 
   PreparedSourceBoundExecution prepared_execution;
+  const auto prepare_execution_start = std::chrono::steady_clock::now();
   auto execution_status =
       prepare_source_bound_execution(d_, rctx, target_layout, storage_layout, prepared_plan, prepared_execution);
   if (!execution_status.ok()) {
     return execution_status;
   }
+  const auto prepare_execution_done = std::chrono::steady_clock::now();
+  prepare_execution_sec = elapsed_sec(prepare_execution_start, prepare_execution_done);
+  const auto strict_preflight_start = std::chrono::steady_clock::now();
   if (auto strict_preflight_status = evaluate_strict_collective_preflight_for_testing(
           &rctx,
           prepared_execution.prepared_execution_plan.has_value() &&
@@ -3407,7 +3628,10 @@ grpc::Status OwnedBindingService::refill_owned_binding(
       !strict_preflight_status.ok()) {
     return strict_preflight_status;
   }
+  const auto strict_preflight_done = std::chrono::steady_clock::now();
+  strict_preflight_sec = elapsed_sec(strict_preflight_start, strict_preflight_done);
 
+  const auto materialize_start = std::chrono::steady_clock::now();
   absl::StatusOr<store::loading::MaterializeIntoTargetResult> result_or = use_mapped_materialization
       ? d_.engine.materialize_mapped_into_target(
             device, *prepared_execution.prepared_execution_plan, prepared_execution.hints, prepared_plan.disk_source)
@@ -3418,6 +3642,8 @@ grpc::Status OwnedBindingService::refill_owned_binding(
             materialization_payload::compute_generation_from_index(prepared_plan.canonical_index_json),
             prepared_execution.hints,
             prepared_plan.disk_source);
+  const auto materialize_done = std::chrono::steady_clock::now();
+  materialize_sec = elapsed_sec(materialize_start, materialize_done);
   if (!result_or.ok()) {
     if (prepared_plan.collective_policy == v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE &&
         absl::IsFailedPrecondition(result_or.status()) && !is_collective_execution_failure(result_or.status())) {
@@ -3480,6 +3706,16 @@ grpc::Status OwnedBindingService::refill_owned_binding(
     resp.set_update_epoch(update_epoch);
     resp.mutable_execution_diagnostics()->CopyFrom(execution_diagnostics);
     resp.mutable_source_bound_plan_diagnostics()->CopyFrom(source_bound_plan_diagnostics);
+    const auto done = std::chrono::steady_clock::now();
+    LOG(INFO) << "tc_profile refill_owned_binding timings"
+              << " binding_id=" << req.binding_id() << " artifact_id=" << prepared_plan.resolved_artifact_id
+              << " target_device=" << device.ordinal << " mapped=" << mapped
+              << " realization_plan=" << use_realization_plan << " execution_only_mutable=1"
+              << " prepare_plan_sec=" << prepare_plan_sec << " storage_layout_sec=" << storage_layout_sec
+              << " prepare_execution_sec=" << prepare_execution_sec << " strict_preflight_sec=" << strict_preflight_sec
+              << " materialize_sec=" << materialize_sec
+              << " post_materialize_sec=" << elapsed_sec(materialize_done, done)
+              << " total_sec=" << elapsed_sec(profile_start, done);
     rctx.mark_success();
     return Status::OK;
   }
@@ -3532,6 +3768,15 @@ grpc::Status OwnedBindingService::refill_owned_binding(
   fill_binding_value(*record, *resp.mutable_current_value());
   resp.mutable_execution_diagnostics()->CopyFrom(execution_diagnostics);
   resp.mutable_source_bound_plan_diagnostics()->CopyFrom(source_bound_plan_diagnostics);
+  const auto done = std::chrono::steady_clock::now();
+  LOG(INFO) << "tc_profile refill_owned_binding timings"
+            << " binding_id=" << req.binding_id() << " artifact_id=" << prepared_plan.resolved_artifact_id
+            << " target_device=" << device.ordinal << " mapped=" << mapped
+            << " realization_plan=" << use_realization_plan << " execution_only_mutable=0"
+            << " prepare_plan_sec=" << prepare_plan_sec << " storage_layout_sec=" << storage_layout_sec
+            << " prepare_execution_sec=" << prepare_execution_sec << " strict_preflight_sec=" << strict_preflight_sec
+            << " materialize_sec=" << materialize_sec << " post_materialize_sec=" << elapsed_sec(materialize_done, done)
+            << " total_sec=" << elapsed_sec(profile_start, done);
   rctx.mark_success();
   return Status::OK;
 }

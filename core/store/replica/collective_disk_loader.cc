@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -30,6 +31,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
+#include "absl/synchronization/blocking_counter.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "core/common/async_runtime.h"
@@ -462,11 +464,71 @@ struct LocalMappedTargetExecutionResult {
 };
 
 struct LocalMappedTensorExecutionStats {
+  uint64_t replicated_jobs{0};
   uint64_t dim0_jobs{0};
   uint64_t dim1_jobs{0};
   uint64_t rect2d_jobs{0};
+  size_t tasks{0};
   uint64_t read_bytes{0};
   uint64_t dst_bytes{0};
+  double exec_sec{0.0};
+};
+
+struct LocalMappedTensorTask {
+  enum class Kind : std::uint8_t {
+    kContiguous = 0,
+    kRect2D = 1,
+  };
+
+  Kind kind{Kind::kContiguous};
+  uint64_t source_offset{0};
+  uint64_t read_bytes{0};
+  std::uint8_t* dst_ptr{nullptr};
+  uint64_t dst_bytes{0};
+  uint64_t src_col_offset_bytes{0};
+  uint64_t src_pitch_bytes{0};
+  uint64_t dst_pitch_bytes{0};
+  uint64_t rows{0};
+};
+
+struct LocalMappedTensorTaskBuildResult {
+  std::vector<LocalMappedTensorTask> tasks;
+  LocalMappedTensorExecutionStats stats;
+};
+
+struct LocalMappedConcatTask {
+  uint64_t source_offset{0};
+  uint64_t dst_logical_offset{0};
+  uint64_t block_bytes{0};
+  uint64_t block_count{0};
+  uint64_t dst_block_stride_bytes{0};
+  std::uint8_t* direct_dst_ptr{nullptr};
+
+  [[nodiscard]] uint64_t total_bytes() const {
+    return block_bytes * block_count;
+  }
+};
+
+struct LocalMappedConcatTaskBuildResult {
+  std::vector<LocalMappedConcatTask> tasks;
+  uint64_t source_bytes{0};
+  uint64_t direct_bytes{0};
+  uint64_t layout_bytes{0};
+  uint64_t strided_bytes{0};
+  size_t direct_tasks{0};
+  size_t layout_tasks{0};
+  size_t strided_tasks{0};
+};
+
+struct LocalMappedConcatExecutionStats {
+  size_t tasks{0};
+  size_t direct_tasks{0};
+  size_t layout_tasks{0};
+  size_t strided_tasks{0};
+  uint64_t read_bytes{0};
+  uint64_t direct_bytes{0};
+  uint64_t layout_bytes{0};
+  uint64_t strided_bytes{0};
   double exec_sec{0.0};
 };
 
@@ -2342,6 +2404,22 @@ absl::StatusOr<uint64_t> checked_mul_u64(uint64_t lhs, uint64_t rhs, std::string
   return lhs * rhs;
 }
 
+absl::StatusOr<uint64_t> checked_add_u64(uint64_t lhs, uint64_t rhs, std::string_view label) {
+  if (rhs > std::numeric_limits<uint64_t>::max() - lhs) {
+    return absl::OutOfRangeError(absl::StrCat(label, " overflows uint64_t"));
+  }
+  return lhs + rhs;
+}
+
+uint64_t elapsed_ns_since(std::chrono::steady_clock::time_point start) {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+}
+
+double seconds_from_ns(uint64_t ns) {
+  return static_cast<double>(ns) / 1'000'000'000.0;
+}
+
 absl::StatusOr<TensorAxisRange> coordinate_axis_range_or_full(
     const TensorCoordinateSpec& range,
     const RepresentationTensorSpec& tensor,
@@ -2420,6 +2498,54 @@ absl::StatusOr<MappedTensorJobRuntime> build_local_partial_dim0_tensor_job(
           .kind = RankTensorSlice::Kind::kDim0,
           .start = src_axis->start,
           .length = static_cast<uint64_t>(src_axis->end - src_axis->start),
+      });
+  runtime_job.destinations.push_back(
+      ParsedParticipant{
+          .rank = participant.rank,
+          .device_id = participant.device_id,
+          .gpu_ptr = *dst_ptr_or,
+      });
+  return runtime_job;
+}
+
+absl::StatusOr<MappedTensorJobRuntime> build_local_partial_replicated_tensor_job(
+    const ParsedMappedParticipant& participant,
+    const RepresentationWorkItem& item,
+    absl::Span<const TensorByteSpan> dst_spans) {
+  if (dst_spans.size() != 1 || item.sources.size() != 1) {
+    return absl::InvalidArgumentError(
+        "local partial replicated tensor job requires one contiguous source and destination span");
+  }
+  const auto& fragment = item.sources.front().fragment;
+  if (fragment.source_spec.element_size == 0 || fragment.source_spec.element_size != item.dst_spec.element_size ||
+      fragment.source_spec.dtype != item.dst_spec.dtype) {
+    return absl::InvalidArgumentError("local partial replicated tensor job has incompatible dtypes");
+  }
+  auto source_spans_or =
+      materialization::contracts::build_coordinate_byte_spans(fragment.source_spec, fragment.source_range);
+  if (!source_spans_or.ok()) {
+    return source_spans_or.status();
+  }
+  if (source_spans_or->size() != 1 || source_spans_or->front().length != dst_spans.front().length) {
+    return absl::InvalidArgumentError("local partial replicated tensor job requires matching contiguous byte spans");
+  }
+  auto dst_ptr_or = find_mapped_destination_base_ptr(participant, item.dst_spec);
+  if (!dst_ptr_or.ok()) {
+    return dst_ptr_or.status();
+  }
+
+  MappedTensorJobRuntime runtime_job;
+  runtime_job.job.name = item.dst_name;
+  runtime_job.job.source = tensor_meta_from_spec(fragment.source_spec);
+  runtime_job.job.source.offset = source_spans_or->front().offset;
+  runtime_job.job.source.size_bytes = source_spans_or->front().length;
+  runtime_job.job.source.storage_offset = 0;
+  runtime_job.job.distribution = TensorJob::Distribution::kReplicated;
+  runtime_job.job.slices.push_back(
+      RankTensorSlice{
+          .dst_offset = dst_spans.front().offset - item.dst_spec.logical_offset,
+          .dst_size_bytes = dst_spans.front().length,
+          .kind = RankTensorSlice::Kind::kFull,
       });
   runtime_job.destinations.push_back(
       ParsedParticipant{
@@ -2620,6 +2746,7 @@ absl::StatusOr<MappedTensorJobBuildResult> build_local_mapped_partial_tensor_job
   merge_byte_ranges(&handled_ranges);
 
   size_t considered = 0;
+  size_t accepted_replicated = 0;
   size_t accepted_dim0 = 0;
   size_t accepted_dim1 = 0;
   size_t accepted_rect2d = 0;
@@ -2663,9 +2790,14 @@ absl::StatusOr<MappedTensorJobBuildResult> build_local_mapped_partial_tensor_job
 
     absl::StatusOr<MappedTensorJobRuntime> runtime_job_or =
         absl::UnimplementedError("unsupported local partial tensor work item");
-    enum class AcceptedKind : uint8_t { kNone = 0, kDim0 = 1, kDim1 = 2, kRect2D = 3 };
+    enum class AcceptedKind : uint8_t { kNone = 0, kReplicated = 1, kDim0 = 2, kDim1 = 3, kRect2D = 4 };
     AcceptedKind accepted_kind = AcceptedKind::kNone;
-    if (item.partition_kind == WorkPartitionKind::kDim0Partitioned) {
+    if (item.partition_kind == WorkPartitionKind::kReplicated) {
+      runtime_job_or = build_local_partial_replicated_tensor_job(participant, item, absl::MakeSpan(dst_spans));
+      if (runtime_job_or.ok()) {
+        accepted_kind = AcceptedKind::kReplicated;
+      }
+    } else if (item.partition_kind == WorkPartitionKind::kDim0Partitioned) {
       runtime_job_or = build_local_partial_dim0_tensor_job(participant, item, absl::MakeSpan(dst_spans));
       if (runtime_job_or.ok()) {
         accepted_kind = AcceptedKind::kDim0;
@@ -2693,6 +2825,9 @@ absl::StatusOr<MappedTensorJobBuildResult> build_local_mapped_partial_tensor_job
     }
 
     switch (accepted_kind) {
+      case AcceptedKind::kReplicated:
+        accepted_replicated += 1;
+        break;
       case AcceptedKind::kDim0:
         accepted_dim0 += 1;
         break;
@@ -2714,7 +2849,8 @@ absl::StatusOr<MappedTensorJobBuildResult> build_local_mapped_partial_tensor_job
 
   merge_byte_ranges(&result.handled_dst_ranges_by_rank.front());
   LOG(INFO) << "local_mapped_partial_tensor_job_summary"
-            << " considered=" << considered << " accepted_dim0=" << accepted_dim0 << " accepted_dim1=" << accepted_dim1
+            << " considered=" << considered << " accepted_replicated=" << accepted_replicated
+            << " accepted_dim0=" << accepted_dim0 << " accepted_dim1=" << accepted_dim1
             << " accepted_rect2d=" << accepted_rect2d << " accepted_bytes=" << accepted_bytes
             << " skipped_lane=" << skipped_lane << " skipped_lane_bytes=" << skipped_lane_bytes
             << " skipped_already=" << skipped_already << " skipped_already_bytes=" << skipped_already_bytes
@@ -5145,7 +5281,7 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
   const auto clique_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - clique_start).count();
   absl::MutexLock clique_use_lock(&clique->use_mutex());
 
-  const size_t chunk_bytes = std::max<size_t>(1, std::min<uint64_t>(options.chunk_bytes, pinned_pool->slice_bytes()));
+  const size_t chunk_bytes = pinned_pool->slice_bytes();
   const int root_rank = 0;
   const int root_device_id = participants[static_cast<size_t>(root_rank)].device_id;
 
@@ -5629,6 +5765,430 @@ absl::Status submit_target_layout_write(
   return absl::OkStatus();
 }
 
+absl::Status append_local_mapped_concat_task(LocalMappedConcatTask task, LocalMappedConcatTaskBuildResult* result) {
+  if (result == nullptr) {
+    return absl::InvalidArgumentError("local mapped concat task result is null");
+  }
+  if (task.block_bytes == 0 || task.block_count == 0) {
+    return absl::OkStatus();
+  }
+  if (task.block_count > std::numeric_limits<uint64_t>::max() / task.block_bytes) {
+    return absl::OutOfRangeError("local mapped concat task byte count overflow");
+  }
+  const uint64_t bytes = task.total_bytes();
+  if (bytes > std::numeric_limits<size_t>::max()) {
+    return absl::OutOfRangeError("local mapped concat task exceeds host size_t limit");
+  }
+  result->source_bytes += bytes;
+  if (task.direct_dst_ptr != nullptr) {
+    result->direct_tasks += 1;
+    result->direct_bytes += bytes;
+  } else {
+    result->layout_tasks += 1;
+    result->layout_bytes += bytes;
+  }
+  if (task.block_count > 1 && task.dst_block_stride_bytes != task.block_bytes) {
+    result->strided_tasks += 1;
+    result->strided_bytes += bytes;
+  }
+  result->tasks.push_back(task);
+  return absl::OkStatus();
+}
+
+absl::Status append_local_mapped_concat_job_tasks(
+    const ParsedMappedParticipant& participant,
+    const MappedConcatJobRuntime& job,
+    size_t host_buffer_bytes,
+    LocalMappedConcatTaskBuildResult* result) {
+  if (job.destinations.size() != 1) {
+    return absl::InvalidArgumentError("local mapped concat task build requires exactly one destination");
+  }
+  for (const auto& fragment : job.fragments) {
+    const auto source_base_offset_or = source_base_offset_bytes(fragment.source);
+    if (!source_base_offset_or.ok()) {
+      return source_base_offset_or.status();
+    }
+    const uint64_t source_base_offset = *source_base_offset_or;
+    if (fragment.src_block_bytes == 0 || fragment.dst_block_bytes == 0) {
+      continue;
+    }
+    if (fragment.dst_logical_begins_by_rank.empty()) {
+      return absl::FailedPreconditionError("local mapped concat requires destination logical offsets");
+    }
+
+    int64_t src_start = fragment.src_start;
+    int64_t src_end = fragment.src_end;
+    if (!fragment.src_starts_by_rank.empty()) {
+      if (fragment.src_ends_by_rank.empty()) {
+        return absl::InvalidArgumentError("local mapped concat has mismatched source rank ranges");
+      }
+      src_start = fragment.src_starts_by_rank.front();
+      src_end = fragment.src_ends_by_rank.front();
+    }
+    if (src_start < 0 || src_end <= src_start) {
+      return absl::InvalidArgumentError("local mapped concat fragment has invalid source range");
+    }
+
+    const uint64_t dst_logical_begin = fragment.dst_logical_begins_by_rank.front();
+    std::uint8_t* direct_dst_base = nullptr;
+    if (!fragment.dst_ptrs.empty()) {
+      direct_dst_base = static_cast<std::uint8_t*>(fragment.dst_ptrs.front());
+    }
+
+    if (fragment.prefix_count == 1) {
+      const uint64_t source_rows = static_cast<uint64_t>(src_end - src_start);
+      if (source_rows == 0 || fragment.src_block_bytes % source_rows != 0) {
+        return absl::InvalidArgumentError("local mapped single-range concat has invalid dim0 source block");
+      }
+      const uint64_t source_row_bytes = fragment.src_block_bytes / source_rows;
+      uint64_t copied = 0;
+      while (copied < fragment.src_block_bytes) {
+        const uint64_t task_bytes =
+            std::min<uint64_t>(fragment.src_block_bytes - copied, static_cast<uint64_t>(host_buffer_bytes));
+        TC_RETURN_IF_ERROR(append_local_mapped_concat_task(
+            LocalMappedConcatTask{
+                .source_offset = source_base_offset + static_cast<uint64_t>(src_start) * source_row_bytes + copied,
+                .dst_logical_offset = dst_logical_begin + copied,
+                .block_bytes = task_bytes,
+                .block_count = 1,
+                .dst_block_stride_bytes = task_bytes,
+                .direct_dst_ptr = direct_dst_base != nullptr ? direct_dst_base + copied : nullptr,
+            },
+            result));
+        copied += task_bytes;
+      }
+      continue;
+    }
+
+    const uint64_t source_rows = static_cast<uint64_t>(src_end - src_start);
+    if (fragment.prefix_count == 0 || source_rows % fragment.prefix_count != 0) {
+      return absl::InvalidArgumentError("local mapped multi-range concat has invalid source block geometry");
+    }
+    const uint64_t source_rows_per_block = source_rows / fragment.prefix_count;
+    if (source_rows_per_block == 0 || fragment.src_block_bytes % source_rows_per_block != 0) {
+      return absl::InvalidArgumentError("local mapped multi-range concat has invalid per-row source block size");
+    }
+    if (fragment.src_block_bytes != fragment.dst_block_bytes) {
+      return absl::InvalidArgumentError("local mapped multi-range concat source/destination block mismatch");
+    }
+    if (fragment.src_block_bytes > host_buffer_bytes) {
+      return absl::FailedPreconditionError("local mapped multi-range concat block exceeds pinned buffer size");
+    }
+    const uint64_t source_row_bytes = fragment.src_block_bytes / source_rows_per_block;
+    const uint64_t blocks_per_task =
+        std::max<uint64_t>(1, static_cast<uint64_t>(host_buffer_bytes) / fragment.src_block_bytes);
+    for (uint64_t block = 0; block < fragment.prefix_count; block += blocks_per_task) {
+      const uint64_t task_blocks = std::min<uint64_t>(fragment.prefix_count - block, blocks_per_task);
+      TC_RETURN_IF_ERROR(append_local_mapped_concat_task(
+          LocalMappedConcatTask{
+              .source_offset = source_base_offset +
+                  (static_cast<uint64_t>(src_start) + block * source_rows_per_block) * source_row_bytes,
+              .dst_logical_offset = dst_logical_begin + block * fragment.dst_block_stride_bytes,
+              .block_bytes = fragment.dst_block_bytes,
+              .block_count = task_blocks,
+              .dst_block_stride_bytes = fragment.dst_block_stride_bytes,
+              .direct_dst_ptr =
+                  direct_dst_base != nullptr ? direct_dst_base + block * fragment.dst_block_stride_bytes : nullptr,
+          },
+          result));
+    }
+  }
+  (void)participant;
+  return absl::OkStatus();
+}
+
+absl::StatusOr<LocalMappedConcatTaskBuildResult> build_local_mapped_concat_tasks(
+    const ParsedMappedParticipant& participant,
+    const std::vector<MappedConcatJobRuntime>& jobs,
+    size_t host_buffer_bytes) {
+  LocalMappedConcatTaskBuildResult result;
+  for (const auto& job : jobs) {
+    TC_RETURN_IF_ERROR(append_local_mapped_concat_job_tasks(participant, job, host_buffer_bytes, &result));
+  }
+  std::sort(result.tasks.begin(), result.tasks.end(), [](const auto& lhs, const auto& rhs) {
+    if (lhs.source_offset != rhs.source_offset) {
+      return lhs.source_offset < rhs.source_offset;
+    }
+    if (lhs.dst_logical_offset != rhs.dst_logical_offset) {
+      return lhs.dst_logical_offset < rhs.dst_logical_offset;
+    }
+    return lhs.total_bytes() < rhs.total_bytes();
+  });
+  return result;
+}
+
+absl::Status execute_local_mapped_concat_task_copy(
+    const ParsedMappedParticipant& participant,
+    const LocalMappedConcatTask& task,
+    const void* host_data,
+    loader::TargetLayoutGpuSink& sink,
+    cudaStream_t stream) {
+  const uint64_t total_bytes = task.total_bytes();
+  if (total_bytes == 0) {
+    return absl::OkStatus();
+  }
+  if (total_bytes > std::numeric_limits<size_t>::max() || task.block_bytes > std::numeric_limits<size_t>::max() ||
+      task.block_count > std::numeric_limits<size_t>::max() ||
+      task.dst_block_stride_bytes > std::numeric_limits<size_t>::max()) {
+    return absl::OutOfRangeError("local mapped concat task exceeds host size_t limit");
+  }
+
+  if (task.direct_dst_ptr != nullptr) {
+    TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(participant.device_id));
+    if (task.block_count == 1 || task.dst_block_stride_bytes == task.block_bytes) {
+      TC_RETURN_IF_ERROR(
+          tensorcast::cuda::memcpy_async(
+              task.direct_dst_ptr, host_data, static_cast<size_t>(total_bytes), cudaMemcpyHostToDevice, stream));
+    } else {
+      SC_RETURN_IF_CUDA_ERROR(cudaMemcpy2DAsync(
+          task.direct_dst_ptr,
+          static_cast<size_t>(task.dst_block_stride_bytes),
+          host_data,
+          static_cast<size_t>(task.block_bytes),
+          static_cast<size_t>(task.block_bytes),
+          static_cast<size_t>(task.block_count),
+          cudaMemcpyHostToDevice,
+          stream));
+    }
+    TC_RETURN_IF_ERROR(tensorcast::cuda::stream_synchronize(stream));
+    return absl::OkStatus();
+  }
+
+  std::vector<common::CopyHandle> copy_handles;
+  if (task.block_count == 1 || task.dst_block_stride_bytes == task.block_bytes) {
+    TC_RETURN_IF_ERROR(
+        submit_target_layout_write(participant, sink, task.dst_logical_offset, host_data, total_bytes, &copy_handles));
+    return wait_copy_handles(&copy_handles);
+  }
+
+  const auto* host_bytes = static_cast<const std::uint8_t*>(host_data);
+  for (uint64_t block = 0; block < task.block_count; ++block) {
+    TC_RETURN_IF_ERROR(submit_target_layout_write(
+        participant,
+        sink,
+        task.dst_logical_offset + block * task.dst_block_stride_bytes,
+        host_bytes + block * task.block_bytes,
+        task.block_bytes,
+        &copy_handles));
+  }
+  return wait_copy_handles(&copy_handles);
+}
+
+absl::StatusOr<LocalMappedConcatExecutionStats> execute_local_mapped_concat_jobs_streaming(
+    const ParsedMappedParticipant& participant,
+    const std::vector<MappedConcatJobRuntime>& jobs,
+    loader::SeekableSource& source,
+    const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
+    std::chrono::milliseconds pinned_timeout,
+    size_t host_buffer_bytes,
+    size_t streaming_buffer_chunks,
+    loader::TargetLayoutGpuSink& sink) {
+  LocalMappedConcatExecutionStats stats;
+  const auto total_start = std::chrono::steady_clock::now();
+  if (jobs.empty()) {
+    return stats;
+  }
+  if (pinned_pool == nullptr) {
+    return absl::InvalidArgumentError("local mapped concat streaming requires a pinned pool");
+  }
+  const auto task_build_start = std::chrono::steady_clock::now();
+  auto task_build_or = build_local_mapped_concat_tasks(participant, jobs, host_buffer_bytes);
+  if (!task_build_or.ok()) {
+    return task_build_or.status();
+  }
+  auto task_build = std::move(*task_build_or);
+  const double task_build_sec =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - task_build_start).count();
+  if (task_build.tasks.empty()) {
+    return stats;
+  }
+  const size_t concurrency = std::max<size_t>(1, streaming_buffer_chunks);
+  auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
+      /*num_chunks=*/concurrency, host_buffer_bytes, pinned_pool);
+  TC_RETURN_IF_ERROR(session_spb->initialize(
+      pinned_timeout, absl::StrCat("local_mapped_concat artifact_id=", participant.artifact_id)));
+
+  TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(participant.device_id));
+  cudaStream_t stream = nullptr;
+  TC_RETURN_IF_ERROR(tensorcast::cuda::stream_create_with_flags(&stream, cudaStreamNonBlocking));
+  absl::Cleanup destroy_stream = [&stream]() {
+    if (stream != nullptr) {
+      (void)tensorcast::cuda::stream_destroy(stream);
+    }
+  };
+
+  absl::Mutex status_mu;
+  absl::Status first_status;
+  std::atomic<bool> stop{false};
+  std::atomic<size_t> next_task{0};
+  std::atomic<uint64_t> producer_get_free_ns{0};
+  std::atomic<uint64_t> producer_read_ns{0};
+  std::atomic<uint64_t> producer_mark_ready_ns{0};
+  std::atomic<uint64_t> producer_tasks{0};
+  std::atomic<uint64_t> producer_bytes{0};
+  auto producers_done = std::make_shared<absl::BlockingCounter>(static_cast<int>(concurrency));
+  auto producers_remaining = std::make_shared<std::atomic<size_t>>(concurrency);
+
+  auto record_failure = [&](absl::Status status) {
+    if (status.ok()) {
+      return;
+    }
+    {
+      absl::MutexLock lock(&status_mu);
+      if (first_status.ok()) {
+        first_status = std::move(status);
+      }
+    }
+    stop.store(true, std::memory_order_release);
+  };
+
+  auto executor = whole_source_load_runtime().blocking_executor();
+  for (size_t worker = 0; worker < concurrency; ++worker) {
+    executor->add([&, producers_done, producers_remaining]() {
+      while (!stop.load(std::memory_order_acquire)) {
+        const size_t task_index = next_task.fetch_add(1, std::memory_order_acq_rel);
+        if (task_index >= task_build.tasks.size()) {
+          break;
+        }
+        const auto& task = task_build.tasks[task_index];
+        const auto get_free_start = std::chrono::steady_clock::now();
+        auto slot_or = session_spb->get_free_chunk();
+        producer_get_free_ns.fetch_add(elapsed_ns_since(get_free_start), std::memory_order_relaxed);
+        if (!slot_or.ok()) {
+          if (!stop.load(std::memory_order_acquire)) {
+            record_failure(slot_or.status());
+          }
+          break;
+        }
+        const int slot_id = *slot_or;
+        if (stop.load(std::memory_order_acquire)) {
+          (void)session_spb->abort_producer_slot(slot_id);
+          break;
+        }
+        char* host_ptr = session_spb->get_chunk_ptr(slot_id);
+        if (host_ptr == nullptr) {
+          (void)session_spb->abort_producer_slot(slot_id);
+          record_failure(absl::InternalError("local mapped concat streaming got a null pinned chunk"));
+          break;
+        }
+        const size_t bytes = static_cast<size_t>(task.total_bytes());
+        const auto read_start = std::chrono::steady_clock::now();
+        auto got_or = source.read_at(task.source_offset, host_ptr, bytes);
+        producer_read_ns.fetch_add(elapsed_ns_since(read_start), std::memory_order_relaxed);
+        if (!got_or.ok()) {
+          (void)session_spb->abort_producer_slot(slot_id);
+          record_failure(got_or.status());
+          break;
+        }
+        if (*got_or != bytes) {
+          (void)session_spb->abort_producer_slot(slot_id);
+          record_failure(
+              absl::OutOfRangeError(
+                  absl::StrCat("short read in local mapped concat streaming: got=", *got_or, " want=", bytes)));
+          break;
+        }
+        const auto mark_ready_start = std::chrono::steady_clock::now();
+        const absl::Status ready_status = session_spb->mark_chunk_ready(slot_id, task_index, bytes);
+        producer_mark_ready_ns.fetch_add(elapsed_ns_since(mark_ready_start), std::memory_order_relaxed);
+        if (!ready_status.ok()) {
+          (void)session_spb->abort_producer_slot(slot_id);
+          record_failure(ready_status);
+          break;
+        }
+        producer_tasks.fetch_add(1, std::memory_order_relaxed);
+        producer_bytes.fetch_add(static_cast<uint64_t>(bytes), std::memory_order_relaxed);
+      }
+      if (producers_remaining->fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        session_spb->signal_production_complete();
+      }
+      producers_done->DecrementCount();
+    });
+  }
+
+  uint64_t consumer_get_ready_ns = 0;
+  uint64_t consumer_copy_ns = 0;
+  uint64_t consumer_return_ns = 0;
+  uint64_t consumer_tasks = 0;
+  uint64_t consumer_bytes = 0;
+  while (true) {
+    const auto get_ready_start = std::chrono::steady_clock::now();
+    auto chunk_or = session_spb->get_ready_chunk();
+    consumer_get_ready_ns += elapsed_ns_since(get_ready_start);
+    if (!chunk_or.ok()) {
+      if (!absl::IsOutOfRange(chunk_or.status()) && !absl::IsUnavailable(chunk_or.status())) {
+        record_failure(chunk_or.status());
+        session_spb->signal_production_complete();
+      }
+      break;
+    }
+    auto chunk = *chunk_or;
+    absl::Cleanup return_chunk = [&]() {
+      const auto return_start = std::chrono::steady_clock::now();
+      const absl::Status return_status = session_spb->return_chunk(chunk.slot_id);
+      consumer_return_ns += elapsed_ns_since(return_start);
+      if (!return_status.ok()) {
+        record_failure(return_status);
+      }
+    };
+
+    if (chunk.global_chunk_id >= task_build.tasks.size()) {
+      record_failure(absl::InternalError("local mapped concat streaming chunk id out of range"));
+      continue;
+    }
+    const auto& task = task_build.tasks[chunk.global_chunk_id];
+    if (chunk.bytes_in_chunk != task.total_bytes()) {
+      record_failure(absl::InternalError("local mapped concat streaming chunk size mismatch"));
+      continue;
+    }
+    if (stop.load(std::memory_order_acquire)) {
+      continue;
+    }
+    const auto copy_start = std::chrono::steady_clock::now();
+    absl::Status copy_status = execute_local_mapped_concat_task_copy(participant, task, chunk.data_ptr, sink, stream);
+    consumer_copy_ns += elapsed_ns_since(copy_start);
+    consumer_tasks += 1;
+    consumer_bytes += static_cast<uint64_t>(chunk.bytes_in_chunk);
+    if (!copy_status.ok()) {
+      record_failure(std::move(copy_status));
+    }
+  }
+
+  producers_done->Wait();
+  {
+    absl::MutexLock lock(&status_mu);
+    if (!first_status.ok()) {
+      return first_status;
+    }
+  }
+
+  stats.tasks = task_build.tasks.size();
+  stats.direct_tasks = task_build.direct_tasks;
+  stats.layout_tasks = task_build.layout_tasks;
+  stats.strided_tasks = task_build.strided_tasks;
+  stats.read_bytes = task_build.source_bytes;
+  stats.direct_bytes = task_build.direct_bytes;
+  stats.layout_bytes = task_build.layout_bytes;
+  stats.strided_bytes = task_build.strided_bytes;
+  stats.exec_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - total_start).count();
+  LOG(INFO) << "local_mapped_concat_streaming_summary"
+            << " artifact_id=" << participant.artifact_id << " jobs=" << jobs.size() << " tasks=" << stats.tasks
+            << " direct_tasks=" << stats.direct_tasks << " layout_tasks=" << stats.layout_tasks
+            << " strided_tasks=" << stats.strided_tasks << " read_bytes=" << stats.read_bytes
+            << " direct_bytes=" << stats.direct_bytes << " layout_bytes=" << stats.layout_bytes
+            << " strided_bytes=" << stats.strided_bytes << " chunk_bytes=" << host_buffer_bytes
+            << " streaming_buffer_chunks=" << concurrency << " task_build_sec=" << task_build_sec
+            << " producer_tasks=" << producer_tasks.load(std::memory_order_relaxed)
+            << " producer_bytes=" << producer_bytes.load(std::memory_order_relaxed)
+            << " producer_get_free_sec=" << seconds_from_ns(producer_get_free_ns.load(std::memory_order_relaxed))
+            << " producer_read_sec=" << seconds_from_ns(producer_read_ns.load(std::memory_order_relaxed))
+            << " producer_mark_ready_sec=" << seconds_from_ns(producer_mark_ready_ns.load(std::memory_order_relaxed))
+            << " consumer_tasks=" << consumer_tasks << " consumer_bytes=" << consumer_bytes
+            << " consumer_get_ready_sec=" << seconds_from_ns(consumer_get_ready_ns)
+            << " consumer_copy_sec=" << seconds_from_ns(consumer_copy_ns)
+            << " consumer_return_sec=" << seconds_from_ns(consumer_return_ns) << " exec=" << stats.exec_sec << "s";
+  return stats;
+}
+
 absl::Status validate_local_mapped_tensor_job_common(
     const MappedTensorJobRuntime& job,
     int device_id,
@@ -5649,6 +6209,16 @@ absl::Status validate_local_mapped_tensor_job_common(
     return absl::InvalidArgumentError(absl::StrCat(role, " has zero element size"));
   }
   return source_base_offset_bytes(job.job.source).status();
+}
+
+absl::Status validate_local_mapped_replicated_tensor_job_admission(const MappedTensorJobRuntime& job, int device_id) {
+  TC_RETURN_IF_ERROR(validate_local_mapped_tensor_job_common(
+      job, device_id, RankTensorSlice::Kind::kFull, "local mapped replicated tensor job"));
+  const auto& slice = job.job.slices.front();
+  if (job.job.source.size_bytes != 0 && slice.dst_size_bytes > job.job.source.size_bytes) {
+    return absl::InvalidArgumentError("local mapped replicated tensor job destination exceeds source tensor bytes");
+  }
+  return absl::OkStatus();
 }
 
 absl::StatusOr<uint64_t> local_mapped_2d_row_bytes(const TensorMeta& source, std::string_view role) {
@@ -5759,7 +6329,8 @@ absl::Status validate_local_mapped_tensor_jobs_admission(
         TC_RETURN_IF_ERROR(validate_local_mapped_dim1_tensor_job_admission(job, device_id, host_buffer_bytes));
         break;
       case TensorJob::Distribution::kReplicated:
-        return absl::InvalidArgumentError("local mapped tensor executor does not admit replicated tensor jobs");
+        TC_RETURN_IF_ERROR(validate_local_mapped_replicated_tensor_job_admission(job, device_id));
+        break;
     }
   }
   return absl::OkStatus();
@@ -5834,14 +6405,104 @@ absl::Status validate_local_mapped_concat_jobs_admission(
   return absl::OkStatus();
 }
 
-absl::Status execute_local_mapped_dim0_tensor_job(
+absl::Status append_local_mapped_tensor_task(LocalMappedTensorTask task, std::vector<LocalMappedTensorTask>* tasks) {
+  if (tasks == nullptr) {
+    return absl::InvalidArgumentError("local mapped tensor task append requires task storage");
+  }
+  if (task.dst_ptr == nullptr || task.read_bytes == 0 || task.dst_bytes == 0) {
+    return absl::InvalidArgumentError("local mapped tensor task has an empty source or destination");
+  }
+  if (task.read_bytes > std::numeric_limits<size_t>::max() || task.dst_bytes > std::numeric_limits<size_t>::max()) {
+    return absl::OutOfRangeError("local mapped tensor task exceeds host size_t limit");
+  }
+  switch (task.kind) {
+    case LocalMappedTensorTask::Kind::kContiguous:
+      if (task.read_bytes != task.dst_bytes) {
+        return absl::InvalidArgumentError("local mapped contiguous tensor task size mismatch");
+      }
+      break;
+    case LocalMappedTensorTask::Kind::kRect2D: {
+      if (task.rows == 0 || task.src_pitch_bytes == 0 || task.dst_pitch_bytes == 0) {
+        return absl::InvalidArgumentError("local mapped rect2d tensor task has invalid pitch geometry");
+      }
+      if (task.dst_bytes % task.rows != 0) {
+        return absl::InvalidArgumentError("local mapped rect2d tensor task has fractional row width");
+      }
+      const uint64_t width_bytes = task.dst_bytes / task.rows;
+      auto expected_read_bytes_or =
+          checked_mul_u64(task.rows, task.src_pitch_bytes, "local mapped rect2d tensor task read bytes");
+      if (!expected_read_bytes_or.ok()) {
+        return expected_read_bytes_or.status();
+      }
+      if (*expected_read_bytes_or != task.read_bytes) {
+        return absl::InvalidArgumentError("local mapped rect2d tensor task read byte size mismatch");
+      }
+      auto src_end_or =
+          checked_add_u64(task.src_col_offset_bytes, width_bytes, "local mapped rect2d tensor task source row end");
+      if (!src_end_or.ok()) {
+        return src_end_or.status();
+      }
+      if (*src_end_or > task.src_pitch_bytes || task.dst_pitch_bytes < width_bytes) {
+        return absl::InvalidArgumentError("local mapped rect2d tensor task has invalid source or destination pitch");
+      }
+      break;
+    }
+  }
+  tasks->push_back(task);
+  return absl::OkStatus();
+}
+
+absl::Status append_local_mapped_replicated_tensor_tasks(
     const MappedTensorJobRuntime& job,
-    loader::SeekableSource& source,
-    char* host_buffer,
     size_t host_buffer_bytes,
-    cudaStream_t stream,
-    uint64_t* read_bytes,
-    uint64_t* dst_bytes) {
+    LocalMappedTensorTaskBuildResult* result) {
+  if (job.destinations.size() != 1 || job.job.slices.size() != 1) {
+    return absl::InvalidArgumentError("local mapped replicated tensor job requires exactly one destination");
+  }
+  const auto source_base_offset_or = source_base_offset_bytes(job.job.source);
+  if (!source_base_offset_or.ok()) {
+    return source_base_offset_or.status();
+  }
+  const auto& slice = job.job.slices.front();
+  if (slice.kind != RankTensorSlice::Kind::kFull || slice.dst_size_bytes == 0) {
+    return absl::InvalidArgumentError("local mapped replicated tensor job requires a non-empty full slice");
+  }
+  if (host_buffer_bytes == 0) {
+    return absl::InvalidArgumentError("local mapped tensor executor requires a non-empty host buffer");
+  }
+
+  const uint64_t source_begin = *source_base_offset_or;
+  auto* dst_base = static_cast<std::uint8_t*>(job.destinations.front().gpu_ptr) + slice.dst_offset;
+  uint64_t copied = 0;
+  while (copied < slice.dst_size_bytes) {
+    const size_t chunk_bytes =
+        static_cast<size_t>(std::min<uint64_t>(slice.dst_size_bytes - copied, host_buffer_bytes));
+    auto task_source_or = checked_add_u64(source_begin, copied, "local mapped replicated tensor task source offset");
+    if (!task_source_or.ok()) {
+      return task_source_or.status();
+    }
+    TC_RETURN_IF_ERROR(append_local_mapped_tensor_task(
+        LocalMappedTensorTask{
+            .kind = LocalMappedTensorTask::Kind::kContiguous,
+            .source_offset = *task_source_or,
+            .read_bytes = static_cast<uint64_t>(chunk_bytes),
+            .dst_ptr = dst_base + copied,
+            .dst_bytes = static_cast<uint64_t>(chunk_bytes),
+        },
+        &result->tasks));
+    copied += static_cast<uint64_t>(chunk_bytes);
+  }
+
+  result->stats.replicated_jobs += 1;
+  result->stats.read_bytes += slice.dst_size_bytes;
+  result->stats.dst_bytes += slice.dst_size_bytes;
+  return absl::OkStatus();
+}
+
+absl::Status append_local_mapped_dim0_tensor_tasks(
+    const MappedTensorJobRuntime& job,
+    size_t host_buffer_bytes,
+    LocalMappedTensorTaskBuildResult* result) {
   if (job.destinations.size() != 1 || job.job.slices.size() != 1) {
     return absl::InvalidArgumentError("local mapped dim0 tensor job requires exactly one destination");
   }
@@ -5859,39 +6520,56 @@ absl::Status execute_local_mapped_dim0_tensor_job(
 
   uint64_t per_row_bytes = job.job.source.elem_size;
   for (size_t dim = 1; dim < job.job.source.shape.size(); ++dim) {
-    per_row_bytes *= static_cast<uint64_t>(job.job.source.shape[dim]);
+    auto per_row_bytes_or = checked_mul_u64(
+        per_row_bytes, static_cast<uint64_t>(job.job.source.shape[dim]), "local mapped dim0 tensor per-row bytes");
+    if (!per_row_bytes_or.ok()) {
+      return per_row_bytes_or.status();
+    }
+    per_row_bytes = *per_row_bytes_or;
   }
-  const uint64_t source_begin = *source_base_offset_or + static_cast<uint64_t>(slice.start) * per_row_bytes;
+  auto source_rel_begin_or =
+      checked_mul_u64(static_cast<uint64_t>(slice.start), per_row_bytes, "local mapped dim0 tensor source begin");
+  if (!source_rel_begin_or.ok()) {
+    return source_rel_begin_or.status();
+  }
+  auto source_begin_or =
+      checked_add_u64(*source_base_offset_or, *source_rel_begin_or, "local mapped dim0 tensor source begin");
+  if (!source_begin_or.ok()) {
+    return source_begin_or.status();
+  }
+  const uint64_t source_begin = *source_begin_or;
   auto* dst_base = static_cast<std::uint8_t*>(job.destinations.front().gpu_ptr) + slice.dst_offset;
 
   uint64_t copied = 0;
   while (copied < slice.dst_size_bytes) {
     const size_t chunk_bytes =
         static_cast<size_t>(std::min<uint64_t>(slice.dst_size_bytes - copied, host_buffer_bytes));
-    TC_RETURN_IF_ERROR(read_exact(source, source_begin + copied, host_buffer, chunk_bytes));
-    TC_RETURN_IF_ERROR(
-        tensorcast::cuda::memcpy_async(dst_base + copied, host_buffer, chunk_bytes, cudaMemcpyHostToDevice, stream));
-    TC_RETURN_IF_ERROR(tensorcast::cuda::stream_synchronize(stream));
+    auto task_source_or = checked_add_u64(source_begin, copied, "local mapped dim0 tensor task source offset");
+    if (!task_source_or.ok()) {
+      return task_source_or.status();
+    }
+    TC_RETURN_IF_ERROR(append_local_mapped_tensor_task(
+        LocalMappedTensorTask{
+            .kind = LocalMappedTensorTask::Kind::kContiguous,
+            .source_offset = *task_source_or,
+            .read_bytes = static_cast<uint64_t>(chunk_bytes),
+            .dst_ptr = dst_base + copied,
+            .dst_bytes = static_cast<uint64_t>(chunk_bytes),
+        },
+        &result->tasks));
     copied += static_cast<uint64_t>(chunk_bytes);
   }
 
-  if (read_bytes != nullptr) {
-    *read_bytes += slice.dst_size_bytes;
-  }
-  if (dst_bytes != nullptr) {
-    *dst_bytes += slice.dst_size_bytes;
-  }
+  result->stats.dim0_jobs += 1;
+  result->stats.read_bytes += slice.dst_size_bytes;
+  result->stats.dst_bytes += slice.dst_size_bytes;
   return absl::OkStatus();
 }
 
-absl::Status execute_local_mapped_dim1_tensor_job(
+absl::Status append_local_mapped_dim1_tensor_tasks(
     const MappedTensorJobRuntime& job,
-    loader::SeekableSource& source,
-    char* host_buffer,
     size_t host_buffer_bytes,
-    cudaStream_t stream,
-    uint64_t* read_bytes,
-    uint64_t* dst_bytes) {
+    LocalMappedTensorTaskBuildResult* result) {
   if (job.destinations.size() != 1 || job.job.slices.size() != 1) {
     return absl::InvalidArgumentError("local mapped dim1 tensor job requires exactly one destination");
   }
@@ -5909,7 +6587,11 @@ absl::Status execute_local_mapped_dim1_tensor_job(
 
   const uint64_t rows = static_cast<uint64_t>(job.job.source.shape[0]);
   const uint64_t cols = static_cast<uint64_t>(job.job.source.shape[1]);
-  const uint64_t row_bytes = cols * job.job.source.elem_size;
+  auto row_bytes_or = checked_mul_u64(cols, job.job.source.elem_size, "local mapped dim1 tensor row bytes");
+  if (!row_bytes_or.ok()) {
+    return row_bytes_or.status();
+  }
+  const uint64_t row_bytes = *row_bytes_or;
   if (rows == 0 || row_bytes == 0 || slice.dst_size_bytes % rows != 0) {
     return absl::InvalidArgumentError("local mapped dim1 tensor job has invalid row geometry");
   }
@@ -5925,37 +6607,52 @@ absl::Status execute_local_mapped_dim1_tensor_job(
 
   for (uint64_t row = 0; row < rows; row += rows_per_chunk) {
     const uint64_t chunk_rows = std::min<uint64_t>(rows_per_chunk, rows - row);
-    const size_t chunk_bytes = static_cast<size_t>(chunk_rows * row_bytes);
-    TC_RETURN_IF_ERROR(read_exact(source, *source_base_offset_or + row * row_bytes, host_buffer, chunk_bytes));
-    SC_RETURN_IF_CUDA_ERROR(cudaMemcpy2DAsync(
-        dst_base + row * dst_pitch_bytes,
-        static_cast<size_t>(dst_pitch_bytes),
-        host_buffer + src_col_bytes,
-        static_cast<size_t>(row_bytes),
-        static_cast<size_t>(col_bytes),
-        static_cast<size_t>(chunk_rows),
-        cudaMemcpyHostToDevice,
-        stream));
-    TC_RETURN_IF_ERROR(tensorcast::cuda::stream_synchronize(stream));
-    if (read_bytes != nullptr) {
-      *read_bytes += static_cast<uint64_t>(chunk_bytes);
+    auto chunk_bytes_or = checked_mul_u64(chunk_rows, row_bytes, "local mapped dim1 tensor task read bytes");
+    if (!chunk_bytes_or.ok()) {
+      return chunk_bytes_or.status();
     }
+    auto source_row_offset_or = checked_mul_u64(row, row_bytes, "local mapped dim1 tensor task source row offset");
+    if (!source_row_offset_or.ok()) {
+      return source_row_offset_or.status();
+    }
+    auto task_source_or =
+        checked_add_u64(*source_base_offset_or, *source_row_offset_or, "local mapped dim1 tensor task source offset");
+    if (!task_source_or.ok()) {
+      return task_source_or.status();
+    }
+    auto dst_row_offset_or = checked_mul_u64(row, dst_pitch_bytes, "local mapped dim1 tensor task destination offset");
+    if (!dst_row_offset_or.ok()) {
+      return dst_row_offset_or.status();
+    }
+    auto dst_bytes_or = checked_mul_u64(chunk_rows, col_bytes, "local mapped dim1 tensor task destination bytes");
+    if (!dst_bytes_or.ok()) {
+      return dst_bytes_or.status();
+    }
+    TC_RETURN_IF_ERROR(append_local_mapped_tensor_task(
+        LocalMappedTensorTask{
+            .kind = LocalMappedTensorTask::Kind::kRect2D,
+            .source_offset = *task_source_or,
+            .read_bytes = *chunk_bytes_or,
+            .dst_ptr = dst_base + *dst_row_offset_or,
+            .dst_bytes = *dst_bytes_or,
+            .src_col_offset_bytes = src_col_bytes,
+            .src_pitch_bytes = row_bytes,
+            .dst_pitch_bytes = dst_pitch_bytes,
+            .rows = chunk_rows,
+        },
+        &result->tasks));
   }
 
-  if (dst_bytes != nullptr) {
-    *dst_bytes += slice.dst_size_bytes;
-  }
+  result->stats.dim1_jobs += 1;
+  result->stats.read_bytes += rows * row_bytes;
+  result->stats.dst_bytes += slice.dst_size_bytes;
   return absl::OkStatus();
 }
 
-absl::Status execute_local_mapped_rect2d_tensor_job(
+absl::Status append_local_mapped_rect2d_tensor_tasks(
     const MappedTensorJobRuntime& job,
-    loader::SeekableSource& source,
-    char* host_buffer,
     size_t host_buffer_bytes,
-    cudaStream_t stream,
-    uint64_t* read_bytes,
-    uint64_t* dst_bytes) {
+    LocalMappedTensorTaskBuildResult* result) {
   if (job.destinations.size() != 1 || job.job.slices.size() != 1) {
     return absl::InvalidArgumentError("local mapped rect2d tensor job requires exactly one destination");
   }
@@ -5974,15 +6671,28 @@ absl::Status execute_local_mapped_rect2d_tensor_job(
 
   const uint64_t rows = static_cast<uint64_t>(job.job.source.shape[0]);
   const uint64_t cols = static_cast<uint64_t>(job.job.source.shape[1]);
-  const uint64_t row_bytes = cols * job.job.source.elem_size;
-  const uint64_t col_bytes = slice.col_count * job.job.source.elem_size;
+  auto row_bytes_or = checked_mul_u64(cols, job.job.source.elem_size, "local mapped rect2d tensor row bytes");
+  if (!row_bytes_or.ok()) {
+    return row_bytes_or.status();
+  }
+  const uint64_t row_bytes = *row_bytes_or;
+  auto col_bytes_or =
+      checked_mul_u64(slice.col_count, job.job.source.elem_size, "local mapped rect2d tensor selected bytes");
+  if (!col_bytes_or.ok()) {
+    return col_bytes_or.status();
+  }
+  const uint64_t col_bytes = *col_bytes_or;
   if (rows == 0 || cols == 0 || row_bytes == 0 || col_bytes == 0 || slice.row_count == 0 || slice.row_start > rows ||
       slice.row_count > rows - slice.row_start || slice.src_col_start > cols ||
       slice.col_count > cols - slice.src_col_start) {
     return absl::InvalidArgumentError("local mapped rect2d tensor job has invalid source geometry");
   }
-  const uint64_t expected_dst_bytes = slice.row_count * col_bytes;
-  if (expected_dst_bytes != slice.dst_size_bytes) {
+  auto expected_dst_bytes_or =
+      checked_mul_u64(slice.row_count, col_bytes, "local mapped rect2d tensor destination bytes");
+  if (!expected_dst_bytes_or.ok()) {
+    return expected_dst_bytes_or.status();
+  }
+  if (*expected_dst_bytes_or != slice.dst_size_bytes) {
     return absl::InvalidArgumentError("local mapped rect2d tensor job destination byte size mismatch");
   }
   if (row_bytes > host_buffer_bytes) {
@@ -5996,51 +6706,63 @@ absl::Status execute_local_mapped_rect2d_tensor_job(
 
   for (uint64_t row = 0; row < slice.row_count; row += rows_per_chunk) {
     const uint64_t chunk_rows = std::min<uint64_t>(rows_per_chunk, slice.row_count - row);
-    const size_t chunk_bytes = static_cast<size_t>(chunk_rows * row_bytes);
-    TC_RETURN_IF_ERROR(
-        read_exact(source, *source_base_offset_or + (slice.row_start + row) * row_bytes, host_buffer, chunk_bytes));
-    SC_RETURN_IF_CUDA_ERROR(cudaMemcpy2DAsync(
-        dst_base + row * dst_pitch_bytes,
-        static_cast<size_t>(dst_pitch_bytes),
-        host_buffer + src_col_bytes,
-        static_cast<size_t>(row_bytes),
-        static_cast<size_t>(col_bytes),
-        static_cast<size_t>(chunk_rows),
-        cudaMemcpyHostToDevice,
-        stream));
-    TC_RETURN_IF_ERROR(tensorcast::cuda::stream_synchronize(stream));
-    if (read_bytes != nullptr) {
-      *read_bytes += static_cast<uint64_t>(chunk_bytes);
+    auto chunk_bytes_or = checked_mul_u64(chunk_rows, row_bytes, "local mapped rect2d tensor task read bytes");
+    if (!chunk_bytes_or.ok()) {
+      return chunk_bytes_or.status();
     }
+    auto source_row_or = checked_add_u64(slice.row_start, row, "local mapped rect2d tensor task source row");
+    if (!source_row_or.ok()) {
+      return source_row_or.status();
+    }
+    auto source_row_offset_or =
+        checked_mul_u64(*source_row_or, row_bytes, "local mapped rect2d tensor task source row offset");
+    if (!source_row_offset_or.ok()) {
+      return source_row_offset_or.status();
+    }
+    auto task_source_or =
+        checked_add_u64(*source_base_offset_or, *source_row_offset_or, "local mapped rect2d tensor task source offset");
+    if (!task_source_or.ok()) {
+      return task_source_or.status();
+    }
+    auto dst_row_offset_or =
+        checked_mul_u64(row, dst_pitch_bytes, "local mapped rect2d tensor task destination offset");
+    if (!dst_row_offset_or.ok()) {
+      return dst_row_offset_or.status();
+    }
+    auto dst_bytes_or = checked_mul_u64(chunk_rows, col_bytes, "local mapped rect2d tensor task destination bytes");
+    if (!dst_bytes_or.ok()) {
+      return dst_bytes_or.status();
+    }
+    TC_RETURN_IF_ERROR(append_local_mapped_tensor_task(
+        LocalMappedTensorTask{
+            .kind = LocalMappedTensorTask::Kind::kRect2D,
+            .source_offset = *task_source_or,
+            .read_bytes = *chunk_bytes_or,
+            .dst_ptr = dst_base + *dst_row_offset_or,
+            .dst_bytes = *dst_bytes_or,
+            .src_col_offset_bytes = src_col_bytes,
+            .src_pitch_bytes = row_bytes,
+            .dst_pitch_bytes = dst_pitch_bytes,
+            .rows = chunk_rows,
+        },
+        &result->tasks));
   }
 
-  if (dst_bytes != nullptr) {
-    *dst_bytes += slice.dst_size_bytes;
+  auto full_read_bytes_or = checked_mul_u64(slice.row_count, row_bytes, "local mapped rect2d tensor total read bytes");
+  if (!full_read_bytes_or.ok()) {
+    return full_read_bytes_or.status();
   }
+  result->stats.rect2d_jobs += 1;
+  result->stats.read_bytes += *full_read_bytes_or;
+  result->stats.dst_bytes += slice.dst_size_bytes;
   return absl::OkStatus();
 }
 
-absl::StatusOr<LocalMappedTensorExecutionStats> execute_local_mapped_tensor_jobs(
+absl::StatusOr<LocalMappedTensorTaskBuildResult> build_local_mapped_tensor_tasks(
     const std::vector<MappedTensorJobRuntime>& jobs,
     int device_id,
-    loader::SeekableSource& source,
-    char* host_buffer,
     size_t host_buffer_bytes) {
-  LocalMappedTensorExecutionStats stats;
-  if (jobs.empty()) {
-    return stats;
-  }
-
-  TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(device_id));
-  cudaStream_t stream = nullptr;
-  TC_RETURN_IF_ERROR(tensorcast::cuda::stream_create_with_flags(&stream, cudaStreamNonBlocking));
-  absl::Cleanup destroy_stream = [&stream]() {
-    if (stream != nullptr) {
-      (void)tensorcast::cuda::stream_destroy(stream);
-    }
-  };
-
-  const auto total_start = std::chrono::steady_clock::now();
+  LocalMappedTensorTaskBuildResult result;
   for (const auto& job : jobs) {
     if (job.destinations.size() != 1 || job.job.slices.size() != 1) {
       return absl::InvalidArgumentError("local mapped tensor job requires one destination and one slice");
@@ -6051,139 +6773,280 @@ absl::StatusOr<LocalMappedTensorExecutionStats> execute_local_mapped_tensor_jobs
     }
     const auto& slice = job.job.slices.front();
     if (slice.kind == RankTensorSlice::Kind::kRect2D) {
-      stats.rect2d_jobs += 1;
-      TC_RETURN_IF_ERROR(execute_local_mapped_rect2d_tensor_job(
-          job, source, host_buffer, host_buffer_bytes, stream, &stats.read_bytes, &stats.dst_bytes));
+      TC_RETURN_IF_ERROR(append_local_mapped_rect2d_tensor_tasks(job, host_buffer_bytes, &result));
       continue;
     }
     switch (job.job.distribution) {
+      case TensorJob::Distribution::kReplicated:
+        TC_RETURN_IF_ERROR(append_local_mapped_replicated_tensor_tasks(job, host_buffer_bytes, &result));
+        break;
       case TensorJob::Distribution::kDim0Partitioned:
-        stats.dim0_jobs += 1;
-        TC_RETURN_IF_ERROR(execute_local_mapped_dim0_tensor_job(
-            job, source, host_buffer, host_buffer_bytes, stream, &stats.read_bytes, &stats.dst_bytes));
+        TC_RETURN_IF_ERROR(append_local_mapped_dim0_tensor_tasks(job, host_buffer_bytes, &result));
         break;
       case TensorJob::Distribution::kDim1Partitioned:
-        stats.dim1_jobs += 1;
-        TC_RETURN_IF_ERROR(execute_local_mapped_dim1_tensor_job(
-            job, source, host_buffer, host_buffer_bytes, stream, &stats.read_bytes, &stats.dst_bytes));
+        TC_RETURN_IF_ERROR(append_local_mapped_dim1_tensor_tasks(job, host_buffer_bytes, &result));
         break;
-      case TensorJob::Distribution::kReplicated:
-        return absl::UnimplementedError("local mapped tensor executor does not handle replicated tensor jobs");
     }
     if (slice.dst_size_bytes == 0) {
       return absl::InvalidArgumentError("local mapped tensor job has empty destination slice");
     }
   }
-  stats.exec_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - total_start).count();
-  return stats;
+  std::stable_sort(
+      result.tasks.begin(), result.tasks.end(), [](const LocalMappedTensorTask& lhs, const LocalMappedTensorTask& rhs) {
+        return lhs.source_offset < rhs.source_offset;
+      });
+  result.stats.tasks = result.tasks.size();
+  return result;
 }
 
-absl::Status execute_local_mapped_concat_job(
-    const ParsedMappedParticipant& participant,
-    const MappedConcatJobRuntime& job,
+absl::Status execute_local_mapped_tensor_task_copy(
+    const LocalMappedTensorTask& task,
+    const void* host_data,
+    cudaStream_t stream) {
+  if (host_data == nullptr) {
+    return absl::InvalidArgumentError("local mapped tensor task copy got a null host buffer");
+  }
+  switch (task.kind) {
+    case LocalMappedTensorTask::Kind::kContiguous:
+      TC_RETURN_IF_ERROR(
+          tensorcast::cuda::memcpy_async(
+              task.dst_ptr, host_data, static_cast<size_t>(task.dst_bytes), cudaMemcpyHostToDevice, stream));
+      TC_RETURN_IF_ERROR(tensorcast::cuda::stream_synchronize(stream));
+      return absl::OkStatus();
+    case LocalMappedTensorTask::Kind::kRect2D: {
+      if (task.rows == 0 || task.dst_bytes % task.rows != 0) {
+        return absl::InvalidArgumentError("local mapped rect2d tensor task has invalid row geometry");
+      }
+      const uint64_t width_bytes = task.dst_bytes / task.rows;
+      if (width_bytes > std::numeric_limits<size_t>::max() ||
+          task.src_pitch_bytes > std::numeric_limits<size_t>::max() ||
+          task.dst_pitch_bytes > std::numeric_limits<size_t>::max() || task.rows > std::numeric_limits<size_t>::max()) {
+        return absl::OutOfRangeError("local mapped rect2d tensor task exceeds host size_t limit");
+      }
+      const auto* host_bytes = static_cast<const std::uint8_t*>(host_data);
+      SC_RETURN_IF_CUDA_ERROR(cudaMemcpy2DAsync(
+          task.dst_ptr,
+          static_cast<size_t>(task.dst_pitch_bytes),
+          host_bytes + task.src_col_offset_bytes,
+          static_cast<size_t>(task.src_pitch_bytes),
+          static_cast<size_t>(width_bytes),
+          static_cast<size_t>(task.rows),
+          cudaMemcpyHostToDevice,
+          stream));
+      TC_RETURN_IF_ERROR(tensorcast::cuda::stream_synchronize(stream));
+      return absl::OkStatus();
+    }
+  }
+  return absl::InternalError("unknown local mapped tensor task kind");
+}
+
+absl::StatusOr<LocalMappedTensorExecutionStats> execute_local_mapped_tensor_jobs(
+    const std::vector<MappedTensorJobRuntime>& jobs,
+    int device_id,
     loader::SeekableSource& source,
-    char* host_buffer,
+    const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
+    std::chrono::milliseconds pinned_timeout,
     size_t host_buffer_bytes,
-    loader::TargetLayoutGpuSink& sink) {
-  if (job.destinations.size() != 1) {
-    return absl::InvalidArgumentError("local mapped concat requires exactly one destination");
+    size_t streaming_buffer_chunks,
+    const std::string& artifact_id) {
+  LocalMappedTensorExecutionStats stats;
+  const auto total_start = std::chrono::steady_clock::now();
+  if (jobs.empty()) {
+    return stats;
   }
-  for (const auto& fragment : job.fragments) {
-    const auto source_base_offset_or = source_base_offset_bytes(fragment.source);
-    if (!source_base_offset_or.ok()) {
-      return source_base_offset_or.status();
-    }
-    const uint64_t source_base_offset = *source_base_offset_or;
-    if (fragment.src_block_bytes == 0 || fragment.dst_block_bytes == 0) {
-      continue;
-    }
+  if (pinned_pool == nullptr) {
+    return absl::InvalidArgumentError("local mapped tensor streaming requires a pinned pool");
+  }
 
-    int64_t src_start = fragment.src_start;
-    int64_t src_end = fragment.src_end;
-    if (!fragment.src_starts_by_rank.empty()) {
-      src_start = fragment.src_starts_by_rank.front();
-      src_end = fragment.src_ends_by_rank.front();
+  const auto task_build_start = std::chrono::steady_clock::now();
+  auto task_build_or = build_local_mapped_tensor_tasks(jobs, device_id, host_buffer_bytes);
+  if (!task_build_or.ok()) {
+    return task_build_or.status();
+  }
+  auto task_build = std::move(*task_build_or);
+  const double task_build_sec =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - task_build_start).count();
+  if (task_build.tasks.empty()) {
+    return task_build.stats;
+  }
+  const size_t concurrency = std::max<size_t>(1, streaming_buffer_chunks);
+  auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
+      /*num_chunks=*/concurrency, host_buffer_bytes, pinned_pool);
+  TC_RETURN_IF_ERROR(
+      session_spb->initialize(pinned_timeout, absl::StrCat("local_mapped_tensor artifact_id=", artifact_id)));
+
+  TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(device_id));
+  cudaStream_t stream = nullptr;
+  TC_RETURN_IF_ERROR(tensorcast::cuda::stream_create_with_flags(&stream, cudaStreamNonBlocking));
+  absl::Cleanup destroy_stream = [&stream]() {
+    if (stream != nullptr) {
+      (void)tensorcast::cuda::stream_destroy(stream);
     }
-    if (src_end <= src_start) {
-      return absl::InvalidArgumentError("local mapped concat fragment has empty source range");
+  };
+
+  absl::Mutex status_mu;
+  absl::Status first_status;
+  std::atomic<bool> stop{false};
+  std::atomic<size_t> next_task{0};
+  std::atomic<uint64_t> producer_get_free_ns{0};
+  std::atomic<uint64_t> producer_read_ns{0};
+  std::atomic<uint64_t> producer_mark_ready_ns{0};
+  std::atomic<uint64_t> producer_tasks{0};
+  std::atomic<uint64_t> producer_bytes{0};
+  auto producers_done = std::make_shared<absl::BlockingCounter>(static_cast<int>(concurrency));
+  auto producers_remaining = std::make_shared<std::atomic<size_t>>(concurrency);
+
+  auto record_failure = [&](absl::Status status) {
+    if (status.ok()) {
+      return;
     }
-    if (fragment.dst_logical_begins_by_rank.empty()) {
-      return absl::FailedPreconditionError("local mapped concat requires destination logical offsets");
-    }
-    const uint64_t dst_logical_begin = fragment.dst_logical_begins_by_rank.front();
-    if (fragment.prefix_count == 1) {
-      const uint64_t source_rows = static_cast<uint64_t>(src_end - src_start);
-      if (source_rows == 0 || fragment.src_block_bytes % source_rows != 0) {
-        return absl::InvalidArgumentError("local mapped single-range concat has invalid dim0 source block");
+    {
+      absl::MutexLock lock(&status_mu);
+      if (first_status.ok()) {
+        first_status = std::move(status);
       }
-      const uint64_t source_row_bytes = fragment.src_block_bytes / source_rows;
-      uint64_t copied = 0;
-      while (copied < fragment.src_block_bytes) {
-        const size_t chunk_bytes = static_cast<size_t>(
-            std::min<uint64_t>(fragment.src_block_bytes - copied, static_cast<uint64_t>(host_buffer_bytes)));
-        TC_RETURN_IF_ERROR(read_exact(
-            source,
-            source_base_offset + static_cast<uint64_t>(src_start) * source_row_bytes + copied,
-            host_buffer,
-            chunk_bytes));
-        std::vector<common::CopyHandle> copy_handles;
-        TC_RETURN_IF_ERROR(submit_target_layout_write(
-            participant, sink, dst_logical_begin + copied, host_buffer, chunk_bytes, &copy_handles));
-        TC_RETURN_IF_ERROR(wait_copy_handles(&copy_handles));
-        copied += static_cast<uint64_t>(chunk_bytes);
-      }
-      continue;
     }
+    stop.store(true, std::memory_order_release);
+  };
 
-    const uint64_t source_rows = static_cast<uint64_t>(src_end - src_start);
-    if (fragment.prefix_count == 0 || source_rows % fragment.prefix_count != 0) {
-      return absl::InvalidArgumentError("local mapped multi-range concat has invalid source block geometry");
-    }
-    const uint64_t source_rows_per_block = source_rows / fragment.prefix_count;
-    if (source_rows_per_block == 0 || fragment.src_block_bytes % source_rows_per_block != 0) {
-      return absl::InvalidArgumentError("local mapped multi-range concat has invalid per-row source block size");
-    }
-    const uint64_t source_row_bytes = fragment.src_block_bytes / source_rows_per_block;
-    if (fragment.src_block_bytes > host_buffer_bytes) {
-      return absl::FailedPreconditionError("local mapped multi-range concat block exceeds pinned buffer size");
-    }
-    const size_t blocks_per_chunk =
-        std::max<size_t>(1, host_buffer_bytes / std::max<uint64_t>(1, fragment.src_block_bytes));
-    for (uint64_t block = 0; block < fragment.prefix_count; block += blocks_per_chunk) {
-      const uint64_t chunk_blocks = std::min<uint64_t>(fragment.prefix_count - block, blocks_per_chunk);
-      const size_t chunk_bytes = static_cast<size_t>(chunk_blocks * fragment.src_block_bytes);
-      TC_RETURN_IF_ERROR(read_exact(
-          source,
-          source_base_offset + (static_cast<uint64_t>(src_start) + block * source_rows_per_block) * source_row_bytes,
-          host_buffer,
-          chunk_bytes));
-
-      std::vector<common::CopyHandle> copy_handles;
-      if (fragment.dst_block_stride_bytes == fragment.dst_block_bytes) {
-        TC_RETURN_IF_ERROR(submit_target_layout_write(
-            participant,
-            sink,
-            dst_logical_begin + block * fragment.dst_block_bytes,
-            host_buffer,
-            chunk_blocks * fragment.dst_block_bytes,
-            &copy_handles));
-      } else {
-        for (uint64_t local_block = 0; local_block < chunk_blocks; ++local_block) {
-          const auto* src_block_ptr =
-              reinterpret_cast<const std::uint8_t*>(host_buffer) + local_block * fragment.src_block_bytes;
-          TC_RETURN_IF_ERROR(submit_target_layout_write(
-              participant,
-              sink,
-              dst_logical_begin + (block + local_block) * fragment.dst_block_stride_bytes,
-              src_block_ptr,
-              fragment.dst_block_bytes,
-              &copy_handles));
+  auto executor = whole_source_load_runtime().blocking_executor();
+  for (size_t worker = 0; worker < concurrency; ++worker) {
+    executor->add([&, producers_done, producers_remaining]() {
+      while (!stop.load(std::memory_order_acquire)) {
+        const size_t task_index = next_task.fetch_add(1, std::memory_order_acq_rel);
+        if (task_index >= task_build.tasks.size()) {
+          break;
         }
+        const auto& task = task_build.tasks[task_index];
+        const auto get_free_start = std::chrono::steady_clock::now();
+        auto slot_or = session_spb->get_free_chunk();
+        producer_get_free_ns.fetch_add(elapsed_ns_since(get_free_start), std::memory_order_relaxed);
+        if (!slot_or.ok()) {
+          if (!stop.load(std::memory_order_acquire)) {
+            record_failure(slot_or.status());
+          }
+          break;
+        }
+        const int slot_id = *slot_or;
+        if (stop.load(std::memory_order_acquire)) {
+          (void)session_spb->abort_producer_slot(slot_id);
+          break;
+        }
+        char* host_ptr = session_spb->get_chunk_ptr(slot_id);
+        if (host_ptr == nullptr) {
+          (void)session_spb->abort_producer_slot(slot_id);
+          record_failure(absl::InternalError("local mapped tensor streaming got a null pinned chunk"));
+          break;
+        }
+        const size_t bytes = static_cast<size_t>(task.read_bytes);
+        const auto read_start = std::chrono::steady_clock::now();
+        auto got_or = source.read_at(task.source_offset, host_ptr, bytes);
+        producer_read_ns.fetch_add(elapsed_ns_since(read_start), std::memory_order_relaxed);
+        if (!got_or.ok()) {
+          (void)session_spb->abort_producer_slot(slot_id);
+          record_failure(got_or.status());
+          break;
+        }
+        if (*got_or != bytes) {
+          (void)session_spb->abort_producer_slot(slot_id);
+          record_failure(
+              absl::OutOfRangeError(
+                  absl::StrCat("short read in local mapped tensor streaming: got=", *got_or, " want=", bytes)));
+          break;
+        }
+        const auto mark_ready_start = std::chrono::steady_clock::now();
+        const absl::Status ready_status = session_spb->mark_chunk_ready(slot_id, task_index, bytes);
+        producer_mark_ready_ns.fetch_add(elapsed_ns_since(mark_ready_start), std::memory_order_relaxed);
+        if (!ready_status.ok()) {
+          (void)session_spb->abort_producer_slot(slot_id);
+          record_failure(ready_status);
+          break;
+        }
+        producer_tasks.fetch_add(1, std::memory_order_relaxed);
+        producer_bytes.fetch_add(static_cast<uint64_t>(bytes), std::memory_order_relaxed);
       }
-      TC_RETURN_IF_ERROR(wait_copy_handles(&copy_handles));
+      if (producers_remaining->fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        session_spb->signal_production_complete();
+      }
+      producers_done->DecrementCount();
+    });
+  }
+
+  uint64_t consumer_get_ready_ns = 0;
+  uint64_t consumer_copy_ns = 0;
+  uint64_t consumer_return_ns = 0;
+  uint64_t consumer_tasks = 0;
+  uint64_t consumer_bytes = 0;
+  while (true) {
+    const auto get_ready_start = std::chrono::steady_clock::now();
+    auto chunk_or = session_spb->get_ready_chunk();
+    consumer_get_ready_ns += elapsed_ns_since(get_ready_start);
+    if (!chunk_or.ok()) {
+      if (!absl::IsOutOfRange(chunk_or.status()) && !absl::IsUnavailable(chunk_or.status())) {
+        record_failure(chunk_or.status());
+        session_spb->signal_production_complete();
+      }
+      break;
+    }
+    auto chunk = *chunk_or;
+    absl::Cleanup return_chunk = [&]() {
+      const auto return_start = std::chrono::steady_clock::now();
+      const absl::Status return_status = session_spb->return_chunk(chunk.slot_id);
+      consumer_return_ns += elapsed_ns_since(return_start);
+      if (!return_status.ok()) {
+        record_failure(return_status);
+      }
+    };
+
+    if (chunk.global_chunk_id >= task_build.tasks.size()) {
+      record_failure(absl::InternalError("local mapped tensor streaming chunk id out of range"));
+      continue;
+    }
+    const auto& task = task_build.tasks[chunk.global_chunk_id];
+    if (chunk.bytes_in_chunk != task.read_bytes) {
+      record_failure(absl::InternalError("local mapped tensor streaming chunk size mismatch"));
+      continue;
+    }
+    if (stop.load(std::memory_order_acquire)) {
+      continue;
+    }
+    const auto copy_start = std::chrono::steady_clock::now();
+    absl::Status copy_status = execute_local_mapped_tensor_task_copy(task, chunk.data_ptr, stream);
+    consumer_copy_ns += elapsed_ns_since(copy_start);
+    consumer_tasks += 1;
+    consumer_bytes += static_cast<uint64_t>(chunk.bytes_in_chunk);
+    if (!copy_status.ok()) {
+      record_failure(std::move(copy_status));
     }
   }
-  return absl::OkStatus();
+
+  producers_done->Wait();
+  {
+    absl::MutexLock lock(&status_mu);
+    if (!first_status.ok()) {
+      return first_status;
+    }
+  }
+
+  stats = task_build.stats;
+  stats.exec_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - total_start).count();
+  LOG(INFO) << "local_mapped_tensor_streaming_summary"
+            << " artifact_id=" << artifact_id << " jobs=" << jobs.size() << " tasks=" << stats.tasks
+            << " replicated_jobs=" << stats.replicated_jobs << " dim0_jobs=" << stats.dim0_jobs
+            << " dim1_jobs=" << stats.dim1_jobs << " rect2d_jobs=" << stats.rect2d_jobs
+            << " read_bytes=" << stats.read_bytes << " dst_bytes=" << stats.dst_bytes
+            << " chunk_bytes=" << host_buffer_bytes << " streaming_buffer_chunks=" << concurrency
+            << " task_build_sec=" << task_build_sec
+            << " producer_tasks=" << producer_tasks.load(std::memory_order_relaxed)
+            << " producer_bytes=" << producer_bytes.load(std::memory_order_relaxed)
+            << " producer_get_free_sec=" << seconds_from_ns(producer_get_free_ns.load(std::memory_order_relaxed))
+            << " producer_read_sec=" << seconds_from_ns(producer_read_ns.load(std::memory_order_relaxed))
+            << " producer_mark_ready_sec=" << seconds_from_ns(producer_mark_ready_ns.load(std::memory_order_relaxed))
+            << " consumer_tasks=" << consumer_tasks << " consumer_bytes=" << consumer_bytes
+            << " consumer_get_ready_sec=" << seconds_from_ns(consumer_get_ready_ns)
+            << " consumer_copy_sec=" << seconds_from_ns(consumer_copy_ns)
+            << " consumer_return_sec=" << seconds_from_ns(consumer_return_ns) << " exec=" << stats.exec_sec << "s";
+  return stats;
 }
 
 absl::StatusOr<LocalMappedTargetExecutionResult> execute_local_mapped_target(
@@ -6203,15 +7066,7 @@ absl::StatusOr<LocalMappedTargetExecutionResult> execute_local_mapped_target(
   }
 
   const auto total_start = std::chrono::steady_clock::now();
-  const size_t chunk_bytes = std::max<size_t>(1, std::min<uint64_t>(options.chunk_bytes, pinned_pool->slice_bytes()));
-  PinnedBorrow host_pool;
-  host_pool.pool = pinned_pool;
-  const std::string request_context = absl::StrCat("local_mapped_target artifact_id=", participant.artifact_id);
-  if (pinned_pool->allocate(chunk_bytes, host_pool.buffers, pinned_timeout, request_context) != 0 ||
-      host_pool.buffers.empty()) {
-    return absl::ResourceExhaustedError("failed to allocate pinned buffer for local mapped target load");
-  }
-  char* host_buffer = host_pool.buffers.front();
+  const size_t chunk_bytes = pinned_pool->slice_bytes();
 
   std::unique_ptr<loader::SeekableSource> source_owner =
       std::make_unique<PreadMultiSafetensorsSource>(std::vector<loader::SharedSafetensorsSegment>(
@@ -6324,47 +7179,69 @@ absl::StatusOr<LocalMappedTargetExecutionResult> execute_local_mapped_target(
       validate_local_mapped_tensor_jobs_admission(local_tensor_jobs, participant.device_id, chunk_bytes));
   TC_RETURN_IF_ERROR(validate_local_mapped_concat_jobs_admission(concat_job_build.jobs, chunk_bytes));
 
-  auto tensor_stats_or =
-      execute_local_mapped_tensor_jobs(local_tensor_jobs, participant.device_id, source, host_buffer, chunk_bytes);
+  const size_t streaming_buffer_chunks = std::max<size_t>(1, options.streaming_buffer_chunks);
+  auto tensor_stats_or = execute_local_mapped_tensor_jobs(
+      local_tensor_jobs,
+      participant.device_id,
+      source,
+      pinned_pool,
+      pinned_timeout,
+      chunk_bytes,
+      streaming_buffer_chunks,
+      participant.artifact_id);
   if (!tensor_stats_or.ok()) {
     return tensor_stats_or.status();
   }
   const LocalMappedTensorExecutionStats tensor_stats = *tensor_stats_or;
 
-  double concat_exec_sec = 0.0;
-  for (const auto& job : concat_job_build.jobs) {
-    const auto job_start = std::chrono::steady_clock::now();
-    TC_RETURN_IF_ERROR(
-        execute_local_mapped_concat_job(participant, job, source, host_buffer, chunk_bytes, target_sink));
-    concat_exec_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - job_start).count();
+  LocalMappedConcatExecutionStats concat_stats;
+  if (!concat_job_build.jobs.empty()) {
+    auto concat_stats_or = execute_local_mapped_concat_jobs_streaming(
+        participant,
+        concat_job_build.jobs,
+        source,
+        pinned_pool,
+        pinned_timeout,
+        chunk_bytes,
+        streaming_buffer_chunks,
+        target_sink);
+    if (!concat_stats_or.ok()) {
+      return concat_stats_or.status();
+    }
+    concat_stats = *concat_stats_or;
   }
 
   const uint64_t unique_source_bytes = tensor_stats.read_bytes + concat_job_build.handled_source_bytes;
+  const uint64_t concat_peak_temporary_bytes = chunk_bytes * static_cast<uint64_t>(streaming_buffer_chunks);
 
   const auto total_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - total_start).count();
   LOG(INFO) << "local_mapped_target timings"
             << " artifact_id=" << participant.artifact_id << " tensor_jobs=" << local_tensor_jobs.size()
             << " base_tensor_jobs=" << tensor_job_build.jobs.size()
             << " partial_tensor_jobs=" << partial_tensor_job_build.jobs.size()
+            << " tensor_replicated_jobs=" << tensor_stats.replicated_jobs
             << " tensor_dim0_jobs=" << tensor_stats.dim0_jobs << " tensor_dim1_jobs=" << tensor_stats.dim1_jobs
             << " tensor_rect2d_jobs=" << tensor_stats.rect2d_jobs << " tensor_read_bytes=" << tensor_stats.read_bytes
             << " tensor_dst_bytes=" << tensor_stats.dst_bytes << " tensor_job_build=" << tensor_build_sec << "s"
             << " tensor_job_exec=" << tensor_stats.exec_sec << "s"
-            << " concat_jobs=" << concat_job_build.jobs.size()
+            << " tensor_streaming_tasks=" << tensor_stats.tasks << " concat_jobs=" << concat_job_build.jobs.size()
             << " concat_job_source_bytes=" << concat_job_build.handled_source_bytes
             << " concat_job_root_dst_bytes=" << concat_job_build.handled_root_dst_bytes
             << " concat_job_build=" << concat_build_sec << "s"
-            << " concat_job_exec=" << concat_exec_sec << "s"
-            << " lane_range_bytes=" << lane_range_bytes << " handled_range_bytes=" << handled_range_bytes
-            << " handled_overlap_bytes=" << handled_overlap_bytes << " residual_segments=" << segment_refs_or->size()
-            << " residual_bytes=" << residual_bytes << " total=" << total_sec << "s";
+            << " concat_job_exec=" << concat_stats.exec_sec << "s"
+            << " concat_streaming_tasks=" << concat_stats.tasks << " concat_direct_tasks=" << concat_stats.direct_tasks
+            << " concat_layout_tasks=" << concat_stats.layout_tasks
+            << " concat_strided_tasks=" << concat_stats.strided_tasks << " lane_range_bytes=" << lane_range_bytes
+            << " handled_range_bytes=" << handled_range_bytes << " handled_overlap_bytes=" << handled_overlap_bytes
+            << " residual_segments=" << segment_refs_or->size() << " residual_bytes=" << residual_bytes
+            << " total=" << total_sec << "s";
   return LocalMappedTargetExecutionResult{
       .metrics =
           runtime::ingestion::strategy::CollectiveExecutionMetrics{
               .unique_source_bytes = unique_source_bytes,
               .peer_transfer_bytes = 0,
-              .peak_temporary_bytes = chunk_bytes,
-              .batch_count = static_cast<uint64_t>(local_tensor_jobs.size() + concat_job_build.jobs.size()),
+              .peak_temporary_bytes = std::max<uint64_t>(chunk_bytes, concat_peak_temporary_bytes),
+              .batch_count = static_cast<uint64_t>(local_tensor_jobs.size() + concat_stats.tasks),
               .dedup_saving_bytes = 0,
           },
       .residual_data_map = std::move(residual_data_map),

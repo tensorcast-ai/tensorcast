@@ -29,6 +29,12 @@ class ArtifactSourceRegistry {
     kBindingSeal = 3,
   };
 
+  enum class SourceFormatKind : std::uint8_t {
+    kUnspecified = 0,
+    kPartitioned = 1,
+    kSafetensors = 2,
+  };
+
   struct SourceFileFingerprint {
     std::uint64_t inode{0};
     std::uint64_t size{0};
@@ -45,6 +51,7 @@ class ArtifactSourceRegistry {
     std::string canonical_index_json;
     std::optional<std::string> source_index_json;
     std::optional<std::string> source_disk_path;
+    SourceFormatKind source_format_kind{SourceFormatKind::kUnspecified};
     bool descriptor_present{false};
     std::optional<std::string> index_multihash;
     std::optional<std::string> data_multihash;

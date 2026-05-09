@@ -187,10 +187,15 @@ struct IndexBackedRepresentationBuildResult {
   RepresentationWorkPlan work_plan;
 };
 
+struct NormalizeRepresentationTransformContractOptions {
+  bool compute_identity_hashes{true};
+};
+
 absl::Status validate_representation_transform_contract(const RepresentationTransformContract& contract);
 
 absl::StatusOr<RepresentationTransformContract> normalize_representation_transform_contract(
-    RepresentationTransformContract contract);
+    RepresentationTransformContract contract,
+    NormalizeRepresentationTransformContractOptions options = {});
 
 absl::StatusOr<std::string> compute_tensor_schema_hash(const RepresentationTransformContract& contract);
 

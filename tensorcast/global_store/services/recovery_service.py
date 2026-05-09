@@ -9,12 +9,17 @@ Handles state recovery after failures, worker rediscovery, and state synchroniza
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID, uuid4
 
 from tensorcast.global_store.exceptions import (
     DatabaseError,
     NotFoundError,
     ValidationError,
+)
+from tensorcast.global_store.grpc_helpers import (
+    coerce_db_datetime,
+    timestamp_to_datetime,
 )
 from tensorcast.global_store.metrics import (
     inc_control_plane_conflict,
@@ -270,6 +275,21 @@ class RecoveryService:
             hash_val ^= b
             hash_val = (hash_val * fnv_prime) & 0xFFFFFFFFFFFFFFFF
         return f"{hash_val:016x}"
+
+    @staticmethod
+    def _snapshot_observed_at(
+        inventory: list[common_pb2.ReplicaInfo],
+    ) -> datetime | None:
+        observed_at = None
+        for replica in inventory:
+            if not replica.stats.HasField("registered_ts"):
+                continue
+            replica_observed_at = timestamp_to_datetime(replica.stats.registered_ts)
+            if replica_observed_at is None:
+                continue
+            if observed_at is None or replica_observed_at < observed_at:
+                observed_at = replica_observed_at
+        return observed_at
 
     def _read_reconcile_noop_cache(
         self, worker_id: str
@@ -728,7 +748,10 @@ class RecoveryService:
                 )
                 resolved_global_replicas = _ensure_global_replicas()
                 state_changes = self._compute_state_changes(
-                    inventory, resolved_global_replicas, force_full_sync
+                    inventory,
+                    resolved_global_replicas,
+                    force_full_sync,
+                    self._snapshot_observed_at(inventory),
                 )
                 if state_changes:
                     adds = 0
@@ -831,6 +854,7 @@ class RecoveryService:
         local_replicas: list[common_pb2.ReplicaInfo],
         global_replicas: list[Replica],
         force_full_sync: bool,
+        snapshot_observed_at: datetime | None = None,
     ) -> list[global_store_pb2.StateChange]:
         """Compute differences between local and global state."""
         state_changes = []
@@ -902,6 +926,21 @@ class RecoveryService:
 
         for key in to_remove:
             global_replica = global_replicas_by_key[key]
+            if snapshot_observed_at is not None:
+                replica_created_at = coerce_db_datetime(global_replica.created_at)
+                if (
+                    replica_created_at is not None
+                    and replica_created_at > snapshot_observed_at
+                ):
+                    logger.info(
+                        "Reconcile preserving replica created after snapshot worker_id=%s replica_id=%s artifact_id=%s created_at=%s snapshot_observed_at=%s",
+                        global_replica.worker_id,
+                        global_replica.replica_id,
+                        global_replica.artifact_id,
+                        replica_created_at.isoformat(),
+                        snapshot_observed_at.isoformat(),
+                    )
+                    continue
 
             # Convert to proto format
             replica_info = self._convert_replica_to_proto(global_replica)

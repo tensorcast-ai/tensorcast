@@ -41,6 +41,7 @@ struct CollectiveDiskLoadResult {
 
 struct CollectiveMappedTargetLoadOptions {
   uint64_t chunk_bytes{128ULL * 1024ULL * 1024ULL};
+  uint32_t streaming_buffer_chunks{1};
   uint64_t merge_max_gap_bytes{256ULL * 1024ULL};
   uint64_t merge_max_amplification{4};
   StoreEngineOptions::MaterializationStrategyConfig strategy_config;

@@ -3,6 +3,7 @@
 #include "daemon/service/controllers/materialization_disk_resolve_utils.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -118,15 +119,12 @@ struct SourceScanResult {
   std::uint64_t total_bytes{0};
 };
 
-absl::StatusOr<SourceScanResult> scan_source(const std::filesystem::path& root) {
-  auto context_or = store::loader::get_disk_artifact_context(root);
-  if (!context_or.ok()) {
-    return normalize_disk_context_status(context_or.status(), root.string());
-  }
-
+absl::StatusOr<SourceScanResult> scan_source_from_context(
+    const std::filesystem::path& root,
+    const std::shared_ptr<const DiskArtifactContext>& context) {
   SourceScanResult out;
-  out.total_bytes = (*context_or)->total_size();
-  for (const auto& path : (*context_or)->partition_paths()) {
+  out.total_bytes = context->total_size();
+  for (const auto& path : context->partition_paths()) {
     auto fp_or = stat_file_fingerprint(path);
     if (!fp_or.ok()) {
       return fp_or.status();
@@ -135,6 +133,65 @@ absl::StatusOr<SourceScanResult> scan_source(const std::filesystem::path& root) 
     out.fingerprints.insert_or_assign(rel, *fp_or);
   }
   return out;
+}
+
+bool is_data_partition_filename(std::string_view name) {
+  if (name == "tensor.data" || absl::EndsWith(name, ".safetensors")) {
+    return true;
+  }
+  constexpr std::string_view kPrefix = "tensor.data_";
+  if (!name.starts_with(kPrefix)) {
+    return false;
+  }
+  const std::string_view suffix = name.substr(kPrefix.size());
+  if (suffix.empty()) {
+    return false;
+  }
+  return std::ranges::all_of(suffix, [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
+}
+
+absl::StatusOr<SourceFingerprintMap> scan_source_fingerprints_lightweight(const std::filesystem::path& root) {
+  std::error_code ec;
+  if (!std::filesystem::exists(root, ec)) {
+    if (ec) {
+      return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to access source path: ", root.string()));
+    }
+    return absl::NotFoundError(absl::StrCat("source path missing: ", root.string()));
+  }
+  if (!std::filesystem::is_directory(root, ec)) {
+    if (ec) {
+      return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat source path: ", root.string()));
+    }
+    return absl::FailedPreconditionError(absl::StrCat("source path is not a directory: ", root.string()));
+  }
+
+  SourceFingerprintMap fingerprints;
+  for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+    if (ec) {
+      return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to enumerate source path: ", root.string()));
+    }
+    if (!entry.is_regular_file()) {
+      continue;
+    }
+    const std::string filename = entry.path().filename().string();
+    if (!is_data_partition_filename(filename)) {
+      continue;
+    }
+    auto fp_or = stat_file_fingerprint(entry.path());
+    if (!fp_or.ok()) {
+      return fp_or.status();
+    }
+    fingerprints.insert_or_assign(filename, *fp_or);
+  }
+  return fingerprints;
+}
+
+absl::StatusOr<SourceScanResult> scan_source(const std::filesystem::path& root) {
+  auto context_or = store::loader::get_uncached_disk_artifact_context(root);
+  if (!context_or.ok()) {
+    return normalize_disk_context_status(context_or.status(), root.string());
+  }
+  return scan_source_from_context(root, *context_or);
 }
 
 absl::StatusOr<MountedSourceMetadata> build_mounted_source_metadata_from_context(
@@ -191,7 +248,7 @@ absl::StatusOr<MountedSourceMetadata> build_mounted_source_metadata_from_context
   }
   metadata.generation = compute_generation_from_index(metadata.index_info.canonical_index_json);
 
-  auto scan_or = scan_source(normalized_path);
+  auto scan_or = scan_source_from_context(normalized_path, context);
   if (!scan_or.ok()) {
     return scan_or.status();
   }
@@ -409,7 +466,7 @@ ImportArtifactErrorCode classify_import_error(const absl::Status& status) {
 }
 
 absl::StatusOr<MountedSourceMetadata> build_mounted_source_metadata(const std::filesystem::path& normalized_path) {
-  auto context_or = store::loader::get_disk_artifact_context(normalized_path);
+  auto context_or = store::loader::get_uncached_disk_artifact_context(normalized_path);
   if (!context_or.ok()) {
     return normalize_disk_context_status(context_or.status(), normalized_path.string());
   }
@@ -624,23 +681,9 @@ absl::StatusOr<ImportArtifactFromPathResult> import_artifact_from_path(
   return result;
 }
 
-absl::Status validate_source_fingerprints(
-    const std::filesystem::path& source_root,
+absl::Status compare_source_fingerprints(
+    const SourceFingerprintMap& current,
     const SourceFingerprintMap& expected_fingerprints) {
-  auto current_or = scan_source(source_root);
-  if (!current_or.ok()) {
-    if (absl::IsNotFound(current_or.status())) {
-      return absl::FailedPreconditionError(
-          absl::StrCat(kSourceMutatedPrefix, " source path missing: ", source_root.string()));
-    }
-    if (absl::IsPermissionDenied(current_or.status())) {
-      return current_or.status();
-    }
-    return absl::FailedPreconditionError(
-        absl::StrCat(kSourceMutatedPrefix, " cannot read source path: ", current_or.status().message()));
-  }
-
-  const auto& current = current_or->fingerprints;
   if (current.size() != expected_fingerprints.size()) {
     return absl::FailedPreconditionError(
         absl::StrCat(
@@ -662,6 +705,25 @@ absl::Status validate_source_fingerprints(
     }
   }
   return absl::OkStatus();
+}
+
+absl::Status validate_source_fingerprints(
+    const std::filesystem::path& source_root,
+    const SourceFingerprintMap& expected_fingerprints) {
+  auto current_or = scan_source_fingerprints_lightweight(source_root);
+  if (!current_or.ok()) {
+    if (absl::IsNotFound(current_or.status())) {
+      return absl::FailedPreconditionError(
+          absl::StrCat(kSourceMutatedPrefix, " source path missing: ", source_root.string()));
+    }
+    if (absl::IsPermissionDenied(current_or.status())) {
+      return current_or.status();
+    }
+    return absl::FailedPreconditionError(
+        absl::StrCat(kSourceMutatedPrefix, " cannot read source path: ", current_or.status().message()));
+  }
+
+  return compare_source_fingerprints(*current_or, expected_fingerprints);
 }
 
 absl::Status validate_mounted_source_snapshot(
@@ -690,7 +752,7 @@ absl::Status validate_mounted_source_snapshot(
     return absl::FailedPreconditionError(
         absl::StrCat(kSourceMutatedPrefix, " source index changed for ", source_root.string()));
   }
-  return validate_source_fingerprints(source_root, expected_fingerprints);
+  return compare_source_fingerprints(metadata_or->file_fingerprints, expected_fingerprints);
 }
 
 } // namespace tensorcast::daemon::materialization_disk_resolve

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 import time
 import uuid
 import weakref
+from concurrent.futures import Future, ThreadPoolExecutor
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Mapping, Sequence, cast
 
@@ -65,6 +67,18 @@ _REQUIRED_SOURCE_BOUND_CAPABILITIES = (
     SourceBoundCapability.TYPED_EXECUTION_DIAGNOSTICS,
     SourceBoundCapability.SINGLE_MINT_BINDING_CLOSEOUT,
 )
+
+_RESTORE_EXECUTOR: ThreadPoolExecutor | None = None
+
+
+def _owned_binding_restore_executor() -> ThreadPoolExecutor:
+    global _RESTORE_EXECUTOR
+    if _RESTORE_EXECUTOR is None:
+        _RESTORE_EXECUTOR = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="tc-owned-binding-restore",
+        )
+    return _RESTORE_EXECUTOR
 
 
 def _raise_if_published_for_mutation(
@@ -418,7 +432,7 @@ class OwnedBindingSlot:
         *,
         store: "Store",
         runtime: "StoreRuntimeContext",
-        tensors: Mapping[str, torch.Tensor],
+        tensors: Mapping[str, torch.Tensor] | None,
         layout: BindingLayout,
         binding_id: str,
         current_value_metadata: BindingValueMetadata | None,
@@ -426,17 +440,24 @@ class OwnedBindingSlot:
         device_id: int,
         target_publication_token: bytes | None,
         target_publication_operation_id: str | None = None,
+        restore_response: store_daemon_pb2.CreateBindingResponse
+        | store_daemon_pb2.CreateOwnedBindingResponse
+        | None = None,
+        start_restore: bool = False,
     ) -> None:
-        if not tensors:
+        if not tensors and restore_response is None:
             raise ArtifactError(
-                "OwnedBindingSlot requires at least one tensor",
+                "OwnedBindingSlot requires tensors or a deferred restore response",
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
         self._store = store
         self._runtime = runtime
-        self._tensors = dict(tensors)
+        self._tensors = dict(tensors or {})
         self._tensors_view: Mapping[str, torch.Tensor] = MappingProxyType(self._tensors)
+        self._tensors_restored = bool(tensors)
+        self._restore_response = restore_response
+        self._restore_future: Future[dict[str, torch.Tensor]] | None = None
         self._layout = layout
         self._binding_id = str(binding_id)
         self._binding_layout_id = str(layout.binding_layout_id)
@@ -475,10 +496,86 @@ class OwnedBindingSlot:
         self._last_source_bound_plan_diagnostics: SourceBoundPlanDiagnostics | None = (
             None
         )
+        if start_restore:
+            self.start_tensor_restore()
 
     @property
     def tensors(self) -> Mapping[str, torch.Tensor]:
+        self.ensure_tensors_restored()
         return self._tensors_view
+
+    def start_tensor_restore(self) -> None:
+        self._ensure_open()
+        if self._tensors_restored or self._restore_future is not None:
+            return
+        if self._restore_response is None:
+            raise ArtifactError(
+                "OwnedBindingSlot has no tensors and no deferred restore response",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        logger.info(
+            "tc_profile_py owned_binding_slot start_tensor_restore_async "
+            "binding_id=%s device_id=%d",
+            self._binding_id,
+            self._device_id,
+        )
+        self._restore_future = _owned_binding_restore_executor().submit(
+            functools.partial(
+                restore_owned_binding_tensors,
+                response=self._restore_response,
+                runtime=self._runtime,
+                device_id=self._device_id,
+            )
+        )
+
+    def ensure_tensors_restored(self) -> None:
+        if self._tensors_restored:
+            return
+        self._ensure_open()
+        if self._restore_response is None and self._restore_future is None:
+            raise ArtifactError(
+                "OwnedBindingSlot has no tensors and no deferred restore response",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        profile_start = time.perf_counter()
+        logger.info(
+            "tc_profile_py owned_binding_slot ensure_tensors_restored_start "
+            "binding_id=%s future_started=%s",
+            self._binding_id,
+            self._restore_future is not None,
+        )
+        if self._restore_future is None:
+            tensors = restore_owned_binding_tensors(
+                response=cast(
+                    store_daemon_pb2.CreateBindingResponse
+                    | store_daemon_pb2.CreateOwnedBindingResponse,
+                    self._restore_response,
+                ),
+                runtime=self._runtime,
+                device_id=self._device_id,
+            )
+        else:
+            tensors = self._restore_future.result()
+        if not tensors:
+            raise ArtifactError(
+                "OwnedBindingSlot tensor restore returned no tensors",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        self._tensors = dict(tensors)
+        self._tensors_view = MappingProxyType(self._tensors)
+        self._tensors_restored = True
+        self._restore_response = None
+        self._restore_future = None
+        logger.info(
+            "tc_profile_py owned_binding_slot ensure_tensors_restored_done "
+            "binding_id=%s tensor_count=%d total_sec=%.6f",
+            self._binding_id,
+            len(self._tensors),
+            time.perf_counter() - profile_start,
+        )
 
     @property
     def binding_id(self) -> str:
@@ -1260,6 +1357,9 @@ class OwnedBindingSlot:
     def close(self) -> None:
         if self._closed:
             return
+        if self._restore_future is not None:
+            with contextlib.suppress(Exception):
+                self._restore_future.result()
         with contextlib.suppress(Exception):
             if self._published_lease_id is not None:
                 self.retire(wait=False)

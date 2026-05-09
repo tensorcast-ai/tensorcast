@@ -460,7 +460,11 @@ static uint64_t get_cuda_memory_ptr_wrapper(int device_id, const py::bytes& cuda
   // Convert Python bytes to std::string handle
   const auto handle = cuda_ipc_handle_py.cast<std::string>();
 
-  absl::StatusOr<std::uint64_t> ptr_or = get_cuda_memory_ptr(device_id, handle);
+  absl::StatusOr<std::uint64_t> ptr_or;
+  {
+    py::gil_scoped_release release;
+    ptr_or = get_cuda_memory_ptr(device_id, handle);
+  }
   if (!ptr_or.ok()) {
     const auto str = std::string("Failed to get CUDA memory pointer: ") + ptr_or.status().ToString();
     PY_THROW_WITH_LOG(PyExc_ValueError, str);
