@@ -22,7 +22,7 @@ from tensorcast.types import (
 
 _MANIFEST_PRODUCER = "tensorcast.serving_binding_spec_cache"
 _MANIFEST_PRODUCER_VERSION = 1
-_SUPPORTED_RUNTIMES = frozenset({"vllm"})
+_SUPPORTED_RUNTIMES = frozenset({"tensorcast-reference", "vllm"})
 
 
 class ServingBindingSpecCacheRecord(BaseModel):

@@ -1432,7 +1432,7 @@ message AcquireBindingValueRequest {
 }
 
 message AcquireBindingValueResponse {
-  string lease_token = 1;
+  bytes lease_token = 1;
   MemCopyHandle mem_handle = 2;
   bytes target_index_bytes = 3;
   repeated TensorPayloadDescriptor payloads = 4;
