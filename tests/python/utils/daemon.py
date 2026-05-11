@@ -95,6 +95,12 @@ def start_daemon_binary(
     global_store_addr: str | None = None,
     p2p_host: str = "0.0.0.0",
     p2p_port: int | None = None,
+    serving_prefetch_enabled: bool = False,
+    serving_prefetch_same_daemon_acquire_enabled: bool = True,
+    serving_prefetch_default_expire_if_unacquired: str = "30s",
+    serving_prefetch_default_idle_ttl_after_last_release: str = "30s",
+    serving_prefetch_default_materialization_timeout: str = "60s",
+    public_disk_source_root: Path | None = None,
 ) -> subprocess.Popen:
     """Start the C++ daemon with a unified minimal config for tests.
 
@@ -210,6 +216,48 @@ def start_daemon_binary(
             "registration_retry_delay": "500ms",
         }
         cfg["capability_directory"] = {"enabled": True}
+
+    if serving_prefetch_enabled:
+        cfg["serving_prefetch"] = {
+            "enabled": True,
+            "same_daemon_acquire_enabled": bool(
+                serving_prefetch_same_daemon_acquire_enabled
+            ),
+            "default_expire_if_unacquired": str(
+                serving_prefetch_default_expire_if_unacquired
+            ),
+            "default_idle_ttl_after_last_release": str(
+                serving_prefetch_default_idle_ttl_after_last_release
+            ),
+            "default_materialization_timeout": str(
+                serving_prefetch_default_materialization_timeout
+            ),
+        }
+
+    if public_disk_source_root is not None:
+        cfg["public_disk_source"] = {
+            "unmatched_path_mode": "UNMATCHED_PATH_MODE_REJECT",
+            "trusted_root_policies": [
+                {
+                    "policy_id": "pytest_public_disk_source_root",
+                    "root_path": str(public_disk_source_root),
+                    "allowed_formats": [
+                        "PUBLIC_DISK_SOURCE_FORMAT_PARTITIONED",
+                    ],
+                    "allowed_metadata_capabilities": [
+                        "PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_TENSOR_AWARE",
+                        "PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_BYTE_ONLY",
+                    ],
+                    "descriptor_reuse_mode": (
+                        "PUBLIC_DISK_SOURCE_DESCRIPTOR_REUSE_MODE_TRUSTED_HINT_ONLY"
+                    ),
+                    "lightweight_attestation_enabled": True,
+                    "validation_mode": (
+                        "PUBLIC_DISK_SOURCE_VALIDATION_MODE_VALIDATE_BEFORE_READ"
+                    ),
+                }
+            ],
+        }
 
     cfg_suffix = ".yaml" if config_mode == "yaml" else ".json"
     with tempfile.NamedTemporaryFile(

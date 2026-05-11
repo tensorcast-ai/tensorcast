@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import timezone
 from typing import (
     TYPE_CHECKING,
+    Any,
     Mapping,
     Sequence,
     SupportsIndex,
@@ -34,8 +35,10 @@ from tensorcast.api._view_ops import (
 )
 from tensorcast.api.context import CallContext
 from tensorcast.api.operation import (
+    DaemonGlobalStoreOperation,
     DaemonReplicaOperation,
     Operation,
+    OperationState,
     OperationStatus,
     PollingOperation,
 )
@@ -103,7 +106,15 @@ from tensorcast.profile_utils import (
 )
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.proto.operation.v1 import operation_pb2
 from tensorcast.types import (
+    PrefetchedServingBinding,
+    PrefetchedServingBindingSet,
+    PrefetchRetentionPolicy,
+    ServingBindingReadiness,
+    ServingBindingSetTarget,
+    ServingBindingSourceReuseDecision,
+    ServingBindingTarget,
     ServingRuntimePolicy,
     ServingRuntimePolicyInput,
     coerce_serving_runtime_policy,
@@ -209,6 +220,94 @@ class PrefetchedReplica:
     device_id: int
     daemon_id: str
     source: str | None
+
+
+ServingPrefetchResult = PrefetchedServingBinding | PrefetchedServingBindingSet
+
+
+def _parse_serving_prefetch_result_any(
+    result: Any,
+) -> ServingPrefetchResult:
+    binding_result = operation_pb2.PrefetchServingBindingResult()
+    if result.Is(binding_result.DESCRIPTOR):
+        result.Unpack(binding_result)
+        return PrefetchedServingBinding.from_proto(binding_result)
+    set_result = operation_pb2.PrefetchServingBindingSetResult()
+    if result.Is(set_result.DESCRIPTOR):
+        result.Unpack(set_result)
+        return PrefetchedServingBindingSet.from_proto(set_result)
+    raise ArtifactError(
+        "Serving prefetch operation did not return a typed serving binding result",
+        status_code="DATA_LOSS",
+        retryable=False,
+    )
+
+
+def _serving_prefetch_result_from_operation_response(
+    response: operation_pb2.GetOperationResponse,
+) -> ServingPrefetchResult:
+    if response.status.HasField("result"):
+        return _parse_serving_prefetch_result_any(response.status.result)
+    if response.HasField("snapshot"):
+        return _parse_serving_prefetch_result_any(response.snapshot)
+    raise ArtifactError(
+        "Serving prefetch operation completed without result metadata",
+        status_code="DATA_LOSS",
+        retryable=False,
+    )
+
+
+def _operation_status_from_proto(
+    status: operation_pb2.OperationStatus,
+) -> OperationStatus:
+    state_by_proto: dict[int, OperationState] = {
+        int(operation_pb2.OPERATION_STATE_PENDING): "pending",
+        int(operation_pb2.OPERATION_STATE_RUNNING): "running",
+        int(operation_pb2.OPERATION_STATE_SUCCESS): "success",
+        int(operation_pb2.OPERATION_STATE_FAILED): "failed",
+        int(operation_pb2.OPERATION_STATE_CANCELLED): "cancelled",
+        int(operation_pb2.OPERATION_STATE_DEGRADED): "degraded",
+    }
+    state = state_by_proto.get(int(status.state), "running")
+    error = None
+    if status.HasField("error"):
+        from tensorcast.api.operation import OperationError
+
+        error = OperationError(
+            status_code=str(status.error.status_code or "UNKNOWN"),
+            message=str(status.error.message or ""),
+            retryable=bool(status.error.retryable),
+        )
+    return OperationStatus(
+        state=state,
+        message=str(status.message) if status.message else None,
+        progress=float(status.progress) if status.progress else None,
+        error=error,
+    )
+
+
+def _serving_target_source_reuse(
+    target: ServingBindingTarget | ServingBindingSetTarget,
+) -> ServingBindingSourceReuseDecision:
+    if isinstance(target, ServingBindingTarget):
+        return target.resolved_layout.source_reuse
+    if not target.members:
+        raise ArtifactError(
+            "Serving binding set members must use one source reuse decision",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
+    reuse_decision = target.members[0].resolved_layout.source_reuse
+    if any(
+        member.resolved_layout.source_reuse != reuse_decision
+        for member in target.members[1:]
+    ):
+        raise ArtifactError(
+            "Serving binding set members must use one source reuse decision",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
+    return reuse_decision
 
 
 @dataclass(frozen=True, slots=True)
@@ -2074,13 +2173,109 @@ class Artifact:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self.tensor_dict(device=device))
 
+    def _prefetch_serving_binding(
+        self,
+        *,
+        target: ServingBindingTarget | ServingBindingSetTarget,
+        readiness: ServingBindingReadiness,
+        retention: PrefetchRetentionPolicy | None,
+        ctx: CallContext | None,
+    ) -> Operation[ServingPrefetchResult]:
+        artifact_id = self._ensure_identified()
+        _, runtime, _ = self._require_components()
+        selection = self._build_artifact_selection()
+        source_reuse = _serving_target_source_reuse(target)
+        if source_reuse.mode in {"serving_transform_required", "unsupported"}:
+            reason = source_reuse.reason or (
+                "source-to-target serving transform requires a topology-scoped executor"
+                if source_reuse.mode == "serving_transform_required"
+                else "serving binding source is unsupported"
+            )
+            raise ArtifactError(
+                f"serving binding prefetch rejected before allocation: {reason}",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        target_proto = target.to_proto()
+        target_bytes = target_proto.SerializeToString(deterministic=True)
+        daemon_id = (
+            getattr(runtime, "daemon_id", None) or None
+        ) or runtime.daemon_endpoint
+        operation_id = uuid.uuid4().hex
+        if ctx is not None and ctx.idempotency_key:
+            ns = uuid.uuid5(uuid.NAMESPACE_DNS, "tensorcast.op.v1")
+            idempotency_key_hex = hashlib.sha256(
+                ctx.idempotency_key.encode("utf-8")
+            ).hexdigest()
+            action_fingerprint = hashlib.sha256(
+                b"prefetch_serving_binding|"
+                + selection.SerializeToString(deterministic=True)
+                + b"|"
+                + target_bytes
+                + f"|readiness={readiness}|daemon={daemon_id}".encode("utf-8")
+            ).hexdigest()
+            operation_id = str(
+                uuid.uuid5(ns, f"{idempotency_key_hex}|{action_fingerprint}")
+            )
+
+        client = runtime.ensure_client()
+        try:
+            response = client.prefetch_serving_binding(
+                source_selection=selection,
+                target=target,
+                requested_readiness=readiness,
+                retention_policy=retention,
+                operation_id=operation_id,
+            )
+        except RuntimeError as exc:
+            raise ArtifactError(
+                str(exc),
+                status_code="UNIMPLEMENTED"
+                if "not supported" in str(exc).lower()
+                or "unimplemented" in str(exc).lower()
+                else "UNKNOWN",
+                retryable=False,
+            ) from exc
+
+        operation_ref = (
+            response.operation_ref if response.HasField("operation_ref") else None
+        )
+        if operation_ref is not None and operation_ref.operation_id:
+            operation_id = str(operation_ref.operation_id)
+        initial_status = _operation_status_from_proto(response.status)
+        if initial_status.state in {"success", "failed", "cancelled"}:
+            return PollingOperation(
+                operation_id=operation_id,
+                status_fn=lambda: initial_status,
+                result_fn=lambda: _parse_serving_prefetch_result_any(
+                    response.status.result
+                ),
+                cancel_fn=lambda: False,
+                ctx=ctx,
+            )
+        return DaemonGlobalStoreOperation(
+            operation_id=operation_id,
+            runtime_ref=weakref.ref(runtime),
+            ctx=ctx,
+            context={
+                "operation_kind": "prefetch_serving_binding",
+                "target_artifact_id": artifact_id,
+                "daemon_endpoint": str(getattr(runtime, "daemon_endpoint", "")),
+            },
+            result_factory=_serving_prefetch_result_from_operation_response,
+            operation_ref=operation_ref,
+        )
+
     def prefetch(
         self,
         *,
-        device: torch.device | str | int,
+        device: torch.device | str | int | None = None,
+        target: ServingBindingTarget | ServingBindingSetTarget | None = None,
+        readiness: ServingBindingReadiness = "serving_local_ready",
+        retention: PrefetchRetentionPolicy | None = None,
         ctx: CallContext | None = None,
         options: GetArtifactOptions | None = None,
-    ) -> Operation[PrefetchedReplica]:
+    ) -> Operation[PrefetchedReplica] | Operation[ServingPrefetchResult]:
         from tensorcast.api._config import GetArtifactOptions
 
         artifact_id = self._ensure_identified()
@@ -2089,6 +2284,25 @@ class Artifact:
             raise ArtifactError(
                 "Prefetch is disabled",
                 status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        if target is not None:
+            if device is not None:
+                raise ArtifactError(
+                    "prefetch target and device are mutually exclusive",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            return self._prefetch_serving_binding(
+                target=target,
+                readiness=readiness,
+                retention=retention,
+                ctx=ctx,
+            )
+        if device is None:
+            raise ArtifactError(
+                "prefetch requires device or target",
+                status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
 

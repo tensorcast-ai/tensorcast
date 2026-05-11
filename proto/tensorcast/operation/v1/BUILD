@@ -8,6 +8,7 @@ proto_library(
     strip_import_prefix = "/proto",
     visibility = ["//visibility:public"],
     deps = [
+        "//proto/tensorcast/publication/v1:publication_proto",
         "@protobuf//:any_proto",
         "@protobuf//:timestamp_proto",
     ],
@@ -17,6 +18,7 @@ cpp_proto_library(
     name = "operation_cc",
     protos = [":operation_proto"],
     visibility = ["//visibility:public"],
+    deps = ["//proto/tensorcast/publication/v1:publication_cc"],
 )
 
 buf_lint_test(

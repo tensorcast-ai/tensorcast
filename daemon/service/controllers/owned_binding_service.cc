@@ -1381,6 +1381,7 @@ void mark_ready_artifact(
   record->current_binding_value_id = mint_binding_value_id();
   record->seal_generation += 1;
   record->sealed_commit_result.reset();
+  record->ready_at = absl::Now();
   set_artifact_verification_metadata(record, artifact_id);
 }
 
@@ -1418,6 +1419,7 @@ void mark_ready_local(BindingRegistry::Record* record) {
   record->current_binding_value_id = mint_binding_value_id();
   record->seal_generation += 1;
   record->sealed_commit_result.reset();
+  record->ready_at = absl::Now();
   clear_verification_metadata(record);
 }
 
@@ -2220,6 +2222,9 @@ grpc::Status OwnedBindingService::create_binding(
   record->binding_id = mint_binding_id();
   record->binding_layout_id = req.binding_layout_id();
   record->owner_pid = req.pid();
+  record->creator_pid = req.pid();
+  record->created_at = absl::Now();
+  record->reserved_at = record->created_at;
   record->device_id = device.ordinal;
   record->device_uuid = req.device_uuid();
   record->ownership = req.ownership();
@@ -2410,6 +2415,9 @@ grpc::Status OwnedBindingService::create_owned_binding(
     record->binding_id = binding_id;
     record->binding_layout_id = req.binding_layout_id();
     record->owner_pid = req.pid();
+    record->creator_pid = req.pid();
+    record->created_at = absl::Now();
+    record->reserved_at = record->created_at;
     record->device_id = device.ordinal;
     record->device_uuid = req.device_uuid();
     record->ownership = v2::BINDING_OWNERSHIP_DAEMON;
@@ -2433,6 +2441,7 @@ grpc::Status OwnedBindingService::create_owned_binding(
       record->copy_plan = req.copy_plan();
       record->dst_tensors.assign(req.dst_tensors().begin(), req.dst_tensors().end());
     }
+    record->payloads.assign(descriptors_or->descriptors.begin(), descriptors_or->descriptors.end());
     insert_status = d_.bindings.insert(record);
     if (insert_status.ok()) {
       break;

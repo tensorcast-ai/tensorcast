@@ -41,6 +41,12 @@ from tensorcast.engine_adapter import (
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
+from tensorcast.types import (
+    _SERVING_READINESS_FROM_PROTO,
+    PrefetchRetentionPolicy,
+    ServingBindingSetTarget,
+    ServingBindingTarget,
+)
 
 ArtifactActionResult = (
     ManifestResult
@@ -986,15 +992,32 @@ class NodeAgentExecutor:
     ) -> NodeAgentStepResult:
         selection = action.selection
         target_id = step.target.target_id
+        serving_target_kind = action.WhichOneof("serving_target")
         base_key = plan.context.idempotency_key
         if base_key:
+            extra = None
+            if serving_target_kind == "serving_binding_target":
+                extra = hashlib.sha256(
+                    action.serving_binding_target.SerializeToString(deterministic=True)
+                ).hexdigest()
+            elif serving_target_kind == "serving_binding_set_target":
+                extra = hashlib.sha256(
+                    action.serving_binding_set_target.SerializeToString(
+                        deterministic=True
+                    )
+                ).hexdigest()
             action_key = _derive_action_idempotency_key(
                 base_key=base_key,
-                action="prefetch",
+                action=(
+                    "prefetch_serving_binding"
+                    if serving_target_kind is not None
+                    else "prefetch"
+                ),
                 target_id=target_id,
                 selection=selection,
                 device_id=action.device_id,
                 ttl_ms=None,
+                extra=extra,
             )
             ns = uuid.uuid5(uuid.NAMESPACE_DNS, "tensorcast.op.v1")
             replica_uuid = str(uuid.uuid5(ns, action_key))
@@ -1013,13 +1036,40 @@ class NodeAgentExecutor:
                 ),
             )
         try:
-            self._materialize_selection(
-                selection=selection,
-                device_id=int(action.device_id),
-                replica_uuid=replica_uuid,
-                timeout_s=timeout_s,
-                wait_for_completion=False,
-            )
+            if serving_target_kind is not None:
+                artifact, _ = self._artifact_from_selection(selection)
+                readiness = _SERVING_READINESS_FROM_PROTO.get(
+                    int(action.requested_readiness),
+                    "serving_local_ready",
+                )
+                retention = (
+                    PrefetchRetentionPolicy.from_proto(action.retention_policy)
+                    if action.HasField("retention_policy")
+                    else None
+                )
+                if serving_target_kind == "serving_binding_target":
+                    target = ServingBindingTarget.from_proto(
+                        action.serving_binding_target
+                    )
+                else:
+                    target = ServingBindingSetTarget.from_proto(
+                        action.serving_binding_set_target
+                    )
+                op = artifact.prefetch(
+                    target=target,
+                    readiness=readiness,
+                    retention=retention,
+                    ctx=call_ctx,
+                )
+                op.wait(timeout_s=timeout_s)
+            else:
+                self._materialize_selection(
+                    selection=selection,
+                    device_id=int(action.device_id),
+                    replica_uuid=replica_uuid,
+                    timeout_s=timeout_s,
+                    wait_for_completion=False,
+                )
         except DeviceMismatch as exc:
             return NodeAgentStepResult(
                 step_id=step.step_id,

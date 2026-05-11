@@ -4,7 +4,7 @@ title: Source-to-Serving Builder and Representation Publication Lineage
 status: accepted
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests"]
 created: 2026-03-24
-last_updated: 2026-04-30
+last_updated: 2026-05-09
 related_code:
   - docs/designs/0110-artifact-representation-contract-and-transform-unification.md
   - docs/designs/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
@@ -23,6 +23,7 @@ links:
   related:
     - ./0108-tensor-aware-materialization-strategy-plane.md
     - ./0112-binding-native-serving-realization-and-publication.md
+    - ./0116-prefetch-serving-binding-target.md
   dependencies:
     - ./0110-artifact-representation-contract-and-transform-unification.md
     - ./0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
@@ -758,6 +759,36 @@ Repository rule:
 - and this design still does not require broad durable artifact-catalog schema
   expansion to represent those facts in phase 1.
 
+### 3.3.1 Generic serving topology references
+
+Follow-on designs that need process-external serving startup, such as `0116`,
+must model runtime topology through TensorCast-owned generic references rather
+than framework-specific fields in daemon lifecycle APIs.
+
+Repository-owned shape:
+
+- `ServingTopologyRef` carries `schema_topology_digest`,
+  `admission_topology_digest`, `logical_topology_ref`, and a schema version.
+- `ServingBindingMemberRef` carries `member_id`, `member_index`,
+  `member_count`, and optional `group_id`.
+- Runtime adapters map framework terms such as TP, PP, DP, or EP coordinates
+  into these generic members before calling daemon prefetch/acquire APIs.
+- Framework-specific topology labels may remain in the logical topology
+  descriptor, runtime diagnostics, or adapter-local metadata, but not as
+  required daemon lifecycle fields.
+
+This keeps the `0111` truth layering intact:
+
+- topology that changes serving tensor schema contributes to
+  `schema_topology_digest` and the semantic representation contract,
+- topology that only gates admitted builder/publication execution contributes
+  to `ServingAdmissionFacts.topology_admission_digest`,
+- live placement and transport choices remain runtime diagnostics,
+- and execution APIs may lower `member_index`/`member_count` into existing
+  hints such as `CollectiveLoadGroup.rank` and
+  `CollectiveLoadGroup.world_size` without treating those hints as serving
+  identity.
+
 ### 3.4 Semantic-core versus builder-publication digests
 
 Repository rule:
@@ -886,7 +917,7 @@ that family and topology slice. If it has not, the family is not admitted to
 7. freeze the current value for optimistic local-ready mode or seal/promote it
    on the strict blocking path,
 8. in optimistic mode, expose only same-daemon local-ready runtime state until
-   all local ranks have crossed the local-ready barrier,
+   all local serving members have crossed the local-ready barrier,
 9. promote the same finalized bytes into a durable serving artifact by ordinary
    registration or assembly promotion,
 10. complete `representation_publish` closeout through `0105`.
@@ -915,7 +946,7 @@ Normative rules:
   until `mi2` promotion succeeds.
 - optimistic promotion start is not part of builder readiness. The integration
   may schedule it only after local-ready state is installed and the local-ready
-  barrier has completed for the local TP group.
+  barrier has completed for the local serving member group.
 - correctness, typed lineage, and serving-only runtime handoff take precedence
   over fast-path optimization.
 - admitted `BINDING_FINALIZE` paths must avoid introducing a second

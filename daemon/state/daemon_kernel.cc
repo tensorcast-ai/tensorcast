@@ -58,6 +58,7 @@ DaemonKernel::DaemonKernel(
       },
       std::chrono::duration_cast<std::chrono::milliseconds>(options_.proc_check_interval));
   lifecycle_mgr_->attach_pid_monitor(pid_monitor_.get());
+  binding_registry_ = std::make_unique<BindingRegistry>();
 
   configure_scheduler_tasks_();
 
@@ -65,8 +66,6 @@ DaemonKernel::DaemonKernel(
       sessions_, *verif_tracker_, scheduler_.get(), lifecycle_mgr_.get(), absl::Seconds(options_.sessions_ttl.count()));
 
   lip_bridge_ = std::make_unique<LipBridge>(*lip_mgr_);
-  binding_registry_ = std::make_unique<BindingRegistry>();
-
   if (!options_.local_handle_socket_path.empty()) {
     HandleLeaseRegistry::Options hl_opts;
     hl_opts.capacity = 4096;
@@ -333,6 +332,15 @@ void DaemonKernel::configure_scheduler_tasks_() {
         TaskKind::kRegionRegistry, std::chrono::duration_cast<milliseconds>(options_.region_sweep_interval), [t]() {
           t->run_once();
         });
+  }
+
+  // Retained serving binding lifecycle sweep.
+  {
+    auto t = std::make_shared<BindingRetentionSweepTask>(*binding_registry_);
+    scheduler_->add_task(
+        TaskKind::kBindingRetention,
+        std::chrono::duration_cast<milliseconds>(options_.binding_retention_sweep_interval),
+        [t]() { t->run_once(); });
   }
 
   // Verification

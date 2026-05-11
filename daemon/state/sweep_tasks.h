@@ -18,6 +18,7 @@
 #include "absl/time/clock.h"
 #include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
+#include "daemon/state/binding_registry.h"
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/ref_tracker.h"
 #include "daemon/state/session_lifecycle.h"
@@ -80,6 +81,26 @@ class RegionRegistrySweepTask final : public IBackgroundTask {
 
  private:
   IpcRegionRegistry& registry_;
+};
+
+class BindingRetentionSweepTask final : public IBackgroundTask {
+ public:
+  explicit BindingRetentionSweepTask(BindingRegistry& registry) : registry_(registry) {}
+
+  void run_once() override {
+    const size_t retired = registry_.sweep_retention(absl::Now());
+    if (retired == 0) {
+      return;
+    }
+    VLOG(1) << "BindingRetentionSweepTask: retired retained binding count=" << retired;
+  }
+
+  [[nodiscard]] std::string name() const override {
+    return "BindingRetentionSweepTask";
+  }
+
+ private:
+  BindingRegistry& registry_;
 };
 
 class VerificationTask final : public IBackgroundTask {

@@ -54,13 +54,20 @@ from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.node_agent.v1 import node_agent_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
 from tensorcast.types import (
+    _SERVING_READINESS_TO_PROTO,
     AssemblyCloseoutContract,
     AssemblyContractFamily,
     AssemblyReadinessPolicy,
     AssemblyRequirementSetRef,
+    PrefetchedServingBinding,
+    PrefetchedServingBindingSet,
+    PrefetchRetentionPolicy,
     RepresentationPublishContract,
     RepresentationPublishSpec,
     ServingArtifactManifest,
+    ServingBindingReadiness,
+    ServingBindingSetTarget,
+    ServingBindingTarget,
 )
 
 if TYPE_CHECKING:
@@ -214,8 +221,11 @@ class _ArtifactSelection:
 @dataclass(frozen=True, slots=True)
 class _PrefetchAction:
     artifact: Artifact
-    device: str | int
+    device: str | int | None
     device_id: int
+    target: ServingBindingTarget | ServingBindingSetTarget | None = None
+    readiness: ServingBindingReadiness = "serving_local_ready"
+    retention: PrefetchRetentionPolicy | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -750,15 +760,39 @@ class WorkerStepBuilder:
         self,
         art: Artifact,
         *,
-        device: str | int,
+        device: str | int | None = None,
+        target: ServingBindingTarget | ServingBindingSetTarget | None = None,
+        readiness: ServingBindingReadiness = "serving_local_ready",
+        retention: PrefetchRetentionPolicy | None = None,
         depends_on: Sequence[PlanStepRef[Any]] | None = None,
-    ) -> PlanStepRef[PrefetchedReplica]:
-        device_id = _resolve_device_id(device=device, allow_cpu=True)
-        device_input: str | int = device
+    ) -> PlanStepRef[
+        PrefetchedReplica | PrefetchedServingBinding | PrefetchedServingBindingSet
+    ]:
+        if target is not None and device is not None:
+            raise ArtifactError(
+                "prefetch target and device are mutually exclusive",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if target is None:
+            if device is None:
+                raise ArtifactError(
+                    "prefetch requires device or target",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            device_id = _resolve_device_id(device=device, allow_cpu=True)
+        else:
+            device_id = -1
         return self._plan._add_step(
             target=self._worker,
             action=_PrefetchAction(
-                artifact=art, device=device_input, device_id=device_id
+                artifact=art,
+                device=device,
+                device_id=device_id,
+                target=target,
+                readiness=readiness,
+                retention=retention,
             ),
             depends_on=depends_on,
         )
@@ -1294,6 +1328,25 @@ class Plan:
                 prefetch_action = step_msg.action.prefetch
                 _fill_selection_proto(selection, prefetch_action.selection)
                 prefetch_action.device_id = int(step.action.device_id)
+                if step.action.target is not None:
+                    if isinstance(step.action.target, ServingBindingTarget):
+                        prefetch_action.serving_binding_target.CopyFrom(
+                            step.action.target.to_proto()
+                        )
+                    else:
+                        prefetch_action.serving_binding_set_target.CopyFrom(
+                            step.action.target.to_proto()
+                        )
+                    prefetch_action.requested_readiness = _SERVING_READINESS_TO_PROTO[
+                        step.action.readiness
+                    ]
+                    prefetch_action.retention_policy.CopyFrom(
+                        (
+                            step.action.retention
+                            if step.action.retention is not None
+                            else PrefetchRetentionPolicy()
+                        ).to_proto()
+                    )
             elif isinstance(step.action, _PrefetchSetAction):
                 prefetch_set_action = step_msg.action.prefetch_set
                 prefetch_set_action.artifact_set.CopyFrom(
@@ -1436,14 +1489,33 @@ class Plan:
             if isinstance(step.action, _PrefetchAction):
                 selection = self._selection_for_artifact(step.action.artifact)
                 ctx = self._action_context(
-                    action="prefetch",
+                    action=(
+                        "prefetch_serving_binding"
+                        if step.action.target is not None
+                        else "prefetch"
+                    ),
                     target_id=target_id,
                     selection=selection,
                     device_id=step.action.device_id,
                     ttl_ms=None,
+                    extra=(
+                        hashlib.sha256(
+                            step.action.target.to_proto().SerializeToString(
+                                deterministic=True
+                            )
+                        ).hexdigest()
+                        if step.action.target is not None
+                        else None
+                    ),
                 )
                 bound = _clone_artifact_for_store(step.action.artifact, store)
-                prefetch_op = bound.prefetch(device=step.action.device, ctx=ctx)
+                prefetch_op = bound.prefetch(
+                    device=step.action.device,
+                    target=step.action.target,
+                    readiness=step.action.readiness,
+                    retention=step.action.retention,
+                    ctx=ctx,
+                )
                 with op_lock:
                     op_registry[step.step_id] = prefetch_op
                 prefetch_value = prefetch_op.wait()

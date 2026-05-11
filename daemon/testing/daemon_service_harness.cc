@@ -205,6 +205,8 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .cpu_shared_memory_enabled = options.cpu_shared_memory_enabled,
       .storage_path = options.storage_path,
       .public_disk_source_policy = options.public_disk_source_policy,
+      .serving_prefetch = options.serving_prefetch,
+      .daemon_id = options.daemon_id,
   };
   auto materialization_controller = std::make_unique<MaterializationController>(mdep);
 
@@ -318,6 +320,8 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .allow_high_card_attrs = options.allow_high_card_attrs,
       .use_cursor_pagination = options.use_cursor_pagination,
       .gateway_ingress_enabled = options.gateway_ingress_enabled,
+      .serving_prefetch_enabled = options.serving_prefetch.enabled,
+      .serving_same_daemon_acquire_enabled = options.serving_prefetch.same_daemon_acquire_enabled,
       .storage_path = options.storage_path,
       .directory_staleness_budget = absl::Milliseconds(
           std::max<int64_t>(
