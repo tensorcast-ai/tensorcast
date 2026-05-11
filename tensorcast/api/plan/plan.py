@@ -774,17 +774,16 @@ class WorkerStepBuilder:
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        if target is None and device is None:
-            raise ArtifactError(
-                "prefetch requires device or target",
-                status_code="INVALID_ARGUMENT",
-                retryable=False,
-            )
-        device_id = (
-            -1
-            if target is not None
-            else _resolve_device_id(device=device, allow_cpu=True)
-        )
+        if target is None:
+            if device is None:
+                raise ArtifactError(
+                    "prefetch requires device or target",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            device_id = _resolve_device_id(device=device, allow_cpu=True)
+        else:
+            device_id = -1
         return self._plan._add_step(
             target=self._worker,
             action=_PrefetchAction(

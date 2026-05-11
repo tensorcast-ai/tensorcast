@@ -16,7 +16,6 @@ from datetime import timezone
 from typing import (
     TYPE_CHECKING,
     Any,
-    Literal,
     Mapping,
     Sequence,
     SupportsIndex,
@@ -39,6 +38,7 @@ from tensorcast.api.operation import (
     DaemonGlobalStoreOperation,
     DaemonReplicaOperation,
     Operation,
+    OperationState,
     OperationStatus,
     PollingOperation,
 )
@@ -260,13 +260,13 @@ def _serving_prefetch_result_from_operation_response(
 def _operation_status_from_proto(
     status: operation_pb2.OperationStatus,
 ) -> OperationStatus:
-    state_by_proto = {
-        operation_pb2.OPERATION_STATE_PENDING: "pending",
-        operation_pb2.OPERATION_STATE_RUNNING: "running",
-        operation_pb2.OPERATION_STATE_SUCCESS: "success",
-        operation_pb2.OPERATION_STATE_FAILED: "failed",
-        operation_pb2.OPERATION_STATE_CANCELLED: "cancelled",
-        operation_pb2.OPERATION_STATE_DEGRADED: "degraded",
+    state_by_proto: dict[int, OperationState] = {
+        int(operation_pb2.OPERATION_STATE_PENDING): "pending",
+        int(operation_pb2.OPERATION_STATE_RUNNING): "running",
+        int(operation_pb2.OPERATION_STATE_SUCCESS): "success",
+        int(operation_pb2.OPERATION_STATE_FAILED): "failed",
+        int(operation_pb2.OPERATION_STATE_CANCELLED): "cancelled",
+        int(operation_pb2.OPERATION_STATE_DEGRADED): "degraded",
     }
     state = state_by_proto.get(int(status.state), "running")
     error = None
@@ -279,10 +279,7 @@ def _operation_status_from_proto(
             retryable=bool(status.error.retryable),
         )
     return OperationStatus(
-        state=cast(
-            Literal["pending", "running", "success", "failed", "cancelled", "degraded"],
-            state,
-        ),
+        state=state,
         message=str(status.message) if status.message else None,
         progress=float(status.progress) if status.progress else None,
         error=error,
@@ -294,14 +291,23 @@ def _serving_target_source_reuse(
 ) -> ServingBindingSourceReuseDecision:
     if isinstance(target, ServingBindingTarget):
         return target.resolved_layout.source_reuse
-    reuse_decisions = {member.resolved_layout.source_reuse for member in target.members}
-    if len(reuse_decisions) != 1:
+    if not target.members:
         raise ArtifactError(
             "Serving binding set members must use one source reuse decision",
             status_code="FAILED_PRECONDITION",
             retryable=False,
         )
-    return next(iter(reuse_decisions))
+    reuse_decision = target.members[0].resolved_layout.source_reuse
+    if any(
+        member.resolved_layout.source_reuse != reuse_decision
+        for member in target.members[1:]
+    ):
+        raise ArtifactError(
+            "Serving binding set members must use one source reuse decision",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
+    return reuse_decision
 
 
 @dataclass(frozen=True, slots=True)

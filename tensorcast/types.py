@@ -1636,13 +1636,15 @@ ServingBindingReadiness = Literal[
     "serving_published_ready",
 ]
 
-_SERVING_READINESS_TO_PROTO: dict[ServingBindingReadiness, int] = {
+_SERVING_READINESS_TO_PROTO: dict[
+    ServingBindingReadiness, operation_pb2.ServingBindingReadiness
+] = {
     "serving_reserved": operation_pb2.SERVING_BINDING_READINESS_RESERVED,
     "serving_local_ready": operation_pb2.SERVING_BINDING_READINESS_LOCAL_READY,
     "serving_published_ready": operation_pb2.SERVING_BINDING_READINESS_PUBLISHED_READY,
 }
 _SERVING_READINESS_FROM_PROTO: dict[int, ServingBindingReadiness] = {
-    value: key for key, value in _SERVING_READINESS_TO_PROTO.items()
+    int(value): key for key, value in _SERVING_READINESS_TO_PROTO.items()
 }
 
 
@@ -1792,22 +1794,26 @@ ServingBindingSourceReuseMode = Literal[
     "unsupported",
 ]
 
-_SOURCE_KIND_TO_PROTO: dict[ServingBindingSourceKind, int] = {
+_SOURCE_KIND_TO_PROTO: dict[
+    ServingBindingSourceKind, operation_pb2.ServingBindingSourceKind
+] = {
     "checkpoint_artifact": operation_pb2.SERVING_BINDING_SOURCE_KIND_CHECKPOINT_ARTIFACT,
     "serving_artifact": operation_pb2.SERVING_BINDING_SOURCE_KIND_SERVING_ARTIFACT,
     "serving_artifact_set": operation_pb2.SERVING_BINDING_SOURCE_KIND_SERVING_ARTIFACT_SET,
 }
 _SOURCE_KIND_FROM_PROTO: dict[int, ServingBindingSourceKind] = {
-    value: key for key, value in _SOURCE_KIND_TO_PROTO.items()
+    int(value): key for key, value in _SOURCE_KIND_TO_PROTO.items()
 }
-_SOURCE_REUSE_TO_PROTO: dict[ServingBindingSourceReuseMode, int] = {
+_SOURCE_REUSE_TO_PROTO: dict[
+    ServingBindingSourceReuseMode, operation_pb2.ServingBindingSourceReuseMode
+] = {
     "checkpoint_to_serving": operation_pb2.SERVING_BINDING_SOURCE_REUSE_MODE_CHECKPOINT_TO_SERVING,
     "serving_direct_member_copy": operation_pb2.SERVING_BINDING_SOURCE_REUSE_MODE_SERVING_DIRECT_MEMBER_COPY,
     "serving_transform_required": operation_pb2.SERVING_BINDING_SOURCE_REUSE_MODE_SERVING_TRANSFORM_REQUIRED,
     "unsupported": operation_pb2.SERVING_BINDING_SOURCE_REUSE_MODE_UNSUPPORTED,
 }
 _SOURCE_REUSE_FROM_PROTO: dict[int, ServingBindingSourceReuseMode] = {
-    value: key for key, value in _SOURCE_REUSE_TO_PROTO.items()
+    int(value): key for key, value in _SOURCE_REUSE_TO_PROTO.items()
 }
 
 
