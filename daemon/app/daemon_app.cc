@@ -253,6 +253,8 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .storage_path = app->options_.daemon_options.storage_path,
       .public_disk_source_policy = app->options_.daemon_options.public_disk_source_policy,
       .post_seal_policy = app->options_.daemon_options.post_seal_policy,
+      .serving_prefetch = app->options_.daemon_options.serving_prefetch,
+      .daemon_id = app->options_.daemon_options.daemon_id,
       .await_state_sync_barrier = [app_ptr = app.get()]() { return app_ptr->await_worker_state_sync_barrier(); },
   };
   app->materialization_controller_ = std::make_unique<MaterializationController>(mdep);
@@ -371,6 +373,8 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .allow_high_card_attrs = app->options_.daemon_options.allow_high_card_attrs,
       .use_cursor_pagination = app->options_.daemon_options.use_cursor_pagination,
       .gateway_ingress_enabled = app->options_.daemon_options.gateway_ingress_enabled,
+      .serving_prefetch_enabled = app->options_.daemon_options.serving_prefetch.enabled,
+      .serving_same_daemon_acquire_enabled = app->options_.daemon_options.serving_prefetch.same_daemon_acquire_enabled,
       .storage_path = app->options_.daemon_options.storage_path,
       .directory_staleness_budget = absl::Milliseconds(
           std::max<int64_t>(

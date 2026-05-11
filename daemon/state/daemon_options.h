@@ -111,6 +111,7 @@ struct DaemonOptions {
   std::chrono::milliseconds verification_sweep_interval{std::chrono::milliseconds(500)};
   std::chrono::milliseconds proc_check_interval{std::chrono::milliseconds(5000)};
   std::chrono::milliseconds region_sweep_interval{std::chrono::milliseconds(5000)};
+  std::chrono::milliseconds binding_retention_sweep_interval{std::chrono::milliseconds(1000)};
 
   // Eviction policy
   bool enable_periodic_eviction{false};
@@ -187,6 +188,17 @@ struct DaemonOptions {
   };
 
   RetentionHandles retention_handles{};
+
+  struct ServingPrefetch {
+    bool enabled{false};
+    bool same_daemon_acquire_enabled{true};
+    std::string resolved_spec_cache_root;
+    std::chrono::milliseconds default_expire_if_unacquired{std::chrono::minutes(10)};
+    std::chrono::milliseconds default_idle_ttl_after_last_release{std::chrono::minutes(5)};
+    std::chrono::milliseconds default_materialization_timeout{std::chrono::minutes(5)};
+  };
+
+  ServingPrefetch serving_prefetch{};
 
   // Local handle plane (UDS) for FD handoff + lease release.
   std::string local_handle_socket_path;

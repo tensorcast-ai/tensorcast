@@ -393,6 +393,12 @@ binding.swap("model:v2")
   `lease_mode=NO_LEASE` so it does not create PID-bound UseLeases and does not mint IPC handle leases. Prefetch is
   supported for both GPU VRAM (`"cuda:0"`/`0`) and daemon-owned host DRAM (`"cpu"`/`"dram"`/`-1`). Handle-exporting APIs
   remain PID/lease-bound and are separate from daemon-owned warm replicas.
+- Serving prefetch is entered explicitly with `artifact.prefetch(target=ServingBindingTarget(...))` or
+  `artifact.prefetch(target=ServingBindingSetTarget(...))`. Ordinary `device=` prefetch behavior is unchanged. Serving
+  targets require runtime-provided resolved layout/index metadata before daemon allocation; unresolved layouts fail
+  closed before GPU memory is reserved. The daemon keeps serving prefetch behind `daemon_config.serving_prefetch.enabled`
+  and returns a typed `PrefetchedServingBinding` / `PrefetchedServingBindingSet` result once the retained binding
+  materialization path is enabled.
 - Prefetch idempotency derives a stable action fingerprint from selection identity (`artifact_id`,
   `logical_layout_hash`, `selection_hash`) and target placement (daemon + device/tier). `selection_hash` is computed via
   `tensorcast.common.selection_identity` (stable `view_id` + `view_subset_hash`), matching Plan selection identity

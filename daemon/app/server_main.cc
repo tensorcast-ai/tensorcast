@@ -1321,6 +1321,28 @@ int main(int argc, char** argv) {
       daemon_opts.retention_handles.max_ttl = duration_to_millis(retention_cfg.max_ttl());
     }
   }
+  if (cfg.has_serving_prefetch()) {
+    const auto& serving_cfg = cfg.serving_prefetch();
+    daemon_opts.serving_prefetch.enabled = serving_cfg.enabled();
+    if (serving_cfg.has_same_daemon_acquire_enabled()) {
+      daemon_opts.serving_prefetch.same_daemon_acquire_enabled = serving_cfg.same_daemon_acquire_enabled();
+    }
+    if (!serving_cfg.resolved_spec_cache_root().empty()) {
+      daemon_opts.serving_prefetch.resolved_spec_cache_root = serving_cfg.resolved_spec_cache_root();
+    }
+    if (serving_cfg.has_default_expire_if_unacquired()) {
+      daemon_opts.serving_prefetch.default_expire_if_unacquired =
+          duration_to_millis(serving_cfg.default_expire_if_unacquired());
+    }
+    if (serving_cfg.has_default_idle_ttl_after_last_release()) {
+      daemon_opts.serving_prefetch.default_idle_ttl_after_last_release =
+          duration_to_millis(serving_cfg.default_idle_ttl_after_last_release());
+    }
+    if (serving_cfg.has_default_materialization_timeout()) {
+      daemon_opts.serving_prefetch.default_materialization_timeout =
+          duration_to_millis(serving_cfg.default_materialization_timeout());
+    }
+  }
 
   if (cfg.has_byte_artifact_routing()) {
     const auto& bar = cfg.byte_artifact_routing();

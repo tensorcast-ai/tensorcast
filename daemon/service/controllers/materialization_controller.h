@@ -72,6 +72,8 @@ class MaterializationController {
     std::filesystem::path storage_path;
     DaemonOptions::PublicDiskSourcePolicy public_disk_source_policy{};
     DaemonOptions::PostSealPolicy post_seal_policy{};
+    DaemonOptions::ServingPrefetch serving_prefetch{};
+    std::string daemon_id;
     std::function<absl::Status()> await_state_sync_barrier;
   };
 
@@ -96,6 +98,16 @@ class MaterializationController {
       RpcContext& rctx,
       const v2::CreateOwnedBindingRequest& req,
       v2::CreateOwnedBindingResponse& resp);
+
+  grpc::Status prefetch_serving_binding(
+      RpcContext& rctx,
+      const v2::PrefetchServingBindingRequest& req,
+      v2::PrefetchServingBindingResponse& resp);
+
+  grpc::Status acquire_binding_value(
+      RpcContext& rctx,
+      const v2::AcquireBindingValueRequest& req,
+      v2::AcquireBindingValueResponse& resp);
 
   grpc::Status create_binding(RpcContext& rctx, const v2::CreateBindingRequest& req, v2::CreateBindingResponse& resp);
 
@@ -242,6 +254,11 @@ class MaterializationController {
  private:
   std::shared_ptr<store::components::IGlobalStoreClient> global_store_client_;
   ShutdownSignal* shutdown_signal_{nullptr};
+  BindingRegistry* binding_registry_{nullptr};
+  HandleLeaseRegistry* handle_leases_{nullptr};
+  DaemonOptions::ServingPrefetch serving_prefetch_;
+  std::string daemon_id_;
+  std::string daemon_session_id_;
   AssemblyOperationService assembly_operation_service_;
   DiskArtifactService disk_artifact_service_;
   ReplicaMaterializationService replica_materialization_service_;

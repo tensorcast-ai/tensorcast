@@ -21,6 +21,8 @@ service StoreDaemonService {
   rpc MaterializeIntoMappedTarget(MaterializeIntoMappedTargetRequest) returns (MaterializeIntoTargetResponse) {}
   rpc CreateBinding(CreateBindingRequest) returns (CreateBindingResponse) {}
   rpc CreateOwnedBinding(CreateOwnedBindingRequest) returns (CreateOwnedBindingResponse) {}
+  rpc PrefetchServingBinding(PrefetchServingBindingRequest) returns (PrefetchServingBindingResponse) {}
+  rpc AcquireBindingValue(AcquireBindingValueRequest) returns (AcquireBindingValueResponse) {}
   rpc CommitBindingArtifact(CommitBindingArtifactRequest) returns (CommitBindingArtifactResponse) {}
   rpc BeginBindingUpdate(BeginBindingUpdateRequest) returns (BeginBindingUpdateResponse) {}
   rpc FreezeBindingCurrentValue(FreezeBindingCurrentValueRequest) returns (FreezeBindingCurrentValueResponse) {}
@@ -1396,6 +1398,46 @@ message CreateOwnedBindingResponse {
   MaterializationSource source = 8;
   BindingState state = 9;
   BindingValue current_value = 10;
+}
+
+message PrefetchServingBindingRequest {
+  tensorcast.common.v1.ArtifactSelection source_selection = 1;
+  tensorcast.operation.v1.ServingBindingSourceRef source = 7;
+  oneof target {
+    tensorcast.operation.v1.ServingBindingTarget serving_binding_target = 2;
+    tensorcast.operation.v1.ServingBindingSetTarget serving_binding_set_target = 3;
+  }
+  tensorcast.operation.v1.ServingBindingReadiness requested_readiness = 4;
+  tensorcast.operation.v1.PrefetchRetentionPolicy retention_policy = 5;
+  optional string operation_id = 6;
+}
+
+message PrefetchServingBindingResponse {
+  tensorcast.operation.v1.OperationRef operation_ref = 1;
+  tensorcast.operation.v1.OperationStatus status = 2;
+}
+
+message AcquireBindingValueRequest {
+  tensorcast.publication.v1.BindingValueRef binding_value_ref = 1;
+  tensorcast.operation.v1.BindingReservationCapability reservation_capability = 2;
+  string expected_daemon_id = 3;
+  string expected_daemon_session_id = 4;
+  string expected_device_uuid = 5;
+  tensorcast.operation.v1.ServingBindingMemberRef expected_member = 6;
+  string expected_target_layout_hash = 7;
+  string expected_tensor_schema_hash = 8;
+  string expected_serving_build_digest = 9;
+  optional string local_serving_ref = 10;
+  optional int32 caller_pid = 11;
+}
+
+message AcquireBindingValueResponse {
+  string lease_token = 1;
+  MemCopyHandle mem_handle = 2;
+  bytes target_index_bytes = 3;
+  repeated TensorPayloadDescriptor payloads = 4;
+  uint64 reservation_bytes = 5;
+  BindingValue current_value = 6;
 }
 
 message CommitBindingArtifactRequest {

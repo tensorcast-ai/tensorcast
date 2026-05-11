@@ -7,7 +7,7 @@ import hashlib
 import json
 from datetime import datetime
 from enum import Enum, IntFlag
-from typing import Iterable, Literal, Union, cast
+from typing import Iterable, Literal, Mapping, Union, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -1630,6 +1630,1252 @@ class BindingValueRef(BaseModel):
         )
 
 
+ServingBindingReadiness = Literal[
+    "serving_reserved",
+    "serving_local_ready",
+    "serving_published_ready",
+]
+
+_SERVING_READINESS_TO_PROTO: dict[ServingBindingReadiness, int] = {
+    "serving_reserved": operation_pb2.SERVING_BINDING_READINESS_RESERVED,
+    "serving_local_ready": operation_pb2.SERVING_BINDING_READINESS_LOCAL_READY,
+    "serving_published_ready": operation_pb2.SERVING_BINDING_READINESS_PUBLISHED_READY,
+}
+_SERVING_READINESS_FROM_PROTO: dict[int, ServingBindingReadiness] = {
+    value: key for key, value in _SERVING_READINESS_TO_PROTO.items()
+}
+
+
+class ServingTopologyRef(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    schema_version: int = 1
+    schema_topology_digest: str
+    admission_topology_digest: str | None = None
+    logical_topology_ref: str | None = None
+    runtime_topology_diagnostics_ref: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_topology(self) -> "ServingTopologyRef":
+        if int(self.schema_version) <= 0:
+            raise ValueError("schema_version must be positive")
+        if not self.schema_topology_digest:
+            raise ValueError("schema_topology_digest must not be empty")
+        return self
+
+    def to_proto(self) -> operation_pb2.ServingTopologyRef:
+        proto = operation_pb2.ServingTopologyRef(
+            schema_version=int(self.schema_version),
+            schema_topology_digest=str(self.schema_topology_digest),
+        )
+        if self.admission_topology_digest is not None:
+            proto.admission_topology_digest = str(self.admission_topology_digest)
+        if self.logical_topology_ref is not None:
+            proto.logical_topology_ref = str(self.logical_topology_ref)
+        if self.runtime_topology_diagnostics_ref is not None:
+            proto.runtime_topology_diagnostics_ref = str(
+                self.runtime_topology_diagnostics_ref
+            )
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls, proto: operation_pb2.ServingTopologyRef
+    ) -> "ServingTopologyRef":
+        return cls(
+            schema_version=int(proto.schema_version),
+            schema_topology_digest=str(proto.schema_topology_digest),
+            admission_topology_digest=(
+                str(proto.admission_topology_digest)
+                if proto.HasField("admission_topology_digest")
+                else None
+            ),
+            logical_topology_ref=(
+                str(proto.logical_topology_ref)
+                if proto.HasField("logical_topology_ref")
+                else None
+            ),
+            runtime_topology_diagnostics_ref=(
+                str(proto.runtime_topology_diagnostics_ref)
+                if proto.HasField("runtime_topology_diagnostics_ref")
+                else None
+            ),
+        )
+
+
+class ServingBindingMemberRef(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    member_id: str
+    member_index: int
+    member_count: int
+    group_id: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_member(self) -> "ServingBindingMemberRef":
+        if not self.member_id:
+            raise ValueError("member_id must not be empty")
+        if int(self.member_index) < 0:
+            raise ValueError("member_index must be non-negative")
+        if int(self.member_count) <= 0:
+            raise ValueError("member_count must be positive")
+        if int(self.member_index) >= int(self.member_count):
+            raise ValueError("member_index must be less than member_count")
+        if self.group_id is not None and not self.group_id:
+            raise ValueError("group_id must not be empty when provided")
+        return self
+
+    def to_proto(self) -> operation_pb2.ServingBindingMemberRef:
+        proto = operation_pb2.ServingBindingMemberRef(
+            member_id=str(self.member_id),
+            member_index=int(self.member_index),
+            member_count=int(self.member_count),
+        )
+        if self.group_id is not None:
+            proto.group_id = str(self.group_id)
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls, proto: operation_pb2.ServingBindingMemberRef
+    ) -> "ServingBindingMemberRef":
+        return cls(
+            member_id=str(proto.member_id),
+            member_index=int(proto.member_index),
+            member_count=int(proto.member_count),
+            group_id=str(proto.group_id) if proto.HasField("group_id") else None,
+        )
+
+
+class BlobRef(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    path: str
+    sha256: str
+    size_bytes: int
+
+    @model_validator(mode="after")
+    def _validate_blob(self) -> "BlobRef":
+        if not self.path:
+            raise ValueError("path must not be empty")
+        if not self.sha256:
+            raise ValueError("sha256 must not be empty")
+        if int(self.size_bytes) < 0:
+            raise ValueError("size_bytes must be non-negative")
+        return self
+
+    def to_proto(self) -> operation_pb2.BlobRef:
+        return operation_pb2.BlobRef(
+            path=str(self.path),
+            sha256=str(self.sha256),
+            size_bytes=int(self.size_bytes),
+        )
+
+    @classmethod
+    def from_proto(cls, proto: operation_pb2.BlobRef) -> "BlobRef":
+        return cls(
+            path=str(proto.path),
+            sha256=str(proto.sha256),
+            size_bytes=int(proto.size_bytes),
+        )
+
+
+ServingBindingSourceKind = Literal[
+    "checkpoint_artifact",
+    "serving_artifact",
+    "serving_artifact_set",
+]
+ServingBindingSourceReuseMode = Literal[
+    "checkpoint_to_serving",
+    "serving_direct_member_copy",
+    "serving_transform_required",
+    "unsupported",
+]
+
+_SOURCE_KIND_TO_PROTO: dict[ServingBindingSourceKind, int] = {
+    "checkpoint_artifact": operation_pb2.SERVING_BINDING_SOURCE_KIND_CHECKPOINT_ARTIFACT,
+    "serving_artifact": operation_pb2.SERVING_BINDING_SOURCE_KIND_SERVING_ARTIFACT,
+    "serving_artifact_set": operation_pb2.SERVING_BINDING_SOURCE_KIND_SERVING_ARTIFACT_SET,
+}
+_SOURCE_KIND_FROM_PROTO: dict[int, ServingBindingSourceKind] = {
+    value: key for key, value in _SOURCE_KIND_TO_PROTO.items()
+}
+_SOURCE_REUSE_TO_PROTO: dict[ServingBindingSourceReuseMode, int] = {
+    "checkpoint_to_serving": operation_pb2.SERVING_BINDING_SOURCE_REUSE_MODE_CHECKPOINT_TO_SERVING,
+    "serving_direct_member_copy": operation_pb2.SERVING_BINDING_SOURCE_REUSE_MODE_SERVING_DIRECT_MEMBER_COPY,
+    "serving_transform_required": operation_pb2.SERVING_BINDING_SOURCE_REUSE_MODE_SERVING_TRANSFORM_REQUIRED,
+    "unsupported": operation_pb2.SERVING_BINDING_SOURCE_REUSE_MODE_UNSUPPORTED,
+}
+_SOURCE_REUSE_FROM_PROTO: dict[int, ServingBindingSourceReuseMode] = {
+    value: key for key, value in _SOURCE_REUSE_TO_PROTO.items()
+}
+
+
+class ServingBindingSourceMemberRef(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    member: ServingBindingMemberRef
+    artifact_ref: str
+    serving_manifest_ref: str | None = None
+    tensor_schema_hash: str | None = None
+    target_layout_hash: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_source_member(self) -> "ServingBindingSourceMemberRef":
+        if not self.artifact_ref:
+            raise ValueError("artifact_ref must not be empty")
+        for field_name in (
+            "serving_manifest_ref",
+            "tensor_schema_hash",
+            "target_layout_hash",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and not value:
+                raise ValueError(f"{field_name} must not be empty when provided")
+        return self
+
+    def to_proto(self) -> operation_pb2.ServingBindingSourceMemberRef:
+        proto = operation_pb2.ServingBindingSourceMemberRef(
+            artifact_ref=str(self.artifact_ref)
+        )
+        proto.member.CopyFrom(self.member.to_proto())
+        if self.serving_manifest_ref is not None:
+            proto.serving_manifest_ref = str(self.serving_manifest_ref)
+        if self.tensor_schema_hash is not None:
+            proto.tensor_schema_hash = str(self.tensor_schema_hash)
+        if self.target_layout_hash is not None:
+            proto.target_layout_hash = str(self.target_layout_hash)
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls, proto: operation_pb2.ServingBindingSourceMemberRef
+    ) -> "ServingBindingSourceMemberRef":
+        return cls(
+            member=ServingBindingMemberRef.from_proto(proto.member),
+            artifact_ref=str(proto.artifact_ref),
+            serving_manifest_ref=(
+                str(proto.serving_manifest_ref)
+                if proto.HasField("serving_manifest_ref")
+                else None
+            ),
+            tensor_schema_hash=(
+                str(proto.tensor_schema_hash)
+                if proto.HasField("tensor_schema_hash")
+                else None
+            ),
+            target_layout_hash=(
+                str(proto.target_layout_hash)
+                if proto.HasField("target_layout_hash")
+                else None
+            ),
+        )
+
+
+class ServingBindingSourceRef(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    source_kind: ServingBindingSourceKind
+    artifact_selection_digest: str
+    source_artifact_ref: str | None = None
+    source_schema_hash: str
+    representation_contract_hash: str | None = None
+    serving_build_digest: str | None = None
+    tensor_schema_hash: str | None = None
+    topology: ServingTopologyRef | None = None
+    members: tuple[ServingBindingSourceMemberRef, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_source(self) -> "ServingBindingSourceRef":
+        if not self.artifact_selection_digest:
+            raise ValueError("artifact_selection_digest must not be empty")
+        if not self.source_schema_hash:
+            raise ValueError("source_schema_hash must not be empty")
+        if self.source_kind == "checkpoint_artifact":
+            if not self.source_artifact_ref:
+                raise ValueError(
+                    "source_artifact_ref is required for checkpoint_artifact sources"
+                )
+            if self.members:
+                raise ValueError("checkpoint_artifact sources must not carry members")
+        if self.source_kind == "serving_artifact_set":
+            if self.topology is None:
+                raise ValueError(
+                    "topology is required for serving_artifact_set sources"
+                )
+            if not self.members:
+                raise ValueError(
+                    "members are required for serving_artifact_set sources"
+                )
+        return self
+
+    def to_proto(self) -> operation_pb2.ServingBindingSourceRef:
+        proto = operation_pb2.ServingBindingSourceRef(
+            source_kind=_SOURCE_KIND_TO_PROTO[self.source_kind],
+            artifact_selection_digest=str(self.artifact_selection_digest),
+            source_schema_hash=str(self.source_schema_hash),
+        )
+        if self.source_artifact_ref is not None:
+            proto.source_artifact_ref = str(self.source_artifact_ref)
+        if self.representation_contract_hash is not None:
+            proto.representation_contract_hash = str(self.representation_contract_hash)
+        if self.serving_build_digest is not None:
+            proto.serving_build_digest = str(self.serving_build_digest)
+        if self.tensor_schema_hash is not None:
+            proto.tensor_schema_hash = str(self.tensor_schema_hash)
+        if self.topology is not None:
+            proto.topology.CopyFrom(self.topology.to_proto())
+        proto.members.extend(member.to_proto() for member in self.members)
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls, proto: operation_pb2.ServingBindingSourceRef
+    ) -> "ServingBindingSourceRef":
+        source_kind = _SOURCE_KIND_FROM_PROTO.get(int(proto.source_kind))
+        if source_kind is None:
+            raise ValueError("ServingBindingSourceRef source_kind is required")
+        return cls(
+            source_kind=source_kind,
+            artifact_selection_digest=str(proto.artifact_selection_digest),
+            source_artifact_ref=(
+                str(proto.source_artifact_ref)
+                if proto.HasField("source_artifact_ref")
+                else None
+            ),
+            source_schema_hash=str(proto.source_schema_hash),
+            representation_contract_hash=(
+                str(proto.representation_contract_hash)
+                if proto.HasField("representation_contract_hash")
+                else None
+            ),
+            serving_build_digest=(
+                str(proto.serving_build_digest)
+                if proto.HasField("serving_build_digest")
+                else None
+            ),
+            tensor_schema_hash=(
+                str(proto.tensor_schema_hash)
+                if proto.HasField("tensor_schema_hash")
+                else None
+            ),
+            topology=(
+                ServingTopologyRef.from_proto(proto.topology)
+                if proto.HasField("topology")
+                else None
+            ),
+            members=tuple(
+                ServingBindingSourceMemberRef.from_proto(member)
+                for member in proto.members
+            ),
+        )
+
+
+class ServingBindingSourceReuseDecision(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    mode: ServingBindingSourceReuseMode
+    representation_contract_hash: str | None = None
+    work_plan_hash: str | None = None
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_reuse(self) -> "ServingBindingSourceReuseDecision":
+        for field_name in ("representation_contract_hash", "work_plan_hash", "reason"):
+            value = getattr(self, field_name)
+            if value is not None and not value:
+                raise ValueError(f"{field_name} must not be empty when provided")
+        if self.mode == "serving_transform_required" and not (
+            self.work_plan_hash or self.reason
+        ):
+            raise ValueError(
+                "serving_transform_required requires work_plan_hash or reason"
+            )
+        if self.mode == "unsupported" and not self.reason:
+            raise ValueError("unsupported source reuse requires reason")
+        return self
+
+    def to_proto(self) -> operation_pb2.ServingBindingSourceReuseDecision:
+        proto = operation_pb2.ServingBindingSourceReuseDecision(
+            mode=_SOURCE_REUSE_TO_PROTO[self.mode]
+        )
+        if self.representation_contract_hash is not None:
+            proto.representation_contract_hash = str(self.representation_contract_hash)
+        if self.work_plan_hash is not None:
+            proto.work_plan_hash = str(self.work_plan_hash)
+        if self.reason is not None:
+            proto.reason = str(self.reason)
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls, proto: operation_pb2.ServingBindingSourceReuseDecision
+    ) -> "ServingBindingSourceReuseDecision":
+        mode = _SOURCE_REUSE_FROM_PROTO.get(int(proto.mode))
+        if mode is None:
+            raise ValueError("ServingBindingSourceReuseDecision mode is required")
+        return cls(
+            mode=mode,
+            representation_contract_hash=(
+                str(proto.representation_contract_hash)
+                if proto.HasField("representation_contract_hash")
+                else None
+            ),
+            work_plan_hash=(
+                str(proto.work_plan_hash) if proto.HasField("work_plan_hash") else None
+            ),
+            reason=str(proto.reason) if proto.HasField("reason") else None,
+        )
+
+
+def plan_serving_binding_source_reuse(
+    *,
+    source: ServingBindingSourceRef,
+    topology: ServingTopologyRef,
+    member: ServingBindingMemberRef,
+    tensor_schema_hash: str,
+    target_layout_hash: str,
+    representation_contract_hash: str | None = None,
+) -> ServingBindingSourceReuseDecision:
+    if source.source_kind == "checkpoint_artifact":
+        return ServingBindingSourceReuseDecision(
+            mode="checkpoint_to_serving",
+            representation_contract_hash=representation_contract_hash,
+        )
+    if source.source_kind not in {"serving_artifact", "serving_artifact_set"}:
+        return ServingBindingSourceReuseDecision(
+            mode="unsupported",
+            reason=f"unsupported serving binding source kind: {source.source_kind}",
+        )
+    if (
+        representation_contract_hash is not None
+        and source.representation_contract_hash is not None
+        and representation_contract_hash != source.representation_contract_hash
+    ):
+        return ServingBindingSourceReuseDecision(
+            mode="serving_transform_required",
+            reason="source representation contract does not match target",
+        )
+    if source.topology is not None and source.topology != topology:
+        return ServingBindingSourceReuseDecision(
+            mode="serving_transform_required",
+            reason="source topology does not match target topology",
+        )
+    if (
+        source.tensor_schema_hash is not None
+        and source.tensor_schema_hash != tensor_schema_hash
+    ):
+        return ServingBindingSourceReuseDecision(
+            mode="serving_transform_required",
+            reason="source tensor schema does not match target tensor schema",
+        )
+    matching_members = [
+        source_member
+        for source_member in source.members
+        if source_member.member == member
+    ]
+    if source.source_kind == "serving_artifact_set" and not matching_members:
+        return ServingBindingSourceReuseDecision(
+            mode="serving_transform_required",
+            reason="source serving set does not contain target member",
+        )
+    for source_member in matching_members:
+        if (
+            source_member.tensor_schema_hash is not None
+            and source_member.tensor_schema_hash != tensor_schema_hash
+        ):
+            return ServingBindingSourceReuseDecision(
+                mode="serving_transform_required",
+                reason="source member tensor schema does not match target",
+            )
+        if (
+            source_member.target_layout_hash is not None
+            and source_member.target_layout_hash != target_layout_hash
+        ):
+            return ServingBindingSourceReuseDecision(
+                mode="serving_transform_required",
+                reason="source member layout does not match target layout",
+            )
+    return ServingBindingSourceReuseDecision(
+        mode="serving_direct_member_copy",
+        representation_contract_hash=representation_contract_hash
+        or source.representation_contract_hash,
+    )
+
+
+class ServingBindingResolvedLayout(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    binding_layout_id: str
+    source: ServingBindingSourceRef
+    source_reuse: ServingBindingSourceReuseDecision
+    topology: ServingTopologyRef
+    member: ServingBindingMemberRef
+    target_layout: bytes
+    target_index_bytes: bytes
+    target_layout_hash: str
+    tensor_schema_hash: str
+    spec_digest: str
+    source_schema_hash: str | None = None
+    copy_plan_bytes: bytes | None = None
+    dst_specs_bytes: bytes | None = None
+
+    @model_validator(mode="after")
+    def _validate_layout(self) -> "ServingBindingResolvedLayout":
+        if not self.binding_layout_id:
+            raise ValueError("binding_layout_id must not be empty")
+        if not self.target_layout:
+            raise ValueError("target_layout must not be empty")
+        if not self.target_index_bytes:
+            raise ValueError("target_index_bytes must not be empty")
+        if not self.target_layout_hash:
+            raise ValueError("target_layout_hash must not be empty")
+        if not self.tensor_schema_hash:
+            raise ValueError("tensor_schema_hash must not be empty")
+        if not self.spec_digest:
+            raise ValueError("spec_digest must not be empty")
+        if self.source_reuse.mode == "serving_direct_member_copy":
+            if self.source.source_kind not in {
+                "serving_artifact",
+                "serving_artifact_set",
+            }:
+                raise ValueError(
+                    "serving_direct_member_copy requires a serving artifact source"
+                )
+            if (
+                self.source.representation_contract_hash is not None
+                and self.source_reuse.representation_contract_hash is not None
+                and self.source_reuse.representation_contract_hash
+                != self.source.representation_contract_hash
+            ):
+                raise ValueError(
+                    "source_reuse representation_contract_hash must match source"
+                )
+            if self.source.tensor_schema_hash is not None and (
+                self.source.tensor_schema_hash != self.tensor_schema_hash
+            ):
+                raise ValueError(
+                    "serving_direct_member_copy tensor_schema_hash must match target"
+                )
+            matching_members = [
+                source_member
+                for source_member in self.source.members
+                if source_member.member == self.member
+            ]
+            if (
+                self.source.source_kind == "serving_artifact_set"
+                and not matching_members
+            ):
+                raise ValueError(
+                    "serving_direct_member_copy requires a matching source member"
+                )
+            for source_member in matching_members:
+                if (
+                    source_member.target_layout_hash is not None
+                    and source_member.target_layout_hash != self.target_layout_hash
+                ):
+                    raise ValueError(
+                        "serving_direct_member_copy target_layout_hash must match source member"
+                    )
+                if (
+                    source_member.tensor_schema_hash is not None
+                    and source_member.tensor_schema_hash != self.tensor_schema_hash
+                ):
+                    raise ValueError(
+                        "serving_direct_member_copy tensor_schema_hash must match source member"
+                    )
+        return self
+
+    def to_proto(self) -> operation_pb2.ServingBindingResolvedLayout:
+        proto = operation_pb2.ServingBindingResolvedLayout(
+            binding_layout_id=str(self.binding_layout_id),
+            target_layout=bytes(self.target_layout),
+            target_index_bytes=bytes(self.target_index_bytes),
+            target_layout_hash=str(self.target_layout_hash),
+            tensor_schema_hash=str(self.tensor_schema_hash),
+            spec_digest=str(self.spec_digest),
+        )
+        proto.source.CopyFrom(self.source.to_proto())
+        proto.source_reuse.CopyFrom(self.source_reuse.to_proto())
+        proto.topology.CopyFrom(self.topology.to_proto())
+        proto.member.CopyFrom(self.member.to_proto())
+        if self.source_schema_hash is not None:
+            proto.source_schema_hash = str(self.source_schema_hash)
+        if self.copy_plan_bytes is not None:
+            proto.copy_plan_bytes = bytes(self.copy_plan_bytes)
+        if self.dst_specs_bytes is not None:
+            proto.dst_specs_bytes = bytes(self.dst_specs_bytes)
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls, proto: operation_pb2.ServingBindingResolvedLayout
+    ) -> "ServingBindingResolvedLayout":
+        return cls(
+            binding_layout_id=str(proto.binding_layout_id),
+            source=ServingBindingSourceRef.from_proto(proto.source),
+            source_reuse=ServingBindingSourceReuseDecision.from_proto(
+                proto.source_reuse
+            ),
+            topology=ServingTopologyRef.from_proto(proto.topology),
+            member=ServingBindingMemberRef.from_proto(proto.member),
+            target_layout=bytes(proto.target_layout),
+            target_index_bytes=bytes(proto.target_index_bytes),
+            target_layout_hash=str(proto.target_layout_hash),
+            tensor_schema_hash=str(proto.tensor_schema_hash),
+            spec_digest=str(proto.spec_digest),
+            source_schema_hash=(
+                str(proto.source_schema_hash)
+                if proto.HasField("source_schema_hash")
+                else None
+            ),
+            copy_plan_bytes=(
+                bytes(proto.copy_plan_bytes)
+                if proto.HasField("copy_plan_bytes")
+                else None
+            ),
+            dst_specs_bytes=(
+                bytes(proto.dst_specs_bytes)
+                if proto.HasField("dst_specs_bytes")
+                else None
+            ),
+        )
+
+
+class ServingBindingTarget(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    runtime: str
+    device: str | int
+    device_uuid: str | None = None
+    source: ServingBindingSourceRef
+    topology: ServingTopologyRef
+    member: ServingBindingMemberRef
+    model_config_digest: str
+    load_config_digest: str | None = None
+    serving_build_digest: str
+    resolved_layout: ServingBindingResolvedLayout
+
+    @model_validator(mode="after")
+    def _validate_target(self) -> "ServingBindingTarget":
+        if not self.runtime:
+            raise ValueError("runtime must not be empty")
+        if str(self.device) == "":
+            raise ValueError("device must not be empty")
+        if self.device_uuid is not None and not self.device_uuid:
+            raise ValueError("device_uuid must not be empty when provided")
+        if not self.model_config_digest:
+            raise ValueError("model_config_digest must not be empty")
+        if self.load_config_digest is not None and not self.load_config_digest:
+            raise ValueError("load_config_digest must not be empty when provided")
+        if not self.serving_build_digest:
+            raise ValueError("serving_build_digest must not be empty")
+        if self.source != self.resolved_layout.source:
+            raise ValueError("resolved_layout.source must match target source")
+        if self.source.topology is not None and self.source.topology != self.topology:
+            raise ValueError("source topology must match target topology when provided")
+        if (
+            self.resolved_layout.source_reuse.mode == "serving_direct_member_copy"
+            and self.source.serving_build_digest is not None
+            and self.source.serving_build_digest != self.serving_build_digest
+        ):
+            raise ValueError(
+                "serving_direct_member_copy serving_build_digest must match source"
+            )
+        if self.topology != self.resolved_layout.topology:
+            raise ValueError("resolved_layout.topology must match target topology")
+        if self.member != self.resolved_layout.member:
+            raise ValueError("resolved_layout.member must match target member")
+        return self
+
+    def to_proto(self) -> operation_pb2.ServingBindingTarget:
+        proto = operation_pb2.ServingBindingTarget(
+            runtime=str(self.runtime),
+            device=str(self.device),
+            model_config_digest=str(self.model_config_digest),
+            serving_build_digest=str(self.serving_build_digest),
+        )
+        if self.device_uuid is not None:
+            proto.device_uuid = str(self.device_uuid)
+        if self.load_config_digest is not None:
+            proto.load_config_digest = str(self.load_config_digest)
+        proto.source.CopyFrom(self.source.to_proto())
+        proto.topology.CopyFrom(self.topology.to_proto())
+        proto.member.CopyFrom(self.member.to_proto())
+        proto.resolved_layout.CopyFrom(self.resolved_layout.to_proto())
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls, proto: operation_pb2.ServingBindingTarget
+    ) -> "ServingBindingTarget":
+        return cls(
+            runtime=str(proto.runtime),
+            device=str(proto.device),
+            device_uuid=str(proto.device_uuid)
+            if proto.HasField("device_uuid")
+            else None,
+            source=ServingBindingSourceRef.from_proto(proto.source),
+            topology=ServingTopologyRef.from_proto(proto.topology),
+            member=ServingBindingMemberRef.from_proto(proto.member),
+            model_config_digest=str(proto.model_config_digest),
+            load_config_digest=(
+                str(proto.load_config_digest)
+                if proto.HasField("load_config_digest")
+                else None
+            ),
+            serving_build_digest=str(proto.serving_build_digest),
+            resolved_layout=ServingBindingResolvedLayout.from_proto(
+                proto.resolved_layout
+            ),
+        )
+
+
+class ServingBindingSetTarget(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    runtime: str
+    source: ServingBindingSourceRef
+    topology: ServingTopologyRef
+    group_id: str
+    members: tuple[ServingBindingTarget, ...]
+
+    @model_validator(mode="after")
+    def _validate_set_target(self) -> "ServingBindingSetTarget":
+        if not self.runtime:
+            raise ValueError("runtime must not be empty")
+        if not self.group_id:
+            raise ValueError("group_id must not be empty")
+        if not self.members:
+            raise ValueError("members must not be empty")
+        for member in self.members:
+            if member.runtime != self.runtime:
+                raise ValueError("all members must use the set runtime")
+            if member.source != self.source:
+                raise ValueError("all members must use the set source")
+            if member.topology != self.topology:
+                raise ValueError("all members must use the set topology")
+            if member.member.group_id not in {None, self.group_id}:
+                raise ValueError("member group_id must match set group_id")
+        return self
+
+    def to_proto(self) -> operation_pb2.ServingBindingSetTarget:
+        proto = operation_pb2.ServingBindingSetTarget(
+            runtime=str(self.runtime),
+            group_id=str(self.group_id),
+        )
+        proto.source.CopyFrom(self.source.to_proto())
+        proto.topology.CopyFrom(self.topology.to_proto())
+        proto.members.extend(member.to_proto() for member in self.members)
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls, proto: operation_pb2.ServingBindingSetTarget
+    ) -> "ServingBindingSetTarget":
+        return cls(
+            runtime=str(proto.runtime),
+            source=ServingBindingSourceRef.from_proto(proto.source),
+            topology=ServingTopologyRef.from_proto(proto.topology),
+            group_id=str(proto.group_id),
+            members=tuple(
+                ServingBindingTarget.from_proto(member) for member in proto.members
+            ),
+        )
+
+
+class ServingBindingResolvedSpecCacheEntry(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    schema_version: int
+    cache_key_digest: str
+    spec_digest: str
+    runtime: str
+    source: ServingBindingSourceRef
+    source_reuse: ServingBindingSourceReuseDecision
+    topology: ServingTopologyRef
+    member: ServingBindingMemberRef
+    source_schema_hash: str
+    model_config_digest: str
+    load_config_digest: str | None = None
+    serving_build_digest: str
+    binding_layout_id: str
+    target_layout_hash: str
+    tensor_schema_hash: str
+    blob_refs: Mapping[str, BlobRef]
+
+    @model_validator(mode="after")
+    def _validate_cache_entry(self) -> "ServingBindingResolvedSpecCacheEntry":
+        if int(self.schema_version) <= 0:
+            raise ValueError("schema_version must be positive")
+        for field_name in (
+            "cache_key_digest",
+            "spec_digest",
+            "runtime",
+            "source_schema_hash",
+            "model_config_digest",
+            "serving_build_digest",
+            "binding_layout_id",
+            "target_layout_hash",
+            "tensor_schema_hash",
+        ):
+            if not getattr(self, field_name):
+                raise ValueError(f"{field_name} must not be empty")
+        if not self.blob_refs:
+            raise ValueError("blob_refs must not be empty")
+        return self
+
+    def canonical_key_json(self) -> str:
+        payload = {
+            "schema_version": int(self.schema_version),
+            "runtime": self.runtime,
+            "source_schema_hash": self.source_schema_hash,
+            "model_config_digest": self.model_config_digest,
+            "load_config_digest": self.load_config_digest,
+            "topology": self.topology.model_dump(mode="json", exclude_none=True),
+            "member": self.member.model_dump(mode="json", exclude_none=True),
+            "serving_build_digest": self.serving_build_digest,
+            "source": self.source.model_dump(mode="json", exclude_none=True),
+            "source_reuse": self.source_reuse.model_dump(
+                mode="json", exclude_none=True
+            ),
+        }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    def computed_cache_key_digest(self) -> str:
+        return hashlib.sha256(self.canonical_key_json().encode("utf-8")).hexdigest()
+
+    def canonical_spec_core_json(self) -> str:
+        payload = {
+            "schema_version": int(self.schema_version),
+            "canonical_key": json.loads(self.canonical_key_json()),
+            "binding_layout_id": self.binding_layout_id,
+            "target_layout_hash": self.target_layout_hash,
+            "tensor_schema_hash": self.tensor_schema_hash,
+            "source_schema_hash": self.source_schema_hash,
+            "serving_build_digest": self.serving_build_digest,
+            "source_reuse": self.source_reuse.model_dump(
+                mode="json", exclude_none=True
+            ),
+            "blob_refs": {
+                key: value.model_dump(mode="json", exclude_none=True)
+                for key, value in sorted(self.blob_refs.items())
+            },
+        }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    def computed_spec_digest(self) -> str:
+        return hashlib.sha256(
+            self.canonical_spec_core_json().encode("utf-8")
+        ).hexdigest()
+
+    def to_proto(self) -> operation_pb2.ServingBindingResolvedSpecCacheEntry:
+        proto = operation_pb2.ServingBindingResolvedSpecCacheEntry(
+            schema_version=int(self.schema_version),
+            cache_key_digest=str(self.cache_key_digest),
+            spec_digest=str(self.spec_digest),
+            runtime=str(self.runtime),
+            source_schema_hash=str(self.source_schema_hash),
+            model_config_digest=str(self.model_config_digest),
+            serving_build_digest=str(self.serving_build_digest),
+            binding_layout_id=str(self.binding_layout_id),
+            target_layout_hash=str(self.target_layout_hash),
+            tensor_schema_hash=str(self.tensor_schema_hash),
+        )
+        proto.source.CopyFrom(self.source.to_proto())
+        proto.source_reuse.CopyFrom(self.source_reuse.to_proto())
+        proto.topology.CopyFrom(self.topology.to_proto())
+        proto.member.CopyFrom(self.member.to_proto())
+        if self.load_config_digest is not None:
+            proto.load_config_digest = str(self.load_config_digest)
+        for key, value in self.blob_refs.items():
+            proto.blob_refs[str(key)].CopyFrom(value.to_proto())
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls, proto: operation_pb2.ServingBindingResolvedSpecCacheEntry
+    ) -> "ServingBindingResolvedSpecCacheEntry":
+        return cls(
+            schema_version=int(proto.schema_version),
+            cache_key_digest=str(proto.cache_key_digest),
+            spec_digest=str(proto.spec_digest),
+            runtime=str(proto.runtime),
+            source=ServingBindingSourceRef.from_proto(proto.source),
+            source_reuse=ServingBindingSourceReuseDecision.from_proto(
+                proto.source_reuse
+            ),
+            topology=ServingTopologyRef.from_proto(proto.topology),
+            member=ServingBindingMemberRef.from_proto(proto.member),
+            source_schema_hash=str(proto.source_schema_hash),
+            model_config_digest=str(proto.model_config_digest),
+            load_config_digest=(
+                str(proto.load_config_digest)
+                if proto.HasField("load_config_digest")
+                else None
+            ),
+            serving_build_digest=str(proto.serving_build_digest),
+            binding_layout_id=str(proto.binding_layout_id),
+            target_layout_hash=str(proto.target_layout_hash),
+            tensor_schema_hash=str(proto.tensor_schema_hash),
+            blob_refs={
+                str(key): BlobRef.from_proto(value)
+                for key, value in proto.blob_refs.items()
+            },
+        )
+
+
+class PrefetchRetentionPolicy(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    expire_if_unacquired_after_ms: int | None = None
+    idle_ttl_after_last_release_ms: int | None = None
+    materialization_timeout_ms: int | None = None
+    allow_acquire_after_creator_exit: bool = True
+
+    @model_validator(mode="after")
+    def _validate_policy(self) -> "PrefetchRetentionPolicy":
+        for field_name in (
+            "expire_if_unacquired_after_ms",
+            "idle_ttl_after_last_release_ms",
+            "materialization_timeout_ms",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and int(value) < 0:
+                raise ValueError(f"{field_name} must be non-negative")
+        return self
+
+    def to_proto(self) -> operation_pb2.PrefetchRetentionPolicy:
+        proto = operation_pb2.PrefetchRetentionPolicy(
+            allow_acquire_after_creator_exit=bool(self.allow_acquire_after_creator_exit)
+        )
+        if self.expire_if_unacquired_after_ms is not None:
+            proto.expire_if_unacquired_after_ms = int(
+                self.expire_if_unacquired_after_ms
+            )
+        if self.idle_ttl_after_last_release_ms is not None:
+            proto.idle_ttl_after_last_release_ms = int(
+                self.idle_ttl_after_last_release_ms
+            )
+        if self.materialization_timeout_ms is not None:
+            proto.materialization_timeout_ms = int(self.materialization_timeout_ms)
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls, proto: operation_pb2.PrefetchRetentionPolicy
+    ) -> "PrefetchRetentionPolicy":
+        return cls(
+            expire_if_unacquired_after_ms=(
+                int(proto.expire_if_unacquired_after_ms)
+                if proto.HasField("expire_if_unacquired_after_ms")
+                else None
+            ),
+            idle_ttl_after_last_release_ms=(
+                int(proto.idle_ttl_after_last_release_ms)
+                if proto.HasField("idle_ttl_after_last_release_ms")
+                else None
+            ),
+            materialization_timeout_ms=(
+                int(proto.materialization_timeout_ms)
+                if proto.HasField("materialization_timeout_ms")
+                else None
+            ),
+            allow_acquire_after_creator_exit=bool(
+                proto.allow_acquire_after_creator_exit
+            ),
+        )
+
+
+class BindingReservationCapability(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    capability_id: str
+    binding_value_ref: BindingValueRef
+    daemon_id: str
+    daemon_session_id: str
+    device_uuid: str
+    member: ServingBindingMemberRef
+    reservation_bytes: int
+    scope_digest: str
+    expires_at_ms: int | None = None
+
+    @model_validator(mode="after")
+    def _validate_capability(self) -> "BindingReservationCapability":
+        for field_name in (
+            "capability_id",
+            "daemon_id",
+            "daemon_session_id",
+            "device_uuid",
+            "scope_digest",
+        ):
+            if not getattr(self, field_name):
+                raise ValueError(f"{field_name} must not be empty")
+        if int(self.reservation_bytes) < 0:
+            raise ValueError("reservation_bytes must be non-negative")
+        if self.expires_at_ms is not None and int(self.expires_at_ms) < 0:
+            raise ValueError("expires_at_ms must be non-negative")
+        return self
+
+    def to_proto(self) -> operation_pb2.BindingReservationCapability:
+        proto = operation_pb2.BindingReservationCapability(
+            capability_id=str(self.capability_id),
+            daemon_id=str(self.daemon_id),
+            daemon_session_id=str(self.daemon_session_id),
+            device_uuid=str(self.device_uuid),
+            reservation_bytes=int(self.reservation_bytes),
+            scope_digest=str(self.scope_digest),
+        )
+        proto.binding_value_ref.CopyFrom(self.binding_value_ref.to_proto())
+        proto.member.CopyFrom(self.member.to_proto())
+        if self.expires_at_ms is not None:
+            proto.expires_at_ms = int(self.expires_at_ms)
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls, proto: operation_pb2.BindingReservationCapability
+    ) -> "BindingReservationCapability":
+        return cls(
+            capability_id=str(proto.capability_id),
+            binding_value_ref=BindingValueRef.from_proto(proto.binding_value_ref),
+            daemon_id=str(proto.daemon_id),
+            daemon_session_id=str(proto.daemon_session_id),
+            device_uuid=str(proto.device_uuid),
+            member=ServingBindingMemberRef.from_proto(proto.member),
+            reservation_bytes=int(proto.reservation_bytes),
+            scope_digest=str(proto.scope_digest),
+            expires_at_ms=(
+                int(proto.expires_at_ms) if proto.HasField("expires_at_ms") else None
+            ),
+        )
+
+
+class PrefetchedServingBinding(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    local_serving_ref: str | None = None
+    binding_value_ref: BindingValueRef
+    daemon_id: str
+    daemon_session_id: str
+    device_uuid: str
+    member: ServingBindingMemberRef
+    reservation_bytes: int
+    reservation_capability: BindingReservationCapability
+    readiness: ServingBindingReadiness
+    verification_state: BindingValueVerificationState
+    serving_artifact_id: str | None = None
+    expires_at_ms: int | None = None
+
+    @model_validator(mode="after")
+    def _validate_result(self) -> "PrefetchedServingBinding":
+        if self.local_serving_ref is not None and not self.local_serving_ref:
+            raise ValueError("local_serving_ref must not be empty when provided")
+        for field_name in ("daemon_id", "daemon_session_id", "device_uuid"):
+            if not getattr(self, field_name):
+                raise ValueError(f"{field_name} must not be empty")
+        if int(self.reservation_bytes) < 0:
+            raise ValueError("reservation_bytes must be non-negative")
+        if self.reservation_capability.binding_value_ref != self.binding_value_ref:
+            raise ValueError(
+                "reservation_capability.binding_value_ref must match binding_value_ref"
+            )
+        if self.expires_at_ms is not None and int(self.expires_at_ms) < 0:
+            raise ValueError("expires_at_ms must be non-negative")
+        return self
+
+    def to_proto(self) -> operation_pb2.PrefetchServingBindingResult:
+        proto = operation_pb2.PrefetchServingBindingResult(
+            daemon_id=str(self.daemon_id),
+            daemon_session_id=str(self.daemon_session_id),
+            device_uuid=str(self.device_uuid),
+            reservation_bytes=int(self.reservation_bytes),
+            readiness=_SERVING_READINESS_TO_PROTO[self.readiness],
+            verification_state=str(self.verification_state.value),
+        )
+        if self.local_serving_ref is not None:
+            proto.local_serving_ref = str(self.local_serving_ref)
+        proto.binding_value_ref.CopyFrom(self.binding_value_ref.to_proto())
+        proto.member.CopyFrom(self.member.to_proto())
+        proto.reservation_capability.CopyFrom(self.reservation_capability.to_proto())
+        if self.serving_artifact_id is not None:
+            proto.serving_artifact_id = str(self.serving_artifact_id)
+        if self.expires_at_ms is not None:
+            proto.expires_at_ms = int(self.expires_at_ms)
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls, proto: operation_pb2.PrefetchServingBindingResult
+    ) -> "PrefetchedServingBinding":
+        readiness = _SERVING_READINESS_FROM_PROTO.get(int(proto.readiness))
+        if readiness is None:
+            raise ValueError("PrefetchServingBindingResult readiness is required")
+        return cls(
+            local_serving_ref=(
+                str(proto.local_serving_ref)
+                if proto.HasField("local_serving_ref")
+                else None
+            ),
+            binding_value_ref=BindingValueRef.from_proto(proto.binding_value_ref),
+            daemon_id=str(proto.daemon_id),
+            daemon_session_id=str(proto.daemon_session_id),
+            device_uuid=str(proto.device_uuid),
+            member=ServingBindingMemberRef.from_proto(proto.member),
+            reservation_bytes=int(proto.reservation_bytes),
+            reservation_capability=BindingReservationCapability.from_proto(
+                proto.reservation_capability
+            ),
+            readiness=readiness,
+            verification_state=BindingValueVerificationState(
+                str(proto.verification_state)
+            ),
+            serving_artifact_id=(
+                str(proto.serving_artifact_id)
+                if proto.HasField("serving_artifact_id")
+                else None
+            ),
+            expires_at_ms=(
+                int(proto.expires_at_ms) if proto.HasField("expires_at_ms") else None
+            ),
+        )
+
+
+class PrefetchedServingBindingMemberFailure(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    member: ServingBindingMemberRef
+    code: str
+    message: str
+    phase: str | None = None
+    cache_key_digest: str | None = None
+    spec_digest: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_failure(self) -> "PrefetchedServingBindingMemberFailure":
+        if not self.code:
+            raise ValueError("code must not be empty")
+        if not self.message:
+            raise ValueError("message must not be empty")
+        if self.phase is not None and not self.phase:
+            raise ValueError("phase must not be empty when provided")
+        if self.cache_key_digest is not None and not self.cache_key_digest:
+            raise ValueError("cache_key_digest must not be empty when provided")
+        if self.spec_digest is not None and not self.spec_digest:
+            raise ValueError("spec_digest must not be empty when provided")
+        return self
+
+    def to_proto(self) -> operation_pb2.PrefetchServingBindingMemberFailure:
+        proto = operation_pb2.PrefetchServingBindingMemberFailure(
+            code=str(self.code),
+            message=str(self.message),
+        )
+        proto.member.CopyFrom(self.member.to_proto())
+        if self.phase is not None:
+            proto.phase = str(self.phase)
+        if self.cache_key_digest is not None:
+            proto.cache_key_digest = str(self.cache_key_digest)
+        if self.spec_digest is not None:
+            proto.spec_digest = str(self.spec_digest)
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls, proto: operation_pb2.PrefetchServingBindingMemberFailure
+    ) -> "PrefetchedServingBindingMemberFailure":
+        return cls(
+            member=ServingBindingMemberRef.from_proto(proto.member),
+            code=str(proto.code),
+            message=str(proto.message),
+            phase=str(proto.phase) if proto.HasField("phase") else None,
+            cache_key_digest=(
+                str(proto.cache_key_digest)
+                if proto.HasField("cache_key_digest")
+                else None
+            ),
+            spec_digest=(
+                str(proto.spec_digest) if proto.HasField("spec_digest") else None
+            ),
+        )
+
+
+class PrefetchedServingBindingSet(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    runtime: str
+    topology: ServingTopologyRef
+    group_id: str
+    members: tuple[PrefetchedServingBinding, ...]
+    readiness: ServingBindingReadiness
+    expires_at_ms: int | None = None
+    member_failures: tuple[PrefetchedServingBindingMemberFailure, ...] = ()
+    partial: bool = False
+
+    @model_validator(mode="after")
+    def _validate_result_set(self) -> "PrefetchedServingBindingSet":
+        if not self.runtime:
+            raise ValueError("runtime must not be empty")
+        if not self.group_id:
+            raise ValueError("group_id must not be empty")
+        if not self.members:
+            raise ValueError("members must not be empty")
+        if self.expires_at_ms is not None and int(self.expires_at_ms) < 0:
+            raise ValueError("expires_at_ms must be non-negative")
+        if self.partial and not self.member_failures:
+            raise ValueError("partial serving binding set requires member_failures")
+        success_member_ids = {member.member.member_id for member in self.members}
+        failed_member_ids = {
+            failure.member.member_id for failure in self.member_failures
+        }
+        overlap = success_member_ids & failed_member_ids
+        if overlap:
+            raise ValueError(
+                "serving binding set member cannot be both success and failure"
+            )
+        return self
+
+    def to_proto(self) -> operation_pb2.PrefetchServingBindingSetResult:
+        proto = operation_pb2.PrefetchServingBindingSetResult(
+            runtime=str(self.runtime),
+            group_id=str(self.group_id),
+            readiness=_SERVING_READINESS_TO_PROTO[self.readiness],
+        )
+        proto.topology.CopyFrom(self.topology.to_proto())
+        proto.members.extend(member.to_proto() for member in self.members)
+        proto.member_failures.extend(
+            failure.to_proto() for failure in self.member_failures
+        )
+        proto.partial = bool(self.partial)
+        if self.expires_at_ms is not None:
+            proto.expires_at_ms = int(self.expires_at_ms)
+        return proto
+
+    @classmethod
+    def from_proto(
+        cls, proto: operation_pb2.PrefetchServingBindingSetResult
+    ) -> "PrefetchedServingBindingSet":
+        readiness = _SERVING_READINESS_FROM_PROTO.get(int(proto.readiness))
+        if readiness is None:
+            raise ValueError("PrefetchServingBindingSetResult readiness is required")
+        return cls(
+            runtime=str(proto.runtime),
+            topology=ServingTopologyRef.from_proto(proto.topology),
+            group_id=str(proto.group_id),
+            members=tuple(
+                PrefetchedServingBinding.from_proto(member) for member in proto.members
+            ),
+            readiness=readiness,
+            expires_at_ms=(
+                int(proto.expires_at_ms) if proto.HasField("expires_at_ms") else None
+            ),
+            member_failures=tuple(
+                PrefetchedServingBindingMemberFailure.from_proto(failure)
+                for failure in proto.member_failures
+            ),
+            partial=bool(proto.partial),
+        )
+
+
 class ServingPublicationSubject(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -2581,6 +3827,25 @@ __all__ = [
     "BeginRegisterArtifactResult",
     "ArtifactDescriptor",
     "BindingValueRef",
+    "ServingBindingReadiness",
+    "ServingBindingSourceKind",
+    "ServingBindingSourceReuseMode",
+    "ServingTopologyRef",
+    "ServingBindingMemberRef",
+    "BlobRef",
+    "ServingBindingSourceMemberRef",
+    "ServingBindingSourceRef",
+    "ServingBindingSourceReuseDecision",
+    "plan_serving_binding_source_reuse",
+    "ServingBindingResolvedLayout",
+    "ServingBindingTarget",
+    "ServingBindingSetTarget",
+    "ServingBindingResolvedSpecCacheEntry",
+    "PrefetchRetentionPolicy",
+    "BindingReservationCapability",
+    "PrefetchedServingBinding",
+    "PrefetchedServingBindingMemberFailure",
+    "PrefetchedServingBindingSet",
     "BuilderMode",
     "ServingPublicationSubject",
     "AssemblyCloseoutContract",

@@ -3,6 +3,7 @@ syntax = "proto3";
 package tensorcast.plan.v1;
 
 import "tensorcast/common/v1/common.proto";
+import "tensorcast/operation/v1/operation.proto";
 import "tensorcast/publication/v1/publication.proto";
 
 message CallContext {
@@ -102,6 +103,12 @@ message TargetRef {
 message PrefetchAction {
   tensorcast.common.v1.ArtifactSelection selection = 1;
   int32 device_id = 2;
+  oneof serving_target {
+    tensorcast.operation.v1.ServingBindingTarget serving_binding_target = 10;
+    tensorcast.operation.v1.ServingBindingSetTarget serving_binding_set_target = 11;
+  }
+  tensorcast.operation.v1.ServingBindingReadiness requested_readiness = 12;
+  tensorcast.operation.v1.PrefetchRetentionPolicy retention_policy = 13;
 }
 
 message ArtifactSetRef {

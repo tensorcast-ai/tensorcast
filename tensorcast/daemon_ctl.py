@@ -59,6 +59,8 @@ from tensorcast.types import (
     AssemblyReadinessPolicy,
     AssemblyRequirementSetRef,
     BeginRegisterArtifactResult,
+    BindingReservationCapability,
+    BindingValueRef,
     CanonicalRange,
     CoalescedHandshake,
     CommitResult,
@@ -70,12 +72,17 @@ from tensorcast.types import (
     LocalRegionHandle,
     LocalStableTierResult,
     Plan,
+    PrefetchRetentionPolicy,
     RegionMemoryKind,
     RegisterStorage,
     RegisterTensorAlias,
     RepresentationPublishSpec,
     SealAssemblyResult,
     ServerConfig,
+    ServingBindingMemberRef,
+    ServingBindingReadiness,
+    ServingBindingSetTarget,
+    ServingBindingTarget,
     ServingRuntimePolicy,
     StableDramHandshake,
     VramRegionHandle,
@@ -1177,6 +1184,137 @@ class DaemonCtl:
                     ) from e
                 raise RuntimeError(
                     _grpc_message(e, fallback="CreateOwnedBinding RPC failed")
+                ) from e
+        return response
+
+    def prefetch_serving_binding(
+        self,
+        *,
+        source_selection: common_pb2.ArtifactSelection,
+        target: ServingBindingTarget | ServingBindingSetTarget,
+        requested_readiness: ServingBindingReadiness,
+        retention_policy: PrefetchRetentionPolicy | None = None,
+        operation_id: str | None = None,
+        timeout_s: float = 10.0,
+    ) -> store_daemon_pb2.PrefetchServingBindingResponse:
+        if not isinstance(source_selection, common_pb2.ArtifactSelection):
+            raise ValueError("source_selection is required")
+        if not source_selection.artifact_id:
+            raise ValueError("source_selection.artifact_id is required")
+        from tensorcast.types import _SERVING_READINESS_TO_PROTO
+
+        request = store_daemon_pb2.PrefetchServingBindingRequest(
+            requested_readiness=_SERVING_READINESS_TO_PROTO[requested_readiness],
+        )
+        request.source_selection.CopyFrom(source_selection)
+        if isinstance(target, ServingBindingTarget):
+            request.source.CopyFrom(target.source.to_proto())
+            request.serving_binding_target.CopyFrom(target.to_proto())
+        elif isinstance(target, ServingBindingSetTarget):
+            request.source.CopyFrom(target.source.to_proto())
+            request.serving_binding_set_target.CopyFrom(target.to_proto())
+        else:
+            raise ValueError(
+                "target must be a ServingBindingTarget or ServingBindingSetTarget"
+            )
+        if retention_policy is not None:
+            request.retention_policy.CopyFrom(retention_policy.to_proto())
+        else:
+            request.retention_policy.CopyFrom(PrefetchRetentionPolicy().to_proto())
+        if operation_id:
+            request.operation_id = str(operation_id)
+        with self._client_span("Client/PrefetchServingBinding") as span:
+            try:
+                response: store_daemon_pb2.PrefetchServingBindingResponse = (
+                    self._unary_call(
+                        self.stub_v2.PrefetchServingBinding,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=0,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                if code == grpc.StatusCode.UNIMPLEMENTED:
+                    raise RuntimeError(
+                        "PrefetchServingBinding is not supported by the connected StoreDaemon."
+                    ) from e
+                raise RuntimeError(
+                    _grpc_message(e, fallback="PrefetchServingBinding RPC failed")
+                ) from e
+        return response
+
+    def acquire_binding_value(
+        self,
+        *,
+        binding_value_ref: BindingValueRef,
+        reservation_capability: BindingReservationCapability,
+        expected_device_uuid: str,
+        expected_target_layout_hash: str,
+        expected_tensor_schema_hash: str,
+        expected_serving_build_digest: str,
+        expected_daemon_id: str | None = None,
+        expected_daemon_session_id: str | None = None,
+        expected_member: ServingBindingMemberRef | None = None,
+        local_serving_ref: str | None = None,
+        caller_pid: int | None = None,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.AcquireBindingValueResponse:
+        if not expected_device_uuid:
+            raise ValueError("expected_device_uuid is required")
+        if not expected_target_layout_hash:
+            raise ValueError("expected_target_layout_hash is required")
+        if not expected_tensor_schema_hash:
+            raise ValueError("expected_tensor_schema_hash is required")
+        if not expected_serving_build_digest:
+            raise ValueError("expected_serving_build_digest is required")
+        member = expected_member or reservation_capability.member
+        request = store_daemon_pb2.AcquireBindingValueRequest(
+            expected_daemon_id=expected_daemon_id or reservation_capability.daemon_id,
+            expected_daemon_session_id=expected_daemon_session_id
+            or reservation_capability.daemon_session_id,
+            expected_device_uuid=str(expected_device_uuid),
+            expected_target_layout_hash=str(expected_target_layout_hash),
+            expected_tensor_schema_hash=str(expected_tensor_schema_hash),
+            expected_serving_build_digest=str(expected_serving_build_digest),
+        )
+        request.binding_value_ref.CopyFrom(binding_value_ref.to_proto())
+        request.reservation_capability.CopyFrom(reservation_capability.to_proto())
+        request.expected_member.CopyFrom(member.to_proto())
+        if local_serving_ref is not None:
+            request.local_serving_ref = str(local_serving_ref)
+        if caller_pid is not None:
+            request.caller_pid = int(caller_pid)
+        with self._client_span("Client/AcquireBindingValue") as span:
+            try:
+                response: store_daemon_pb2.AcquireBindingValueResponse = (
+                    self._unary_call(
+                        self.stub_v2.AcquireBindingValue,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=0,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                if code == grpc.StatusCode.UNIMPLEMENTED:
+                    raise RuntimeError(
+                        "AcquireBindingValue is not supported by the connected StoreDaemon."
+                    ) from e
+                raise RuntimeError(
+                    _grpc_message(e, fallback="AcquireBindingValue RPC failed")
                 ) from e
         return response
 

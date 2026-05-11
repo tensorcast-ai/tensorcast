@@ -305,6 +305,16 @@ message DaemonConfig {
   }
   RetentionHandles retention_handles = 23;
 
+  message ServingPrefetch {
+    bool enabled = 1;
+    optional bool same_daemon_acquire_enabled = 2;
+    string resolved_spec_cache_root = 3;
+    google.protobuf.Duration default_expire_if_unacquired = 4;
+    google.protobuf.Duration default_idle_ttl_after_last_release = 5;
+    google.protobuf.Duration default_materialization_timeout = 6;
+  }
+  ServingPrefetch serving_prefetch = 33;
+
   message CapabilityDirectory {
     bool enabled = 1;
     optional bool gateway_ingress_enabled = 2;

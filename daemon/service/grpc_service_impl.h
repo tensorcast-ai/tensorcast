@@ -36,6 +36,8 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     bool allow_high_card_attrs{false};
     bool use_cursor_pagination{false};
     bool gateway_ingress_enabled{false};
+    bool serving_prefetch_enabled{false};
+    bool serving_same_daemon_acquire_enabled{true};
     std::filesystem::path storage_path;
     absl::Duration directory_staleness_budget{absl::Seconds(2)};
   };
@@ -86,6 +88,16 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       grpc::ServerContext* ctx,
       const v2::CreateOwnedBindingRequest* req,
       v2::CreateOwnedBindingResponse* resp) override;
+
+  grpc::Status PrefetchServingBinding(
+      grpc::ServerContext* ctx,
+      const v2::PrefetchServingBindingRequest* req,
+      v2::PrefetchServingBindingResponse* resp) override;
+
+  grpc::Status AcquireBindingValue(
+      grpc::ServerContext* ctx,
+      const v2::AcquireBindingValueRequest* req,
+      v2::AcquireBindingValueResponse* resp) override;
 
   grpc::Status CreateBinding(
       grpc::ServerContext* ctx,

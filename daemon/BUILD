@@ -623,6 +623,17 @@ sc_cc_library(
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time:time",
+    ],
+)
+
+cc_test(
+    name = "binding_registry_test",
+    srcs = ["state/binding_registry_test.cc"],
+    deps = [
+        ":binding_registry_lib",
+        "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
     ],
 )
 

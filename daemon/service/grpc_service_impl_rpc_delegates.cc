@@ -51,6 +51,41 @@ Status StoreDaemonServiceImpl::CreateOwnedBinding(
   return materialization_controller_->create_owned_binding(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::PrefetchServingBinding(
+    grpc::ServerContext* ctx,
+    const v2::PrefetchServingBindingRequest* req,
+    v2::PrefetchServingBindingResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  (void)req;
+  (void)resp;
+  if (!opts_.serving_prefetch_enabled) {
+    return {StatusCode::FAILED_PRECONDITION, "serving binding prefetch feature is disabled"};
+  }
+  RpcContext rctx{"PrefetchServingBinding", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->prefetch_serving_binding(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::AcquireBindingValue(
+    grpc::ServerContext* ctx,
+    const v2::AcquireBindingValueRequest* req,
+    v2::AcquireBindingValueResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  (void)req;
+  (void)resp;
+  if (!opts_.serving_prefetch_enabled) {
+    return {StatusCode::FAILED_PRECONDITION, "serving binding acquire feature is disabled"};
+  }
+  if (!opts_.serving_same_daemon_acquire_enabled) {
+    return {StatusCode::FAILED_PRECONDITION, "same-daemon serving binding acquire is disabled"};
+  }
+  RpcContext rctx{"AcquireBindingValue", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->acquire_binding_value(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::CreateBinding(
     grpc::ServerContext* ctx,
     const v2::CreateBindingRequest* req,
