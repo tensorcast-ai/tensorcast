@@ -7,7 +7,6 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tensorcast"
 description = "Shared tensor layer for distributed inference — load once, share everywhere."
-readme = "README.md"
 authors = [{ name = "TensorCast Team" }]
 license = "MIT"
 license-files = ["LICENSE"]
@@ -46,7 +45,7 @@ dependencies = [
     "tqdm>=4.66.0",
 ]
 
-dynamic = ["version"]
+dynamic = ["version", "readme"]
 
 [project.urls]
 Repository = "https://github.com/tensorcast-ai/tensorcast"

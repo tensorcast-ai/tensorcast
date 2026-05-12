@@ -8,6 +8,8 @@ tensorcast_daemon
 
 tensorcast/_version.py
 tensorcast/lib
+tensorcast/bin/tensorcast_daemon
+tensorcast/examples/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

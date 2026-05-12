@@ -5,6 +5,28 @@ from __future__ import annotations
 import contextlib
 
 # -----------------------------------------------------------------------------
+# Torch ABI fail-fast guard.
+#
+# tensorcast ships a C++ extension (`tensorcast._C`) and a `tensorcast_daemon`
+# binary that link against a specific PyTorch C++ ABI. Mixing them with a
+# different torch minor version usually produces undefined-symbol errors at
+# dlopen time. We refuse to import early with a clearer message so users land
+# on a fix before they hit confusing low-level failures.
+# -----------------------------------------------------------------------------
+import torch as _torch
+
+_REQUIRED_TORCH_MAJOR_MINOR = "2.11"
+if not _torch.__version__.split("+", 1)[0].startswith(f"{_REQUIRED_TORCH_MAJOR_MINOR}."):
+    raise ImportError(
+        f"tensorcast was built against torch {_REQUIRED_TORCH_MAJOR_MINOR}.x "
+        f"but found torch {_torch.__version__}. "
+        f"Install a matching torch (`pip install torch=={_REQUIRED_TORCH_MAJOR_MINOR}.0 "
+        "--index-url https://download.pytorch.org/whl/cu128`) or build tensorcast "
+        "from source against your torch version."
+    )
+del _torch, _REQUIRED_TORCH_MAJOR_MINOR
+
+# -----------------------------------------------------------------------------
 # Early patch for a PyTorch bug that can raise the following exception when
 # importing `torch.overrides` multiple times within the same interpreter:
 #
