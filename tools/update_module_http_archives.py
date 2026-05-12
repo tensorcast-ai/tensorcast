@@ -29,7 +29,6 @@ PACKAGE_MAP = {
     "triton": "triton",
 }
 
-MIRROR_PREFIX = "http://mirrors.i.basemind.com/pypi/packages/packages/"
 PYPI_PREFIX = "https://files.pythonhosted.org/packages/"
 
 WHEEL_LINE_RE = re.compile(r'url = "([^"]+)", hash = "sha256[:=]([0-9a-fA-F]+)"')
@@ -100,9 +99,14 @@ def select_wheel(wheels: list[Wheel], python_tag: str, arch: str) -> Wheel:
     def filename(wheel: Wheel) -> str:
         return wheel.url.rsplit("/", 1)[-1]
 
+    def is_pure_py3(wheel: Wheel) -> bool:
+        # NVIDIA wheels (and similar) ship as `*-py3-none-<platform>.whl` without a cpython tag.
+        # Treat any such wheel as compatible with the requested cpython tag.
+        return "-py3-none-" in filename(wheel)
+
     def matches(wheel: Wheel, want_python: bool, want_arch: bool, want_linux: bool) -> bool:
         name = filename(wheel)
-        if want_python and f"-{python_tag}-" not in name:
+        if want_python and f"-{python_tag}-" not in name and not is_pure_py3(wheel):
             return False
         if want_arch and arch not in name:
             return False
@@ -132,9 +136,6 @@ def sri_from_sha256_hex(sha256_hex: str) -> str:
 
 
 def build_urls(primary_url: str) -> list[str]:
-    if primary_url.startswith(MIRROR_PREFIX):
-        suffix = primary_url[len(MIRROR_PREFIX) :]
-        return [primary_url, f"{PYPI_PREFIX}{suffix}"]
     return [primary_url]
 
 

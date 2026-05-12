@@ -1,14 +1,24 @@
 [build-system]
 # Note: The torch version here is the default. When building releases,
 # use tools/release.sh with --torch-version to specify different versions
-requires = ["setuptools>=68.0.0", "pyyaml", "torch==2.8.0+cu128", "toml"]
+requires = ["setuptools>=68.0.0", "pyyaml", "torch==2.11.0", "toml"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "tensorcast"
-description = "TensorCast"
+description = "Shared tensor layer for distributed inference — load once, share everywhere."
 readme = "README.md"
+authors = [{ name = "TensorCast Team" }]
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 # Note: Runtime torch version should match the build-time version
 # The package name will include the torch version suffix (e.g., tensorcast-0.0.2+torch26)
 dependencies = [
@@ -20,7 +30,7 @@ dependencies = [
     "pytz>=2025.2",
     "prometheus-client>=0.21.1",
     "py-grpc-prometheus>=0.8.0",
-    "torch==2.8.0+cu128",
+    "torch==2.11.0",
     "protobuf==6.31.1",
     # OpenTelemetry is a required dependency. No automatic downgrade.
     "opentelemetry-api>=1.36.0",
@@ -37,6 +47,9 @@ dependencies = [
 ]
 
 dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/tensorcast-ai/tensorcast"
 
 [dependency-groups]
 dev = [
