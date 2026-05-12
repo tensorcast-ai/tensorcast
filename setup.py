@@ -368,6 +368,12 @@ def gen_version_file():
         print("creating version file")
         f.write('__version__ = "' + __version__ + '"\n')
         f.write('__cuda_version__ = "' + __cuda_version__ + '"\n')
+        # Persist the build-time torch version so the runtime ABI guard in
+        # tensorcast/__init__.py can compare against it. Picking up the
+        # currently-installed torch is correct here: setup.py imports torch
+        # to compile the C++ extension, so this is exactly the version the
+        # bits in this wheel were built against.
+        f.write(f'__torch_version__ = "{torch.__version__}"\n')
 
 
 def _place_artifact(src: Path, dst: Path, *, prefer_copy: bool, name: str, make_executable: bool = False) -> None:
@@ -620,6 +626,7 @@ class BuildExtensionCommand(BuildExtension):
         copy_daemon_binary()
         copy_schema_sql()
         copy_example_configs()
+        gen_version_file()
 
 
 class InstallCommand(install):

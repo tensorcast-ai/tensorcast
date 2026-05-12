@@ -12,19 +12,49 @@ import contextlib
 # different torch minor version usually produces undefined-symbol errors at
 # dlopen time. We refuse to import early with a clearer message so users land
 # on a fix before they hit confusing low-level failures.
+#
+# The build-time torch version is baked into `tensorcast/_version.py` by
+# `setup.py:gen_version_file()` so each wheel/install carries its own ABI
+# anchor. From-source developers automatically get the right anchor for their
+# torch — no source edits needed when bumping torch versions.
+#
+# Set `TENSORCAST_SKIP_TORCH_ABI_CHECK=1` to bypass at your own risk.
 # -----------------------------------------------------------------------------
+import os as _os
+import warnings as _warnings
+
 import torch as _torch
 
-_REQUIRED_TORCH_MAJOR_MINOR = "2.11"
-if not _torch.__version__.split("+", 1)[0].startswith(f"{_REQUIRED_TORCH_MAJOR_MINOR}."):
-    raise ImportError(
-        f"tensorcast was built against torch {_REQUIRED_TORCH_MAJOR_MINOR}.x "
-        f"but found torch {_torch.__version__}. "
-        f"Install a matching torch (`pip install torch=={_REQUIRED_TORCH_MAJOR_MINOR}.0 "
-        "--index-url https://download.pytorch.org/whl/cu128`) or build tensorcast "
-        "from source against your torch version."
-    )
-del _torch, _REQUIRED_TORCH_MAJOR_MINOR
+
+def _torch_major_minor(version: str) -> str:
+    return ".".join(version.split("+", 1)[0].split(".")[:2])
+
+
+if _os.environ.get("TENSORCAST_SKIP_TORCH_ABI_CHECK") != "1":
+    try:
+        from tensorcast._version import __torch_version__ as _build_torch
+    except ImportError:
+        _warnings.warn(
+            "tensorcast/_version.py not found; skipping torch ABI check. "
+            "Run `setup.py build_ext` (or `pip install`) to populate it.",
+            stacklevel=2,
+        )
+    else:
+        _build_mm = _torch_major_minor(_build_torch)
+        _runtime_mm = _torch_major_minor(_torch.__version__)
+        if _build_mm != _runtime_mm:
+            raise ImportError(
+                f"tensorcast was built against torch {_build_torch} "
+                f"(major.minor={_build_mm}) but found torch {_torch.__version__} "
+                f"(major.minor={_runtime_mm}). The native extension and daemon "
+                "link against a specific torch C++ ABI; mixing produces "
+                "undefined-symbol errors at dlopen time. "
+                f"Fix: install torch {_build_mm}.x to match this wheel, or rebuild "
+                "tensorcast from source against your torch version. To override "
+                "at your own risk: TENSORCAST_SKIP_TORCH_ABI_CHECK=1."
+            )
+
+del _torch, _os, _warnings, _torch_major_minor
 
 # -----------------------------------------------------------------------------
 # Early patch for a PyTorch bug that can raise the following exception when
