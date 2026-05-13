@@ -24,8 +24,12 @@ version, build from source instead — see [Build from source](#build-from-sourc
 | Python | 3.10 / 3.11 / 3.12 |
 | OS | Linux only, kernel ≥ 5.10 |
 | glibc | ≥ 2.28 (RHEL 8, Ubuntu 20.04+, Debian 10+) |
-| torch | 2.11.0 (exact pin; ABI-checked at import) |
+| torch | 2.11.0 + CUDA 12.8 (exact pin; ABI-checked at import) |
 | CUDA | 12.8 driver + runtime |
+
+> **Note on torch/CUDA version**
+> The pre-built PyPI wheel is compiled against `torch==2.11.0` + **CUDA 12.8**. At runtime tensorcast checks that the installed torch was built against the same CUDA version; mismatch (e.g. torch with CUDA 13.0) will raise `ImportError` with a clear remediation message.
+> If you need a different torch or CUDA version, build from source using `tools/release.sh --torch-version X.Y.Z --cuda-version cuXXX`. See [Build from source](#build-from-source) below.
 
 The wheel is `manylinux_2_28_x86_64`. The native extension and daemon link
 against the cxx11 ABI of PyTorch (`_GLIBCXX_USE_CXX11_ABI=1`), which matches
@@ -33,22 +37,59 @@ the official PyTorch wheels on PyPI.
 
 ### Python quickstart
 
+TensorCast persists tensors through a **Store Daemon** that is backed by a **Global Store** for metadata and key mapping. The typical local workflow is:
+
+1. Start the Global Store
+2. Start the Store Daemon (connecting to the Global Store)
+3. From Python, `put()` tensors and later read them back by key
+
+**Prerequisite:** install the matching torch *before* installing tensorcast:
+
+```bash
+pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+pip install tensorcast
+```
+
+**Start the services:**
+
+```bash
+# 1. Start the Global Store
+uv run tensorcast-cli global start --config=examples/config/global_store_config.yaml
+
+# 2. Start the Store Daemon (connects to the Global Store above)
+uv run tensorcast-cli daemon start \
+  --config=examples/config/store_daemon_config.yaml \
+  --global-store-mode connect \
+  --global-store-address 127.0.0.1:50051
+
+# 3. Verify both services are up
+uv run tensorcast-cli global status
+uv run tensorcast-cli daemon status
+```
+
+**Python SDK:**
+
 ```python
 import tensorcast as tc
 import torch
 
-tc.init(mode="connect")
+# Connect to the running daemon
+tc.init(mode="connect", address="127.0.0.1:50052")
 
-state_dict = {"layer.weight": torch.randn(8, 8, device="cuda")}
-tc.register(state_dict, key="demo:model:001")
+# Put a CUDA tensor dict under a named key
+state_dict = {"layer.weight": torch.randn(8, 8, device="cuda:0")}
+tc.put(state_dict, key="demo:model:001")
 
+# Read it back by key
 handle = tc.artifact(key="demo:model:001")
 tensors = handle.tensor_dict(device="cuda:0")
+print(tensors)
 ```
 
+For production deployments, see the [SDK Startup User Guide](docs/guides/sdk-startup-user-guide.md) for config files, auto-discovery, and multi-process patterns.
+
 For advanced flows (async, views, prefetch, policies), see
-[API Architecture](docs/architecture/api/README.md) and
-[SDK Startup User Guide](docs/guides/sdk-startup-user-guide.md).
+[API Architecture](docs/architecture/api/README.md).
 
 ## Docs
 
@@ -74,7 +115,10 @@ unsupported distro, or want to develop against a checkout.
 - `uv` + `pre-commit`
 - Bazel (via `tools/install-bazel.sh`)
 - `gcc-13`/`g++-13`, `libstdc++-12-dev`, `libxml2`
-- `patchelf` (system package) — required for wheel post-processing
+- Release toolchain (`wheel`, `auditwheel`, `patchelf`, `twine`) is installed
+  via the `release` dependency group when needed — `tools/release.sh` calls
+  `uv sync --group release` automatically; no system `apt install patchelf`
+  required.
 
 ```bash
 # uv + pre-commit
@@ -89,7 +133,7 @@ pre-commit install
 sudo add-apt-repository ppa:ubuntu-toolchain-r/test
 sudo apt update
 sudo apt install -y software-properties-common libxml2 libstdc++-12-dev \
-    gcc-13 g++-13 python3 patchelf
+    gcc-13 g++-13 python3
 ```
 
 ### Build

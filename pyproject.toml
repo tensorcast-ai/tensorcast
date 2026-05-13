@@ -72,6 +72,16 @@ dev = [
     "types-protobuf==5.28.3.20241203",
     "safetensors==0.7.0"
 ]
+release = [
+    # Toolchain for packaging and publishing the wheel. Maintainers run
+    # `uv sync --group release` before invoking tools/release.sh post-process /
+    # check / publish*. End users and ordinary developers never need this
+    # group, so it stays out of the default sync.
+    "wheel>=0.47",
+    "auditwheel>=6.6",
+    "patchelf>=0.17",  # Python-wrapped patchelf binary; avoids system apt
+    "twine>=6.0",
+]
 
 [project.scripts]
 tensorcast-cli = "tensorcast.cli:main"

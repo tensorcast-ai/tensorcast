@@ -32,6 +32,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # RPATH layout: tensorcast/_C*.so sits in `tensorcast/`, tensorcast/lib/*.so
@@ -125,8 +126,9 @@ def _require(name: str) -> str:
     if not path:
         raise ToolMissingError(
             f"required tool `{name}` is not on PATH. "
-            "Install build dependencies: `pip install wheel auditwheel patchelf` "
-            "(patchelf may also come from system package manager)."
+            "The tensorcast release toolchain (wheel / auditwheel / patchelf / twine) "
+            "lives in the `release` dependency group. Run `uv sync --group release` "
+            "(or use `tools/release.sh post-process`, which does this for you)."
         )
     return path
 
@@ -164,17 +166,25 @@ def _wheel_unpack(wheel: Path, out_dir: Path) -> Path:
 
 
 def _wheel_pack(unpacked_dir: Path, dest_dir: Path) -> Path:
-    """Pack `unpacked_dir` back into a wheel in `dest_dir` and return its path."""
+    """Pack `unpacked_dir` back into a wheel in `dest_dir` and return its path.
+
+    `wheel pack` rebuilds the same filename as the input, so a simple
+    before/after set diff misses the produced wheel when it overwrites an
+    existing entry. We instead track mtimes: any wheel whose mtime advances
+    past the moment we started the pack is the one wheel pack just wrote.
+    """
     wheel_cli = _require("wheel")
-    before = set(dest_dir.glob("*.whl"))
+    mark = time.time()
     _run([wheel_cli, "pack", "--dest-dir", str(dest_dir), str(unpacked_dir)])
-    after = set(dest_dir.glob("*.whl"))
-    produced = after - before
+    produced = [
+        whl for whl in dest_dir.glob("*.whl")
+        if whl.stat().st_mtime >= mark - 1.0
+    ]
     if len(produced) != 1:
         raise RuntimeError(
             f"wheel pack produced unexpected output set: {produced}"
         )
-    return produced.pop()
+    return produced[0]
 
 
 def _auditwheel_repair(wheel: Path, dest_dir: Path, plat: str) -> Path:

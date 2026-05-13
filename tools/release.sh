@@ -95,6 +95,17 @@ ensure_uv() {
     }
 }
 
+# Ensure the `release` dependency group (wheel / auditwheel / patchelf / twine)
+# is synced into .venv. These tools are not part of the default `uv sync`, so
+# any release-only entrypoint (post-process / check / publish) must call this
+# before invoking them.
+ensure_release_deps() {
+    ensure_uv
+    cd "${PROJECT_ROOT}"
+    echo "==> uv sync --group release"
+    uv sync --group release
+}
+
 # Filter dist/ for wheels eligible for PyPI upload (manylinux_*, not linux_*).
 collect_pypi_wheels() {
     local out=()
@@ -218,7 +229,21 @@ sys.exit(0 if ok else 1)
             build_env+=("BUILD_VERSION=$(cat version.txt)")
         fi
     fi
-    env "${build_env[@]}" uv build --wheel
+    # Make Bazel's progress and Fetching@... events stream live to the
+    # terminal. The default `uv build --wheel` front-end runs the PEP 517
+    # build backend through a captured pipe, which swallows Bazel's curses
+    # progress lines and leaves the user staring at a single "Analyzing:
+    # 2 targets ..." line for minutes. Going through `setup.py bdist_wheel`
+    # directly (the same pattern as `uv run -vvv setup.py build_ext`) lets
+    # the bazel subprocess inherit stdio so its output is visible in real
+    # time.
+    #
+    # BAZEL_BUILD_FLAGS: enable curses, lift the progress rate limit, and
+    # show only progress + warnings + errors so external fetches are loud.
+    export BAZEL_BUILD_FLAGS="--curses=yes --show_progress_rate_limit=0 --ui_event_filters=progress,warning,error,info"
+
+    rm -rf build dist
+    env "${build_env[@]}" uv run -vvv python setup.py bdist_wheel
 
     if [[ ${restore_pyproject} -eq 1 ]]; then
         mv pyproject.toml.bak pyproject.toml
@@ -231,6 +256,17 @@ sys.exit(0 if ok else 1)
 
     # Auto-run post-process for each freshly built wheel; auditwheel only
     # fires when IN_DOCKER=1.
+    local need_post_process=0
+    for whl in dist/*.whl; do
+        case "${whl}" in
+            *manylinux*) continue ;;
+        esac
+        need_post_process=1
+        break
+    done
+    if [[ ${need_post_process} -eq 1 ]]; then
+        ensure_release_deps
+    fi
     for whl in dist/*.whl; do
         # Skip files already labeled "manylinux*" (auditwheel output) to
         # avoid double-processing on rerun.
@@ -249,23 +285,20 @@ cmd_post_process() {
     if [[ -z "${whl}" ]]; then
         echo "usage: tools/release.sh post-process WHEEL_PATH" >&2; exit 2
     fi
-    cd "${PROJECT_ROOT}"
-    ensure_uv
+    ensure_release_deps
     uv run python "${SCRIPT_DIR}/wheel_post_process.py" "${whl}"
 }
 
 # ---- check -----------------------------------------------------------------
 cmd_check() {
-    cd "${PROJECT_ROOT}"
-    ensure_uv
+    ensure_release_deps
     echo "==> twine check dist/*.whl"
-    uv run --with twine twine check dist/*.whl
+    uv run twine check dist/*.whl
 }
 
 # ---- publish ---------------------------------------------------------------
 cmd_publish_test() {
-    cd "${PROJECT_ROOT}"
-    ensure_uv
+    ensure_release_deps
     local wheels
     wheels="$(collect_pypi_wheels)"
     echo "==> Wheels to upload to TestPyPI:"
@@ -274,12 +307,11 @@ cmd_publish_test() {
     read -r -p "Continue? [y/N] " confirm
     [[ "${confirm}" == "y" || "${confirm}" == "Y" ]] || { echo "aborted."; exit 1; }
     # shellcheck disable=SC2086
-    uv run --with twine twine upload --repository testpypi ${wheels}
+    uv run twine upload --repository testpypi ${wheels}
 }
 
 cmd_publish() {
-    cd "${PROJECT_ROOT}"
-    ensure_uv
+    ensure_release_deps
     local wheels
     wheels="$(collect_pypi_wheels)"
     echo "==> Wheels to upload to **production PyPI**:"
@@ -294,7 +326,7 @@ cmd_publish() {
         exit 1
     fi
     # shellcheck disable=SC2086
-    uv run --with twine twine upload ${wheels}
+    uv run twine upload ${wheels}
 }
 
 # ---- dispatch --------------------------------------------------------------

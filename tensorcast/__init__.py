@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import importlib
+import importlib.abc
 
 # -----------------------------------------------------------------------------
 # Torch ABI fail-fast guard.
@@ -21,7 +23,11 @@ import contextlib
 # Set `TENSORCAST_SKIP_TORCH_ABI_CHECK=1` to bypass at your own risk.
 # -----------------------------------------------------------------------------
 import os as _os
+import sys
+import threading
 import warnings as _warnings
+from types import ModuleType
+from typing import TYPE_CHECKING, Any, Callable
 
 import torch as _torch
 
@@ -54,6 +60,45 @@ if _os.environ.get("TENSORCAST_SKIP_TORCH_ABI_CHECK") != "1":
                 "at your own risk: TENSORCAST_SKIP_TORCH_ABI_CHECK=1."
             )
 
+# -------------------------------------------------------------------------
+# CUDA runtime version guard
+#
+# tensorcast is built against a specific CUDA toolkit (via PyTorch). The
+# torch wheel carries its own CUDA runtime, but the driver must be new
+# enough to support that CUDA version. We warn early so users know they
+# need a driver update or a different torch index.
+#
+# Set TENSORCAST_SKIP_TORCH_ABI_CHECK=1 to bypass at your own risk.
+# -------------------------------------------------------------------------
+if _os.environ.get("TENSORCAST_SKIP_TORCH_ABI_CHECK") != "1":
+    try:
+        from tensorcast._version import __cuda_version__ as _build_cuda
+    except ImportError:
+        pass
+    else:
+        _runtime_cuda = _torch.version.cuda
+        if _runtime_cuda is None:
+            raise ImportError(
+                "tensorcast was built with CUDA support (CUDA "
+                f"{_build_cuda}), but the installed torch does not report a CUDA "
+                "version. Ensure you installed torch from a CUDA-enabled index, e.g. "
+                "pip install torch==2.11.0 --index-url "
+                "https://download.pytorch.org/whl/cu128"
+            )
+        # Compare major.minor (ignore patch level differences)
+        _build_cuda_mm = ".".join(_build_cuda.split(".")[:2])
+        _runtime_cuda_mm = ".".join(_runtime_cuda.split(".")[:2])
+        if _build_cuda_mm != _runtime_cuda_mm:
+            raise ImportError(
+                f"tensorcast was built against CUDA {_build_cuda}, but the "
+                f"installed torch uses CUDA {_runtime_cuda}. "
+                "The NVIDIA driver may be too old, or torch was installed from the "
+                "wrong index. Fix: reinstall torch from the correct CUDA index, e.g. "
+                f"pip install torch==2.11.0 --index-url "
+                f"https://download.pytorch.org/whl/cu128 . "
+                "To override at your own risk: TENSORCAST_SKIP_TORCH_ABI_CHECK=1."
+            )
+
 del _torch, _os, _warnings, _torch_major_minor
 
 # -----------------------------------------------------------------------------
@@ -68,12 +113,6 @@ del _torch, _os, _warnings, _torch_major_minor
 # eagerly importing PyTorch (and its dependency chain) we install the patch via
 # a meta path hook that runs immediately before ``tensorcast._C`` is imported.
 # -----------------------------------------------------------------------------
-import importlib
-import importlib.abc
-import sys
-import threading
-from types import ModuleType
-from typing import TYPE_CHECKING, Any, Callable
 
 
 class _TensorCastCExtensionBootstrap(importlib.abc.MetaPathFinder):

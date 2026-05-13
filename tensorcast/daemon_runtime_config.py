@@ -280,11 +280,14 @@ def _normalize_units_inplace(data: Any, desc) -> None:
                     else:
                         _normalize_units_inplace(v, f.message_type)
             else:
-                # Byte-size fields by naming convention *_bytes
+                # Byte-size fields by naming convention. Most fields end in
+                # `_bytes`; a few embed `_bytes_` mid-name (e.g.
+                # `owner_file_collective_peak_bytes_budget`), and still mean a
+                # byte count. Treat both as byte fields.
                 if f.type in (
                     FieldDescriptor.TYPE_UINT32,
                     FieldDescriptor.TYPE_UINT64,
-                ) and k.endswith("_bytes"):
+                ) and (k.endswith("_bytes") or "_bytes_" in k):
                     data[k] = _to_num_bytes(v)
     elif isinstance(data, list):
         for item in data:

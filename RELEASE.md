@@ -33,9 +33,11 @@ it to GitHub Actions in v0.2.
 
 - `uv` (Python package manager) — `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - `docker` — required for Stage B (manylinux build).
-- `patchelf`, `auditwheel`, `wheel`, `twine` — `tools/release.sh` runs them
-  through `uv run --with`, but on Stage A you also need `patchelf` from the
-  system package manager: `sudo apt install patchelf` (or equivalent).
+- The release toolchain (`wheel`, `auditwheel`, `patchelf`, `twine`) lives in
+  the `release` dependency group in `pyproject.toml`. `tools/release.sh`
+  invokes `uv sync --group release` automatically before any subcommand that
+  needs them (`post-process`, `check`, `publish*`), so you only need `uv` on
+  PATH — no system `apt install patchelf` step required.
 
 ---
 

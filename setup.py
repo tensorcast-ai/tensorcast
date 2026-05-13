@@ -346,6 +346,14 @@ def build_checkpoint_runtime_and_daemon(
         cmd.append("--build_metadata=ROLE=CI")
         cmd.append("--jobs=16")
 
+    # Allow callers (e.g. tools/release.sh) to forward extra Bazel flags so
+    # interactive builds can crank up logging without us hard-coding it:
+    #   BAZEL_BUILD_FLAGS="--curses=no --show_progress_rate_limit=0 ..."
+    extra_flags = os.environ.get("BAZEL_BUILD_FLAGS", "").strip()
+    if extra_flags:
+        import shlex as _shlex
+        cmd.extend(_shlex.split(extra_flags))
+
     display_cmd = list(cmd)
     if use_remote:
         for i, arg in enumerate(display_cmd):
