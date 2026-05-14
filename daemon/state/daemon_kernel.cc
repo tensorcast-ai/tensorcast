@@ -24,6 +24,7 @@ DaemonKernel::DaemonKernel(
     : engine_(std::move(engine)),
       async_runtime_(async_runtime ? std::move(async_runtime) : std::make_shared<common::AsyncRuntime>()),
       options_(std::move(options)),
+      global_store_client_(std::move(global_store_client)),
       sessions_(options_.sessions_ttl),
       locks_(options_.locks_ttl),
       region_registry_(
@@ -150,13 +151,13 @@ DaemonKernel::DaemonKernel(
     }
     byte_artifact_body_store_->invalidate_replica_visibility(payload->key, absl::Now(), "runtime_evicted");
   });
-  worker_directory_cache_ = std::make_unique<WorkerDirectoryCache>(global_store_client);
-  instance_execution_directory_cache_ = std::make_unique<InstanceExecutionDirectoryCache>(global_store_client);
+  worker_directory_cache_ = std::make_unique<WorkerDirectoryCache>(global_store_client_);
+  instance_execution_directory_cache_ = std::make_unique<InstanceExecutionDirectoryCache>(global_store_client_);
   inter_daemon_channel_credentials_ = make_inter_daemon_channel_credentials(options_.inter_daemon_grpc_security);
   const std::string local_daemon_id = options_.daemon_id.empty() ? std::string("daemon-local") : options_.daemon_id;
   byte_artifact_route_resolver_ = std::make_unique<ByteArtifactRouteResolver>(
       *byte_artifact_runtime_state_,
-      global_store_client,
+      global_store_client_,
       local_daemon_id,
       ByteArtifactRouteResolver::Options{
           .route_staleness_budget = absl::Milliseconds(
@@ -262,6 +263,12 @@ void DaemonKernel::stop() {
 
 void DaemonKernel::begin_shutdown() {
   shutdown_signal_.begin_shutdown();
+  if (binding_registry_) {
+    const size_t removed = binding_registry_->clear_staged_values("daemon_shutdown");
+    if (removed > 0) {
+      VLOG(1) << "DaemonKernel: cleared staged binding values during shutdown count=" << removed;
+    }
+  }
   if (async_runtime_) {
     async_runtime_->shutdown();
   }
@@ -336,7 +343,7 @@ void DaemonKernel::configure_scheduler_tasks_() {
 
   // Retained serving binding lifecycle sweep.
   {
-    auto t = std::make_shared<BindingRetentionSweepTask>(*binding_registry_);
+    auto t = std::make_shared<BindingRetentionSweepTask>(*binding_registry_, global_store_client_);
     scheduler_->add_task(
         TaskKind::kBindingRetention,
         std::chrono::duration_cast<milliseconds>(options_.binding_retention_sweep_interval),

@@ -51,15 +51,20 @@ using materialization_index_source::load_descriptor_metadata;
 using materialization_index_source::validate_descriptor_against_index;
 using materialization_payload::populate_materialize_payloads;
 using materialization_payload::resolve_layout_json;
+using materialization_policy::apply_group_realization_begin_context_to_transport_context;
+using materialization_policy::apply_operation_transport_context;
 using materialization_policy::apply_request_context_to_hints;
+using materialization_policy::begin_or_join_group_realization_if_enabled;
 using materialization_policy::build_view_spec_proto;
 using materialization_policy::compute_view_id_from_spec;
 using materialization_policy::convert_view_spec;
 using materialization_policy::NormalizedMaterializationRequestContext;
 using materialization_policy::resolve_collective_group_hint;
+using materialization_policy::resolve_group_realization_transport_context;
 using materialization_policy::resolve_materialization_request_context;
 using materialization_policy::resolve_transform_placement;
 using materialization_policy::to_hint_export_policy;
+using materialization_policy::validate_group_realization_staged_publish_supported;
 using materialization_post_seal::check_post_seal_view_reuse_safe;
 using materialization_replica_handle::bind_replica_handle_for_response;
 using materialization_request_common::LeaseContext;
@@ -249,7 +254,21 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     const v2::MaterializeReplicaRequest& req,
     v2::MaterializeReplicaResponse& resp) {
   auto& span = rctx.span();
-  store::loading::ExecutionTopologyContext execution_topology;
+  auto transport_context_or = resolve_group_realization_transport_context(
+      std::string_view(), req.has_group_realization() ? &req.group_realization() : nullptr);
+  if (!transport_context_or.ok()) {
+    resp.set_status(v2::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(transport_context_or.status());
+  }
+  auto staged_publish_status = validate_group_realization_staged_publish_supported(
+      req.has_group_realization() ? &req.group_realization() : nullptr,
+      /*staged_publish_supported=*/false);
+  if (!staged_publish_status.ok()) {
+    resp.set_status(v2::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(staged_publish_status);
+  }
+  auto transport_context = std::move(*transport_context_or);
+  store::loading::ExecutionTopologyContext execution_topology = transport_context.execution_topology;
   // Collective disk load is an explicit request contract. Do not infer it from
   // replica_uuid or ambient process state.
   execution_topology.collective_load_group =
@@ -286,10 +305,33 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
-  if (!req.has_selection() || req.selection().artifact_id().empty()) {
+  tensorcast::common::v1::ArtifactSelection effective_selection;
+  if (req.has_selection()) {
+    effective_selection = req.selection();
+  }
+  std::string daemon_id = d_.identity != nullptr ? d_.identity->daemon_id() : std::string();
+  if (daemon_id.empty()) {
+    daemon_id = d_.daemon_id;
+  }
+  const std::string worker_id = d_.identity != nullptr ? d_.identity->worker_id() : std::string();
+  auto begin_context_or = begin_or_join_group_realization_if_enabled(
+      d_.global_store_client,
+      req.has_group_realization() ? &req.group_realization() : nullptr,
+      daemon_id,
+      d_.daemon_session_id,
+      worker_id);
+  if (!begin_context_or.ok()) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(begin_context_or.status());
+  }
+  if (begin_context_or->has_value()) {
+    effective_selection = (*begin_context_or)->part_selection;
+    apply_group_realization_begin_context_to_transport_context(**begin_context_or, &transport_context);
+  }
+  if (effective_selection.artifact_id().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "selection.artifact_id is required"};
   }
-  const auto& selection = req.selection();
+  const auto& selection = effective_selection;
 
   const auto dev = d_.devices.From(req.target_device_type(), req.device_uuid(), std::nullopt);
   const bool cpu_target = dev.type == DeviceType::CPU;
@@ -651,6 +693,8 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     return selection_identity_status;
   }
 
+  v2::MaterializeReplicaRequest effective_req = req;
+  effective_req.mutable_selection()->CopyFrom(selection);
   auto finalize_response = [&]() -> grpc::Status {
     if (no_lease) {
       resp.clear_mem_handle();
@@ -659,7 +703,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
       resp.set_view_index_bytes(resp.view_index_json());
     }
 
-    auto layout_or = resolve_layout_json(resp, req, d_.engine);
+    auto layout_or = resolve_layout_json(resp, effective_req, d_.engine);
     if (!layout_or.ok()) {
       return to_grpc_status(layout_or.status());
     }
@@ -725,6 +769,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   hints.transport_wait_timeout = request_budget;
   hints.verify = verify_checksums ? store::loading::MaterializeHints::Verify::CHECKSUM
                                   : store::loading::MaterializeHints::Verify::NONE;
+  apply_operation_transport_context(transport_context, &hints);
   apply_request_context_to_hints(request_context, &hints);
   if (prefer_direct_disk_for_local_import) {
     hints.set_retrieval_policy(

@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <string>
 #include <string_view>
 
 #include "absl/base/thread_annotations.h"
@@ -54,6 +55,8 @@ class OwnedBindingService {
     uint32_t max_concurrency{4};
     common::CapabilityTokenManager* capability_tokens{nullptr};
     TargetMaterializationService* target_materialization_service{nullptr};
+    std::string daemon_id;
+    std::string daemon_session_id;
     std::filesystem::path storage_path;
     std::function<absl::Status()> await_state_sync_barrier;
   };

@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -49,6 +50,8 @@ class TargetMaterializationService {
     common::CapabilityTokenManager* capability_tokens{nullptr};
     uint32_t max_concurrency{4};
     bool external_target_verification_enabled{false};
+    std::string daemon_id;
+    std::string daemon_session_id;
     std::filesystem::path storage_path;
     std::function<absl::Status()> await_state_sync_barrier;
   };

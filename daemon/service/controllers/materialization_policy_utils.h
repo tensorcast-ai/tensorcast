@@ -3,12 +3,14 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "core/store/components/global_store_client.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/runtime/ingestion/materialization_strategy_types.h"
@@ -33,6 +35,33 @@ struct OperationTransportContext {
   ExecutionTopologyContext execution_topology;
   std::string transport_request_id;
   std::optional<store::loading::TransportSchedulingGroupHint> transport_scheduling_group;
+};
+
+struct GroupRealizationBeginContext {
+  std::string transaction_id;
+  tensorcast::global_store::v1::GroupVersionSetRef version_set;
+  tensorcast::global_store::v1::GroupRealizationKind realization_kind{
+      tensorcast::global_store::v1::GROUP_REALIZATION_KIND_UNSPECIFIED};
+  std::string part_id;
+  tensorcast::common::v1::ArtifactSelection part_selection;
+  tensorcast::common::v1::ByteSpaceRef requested_byte_space;
+  std::string selection_hash;
+  tensorcast::global_store::v1::GroupRealizationState state{
+      tensorcast::global_store::v1::GROUP_REALIZATION_STATE_UNSPECIFIED};
+  uint64_t key_generation{0};
+};
+
+struct GroupRealizationPreparedMemberContext {
+  std::string binding_id;
+  std::string binding_value_id;
+  std::string staging_token;
+  uint64_t staging_epoch{0};
+  uint64_t expected_previous_seal_generation{0};
+  std::string materialization_attempt_id;
+  std::string prepared_value_hash;
+  std::string source_replica_id;
+  uint64_t source_export_generation{0};
+  std::string child_transport_request_id;
 };
 
 struct HashExecutionDetails {
@@ -65,6 +94,37 @@ v2::CollectivePolicy default_collective_policy_for_mapped_target(const Execution
 bool collective_policy_requests_collective(v2::CollectivePolicy policy);
 
 OperationTransportContext resolve_operation_transport_context(std::string_view operation_id);
+
+absl::StatusOr<OperationTransportContext> resolve_group_realization_transport_context(
+    std::string_view operation_id,
+    const v2::GroupRealizationOptions* group_realization);
+
+absl::Status validate_group_realization_staged_publish_supported(
+    const v2::GroupRealizationOptions* group_realization,
+    bool staged_publish_supported);
+
+absl::StatusOr<std::optional<GroupRealizationBeginContext>> begin_or_join_group_realization_if_enabled(
+    const std::shared_ptr<store::components::IGlobalStoreClient>& global_store_client,
+    const v2::GroupRealizationOptions* group_realization,
+    std::string_view daemon_id,
+    std::string_view daemon_session_id,
+    std::string_view worker_id,
+    const store::components::RpcOptions& rpc_options = store::components::RpcOptions{});
+
+void apply_group_realization_begin_context_to_transport_context(
+    const GroupRealizationBeginContext& begin_context,
+    OperationTransportContext* transport_context);
+
+absl::StatusOr<std::optional<tensorcast::global_store::v1::ReportGroupRealizationPreparedResponse>>
+report_group_realization_prepared_if_enabled(
+    const std::shared_ptr<store::components::IGlobalStoreClient>& global_store_client,
+    const v2::GroupRealizationOptions* group_realization,
+    const GroupRealizationBeginContext* begin_context,
+    const GroupRealizationPreparedMemberContext& prepared_member,
+    std::string_view daemon_id,
+    std::string_view daemon_session_id,
+    std::string_view worker_id,
+    const store::components::RpcOptions& rpc_options = store::components::RpcOptions{});
 
 absl::StatusOr<NormalizedMaterializationRequestContext> resolve_materialization_request_context(
     const v2::SourcePolicy* source_policy,

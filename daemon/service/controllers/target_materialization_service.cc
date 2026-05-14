@@ -58,14 +58,17 @@ using materialization_index_source::parse_mi2_data_multihash;
 using materialization_index_source::TargetLayoutSpan;
 using materialization_layout::resolve_target_offsets;
 using materialization_payload::compute_generation_from_index;
+using materialization_policy::apply_group_realization_begin_context_to_transport_context;
 using materialization_policy::apply_operation_transport_context;
 using materialization_policy::apply_request_context_to_hints;
+using materialization_policy::begin_or_join_group_realization_if_enabled;
 using materialization_policy::default_collective_policy_for_mapped_target;
 using materialization_policy::NormalizedMaterializationRequestContext;
 using materialization_policy::OperationTransportContext;
+using materialization_policy::resolve_group_realization_transport_context;
 using materialization_policy::resolve_materialization_request_context;
-using materialization_policy::resolve_operation_transport_context;
 using materialization_policy::resolve_transform_placement;
+using materialization_policy::validate_group_realization_staged_publish_supported;
 using materialization_request_common::resolve_artifact_and_disk_source;
 using materialization_target_plan::build_mapped_target_materialization_plan;
 using materialization_target_plan::build_resolved_mapped_materialization_plan;
@@ -220,6 +223,7 @@ v2::MaterializationSource to_proto_source(MaterializationSource source) {
 struct TargetMaterializationCommonContext {
   NormalizedMaterializationRequestContext request_context;
   OperationTransportContext transport_context;
+  tensorcast::common::v1::ArtifactSelection effective_selection;
   std::string resolved_artifact_id;
   bool gs_connected{false};
   std::optional<std::filesystem::path> normalized_disk_path;
@@ -317,17 +321,47 @@ absl::StatusOr<TargetMaterializationCommonContext> prepare_target_materializatio
     std::string_view peer,
     std::string_view rpc_name,
     const std::shared_ptr<store::components::IGlobalStoreClient>& global_store_client,
+    std::string_view daemon_id,
+    std::string_view daemon_session_id,
+    std::string_view worker_id,
     ArtifactSourceRegistry& disk_imports,
     const std::filesystem::path& storage_path) {
   TargetMaterializationCommonContext context;
+  std::string_view operation_id;
   if constexpr (requires {
                   req.has_operation_id();
                   req.operation_id();
                 }) {
     if (req.has_operation_id() && !req.operation_id().empty()) {
-      context.transport_context = resolve_operation_transport_context(req.operation_id());
+      operation_id = req.operation_id();
     }
   }
+  const v2::GroupRealizationOptions* group_realization = nullptr;
+  if constexpr (requires {
+                  req.has_group_realization();
+                  req.group_realization();
+                }) {
+    if (req.has_group_realization()) {
+      group_realization = &req.group_realization();
+    }
+  }
+  auto transport_context_or = resolve_group_realization_transport_context(operation_id, group_realization);
+  if (!transport_context_or.ok()) {
+    record_materialize_into_target(
+        "error", "group_realization_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return transport_context_or.status();
+  }
+  auto staged_publish_status = validate_group_realization_staged_publish_supported(
+      group_realization,
+      /*staged_publish_supported=*/false);
+  if (!staged_publish_status.ok()) {
+    record_materialize_into_target(
+        "error",
+        "group_realization_staging_unsupported",
+        v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return staged_publish_status;
+  }
+  context.transport_context = std::move(*transport_context_or);
   auto request_context_or = resolve_materialization_request_context(
       req.has_source_policy() ? &req.source_policy() : nullptr, context.transport_context.execution_topology);
   if (!request_context_or.ok()) {
@@ -342,12 +376,27 @@ absl::StatusOr<TargetMaterializationCommonContext> prepare_target_materializatio
     return absl::PermissionDeniedError(std::format("{} is local-only (loopback/UDS)", rpc_name));
   }
 
-  if (!req.has_selection()) {
+  const bool group_realization_enabled = group_realization != nullptr && group_realization->enabled();
+  if (!req.has_selection() && !group_realization_enabled) {
     record_materialize_into_target(
         "error", "missing_artifact_id", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return absl::InvalidArgumentError(std::format("selection is required for {}", rpc_name));
   }
-  if (req.selection().artifact_id().empty()) {
+  if (req.has_selection()) {
+    context.effective_selection = req.selection();
+  }
+  auto begin_context_or = begin_or_join_group_realization_if_enabled(
+      global_store_client, group_realization, daemon_id, daemon_session_id, worker_id);
+  if (!begin_context_or.ok()) {
+    record_materialize_into_target(
+        "error", "group_realization_begin_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return begin_context_or.status();
+  }
+  if (begin_context_or->has_value()) {
+    context.effective_selection = (*begin_context_or)->part_selection;
+    apply_group_realization_begin_context_to_transport_context(**begin_context_or, &context.transport_context);
+  }
+  if (context.effective_selection.artifact_id().empty()) {
     record_materialize_into_target(
         "error", "missing_artifact_id", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return absl::InvalidArgumentError(std::format("selection.artifact_id is required for {}", rpc_name));
@@ -357,7 +406,7 @@ absl::StatusOr<TargetMaterializationCommonContext> prepare_target_materializatio
       global_store_client,
       &disk_imports,
       storage_path,
-      req.selection().artifact_id(),
+      context.effective_selection.artifact_id(),
       context.request_context.retrieval_policy.allow_disk,
       /*allow_local_import_fallback=*/true,
       /*loopback_peer=*/true);
@@ -458,7 +507,8 @@ grpc::Status TargetMaterializationService::materialize_into_target(
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
-  if (!req.has_selection() || req.selection().artifact_id().empty()) {
+  const bool group_realization_enabled = req.has_group_realization() && req.group_realization().enabled();
+  if ((!req.has_selection() || req.selection().artifact_id().empty()) && !group_realization_enabled) {
     record_materialize_into_target(
         "error", "missing_artifact_id", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "selection.artifact_id is required for MaterializeIntoTarget"};
@@ -526,17 +576,27 @@ grpc::Status TargetMaterializationService::materialize_into_target(
     return {StatusCode::INVALID_ARGUMENT, "target_layout offsets are required"};
   }
 
+  std::string daemon_id = d_.identity.daemon_id();
+  if (daemon_id.empty()) {
+    daemon_id = d_.daemon_id;
+  }
+  const std::string worker_id = d_.identity.worker_id();
   auto common_or = prepare_target_materialization_common(
       req,
       rctx.server_context().peer(),
       "MaterializeIntoTarget",
       d_.global_store_client,
+      daemon_id,
+      d_.daemon_session_id,
+      worker_id,
       d_.disk_imports,
       storage_path_);
   if (!common_or.ok()) {
     return to_grpc_status(common_or.status());
   }
   auto common = std::move(*common_or);
+  auto effective_req = req;
+  effective_req.mutable_selection()->CopyFrom(common.effective_selection);
   const auto request_context = common.request_context;
   std::string resolved_artifact_id = std::move(common.resolved_artifact_id);
   const bool gs_connected = common.gs_connected;
@@ -549,7 +609,8 @@ grpc::Status TargetMaterializationService::materialize_into_target(
   }
   auto disk_metadata = std::move(*disk_metadata_or);
   span->SetAttribute("tc.disk.metadata_capability", disk_metadata_capability_attr(disk_metadata));
-  if (is_byte_only_disk_metadata(disk_metadata) && selection_requires_tensor_aware_metadata(req.selection())) {
+  if (is_byte_only_disk_metadata(disk_metadata) &&
+      selection_requires_tensor_aware_metadata(effective_req.selection())) {
     return {StatusCode::INVALID_ARGUMENT, "selection/view requires tensor-aware mounted-source metadata"};
   }
 
@@ -565,7 +626,7 @@ grpc::Status TargetMaterializationService::materialize_into_target(
   auto build_plan_status = build_target_materialization_plan(
       d_.engine,
       resolved_artifact_id,
-      req,
+      effective_req,
       layout,
       offsets,
       std::move(*canonical_json_or),
@@ -869,11 +930,19 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
+  std::string daemon_id = d_.identity.daemon_id();
+  if (daemon_id.empty()) {
+    daemon_id = d_.daemon_id;
+  }
+  const std::string worker_id = d_.identity.worker_id();
   auto common_or = prepare_target_materialization_common(
       req,
       rctx.server_context().peer(),
       "MaterializeIntoMappedTarget",
       d_.global_store_client,
+      daemon_id,
+      d_.daemon_session_id,
+      worker_id,
       d_.disk_imports,
       storage_path_);
   const auto common_done = std::chrono::steady_clock::now();
@@ -881,6 +950,8 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
     return to_grpc_status(common_or.status());
   }
   auto common = std::move(*common_or);
+  auto effective_req = req;
+  effective_req.mutable_selection()->CopyFrom(common.effective_selection);
   const auto request_context = common.request_context;
   std::string resolved_artifact_id = std::move(common.resolved_artifact_id);
   const bool gs_connected = common.gs_connected;
@@ -894,7 +965,8 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   }
   auto disk_metadata = std::move(*disk_metadata_or);
   span->SetAttribute("tc.disk.metadata_capability", disk_metadata_capability_attr(disk_metadata));
-  if (is_byte_only_disk_metadata(disk_metadata) && selection_requires_tensor_aware_metadata(req.selection())) {
+  if (is_byte_only_disk_metadata(disk_metadata) &&
+      selection_requires_tensor_aware_metadata(effective_req.selection())) {
     return {StatusCode::INVALID_ARGUMENT, "selection/view requires tensor-aware mounted-source metadata"};
   }
 
@@ -963,7 +1035,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   MappedTargetMaterializationPlan mapped_plan;
   auto build_mapped_plan_status = build_mapped_target_materialization_plan(
       d_.engine,
-      req,
+      effective_req,
       resolved_artifact_id,
       offsets,
       std::move(*canonical_json_or),

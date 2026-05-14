@@ -4,20 +4,26 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <format>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "absl/status/status.h"
-#include "absl/strings/numbers.h"
-#include "absl/strings/str_split.h"
+#include "absl/strings/escaping.h"
+#include "absl/strings/str_cat.h"
 #include "core/store/materialization/dataplane/view/view_identity.h"
 
 namespace tensorcast::daemon::materialization_policy {
 
+namespace global_store = tensorcast::global_store::v1;
+
 namespace {
 
 using store::loader::ViewOp;
+
+constexpr std::string_view kGroupRealizationTransportKind = "group_realization_transport";
 
 store::loading::SourceLocalityHint to_source_locality(v2::SourceLocality locality) {
   switch (locality) {
@@ -29,6 +35,29 @@ store::loading::SourceLocalityHint to_source_locality(v2::SourceLocality localit
     case v2::SourceLocality::SOURCE_LOCALITY_UNSPECIFIED:
     default:
       return store::loading::SourceLocalityHint::kAuto;
+  }
+}
+
+absl::Status response_status_to_absl(global_store::Status status, std::string_view rpc_name) {
+  if (status == global_store::STATUS_OK) {
+    return absl::OkStatus();
+  }
+  const std::string status_name = global_store::Status_Name(status);
+  const std::string message =
+      std::format("{} failed: {}", rpc_name, status_name.empty() ? "STATUS_UNKNOWN" : status_name);
+  switch (status) {
+    case global_store::STATUS_NOT_FOUND:
+      return absl::NotFoundError(message);
+    case global_store::STATUS_TIMED_OUT:
+      return absl::DeadlineExceededError(message);
+    case global_store::STATUS_TOO_MANY_REQUESTS:
+      return absl::ResourceExhaustedError(message);
+    case global_store::STATUS_STATE_SYNC_REQUIRED:
+      return absl::FailedPreconditionError(message);
+    case global_store::STATUS_ERROR:
+    case global_store::STATUS_UNSPECIFIED:
+    default:
+      return absl::InternalError(message);
   }
 }
 
@@ -60,15 +89,190 @@ store::loading::ExportPolicy to_hint_export_policy(v2::ExportPolicy policy) {
   }
 }
 
-store::loading::SourceLocalityHint parse_source_locality_hint(std::string_view value) {
-  if (value == "host_local") {
-    return store::loading::SourceLocalityHint::kHostLocal;
+namespace {
+
+absl::Status validate_required_group_parts(const v2::SemanticGroupContext& group) {
+  if (group.required_part_ids_size() == 0) {
+    return absl::InvalidArgumentError("group_realization.group.required_part_ids is required");
   }
-  if (value == "shared_source") {
-    return store::loading::SourceLocalityHint::kSharedSource;
+  if (static_cast<uint32_t>(group.required_part_ids_size()) != group.total_parts()) {
+    return absl::InvalidArgumentError("group_realization.group.required_part_ids must match total_parts");
   }
-  return store::loading::SourceLocalityHint::kAuto;
+
+  std::vector<std::string> required_part_ids(group.required_part_ids().begin(), group.required_part_ids().end());
+  bool contains_part_id = false;
+  for (const std::string& part_id : required_part_ids) {
+    if (part_id.empty()) {
+      return absl::InvalidArgumentError("group_realization.group.required_part_ids entries must be non-empty");
+    }
+    contains_part_id = contains_part_id || part_id == group.part_id();
+  }
+  std::sort(required_part_ids.begin(), required_part_ids.end());
+  if (std::adjacent_find(required_part_ids.begin(), required_part_ids.end()) != required_part_ids.end()) {
+    return absl::InvalidArgumentError("group_realization.group.required_part_ids must be unique");
+  }
+  if (!contains_part_id) {
+    return absl::InvalidArgumentError("group_realization.group.part_id must be present in required_part_ids");
+  }
+  return absl::OkStatus();
 }
+
+absl::Status validate_group_realization_version_reference(const v2::VersionReference& version) {
+  switch (version.value_case()) {
+    case v2::VersionReference::kExplicitSelection:
+      if (version.explicit_selection().artifact_id().empty()) {
+        return absl::InvalidArgumentError("group_realization.version.explicit_selection.artifact_id is required");
+      }
+      return absl::OkStatus();
+    case v2::VersionReference::kExplicitVersionSet:
+      if (version.explicit_version_set().version_set_id().empty()) {
+        return absl::InvalidArgumentError("group_realization.version.explicit_version_set.version_set_id is required");
+      }
+      return absl::OkStatus();
+    case v2::VersionReference::kKeyReference:
+      if (version.key_reference().key().empty()) {
+        return absl::InvalidArgumentError("group_realization.version.key_reference.key is required");
+      }
+      return absl::OkStatus();
+    case v2::VersionReference::VALUE_NOT_SET:
+    default:
+      return absl::InvalidArgumentError("group_realization.version value is required");
+  }
+}
+
+absl::Status validate_group_realization_options(const v2::GroupRealizationOptions& options) {
+  if (!options.has_version()) {
+    return absl::InvalidArgumentError("group_realization.version is required when group realization is enabled");
+  }
+  if (auto status = validate_group_realization_version_reference(options.version()); !status.ok()) {
+    return status;
+  }
+  if (!options.has_group()) {
+    return absl::InvalidArgumentError("group_realization.group is required when group realization is enabled");
+  }
+  const auto& group = options.group();
+  if (group.group_kind().empty() || group.group_id().empty()) {
+    return absl::InvalidArgumentError("group_realization.group group_kind and group_id are required");
+  }
+  if (group.part_id().empty()) {
+    return absl::InvalidArgumentError("group_realization.group.part_id is required");
+  }
+  if (group.total_parts() == 0) {
+    return absl::InvalidArgumentError("group_realization.group.total_parts must be > 0");
+  }
+  return validate_required_group_parts(group);
+}
+
+std::string build_group_realization_transport_group_id(const v2::SemanticGroupContext& group) {
+  std::string group_id = group.group_kind();
+  group_id.push_back(':');
+  group_id.append(group.group_id());
+  return group_id;
+}
+
+store::loading::TransportSchedulingGroupHint build_group_realization_transport_group(
+    const v2::SemanticGroupContext& group) {
+  return store::loading::TransportSchedulingGroupHint{
+      .group_id = build_group_realization_transport_group_id(group),
+      .group_kind = std::string(kGroupRealizationTransportKind),
+      .total_parts = group.total_parts(),
+      .part_id = group.part_id(),
+      .priority = 0,
+      .epoch = group.epoch(),
+  };
+}
+
+void copy_group_version_set_ref(const v2::GroupVersionSetRef& source, global_store::GroupVersionSetRef* destination) {
+  destination->set_version_set_id(source.version_set_id());
+  destination->set_manifest_hash(source.manifest_hash());
+  destination->set_manifest_generation(source.manifest_generation());
+}
+
+void copy_key_version_reference(const v2::KeyVersionReference& source, global_store::KeyVersionReference* destination) {
+  destination->set_key(source.key());
+  destination->set_namespace_(source.namespace_());
+  destination->set_alias(source.alias());
+  if (source.has_expected_generation()) {
+    destination->set_expected_generation(source.expected_generation());
+  }
+}
+
+absl::Status copy_version_reference(const v2::VersionReference& source, global_store::VersionReference* destination) {
+  switch (source.value_case()) {
+    case v2::VersionReference::kExplicitSelection:
+      destination->mutable_explicit_selection()->CopyFrom(source.explicit_selection());
+      return absl::OkStatus();
+    case v2::VersionReference::kExplicitVersionSet:
+      copy_group_version_set_ref(source.explicit_version_set(), destination->mutable_explicit_version_set());
+      return absl::OkStatus();
+    case v2::VersionReference::kKeyReference:
+      copy_key_version_reference(source.key_reference(), destination->mutable_key_reference());
+      return absl::OkStatus();
+    case v2::VersionReference::VALUE_NOT_SET:
+    default:
+      return absl::InvalidArgumentError("group_realization.version value is required");
+  }
+}
+
+void copy_group_realization_context(
+    const v2::SemanticGroupContext& source,
+    global_store::GroupRealizationContext* destination) {
+  destination->set_group_kind(source.group_kind());
+  destination->set_group_id(source.group_id());
+  destination->set_epoch(source.epoch());
+  destination->set_total_parts(source.total_parts());
+  destination->set_part_id(source.part_id());
+  for (const std::string& part_id : source.required_part_ids()) {
+    destination->add_required_part_ids(part_id);
+  }
+}
+
+absl::Status validate_begin_or_join_response(
+    const global_store::BeginOrJoinGroupRealizationResponse& response,
+    const v2::SemanticGroupContext& group) {
+  if (auto status = response_status_to_absl(response.status(), "BeginOrJoinGroupRealization"); !status.ok()) {
+    return status;
+  }
+  if (response.transaction_id().empty()) {
+    return absl::FailedPreconditionError("BeginOrJoinGroupRealization returned an empty transaction_id");
+  }
+  if (!response.has_part()) {
+    return absl::FailedPreconditionError("BeginOrJoinGroupRealization returned no part");
+  }
+  if (response.part().part_id() != group.part_id()) {
+    return absl::FailedPreconditionError("BeginOrJoinGroupRealization returned a different part_id");
+  }
+  if (!response.part().has_selection() || response.part().selection().artifact_id().empty()) {
+    return absl::FailedPreconditionError("BeginOrJoinGroupRealization returned no frozen part selection");
+  }
+  return absl::OkStatus();
+}
+
+std::string byte_space_identity(const tensorcast::common::v1::ByteSpaceRef& byte_space) {
+  if (byte_space.kind() == tensorcast::common::v1::BYTE_SPACE_KIND_UNSPECIFIED && byte_space.id().empty()) {
+    return "none";
+  }
+  return std::format("{}:{}", static_cast<int>(byte_space.kind()), byte_space.id());
+}
+
+std::string selection_view_identity(const tensorcast::common::v1::ArtifactSelection& selection) {
+  if (!selection.view_id().empty()) {
+    return selection.view_id();
+  }
+  if (!selection.view_subset_hash().empty()) {
+    return std::format("subset:{}", selection.view_subset_hash());
+  }
+  if (selection.has_view_spec()) {
+    std::string serialized;
+    if (selection.view_spec().SerializeToString(&serialized)) {
+      return absl::StrCat("spec:", absl::BytesToHexString(serialized));
+    }
+    return "spec";
+  }
+  return "canonical";
+}
+
+} // namespace
 
 absl::StatusOr<RetrievalPolicy> resolve_retrieval_policy_compat(const v2::SourcePolicy* policy) {
   RetrievalPolicy resolved;
@@ -155,132 +359,187 @@ bool collective_policy_requests_collective(v2::CollectivePolicy policy) {
 }
 
 OperationTransportContext resolve_operation_transport_context(std::string_view operation_id) {
-  constexpr std::string_view kGroupMarker = "#tcg:";
   OperationTransportContext context;
-  if (operation_id.empty()) {
-    return context;
-  }
-  const size_t marker_pos = operation_id.find(kGroupMarker);
-  if (marker_pos == std::string_view::npos) {
+  if (!operation_id.empty()) {
     context.transport_request_id = std::string(operation_id);
-    return context;
-  }
-
-  context.transport_request_id = std::string(operation_id.substr(0, marker_pos));
-  const std::string_view metadata = operation_id.substr(marker_pos + kGroupMarker.size());
-
-  std::string group_kind;
-  std::string group_id;
-  std::string part_id;
-  std::string request_id_override;
-  std::string collective_group_id;
-  std::string source_sharing_domain;
-  int group_total_parts = 0;
-  int group_priority = 0;
-  int collective_world_size = 0;
-  int collective_rank = -1;
-  uint64_t group_epoch = 0;
-  store::loading::SourceLocalityHint source_locality = store::loading::SourceLocalityHint::kAuto;
-
-  for (const std::string_view item : absl::StrSplit(metadata, ';', absl::SkipEmpty())) {
-    std::vector<std::string_view> kv = absl::StrSplit(item, absl::MaxSplits('=', 1));
-    if (kv.size() != 2) {
-      continue;
-    }
-    const std::string_view key = kv[0];
-    const std::string_view value = kv[1];
-    if (key == "kind") {
-      group_kind = std::string(value);
-      continue;
-    }
-    if (key == "gid") {
-      group_id = std::string(value);
-      continue;
-    }
-    if (key == "tot") {
-      int parsed_total_parts = 0;
-      if (absl::SimpleAtoi(value, &parsed_total_parts)) {
-        group_total_parts = parsed_total_parts;
-      }
-      continue;
-    }
-    if (key == "part") {
-      part_id = std::string(value);
-      continue;
-    }
-    if (key == "pri") {
-      int parsed_priority = 0;
-      if (absl::SimpleAtoi(value, &parsed_priority)) {
-        group_priority = parsed_priority;
-      }
-      continue;
-    }
-    if (key == "ep") {
-      uint64_t parsed_epoch = 0;
-      if (absl::SimpleAtoi(value, &parsed_epoch)) {
-        group_epoch = parsed_epoch;
-      }
-      continue;
-    }
-    if (key == "rid") {
-      request_id_override = std::string(value);
-      continue;
-    }
-    if (key == "clid") {
-      collective_group_id = std::string(value);
-      continue;
-    }
-    if (key == "sloc") {
-      source_locality = parse_source_locality_hint(value);
-      continue;
-    }
-    if (key == "sdom") {
-      source_sharing_domain = std::string(value);
-      continue;
-    }
-    if (key == "clws") {
-      int parsed_world_size = 0;
-      if (absl::SimpleAtoi(value, &parsed_world_size)) {
-        collective_world_size = parsed_world_size;
-      }
-      continue;
-    }
-    if (key == "clrk") {
-      int parsed_rank = -1;
-      if (absl::SimpleAtoi(value, &parsed_rank)) {
-        collective_rank = parsed_rank;
-      }
-      continue;
-    }
-  }
-
-  if (!request_id_override.empty()) {
-    context.transport_request_id = std::move(request_id_override);
-  }
-
-  if (!group_kind.empty() && !group_id.empty() && !part_id.empty() && group_total_parts > 0) {
-    store::loading::TransportSchedulingGroupHint group;
-    group.group_kind = std::move(group_kind);
-    group.group_id = std::move(group_id);
-    group.total_parts = static_cast<uint32_t>(group_total_parts);
-    group.part_id = std::move(part_id);
-    group.priority = static_cast<uint32_t>(std::max(0, group_priority));
-    group.epoch = group_epoch;
-    context.transport_scheduling_group = std::move(group);
-  }
-  context.execution_topology.source_locality = source_locality;
-  if (!source_sharing_domain.empty()) {
-    context.execution_topology.source_sharing_domain = std::move(source_sharing_domain);
-  }
-  if (!collective_group_id.empty() && collective_world_size > 1 && collective_rank >= 0 &&
-      collective_rank < collective_world_size) {
-    context.execution_topology.collective_load_group = store::loading::CollectiveLoadGroupHint{
-        .group_id = std::move(collective_group_id),
-        .world_size = static_cast<uint32_t>(collective_world_size),
-        .rank = static_cast<uint32_t>(collective_rank),
-    };
   }
   return context;
+}
+
+absl::StatusOr<OperationTransportContext> resolve_group_realization_transport_context(
+    std::string_view operation_id,
+    const v2::GroupRealizationOptions* group_realization) {
+  OperationTransportContext context = resolve_operation_transport_context(operation_id);
+  if (group_realization == nullptr || !group_realization->enabled()) {
+    return context;
+  }
+
+  auto validation_status = validate_group_realization_options(*group_realization);
+  if (!validation_status.ok()) {
+    return validation_status;
+  }
+  context.transport_scheduling_group = build_group_realization_transport_group(group_realization->group());
+  return context;
+}
+
+absl::Status validate_group_realization_staged_publish_supported(
+    const v2::GroupRealizationOptions* group_realization,
+    bool staged_publish_supported) {
+  if (group_realization == nullptr || !group_realization->enabled()) {
+    return absl::OkStatus();
+  }
+  if (!group_realization->require_staged_publish() || staged_publish_supported) {
+    return absl::OkStatus();
+  }
+  return absl::FailedPreconditionError("group_realization.require_staged_publish requires a staged resource path");
+}
+
+absl::StatusOr<std::optional<GroupRealizationBeginContext>> begin_or_join_group_realization_if_enabled(
+    const std::shared_ptr<store::components::IGlobalStoreClient>& global_store_client,
+    const v2::GroupRealizationOptions* group_realization,
+    std::string_view daemon_id,
+    std::string_view daemon_session_id,
+    std::string_view worker_id,
+    const store::components::RpcOptions& rpc_options) {
+  if (group_realization == nullptr || !group_realization->enabled()) {
+    return std::nullopt;
+  }
+  if (auto validation_status = validate_group_realization_options(*group_realization); !validation_status.ok()) {
+    return validation_status;
+  }
+  if (global_store_client == nullptr || !global_store_client->is_connected()) {
+    return absl::UnavailableError("GlobalStoreClient is required for group_realization");
+  }
+  if (daemon_id.empty()) {
+    return absl::FailedPreconditionError("daemon_id is required for group_realization");
+  }
+  if (daemon_session_id.empty()) {
+    return absl::FailedPreconditionError("daemon_session_id is required for group_realization");
+  }
+
+  global_store::BeginOrJoinGroupRealizationRequest request;
+  if (auto status = copy_version_reference(group_realization->version(), request.mutable_version()); !status.ok()) {
+    return status;
+  }
+  copy_group_realization_context(group_realization->group(), request.mutable_context());
+  request.set_deadline_unix_nanos(group_realization->deadline_unix_nanos());
+  request.set_daemon_id(std::string(daemon_id));
+  request.set_daemon_session_id(std::string(daemon_session_id));
+  request.set_worker_id(std::string(worker_id));
+
+  auto response_or = global_store_client->begin_or_join_group_realization(request, rpc_options);
+  if (!response_or.ok()) {
+    return response_or.status();
+  }
+  if (auto status = validate_begin_or_join_response(*response_or, group_realization->group()); !status.ok()) {
+    return status;
+  }
+
+  GroupRealizationBeginContext begin_context;
+  begin_context.transaction_id = response_or->transaction_id();
+  begin_context.version_set = response_or->version_set();
+  begin_context.realization_kind = response_or->realization_kind();
+  begin_context.part_id = response_or->part().part_id();
+  begin_context.part_selection = response_or->part().selection();
+  begin_context.requested_byte_space = response_or->part().requested_byte_space();
+  begin_context.selection_hash = response_or->part().selection_hash();
+  begin_context.state = response_or->state();
+  begin_context.key_generation = response_or->key_generation();
+  return std::optional<GroupRealizationBeginContext>(std::move(begin_context));
+}
+
+void apply_group_realization_begin_context_to_transport_context(
+    const GroupRealizationBeginContext& begin_context,
+    OperationTransportContext* transport_context) {
+  if (transport_context == nullptr || !transport_context->transport_scheduling_group.has_value()) {
+    return;
+  }
+  auto& group = *transport_context->transport_scheduling_group;
+  group.group_kind = std::string(kGroupRealizationTransportKind);
+  group.group_id = absl::StrCat(
+      "txn:",
+      begin_context.transaction_id,
+      "|vs:",
+      begin_context.version_set.version_set_id(),
+      "|artifact:",
+      begin_context.part_selection.artifact_id(),
+      "|part:",
+      begin_context.part_id,
+      "|byte_space:",
+      byte_space_identity(begin_context.requested_byte_space),
+      "|view:",
+      selection_view_identity(begin_context.part_selection),
+      "|selection_hash:",
+      absl::BytesToHexString(begin_context.selection_hash));
+  group.part_id = begin_context.part_id;
+}
+
+absl::StatusOr<std::optional<global_store::ReportGroupRealizationPreparedResponse>>
+report_group_realization_prepared_if_enabled(
+    const std::shared_ptr<store::components::IGlobalStoreClient>& global_store_client,
+    const v2::GroupRealizationOptions* group_realization,
+    const GroupRealizationBeginContext* begin_context,
+    const GroupRealizationPreparedMemberContext& prepared_member,
+    std::string_view daemon_id,
+    std::string_view daemon_session_id,
+    std::string_view worker_id,
+    const store::components::RpcOptions& rpc_options) {
+  if (group_realization == nullptr || !group_realization->enabled()) {
+    return std::nullopt;
+  }
+  if (begin_context == nullptr || begin_context->transaction_id.empty()) {
+    return absl::FailedPreconditionError("group_realization begin context is required before prepared report");
+  }
+  if (prepared_member.binding_id.empty() || prepared_member.binding_value_id.empty() ||
+      prepared_member.staging_token.empty()) {
+    return absl::InvalidArgumentError("group_realization prepared report requires staged binding value identity");
+  }
+  if (prepared_member.staging_epoch == 0) {
+    return absl::InvalidArgumentError("group_realization prepared report requires staging_epoch");
+  }
+  if (begin_context->part_id.empty()) {
+    return absl::FailedPreconditionError("group_realization begin context part_id is required");
+  }
+  if (global_store_client == nullptr || !global_store_client->is_connected()) {
+    return absl::UnavailableError("GlobalStoreClient is required for group_realization prepared report");
+  }
+  if (daemon_id.empty()) {
+    return absl::FailedPreconditionError("daemon_id is required for group_realization prepared report");
+  }
+  if (daemon_session_id.empty()) {
+    return absl::FailedPreconditionError("daemon_session_id is required for group_realization prepared report");
+  }
+
+  global_store::ReportGroupRealizationPreparedRequest request;
+  request.set_transaction_id(begin_context->transaction_id);
+  request.set_part_id(begin_context->part_id);
+  auto* staged_value = request.mutable_staged_value();
+  staged_value->set_daemon_id(std::string(daemon_id));
+  staged_value->set_daemon_session_id(std::string(daemon_session_id));
+  staged_value->set_binding_id(prepared_member.binding_id);
+  staged_value->set_binding_value_id(prepared_member.binding_value_id);
+  staged_value->set_staging_token(prepared_member.staging_token);
+  staged_value->set_staging_epoch(prepared_member.staging_epoch);
+  request.set_expected_previous_seal_generation(prepared_member.expected_previous_seal_generation);
+  if (!prepared_member.prepared_value_hash.empty()) {
+    request.set_prepared_value_hash(prepared_member.prepared_value_hash);
+  }
+  request.set_daemon_id(std::string(daemon_id));
+  request.set_daemon_session_id(std::string(daemon_session_id));
+  request.set_worker_id(std::string(worker_id));
+  request.set_materialization_attempt_id(prepared_member.materialization_attempt_id);
+  request.set_source_replica_id(prepared_member.source_replica_id);
+  request.set_source_export_generation(prepared_member.source_export_generation);
+  request.set_child_transport_request_id(prepared_member.child_transport_request_id);
+
+  auto response_or = global_store_client->report_group_realization_prepared(request, rpc_options);
+  if (!response_or.ok()) {
+    return response_or.status();
+  }
+  if (response_or->status() != global_store::STATUS_OK) {
+    return response_status_to_absl(response_or->status(), "ReportGroupRealizationPrepared");
+  }
+  return std::optional<global_store::ReportGroupRealizationPreparedResponse>(std::move(*response_or));
 }
 
 absl::StatusOr<NormalizedMaterializationRequestContext> resolve_materialization_request_context(

@@ -70,20 +70,26 @@ using materialization_index_source::load_descriptor_metadata;
 using materialization_layout::parse_canonical_index;
 using materialization_layout::resolve_target_offsets;
 using materialization_payload::build_descriptors_from_index;
+using materialization_policy::apply_group_realization_begin_context_to_transport_context;
 using materialization_policy::apply_operation_transport_context;
 using materialization_policy::apply_request_context_to_hints;
+using materialization_policy::begin_or_join_group_realization_if_enabled;
 using materialization_policy::build_execution_diagnostics;
 using materialization_policy::build_view_spec_proto;
 using materialization_policy::collective_policy_requests_collective;
 using materialization_policy::compute_view_id_from_spec;
+using materialization_policy::GroupRealizationBeginContext;
+using materialization_policy::GroupRealizationPreparedMemberContext;
 using materialization_policy::HashExecutionDetails;
 using materialization_policy::NormalizedMaterializationRequestContext;
 using materialization_policy::OperationTransportContext;
+using materialization_policy::report_group_realization_prepared_if_enabled;
 using materialization_policy::resolve_collective_policy;
+using materialization_policy::resolve_group_realization_transport_context;
 using materialization_policy::resolve_materialization_request_context;
-using materialization_policy::resolve_operation_transport_context;
 using materialization_policy::resolve_source_execution_topology;
 using materialization_policy::resolve_transform_placement;
+using materialization_policy::validate_group_realization_staged_publish_supported;
 using materialization_request_common::resolve_artifact_and_disk_source;
 using materialization_target_plan::build_binding_realization_materialization_plan;
 using materialization_target_plan::build_mapped_target_materialization_plan;
@@ -1331,6 +1337,36 @@ void fill_binding_value(const BindingRegistry::Record& record, v2::BindingValue&
   }
 }
 
+void fill_staged_binding_value(
+    const BindingRegistry::Record& record,
+    const BindingRegistry::StagedBindingValue& staged,
+    v2::BindingValue& value) {
+  value.set_binding_id(record.binding_id);
+  value.set_binding_layout_id(record.binding_layout_id);
+  value.set_binding_value_id(staged.binding_value_id);
+  value.set_seal_generation(staged.expected_previous_seal_generation);
+  if (!staged.artifact_id.empty()) {
+    value.set_source_artifact_id(staged.artifact_id);
+  }
+  if (!staged.selection.artifact_id().empty()) {
+    value.mutable_selection()->CopyFrom(staged.selection);
+  }
+  value.set_is_artifact_backed(!staged.artifact_id.empty());
+  value.set_verification_state(staged.verification_state);
+  if (!staged.verification_failure_reason.empty()) {
+    value.set_verification_failure_reason(staged.verification_failure_reason);
+  }
+}
+
+void fill_group_realization_acquire_ref(
+    const BindingRegistry::StagedBindingValue& staged,
+    v2::GroupRealizationAcquireRef& acquire) {
+  acquire.set_transaction_id(staged.transaction_id);
+  acquire.set_version_set_id(staged.version_set_id);
+  acquire.set_part_id(staged.part_id);
+  acquire.set_staging_token(staged.staging_token);
+}
+
 void clear_verification_metadata(BindingRegistry::Record* record) {
   record->verification_state = v2::BINDING_VALUE_VERIFICATION_STATE_UNSPECIFIED;
   record->verification_job_id.clear();
@@ -1572,6 +1608,8 @@ struct SourceBoundMaterializationRequest {
   const v2::SourceExecutionTopology* execution_topology{nullptr};
   v2::CollectivePolicy collective_policy{v2::COLLECTIVE_POLICY_UNSPECIFIED};
   std::optional<std::string_view> operation_id;
+  const v2::GroupRealizationOptions* group_realization{nullptr};
+  bool staged_publish_supported{false};
   v2::TransformPlacement placement{v2::TRANSFORM_PLACEMENT_UNSPECIFIED};
 };
 
@@ -1588,6 +1626,7 @@ struct PreparedSourceBoundPlan {
   std::optional<store::loading::DiskMetadata> disk_metadata;
   std::optional<MappedTargetMaterializationPlan> mapped_plan;
   std::optional<TargetMaterializationPlan> unmapped_plan;
+  std::optional<GroupRealizationBeginContext> group_begin_context;
   bool execution_only_mutable{false};
 };
 
@@ -1680,7 +1719,8 @@ grpc::Status prepare_source_bound_plan(
   double canonical_index_sec = 0.0;
   double target_offsets_sec = 0.0;
   double target_plan_sec = 0.0;
-  if ((request.source_selection == nullptr && request.public_disk_source == nullptr) ||
+  const bool group_realization_enabled = request.group_realization != nullptr && request.group_realization->enabled();
+  if ((request.source_selection == nullptr && request.public_disk_source == nullptr && !group_realization_enabled) ||
       request.target_layout == nullptr) {
     return {StatusCode::INVALID_ARGUMENT, "source-bound materialization request is incomplete"};
   }
@@ -1697,9 +1737,18 @@ grpc::Status prepare_source_bound_plan(
 
   out = PreparedSourceBoundPlan{};
   out.requested_placement = request.placement;
-  if (request.operation_id.has_value() && !request.operation_id->empty()) {
-    out.transport_context = resolve_operation_transport_context(*request.operation_id);
+  const std::string_view operation_id =
+      request.operation_id.has_value() && !request.operation_id->empty() ? *request.operation_id : std::string_view();
+  auto transport_context_or = resolve_group_realization_transport_context(operation_id, request.group_realization);
+  if (!transport_context_or.ok()) {
+    return to_grpc_status(transport_context_or.status());
   }
+  auto staged_publish_status =
+      validate_group_realization_staged_publish_supported(request.group_realization, request.staged_publish_supported);
+  if (!staged_publish_status.ok()) {
+    return to_grpc_status(staged_publish_status);
+  }
+  out.transport_context = std::move(*transport_context_or);
   auto execution_topology_or = resolve_source_execution_topology(request.execution_topology);
   if (!execution_topology_or.ok()) {
     return to_grpc_status(execution_topology_or.status());
@@ -1723,14 +1772,33 @@ grpc::Status prepare_source_bound_plan(
   if (request.source_selection != nullptr) {
     effective_source_selection = *request.source_selection;
   }
+  std::string daemon_id = d.identity.daemon_id();
+  if (daemon_id.empty()) {
+    daemon_id = d.daemon_id;
+  }
+  auto begin_context_or = begin_or_join_group_realization_if_enabled(
+      d.global_store_client, request.group_realization, daemon_id, d.daemon_session_id, d.identity.worker_id());
+  if (!begin_context_or.ok()) {
+    return to_grpc_status(begin_context_or.status());
+  }
+  const bool has_frozen_group_selection = begin_context_or->has_value();
+  if (has_frozen_group_selection) {
+    effective_source_selection = (*begin_context_or)->part_selection;
+    out.group_begin_context = **begin_context_or;
+    apply_group_realization_begin_context_to_transport_context(**begin_context_or, &out.transport_context);
+  }
   materialization_request_common::ArtifactResolution resolution;
   const auto resolve_start = std::chrono::steady_clock::now();
   if (request.public_disk_source != nullptr) {
     if (!loopback_peer) {
       return {StatusCode::PERMISSION_DENIED, "public_disk_source is local-only (loopback/UDS)"};
     }
+    if (has_frozen_group_selection && !request.public_disk_source->artifact_id().empty() &&
+        request.public_disk_source->artifact_id() != effective_source_selection.artifact_id()) {
+      return {StatusCode::FAILED_PRECONDITION, "public_disk_source.artifact_id conflicts with group frozen selection"};
+    }
     const std::string resolved_artifact_id =
-        resolve_source_artifact_id(request.source_selection, request.public_disk_source);
+        resolve_source_artifact_id(&effective_source_selection, request.public_disk_source);
     if (resolved_artifact_id.empty()) {
       return {StatusCode::INVALID_ARGUMENT, "public_disk_source.artifact_id is required"};
     }
@@ -1750,11 +1818,14 @@ grpc::Status prepare_source_bound_plan(
     resolution = std::move(*resolution_or);
     effective_source_selection.set_artifact_id(resolution.resolved_artifact_id);
   } else {
+    if (effective_source_selection.artifact_id().empty()) {
+      return {StatusCode::INVALID_ARGUMENT, "source_selection.artifact_id is required"};
+    }
     auto resolution_or = resolve_artifact_and_disk_source(
         d.global_store_client,
         &d.disk_imports,
         d.storage_path,
-        request.source_selection->artifact_id(),
+        effective_source_selection.artifact_id(),
         out.request_context.retrieval_policy.allow_disk,
         /*allow_local_import_fallback=*/true,
         loopback_peer);
@@ -2341,11 +2412,22 @@ grpc::Status OwnedBindingService::create_owned_binding(
           .dst_tensors = mapped ? &mapped_dst_tensors : nullptr,
           .source_policy = req.has_source_policy() ? &req.source_policy() : nullptr,
           .operation_id = req.has_operation_id() ? std::optional<std::string_view>(req.operation_id()) : std::nullopt,
+          .group_realization = req.has_group_realization() ? &req.group_realization() : nullptr,
+          .staged_publish_supported = true,
           .placement = req.placement(),
       },
       prepared_plan);
   if (!prepare_status.ok()) {
     return prepare_status;
+  }
+  const bool create_staged_value = req.has_group_realization() && req.group_realization().enabled() &&
+      req.group_realization().require_staged_publish();
+  if (create_staged_value && !prepared_plan.group_begin_context.has_value()) {
+    return {StatusCode::FAILED_PRECONDITION, "group realization begin context is required for staged binding"};
+  }
+  std::string group_daemon_id = d_.identity.daemon_id();
+  if (group_daemon_id.empty()) {
+    group_daemon_id = d_.daemon_id;
   }
 
   auto allocation = std::make_unique<common::memory::GpuDeviceMemory>();
@@ -2406,6 +2488,10 @@ grpc::Status OwnedBindingService::create_owned_binding(
   }
 
   const std::string target_layout_hash = compute_target_layout_hash(req.target_layout());
+  std::shared_ptr<common::memory::GpuDeviceMemory> staged_allocation;
+  if (create_staged_value) {
+    staged_allocation = std::shared_ptr<common::memory::GpuDeviceMemory>(std::move(allocation));
+  }
   std::string binding_id;
   std::shared_ptr<BindingRegistry::Record> record;
   absl::Status insert_status = absl::UnknownError("uninitialized");
@@ -2424,19 +2510,28 @@ grpc::Status OwnedBindingService::create_owned_binding(
     record->mapped = mapped;
     record->closed = false;
     record->export_refs = 1;
-    record->allocation = std::move(allocation);
+    if (!create_staged_value) {
+      record->allocation = std::move(allocation);
+    }
     record->handle_bytes = handle_bytes;
     record->source_selection = req.source_selection();
     record->source_selection.set_artifact_id(prepared_plan.resolved_artifact_id);
     record->target_layout = req.target_layout();
     record->target_index_json = std::string(req.target_index_bytes().data(), req.target_index_bytes().size());
     record->target_layout_hash = target_layout_hash;
-    mark_ready_artifact(
-        record.get(),
-        prepared_plan.resolved_artifact_id,
-        prepared_plan.current_selection,
-        std::string(),
-        prepared_plan.canonical_index_json);
+    if (create_staged_value) {
+      record->state = v2::BINDING_STATE_READY_LOCAL;
+      record->active_update_epoch.clear();
+      record->ready_at = absl::Now();
+      clear_verification_metadata(record.get());
+    } else {
+      mark_ready_artifact(
+          record.get(),
+          prepared_plan.resolved_artifact_id,
+          prepared_plan.current_selection,
+          std::string(),
+          prepared_plan.canonical_index_json);
+    }
     if (mapped) {
       record->copy_plan = req.copy_plan();
       record->dst_tensors.assign(req.dst_tensors().begin(), req.dst_tensors().end());
@@ -2454,6 +2549,45 @@ grpc::Status OwnedBindingService::create_owned_binding(
     return to_grpc_status(insert_status);
   }
 
+  std::optional<BindingRegistry::StagedBindingValue> created_staged;
+  if (create_staged_value) {
+    BindingRegistry::StagedBindingValue staged;
+    staged.transaction_id = prepared_plan.group_begin_context->transaction_id;
+    staged.version_set_id = prepared_plan.group_begin_context->version_set.version_set_id();
+    staged.part_id = prepared_plan.group_begin_context->part_id;
+    staged.binding_value_id = mint_binding_value_id();
+    staged.staging_token = absl::StrCat("stage:", binding_id, ":", staged.binding_value_id);
+    staged.staging_epoch = 1;
+    staged.daemon_id = group_daemon_id;
+    staged.daemon_session_id = d_.daemon_session_id;
+    staged.materialization_attempt_id = req.has_operation_id() && !req.operation_id().empty()
+        ? req.operation_id()
+        : absl::StrCat("create:", binding_id);
+    staged.allocation = staged_allocation;
+    staged.handle_bytes = handle_bytes;
+    staged.selection = prepared_plan.current_selection;
+    staged.artifact_id = prepared_plan.resolved_artifact_id;
+    staged.canonical_index_json = prepared_plan.canonical_index_json;
+    staged.target_layout = req.target_layout();
+    staged.target_index_json = std::string(req.target_index_bytes().data(), req.target_index_bytes().size());
+    staged.target_layout_hash = target_layout_hash;
+    staged.payloads.assign(descriptors_or->descriptors.begin(), descriptors_or->descriptors.end());
+    staged.logical_total_size = prepared_plan.logical_total_size;
+    staged.expected_previous_seal_generation = record->seal_generation;
+    staged.verification_state = v2::BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY;
+    staged.created_at = absl::Now();
+    auto staged_status = d_.bindings.insert_staged_value(binding_id, staged, staged.created_at);
+    if (!staged_status.ok()) {
+      const bool closed = d_.bindings.close_control(binding_id);
+      if (!closed) {
+        LOG(WARNING) << "staged owner binding cleanup could not find binding_id=" << binding_id;
+      }
+      d_.bindings.release_export_ref(binding_id);
+      return to_grpc_status(staged_status);
+    }
+    created_staged = std::move(staged);
+  }
+
   auto token_or = d_.handle_leases->mint_external_cuda_lease(
       req.pid(), [registry = &d_.bindings, binding_id]() { registry->release_export_ref(binding_id); });
   if (!token_or.ok()) {
@@ -2465,22 +2599,65 @@ grpc::Status OwnedBindingService::create_owned_binding(
     return to_grpc_status(token_or.status());
   }
 
-  auto target_publication_token_or = maybe_mint_target_publication_token(
-      d_.capability_tokens,
-      d_.identity,
-      d_.target_materialization_service,
-      req.target_layout(),
-      prepared_plan.current_selection,
-      prepared_plan.canonical_index_json,
-      device.ordinal,
-      req.device_uuid(),
-      req.pid(),
-      req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view(),
-      std::move(storage_layout.publish_segments),
-      std::move(storage_layout.publish_storages));
+  absl::StatusOr<std::string> target_publication_token_or =
+      absl::UnimplementedError("staged binding has no target publication token");
+  if (!create_staged_value) {
+    target_publication_token_or = maybe_mint_target_publication_token(
+        d_.capability_tokens,
+        d_.identity,
+        d_.target_materialization_service,
+        req.target_layout(),
+        prepared_plan.current_selection,
+        prepared_plan.canonical_index_json,
+        device.ordinal,
+        req.device_uuid(),
+        req.pid(),
+        req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view(),
+        std::move(storage_layout.publish_segments),
+        std::move(storage_layout.publish_storages));
+  }
   if (target_publication_token_or.ok()) {
     absl::MutexLock lock(&record->mu);
     record->target_publication_token = *target_publication_token_or;
+  }
+
+  if (create_staged_value) {
+    GroupRealizationPreparedMemberContext prepared_member{
+        .binding_id = binding_id,
+        .binding_value_id = created_staged->binding_value_id,
+        .staging_token = created_staged->staging_token,
+        .staging_epoch = created_staged->staging_epoch,
+        .expected_previous_seal_generation = created_staged->expected_previous_seal_generation,
+        .materialization_attempt_id = created_staged->materialization_attempt_id,
+        .source_replica_id = created_staged->source_replica_id,
+        .source_export_generation = created_staged->source_export_generation,
+        .child_transport_request_id = prepared_plan.transport_context.transport_request_id,
+    };
+    auto report_or = report_group_realization_prepared_if_enabled(
+        d_.global_store_client,
+        req.has_group_realization() ? &req.group_realization() : nullptr,
+        &*prepared_plan.group_begin_context,
+        prepared_member,
+        group_daemon_id,
+        d_.daemon_session_id,
+        d_.identity.worker_id());
+    if (!report_or.ok()) {
+      const auto remove_status =
+          d_.bindings.remove_staged_value(binding_id, created_staged->binding_value_id, "prepared_report_failed");
+      if (!remove_status.ok()) {
+        LOG(WARNING) << "failed to remove staged binding after prepared report failure: " << remove_status;
+      }
+      auto release_status = d_.handle_leases->release(*token_or);
+      if (!release_status.ok()) {
+        LOG(WARNING) << "failed to release staged binding bootstrap lease after prepared report failure: "
+                     << release_status;
+      }
+      const bool closed = d_.bindings.close_control(binding_id);
+      if (!closed) {
+        LOG(WARNING) << "failed to close staged binding after prepared report failure binding_id=" << binding_id;
+      }
+      return to_grpc_status(report_or.status());
+    }
   }
 
   resp.set_binding_id(binding_id);
@@ -2497,8 +2674,14 @@ grpc::Status OwnedBindingService::create_owned_binding(
   }
   resp.mutable_resolved_selection()->CopyFrom(prepared_plan.current_selection);
   resp.set_source(to_proto_source(result_or->source));
-  resp.set_state(v2::BINDING_STATE_READY_ARTIFACT);
-  fill_binding_value(*record, *resp.mutable_current_value());
+  resp.set_state(create_staged_value ? v2::BINDING_STATE_READY_LOCAL : v2::BINDING_STATE_READY_ARTIFACT);
+  if (create_staged_value) {
+    resp.set_created_staged_value(true);
+    fill_staged_binding_value(*record, *created_staged, *resp.mutable_staged_value());
+    fill_group_realization_acquire_ref(*created_staged, *resp.mutable_group_realization_acquire());
+  } else {
+    fill_binding_value(*record, *resp.mutable_current_value());
+  }
   {
     absl::MutexLock lock(&record->mu);
     if (target_publication_token_or.ok()) {
@@ -3594,6 +3777,7 @@ grpc::Status OwnedBindingService::refill_owned_binding(
           .execution_topology = req.has_execution_topology() ? &req.execution_topology() : nullptr,
           .collective_policy = req.collective_policy(),
           .operation_id = req.has_operation_id() ? std::optional<std::string_view>(req.operation_id()) : std::nullopt,
+          .group_realization = req.has_group_realization() ? &req.group_realization() : nullptr,
           .placement = req.placement(),
       },
       prepared_plan);
