@@ -93,6 +93,17 @@ Execution-policy note:
 - and the mounted closure evidence now tracks directly through this design plus
   `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`.
 
+Group realization note:
+
+- `0117` may coordinate a multi-member serving version before runtime injection,
+  but it must enter this path through staged retained values, serving prefetch,
+  or explicit group-aware acquire;
+- `0117` does not replace the same-binding publication subject or create a
+  second publication truth;
+- live in-place group replacement of an already current binding value remains
+  outside the shipped `0112` scope until a separate cutover design defines the
+  required double-buffering, admission fences, and traffic switch semantics.
+
 # Implementation Status
 
 As of `2026-04-10`, the repository has landed the main repo-local contract and

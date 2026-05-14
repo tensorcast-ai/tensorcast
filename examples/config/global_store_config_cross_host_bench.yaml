@@ -88,6 +88,8 @@ worker_policy:
       group_source_spread_weight: 2.0
       group_source_soft_cap_ratio: 1.3
       group_source_min_candidates_for_enforce: 3
+  group_realization:
+    enabled: true
 
 # v2 limits and retention policies.
 limits:
