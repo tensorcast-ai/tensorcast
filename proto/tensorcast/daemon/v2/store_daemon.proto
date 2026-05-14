@@ -23,6 +23,7 @@ service StoreDaemonService {
   rpc CreateOwnedBinding(CreateOwnedBindingRequest) returns (CreateOwnedBindingResponse) {}
   rpc PrefetchServingBinding(PrefetchServingBindingRequest) returns (PrefetchServingBindingResponse) {}
   rpc AcquireBindingValue(AcquireBindingValueRequest) returns (AcquireBindingValueResponse) {}
+  rpc RegisterGroupVersionSet(RegisterGroupVersionSetRequest) returns (RegisterGroupVersionSetResponse) {}
   rpc CommitBindingArtifact(CommitBindingArtifactRequest) returns (CommitBindingArtifactResponse) {}
   rpc BeginBindingUpdate(BeginBindingUpdateRequest) returns (BeginBindingUpdateResponse) {}
   rpc FreezeBindingCurrentValue(FreezeBindingCurrentValueRequest) returns (FreezeBindingCurrentValueResponse) {}
@@ -552,6 +553,7 @@ message MaterializeReplicaRequest {
   // Explicit collective group hint for same-host coordinated disk->GPU loads.
   optional CollectiveLoadGroup collective_load_group = 19;
   ServingArtifactRuntimePolicy serving_artifact_policy = 20;
+  GroupRealizationOptions group_realization = 21;
 }
 
 message CollectiveLoadGroup {
@@ -651,6 +653,73 @@ message SourceBoundPlanDiagnostics {
   uint64 estimated_collective_peak_temporary_bytes = 11;
   uint64 estimated_collective_batch_bytes = 12;
   uint64 estimated_collective_dedup_saving_bytes = 13;
+}
+
+message GroupVersionSetRef {
+  string version_set_id = 1;
+  bytes manifest_hash = 2;
+  uint64 manifest_generation = 3;
+}
+
+enum GroupRealizationKind {
+  GROUP_REALIZATION_KIND_UNSPECIFIED = 0;
+  GROUP_REALIZATION_KIND_SAME_SELECTION = 1;
+  GROUP_REALIZATION_KIND_PER_PART_SELECTION = 2;
+}
+
+message GroupVersionSetPart {
+  string part_id = 1;
+  tensorcast.common.v1.ArtifactSelection selection = 2;
+  tensorcast.common.v1.ByteSpaceRef requested_byte_space = 3;
+  bytes selection_hash = 4;
+  bytes logical_layout_hash = 5;
+  string part_metadata_json = 6;
+}
+
+message RegisterGroupVersionSetRequest {
+  GroupRealizationKind realization_kind = 1;
+  repeated GroupVersionSetPart parts = 2;
+  string namespace = 3;
+  string key = 4;
+  optional uint64 key_generation = 5;
+}
+
+message RegisterGroupVersionSetResponse {
+  GroupVersionSetRef version_set = 1;
+  GroupRealizationKind realization_kind = 2;
+  repeated GroupVersionSetPart parts = 3;
+}
+
+message KeyVersionReference {
+  string key = 1;
+  string namespace = 2;
+  string alias = 3;
+  optional uint64 expected_generation = 4;
+}
+
+message VersionReference {
+  oneof value {
+    tensorcast.common.v1.ArtifactSelection explicit_selection = 1;
+    GroupVersionSetRef explicit_version_set = 2;
+    KeyVersionReference key_reference = 3;
+  }
+}
+
+message SemanticGroupContext {
+  string group_kind = 1;
+  string group_id = 2;
+  uint64 epoch = 3;
+  uint32 total_parts = 4;
+  string part_id = 5;
+  repeated string required_part_ids = 6;
+}
+
+message GroupRealizationOptions {
+  bool enabled = 1;
+  VersionReference version = 2;
+  SemanticGroupContext group = 3;
+  bool require_staged_publish = 4;
+  uint64 deadline_unix_nanos = 5;
 }
 
 enum SourceBoundCapabilityFlag {
@@ -800,6 +869,7 @@ message MaterializeIntoMappedTargetRequest {
 
   TransformPlacement placement = 1003;
   ServingArtifactRuntimePolicy serving_artifact_policy = 13;
+  GroupRealizationOptions group_realization = 14;
 }
 
 message MaterializeIntoTargetRequest {
@@ -819,6 +889,7 @@ message MaterializeIntoTargetRequest {
 
   TransformPlacement placement = 1003;
   ServingArtifactRuntimePolicy serving_artifact_policy = 13;
+  GroupRealizationOptions group_realization = 14;
 }
 
 message MaterializeIntoTargetResponse {
@@ -1385,6 +1456,7 @@ message CreateOwnedBindingRequest {
   repeated MappedTensorSpec dst_tensors = 11;
   string binding_layout_id = 12;
   ServingArtifactRuntimePolicy serving_artifact_policy = 13;
+  GroupRealizationOptions group_realization = 14;
 }
 
 message CreateOwnedBindingResponse {
@@ -1398,6 +1470,9 @@ message CreateOwnedBindingResponse {
   MaterializationSource source = 8;
   BindingState state = 9;
   BindingValue current_value = 10;
+  BindingValue staged_value = 11;
+  GroupRealizationAcquireRef group_realization_acquire = 12;
+  bool created_staged_value = 13;
 }
 
 message PrefetchServingBindingRequest {
@@ -1410,6 +1485,7 @@ message PrefetchServingBindingRequest {
   tensorcast.operation.v1.ServingBindingReadiness requested_readiness = 4;
   tensorcast.operation.v1.PrefetchRetentionPolicy retention_policy = 5;
   optional string operation_id = 6;
+  GroupRealizationOptions group_realization = 8;
 }
 
 message PrefetchServingBindingResponse {
@@ -1429,6 +1505,16 @@ message AcquireBindingValueRequest {
   string expected_serving_build_digest = 9;
   optional string local_serving_ref = 10;
   optional int32 caller_pid = 11;
+  GroupRealizationAcquireRef group_realization_acquire = 12;
+}
+
+message GroupRealizationAcquireRef {
+  string transaction_id = 1;
+  string version_set_id = 2;
+  string part_id = 3;
+  string staging_token = 4;
+  bool wait_for_publish = 5;
+  uint32 wait_timeout_ms = 6;
 }
 
 message AcquireBindingValueResponse {
@@ -1438,6 +1524,8 @@ message AcquireBindingValueResponse {
   repeated TensorPayloadDescriptor payloads = 4;
   uint64 reservation_bytes = 5;
   BindingValue current_value = 6;
+  BindingValue acquired_value = 7;
+  bool acquired_staged_value = 8;
 }
 
 message CommitBindingArtifactRequest {
@@ -1542,6 +1630,7 @@ message RefillOwnedBindingRequest {
   PublicDiskSourceHandle public_disk_source = 10;
   SourceExecutionTopology execution_topology = 11;
   CollectivePolicy collective_policy = 12;
+  GroupRealizationOptions group_realization = 13;
 }
 
 message RefillOwnedBindingResponse {
@@ -2156,6 +2245,7 @@ message PublishTargetReplicaRequest {
   optional uint32 ttl_ms = 3;
   optional int32 owner_pid = 4;
   optional string operation_id = 5;
+  GroupRealizationOptions group_realization = 6;
 }
 
 message PublishTargetReplicaResponse {

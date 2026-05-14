@@ -1597,8 +1597,8 @@ class BindingValueRef(BaseModel):
             raise ValueError("binding_layout_id must not be empty")
         if not self.binding_value_id:
             raise ValueError("binding_value_id must not be empty")
-        if int(self.seal_generation) <= 0:
-            raise ValueError("seal_generation must be positive")
+        if int(self.seal_generation) < 0:
+            raise ValueError("seal_generation must be non-negative")
         return self
 
     def to_proto(self) -> publication_pb2.BindingValueRef:
@@ -2657,6 +2657,54 @@ class BindingReservationCapability(BaseModel):
         )
 
 
+class GroupRealizationAcquireRef(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    transaction_id: str
+    version_set_id: str
+    part_id: str
+    staging_token: str
+    wait_for_publish: bool = False
+    wait_timeout_ms: int = 0
+
+    @model_validator(mode="after")
+    def _validate_ref(self) -> "GroupRealizationAcquireRef":
+        for field_name in (
+            "transaction_id",
+            "version_set_id",
+            "part_id",
+            "staging_token",
+        ):
+            if not getattr(self, field_name):
+                raise ValueError(f"{field_name} must not be empty")
+        if int(self.wait_timeout_ms) < 0:
+            raise ValueError("wait_timeout_ms must be non-negative")
+        return self
+
+    def to_proto(self) -> store_daemon_pb2.GroupRealizationAcquireRef:
+        return store_daemon_pb2.GroupRealizationAcquireRef(
+            transaction_id=str(self.transaction_id),
+            version_set_id=str(self.version_set_id),
+            part_id=str(self.part_id),
+            staging_token=str(self.staging_token),
+            wait_for_publish=bool(self.wait_for_publish),
+            wait_timeout_ms=int(self.wait_timeout_ms),
+        )
+
+    @classmethod
+    def from_proto(
+        cls, proto: store_daemon_pb2.GroupRealizationAcquireRef
+    ) -> "GroupRealizationAcquireRef":
+        return cls(
+            transaction_id=str(proto.transaction_id),
+            version_set_id=str(proto.version_set_id),
+            part_id=str(proto.part_id),
+            staging_token=str(proto.staging_token),
+            wait_for_publish=bool(proto.wait_for_publish),
+            wait_timeout_ms=int(proto.wait_timeout_ms),
+        )
+
+
 class PrefetchedServingBinding(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -2672,6 +2720,8 @@ class PrefetchedServingBinding(BaseModel):
     verification_state: BindingValueVerificationState
     serving_artifact_id: str | None = None
     expires_at_ms: int | None = None
+    staged_value: bool = False
+    group_realization_acquire: GroupRealizationAcquireRef | None = None
 
     @model_validator(mode="after")
     def _validate_result(self) -> "PrefetchedServingBinding":
@@ -2688,6 +2738,10 @@ class PrefetchedServingBinding(BaseModel):
             )
         if self.expires_at_ms is not None and int(self.expires_at_ms) < 0:
             raise ValueError("expires_at_ms must be non-negative")
+        if self.staged_value and self.group_realization_acquire is None:
+            raise ValueError(
+                "group_realization_acquire must be provided for staged values"
+            )
         return self
 
     def to_proto(self) -> operation_pb2.PrefetchServingBindingResult:
@@ -2708,6 +2762,18 @@ class PrefetchedServingBinding(BaseModel):
             proto.serving_artifact_id = str(self.serving_artifact_id)
         if self.expires_at_ms is not None:
             proto.expires_at_ms = int(self.expires_at_ms)
+        proto.staged_value = bool(self.staged_value)
+        if self.group_realization_acquire is not None:
+            proto.group_realization_transaction_id = (
+                self.group_realization_acquire.transaction_id
+            )
+            proto.group_realization_version_set_id = (
+                self.group_realization_acquire.version_set_id
+            )
+            proto.group_realization_part_id = self.group_realization_acquire.part_id
+            proto.group_realization_staging_token = (
+                self.group_realization_acquire.staging_token
+            )
         return proto
 
     @classmethod
@@ -2717,6 +2783,14 @@ class PrefetchedServingBinding(BaseModel):
         readiness = _SERVING_READINESS_FROM_PROTO.get(int(proto.readiness))
         if readiness is None:
             raise ValueError("PrefetchServingBindingResult readiness is required")
+        group_realization_acquire = None
+        if bool(proto.staged_value):
+            group_realization_acquire = GroupRealizationAcquireRef(
+                transaction_id=str(proto.group_realization_transaction_id),
+                version_set_id=str(proto.group_realization_version_set_id),
+                part_id=str(proto.group_realization_part_id),
+                staging_token=str(proto.group_realization_staging_token),
+            )
         return cls(
             local_serving_ref=(
                 str(proto.local_serving_ref)
@@ -2744,6 +2818,8 @@ class PrefetchedServingBinding(BaseModel):
             expires_at_ms=(
                 int(proto.expires_at_ms) if proto.HasField("expires_at_ms") else None
             ),
+            staged_value=bool(proto.staged_value),
+            group_realization_acquire=group_realization_acquire,
         )
 
 
@@ -3849,6 +3925,7 @@ __all__ = [
     "ServingBindingResolvedSpecCacheEntry",
     "PrefetchRetentionPolicy",
     "BindingReservationCapability",
+    "GroupRealizationAcquireRef",
     "PrefetchedServingBinding",
     "PrefetchedServingBindingMemberFailure",
     "PrefetchedServingBindingSet",

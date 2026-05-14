@@ -58,6 +58,8 @@ from tensorcast.global_store.repositories import (
     AssemblySlotOccupancyRepository,
     ChunkDirectoryRepository,
     ClusterInfoRepository,
+    GroupRealizationRepository,
+    GroupVersionSetRepository,
     InstanceRepository,
     LayoutSpecRepository,
     LeafRepository,
@@ -102,6 +104,9 @@ from tensorcast.global_store.rpc.assembly_slot_occupancy_rpc_handler import (
 )
 from tensorcast.global_store.rpc.chunk_rpc_handler import ChunkRpcHandler
 from tensorcast.global_store.rpc.disk_location_rpc_handler import DiskLocationRpcHandler
+from tensorcast.global_store.rpc.group_realization_rpc_handler import (
+    GroupRealizationRpcHandler,
+)
 from tensorcast.global_store.rpc.instance_rpc_handler import InstanceRpcHandler
 from tensorcast.global_store.rpc.key_mapping_rpc_handler import KeyMappingRpcHandler
 from tensorcast.global_store.rpc.layout_binding_rpc_handler import (
@@ -136,6 +141,7 @@ from tensorcast.global_store.rpc_servicer_mixins import (
 from tensorcast.global_store.services import (
     ArtifactService,
     ChunkService,
+    GroupRealizationService,
     InstanceService,
     PlacementService,
     RecoveryService,
@@ -239,6 +245,8 @@ class GlobalStoreServicer(
         self.leaf_repository = LeafRepository(self.connection)
         self.binding_repository = ArtifactBindingRepository(self.connection)
         self.key_mapping_repository = KeyMappingRepository(self.connection)
+        self.group_version_set_repository = GroupVersionSetRepository(self.connection)
+        self.group_realization_repository = GroupRealizationRepository(self.connection)
         self.cluster_info_repository = ClusterInfoRepository(self.connection)
         self.disk_location_repository = ArtifactDiskLocationRepository(self.connection)
         self.placement_repository = ArtifactPlacementRepository(self.connection)
@@ -293,6 +301,17 @@ class GlobalStoreServicer(
             artifact_index_repository=self.artifact_indices,
             multibase_sha256_to_hex=multibase_sha256_to_hex,
             alias_cache_ttl_seconds=alias_cache_ttl_seconds,
+            logger=logger,
+        )
+        self.group_realization_service = GroupRealizationService(
+            version_set_repository=self.group_version_set_repository,
+            realization_repository=self.group_realization_repository,
+            key_mapping_repository=self.key_mapping_repository,
+            config=self.config.group_realization,
+        )
+        self.group_realization_rpc_handler = GroupRealizationRpcHandler(
+            group_realization_service=self.group_realization_service,
+            operation_repository=self.operation_repository,
             logger=logger,
         )
         self.artifact_index_rpc_handler = ArtifactIndexRpcHandler(
@@ -908,8 +927,12 @@ class GlobalStoreServicer(
         self.pending_transport_request_repository = PendingTransportRequestRepository(
             self.connection
         )
+        self.key_mapping_repository = KeyMappingRepository(self.connection)
+        self.group_version_set_repository = GroupVersionSetRepository(self.connection)
+        self.group_realization_repository = GroupRealizationRepository(self.connection)
         self.worker_repository = WorkerRepository(self.connection)
         self.instance_repository = InstanceRepository(self.connection)
+        self._init_catalog_handlers()
         self._rebuild_runtime_services_and_handlers()
 
         logger.debug("GlobalStoreServicer state has been reset for the next test run")

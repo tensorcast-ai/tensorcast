@@ -11,6 +11,7 @@ from tensorcast.types import (
     BindingReservationCapability,
     BindingValueRef,
     BindingValueVerificationState,
+    GroupRealizationAcquireRef,
     PrefetchedServingBinding,
     PrefetchedServingBindingMemberFailure,
     PrefetchedServingBindingSet,
@@ -348,6 +349,47 @@ def test_prefetched_serving_binding_result_proto_roundtrip() -> None:
         verification_state=BindingValueVerificationState.LOCAL_ONLY,
         serving_artifact_id=None,
         expires_at_ms=1234,
+    )
+
+    assert PrefetchedServingBinding.from_proto(result.to_proto()) == result
+
+
+def test_prefetched_serving_binding_staged_result_proto_roundtrip() -> None:
+    member = _member()
+    binding_ref = BindingValueRef(
+        binding_id="binding-1",
+        binding_layout_id="layout-1",
+        binding_value_id="staged-value-1",
+        seal_generation=0,
+    )
+    capability = BindingReservationCapability(
+        capability_id="capability-1",
+        binding_value_ref=binding_ref,
+        daemon_id="daemon-1",
+        daemon_session_id="session-1",
+        device_uuid="GPU-0",
+        member=member,
+        reservation_bytes=1024,
+        scope_digest="scope",
+    )
+    result = PrefetchedServingBinding(
+        local_serving_ref="binding-local:binding-1:staged-value-1",
+        binding_value_ref=binding_ref,
+        daemon_id="daemon-1",
+        daemon_session_id="session-1",
+        device_uuid="GPU-0",
+        member=member,
+        reservation_bytes=1024,
+        reservation_capability=capability,
+        readiness="serving_local_ready",
+        verification_state=BindingValueVerificationState.LOCAL_ONLY,
+        staged_value=True,
+        group_realization_acquire=GroupRealizationAcquireRef(
+            transaction_id="txn-1",
+            version_set_id="version-set-1",
+            part_id="member-0",
+            staging_token="stage-1",
+        ),
     )
 
     assert PrefetchedServingBinding.from_proto(result.to_proto()) == result

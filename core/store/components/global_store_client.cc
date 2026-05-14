@@ -152,7 +152,11 @@ const char* rpc_service_for_method(absl::string_view method_name) {
       method_name == "UpsertArtifactMetadata" || method_name == "GetArtifactIndex" ||
       method_name == "GetArtifactIndexById" || method_name == "UpsertArtifactDiskLocation" ||
       method_name == "ListArtifactDiskLocations" || method_name == "UpsertKeyMapping" ||
-      method_name == "SwapKeyMapping" || method_name == "ResolveKeyMapping" || method_name == "RevokeKeyMapping") {
+      method_name == "SwapKeyMapping" || method_name == "ResolveKeyMapping" || method_name == "RevokeKeyMapping" ||
+      method_name == "RegisterGroupVersionSet" || method_name == "BeginOrJoinGroupRealization" ||
+      method_name == "ReportGroupRealizationPrepared" || method_name == "PublishGroupRealization" ||
+      method_name == "WaitGroupRealizationPublished" || method_name == "AbortGroupRealization" ||
+      method_name == "GetGroupRealization") {
     return "tensorcast.global_store.v1.ArtifactCatalogService";
   }
   if (method_name == "GetArtifactInfoById" || method_name == "UpdateArtifactViewState" ||
@@ -3382,6 +3386,161 @@ absl::Status GlobalStoreClient::revoke_key_mapping(std::string_view key) {
     return absl::NotFoundError("key not found");
   }
   return absl::OkStatus();
+}
+
+absl::StatusOr<global_store::RegisterGroupVersionSetResponse> GlobalStoreClient::register_group_version_set(
+    const global_store::RegisterGroupVersionSetRequest& request,
+    const RpcOptions& rpc_options) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+
+  global_store::RegisterGroupVersionSetResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return artifact_catalog_stub_->RegisterGroupVersionSet(ctx, req, resp);
+      },
+      "RegisterGroupVersionSet",
+      rpc_options);
+  if (!status.ok()) {
+    return status;
+  }
+  return response;
+}
+
+absl::StatusOr<global_store::BeginOrJoinGroupRealizationResponse> GlobalStoreClient::begin_or_join_group_realization(
+    const global_store::BeginOrJoinGroupRealizationRequest& request,
+    const RpcOptions& rpc_options) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+
+  global_store::BeginOrJoinGroupRealizationResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return artifact_catalog_stub_->BeginOrJoinGroupRealization(ctx, req, resp);
+      },
+      "BeginOrJoinGroupRealization",
+      rpc_options);
+  if (!status.ok()) {
+    return status;
+  }
+  return response;
+}
+
+absl::StatusOr<global_store::ReportGroupRealizationPreparedResponse> GlobalStoreClient::
+    report_group_realization_prepared(
+        const global_store::ReportGroupRealizationPreparedRequest& request,
+        const RpcOptions& rpc_options) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+
+  global_store::ReportGroupRealizationPreparedResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return artifact_catalog_stub_->ReportGroupRealizationPrepared(ctx, req, resp);
+      },
+      "ReportGroupRealizationPrepared",
+      rpc_options);
+  if (!status.ok()) {
+    return status;
+  }
+  return response;
+}
+
+absl::StatusOr<global_store::PublishGroupRealizationResponse> GlobalStoreClient::publish_group_realization(
+    const global_store::PublishGroupRealizationRequest& request,
+    const RpcOptions& rpc_options) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+
+  global_store::PublishGroupRealizationResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return artifact_catalog_stub_->PublishGroupRealization(ctx, req, resp);
+      },
+      "PublishGroupRealization",
+      rpc_options);
+  if (!status.ok()) {
+    return status;
+  }
+  return response;
+}
+
+absl::StatusOr<global_store::WaitGroupRealizationPublishedResponse> GlobalStoreClient::wait_group_realization_published(
+    const global_store::WaitGroupRealizationPublishedRequest& request,
+    const RpcOptions& rpc_options) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+
+  global_store::WaitGroupRealizationPublishedResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return artifact_catalog_stub_->WaitGroupRealizationPublished(ctx, req, resp);
+      },
+      "WaitGroupRealizationPublished",
+      rpc_options);
+  if (!status.ok()) {
+    return status;
+  }
+  return response;
+}
+
+absl::StatusOr<global_store::AbortGroupRealizationResponse> GlobalStoreClient::abort_group_realization(
+    const global_store::AbortGroupRealizationRequest& request,
+    const RpcOptions& rpc_options) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+
+  global_store::AbortGroupRealizationResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return artifact_catalog_stub_->AbortGroupRealization(ctx, req, resp);
+      },
+      "AbortGroupRealization",
+      rpc_options);
+  if (!status.ok()) {
+    return status;
+  }
+  return response;
+}
+
+absl::StatusOr<global_store::GetGroupRealizationResponse> GlobalStoreClient::get_group_realization(
+    const global_store::GetGroupRealizationRequest& request,
+    const RpcOptions& rpc_options) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+
+  global_store::GetGroupRealizationResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return artifact_catalog_stub_->GetGroupRealization(ctx, req, resp);
+      },
+      "GetGroupRealization",
+      rpc_options);
+  if (!status.ok()) {
+    return status;
+  }
+  return response;
 }
 
 absl::StatusOr<std::string> GlobalStoreClient::get_cluster_id() {

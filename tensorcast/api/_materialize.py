@@ -391,6 +391,7 @@ def materialize_artifact_v2(
             target_device_type=target_device_type,
             lease_mode=lease_mode,
             collective_load_group=collective_load_group,
+            group_realization=ctx.group_realization if ctx is not None else None,
             timeout_s=effective_timeout_s,
             timing_out=materialize_timing,
         )

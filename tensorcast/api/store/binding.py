@@ -30,6 +30,7 @@ from tensorcast.types import (
     AssemblyAttemptRef,
     BindingValueRef,
     ExecutionDiagnostics,
+    GroupRealizationAcquireRef,
     PartialSealResult,
     PublicDiskSourceHandle,
     ServingRuntimePolicyInput,
@@ -46,21 +47,7 @@ if TYPE_CHECKING:
     from tensorcast.proto.common.v1 import common_pb2
 
 
-_TRANSPORT_GROUP_OPID_MARKER = "#tcg:"
-_TRANSPORT_GROUP_KIND_TAG = "tc.transport.group.kind"
-_TRANSPORT_GROUP_ID_TAG = "tc.transport.group.id"
-_TRANSPORT_GROUP_TOTAL_PARTS_TAG = "tc.transport.group.total_parts"
-_TRANSPORT_GROUP_PART_ID_TAG = "tc.transport.group.part_id"
-_TRANSPORT_GROUP_PRIORITY_TAG = "tc.transport.group.priority"
-_TRANSPORT_GROUP_EPOCH_TAG = "tc.transport.group.epoch"
-_TRANSPORT_REQUEST_ID_TAG = "tc.transport.request_id"
-_COLLECTIVE_GROUP_ID_OPID_KEY = "clid"
-_COLLECTIVE_GROUP_WORLD_SIZE_OPID_KEY = "clws"
-_COLLECTIVE_GROUP_RANK_OPID_KEY = "clrk"
 _CANONICAL_FULL_CONTRIBUTION_VIEW_ID = "__canonical_full__"
-_ALLOWED_OPERATION_TOKEN_CHARS = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:"
-)
 
 
 def _artifact_id_kind_from_proto(kind: int, artifact_id: str) -> ArtifactIdKind:
@@ -116,123 +103,25 @@ def _typed_descriptor_from_proto(
     )
 
 
-def _sanitize_operation_token(value: str | None) -> str:
-    raw = "" if value is None else str(value).strip()
-    if not raw:
-        return ""
-    return "".join(ch if ch in _ALLOWED_OPERATION_TOKEN_CHARS else "_" for ch in raw)
-
-
-def _read_context_tag_str(
-    tags: Mapping[str, object] | None,
-    key: str,
-) -> str:
-    if not tags:
-        return ""
-    value = tags.get(key)
-    if value is None:
-        return ""
-    return _sanitize_operation_token(str(value))
-
-
-def _read_context_tag_int(
-    tags: Mapping[str, object] | None,
-    key: str,
-    *,
-    default: int,
-) -> int:
-    if not tags:
-        return default
-    value = tags.get(key)
-    if value is None:
-        return default
-    try:
-        return int(str(value))
-    except (TypeError, ValueError):
-        return default
-
-
 def _build_transport_operation_id(
     *,
     base_operation_id: str,
     ctx: CallContext | None,
     include_collective: bool = True,
 ) -> str:
-    if ctx is None:
-        return base_operation_id
-
-    tags = ctx.tags
-    group_kind = _read_context_tag_str(tags, _TRANSPORT_GROUP_KIND_TAG)
-    group_id = _read_context_tag_str(tags, _TRANSPORT_GROUP_ID_TAG)
-    part_id = _read_context_tag_str(tags, _TRANSPORT_GROUP_PART_ID_TAG)
-    total_parts = _read_context_tag_int(
-        tags,
-        _TRANSPORT_GROUP_TOTAL_PARTS_TAG,
-        default=0,
-    )
-    priority = _read_context_tag_int(
-        tags,
-        _TRANSPORT_GROUP_PRIORITY_TAG,
-        default=0,
-    )
-    epoch = _read_context_tag_int(
-        tags,
-        _TRANSPORT_GROUP_EPOCH_TAG,
-        default=0,
-    )
-    request_id = _read_context_tag_str(tags, _TRANSPORT_REQUEST_ID_TAG)
-    collective_group_id = ""
-    collective_world_size = 0
-    collective_rank = 0
-    if include_collective:
-        collective = ctx.collective
-        if collective is not None:
-            collective_group_id = _sanitize_operation_token(collective.group_id)
-            try:
-                collective_world_size = int(collective.world_size)
-                collective_rank = int(collective.rank)
-            except (TypeError, ValueError):
-                collective_group_id = ""
-                collective_world_size = 0
-                collective_rank = 0
-
-    metadata_parts: list[str] = []
-    if group_kind and group_id and part_id and total_parts > 0:
-        if not request_id:
-            request_id = _sanitize_operation_token(f"{group_id}:{part_id}")
-        metadata_parts.extend(
-            [
-                f"kind={group_kind}",
-                f"gid={group_id}",
-                f"tot={int(total_parts)}",
-                f"part={part_id}",
-                f"pri={int(priority)}",
-                f"ep={int(epoch)}",
-            ]
-        )
-    if (
-        collective_group_id
-        and collective_world_size > 1
-        and 0 <= collective_rank < collective_world_size
-    ):
-        metadata_parts.extend(
-            [
-                f"{_COLLECTIVE_GROUP_ID_OPID_KEY}={collective_group_id}",
-                f"{_COLLECTIVE_GROUP_WORLD_SIZE_OPID_KEY}={int(collective_world_size)}",
-                f"{_COLLECTIVE_GROUP_RANK_OPID_KEY}={int(collective_rank)}",
-            ]
-        )
-
-    if request_id:
-        metadata_parts.append(f"rid={request_id}")
-
-    if metadata_parts:
-        return (
-            f"{base_operation_id}{_TRANSPORT_GROUP_OPID_MARKER}"
-            f"{';'.join(metadata_parts)}"
-        )
-
+    _ = ctx
+    _ = include_collective
     return base_operation_id
+
+
+def _reject_live_swap_group_realization(ctx: CallContext | None) -> None:
+    if ctx is None or ctx.group_realization is None:
+        return
+    raise ArtifactError(
+        "Binding.swap group_realization is disabled; use staged serving prefetch/acquire",
+        status_code="FAILED_PRECONDITION",
+        retryable=False,
+    )
 
 
 def _clone_view_spec(
@@ -603,6 +492,59 @@ class SealedBindingValue:
         return binding
 
 
+@dataclass(frozen=True, slots=True)
+class StagedBindingValue:
+    binding_id: str
+    binding_layout_id: str
+    binding_value_id: str
+    seal_generation: int
+    source_artifact_id: str | None
+    selection: "common_pb2.ArtifactSelection | None"
+    is_artifact_backed: bool
+    group_realization_acquire: GroupRealizationAcquireRef
+    acquired: bool
+    _binding_ref: weakref.ReferenceType["Binding"] = field(
+        repr=False,
+        compare=False,
+    )
+    verification_state: int = (
+        store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_UNSPECIFIED
+    )
+    verification_failure_reason: str | None = None
+
+    @property
+    def artifact_id(self) -> str | None:
+        return self.source_artifact_id
+
+    def to_binding_value_ref(self) -> BindingValueRef:
+        return BindingValueRef(
+            binding_id=str(self.binding_id),
+            binding_layout_id=str(self.binding_layout_id),
+            binding_value_id=str(self.binding_value_id),
+            seal_generation=int(self.seal_generation),
+        )
+
+    def acquire(
+        self,
+        *,
+        wait_for_publish: bool = True,
+        wait_timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> "StagedBindingValue":
+        binding = self._binding_ref()
+        if binding is None:
+            raise ArtifactError(
+                "Binding is no longer available",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        return binding.acquire_staged_value(
+            wait_for_publish=wait_for_publish,
+            wait_timeout_s=wait_timeout_s,
+            ctx=ctx,
+        )
+
+
 class Binding:
     """Stable, client-owned CUDA layout that can be refilled in-place."""
 
@@ -668,10 +610,44 @@ class Binding:
         )
 
     @property
+    def staged_value(self) -> StagedBindingValue | None:
+        metadata = getattr(self._slot, "staged_value_metadata", None)
+        acquire_ref = getattr(self._slot, "group_realization_acquire", None)
+        if metadata is None:
+            return None
+        if acquire_ref is None:
+            raise ArtifactError(
+                "staged binding is missing group_realization_acquire",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        return StagedBindingValue(
+            binding_id=metadata.binding_id,
+            binding_layout_id=metadata.binding_layout_id,
+            binding_value_id=metadata.binding_value_id,
+            seal_generation=metadata.seal_generation,
+            source_artifact_id=metadata.source_artifact_id,
+            selection=clone_selection(metadata.selection),
+            is_artifact_backed=metadata.is_artifact_backed,
+            verification_state=metadata.verification_state,
+            verification_failure_reason=metadata.verification_failure_reason,
+            group_realization_acquire=acquire_ref,
+            acquired=bool(getattr(self._slot, "staged_value_acquired", False)),
+            _binding_ref=weakref.ref(self),
+        )
+
+    @property
+    def group_realization_acquire(self) -> GroupRealizationAcquireRef | None:
+        return getattr(self._slot, "group_realization_acquire", None)
+
+    @property
     def artifact_id(self) -> str | None:
         current_value = self.current_value
         if current_value is None or not current_value.is_artifact_backed:
-            return None
+            staged_value = self.staged_value
+            if staged_value is None or not staged_value.is_artifact_backed:
+                return None
+            return staged_value.source_artifact_id
         return current_value.source_artifact_id
 
     @property
@@ -707,6 +683,13 @@ class Binding:
         drain_timeout_s: float | None = None,
         ctx: CallContext | None = None,
     ) -> SealedBindingValue:
+        if self.staged_value is not None:
+            raise ArtifactError(
+                "Binding.swap() is disabled for staged group-realization values",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        _reject_live_swap_group_realization(ctx)
         include_collective = not isinstance(self._slot, OwnedBindingSlot)
         operation_id = _build_transport_operation_id(
             base_operation_id=uuid.uuid4().hex,
@@ -759,6 +742,13 @@ class Binding:
         options: "GetArtifactOptions | None" = None,
         ctx: CallContext | None = None,
     ) -> BindingUpdateEpoch:
+        if self.staged_value is not None:
+            raise ArtifactError(
+                "Binding.realize_from() is disabled for staged group-realization values",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        _reject_live_swap_group_realization(ctx)
         operation_id = _build_transport_operation_id(
             base_operation_id=uuid.uuid4().hex,
             ctx=ctx,
@@ -965,6 +955,12 @@ class Binding:
         *,
         ctx: CallContext | None = None,
     ) -> SealedBindingValue:
+        if self.staged_value is not None:
+            raise ArtifactError(
+                "Binding.publish_replica() is disabled for staged group-realization values",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
         self._slot.publish_replica(ttl_ms=self._publish_ttl_ms, ctx=ctx)
         self._start_keepalive()
         current_value = self.current_value
@@ -981,6 +977,12 @@ class Binding:
         *,
         ctx: CallContext | None = None,
     ) -> "Operation[SealedBindingValue]":
+        if self.staged_value is not None:
+            raise ArtifactError(
+                "Binding.publish_replica_operation() is disabled for staged group-realization values",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
         slot_op = self._slot.publish_replica_operation(
             ttl_ms=self._publish_ttl_ms,
             ctx=ctx,
@@ -1008,6 +1010,34 @@ class Binding:
             cancel_fn=slot_op.cancel,
             ctx=ctx,
         )
+
+    def acquire_staged_value(
+        self,
+        *,
+        wait_for_publish: bool = True,
+        wait_timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> StagedBindingValue:
+        acquire = getattr(self._slot, "acquire_staged_value", None)
+        if not callable(acquire):
+            raise ArtifactError(
+                "acquire_staged_value() requires a daemon-owned staged binding",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        acquire(
+            wait_for_publish=wait_for_publish,
+            wait_timeout_s=wait_timeout_s,
+            ctx=ctx,
+        )
+        staged_value = self.staged_value
+        if staged_value is None:
+            raise ArtifactError(
+                "acquire_staged_value() completed without a staged value",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        return staged_value
 
     def _start_keepalive(self) -> None:
         lease_id = self._slot.published_lease_id
@@ -1065,4 +1095,5 @@ __all__ = [
     "Binding",
     "BindingUpdateEpoch",
     "SealedBindingValue",
+    "StagedBindingValue",
 ]

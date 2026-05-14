@@ -675,6 +675,34 @@ class IGlobalStoreClient {
 
   virtual absl::Status revoke_key_mapping(std::string_view key) = 0;
 
+  virtual absl::StatusOr<global_store::RegisterGroupVersionSetResponse> register_group_version_set(
+      const global_store::RegisterGroupVersionSetRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<global_store::BeginOrJoinGroupRealizationResponse> begin_or_join_group_realization(
+      const global_store::BeginOrJoinGroupRealizationRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<global_store::ReportGroupRealizationPreparedResponse> report_group_realization_prepared(
+      const global_store::ReportGroupRealizationPreparedRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<global_store::PublishGroupRealizationResponse> publish_group_realization(
+      const global_store::PublishGroupRealizationRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<global_store::WaitGroupRealizationPublishedResponse> wait_group_realization_published(
+      const global_store::WaitGroupRealizationPublishedRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<global_store::AbortGroupRealizationResponse> abort_group_realization(
+      const global_store::AbortGroupRealizationRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<global_store::GetGroupRealizationResponse> get_group_realization(
+      const global_store::GetGroupRealizationRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
   virtual absl::StatusOr<std::string> get_cluster_id() = 0;
 
   virtual absl::Status upsert_artifact_disk_location(
@@ -1093,6 +1121,34 @@ class GlobalStoreClient : public IGlobalStoreClient {
       std::optional<uint64_t> expected_generation) override;
 
   absl::Status revoke_key_mapping(std::string_view key) override;
+
+  absl::StatusOr<global_store::RegisterGroupVersionSetResponse> register_group_version_set(
+      const global_store::RegisterGroupVersionSetRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<global_store::BeginOrJoinGroupRealizationResponse> begin_or_join_group_realization(
+      const global_store::BeginOrJoinGroupRealizationRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<global_store::ReportGroupRealizationPreparedResponse> report_group_realization_prepared(
+      const global_store::ReportGroupRealizationPreparedRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<global_store::PublishGroupRealizationResponse> publish_group_realization(
+      const global_store::PublishGroupRealizationRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<global_store::WaitGroupRealizationPublishedResponse> wait_group_realization_published(
+      const global_store::WaitGroupRealizationPublishedRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<global_store::AbortGroupRealizationResponse> abort_group_realization(
+      const global_store::AbortGroupRealizationRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<global_store::GetGroupRealizationResponse> get_group_realization(
+      const global_store::GetGroupRealizationRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
 
   absl::StatusOr<std::string> get_cluster_id() override;
 

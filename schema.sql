@@ -408,20 +408,163 @@ CREATE TABLE IF NOT EXISTS artifact_persistence_status (
 );
 CREATE INDEX IF NOT EXISTS idx_artifact_persistence_status_artifact_state ON artifact_persistence_status(artifact_id, state);
 
--- Key mapping: Human key -> artifact_id with optional routing hints
+-- Key mapping: Human key -> current target with optional routing hints.
+--
+-- `key_mappings` is intentionally only the fast current pointer. The
+-- generation-forming truth lives in `key_version_targets`.
 CREATE TABLE IF NOT EXISTS key_mappings (
     key TEXT PRIMARY KEY,
-    artifact_id TEXT NOT NULL,
+    artifact_id TEXT NULL,
     replica_uuid TEXT NULL,
     daemon_address TEXT NULL,
     ttl_seconds BIGINT NULL,
     generation BIGINT NOT NULL DEFAULT 0,
     kind TEXT NOT NULL DEFAULT 'IMMUTABLE',
+    target_kind TEXT NOT NULL DEFAULT 'artifact_selection' CHECK (target_kind IN ('artifact_selection','group_version_set')),
+    group_version_set_id TEXT NULL,
+    selection_hash BLOB NULL,
+    manifest_hash BLOB NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CHECK (
+        (
+            target_kind = 'artifact_selection'
+            AND artifact_id IS NOT NULL
+            AND group_version_set_id IS NULL
+        )
+        OR (
+            target_kind = 'group_version_set'
+            AND group_version_set_id IS NOT NULL
+        )
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_key_mappings_artifact ON key_mappings(artifact_id);
+
+CREATE TABLE IF NOT EXISTS key_version_targets (
+    namespace TEXT NOT NULL DEFAULT '',
+    key TEXT NOT NULL,
+    generation BIGINT NOT NULL,
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('artifact_selection','group_version_set')),
+    artifact_id TEXT NULL,
+    view_id TEXT NULL,
+    group_version_set_id TEXT NULL,
+    selection_hash BLOB NULL,
+    manifest_hash BLOB NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (
+        (
+            target_kind = 'artifact_selection'
+            AND artifact_id IS NOT NULL
+            AND group_version_set_id IS NULL
+        )
+        OR (
+            target_kind = 'group_version_set'
+            AND group_version_set_id IS NOT NULL
+            AND artifact_id IS NULL
+            AND view_id IS NULL
+        )
+    ),
+    PRIMARY KEY (namespace, key, generation)
+);
+
+CREATE INDEX IF NOT EXISTS idx_key_version_targets_current ON key_version_targets(namespace, key, generation);
+CREATE INDEX IF NOT EXISTS idx_key_version_targets_artifact ON key_version_targets(artifact_id, view_id);
+CREATE INDEX IF NOT EXISTS idx_key_version_targets_version_set ON key_version_targets(group_version_set_id);
+
+CREATE TABLE IF NOT EXISTS group_version_sets (
+    version_set_id TEXT PRIMARY KEY,
+    realization_kind TEXT NOT NULL CHECK (realization_kind IN ('same_selection','per_part_selection')),
+    namespace TEXT NULL,
+    key TEXT NULL,
+    key_generation BIGINT NULL,
+    total_parts INTEGER NOT NULL,
+    manifest_hash BLOB NOT NULL UNIQUE,
+    manifest_generation BIGINT NOT NULL DEFAULT 1,
+    logical_layout_hash BLOB NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS group_version_set_parts (
+    version_set_id TEXT NOT NULL,
+    part_id TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    view_id TEXT NULL,
+    requested_byte_space TEXT NOT NULL,
+    selection_hash BLOB NOT NULL,
+    logical_layout_hash BLOB NULL,
+    part_metadata_json TEXT NULL,
+    selection_proto BLOB NULL,
+    PRIMARY KEY (version_set_id, part_id),
+    FOREIGN KEY (version_set_id) REFERENCES group_version_sets(version_set_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_version_set_parts_artifact ON group_version_set_parts(artifact_id, view_id, requested_byte_space);
+
+CREATE TABLE IF NOT EXISTS group_realization_transactions (
+    transaction_id TEXT PRIMARY KEY,
+    group_kind TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    epoch BIGINT NOT NULL,
+    version_set_id TEXT NOT NULL,
+    realization_kind TEXT NOT NULL CHECK (realization_kind IN ('same_selection','per_part_selection')),
+    transaction_fingerprint BLOB NOT NULL,
+    required_part_ids_json TEXT NOT NULL,
+    total_parts INTEGER NOT NULL,
+    prepared_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    published_count INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL CHECK (
+        state IN ('open','resolved','preparing','ready_to_publish','published','aborted','expired')
+    ),
+    deadline_unix_nanos BIGINT NULL,
+    namespace TEXT NULL,
+    key TEXT NULL,
+    key_generation BIGINT NULL,
+    manifest_hash BLOB NULL,
+    failure_code TEXT NULL,
+    failure_detail TEXT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_state_change_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (group_kind, group_id, epoch),
+    FOREIGN KEY (version_set_id) REFERENCES group_version_sets(version_set_id)
+);
+
+CREATE TABLE IF NOT EXISTS group_realization_members (
+    transaction_id TEXT NOT NULL,
+    part_id TEXT NOT NULL,
+    daemon_id TEXT NOT NULL DEFAULT '',
+    worker_id TEXT NULL,
+    daemon_session_id TEXT NULL,
+    materialization_attempt_id TEXT NULL,
+    artifact_id TEXT NOT NULL,
+    view_id TEXT NULL,
+    requested_byte_space TEXT NOT NULL,
+    selection_hash BLOB NOT NULL,
+    member_fingerprint BLOB NULL,
+    state TEXT NOT NULL CHECK (
+        state IN ('joined','preparing','prepared','published','failed','cancelled','expired')
+    ),
+    staged_binding_id TEXT NULL,
+    staged_binding_value_id TEXT NULL,
+    staging_token TEXT NULL,
+    staging_epoch BIGINT NULL,
+    expected_previous_seal_generation BIGINT NULL,
+    prepared_value_hash BLOB NULL,
+    source_replica_id TEXT NULL,
+    source_export_generation BIGINT NULL,
+    child_transport_request_id TEXT NULL,
+    failure_code TEXT NULL,
+    failure_detail TEXT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (transaction_id, part_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_realization_transactions_state_deadline ON group_realization_transactions(state, deadline_unix_nanos);
+CREATE INDEX IF NOT EXISTS idx_group_realization_transactions_version_set ON group_realization_transactions(version_set_id);
+CREATE INDEX IF NOT EXISTS idx_group_realization_members_state ON group_realization_members(transaction_id, state);
 
 -- Disk locations (durable shared-disk persistence locations)
 CREATE TABLE IF NOT EXISTS artifact_disk_locations (

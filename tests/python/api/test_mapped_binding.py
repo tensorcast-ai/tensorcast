@@ -12,8 +12,8 @@ from typing import Any
 import pytest
 import torch
 
-from tensorcast.api.context import CallContext, CollectiveLoadGroup
 from tensorcast.api import _region_cache as region_cache
+from tensorcast.api.context import CallContext, CollectiveLoadGroup
 from tensorcast.api.store import ArtifactError, Store
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
@@ -807,10 +807,9 @@ def test_bind_into_mapping_propagates_collective_hint_in_operation_id(
 
     assert len(client.into_mapped_calls) == 1
     operation_id = client.into_mapped_calls[0]["operation_id"]
-    assert "#tcg:" in operation_id
-    assert "clid=same-host-tp-load" in operation_id
-    assert "clws=8" in operation_id
-    assert "clrk=3" in operation_id
+    assert "clid=same-host-tp-load" not in operation_id
+    assert "clws=8" not in operation_id
+    assert "clrk=3" not in operation_id
 
 
 @pytest.mark.requires_cuda_or_fake

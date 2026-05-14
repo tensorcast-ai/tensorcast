@@ -11,6 +11,7 @@ import os
 from google.protobuf.any_pb2 import Any
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from tensorcast.api.context import GroupRealization
 from tensorcast.api.store.serving_binding_spec_cache import (
     ServingBindingSpecCacheRecord,
     read_matching_resolved_spec_cache_entry,
@@ -315,6 +316,7 @@ def prefetch_reference_binding(
     target: ServingBindingTarget,
     retention_policy: PrefetchRetentionPolicy | None = None,
     operation_id: str | None = None,
+    group_realization: GroupRealization | None = None,
     timeout_s: float = 30.0,
 ) -> PrefetchedServingBinding:
     selection = common_pb2.ArtifactSelection(artifact_id=source_artifact_id)
@@ -324,6 +326,7 @@ def prefetch_reference_binding(
         requested_readiness="serving_local_ready",
         retention_policy=retention_policy,
         operation_id=operation_id,
+        group_realization=group_realization,
         timeout_s=timeout_s,
     )
     if response.status.state != operation_pb2.OPERATION_STATE_SUCCESS:
@@ -384,6 +387,7 @@ def acquire_reference_binding_response(
         expected_daemon_session_id=prefetched.daemon_session_id,
         expected_member=prefetched.member,
         local_serving_ref=prefetched.local_serving_ref,
+        group_realization_acquire=prefetched.group_realization_acquire,
         caller_pid=caller_pid or os.getpid(),
         timeout_s=timeout_s,
     )
