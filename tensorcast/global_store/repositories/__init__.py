@@ -25,6 +25,7 @@ from .placement_repository import (
     ArtifactPersistenceStatusRepository,
     ArtifactPlacementRepository,
 )
+from .progressive_repository import ProgressiveCoverageRepository
 from .proof_repository import ProofRepository
 from .replica_repository import ReplicaRepository
 from .shard_home_lease_repository import ShardHomeLeaseRepository
@@ -54,6 +55,7 @@ __all__ = [
     "OperationRepository",
     "PendingTransportRequestRepository",
     "ProofRepository",
+    "ProgressiveCoverageRepository",
     "ReplicaRepository",
     "ShardHomeLeaseRepository",
     "TransportRepository",

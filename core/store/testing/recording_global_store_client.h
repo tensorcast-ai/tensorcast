@@ -53,6 +53,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   std::vector<components::MemoryTierLeaseDescriptor> memory_tier_leases;
   std::vector<components::PlacementPlanResult> placement_plans;
   std::vector<components::PersistenceReport> persistence_reports;
+  std::vector<tensorcast::global_store::v1::ReportProgressiveCoverageRequest> progressive_coverage_reports;
   std::unordered_map<std::string, tensorcast::operation::v1::GetOperationResponse> operations;
   std::unordered_map<std::string, std::string> operation_lease_tokens;
   std::unordered_map<std::string, std::string> operation_lease_owners;
@@ -66,6 +67,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   absl::Status upsert_artifact_metadata_status{absl::OkStatus()};
   absl::Status unregister_replica_status{absl::OkStatus()};
   absl::Status unregister_replica_by_worker_status{absl::OkStatus()};
+  absl::Status report_progressive_coverage_status{absl::OkStatus()};
   bool drain_success{true};
   uint32_t drain_current_requests{0};
   std::string remote_node_id{"stub-remote"};
@@ -86,6 +88,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     std::vector<uint64_t> buffer_sizes;
     common::memory::MemoryLocation memory_type{common::memory::MemoryLocation::CPU};
     int device_id{0};
+    uint64_t export_generation{0};
   };
 
   struct UnregisterReplicaByWorkerCall {
@@ -202,7 +205,8 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       uint32_t,
       const std::optional<std::string>&,
       std::optional<std::string_view> view_id,
-      const std::optional<common::v1::ArtifactDescriptor>&) override {
+      const std::optional<common::v1::ArtifactDescriptor>&,
+      uint64_t export_generation) override {
     if (register_memory_replica_delay > absl::ZeroDuration()) {
       absl::SleepFor(register_memory_replica_delay);
     }
@@ -218,6 +222,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     info.memory_type =
         (device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;
     info.device_id = device.ordinal;
+    info.export_generation = export_generation;
     transport_replicas[transport_key(info.artifact_id, view_id)] = std::move(info);
     return std::string("memory_replica");
   }
@@ -793,6 +798,20 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       const tensorcast::global_store::v1::GetGroupRealizationRequest&,
       const components::RpcOptions&) override {
     return absl::UnimplementedError("get_group_realization not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::ReportProgressiveCoverageResponse> report_progressive_coverage(
+      const tensorcast::global_store::v1::ReportProgressiveCoverageRequest& request,
+      const components::RpcOptions&) override {
+    if (!report_progressive_coverage_status.ok()) {
+      return report_progressive_coverage_status;
+    }
+    progressive_coverage_reports.push_back(request);
+    tensorcast::global_store::v1::ReportProgressiveCoverageResponse response;
+    response.set_status(tensorcast::global_store::v1::STATUS_OK);
+    response.set_coverage_id(request.coverage_id());
+    response.set_updated(true);
+    return response;
   }
 
   absl::Status publish_memory_tier_status(const components::MemoryTierStatusPayload& status) override {

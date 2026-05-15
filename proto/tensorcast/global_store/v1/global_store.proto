@@ -45,6 +45,11 @@ service ClusterRuntimeService {
   rpc RequestReplicaTransport(RequestReplicaTransportRequest) returns (RequestReplicaTransportResponse) {}
   rpc CompleteReplicaTransport(CompleteReplicaTransportRequest) returns (CompleteReplicaTransportResponse) {}
   rpc QueryTransportWindow(QueryTransportWindowRequest) returns (QueryTransportWindowResponse) {}
+  rpc ReportProgressiveCoverage(ReportProgressiveCoverageRequest) returns (ReportProgressiveCoverageResponse) {}
+  rpc FindProgressiveSource(FindProgressiveSourceRequest) returns (FindProgressiveSourceResponse) {}
+  rpc CompleteProgressiveAssignment(CompleteProgressiveAssignmentRequest) returns (CompleteProgressiveAssignmentResponse) {}
+  rpc RetireProgressiveCoverage(RetireProgressiveCoverageRequest) returns (RetireProgressiveCoverageResponse) {}
+  rpc ExpireProgressiveState(ExpireProgressiveStateRequest) returns (ExpireProgressiveStateResponse) {}
 
   // Chunk directory operations
   rpc QueryChunkLocations(QueryChunkLocationsRequest) returns (QueryChunkLocationsResponse) {}
@@ -1066,6 +1071,158 @@ message TransportWindowRow {
 message QueryTransportWindowResponse {
   Status status = 1;
   repeated TransportWindowRow rows = 2;
+}
+
+enum ProgressiveCoverageKind {
+  PROGRESSIVE_COVERAGE_KIND_UNSPECIFIED = 0;
+  PROGRESSIVE_COVERAGE_KIND_BYTE_PREFIX = 1;
+  PROGRESSIVE_COVERAGE_KIND_TENSOR_PREFIX = 2; // Reserved for v1.1.
+}
+
+enum ProgressiveCoverageState {
+  PROGRESSIVE_COVERAGE_STATE_UNSPECIFIED = 0;
+  PROGRESSIVE_COVERAGE_STATE_PENDING = 1;
+  PROGRESSIVE_COVERAGE_STATE_VERIFIED = 2;
+  PROGRESSIVE_COVERAGE_STATE_FAILED = 3;
+  PROGRESSIVE_COVERAGE_STATE_RETIRED = 4;
+}
+
+enum ProgressiveExportState {
+  PROGRESSIVE_EXPORT_STATE_UNSPECIFIED = 0;
+  PROGRESSIVE_EXPORT_STATE_NOT_EXPORTABLE = 1;
+  PROGRESSIVE_EXPORT_STATE_IN_PROGRESS_EXPORTABLE = 2;
+  PROGRESSIVE_EXPORT_STATE_COMPLETE_EXPORTABLE = 3;
+}
+
+enum ProgressiveAssignmentState {
+  PROGRESSIVE_ASSIGNMENT_STATE_UNSPECIFIED = 0;
+  PROGRESSIVE_ASSIGNMENT_STATE_CLAIMED = 1;
+  PROGRESSIVE_ASSIGNMENT_STATE_READING = 2;
+  PROGRESSIVE_ASSIGNMENT_STATE_SUCCEEDED = 3;
+  PROGRESSIVE_ASSIGNMENT_STATE_FAILED = 4;
+  PROGRESSIVE_ASSIGNMENT_STATE_EXPIRED = 5;
+  PROGRESSIVE_ASSIGNMENT_STATE_CANCELLED = 6;
+}
+
+message ProgressiveCoverageIdentity {
+  string artifact_id = 1;
+  tensorcast.common.v1.ByteSpaceRef byte_space = 2;
+  bytes selection_hash = 3;
+  bytes logical_layout_hash = 4;
+  tensorcast.common.v1.HashSpaceRef hash_space = 5;
+  bytes coverage_order_hash = 6;
+  string group_version_set_id = 7;
+  string group_part_id = 8;
+}
+
+message ReportProgressiveCoverageRequest {
+  string coverage_id = 1;
+  ProgressiveCoverageIdentity identity = 2;
+  string replica_id = 3;
+  string daemon_id = 4;
+  string daemon_session_id = 5;
+  string worker_id = 6;
+  uint64 source_export_generation = 7;
+  uint64 coverage_epoch = 8;
+  ProgressiveCoverageKind coverage_kind = 9;
+  uint64 verified_units = 10;
+  uint64 verified_bytes = 11;
+  uint64 completed_units = 12;
+  uint64 completed_bytes = 13;
+  uint64 total_units = 14;
+  uint64 total_bytes = 15;
+  string materialization_attempt_id = 16;
+  string source_transport_id = 17;
+  ProgressiveCoverageState state = 18;
+  ProgressiveExportState export_state = 19;
+  string source_domain = 20;
+  string seed_transport_kind = 21;
+  uint64 deadline_unix_nanos = 22;
+}
+
+message ReportProgressiveCoverageResponse {
+  Status status = 1;
+  string coverage_id = 2;
+  ProgressiveCoverageState state = 3;
+  bool updated = 4;
+  bool throttled = 5;
+  string reason = 6;
+}
+
+message FindProgressiveSourceRequest {
+  ProgressiveCoverageIdentity identity = 1;
+  uint64 next_unit = 2;
+  uint64 max_units = 3;
+  string requester_daemon_id = 4;
+  string requester_worker_id = 5;
+  string requester_source_domain = 6;
+  bytes request_fingerprint = 7;
+  uint64 deadline_unix_nanos = 8;
+  string requester_materialization_attempt_id = 9;
+}
+
+message ProgressiveSourceAssignment {
+  string assignment_id = 1;
+  string coverage_id = 2;
+  string replica_id = 3;
+  string source_daemon_id = 4;
+  string source_worker_id = 5;
+  string source_domain = 6;
+  string seed_transport_kind = 7;
+  string requester_daemon_id = 8;
+  string requester_worker_id = 9;
+  uint64 start_unit = 10;
+  uint64 end_unit_exclusive = 11;
+  uint64 start_byte = 12;
+  uint64 end_byte_exclusive = 13;
+  uint64 source_export_generation = 14;
+  uint64 deadline_unix_nanos = 15;
+  ProgressiveAssignmentState state = 16;
+  tensorcast.common.v1.MemoryInfo source_memory_info = 17;
+}
+
+message FindProgressiveSourceResponse {
+  Status status = 1;
+  ProgressiveSourceAssignment assignment = 2;
+  bool replayed = 3;
+  string no_eligible_reason = 4;
+}
+
+message CompleteProgressiveAssignmentRequest {
+  string assignment_id = 1;
+  ProgressiveAssignmentState outcome = 2;
+  string outcome_detail = 3;
+}
+
+message CompleteProgressiveAssignmentResponse {
+  Status status = 1;
+  bool released_counter = 2;
+}
+
+message RetireProgressiveCoverageRequest {
+  string coverage_id = 1;
+  string replica_id = 2;
+  string daemon_id = 3;
+  uint64 source_export_generation = 4;
+  ProgressiveCoverageState state = 5;
+  string reason = 6;
+}
+
+message RetireProgressiveCoverageResponse {
+  Status status = 1;
+  uint32 retired_coverage_rows = 2;
+  uint32 retired_assignments = 3;
+}
+
+message ExpireProgressiveStateRequest {
+  uint32 coverage_batch_limit = 1;
+  uint32 assignment_batch_limit = 2;
+}
+
+message ExpireProgressiveStateResponse {
+  Status status = 1;
+  uint32 expired_coverage_rows = 2;
+  uint32 expired_assignments = 3;
 }
 
 // ========== Health Check ==========

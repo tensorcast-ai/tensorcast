@@ -32,7 +32,6 @@ class ArtifactService:
         self,
         replica: Replica,
         *,
-        preserve_transport: bool = False,
         cursor=None,
     ) -> Replica:
         """
@@ -78,16 +77,14 @@ class ArtifactService:
                 raise ValidationError("sum(buffer_sizes) must equal memory_size")
 
         if cursor is not None:
-            result = self.replica_repository.create_or_update_atomic(
-                replica, cursor, preserve_transport=preserve_transport
-            )
+            result = self.replica_repository.create_or_update_atomic(replica, cursor)
             inc_replica_register(result.artifact_id, result.memory_type.value)
         else:
             # Use atomic transaction to prevent race conditions
             with self.replica_repository.transaction() as tx_cursor:
                 # Use database-level UPSERT to handle concurrent registrations
                 result = self.replica_repository.create_or_update_atomic(
-                    replica, tx_cursor, preserve_transport=preserve_transport
+                    replica, tx_cursor
                 )
 
                 # Update metrics after successful transaction

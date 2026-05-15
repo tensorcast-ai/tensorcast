@@ -65,6 +65,7 @@ from tensorcast.global_store.repositories import (
     LeafRepository,
     OperationRepository,
     PendingTransportRequestRepository,
+    ProgressiveCoverageRepository,
     ProofRepository,
     ReplicaRepository,
     ShardHomeLeaseRepository,
@@ -117,6 +118,7 @@ from tensorcast.global_store.rpc.operation_rpc_handler import OperationRpcHandle
 from tensorcast.global_store.rpc.placement_persistence_rpc_handler import (
     PlacementPersistenceRpcHandler,
 )
+from tensorcast.global_store.rpc.progressive_rpc_handler import ProgressiveRpcHandler
 from tensorcast.global_store.rpc.replica_lifecycle_rpc_handler import (
     ReplicaLifecycleRpcHandler,
 )
@@ -144,6 +146,7 @@ from tensorcast.global_store.services import (
     GroupRealizationService,
     InstanceService,
     PlacementService,
+    ProgressiveReplicationService,
     RecoveryService,
     ShardHomeLeaseService,
     TransportService,
@@ -270,6 +273,9 @@ class GlobalStoreServicer(
         self.proof_repository = ProofRepository(self.connection)
         self.operation_repository = OperationRepository(self.connection)
         self.shard_home_lease_repository = ShardHomeLeaseRepository(self.connection)
+        self.progressive_coverage_repository = ProgressiveCoverageRepository(
+            self.connection
+        )
 
     def _init_catalog_handlers(self) -> None:
         """Initialize handlers for artifact catalog and workflow metadata."""
@@ -400,6 +406,8 @@ class GlobalStoreServicer(
             get_worker_service=lambda: self.worker_service,
             get_instance_service=lambda: self.instance_service,
             get_transport_service=lambda: self.transport_service,
+            get_group_realization_service=lambda: self.group_realization_service,
+            get_progressive_replication_service=lambda: self.progressive_replication_service,
             logger=logger,
         )
         self.cleanup_thread = self._maintenance_coordinator.start()
@@ -489,6 +497,13 @@ class GlobalStoreServicer(
         self.transport_rpc_handler = TransportRpcHandler(
             transport_service=self.transport_service,
             replica_to_memory_info=self._replica_to_memory_info,
+            logger=logger,
+        )
+        self.progressive_replication_service = ProgressiveReplicationService(
+            self.progressive_coverage_repository
+        )
+        self.progressive_rpc_handler = ProgressiveRpcHandler(
+            service=self.progressive_replication_service,
             logger=logger,
         )
         self.replica_lifecycle_rpc_handler = ReplicaLifecycleRpcHandler(

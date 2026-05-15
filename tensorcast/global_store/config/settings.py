@@ -119,6 +119,26 @@ class GroupRealizationConfig(BaseModel):
     cleanup_batch_limit: int = 256
 
 
+class ProgressiveReplicationConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    max_outgoing_per_source: int = 1
+    coverage_ttl_ms: int = 300_000
+    assignment_ttl_ms: int = 30_000
+    allow_cross_domain_seed_sources: bool = False
+    min_verified_bytes: int = 16 * 1024 * 1024
+    min_assignment_bytes: int = 16 * 1024 * 1024
+    max_assignment_bytes: int = 256 * 1024 * 1024
+    max_assignments_per_materialization: int = 1024
+    assignment_candidate_scan_limit: int = 64
+    max_claim_qps_per_daemon: int = 100
+    cleanup_batch_limit: int = 256
+    source_domain_policy: str = "local_only"
+    min_report_delta_bytes: int = 16 * 1024 * 1024
+    min_report_interval_ms: int = 1_000
+
+
 class GlobalStoreConfig(BaseModel):
     """Configuration for Global Store service."""
 
@@ -145,6 +165,9 @@ class GlobalStoreConfig(BaseModel):
         TransportSchedulerPolicyConfig()
     )
     group_realization: GroupRealizationConfig = GroupRealizationConfig()
+    progressive_replication: ProgressiveReplicationConfig = (
+        ProgressiveReplicationConfig()
+    )
 
     # Server settings
     listen_host: str = "127.0.0.1"
@@ -263,6 +286,7 @@ class GlobalStoreConfig(BaseModel):
         key_mapping_policy = KeyMappingPolicyConfig()
         scheduler_policy = TransportSchedulerPolicyConfig()
         group_realization = GroupRealizationConfig()
+        progressive_replication = ProgressiveReplicationConfig()
         if pb.worker_policy.HasField("memory_tiers"):
             mt = pb.worker_policy.memory_tiers
             snapshot_retention_ms = (
@@ -487,6 +511,101 @@ class GlobalStoreConfig(BaseModel):
                     else group_realization.cleanup_batch_limit,
                 ),
             )
+        if pb.worker_policy.HasField("progressive_replication"):
+            progressive_pb = pb.worker_policy.progressive_replication
+            progressive_section = (
+                worker_policy_section.get("progressive_replication", {})
+                if isinstance(worker_policy_section, dict)
+                else {}
+            )
+            progressive_replication = ProgressiveReplicationConfig(
+                enabled=bool(progressive_pb.enabled)
+                if "enabled" in progressive_section
+                else progressive_replication.enabled,
+                max_outgoing_per_source=max(
+                    1,
+                    int(progressive_pb.max_outgoing_per_source)
+                    if "max_outgoing_per_source" in progressive_section
+                    else progressive_replication.max_outgoing_per_source,
+                ),
+                coverage_ttl_ms=max(
+                    0,
+                    _dur_ms(progressive_pb.coverage_ttl)
+                    if progressive_pb.HasField("coverage_ttl")
+                    else progressive_replication.coverage_ttl_ms,
+                ),
+                assignment_ttl_ms=max(
+                    0,
+                    _dur_ms(progressive_pb.assignment_ttl)
+                    if progressive_pb.HasField("assignment_ttl")
+                    else progressive_replication.assignment_ttl_ms,
+                ),
+                allow_cross_domain_seed_sources=bool(
+                    progressive_pb.allow_cross_domain_seed_sources
+                )
+                if "allow_cross_domain_seed_sources" in progressive_section
+                else progressive_replication.allow_cross_domain_seed_sources,
+                min_verified_bytes=max(
+                    0,
+                    int(progressive_pb.min_verified_bytes)
+                    if "min_verified_bytes" in progressive_section
+                    else progressive_replication.min_verified_bytes,
+                ),
+                min_assignment_bytes=max(
+                    1,
+                    int(progressive_pb.min_assignment_bytes)
+                    if "min_assignment_bytes" in progressive_section
+                    else progressive_replication.min_assignment_bytes,
+                ),
+                max_assignment_bytes=max(
+                    1,
+                    int(progressive_pb.max_assignment_bytes)
+                    if "max_assignment_bytes" in progressive_section
+                    else progressive_replication.max_assignment_bytes,
+                ),
+                max_assignments_per_materialization=max(
+                    1,
+                    int(progressive_pb.max_assignments_per_materialization)
+                    if "max_assignments_per_materialization" in progressive_section
+                    else progressive_replication.max_assignments_per_materialization,
+                ),
+                assignment_candidate_scan_limit=max(
+                    1,
+                    int(progressive_pb.assignment_candidate_scan_limit)
+                    if "assignment_candidate_scan_limit" in progressive_section
+                    else progressive_replication.assignment_candidate_scan_limit,
+                ),
+                max_claim_qps_per_daemon=max(
+                    0,
+                    int(progressive_pb.max_claim_qps_per_daemon)
+                    if "max_claim_qps_per_daemon" in progressive_section
+                    else progressive_replication.max_claim_qps_per_daemon,
+                ),
+                cleanup_batch_limit=max(
+                    1,
+                    int(progressive_pb.cleanup_batch_limit)
+                    if "cleanup_batch_limit" in progressive_section
+                    else progressive_replication.cleanup_batch_limit,
+                ),
+                source_domain_policy=str(
+                    progressive_pb.source_domain_policy
+                    if "source_domain_policy" in progressive_section
+                    else progressive_replication.source_domain_policy
+                ).strip()
+                or "local_only",
+                min_report_delta_bytes=max(
+                    0,
+                    int(progressive_pb.min_report_delta_bytes)
+                    if "min_report_delta_bytes" in progressive_section
+                    else progressive_replication.min_report_delta_bytes,
+                ),
+                min_report_interval_ms=max(
+                    0,
+                    _dur_ms(progressive_pb.min_report_interval)
+                    if progressive_pb.HasField("min_report_interval")
+                    else progressive_replication.min_report_interval_ms,
+                ),
+            )
 
         # Limits
         limits = GlobalStoreLimitsConfig()
@@ -563,6 +682,7 @@ class GlobalStoreConfig(BaseModel):
             key_mapping_policy=key_mapping_policy,
             transport_scheduler=scheduler_policy,
             group_realization=group_realization,
+            progressive_replication=progressive_replication,
             listen_host=listen_host or "127.0.0.1",
             listen_port=listen_port if listen_port >= 0 else 0,
             advertise_host=advertise_host,

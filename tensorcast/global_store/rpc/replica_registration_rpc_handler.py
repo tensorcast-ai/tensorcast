@@ -193,7 +193,6 @@ class ReplicaRegistrationRpcHandler:
                     request.max_concurrency,
                     request.worker_id,
                 )
-                preserve_transport = not request.mem_info.HasField("transport")
                 artifact_id = resolved_artifact_id
                 descriptor = (
                     request.descriptor if request.HasField("descriptor") else None
@@ -281,7 +280,6 @@ class ReplicaRegistrationRpcHandler:
                             )
                         return self._artifact_service.register_replica(
                             replica,
-                            preserve_transport=preserve_transport,
                             cursor=cursor,
                         )
 
@@ -302,7 +300,6 @@ class ReplicaRegistrationRpcHandler:
                         )
                     return self._artifact_service.register_replica(
                         replica,
-                        preserve_transport=preserve_transport,
                         cursor=cursor,
                     )
 

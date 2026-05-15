@@ -258,6 +258,58 @@ TRANSPORT_DISPATCH_EVENT_COUNTER = Counter(
     labelnames=("event",),
 )
 
+PROGRESSIVE_COVERAGE_REPORT_COUNTER = Counter(
+    "tc_progressive_coverage_reports_total",
+    "Progressive coverage reports accepted by the Global Store.",
+    labelnames=("state", "coverage_kind"),
+)
+
+PROGRESSIVE_ASSIGNMENT_COUNTER = Counter(
+    "tc_progressive_source_assignments_total",
+    "Progressive source assignment lifecycle events.",
+    labelnames=("assignment_state", "coverage_kind"),
+)
+
+PROGRESSIVE_ASSIGNMENT_ACTIVE_GAUGE = Gauge(
+    "tc_progressive_source_assignments_active",
+    "Active progressive assignments by source domain.",
+    labelnames=("source_domain",),
+)
+
+PROGRESSIVE_SKIPPED_SOURCE_COUNTER = Counter(
+    "tc_progressive_skipped_sources_total",
+    "Progressive source candidates skipped during claim.",
+    labelnames=("reason",),
+)
+
+PROGRESSIVE_VERIFIED_BYTES_GAUGE = Gauge(
+    "tc_progressive_verified_bytes",
+    "Latest reported verified progressive bytes.",
+    labelnames=("coverage_kind",),
+)
+
+PROGRESSIVE_REPORT_THROTTLED_COUNTER = Counter(
+    "tc_progressive_coverage_reports_throttled_total",
+    "Progressive coverage reports skipped by coalescing policy.",
+    labelnames=("reason",),
+)
+
+PROGRESSIVE_CLAIM_DB_CONFLICT_COUNTER = Counter(
+    "tc_progressive_claim_db_conflicts_total",
+    "Transient database conflicts during progressive claim operations.",
+    labelnames=("op",),
+)
+
+PROGRESSIVE_CLAIM_CANDIDATE_ROWS_GAUGE = Gauge(
+    "tc_progressive_claim_candidate_rows",
+    "Candidate rows inspected by the latest progressive claim.",
+)
+
+PROGRESSIVE_ASSIGNMENT_CLEANUP_BATCH_GAUGE = Gauge(
+    "tc_progressive_assignment_cleanup_batch_size",
+    "Assignment rows cleaned up by the latest progressive expiration sweep.",
+)
+
 _TRANSPORT_ASSIGNMENT_LOCK = threading.Lock()
 _TRANSPORT_SOURCE_ASSIGNMENTS: dict[str, dict[str, int]] = {}
 _TRANSPORT_SOURCE_FIRST_ASSIGNMENT: set[tuple[str, str]] = set()
@@ -758,6 +810,59 @@ def record_transport_source_assignment(
     TRANSPORT_DIFFUSION_FIRST_HIT_SECONDS.labels(artifact_id=artifact_id).observe(
         latency_seconds
     )
+
+
+def inc_progressive_coverage_report(*, state: str, coverage_kind: str) -> None:
+    PROGRESSIVE_COVERAGE_REPORT_COUNTER.labels(
+        state=state, coverage_kind=coverage_kind
+    ).inc()
+
+
+def inc_progressive_assignment(*, assignment_state: str, coverage_kind: str) -> None:
+    PROGRESSIVE_ASSIGNMENT_COUNTER.labels(
+        assignment_state=assignment_state,
+        coverage_kind=coverage_kind,
+    ).inc()
+
+
+def inc_progressive_active_assignment(*, source_domain: str) -> None:
+    PROGRESSIVE_ASSIGNMENT_ACTIVE_GAUGE.labels(
+        source_domain=source_domain or "unknown"
+    ).inc()
+
+
+def dec_progressive_active_assignment(*, source_domain: str) -> None:
+    gauge = PROGRESSIVE_ASSIGNMENT_ACTIVE_GAUGE.labels(
+        source_domain=source_domain or "unknown"
+    )
+    if gauge._value.get() > 0:
+        gauge.dec()
+
+
+def inc_progressive_skipped_source(reason: str) -> None:
+    PROGRESSIVE_SKIPPED_SOURCE_COUNTER.labels(reason=reason or "unknown").inc()
+
+
+def set_progressive_verified_bytes(*, coverage_kind: str, value: int) -> None:
+    PROGRESSIVE_VERIFIED_BYTES_GAUGE.labels(coverage_kind=coverage_kind).set(
+        max(0, int(value))
+    )
+
+
+def inc_progressive_report_throttled(reason: str) -> None:
+    PROGRESSIVE_REPORT_THROTTLED_COUNTER.labels(reason=reason or "unknown").inc()
+
+
+def inc_progressive_claim_db_conflict(op: str) -> None:
+    PROGRESSIVE_CLAIM_DB_CONFLICT_COUNTER.labels(op=op or "unknown").inc()
+
+
+def set_progressive_claim_candidate_rows(count: int) -> None:
+    PROGRESSIVE_CLAIM_CANDIDATE_ROWS_GAUGE.set(max(0, int(count)))
+
+
+def set_progressive_assignment_cleanup_batch_size(count: int) -> None:
+    PROGRESSIVE_ASSIGNMENT_CLEANUP_BATCH_GAUGE.set(max(0, int(count)))
 
 
 # ---------------------------------------------------------------------------

@@ -316,7 +316,8 @@ absl::Status MetadataGateway::register_replica(
           verification_json,
           key.view_id.has_value() ? std::optional<std::string_view>(*key.view_id) : std::nullopt,
           descriptor,
-          publish_context_id.empty() ? std::nullopt : std::optional<std::string_view>(publish_context_id));
+          publish_context_id.empty() ? std::nullopt : std::optional<std::string_view>(publish_context_id),
+          transport_state.export_generation);
       register_status = register_or.ok() ? absl::OkStatus() : register_or.status();
       if (register_or.ok()) {
         replica_runtime_->set_replica_global_id(key, *register_or);

@@ -8,6 +8,7 @@ from .group_realization_service import GroupRealizationService
 from .instance_service import InstanceService
 from .memory_tier_service import MemoryTierService
 from .placement_service import PlacementService
+from .progressive_service import ProgressiveReplicationService
 from .recovery_service import RecoveryService
 from .shard_home_lease_service import ShardHomeLeaseService
 from .transport_service import TransportService
@@ -26,6 +27,7 @@ __all__ = [
     "ViewStateService",
     "MemoryTierService",
     "PlacementService",
+    "ProgressiveReplicationService",
     "WorkerControlReducer",
     "ShardHomeLeaseService",
 ]

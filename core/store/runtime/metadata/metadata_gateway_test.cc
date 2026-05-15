@@ -244,6 +244,7 @@ class TestGlobalStoreClient final : public tensorcast::store::testing::GlobalSto
  public:
   absl::Status next_register_status{absl::OkStatus()};
   int register_calls{0};
+  uint64_t last_memory_export_generation{0};
   std::vector<std::string> registered_artifacts;
 
   void set_register_blocking(bool enabled) {
@@ -314,8 +315,10 @@ class TestGlobalStoreClient final : public tensorcast::store::testing::GlobalSto
       uint32_t,
       const std::optional<std::string>&,
       std::optional<std::string_view>,
-      const std::optional<tensorcast::common::v1::ArtifactDescriptor>&) override {
+      const std::optional<tensorcast::common::v1::ArtifactDescriptor>&,
+      uint64_t export_generation) override {
     registered_artifacts.emplace_back(artifact_id);
+    last_memory_export_generation = export_generation;
     ++register_calls;
     if (!next_register_status.ok()) {
       return next_register_status;
@@ -411,6 +414,17 @@ ReplicaKey CreateCpuReplica(RuntimeContext& context, ReplicaRuntime& runtime, co
   REQUIRE(replica != nullptr);
   DeviceKey cpu_device{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
   return MakeReplicaKey(artifact_id, cpu_device);
+}
+
+ReplicaKey CreateGpuReplica(RuntimeContext& context, ReplicaRuntime& runtime, const std::string& artifact_id) {
+  constexpr size_t kBytes = 4096;
+  auto backing = std::make_shared<std::vector<uint8_t>>(kBytes, 0xCD);
+  auto view = std::shared_ptr<const void>(backing, static_cast<const void*>(backing->data()));
+  auto config = MakeInlineReplicaConfig(context, artifact_id, DeviceType::GPU, 0, view, kBytes);
+  auto replica = runtime.get_or_create_replica(artifact_id, config);
+  REQUIRE(replica != nullptr);
+  DeviceKey gpu_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  return MakeReplicaKey(artifact_id, gpu_device);
 }
 
 } // namespace
@@ -902,6 +916,25 @@ TEST_CASE("MetadataGateway deduplicates publish contexts", "[metadata_gateway][r
   auto second_status = harness.gateway->register_replica(replica_key, {}, "ctx-2");
   CHECK(second_status.ok());
   CHECK(harness.client->register_calls == 2);
+}
+
+TEST_CASE("MetadataGateway preserves memory replica export generation", "[metadata_gateway][runtime]") {
+  SKIP_IF_NO_CUDA();
+
+  MetadataGatewayHarness harness;
+  auto replica_key = CreateGpuReplica(harness.context, harness.replica_runtime, "mi2:export_generation:data");
+
+  tensorcast::store::runtime::ReplicaTransportState state;
+  state.export_state = tensorcast::store::runtime::ReplicaExportState::kExportable;
+  state.export_generation = 17;
+  state.remote_memory_keys = {"remote-key"};
+  state.buffer_sizes = {4096};
+  harness.replica_runtime.update_transport_state(replica_key, state);
+
+  auto status = harness.gateway->register_replica(replica_key, {}, "ctx-export-generation");
+  REQUIRE(status.ok());
+  CHECK(harness.client->register_calls == 1);
+  CHECK(harness.client->last_memory_export_generation == 17);
 }
 
 TEST_CASE("MetadataGateway suppresses concurrent publish context duplicates", "[metadata_gateway][runtime]") {

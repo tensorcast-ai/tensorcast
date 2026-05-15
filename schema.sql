@@ -5,7 +5,8 @@
 --
 -- Areas currently covered:
 --   - Global Store (DuckDB-backed): workers, artifact_replicas, replica_counters,
---     artifact_transports, artifacts, artifact_indices, chunk_directory, key_mappings
+--     artifact_transports, progressive replica coverage, artifacts,
+--     artifact_indices, chunk_directory, key_mappings
 --
 -- Notes:
 --   - SQL dialect strives to be DuckDB-compatible as the Global Store uses DuckDB.
@@ -239,6 +240,118 @@ CREATE INDEX IF NOT EXISTS idx_artifact_replicas_node_address ON artifact_replic
 CREATE INDEX IF NOT EXISTS idx_replicas_worker ON artifact_replicas(worker_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_replicas_tensor_index_key ON artifact_replicas(tensor_index_key);
 CREATE INDEX IF NOT EXISTS idx_artifact_replicas_memory_replica ON artifact_replicas(is_memory_replica, artifact_id);
+
+-- Progressive replica dissemination coverage. These rows are partial-source
+-- visibility records only; ordinary complete-replica source selection must not
+-- consult this table.
+CREATE TABLE IF NOT EXISTS replica_progress_coverage (
+    coverage_id TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL,
+    byte_space_kind TEXT NOT NULL,
+    byte_space_id TEXT NOT NULL DEFAULT '',
+    selection_hash TEXT NOT NULL,
+    logical_layout_hash TEXT NOT NULL,
+    hash_space_kind TEXT NOT NULL,
+    hash_space_id TEXT NOT NULL DEFAULT '',
+    canonical_index_multihash TEXT NOT NULL,
+    coverage_order_hash TEXT NOT NULL,
+    group_version_set_id TEXT NOT NULL DEFAULT '',
+    group_part_id TEXT NOT NULL DEFAULT '',
+    replica_id TEXT NOT NULL,
+    daemon_id TEXT NOT NULL,
+    daemon_session_id TEXT NULL,
+    worker_id TEXT NOT NULL,
+    source_export_generation BIGINT NOT NULL,
+    coverage_epoch BIGINT NOT NULL,
+    coverage_kind TEXT CHECK (coverage_kind IN ('byte_prefix')) NOT NULL,
+    state TEXT CHECK (state IN ('pending','verified','failed','retired')) NOT NULL,
+    export_state TEXT CHECK (export_state IN (
+      'not_exportable','in_progress_exportable','complete_exportable'
+    )) NOT NULL,
+    verified_units BIGINT NOT NULL,
+    verified_bytes BIGINT NOT NULL,
+    completed_units BIGINT NOT NULL,
+    completed_bytes BIGINT NOT NULL,
+    total_units BIGINT NOT NULL,
+    total_bytes BIGINT NOT NULL,
+    materialization_attempt_id TEXT NOT NULL,
+    source_transport_id TEXT NULL,
+    source_domain TEXT NOT NULL DEFAULT '',
+    seed_transport_kind TEXT NULL,
+    deadline_at TIMESTAMP WITH TIME ZONE NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(materialization_attempt_id, replica_id, source_export_generation)
+);
+
+CREATE INDEX IF NOT EXISTS idx_progress_coverage_artifact_space_state
+    ON replica_progress_coverage(artifact_id, byte_space_kind, byte_space_id, state, verified_bytes);
+CREATE INDEX IF NOT EXISTS idx_progress_coverage_identity_state
+    ON replica_progress_coverage(selection_hash, logical_layout_hash, coverage_order_hash, state);
+CREATE INDEX IF NOT EXISTS idx_progress_coverage_claim_identity
+    ON replica_progress_coverage(
+        artifact_id, byte_space_kind, byte_space_id,
+        selection_hash, logical_layout_hash,
+        hash_space_kind, hash_space_id, canonical_index_multihash,
+        coverage_order_hash, group_version_set_id, group_part_id,
+        state, verified_units, verified_bytes, deadline_at
+    );
+CREATE INDEX IF NOT EXISTS idx_progress_coverage_daemon_state_deadline
+    ON replica_progress_coverage(daemon_id, state, deadline_at);
+CREATE INDEX IF NOT EXISTS idx_progress_coverage_domain_seed_state
+    ON replica_progress_coverage(source_domain, seed_transport_kind, state);
+CREATE INDEX IF NOT EXISTS idx_progress_coverage_attempt_replica_generation
+    ON replica_progress_coverage(materialization_attempt_id, replica_id, source_export_generation);
+
+-- Durable progressive source claims. Assignment rows are the audit truth for
+-- partial-source reads; progressive_source_counters is admission state only.
+-- coverage_id is kept as an indexed audit relation rather than a DuckDB foreign
+-- key because coverage state must be mutable while assignments reference it.
+CREATE TABLE IF NOT EXISTS progressive_source_assignments (
+    assignment_id TEXT PRIMARY KEY,
+    coverage_id TEXT NOT NULL,
+    requester_daemon_id TEXT NOT NULL,
+    requester_worker_id TEXT NOT NULL,
+    requester_materialization_attempt_id TEXT NOT NULL DEFAULT '',
+    source_daemon_id TEXT NOT NULL,
+    source_worker_id TEXT NOT NULL,
+    source_domain TEXT NOT NULL,
+    seed_transport_kind TEXT NULL,
+    start_unit BIGINT NOT NULL,
+    end_unit_exclusive BIGINT NOT NULL,
+    start_byte BIGINT NOT NULL,
+    end_byte_exclusive BIGINT NOT NULL,
+    source_export_generation BIGINT NOT NULL,
+    state TEXT CHECK (state IN (
+      'claimed','reading','succeeded','failed','expired','cancelled'
+    )) NOT NULL,
+    deadline_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    request_fingerprint BLOB NOT NULL,
+    outcome_detail TEXT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(request_fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_progress_assignments_coverage_state_deadline
+    ON progressive_source_assignments(coverage_id, state, deadline_at);
+CREATE INDEX IF NOT EXISTS idx_progress_assignments_source_state_deadline
+    ON progressive_source_assignments(source_daemon_id, state, deadline_at);
+CREATE INDEX IF NOT EXISTS idx_progress_assignments_requester_attempt
+    ON progressive_source_assignments(requester_daemon_id, requester_worker_id, requester_materialization_attempt_id);
+
+CREATE TABLE IF NOT EXISTS progressive_source_counters (
+    source_replica_id TEXT NOT NULL,
+    source_daemon_id TEXT NOT NULL,
+    source_export_generation BIGINT NOT NULL,
+    active_assignments INTEGER NOT NULL DEFAULT 0,
+    last_assigned_at TIMESTAMP WITH TIME ZONE NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (source_replica_id, source_export_generation)
+);
+
+CREATE INDEX IF NOT EXISTS idx_progress_source_counters_daemon_active
+    ON progressive_source_counters(source_daemon_id, active_assignments);
 
 -- Deduplicated tensor index storage
 CREATE TABLE IF NOT EXISTS artifact_indices (

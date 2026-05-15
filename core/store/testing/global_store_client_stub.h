@@ -107,7 +107,8 @@ class GlobalStoreClientStub : public components::IGlobalStoreClient {
       uint32_t,
       const std::optional<std::string>&,
       std::optional<std::string_view>,
-      const std::optional<common::v1::ArtifactDescriptor>&) override {
+      const std::optional<common::v1::ArtifactDescriptor>&,
+      uint64_t) override {
     return absl::UnimplementedError("register_memory_replica not supported in GlobalStoreClientStub");
   }
 

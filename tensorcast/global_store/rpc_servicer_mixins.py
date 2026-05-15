@@ -319,6 +319,7 @@ class ClusterRuntimeRpcServicerMixin:
     replica_registration_rpc_handler: ReplicaRegistrationRpcHandler
     replica_lifecycle_rpc_handler: ReplicaLifecycleRpcHandler
     transport_rpc_handler: TransportRpcHandler
+    progressive_rpc_handler: Any
     worker_rpc_handler: WorkerRpcHandler
     instance_rpc_handler: InstanceRpcHandler
     worker_state_sync_rpc_handler: WorkerStateSyncRpcHandler
@@ -371,6 +372,35 @@ class ClusterRuntimeRpcServicerMixin:
 
     def QueryTransportWindow(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.transport_rpc_handler.query_transport_window(request, context)
+
+    def ReportProgressiveCoverage(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.progressive_rpc_handler.report_progressive_coverage(
+            request, context
+        )
+
+    def FindProgressiveSource(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.progressive_rpc_handler.find_progressive_source(request, context)
+
+    def CompleteProgressiveAssignment(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.progressive_rpc_handler.complete_progressive_assignment(
+            request, context
+        )
+
+    def RetireProgressiveCoverage(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.progressive_rpc_handler.retire_progressive_coverage(
+            request, context
+        )
+
+    def ExpireProgressiveState(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.progressive_rpc_handler.expire_progressive_state(request, context)
 
     def RegisterWorker(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.worker_rpc_handler.register_worker(request, context)
