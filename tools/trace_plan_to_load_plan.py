@@ -27,7 +27,7 @@ expects a compact JSON shape:
 }
 
 internal-vLLM already emits trace-plan dumps under
-`<tensorcast_debug_path>/trace_plan/tensorcast_trace_plan_tp*.json`, but those
+`<diagnostics.debug_path>/trace_plan/tensorcast_trace_plan_tp*.json`, but those
 files include fill ops and builder-oriented copy-plan fields. This tool lowers
 the trace dump into the benchmark contract by:
 

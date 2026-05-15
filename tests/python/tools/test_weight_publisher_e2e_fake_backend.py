@@ -34,7 +34,7 @@ def test_check_options_enforces_local_only_under_fake_backend(
 def test_pre_publish_trim_is_enforced_with_keep_last_minus_one(tmp_path: Path) -> None:
     publisher = e2e.WeightUpdatePublisher(
         model_name="m",
-        key_template="k:{model_name}:v{version}",
+        key_template="k:{model_name}:v{weight_version}",
         keep_last=2,
         history_path=tmp_path / "history.json",
         run_root=tmp_path,

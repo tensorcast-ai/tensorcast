@@ -40,7 +40,7 @@ class WeightPublisherConfig(BaseModel):
       that already export weights to a shared filesystem (e.g. Steptron).
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     model_name: str
     keep_last: int = 2
@@ -55,8 +55,7 @@ class WeightPublisherConfig(BaseModel):
     persistence_poll_interval_s: float = 2.0
     use_cgid: bool = True
     cgid_prefix: str = "weights"
-    # Note: vLLM's online update protocol uses {weight_version}. This tool
-    # supports both {version} (legacy) and {weight_version} (protocol v1).
+    # vLLM's online update protocol uses {weight_version}.
     key_template: str = "model:{model_name}:v{weight_version}"
     trigger_reload: bool = True
     reload_url: str | None = None
@@ -65,17 +64,10 @@ class WeightPublisherConfig(BaseModel):
     # If set, this takes precedence over reload_url.
     stepcast_router: str | None = None  # e.g. "stepcast-router:9200"
     stepcast_served_model_name: str | None = None  # defaults to model_name
-    stepcast_update_config: bool = True
     stepcast_reset_prefix_cache: bool = True
     stepcast_ack: bool = True
     stepcast_ack_timeout_s: float = 900.0
     stepcast_ack_poll_interval_s: float = 2.0
-
-    # vLLM Tensorcast loader config pushed via /collective_rpc update_config.
-    vllm_tensorcast_key_template: str = "model:{model_name}:v{weight_version}"
-    vllm_tensorcast_model_name: str | None = None  # defaults to model_name
-    vllm_tensorcast_allow_disk_fallback: bool = True
-    vllm_tensorcast_fallback_prefer: str = "auto"
 
     # When publishing from a HF folder via tensorcast.from_disk(...).
     from_disk_verify_checksums: bool = True
@@ -147,11 +139,8 @@ class WeightPublisherConfig(BaseModel):
     @classmethod
     def _validate_key_template(cls, value: object) -> str:
         template = str(value).strip()
-        if "{version}" not in template and "{weight_version}" not in template:
-            raise ValueError(
-                "key_template must include '{weight_version}' (preferred) "
-                "or '{version}' (legacy)"
-            )
+        if "{weight_version}" not in template:
+            raise ValueError("key_template must include '{weight_version}'")
         if "{model_name}" not in template:
             raise ValueError("key_template must include '{model_name}'")
         return template
@@ -296,7 +285,6 @@ class WeightPublisher:
     def _build_key(self, version: int) -> str:
         key = self._config.key_template.format(
             model_name=self._config.model_name,
-            version=version,
             weight_version=version,
         ).strip()
         if not key:
@@ -380,30 +368,6 @@ class WeightPublisher:
         served = self._config.stepcast_served_model_name or self._config.model_name
         endpoints = _stepcast_endpoints(router=router, served_model_name=served)
         logger.info("Stepcast endpoints(%s): %s", len(endpoints), endpoints)
-
-        if self._config.stepcast_update_config:
-            overrides = {
-                "load_config": {
-                    "load_format": "tensorcast",
-                    "model_loader_extra_config": {
-                        "tensorcast_key_template": self._config.vllm_tensorcast_key_template,
-                        "tensorcast_model_name": self._config.vllm_tensorcast_model_name
-                        or self._config.model_name,
-                        "tensorcast_allow_disk_fallback": bool(
-                            self._config.vllm_tensorcast_allow_disk_fallback
-                        ),
-                        "tensorcast_fallback_prefer": str(
-                            self._config.vllm_tensorcast_fallback_prefer
-                        ),
-                    },
-                },
-            }
-            for ep in endpoints:
-                _http_post_json(
-                    f"http://{ep}/collective_rpc",
-                    {"method": "update_config", "kwargs": {"overrides": overrides}},
-                    timeout_s=self._config.reload_timeout_s,
-                )
 
         payload = {
             "weight_version": int(version),

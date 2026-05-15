@@ -40,7 +40,7 @@ def test_serving_config_parses_nested_schema_defaults() -> None:
         kind="version_key",
         value="models/demo/serving/v1",
     )
-    assert config.bootstrap.serving_metadata_mode() == "require"
+    assert config.bootstrap.mode == "required"
     assert config.bootstrap.verify_source_checksums is False
     assert config.materialization.collective_policy_value() == \
         "require_collective"
@@ -48,7 +48,7 @@ def test_serving_config_parses_nested_schema_defaults() -> None:
 
 def test_serving_config_rejects_unknown_top_level_keys() -> None:
     with pytest.raises(ValueError, match="Unexpected TensorCast serving config"):
-        ServingConfig.from_mapping({"preload_mode": "external"})
+        ServingConfig.from_mapping({"unrelated": "unexpected"})
 
 
 def test_serving_policy_pinned_requires_identity_fields() -> None:

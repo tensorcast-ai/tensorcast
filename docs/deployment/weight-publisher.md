@@ -6,11 +6,20 @@ sidebar_position: 6
 
 # Weight Publisher
 
-`tensorcast.tools.weight_publisher` is a small helper for the common workflow:
+`tensorcast.tools.weight_publisher` is a legacy helper for the generic
+weight-version workflow:
 
 1) Publish a new set of weights to Tensorcast under an immutable versioned key.
 2) Trigger an inference service to reload that `weight_version`.
 3) Optionally wait for acknowledgement and garbage-collect old versions.
+
+Current `internal-vllm` with `load_format="tensorcast"` no longer treats
+`weight_version` or `/set_model_weight` as TensorCast serving identity. That
+runtime expects a published serving artifact and reloads through
+`POST /reload_serving_artifact` with a `selector + policy` request. Use
+`internal-vllm/tools/tensorcast_prepare_local_dir.py` or a serving-artifact
+publisher to produce that request. The reload sections below apply to
+non-TensorCast or legacy `/set_model_weight` deployments.
 
 It supports two publishing modes:
 
@@ -114,10 +123,10 @@ Important:
 - `publish_from_disk` requires a Tensorcast daemon that can access the folder
   path (typically via shared storage).
 
-## Trigger Reload: Direct HTTP Endpoint
+## Trigger Reload: Legacy Direct HTTP Endpoint
 
-If your inference service exposes a single reload endpoint, set `reload_url`.
-The publisher sends:
+If your non-TensorCast or legacy inference service exposes a single generic
+reload endpoint, set `reload_url`. The publisher sends:
 
 ```json
 { "weight_version": 123, "model_overrides": null }
@@ -134,7 +143,24 @@ cfg = WeightPublisherConfig(
 WeightPublisher(cfg).publish_from_disk("/mnt/shared/it123_hf", version=123)
 ```
 
-## Trigger Reload: Stepcast Router (Multi-endpoint)
+For current vLLM TensorCast serving reload, the request shape is instead:
+
+```json
+{
+  "selector": {
+    "kind": "version_key",
+    "value": "models/demo/serving/v123"
+  },
+  "policy": {
+    "mode": "from_manifest"
+  },
+  "model_overrides": null
+}
+```
+
+`WeightPublisher` does not synthesize this serving-artifact request today.
+
+## Trigger Reload: Legacy Stepcast Router (Multi-endpoint)
 
 For Stepcast deployments that expose vLLM dev endpoints per replica, set:
 
@@ -145,10 +171,9 @@ The publisher will:
 
 1) Discover endpoints via:
    `GET http://{router}/v1/model/{served_model_name}`
-2) Optionally push vLLM Tensorcast loader config via `/collective_rpc update_config`
-3) Call each endpoint:
+2) Call each endpoint:
    `POST /set_model_weight?drain_timeout_s=...`
-4) Optionally ack by polling `GET /weight_version`
+3) Optionally ack by polling `GET /weight_version`
 
 Example:
 
@@ -157,7 +182,6 @@ cfg = WeightPublisherConfig(
     model_name="llama7b",
     stepcast_router="stepcast-router:9200",
     stepcast_served_model_name="llama7b",
-    stepcast_update_config=True,
     stepcast_ack=True,
     vllm_drain_timeout_s=300.0,
 )
@@ -169,9 +193,10 @@ publisher.publish_from_disk("/mnt/shared/it123_hf", version=123)
 Notes:
 - The Stepcast reload path assumes vLLM dev endpoints are enabled on each
   replica (e.g. `VLLM_SERVER_DEV_MODE=1`).
-- vLLM Tensorcast loader settings are pushed via:
-  `load_config.load_format="tensorcast"` and `model_loader_extra_config`
-  (`tensorcast_key_template`, `tensorcast_model_name`, disk fallback options).
+- This path no longer pushes vLLM TensorCast loader config. Current
+  `internal-vllm` serving-artifact runtime must be configured through
+  `tensorcast.serving.ServingConfig` and reloaded with
+  `/reload_serving_artifact`.
 
 ## Retention and Garbage Collection (keep_last)
 

@@ -140,7 +140,7 @@ vllm serve /mnt/step3-alignment/checkpoints/step3p5_flash_release_hf_mtp3_fp8 \
   --max-model-len 4096 \
   --load-format tensorcast \
   --gpu-memory-utilization 0.82 \
-  --model-loader-extra-config '{"tensorcast_init_mode":"connect","tensorcast_show_daemon_logs":true,"tensorcast_enable_runtime_binding":true}'
+  --model-loader-extra-config '{"runtime":{"mode":"connect","daemon":{"address":"127.0.0.1:50052","show_logs":true}}}'
 ```
 
 The daemon summary for this packet was:
@@ -314,7 +314,7 @@ A follow-up 8xH800 strategy probe was run on
   `ws-7681b3683947089e-worker-cptmd` on H800, deleted after the run and
   verified `NotFound`;
 - TensorCast extra config:
-  `{"tensorcast_collective_policy":"disable_collective"}`.
+  `{"materialization":{"collective":"disabled"}}`.
 
 Result:
 

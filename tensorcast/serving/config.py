@@ -71,13 +71,6 @@ class BootstrapSettings(BaseModel):
     def _normalize_optional_fields(cls, value: Any) -> Any:
         return _normalize_optional_text(value)
 
-    def serving_metadata_mode(self) -> str:
-        if self.mode == "disabled":
-            return "disabled"
-        if self.mode == "required":
-            return "require"
-        return "auto"
-
 
 class MaterializationSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")

@@ -367,7 +367,7 @@ Current SOT rule for this work:
     `/data/tc/0113-tp8-8gpu-ab-20260428-064325/0113-tp8-nocollective-rerun-20260428-064445`
     on `dev-yuchu-kk2x2-362559-worker-0`;
   - the probe used
-    `{"tensorcast_collective_policy":"disable_collective"}` and selected
+    `{"materialization":{"collective":"disabled"}}` and selected
     `SourceOrderedMappedTargetExecutor` with
     `bootstrap_realize_collective_requested=false`,
     `bootstrap_realize_collective_used=false`, and

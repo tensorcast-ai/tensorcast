@@ -122,7 +122,7 @@ export PYTHONUNBUFFERED=1
   --max-model-len 4096 \
   --gpu-memory-utilization 0.82 \
   --load-format tensorcast \
-  --model-loader-extra-config '{"tensorcast_init_mode":"connect","tensorcast_daemon_address":"127.0.0.1:50052","tensorcast_show_daemon_logs":false,"tensorcast_debug_path":"/data/tc/tp4-loader-repro/serve_debug"}' \
+  --model-loader-extra-config '{"runtime":{"mode":"connect","daemon":{"address":"127.0.0.1:50052","show_logs":false}},"diagnostics":{"debug_path":"/data/tc/tp4-loader-repro/serve_debug"}}' \
   --enforce-eager
 ```
 

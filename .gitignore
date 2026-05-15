@@ -195,3 +195,5 @@ tensorcast/schema.sql
 docs/drafts
 
 .vscode/
+tensorhub-md
+test.md
