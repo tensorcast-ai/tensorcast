@@ -1502,6 +1502,66 @@ class DaemonCtl:
                 ) from e
         return response
 
+    def acquire_binding_value_by_local_ref(
+        self,
+        *,
+        local_serving_ref: str,
+        expected_device_uuid: str,
+        expected_tensor_schema_hash: str,
+        expected_serving_build_digest: str,
+        expected_member: ServingBindingMemberRef,
+        expected_target_layout_hash: str | None = None,
+        expected_daemon_id: str | None = None,
+        expected_daemon_session_id: str | None = None,
+        caller_pid: int | None = None,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.AcquireBindingValueResponse:
+        if not local_serving_ref:
+            raise ValueError("local_serving_ref is required")
+        if not expected_device_uuid:
+            raise ValueError("expected_device_uuid is required")
+        if not expected_tensor_schema_hash:
+            raise ValueError("expected_tensor_schema_hash is required")
+        if not expected_serving_build_digest:
+            raise ValueError("expected_serving_build_digest is required")
+        request = store_daemon_pb2.AcquireBindingValueRequest(
+            local_serving_ref=str(local_serving_ref),
+            expected_daemon_id=str(expected_daemon_id or ""),
+            expected_daemon_session_id=str(expected_daemon_session_id or ""),
+            expected_device_uuid=str(expected_device_uuid),
+            expected_target_layout_hash=str(expected_target_layout_hash or ""),
+            expected_tensor_schema_hash=str(expected_tensor_schema_hash),
+            expected_serving_build_digest=str(expected_serving_build_digest),
+        )
+        request.expected_member.CopyFrom(expected_member.to_proto())
+        if caller_pid is not None:
+            request.caller_pid = int(caller_pid)
+        with self._client_span("Client/AcquireBindingValueByLocalRef") as span:
+            try:
+                response: store_daemon_pb2.AcquireBindingValueResponse = (
+                    self._unary_call(
+                        self.stub_v2.AcquireBindingValue,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=0,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                raise RuntimeError(
+                    _grpc_message(
+                        e,
+                        fallback="AcquireBindingValueByLocalRef RPC failed",
+                    )
+                ) from e
+        return response
+
     def acquire_group_staged_binding_value(
         self,
         *,

@@ -1,0 +1,46 @@
+meta:
+  schema_version: "v1"
+  description: "TensorCast single-node serving Global Store profile"
+  cluster_token: ""
+
+database:
+  db_file: null
+
+server:
+  listen:
+    host: 0.0.0.0
+    port: 50051
+  advertise:
+    host: ""
+    port: 0
+  max_workers: 10
+  metrics_port: 18008
+
+worker_policy:
+  heartbeat_timeout: 30s
+  cleanup_interval: 60s
+  default_heartbeat_interval: 5s
+  memory_tiers:
+    snapshot_retention: 600s
+    snapshot_max_rows: 200
+    publish_interval: 5s
+  key_mapping:
+    alias_cache_ttl: 1s
+  transport_scheduler:
+    mode: TRANSPORT_SCHEDULER_MODE_GROUP_DISPATCH
+    source_balance_weights:
+      replica_load_weight: 1.0
+      worker_load_weight: 1.0
+      recent_assignment_penalty_weight: 1.0
+      diffusion_bonus_weight: 1.0
+    group_dispatch:
+      fairness_floor_ratio: 0.25
+      completion_bias_weight: 1.0
+      starvation_aging_threshold: 5s
+      queue_scan_limit: 128
+      dispatch_batch_limit: 16
+      group_source_spread_weight: 2.0
+      group_source_soft_cap_ratio: 1.3
+      group_source_min_candidates_for_enforce: 3
+  group_realization:
+    enabled: true

@@ -98,6 +98,24 @@ absl::StatusOr<std::shared_ptr<BindingRegistry::Record>> BindingRegistry::get(st
   return it->second;
 }
 
+absl::StatusOr<std::shared_ptr<BindingRegistry::Record>> BindingRegistry::get_by_local_serving_ref(
+    std::string_view local_serving_ref) const {
+  if (local_serving_ref.empty()) {
+    return absl::InvalidArgumentError("local_serving_ref is required");
+  }
+  absl::MutexLock lock(&mu_);
+  for (const auto& [_, record] : records_) {
+    if (record == nullptr) {
+      continue;
+    }
+    absl::MutexLock record_lock(&record->mu);
+    if (record->local_serving_ref == local_serving_ref) {
+      return record;
+    }
+  }
+  return absl::NotFoundError("local_serving_ref not found");
+}
+
 bool BindingRegistry::close_control(std::string_view binding_id) {
   std::shared_ptr<Record> record;
   {

@@ -380,6 +380,13 @@ absl::Status validate_serving_member_target(const tensorcast::operation::v1::Ser
   return absl::OkStatus();
 }
 
+bool same_serving_member_ref(
+    const tensorcast::operation::v1::ServingBindingMemberRef& lhs,
+    const tensorcast::operation::v1::ServingBindingMemberRef& rhs) {
+  return lhs.member_id() == rhs.member_id() && lhs.member_index() == rhs.member_index() &&
+      lhs.member_count() == rhs.member_count() && lhs.group_id() == rhs.group_id();
+}
+
 absl::Status validate_serving_prefetch_request(const v2::PrefetchServingBindingRequest& req) {
   switch (req.target_case()) {
     case v2::PrefetchServingBindingRequest::kServingBindingTarget:
@@ -798,6 +805,109 @@ grpc::Status MaterializationController::acquire_binding_value(
   }
   if (!is_loopback_grpc_peer(rctx.server_context().peer())) {
     return {grpc::StatusCode::PERMISSION_DENIED, "AcquireBindingValue is local-only (loopback/UDS)"};
+  }
+  if (!req.has_group_realization_acquire() && req.binding_value_ref().binding_id().empty() &&
+      !req.local_serving_ref().empty()) {
+    if (req.expected_device_uuid().empty()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT, "expected_device_uuid is required"};
+    }
+    if (!req.has_expected_member() || req.expected_member().member_id().empty()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT, "expected_member is required"};
+    }
+    if (req.expected_tensor_schema_hash().empty()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT, "expected_tensor_schema_hash is required"};
+    }
+    if (req.expected_serving_build_digest().empty()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT, "expected_serving_build_digest is required"};
+    }
+
+    auto record_or = binding_registry_->get_by_local_serving_ref(req.local_serving_ref());
+    if (!record_or.ok()) {
+      return to_grpc_status(record_or.status());
+    }
+    const auto record = *record_or;
+    std::string binding_id;
+    bool retained_ref = false;
+    {
+      absl::MutexLock lock(&record->mu);
+      if (record->retired) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "binding is retired"};
+      }
+      retained_ref = record->retained_ref;
+      if (!retained_ref && record->owner_pid != req.caller_pid()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "binding is not retained"};
+      }
+      if (record->current_binding_value_id.empty()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "binding has no current value"};
+      }
+      if (!req.expected_daemon_id().empty() && record->daemon_id != req.expected_daemon_id()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "daemon_id mismatch"};
+      }
+      if (!req.expected_daemon_session_id().empty() && record->daemon_session_id != req.expected_daemon_session_id()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "daemon_session_id mismatch"};
+      }
+      if (record->device_uuid != req.expected_device_uuid()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "device_uuid mismatch"};
+      }
+      if (!record->serving_member.member_id().empty() &&
+          !same_serving_member_ref(record->serving_member, req.expected_member())) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "member mismatch"};
+      }
+      if (!req.expected_target_layout_hash().empty() &&
+          record->target_layout_hash != req.expected_target_layout_hash()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "target_layout_hash mismatch"};
+      }
+      if (retained_ref && record->tensor_schema_hash != req.expected_tensor_schema_hash()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "tensor_schema_hash mismatch"};
+      }
+      if (retained_ref && record->serving_build_digest != req.expected_serving_build_digest()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "serving_build_digest mismatch"};
+      }
+      if (record->allowed_caller_pid.has_value() && *record->allowed_caller_pid != req.caller_pid()) {
+        return {grpc::StatusCode::PERMISSION_DENIED, "caller_pid mismatch"};
+      }
+      binding_id = record->binding_id;
+    }
+
+    if (retained_ref) {
+      if (auto status = binding_registry_->acquire_attachment_ref(binding_id, absl::Now()); !status.ok()) {
+        return to_grpc_status(status);
+      }
+    }
+    auto token_or = retained_ref ? handle_leases_->mint_external_cuda_lease(
+                                       req.caller_pid(),
+                                       [registry = binding_registry_, binding_id]() {
+                                         registry->release_attachment_ref(binding_id, absl::Now());
+                                       })
+                                 : handle_leases_->mint_external_cuda_lease(req.caller_pid(), []() {});
+    if (!token_or.ok()) {
+      if (retained_ref) {
+        binding_registry_->release_attachment_ref(binding_id, absl::Now());
+      }
+      return to_grpc_status(token_or.status());
+    }
+    auto refreshed_or = binding_registry_->get(binding_id);
+    if (!refreshed_or.ok()) {
+      auto release_status = handle_leases_->release(*token_or);
+      if (!release_status.ok()) {
+        LOG(WARNING) << "failed to release local-ref acquire lease after binding lookup failure: " << release_status;
+      }
+      return to_grpc_status(refreshed_or.status());
+    }
+    const auto refreshed = *refreshed_or;
+    absl::MutexLock lock(&refreshed->mu);
+    resp.set_lease_token(*token_or);
+    resp.mutable_mem_handle()->set_cuda_ipc_handle(
+        refreshed->handle_bytes.as_string_view().data(), refreshed->handle_bytes.as_string_view().size());
+    resp.mutable_mem_handle()->set_lease_token(*token_or);
+    resp.set_target_index_bytes(refreshed->target_index_json);
+    for (const auto& payload : refreshed->payloads) {
+      *resp.add_payloads() = payload;
+    }
+    resp.set_reservation_bytes(logical_total_size(refreshed->target_layout));
+    fill_current_binding_value(*refreshed, resp.mutable_current_value());
+    resp.mutable_acquired_value()->CopyFrom(resp.current_value());
+    return grpc::Status::OK;
   }
   if (req.has_group_realization_acquire()) {
     const auto publish_check =

@@ -328,11 +328,23 @@ std::shared_ptr<tensorcast::daemon::BindingRegistry::Record> make_retained_servi
   record->current_binding_value_id = "value-1";
   record->seal_generation = 7;
   record->target_index_json = R"({"tensors":[]})";
+  auto* offset = record->target_layout.add_offsets();
+  offset->set_storage_offset(0);
+  offset->set_logical_length(4096);
   record->target_layout_hash = "layout-hash";
   record->tensor_schema_hash = "tensor-schema";
   record->daemon_id = "daemon-1";
   record->daemon_session_id = "session-1";
   record->serving_build_digest = "serving-build";
+  auto& payload = record->payloads.emplace_back();
+  payload.set_name("alpha");
+  payload.add_shape(4);
+  payload.add_stride(1);
+  payload.set_buffer_offset(0);
+  payload.set_byte_length(4);
+  payload.set_storage_offset(0);
+  payload.set_dtype("torch.uint8");
+  payload.set_device_uuid("GPU-0");
   record->reservation_capability_id = "capability-1";
   record->reservation_expires_at = absl::Now() + absl::Hours(1);
   record->local_serving_ref = "binding-local:binding-acquire:value-1";
@@ -582,11 +594,110 @@ TEST_CASE(
   REQUIRE_FALSE(resp.lease_token().empty());
   REQUIRE(resp.mem_handle().lease_token() == resp.lease_token());
   REQUIRE(resp.target_index_bytes() == R"({"tensors":[]})");
+  REQUIRE(resp.payloads_size() == 1);
+  REQUIRE(resp.payloads(0).name() == "alpha");
   REQUIRE(resp.reservation_bytes() == 4096);
   REQUIRE(resp.current_value().binding_value_id() == "value-1");
   {
     absl::MutexLock lock(&record->mu);
     REQUIRE(record->active_attachment_refs == 1);
+  }
+
+  REQUIRE(harness->kernel().handle_leases() != nullptr);
+  REQUIRE(harness->kernel().handle_leases()->release(resp.lease_token()).ok());
+  {
+    absl::MutexLock lock(&record->mu);
+    REQUIRE(record->active_attachment_refs == 0);
+  }
+}
+
+TEST_CASE("AcquireBindingValue can borrow retained binding by local_serving_ref", "[daemon][operation][serving]") {
+  auto client = std::make_shared<OperationClient>();
+  auto harness = make_harness(client, true);
+  auto record = make_retained_serving_record();
+  REQUIRE(harness->kernel().binding_registry().insert(record).ok());
+
+  tensorcast::daemon::v2::AcquireBindingValueRequest req;
+  req.set_local_serving_ref("binding-local:binding-acquire:value-1");
+  req.set_expected_device_uuid("GPU-0");
+  auto* expected_member = req.mutable_expected_member();
+  expected_member->set_member_id("member-0");
+  expected_member->set_member_index(0);
+  expected_member->set_member_count(1);
+  expected_member->set_group_id("group-1");
+  req.set_expected_tensor_schema_hash("tensor-schema");
+  req.set_expected_serving_build_digest("serving-build");
+  req.set_caller_pid(4321);
+
+  tensorcast::daemon::v2::AcquireBindingValueResponse resp;
+  grpc::ServerContext ctx;
+  const auto st = harness->service().AcquireBindingValue(&ctx, &req, &resp);
+
+  REQUIRE(st.ok());
+  REQUIRE_FALSE(resp.lease_token().empty());
+  REQUIRE(resp.mem_handle().lease_token() == resp.lease_token());
+  REQUIRE(resp.target_index_bytes() == R"({"tensors":[]})");
+  REQUIRE(resp.payloads_size() == 1);
+  REQUIRE(resp.payloads(0).name() == "alpha");
+  REQUIRE(resp.reservation_bytes() == 4096);
+  REQUIRE(resp.current_value().binding_id() == "binding-acquire");
+  REQUIRE(resp.current_value().binding_layout_id() == "layout-1");
+  REQUIRE(resp.current_value().binding_value_id() == "value-1");
+  REQUIRE(resp.current_value().local_serving_ref() == "binding-local:binding-acquire:value-1");
+  {
+    absl::MutexLock lock(&record->mu);
+    REQUIRE(record->active_attachment_refs == 1);
+  }
+
+  REQUIRE(harness->kernel().handle_leases() != nullptr);
+  REQUIRE(harness->kernel().handle_leases()->release(resp.lease_token()).ok());
+  {
+    absl::MutexLock lock(&record->mu);
+    REQUIRE(record->active_attachment_refs == 0);
+  }
+}
+
+TEST_CASE(
+    "AcquireBindingValue can borrow caller-owned local binding by local_serving_ref",
+    "[daemon][operation][serving]") {
+  auto client = std::make_shared<OperationClient>();
+  auto harness = make_harness(client, true);
+  auto record = make_retained_serving_record();
+  {
+    absl::MutexLock lock(&record->mu);
+    record->control_lifetime = tensorcast::daemon::BindingRegistry::ControlLifetime::kPidBound;
+    record->retained_ref = false;
+    record->owner_pid = 4321;
+    record->serving_member.Clear();
+  }
+  REQUIRE(harness->kernel().binding_registry().insert(record).ok());
+
+  tensorcast::daemon::v2::AcquireBindingValueRequest req;
+  req.set_local_serving_ref("binding-local:binding-acquire:value-1");
+  req.set_expected_device_uuid("GPU-0");
+  auto* expected_member = req.mutable_expected_member();
+  expected_member->set_member_id("member-0");
+  expected_member->set_member_index(0);
+  expected_member->set_member_count(1);
+  expected_member->set_group_id("group-1");
+  req.set_expected_tensor_schema_hash("serving-schema");
+  req.set_expected_serving_build_digest("published-serving-build");
+  req.set_caller_pid(4321);
+
+  tensorcast::daemon::v2::AcquireBindingValueResponse resp;
+  grpc::ServerContext ctx;
+  const auto st = harness->service().AcquireBindingValue(&ctx, &req, &resp);
+
+  REQUIRE(st.ok());
+  REQUIRE_FALSE(resp.lease_token().empty());
+  REQUIRE(resp.mem_handle().lease_token() == resp.lease_token());
+  REQUIRE(resp.target_index_bytes() == R"({"tensors":[]})");
+  REQUIRE(resp.reservation_bytes() == 4096);
+  REQUIRE(resp.current_value().binding_id() == "binding-acquire");
+  REQUIRE(resp.current_value().binding_value_id() == "value-1");
+  {
+    absl::MutexLock lock(&record->mu);
+    REQUIRE(record->active_attachment_refs == 0);
   }
 
   REQUIRE(harness->kernel().handle_leases() != nullptr);

@@ -1347,6 +1347,15 @@ def test_group_realization_deadline_expiration_is_diagnostic_terminal(
     assert diagnostic.publish_authority_mode == "AUTO_WHEN_READY"
 
 
+def test_group_realization_maintenance_expiration_scan_smoke(
+    group_servicer,
+) -> None:
+    expired = group_servicer.group_realization_service.run_expiration_scan(
+        force=True)
+
+    assert expired >= 0
+
+
 def test_group_realization_deadline_is_capped_by_transaction_ttl(test_context) -> None:
     try:
         original_config = get_config()

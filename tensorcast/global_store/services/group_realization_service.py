@@ -185,6 +185,11 @@ class GroupRealizationService:
             )
         return expired
 
+    def run_expiration_scan(self, *, force: bool = False) -> int:
+        if not self._config.enabled:
+            return 0
+        return self._scan_expired(force=force)
+
     def _transaction_deadline_unix_nanos(self, requested: int) -> int | None:
         now_ns = time.time_ns()
         ttl_ms = max(0, int(self._config.transaction_ttl_ms))

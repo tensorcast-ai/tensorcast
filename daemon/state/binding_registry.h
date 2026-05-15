@@ -127,6 +127,9 @@ class BindingRegistry {
 
   [[nodiscard]] absl::StatusOr<std::shared_ptr<Record>> get(std::string_view binding_id) const;
 
+  [[nodiscard]] absl::StatusOr<std::shared_ptr<Record>> get_by_local_serving_ref(
+      std::string_view local_serving_ref) const;
+
   [[nodiscard]] bool close_control(std::string_view binding_id);
 
   [[nodiscard]] absl::Status retire_retained(std::string_view binding_id, std::string_view reason);

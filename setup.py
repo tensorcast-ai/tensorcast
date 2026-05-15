@@ -935,6 +935,7 @@ setup(
             "*.so",
             "lib/*.so",
             "bin/*",
+            "config/profiles/*/*.yaml",
         ]
     },
     exclude_package_data={

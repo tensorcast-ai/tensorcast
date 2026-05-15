@@ -2308,6 +2308,7 @@ grpc::Status OwnedBindingService::create_binding(
   record->target_layout = req.target_layout();
   record->target_index_json = std::string(req.target_index_bytes().data(), req.target_index_bytes().size());
   record->target_layout_hash = compute_target_layout_hash(req.target_layout());
+  record->payloads.assign(descriptors_or->descriptors.begin(), descriptors_or->descriptors.end());
   if (mapped) {
     record->copy_plan = req.copy_plan();
     record->dst_tensors.assign(req.dst_tensors().begin(), req.dst_tensors().end());
