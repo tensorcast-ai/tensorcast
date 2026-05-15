@@ -1627,7 +1627,6 @@ class DaemonCtl:
         binding_layout_id: str,
         initial_selection: common_pb2.ArtifactSelection | None = None,
         source_artifact_id: str | None = None,
-        target_publication_token: bytes | None = None,
         copy_plan: store_daemon_pb2.CopyPlan | None = None,
         dst_specs: Iterable[store_daemon_pb2.MappedTensorSpec] | None = None,
         pid: int | None = None,
@@ -1655,8 +1654,6 @@ class DaemonCtl:
                 request.initial_selection.CopyFrom(initial_selection)
             if source_artifact_id:
                 request.source_artifact_id = str(source_artifact_id)
-            if target_publication_token:
-                request.target_publication_token = bytes(target_publication_token)
             if copy_plan is not None:
                 request.copy_plan.CopyFrom(copy_plan)
             if dst_specs is not None:
@@ -1688,7 +1685,6 @@ class DaemonCtl:
         binding_id: str,
         selection: common_pb2.ArtifactSelection,
         source_artifact_id: str | None = None,
-        target_publication_token: bytes | None = None,
         timeout_s: float = 30.0,
     ) -> store_daemon_pb2.CommitBindingArtifactResponse:
         if not binding_id:
@@ -1702,8 +1698,6 @@ class DaemonCtl:
             )
             if source_artifact_id:
                 request.source_artifact_id = str(source_artifact_id)
-            if target_publication_token:
-                request.target_publication_token = bytes(target_publication_token)
             try:
                 response: store_daemon_pb2.CommitBindingArtifactResponse = (
                     self._unary_call(
@@ -3896,19 +3890,21 @@ class DaemonCtl:
     def publish_target_replica(
         self,
         *,
-        target_publication_token: bytes,
+        binding_current_value_publication_token: bytes,
         byte_space: common_pb2.ByteSpaceRef,
         ttl_ms: int | None = None,
         owner_pid: int | None = None,
         operation_id: str | None = None,
         timeout_s: float = 60.0,
     ) -> store_daemon_pb2.PublishTargetReplicaResponse:
-        if not target_publication_token:
-            raise ValueError("target_publication_token is required")
+        if not binding_current_value_publication_token:
+            raise ValueError("binding_current_value_publication_token is required")
         if byte_space is None:
             raise ValueError("byte_space is required")
         req = store_daemon_pb2.PublishTargetReplicaRequest(
-            target_publication_token=bytes(target_publication_token),
+            binding_current_value_publication_token=bytes(
+                binding_current_value_publication_token
+            ),
             byte_space=byte_space,
         )
         if ttl_ms is not None:
@@ -3943,19 +3939,21 @@ class DaemonCtl:
     def start_publish_target_replica(
         self,
         *,
-        target_publication_token: bytes,
+        binding_current_value_publication_token: bytes,
         byte_space: common_pb2.ByteSpaceRef,
         ttl_ms: int | None = None,
         owner_pid: int | None = None,
         operation_id: str | None = None,
         timeout_s: float = 10.0,
     ) -> store_daemon_pb2.StartPublishTargetReplicaResponse:
-        if not target_publication_token:
-            raise ValueError("target_publication_token is required")
+        if not binding_current_value_publication_token:
+            raise ValueError("binding_current_value_publication_token is required")
         if byte_space is None:
             raise ValueError("byte_space is required")
         req = store_daemon_pb2.PublishTargetReplicaRequest(
-            target_publication_token=bytes(target_publication_token),
+            binding_current_value_publication_token=bytes(
+                binding_current_value_publication_token
+            ),
             byte_space=byte_space,
         )
         if ttl_ms is not None:

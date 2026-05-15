@@ -961,6 +961,7 @@ TargetMaterializationService::TargetMaterializationService(Dep d)
       target_publish_service_(
           TargetPublishService::Dep{
               .lip_manager = d_.lip_manager,
+              .bindings = d_.bindings,
               .devices = d_.devices,
               .identity = d_.identity,
               .lifecycle = d_.lifecycle,
@@ -987,6 +988,26 @@ TargetMaterializationService::TargetMaterializationService(Dep d)
 
 absl::StatusOr<TargetPublicationRegistry::Record> TargetMaterializationService::insert_target_publication_for_testing(
     TargetPublicationRegistry::Record record) {
+  if (!record.binding_id.empty()) {
+    auto binding = std::make_shared<BindingRegistry::Record>();
+    binding->binding_id = record.binding_id;
+    binding->binding_layout_id = record.binding_layout_id;
+    binding->owner_pid = record.owner_pid;
+    binding->creator_pid = record.owner_pid;
+    binding->device_uuid = record.device_uuid;
+    binding->state = v2::BINDING_STATE_READY_ARTIFACT;
+    binding->current_artifact_id = record.selection.artifact_id();
+    binding->current_selection = record.selection;
+    binding->current_binding_value_id = record.binding_value_id;
+    binding->seal_generation = record.seal_generation;
+    binding->target_layout_hash = record.target_layout_hash;
+    binding->daemon_id = record.daemon_id;
+    binding->daemon_session_id = record.daemon_session_id;
+    auto insert_status = d_.bindings.insert(binding);
+    if (!insert_status.ok() && !absl::IsAlreadyExists(insert_status)) {
+      return insert_status;
+    }
+  }
   return target_publish_service_.remember_target_publication(std::move(record));
 }
 
@@ -1165,8 +1186,6 @@ grpc::Status TargetMaterializationService::materialize_into_target(
   const bool has_view_transform = plan.has_view_transform;
   const std::string& canonical_index_json = plan.canonical_index_json;
   const uint64_t logical_total_size = plan.logical_total_size;
-  std::vector<RegisterStorageMeta> publish_storages = std::move(plan.publish_storages);
-  std::vector<LeaseSegMeta> publish_segments = std::move(plan.publish_segments);
 
   if (d_.external_target_verification_enabled && resolved_view_id.has_value() && !view_data_hash.has_value()) {
     auto view_meta_or = d_.engine.get_view_metadata(resolved_artifact_id, *resolved_view_id);
@@ -1384,88 +1403,6 @@ grpc::Status TargetMaterializationService::materialize_into_target(
   }
   resp.mutable_resolved_selection()->CopyFrom(resolved_selection);
   resp.set_generation(generation);
-  if (capability_tokens_ != nullptr && capability_tokens_->configured()) {
-    tensorcast::common::v1::ByteSpaceRef byte_space;
-    if (!resolved_selection.view_id().empty()) {
-      byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_VIEW);
-      byte_space.set_id(resolved_selection.view_id());
-    } else {
-      byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
-      byte_space.set_id("");
-    }
-
-    const std::string layout_hash = compute_target_layout_hash(layout);
-    const std::string publication_id = mint_publication_id();
-    const absl::Time expires_at = absl::Now() + TargetPublishService::target_publication_token_ttl();
-
-    auto stable_index_or = store::loader::rebuild_stable_canonical_index(canonical_index_json, device.ordinal);
-    if (!stable_index_or.ok()) {
-      VLOG(1) << "MaterializeIntoTarget: failed to rebuild canonical index for target publication token: "
-              << stable_index_or.status();
-    } else {
-      std::string stable_index_json = std::move(*stable_index_or);
-      const auto digest = common::sha256_digest_bytes(
-          absl::Span<const uint8_t>(
-              reinterpret_cast<const uint8_t*>(stable_index_json.data()), stable_index_json.size()));
-      std::string index_key_hex =
-          absl::BytesToHexString(absl::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
-
-      tensorcast::common::v1::TargetPublicationScope scope;
-      scope.set_publication_id(publication_id);
-      scope.mutable_selection()->CopyFrom(resolved_selection);
-      scope.mutable_byte_space()->CopyFrom(byte_space);
-      scope.set_device_uuid(req.device_uuid());
-      scope.set_owner_pid(req.pid());
-      scope.set_target_layout_hash(layout_hash);
-      if (req.has_operation_id()) {
-        scope.set_operation_id(req.operation_id());
-      }
-
-      auto scope_or = common::CapabilityTokenManager::serialize_scope_deterministic(scope);
-      if (scope_or.ok()) {
-        const uint64_t expires_at_ms = static_cast<uint64_t>(absl::ToUnixMillis(expires_at));
-        auto token_or = capability_tokens_->mint(
-            d_.identity.daemon_id(),
-            tensorcast::common::v1::CAPABILITY_AUDIENCE_TARGET_PUBLICATION,
-            *scope_or,
-            expires_at_ms);
-        if (token_or.ok()) {
-          TargetPublicationRegistry::Record record;
-          record.publication_id = PublicationInstanceId{.value = publication_id};
-          record.publication_subject_key =
-              build_publication_subject_key(resolved_selection, byte_space, layout_hash, req.device_uuid());
-          record.target_layout_hash = layout_hash;
-          record.selection = resolved_selection;
-          record.byte_space = byte_space;
-          if (common.group_begin_context.has_value()) {
-            record.group_version_set_id = common.group_begin_context->version_set.version_set_id();
-            record.group_part_id = common.group_begin_context->part_id;
-          }
-          record.canonical_index_json = std::move(stable_index_json);
-          record.index_key_hex = std::move(index_key_hex);
-          record.device_uuid = req.device_uuid();
-          record.owner_pid = req.pid();
-          if (req.has_operation_id()) {
-            record.request_operation_id = req.operation_id();
-          }
-          record.expires_at = expires_at;
-          record.segments = std::move(publish_segments);
-          record.storages = std::move(publish_storages);
-          auto inserted_or = target_publish_service_.remember_target_publication(std::move(record));
-          if (inserted_or.ok()) {
-            resp.set_target_publication_token(*token_or);
-          } else {
-            VLOG(1) << "MaterializeIntoTarget: failed to register target publication lifecycle: "
-                    << inserted_or.status();
-          }
-        } else {
-          VLOG(1) << "MaterializeIntoTarget: failed to mint target_publication_token: " << token_or.status();
-        }
-      } else {
-        VLOG(1) << "MaterializeIntoTarget: failed to serialize target_publication scope: " << scope_or.status();
-      }
-    }
-  }
   record_materialize_into_target("ok", "ok", resp.source());
   rctx.mark_success();
   return Status::OK;
@@ -1606,8 +1543,6 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   const std::string& canonical_index_json = mapped_plan.canonical_index_json;
   auto& view_spec = mapped_plan.view_spec;
   auto& view_plan = mapped_plan.view_plan;
-  auto publish_storages = std::move(mapped_plan.publish_storages);
-  auto publish_segments = std::move(mapped_plan.publish_segments);
 
   auto storage_lease = std::move(validated_target.storage_lease);
 
@@ -1762,88 +1697,6 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   }
   resp.mutable_resolved_selection()->CopyFrom(resolved_selection);
   resp.set_generation(generation);
-  if (capability_tokens_ != nullptr && capability_tokens_->configured()) {
-    tensorcast::common::v1::ByteSpaceRef byte_space;
-    if (!resolved_selection.view_id().empty()) {
-      byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_VIEW);
-      byte_space.set_id(resolved_selection.view_id());
-    } else {
-      byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
-      byte_space.set_id("");
-    }
-
-    const std::string layout_hash = compute_target_layout_hash(layout);
-    const std::string publication_id = mint_publication_id();
-    const absl::Time expires_at = absl::Now() + TargetPublishService::target_publication_token_ttl();
-
-    auto stable_index_or = store::loader::rebuild_stable_canonical_index(canonical_index_json, device.ordinal);
-    if (!stable_index_or.ok()) {
-      VLOG(1) << "MaterializeIntoMappedTarget: failed to rebuild canonical index for target publication token: "
-              << stable_index_or.status();
-    } else {
-      std::string stable_index_json = std::move(*stable_index_or);
-      const auto digest = common::sha256_digest_bytes(
-          absl::Span<const uint8_t>(
-              reinterpret_cast<const uint8_t*>(stable_index_json.data()), stable_index_json.size()));
-      std::string index_key_hex =
-          absl::BytesToHexString(absl::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
-
-      tensorcast::common::v1::TargetPublicationScope scope;
-      scope.set_publication_id(publication_id);
-      scope.mutable_selection()->CopyFrom(resolved_selection);
-      scope.mutable_byte_space()->CopyFrom(byte_space);
-      scope.set_device_uuid(req.device_uuid());
-      scope.set_owner_pid(req.pid());
-      scope.set_target_layout_hash(layout_hash);
-      if (req.has_operation_id()) {
-        scope.set_operation_id(req.operation_id());
-      }
-
-      auto scope_or = common::CapabilityTokenManager::serialize_scope_deterministic(scope);
-      if (scope_or.ok()) {
-        const uint64_t expires_at_ms = static_cast<uint64_t>(absl::ToUnixMillis(expires_at));
-        auto token_or = capability_tokens_->mint(
-            d_.identity.daemon_id(),
-            tensorcast::common::v1::CAPABILITY_AUDIENCE_TARGET_PUBLICATION,
-            *scope_or,
-            expires_at_ms);
-        if (token_or.ok()) {
-          TargetPublicationRegistry::Record record;
-          record.publication_id = PublicationInstanceId{.value = publication_id};
-          record.publication_subject_key =
-              build_publication_subject_key(resolved_selection, byte_space, layout_hash, req.device_uuid());
-          record.target_layout_hash = layout_hash;
-          record.selection = resolved_selection;
-          record.byte_space = byte_space;
-          if (common.group_begin_context.has_value()) {
-            record.group_version_set_id = common.group_begin_context->version_set.version_set_id();
-            record.group_part_id = common.group_begin_context->part_id;
-          }
-          record.canonical_index_json = std::move(stable_index_json);
-          record.index_key_hex = std::move(index_key_hex);
-          record.device_uuid = req.device_uuid();
-          record.owner_pid = req.pid();
-          if (req.has_operation_id()) {
-            record.request_operation_id = req.operation_id();
-          }
-          record.expires_at = expires_at;
-          record.segments = std::move(publish_segments);
-          record.storages = std::move(publish_storages);
-          auto inserted_or = target_publish_service_.remember_target_publication(std::move(record));
-          if (inserted_or.ok()) {
-            resp.set_target_publication_token(*token_or);
-          } else {
-            VLOG(1) << "MaterializeIntoMappedTarget: failed to register target publication lifecycle: "
-                    << inserted_or.status();
-          }
-        } else {
-          VLOG(1) << "MaterializeIntoMappedTarget: failed to mint target_publication_token: " << token_or.status();
-        }
-      } else {
-        VLOG(1) << "MaterializeIntoMappedTarget: failed to serialize target_publication scope: " << scope_or.status();
-      }
-    }
-  }
   if (rctx.allow_high_card_attrs()) {
     span->SetAttribute("tc.mapped.entries", static_cast<int64_t>(req.copy_plan().entries_size()));
     span->SetAttribute("tc.mapped.bytes", static_cast<int64_t>(mapped_plan.representation.total_bytes_copied));
@@ -1896,6 +1749,13 @@ grpc::Status TargetMaterializationService::start_publish_target_replica(
 absl::StatusOr<TargetPublicationRegistry::Record> TargetMaterializationService::remember_target_publication(
     TargetPublicationRegistry::Record record) {
   return target_publish_service_.remember_target_publication(std::move(record));
+}
+
+absl::Status TargetMaterializationService::terminalize_target_publication(
+    std::string_view publication_id,
+    std::string_view reason,
+    bool release_published_lifecycle_lease) {
+  return target_publish_service_.terminalize_publication(publication_id, reason, release_published_lifecycle_lease);
 }
 
 absl::Status TargetMaterializationService::admit_public_operation(

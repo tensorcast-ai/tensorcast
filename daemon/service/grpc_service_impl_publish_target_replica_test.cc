@@ -69,17 +69,23 @@ std::unique_ptr<tensorcast::daemon::DaemonServiceHarness> make_harness(
   return harness;
 }
 
-tensorcast::common::v1::TargetPublicationScope make_scope(
+tensorcast::common::v1::BindingCurrentValuePublicationScope make_scope(
     std::string publication_id,
     std::string artifact_id,
     std::string device_uuid,
     int owner_pid,
     bool publishable) {
-  tensorcast::common::v1::TargetPublicationScope scope;
+  tensorcast::common::v1::BindingCurrentValuePublicationScope scope;
   scope.set_publication_id(std::move(publication_id));
   scope.set_device_uuid(std::move(device_uuid));
   scope.set_owner_pid(owner_pid);
   scope.set_target_layout_hash("layout-hash");
+  scope.set_binding_id(absl::StrCat("binding-", publication_id));
+  scope.set_binding_layout_id("binding-layout");
+  scope.set_binding_value_id(absl::StrCat("binding-value-", publication_id));
+  scope.set_seal_generation(1);
+  scope.set_daemon_id("daemon-test");
+  scope.set_daemon_session_id("session-test");
   auto* space = scope.mutable_byte_space();
   space->set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
   space->set_id("");
@@ -94,7 +100,7 @@ tensorcast::common::v1::TargetPublicationScope make_scope(
   return scope;
 }
 
-tensorcast::common::v1::TargetPublicationScope make_view_subset_scope(
+tensorcast::common::v1::BindingCurrentValuePublicationScope make_view_subset_scope(
     std::string publication_id,
     std::string artifact_id,
     std::string device_uuid,
@@ -115,8 +121,32 @@ tensorcast::common::v1::TargetPublicationScope make_view_subset_scope(
 std::string mint_token(
     const tensorcast::common::CapabilityTokenManager& manager,
     std::string_view issuer,
-    const tensorcast::common::v1::TargetPublicationScope& scope) {
+    const tensorcast::common::v1::BindingCurrentValuePublicationScope& scope) {
   auto scope_bytes_or = tensorcast::common::CapabilityTokenManager::serialize_scope_deterministic(scope);
+  REQUIRE(scope_bytes_or.ok());
+  const uint64_t expires_at_ms = static_cast<uint64_t>(absl::ToUnixMillis(absl::Now() + absl::Minutes(5)));
+  auto token_or = manager.mint(
+      issuer,
+      tensorcast::common::v1::CAPABILITY_AUDIENCE_BINDING_CURRENT_VALUE_PUBLICATION,
+      *scope_bytes_or,
+      expires_at_ms);
+  REQUIRE(token_or.ok());
+  return *token_or;
+}
+
+std::string mint_legacy_target_publication_token(
+    const tensorcast::common::CapabilityTokenManager& manager,
+    std::string_view issuer,
+    const tensorcast::common::v1::BindingCurrentValuePublicationScope& scope) {
+  tensorcast::common::v1::TargetPublicationScope legacy_scope;
+  legacy_scope.set_publication_id(scope.publication_id());
+  legacy_scope.mutable_selection()->CopyFrom(scope.selection());
+  legacy_scope.mutable_byte_space()->CopyFrom(scope.byte_space());
+  legacy_scope.set_device_uuid(scope.device_uuid());
+  legacy_scope.set_owner_pid(scope.owner_pid());
+  legacy_scope.set_target_layout_hash(scope.target_layout_hash());
+  legacy_scope.set_operation_id(scope.operation_id());
+  auto scope_bytes_or = tensorcast::common::CapabilityTokenManager::serialize_scope_deterministic(legacy_scope);
   REQUIRE(scope_bytes_or.ok());
   const uint64_t expires_at_ms = static_cast<uint64_t>(absl::ToUnixMillis(absl::Now() + absl::Minutes(5)));
   auto token_or = manager.mint(
@@ -126,7 +156,7 @@ std::string mint_token(
 }
 
 tensorcast::daemon::TargetPublicationRegistry::Record make_record_from_scope(
-    const tensorcast::common::v1::TargetPublicationScope& scope) {
+    const tensorcast::common::v1::BindingCurrentValuePublicationScope& scope) {
   tensorcast::daemon::TargetPublicationRegistry::Record record;
   record.publication_id = tensorcast::daemon::PublicationInstanceId{.value = scope.publication_id()};
   record.publication_subject_key = tensorcast::daemon::build_publication_subject_key(
@@ -138,12 +168,18 @@ tensorcast::daemon::TargetPublicationRegistry::Record make_record_from_scope(
   record.index_key_hex = "deadbeef";
   record.device_uuid = scope.device_uuid();
   record.owner_pid = scope.owner_pid();
+  record.daemon_id = scope.daemon_id();
+  record.daemon_session_id = scope.daemon_session_id();
+  record.binding_id = scope.binding_id();
+  record.binding_layout_id = scope.binding_layout_id();
+  record.binding_value_id = scope.binding_value_id();
+  record.seal_generation = scope.seal_generation();
   record.expires_at = absl::Now() + absl::Minutes(5);
   return record;
 }
 
 tensorcast::daemon::TargetPublicationRegistry::Record make_publishable_record_from_scope(
-    const tensorcast::common::v1::TargetPublicationScope& scope,
+    const tensorcast::common::v1::BindingCurrentValuePublicationScope& scope,
     std::string handle_bytes = "fake-cuda-ipc-handle") {
   auto record = make_record_from_scope(scope);
   tensorcast::daemon::RegisterStorageMeta storage;
@@ -189,12 +225,37 @@ TEST_CASE("PublishTargetReplica rejects owner mismatch", "[daemon][publish]") {
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::PublishTargetReplicaRequest req;
   tensorcast::daemon::v2::PublishTargetReplicaResponse resp;
-  req.set_target_publication_token(token);
+  req.set_binding_current_value_publication_token(token);
   req.mutable_byte_space()->set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
   req.set_owner_pid(owner_pid + 1);
 
   auto st = harness->service().PublishTargetReplica(&ctx, &req, &resp);
   REQUIRE(st.error_code() == grpc::StatusCode::PERMISSION_DENIED);
+}
+
+TEST_CASE("PublishTargetReplica rejects legacy target publication tokens", "[daemon][publish]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts());
+  auto gs = std::make_shared<tensorcast::store::testing::RecordingGlobalStoreClient>();
+  auto harness = make_harness(engine, gs);
+
+  auto* tokens = harness->kernel().capability_tokens();
+  REQUIRE(tokens != nullptr);
+  const int owner_pid = getpid();
+  const auto scope = make_scope("write-legacy", "artifact-legacy", "gpu-0", owner_pid, true);
+  auto record = make_publishable_record_from_scope(scope);
+  auto inserted_or = harness->materialization_controller().insert_target_publication_for_testing(std::move(record));
+  REQUIRE(inserted_or.ok());
+  const std::string token = mint_legacy_target_publication_token(*tokens, "daemon-test", scope);
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::PublishTargetReplicaRequest req;
+  tensorcast::daemon::v2::PublishTargetReplicaResponse resp;
+  req.set_binding_current_value_publication_token(token);
+  req.mutable_byte_space()->CopyFrom(scope.byte_space());
+  req.set_owner_pid(owner_pid);
+
+  auto st = harness->service().PublishTargetReplica(&ctx, &req, &resp);
+  REQUIRE(!st.ok());
 }
 
 TEST_CASE("PublishTargetReplica rejects packed selections", "[daemon][publish]") {
@@ -215,7 +276,7 @@ TEST_CASE("PublishTargetReplica rejects packed selections", "[daemon][publish]")
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::PublishTargetReplicaRequest req;
   tensorcast::daemon::v2::PublishTargetReplicaResponse resp;
-  req.set_target_publication_token(token);
+  req.set_binding_current_value_publication_token(token);
   req.mutable_byte_space()->set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
   req.set_owner_pid(owner_pid);
 
@@ -241,13 +302,13 @@ TEST_CASE("PublishTargetReplica allows packed selection for view byte-space", "[
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::PublishTargetReplicaRequest req;
   tensorcast::daemon::v2::PublishTargetReplicaResponse resp;
-  req.set_target_publication_token(token);
+  req.set_binding_current_value_publication_token(token);
   req.mutable_byte_space()->CopyFrom(scope.byte_space());
   req.set_owner_pid(owner_pid);
 
   auto st = harness->service().PublishTargetReplica(&ctx, &req, &resp);
   REQUIRE(st.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
-  REQUIRE(st.error_message() == "target_publication_token has empty segments");
+  REQUIRE(st.error_message() == "binding_current_value_publication_token has empty segments");
   REQUIRE(resp.lease_id().empty());
   REQUIRE(resp.replica_id().empty());
   REQUIRE(gs->registered_replicas.empty());
@@ -285,7 +346,7 @@ TEST_CASE("PublishTargetReplica reports terminal progressive coverage when enabl
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::PublishTargetReplicaRequest req;
   tensorcast::daemon::v2::PublishTargetReplicaResponse resp;
-  req.set_target_publication_token(token);
+  req.set_binding_current_value_publication_token(token);
   req.mutable_byte_space()->CopyFrom(scope.byte_space());
   req.set_owner_pid(owner_pid);
 
@@ -385,7 +446,7 @@ TEST_CASE(
   REQUIRE(inserted_or.ok());
 
   tensorcast::daemon::v2::PublishTargetReplicaRequest req;
-  req.set_target_publication_token(token);
+  req.set_binding_current_value_publication_token(token);
   req.mutable_byte_space()->CopyFrom(scope.byte_space());
   req.set_owner_pid(owner_pid);
   req.set_operation_id(scope.operation_id());
@@ -463,7 +524,7 @@ TEST_CASE(
   REQUIRE(inserted_current_or.ok());
 
   tensorcast::daemon::v2::PublishTargetReplicaRequest req;
-  req.set_target_publication_token(stale_token);
+  req.set_binding_current_value_publication_token(stale_token);
   req.mutable_byte_space()->CopyFrom(stale_scope.byte_space());
   req.set_owner_pid(owner_pid);
   req.set_operation_id(stale_scope.operation_id());
@@ -477,7 +538,7 @@ TEST_CASE(
   tensorcast::daemon::v2::PublishTargetReplicaResponse resp;
   auto st = harness->service().PublishTargetReplica(&ctx, &req, &resp);
   REQUIRE(st.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
-  CHECK(st.error_message() == "target_publication_token is stale for target");
+  CHECK(st.error_message() == "binding_current_value_publication_token is stale for target");
   CHECK(resp.lease_id().empty());
   CHECK(resp.replica_id().empty());
   CHECK(gs->registered_replicas.empty());
@@ -517,7 +578,7 @@ TEST_CASE(
   CHECK(inserted_primary_or->subject_generation == inserted_sibling_or->subject_generation);
 
   tensorcast::daemon::v2::PublishTargetReplicaRequest publish_req;
-  publish_req.set_target_publication_token(primary_token);
+  publish_req.set_binding_current_value_publication_token(primary_token);
   publish_req.mutable_byte_space()->CopyFrom(primary_scope.byte_space());
   publish_req.set_owner_pid(owner_pid);
   publish_req.set_operation_id(primary_scope.operation_id());
@@ -573,7 +634,7 @@ TEST_CASE(
   REQUIRE(inserted_current_or.ok());
 
   tensorcast::daemon::v2::PublishTargetReplicaRequest req;
-  req.set_target_publication_token(stale_token);
+  req.set_binding_current_value_publication_token(stale_token);
   req.mutable_byte_space()->CopyFrom(stale_scope.byte_space());
   req.set_owner_pid(owner_pid);
   req.set_operation_id(stale_scope.operation_id());
@@ -582,7 +643,7 @@ TEST_CASE(
   tensorcast::daemon::v2::PublishTargetReplicaResponse resp;
   auto st = harness->service().PublishTargetReplica(&ctx, &req, &resp);
   REQUIRE(st.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
-  CHECK(st.error_message() == "target_publication_token is stale for target");
+  CHECK(st.error_message() == "binding_current_value_publication_token is stale for target");
 
   REQUIRE(harness->kernel().lifecycle_kernel().release_capability(stale_capability_id).ok());
   auto inspect_or = harness->kernel().lifecycle_kernel().inspect_capability(stale_capability_id);
@@ -617,7 +678,7 @@ TEST_CASE(
   harness->kernel().lip_manager().attach_replica_id(active_lease.registration_id, "replica-existing");
 
   tensorcast::daemon::v2::PublishTargetReplicaRequest req;
-  req.set_target_publication_token(token);
+  req.set_binding_current_value_publication_token(token);
   req.mutable_byte_space()->CopyFrom(scope.byte_space());
   req.set_owner_pid(owner_pid);
   req.set_operation_id(scope.operation_id());
@@ -654,7 +715,7 @@ TEST_CASE(
   REQUIRE(inserted_or.ok());
 
   tensorcast::daemon::v2::PublishTargetReplicaRequest publish_req;
-  publish_req.set_target_publication_token(token);
+  publish_req.set_binding_current_value_publication_token(token);
   publish_req.mutable_byte_space()->CopyFrom(scope.byte_space());
   publish_req.set_owner_pid(owner_pid);
   publish_req.set_operation_id(scope.operation_id());
@@ -728,7 +789,7 @@ TEST_CASE(
   REQUIRE(inserted_or.ok());
 
   tensorcast::daemon::v2::PublishTargetReplicaRequest publish_req;
-  publish_req.set_target_publication_token(token);
+  publish_req.set_binding_current_value_publication_token(token);
   publish_req.mutable_byte_space()->CopyFrom(scope.byte_space());
   publish_req.set_owner_pid(owner_pid);
   publish_req.set_operation_id(scope.operation_id());
@@ -810,7 +871,7 @@ TEST_CASE(
   REQUIRE(inserted_current_or.ok());
 
   tensorcast::daemon::v2::PublishTargetReplicaRequest publish_req;
-  publish_req.set_target_publication_token(stale_token);
+  publish_req.set_binding_current_value_publication_token(stale_token);
   publish_req.mutable_byte_space()->CopyFrom(stale_scope.byte_space());
   publish_req.set_owner_pid(owner_pid);
   publish_req.set_operation_id(stale_scope.operation_id());
@@ -854,7 +915,7 @@ TEST_CASE(
   REQUIRE(inserted_or.ok());
 
   tensorcast::daemon::v2::PublishTargetReplicaRequest req;
-  req.set_target_publication_token(token);
+  req.set_binding_current_value_publication_token(token);
   req.mutable_byte_space()->CopyFrom(scope.byte_space());
   req.set_owner_pid(owner_pid);
   req.set_operation_id(scope.operation_id());
@@ -919,7 +980,7 @@ TEST_CASE(
   REQUIRE(inserted_or.ok());
 
   tensorcast::daemon::v2::PublishTargetReplicaRequest publish_req;
-  publish_req.set_target_publication_token(token);
+  publish_req.set_binding_current_value_publication_token(token);
   publish_req.mutable_byte_space()->CopyFrom(scope.byte_space());
   publish_req.set_owner_pid(owner_pid);
   publish_req.set_operation_id(scope.operation_id());
@@ -992,7 +1053,7 @@ TEST_CASE(
   REQUIRE(inserted_or.ok());
 
   tensorcast::daemon::v2::PublishTargetReplicaRequest publish_req;
-  publish_req.set_target_publication_token(token);
+  publish_req.set_binding_current_value_publication_token(token);
   publish_req.mutable_byte_space()->CopyFrom(scope.byte_space());
   publish_req.set_owner_pid(owner_pid);
   publish_req.set_operation_id(scope.operation_id());
@@ -1051,7 +1112,7 @@ TEST_CASE("GetOperation fails closed when publish owner state is lost", "[daemon
   REQUIRE(inserted_or.ok());
 
   tensorcast::daemon::v2::PublishTargetReplicaRequest req;
-  req.set_target_publication_token(token);
+  req.set_binding_current_value_publication_token(token);
   req.mutable_byte_space()->CopyFrom(scope.byte_space());
   req.set_owner_pid(owner_pid);
   req.set_operation_id(scope.operation_id());
@@ -1099,7 +1160,7 @@ TEST_CASE(
   CHECK(inserted_original_or->subject_generation == 1);
 
   tensorcast::daemon::v2::PublishTargetReplicaRequest original_req;
-  original_req.set_target_publication_token(original_token);
+  original_req.set_binding_current_value_publication_token(original_token);
   original_req.mutable_byte_space()->CopyFrom(original_scope.byte_space());
   original_req.set_owner_pid(owner_pid);
   original_req.set_operation_id(original_scope.operation_id());
@@ -1161,7 +1222,7 @@ TEST_CASE(
   REQUIRE(inserted_stale_or.ok());
 
   tensorcast::daemon::v2::PublishTargetReplicaRequest req;
-  req.set_target_publication_token(token);
+  req.set_binding_current_value_publication_token(token);
   req.mutable_byte_space()->CopyFrom(stale_scope.byte_space());
   req.set_owner_pid(owner_pid);
   req.set_operation_id(stale_scope.operation_id());

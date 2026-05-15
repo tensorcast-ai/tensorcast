@@ -286,6 +286,7 @@ MaterializationController::MaterializationController(Dep d)
           TargetMaterializationService::Dep{
               .engine = d.engine,
               .lip_manager = d.lip_manager,
+              .bindings = d.binding_registry,
               .devices = d.devices,
               .regions = d.regions,
               .disk_imports = d.disk_imports,
@@ -296,8 +297,8 @@ MaterializationController::MaterializationController(Dep d)
               .identity = d.identity,
               .external_target_access_service = d.external_target_access_service,
               .global_store_client = d.global_store_client,
-              .max_concurrency = d.max_concurrency,
               .capability_tokens = d.capability_tokens,
+              .max_concurrency = d.max_concurrency,
               .external_target_verification_enabled = d.external_target_verification_enabled,
               .progressive_replication = d.progressive_replication,
               .daemon_id = daemon_id_,
@@ -826,15 +827,24 @@ grpc::Status MaterializationController::acquire_binding_value(
       return to_grpc_status(record_or.status());
     }
     const auto record = *record_or;
-    std::string binding_id;
-    bool retained_ref = false;
+
+    struct LocalAcquireSnapshot {
+      std::string binding_id;
+      bool retained_ref{false};
+      cuda::IpcHandleBytes handle_bytes;
+      std::string target_index_json;
+      std::vector<v2::TensorPayloadDescriptor> payloads;
+      v2::TargetLayout target_layout;
+      v2::BindingValue current_value;
+    } snapshot;
+
     {
       absl::MutexLock lock(&record->mu);
       if (record->retired) {
         return {grpc::StatusCode::FAILED_PRECONDITION, "binding is retired"};
       }
-      retained_ref = record->retained_ref;
-      if (!retained_ref && record->owner_pid != req.caller_pid()) {
+      snapshot.retained_ref = record->retained_ref;
+      if (!snapshot.retained_ref && record->owner_pid != req.caller_pid()) {
         return {grpc::StatusCode::FAILED_PRECONDITION, "binding is not retained"};
       }
       if (record->current_binding_value_id.empty()) {
@@ -857,56 +867,54 @@ grpc::Status MaterializationController::acquire_binding_value(
           record->target_layout_hash != req.expected_target_layout_hash()) {
         return {grpc::StatusCode::FAILED_PRECONDITION, "target_layout_hash mismatch"};
       }
-      if (retained_ref && record->tensor_schema_hash != req.expected_tensor_schema_hash()) {
+      if (snapshot.retained_ref && record->tensor_schema_hash != req.expected_tensor_schema_hash()) {
         return {grpc::StatusCode::FAILED_PRECONDITION, "tensor_schema_hash mismatch"};
       }
-      if (retained_ref && record->serving_build_digest != req.expected_serving_build_digest()) {
+      if (snapshot.retained_ref && record->serving_build_digest != req.expected_serving_build_digest()) {
         return {grpc::StatusCode::FAILED_PRECONDITION, "serving_build_digest mismatch"};
       }
       if (record->allowed_caller_pid.has_value() && *record->allowed_caller_pid != req.caller_pid()) {
         return {grpc::StatusCode::PERMISSION_DENIED, "caller_pid mismatch"};
       }
-      binding_id = record->binding_id;
-    }
-
-    if (retained_ref) {
-      if (auto status = binding_registry_->acquire_attachment_ref(binding_id, absl::Now()); !status.ok()) {
-        return to_grpc_status(status);
+      snapshot.binding_id = record->binding_id;
+      snapshot.handle_bytes = record->handle_bytes;
+      snapshot.target_index_json = record->target_index_json;
+      snapshot.payloads = record->payloads;
+      snapshot.target_layout = record->target_layout;
+      fill_current_binding_value(*record, &snapshot.current_value);
+      if (snapshot.retained_ref) {
+        const absl::Time now = absl::Now();
+        if (record->active_attachment_refs == 0 && record->first_acquired_at == absl::InfinitePast()) {
+          record->first_acquired_at = now;
+        }
+        record->last_acquired_at = now;
+        record->idle_deadline = absl::InfiniteFuture();
+        record->active_attachment_refs++;
       }
     }
-    auto token_or = retained_ref ? handle_leases_->mint_external_cuda_lease(
-                                       req.caller_pid(),
-                                       [registry = binding_registry_, binding_id]() {
-                                         registry->release_attachment_ref(binding_id, absl::Now());
-                                       })
-                                 : handle_leases_->mint_external_cuda_lease(req.caller_pid(), []() {});
+    auto token_or = snapshot.retained_ref ? handle_leases_->mint_external_cuda_lease(
+                                                req.caller_pid(),
+                                                [registry = binding_registry_, binding_id = snapshot.binding_id]() {
+                                                  registry->release_attachment_ref(binding_id, absl::Now());
+                                                })
+                                          : handle_leases_->mint_external_cuda_lease(req.caller_pid(), []() {});
     if (!token_or.ok()) {
-      if (retained_ref) {
-        binding_registry_->release_attachment_ref(binding_id, absl::Now());
+      if (snapshot.retained_ref) {
+        binding_registry_->release_attachment_ref(snapshot.binding_id, absl::Now());
       }
       return to_grpc_status(token_or.status());
     }
-    auto refreshed_or = binding_registry_->get(binding_id);
-    if (!refreshed_or.ok()) {
-      auto release_status = handle_leases_->release(*token_or);
-      if (!release_status.ok()) {
-        LOG(WARNING) << "failed to release local-ref acquire lease after binding lookup failure: " << release_status;
-      }
-      return to_grpc_status(refreshed_or.status());
-    }
-    const auto refreshed = *refreshed_or;
-    absl::MutexLock lock(&refreshed->mu);
     resp.set_lease_token(*token_or);
     resp.mutable_mem_handle()->set_cuda_ipc_handle(
-        refreshed->handle_bytes.as_string_view().data(), refreshed->handle_bytes.as_string_view().size());
+        snapshot.handle_bytes.as_string_view().data(), snapshot.handle_bytes.as_string_view().size());
     resp.mutable_mem_handle()->set_lease_token(*token_or);
-    resp.set_target_index_bytes(refreshed->target_index_json);
-    for (const auto& payload : refreshed->payloads) {
+    resp.set_target_index_bytes(snapshot.target_index_json);
+    for (const auto& payload : snapshot.payloads) {
       *resp.add_payloads() = payload;
     }
-    resp.set_reservation_bytes(logical_total_size(refreshed->target_layout));
-    fill_current_binding_value(*refreshed, resp.mutable_current_value());
-    resp.mutable_acquired_value()->CopyFrom(resp.current_value());
+    resp.set_reservation_bytes(logical_total_size(snapshot.target_layout));
+    resp.mutable_current_value()->CopyFrom(snapshot.current_value);
+    resp.mutable_acquired_value()->CopyFrom(snapshot.current_value);
     return grpc::Status::OK;
   }
   if (req.has_group_realization_acquire()) {
@@ -1129,6 +1137,14 @@ grpc::Status MaterializationController::start_publish_target_replica(
     const v2::PublishTargetReplicaRequest& req,
     v2::StartPublishTargetReplicaResponse& resp) {
   return target_materialization_service_.start_publish_target_replica(rctx, req, resp);
+}
+
+absl::Status MaterializationController::terminalize_target_publication(
+    std::string_view publication_id,
+    std::string_view reason,
+    bool release_published_lifecycle_lease) {
+  return target_materialization_service_.terminalize_target_publication(
+      publication_id, reason, release_published_lifecycle_lease);
 }
 
 absl::StatusOr<TargetPublishService::TargetPublicationFrontDoorContext> MaterializationController::

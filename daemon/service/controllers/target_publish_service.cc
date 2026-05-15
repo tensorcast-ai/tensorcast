@@ -219,7 +219,7 @@ class OperationLeaseGuard {
 
 struct TargetPublicationCredentialInspection {
   tensorcast::common::v1::CapabilityTokenEnvelope envelope;
-  tensorcast::common::v1::TargetPublicationScope scope;
+  tensorcast::common::v1::BindingCurrentValuePublicationScope scope;
   tensorcast::common::v1::ByteSpaceRef normalized_byte_space;
   FrontDoorCredentialContext front_door_context;
 };
@@ -280,12 +280,12 @@ LocalObservationSet build_target_publication_local_observations(const v2::Publis
 }
 
 absl::Status validate_target_publication_local_observations(
-    const tensorcast::common::v1::TargetPublicationScope& scope,
+    const tensorcast::common::v1::BindingCurrentValuePublicationScope& scope,
     const LocalObservationSet& local_observations) {
   for (const auto& observation : local_observations.observations) {
     if (observation.observation_kind == kTargetPublicationOwnerPidObservationKind) {
       if (std::to_string(scope.owner_pid()) != observation.observation_payload) {
-        return absl::PermissionDeniedError("owner_pid mismatch for target_publication_token");
+        return absl::PermissionDeniedError("owner_pid mismatch for binding_current_value_publication_token");
       }
       continue;
     }
@@ -297,15 +297,15 @@ absl::Status validate_target_publication_local_observations(
 
 FrontDoorCredentialContext build_target_publication_front_door_context(
     const tensorcast::common::v1::CapabilityTokenEnvelope& envelope,
-    const tensorcast::common::v1::TargetPublicationScope& scope,
-    std::string_view target_publication_token,
+    const tensorcast::common::v1::BindingCurrentValuePublicationScope& scope,
+    std::string_view binding_current_value_publication_token,
     CredentialCarriageKind carriage_kind,
     LocalObservationSet local_observations) {
   std::optional<ForwardableCredentialEvidence> forwardable_evidence;
   if (carriage_kind == CredentialCarriageKind::kSelfDescribing) {
     forwardable_evidence = ForwardableCredentialEvidence{
         .evidence_kind = CredentialEvidenceKind::kRawCredential,
-        .raw_credential_bytes = std::string(target_publication_token),
+        .raw_credential_bytes = std::string(binding_current_value_publication_token),
     };
   }
   return FrontDoorCredentialContext{
@@ -627,19 +627,19 @@ DelegationEnvelope make_delegation_envelope(
 
 absl::StatusOr<TargetPublicationCredentialInspection> inspect_target_publication_credential(
     common::CapabilityTokenManager* capability_tokens,
-    std::string_view target_publication_token,
+    std::string_view binding_current_value_publication_token,
     absl::Time now,
     std::string_view expected_issuer,
     LocalObservationSet local_observations) {
-  if (target_publication_token.empty()) {
-    return absl::InvalidArgumentError("target_publication_token is required");
+  if (binding_current_value_publication_token.empty()) {
+    return absl::InvalidArgumentError("binding_current_value_publication_token is required");
   }
   if (capability_tokens == nullptr || !capability_tokens->configured()) {
     return absl::FailedPreconditionError("capability tokens not configured");
   }
   auto env_or = capability_tokens->verify(
-      target_publication_token,
-      tensorcast::common::v1::CAPABILITY_AUDIENCE_TARGET_PUBLICATION,
+      binding_current_value_publication_token,
+      tensorcast::common::v1::CAPABILITY_AUDIENCE_BINDING_CURRENT_VALUE_PUBLICATION,
       expected_issuer,
       now,
       /*require_not_expired=*/true);
@@ -647,9 +647,9 @@ absl::StatusOr<TargetPublicationCredentialInspection> inspect_target_publication
     return env_or.status();
   }
 
-  tensorcast::common::v1::TargetPublicationScope scope;
+  tensorcast::common::v1::BindingCurrentValuePublicationScope scope;
   if (!scope.ParseFromString(env_or->scope())) {
-    return absl::InvalidArgumentError("target_publication_token scope parse failed");
+    return absl::InvalidArgumentError("binding_current_value_publication_token scope parse failed");
   }
   auto local_observation_status = validate_target_publication_local_observations(scope, local_observations);
   if (!local_observation_status.ok()) {
@@ -663,7 +663,7 @@ absl::StatusOr<TargetPublicationCredentialInspection> inspect_target_publication
   const auto front_door_context = build_target_publication_front_door_context(
       envelope,
       scope,
-      target_publication_token,
+      binding_current_value_publication_token,
       CredentialCarriageKind::kSelfDescribing,
       std::move(local_observations));
 
@@ -685,46 +685,64 @@ absl::Status validate_target_publication_request_against_scope(
   const auto& normalized_req = *normalized_req_or;
   if (normalized_req.kind() != inspection.normalized_byte_space.kind() ||
       normalized_req.id() != inspection.normalized_byte_space.id()) {
-    return absl::InvalidArgumentError("byte_space does not match target_publication_token");
+    return absl::InvalidArgumentError("byte_space does not match binding_current_value_publication_token");
   }
   if (!inspection.scope.operation_id().empty()) {
     if (!req.has_operation_id() || req.operation_id().empty()) {
-      return absl::InvalidArgumentError("operation_id is required for target_publication_token");
+      return absl::InvalidArgumentError("operation_id is required for binding_current_value_publication_token");
     }
     if (inspection.scope.operation_id() != req.operation_id()) {
-      return absl::FailedPreconditionError("operation_id mismatch for target_publication_token");
+      return absl::FailedPreconditionError("operation_id mismatch for binding_current_value_publication_token");
     }
   }
   if (inspection.scope.publication_id().empty()) {
-    return absl::InvalidArgumentError("target_publication_token missing publication_id");
+    return absl::InvalidArgumentError("binding_current_value_publication_token missing publication_id");
   }
   return absl::OkStatus();
 }
 
 absl::Status validate_target_publication_scope_against_record(
     const TargetPublicationRegistry::Record& record,
-    const tensorcast::common::v1::TargetPublicationScope& scope,
+    const tensorcast::common::v1::BindingCurrentValuePublicationScope& scope,
     const tensorcast::common::v1::ByteSpaceRef& normalized_byte_space) {
   const PublicationSubjectKey publication_subject_key = build_publication_subject_key(
       scope.selection(), normalized_byte_space, scope.target_layout_hash(), scope.device_uuid());
   if (record.publication_subject_key != publication_subject_key) {
-    return absl::FailedPreconditionError("publication target mismatch for target_publication_token");
+    return absl::FailedPreconditionError("publication target mismatch for binding_current_value_publication_token");
   }
   if (record.device_uuid != scope.device_uuid()) {
-    return absl::FailedPreconditionError("device_uuid mismatch for target_publication_token");
+    return absl::FailedPreconditionError("device_uuid mismatch for binding_current_value_publication_token");
   }
   if (record.owner_pid != scope.owner_pid()) {
-    return absl::FailedPreconditionError("owner_pid mismatch for target_publication_token");
+    return absl::FailedPreconditionError("owner_pid mismatch for binding_current_value_publication_token");
+  }
+  if (record.daemon_id != scope.daemon_id()) {
+    return absl::FailedPreconditionError("daemon_id mismatch for binding_current_value_publication_token");
+  }
+  if (record.daemon_session_id != scope.daemon_session_id()) {
+    return absl::FailedPreconditionError("daemon_session_id mismatch for binding_current_value_publication_token");
+  }
+  if (record.binding_id != scope.binding_id()) {
+    return absl::FailedPreconditionError("binding_id mismatch for binding_current_value_publication_token");
+  }
+  if (record.binding_layout_id != scope.binding_layout_id()) {
+    return absl::FailedPreconditionError("binding_layout_id mismatch for binding_current_value_publication_token");
+  }
+  if (record.binding_value_id != scope.binding_value_id()) {
+    return absl::FailedPreconditionError("binding_value_id mismatch for binding_current_value_publication_token");
+  }
+  if (record.seal_generation != scope.seal_generation()) {
+    return absl::FailedPreconditionError("seal_generation mismatch for binding_current_value_publication_token");
   }
   if (record.target_layout_hash != scope.target_layout_hash()) {
-    return absl::FailedPreconditionError("target_layout_hash mismatch for target_publication_token");
+    return absl::FailedPreconditionError("target_layout_hash mismatch for binding_current_value_publication_token");
   }
   if (record.byte_space.kind() != normalized_byte_space.kind() ||
       record.byte_space.id() != normalized_byte_space.id()) {
-    return absl::FailedPreconditionError("byte_space mismatch for target_publication_token");
+    return absl::FailedPreconditionError("byte_space mismatch for binding_current_value_publication_token");
   }
   if (!scope.operation_id().empty() && record.request_operation_id != scope.operation_id()) {
-    return absl::FailedPreconditionError("stored operation_id mismatch for target_publication_token");
+    return absl::FailedPreconditionError("stored operation_id mismatch for binding_current_value_publication_token");
   }
   if (record.selection.artifact_id() != scope.selection().artifact_id() ||
       record.selection.view_id() != scope.selection().view_id() ||
@@ -732,11 +750,12 @@ absl::Status validate_target_publication_scope_against_record(
       record.selection.selection_hash() != scope.selection().selection_hash() ||
       record.selection.view_subset_hash() != scope.selection().view_subset_hash() ||
       record.selection.tensor_names_size() != scope.selection().tensor_names_size()) {
-    return absl::FailedPreconditionError("selection mismatch for target_publication_token");
+    return absl::FailedPreconditionError("selection mismatch for binding_current_value_publication_token");
   }
   for (int i = 0; i < record.selection.tensor_names_size(); ++i) {
     if (record.selection.tensor_names(i) != scope.selection().tensor_names(i)) {
-      return absl::FailedPreconditionError("selection tensor_names mismatch for target_publication_token");
+      return absl::FailedPreconditionError(
+          "selection tensor_names mismatch for binding_current_value_publication_token");
     }
   }
   const bool has_subset_selection =
@@ -747,7 +766,80 @@ absl::Status validate_target_publication_scope_against_record(
     return absl::FailedPreconditionError("selection is not publishable (packed or subset requires view byte-space)");
   }
   if (scope.selection().artifact_id().empty()) {
-    return absl::InvalidArgumentError("artifact_id missing from target_publication_token");
+    return absl::InvalidArgumentError("artifact_id missing from binding_current_value_publication_token");
+  }
+  if (scope.binding_id().empty() || scope.binding_layout_id().empty() || scope.binding_value_id().empty() ||
+      scope.seal_generation() == 0) {
+    return absl::InvalidArgumentError("binding identity missing from binding_current_value_publication_token");
+  }
+  return absl::OkStatus();
+}
+
+absl::Status validate_binding_current_value_against_publication(
+    BindingRegistry& bindings,
+    const TargetPublicationRegistry::Record& record,
+    const tensorcast::common::v1::BindingCurrentValuePublicationScope& scope) {
+  auto binding_or = bindings.get(scope.binding_id());
+  if (!binding_or.ok()) {
+    return binding_or.status();
+  }
+  const auto binding = *binding_or;
+  absl::MutexLock lock(&binding->mu);
+  if (binding->closed) {
+    return absl::FailedPreconditionError("binding is closed");
+  }
+  if (binding->retired) {
+    return absl::FailedPreconditionError("binding is retired");
+  }
+  if (binding->state != v2::BINDING_STATE_READY_ARTIFACT) {
+    return absl::FailedPreconditionError("binding current value is not artifact-backed");
+  }
+  if (binding->binding_layout_id != scope.binding_layout_id()) {
+    return absl::FailedPreconditionError("binding_layout_id mismatch for binding current value publication");
+  }
+  if (binding->current_binding_value_id != scope.binding_value_id()) {
+    return absl::FailedPreconditionError("binding_value_id mismatch for binding current value publication");
+  }
+  if (binding->seal_generation != scope.seal_generation()) {
+    return absl::FailedPreconditionError("seal_generation mismatch for binding current value publication");
+  }
+  if (binding->owner_pid != scope.owner_pid()) {
+    return absl::FailedPreconditionError("owner_pid mismatch for binding current value publication");
+  }
+  if (binding->daemon_id != scope.daemon_id()) {
+    return absl::FailedPreconditionError("daemon_id mismatch for binding current value publication");
+  }
+  if (binding->daemon_session_id != scope.daemon_session_id()) {
+    return absl::FailedPreconditionError("daemon_session_id mismatch for binding current value publication");
+  }
+  if (binding->device_uuid != scope.device_uuid()) {
+    return absl::FailedPreconditionError("device_uuid mismatch for binding current value publication");
+  }
+  if (binding->target_layout_hash != scope.target_layout_hash()) {
+    return absl::FailedPreconditionError("target_layout_hash mismatch for binding current value publication");
+  }
+  if (binding->current_artifact_id.empty() || binding->current_artifact_id != scope.selection().artifact_id()) {
+    return absl::FailedPreconditionError("artifact_id mismatch for binding current value publication");
+  }
+  if (binding->current_selection.artifact_id() != scope.selection().artifact_id() ||
+      binding->current_selection.view_id() != scope.selection().view_id() ||
+      binding->current_selection.logical_layout_hash() != scope.selection().logical_layout_hash() ||
+      binding->current_selection.selection_hash() != scope.selection().selection_hash() ||
+      binding->current_selection.view_subset_hash() != scope.selection().view_subset_hash() ||
+      binding->current_selection.tensor_names_size() != scope.selection().tensor_names_size()) {
+    return absl::FailedPreconditionError("selection mismatch for binding current value publication");
+  }
+  for (int i = 0; i < binding->current_selection.tensor_names_size(); ++i) {
+    if (binding->current_selection.tensor_names(i) != scope.selection().tensor_names(i)) {
+      return absl::FailedPreconditionError("selection tensor_names mismatch for binding current value publication");
+    }
+  }
+  if (binding->active_published_current.has_value() &&
+      binding->active_published_current->binding_id == binding->binding_id &&
+      binding->active_published_current->binding_value_id == binding->current_binding_value_id &&
+      binding->active_published_current->seal_generation == binding->seal_generation &&
+      binding->active_published_current->publication_id != record.publication_id.value) {
+    return absl::FailedPreconditionError("binding current value is already published; call retire() first");
   }
   return absl::OkStatus();
 }
@@ -962,17 +1054,123 @@ struct UseGuardScope {
   }
 };
 
+void clear_binding_published_guard(BindingRegistry* bindings, const TargetPublicationRegistry::Record& record) {
+  if (bindings == nullptr || record.binding_id.empty()) {
+    return;
+  }
+  auto binding_or = bindings->get(record.binding_id);
+  if (!binding_or.ok()) {
+    return;
+  }
+  const auto binding = *binding_or;
+  absl::MutexLock lock(&binding->mu);
+  if (!binding->active_published_current.has_value()) {
+    return;
+  }
+  if (binding->active_published_current->publication_id == record.publication_id.value) {
+    binding->active_published_current.reset();
+  }
+}
+
+absl::Status mark_binding_published(
+    BindingRegistry& bindings,
+    const TargetPublicationRegistry::Record& record,
+    std::string_view lease_id,
+    std::string_view replica_id,
+    std::string_view operation_id) {
+  auto binding_or = bindings.get(record.binding_id);
+  if (!binding_or.ok()) {
+    return binding_or.status();
+  }
+  const auto binding = *binding_or;
+  absl::MutexLock lock(&binding->mu);
+  if (binding->current_binding_value_id != record.binding_value_id ||
+      binding->seal_generation != record.seal_generation) {
+    return absl::FailedPreconditionError("binding current value changed before publish completion");
+  }
+  if (binding->active_published_current.has_value() &&
+      binding->active_published_current->binding_id == binding->binding_id &&
+      binding->active_published_current->binding_value_id == binding->current_binding_value_id &&
+      binding->active_published_current->seal_generation == binding->seal_generation &&
+      binding->active_published_current->publication_id != record.publication_id.value) {
+    return absl::FailedPreconditionError("binding current value is already published; call retire() first");
+  }
+  binding->active_published_current = BindingRegistry::Record::PublishedCurrentValue{
+      .binding_id = record.binding_id,
+      .binding_layout_id = record.binding_layout_id,
+      .binding_value_id = record.binding_value_id,
+      .seal_generation = record.seal_generation,
+      .publication_id = record.publication_id.value,
+      .lease_id = std::string(lease_id),
+      .replica_id = std::string(replica_id),
+      .operation_id = std::string(operation_id),
+  };
+  return absl::OkStatus();
+}
+
+absl::Status release_publication_capability(
+    LifecycleKernel* lifecycle_kernel,
+    const TargetPublicationRegistry::Record& record) {
+  if (lifecycle_kernel == nullptr) {
+    return absl::OkStatus();
+  }
+  const std::string capability_id =
+      record.capability_id.empty() ? publication_capability_id(record.publication_id.value) : record.capability_id;
+  return lifecycle_kernel->release_capability(capability_id);
+}
+
+absl::StatusOr<TargetPublicationRegistry::Record> terminalize_publication_record(
+    const std::shared_ptr<TargetPublicationRegistry>& registry,
+    LifecycleKernel* lifecycle_kernel,
+    BindingRegistry* bindings,
+    std::string_view publication_id,
+    std::string_view reason) {
+  if (registry == nullptr) {
+    return absl::FailedPreconditionError("target publication registry unavailable");
+  }
+  auto record = registry->terminalize(publication_id, reason);
+  if (!record.has_value()) {
+    return absl::NotFoundError("publication is not active");
+  }
+  clear_binding_published_guard(bindings, *record);
+  auto release_status = release_publication_capability(lifecycle_kernel, *record);
+  if (!release_status.ok() && !absl::IsNotFound(release_status)) {
+    return release_status;
+  }
+  return *record;
+}
+
 absl::StatusOr<v2::PublishTargetReplicaResponse> execute_publish_target_replica(
     const TargetPublishService::Dep& d,
-    TargetPublicationRegistry* target_publication_registry,
+    std::shared_ptr<TargetPublicationRegistry> target_publication_registry,
     TargetPublishService::TargetPublicationFrontDoorContext publish_context,
+    std::string_view request_operation_id,
     uint32_t ttl_ms) {
   auto record = std::move(publish_context.record);
   populate_publication_workflow_state(&record);
+  const std::string effective_operation_id =
+      !request_operation_id.empty() ? std::string(request_operation_id) : record.request_operation_id;
+  if (record.published) {
+    if (record.published_operation_id != effective_operation_id) {
+      return absl::FailedPreconditionError(
+          "binding_current_value_publication_token already published with a different operation_id");
+    }
+    if (record.published_lease_id.empty() || record.published_replica_id.empty()) {
+      return absl::FailedPreconditionError("published target publication record is missing replay ids");
+    }
+    v2::PublishTargetReplicaResponse response;
+    response.set_lease_id(record.published_lease_id);
+    response.set_replica_id(record.published_replica_id);
+    return response;
+  }
   auto scope_record_status = validate_target_publication_scope_against_record(
       record, publish_context.scope, publish_context.normalized_byte_space);
   if (!scope_record_status.ok()) {
     return scope_record_status;
+  }
+  auto binding_status = validate_binding_current_value_against_publication(d.bindings, record, publish_context.scope);
+  if (!binding_status.ok()) {
+    return binding_status;
   }
   const auto subject_evaluation = evaluate_publication_subject(*target_publication_registry, record, absl::Now());
   if (subject_evaluation.match_result == PublicationSubjectMatchResult::kOwnerLost) {
@@ -982,13 +1180,13 @@ absl::StatusOr<v2::PublishTargetReplicaResponse> execute_publish_target_replica(
     return absl::UnavailableError("target_publication workflow state unavailable");
   }
   if (subject_evaluation.match_result == PublicationSubjectMatchResult::kStaleCurrent) {
-    return absl::FailedPreconditionError("target_publication_token is stale for target");
+    return absl::FailedPreconditionError("binding_current_value_publication_token is stale for target");
   }
 
   const auto device =
       d.devices.From(v2::DeviceType::DEVICE_TYPE_GPU, publish_context.scope.device_uuid(), std::nullopt);
   if (device.type != DeviceType::GPU || device.ordinal < 0) {
-    return absl::InvalidArgumentError("invalid device_uuid for target_publication_token");
+    return absl::InvalidArgumentError("invalid device_uuid for binding_current_value_publication_token");
   }
 
   const std::string view_id =
@@ -1023,7 +1221,7 @@ absl::StatusOr<v2::PublishTargetReplicaResponse> execute_publish_target_replica(
     }
   }
   if (total_size == 0) {
-    return absl::FailedPreconditionError("target_publication_token has empty segments");
+    return absl::FailedPreconditionError("binding_current_value_publication_token has empty segments");
   }
 
   struct LipRollback {
@@ -1132,6 +1330,58 @@ absl::StatusOr<v2::PublishTargetReplicaResponse> execute_publish_target_replica(
 
   maybe_report_progressive_published_target_coverage(d, record, replica_id, total_size);
 
+  auto lifecycle_lease_or = d.lifecycle.create_use_lease(
+      store::loading::ReplicaKey{
+          .artifact_id = publish_context.scope.selection().artifact_id(),
+          .view_id = view_id.empty() ? std::nullopt : std::optional<std::string>(view_id),
+          .device =
+              store::DeviceKey{
+                  .type = DeviceType::GPU,
+                  .ordinal = device.ordinal,
+                  .uuid = publish_context.scope.device_uuid(),
+              },
+          .replica = 0,
+      },
+      publish_context.scope.owner_pid(),
+      {[registry = target_publication_registry,
+        lifecycle_kernel = &d.lifecycle_kernel,
+        bindings = &d.bindings,
+        lip_manager = &d.lip_manager,
+        publication_id = record.publication_id.value]() -> absl::Status {
+        auto terminalized_or =
+            terminalize_publication_record(registry, lifecycle_kernel, bindings, publication_id, "owner_pid_exit");
+        if (!terminalized_or.ok() && !absl::IsNotFound(terminalized_or.status())) {
+          return terminalized_or.status();
+        }
+        auto revoke_status = lip_manager->revoke_by_registration_id(publication_id);
+        if (!revoke_status.ok() && !absl::IsNotFound(revoke_status)) {
+          return revoke_status;
+        }
+        return absl::OkStatus();
+      }});
+  if (!lifecycle_lease_or.ok()) {
+    return lifecycle_lease_or.status();
+  }
+
+  auto mark_binding_status =
+      mark_binding_published(d.bindings, record, record.publication_id.value, replica_id, effective_operation_id);
+  if (!mark_binding_status.ok()) {
+    d.lifecycle.release_lease(*lifecycle_lease_or);
+    return mark_binding_status;
+  }
+  auto marked_record = target_publication_registry->mark_published(
+      record.publication_id.value,
+      effective_operation_id,
+      record.publication_id.value,
+      replica_id,
+      *lifecycle_lease_or,
+      absl::Now());
+  if (!marked_record.has_value()) {
+    d.lifecycle.release_lease(*lifecycle_lease_or);
+    clear_binding_published_guard(&d.bindings, record);
+    return absl::NotFoundError("publication record disappeared before publish completion");
+  }
+
   lip_rollback.release();
   replica_rollback.release();
   v2::PublishTargetReplicaResponse response;
@@ -1147,11 +1397,26 @@ TargetPublishService::TargetPublishService(Dep d)
       capability_tokens_(d_.capability_tokens),
       target_publication_registry_(
           std::make_shared<TargetPublicationRegistry>(
-              TargetPublicationRegistry::Options{.ttl = target_publication_token_ttl()})),
+              TargetPublicationRegistry::Options{.ttl = binding_current_value_publication_token_ttl()})),
       publish_operation_tracker_(std::make_shared<PublishOperationTracker>()) {}
 
-absl::Duration TargetPublishService::target_publication_token_ttl() {
+absl::Duration TargetPublishService::binding_current_value_publication_token_ttl() {
   return absl::Minutes(5);
+}
+
+absl::Status TargetPublishService::terminalize_publication(
+    std::string_view publication_id,
+    std::string_view reason,
+    bool release_published_lifecycle_lease) {
+  auto terminalized_or = terminalize_publication_record(
+      target_publication_registry_, &d_.lifecycle_kernel, &d_.bindings, publication_id, reason);
+  if (!terminalized_or.ok()) {
+    return terminalized_or.status();
+  }
+  if (release_published_lifecycle_lease && terminalized_or->published_lifecycle_lease_id != 0) {
+    d_.lifecycle.release_lease(terminalized_or->published_lifecycle_lease_id);
+  }
+  return absl::OkStatus();
 }
 
 absl::StatusOr<TargetPublicationRegistry::Record> TargetPublishService::remember_target_publication(
@@ -1159,14 +1424,23 @@ absl::StatusOr<TargetPublicationRegistry::Record> TargetPublishService::remember
   const absl::Time now = absl::Now();
   record.workflow_recovery_class = WorkflowRecoveryClass::kEphemeralProcessLocal;
   populate_publication_workflow_state(&record);
-  const absl::Duration ttl =
-      record.expires_at == absl::InfinitePast() ? target_publication_token_ttl() : record.expires_at - now;
+  const absl::Duration ttl = record.expires_at == absl::InfinitePast() ? binding_current_value_publication_token_ttl()
+                                                                       : record.expires_at - now;
   auto lease_or = d_.lifecycle.create_retention_lease(
       ttl,
       std::vector<std::function<absl::Status()>>{
           [this, publication_id = record.publication_id.value]() -> absl::Status {
+            auto record =
+                target_publication_registry_->lookup(publication_id, absl::Now(), /*require_not_expired=*/false);
+            if (record.has_value() && record->published) {
+              return absl::OkStatus();
+            }
             target_publication_registry_->erase(publication_id);
-            return d_.lifecycle_kernel.release_capability(publication_capability_id(publication_id));
+            auto release_status = d_.lifecycle_kernel.release_capability(publication_capability_id(publication_id));
+            if (!release_status.ok() && !absl::IsNotFound(release_status)) {
+              return release_status;
+            }
+            return absl::OkStatus();
           },
       });
   if (!lease_or.ok()) {
@@ -1223,7 +1497,11 @@ absl::StatusOr<TargetPublishService::TargetPublicationFrontDoorContext> TargetPu
     inspect_target_publication_context(const v2::PublishTargetReplicaRequest& req, absl::Time now) const {
   const LocalObservationSet local_observations = build_target_publication_local_observations(req);
   auto inspection_or = inspect_target_publication_credential(
-      capability_tokens_, req.target_publication_token(), now, d_.identity.daemon_id(), local_observations);
+      capability_tokens_,
+      req.binding_current_value_publication_token(),
+      now,
+      d_.identity.daemon_id(),
+      local_observations);
   if (!inspection_or.ok()) {
     return inspection_or.status();
   }
@@ -1235,7 +1513,7 @@ absl::StatusOr<TargetPublishService::TargetPublicationFrontDoorContext> TargetPu
   auto record_opt =
       target_publication_registry_->lookup(inspection_or->scope.publication_id(), now, /*require_not_expired=*/true);
   if (!record_opt.has_value()) {
-    return absl::NotFoundError("target_publication_token is no longer valid");
+    return absl::NotFoundError("binding_current_value_publication_token is no longer valid");
   }
   bind_record_to_target_publication_front_door_context(*record_opt, &inspection_or->front_door_context);
 
@@ -1252,7 +1530,11 @@ absl::StatusOr<RoutedAuthorityRequest> TargetPublishService::build_target_public
     absl::Time now) const {
   const LocalObservationSet local_observations = build_target_publication_local_observations(req);
   auto inspection_or = inspect_target_publication_credential(
-      capability_tokens_, req.target_publication_token(), now, /*expected_issuer=*/"", local_observations);
+      capability_tokens_,
+      req.binding_current_value_publication_token(),
+      now,
+      /*expected_issuer=*/"",
+      local_observations);
   if (!inspection_or.ok()) {
     return inspection_or.status();
   }
@@ -1271,7 +1553,7 @@ absl::StatusOr<RoutedAuthorityRequest> TargetPublishService::build_target_public
   auto record_opt =
       target_publication_registry_->lookup(inspection_or->scope.publication_id(), now, /*require_not_expired=*/true);
   if (!record_opt.has_value()) {
-    return absl::NotFoundError("target_publication_token is no longer valid");
+    return absl::NotFoundError("binding_current_value_publication_token is no longer valid");
   }
   bind_record_to_target_publication_front_door_context(*record_opt, &inspection_or->front_door_context);
   const auto authority_ref = publication_routed_workflow_authority_ref(inspection_or->envelope.issuer_daemon_id());
@@ -1409,6 +1691,15 @@ absl::StatusOr<std::optional<OwnerStageReply>> TargetPublishService::maybe_route
           "failed_precondition",
           std::string(scope_record_status.message()),
           std::string(scope_record_status.message())));
+    }
+    auto binding_status = validate_binding_current_value_against_publication(d_.bindings, record, inspection_or->scope);
+    if (!binding_status.ok()) {
+      return std::optional<OwnerStageReply>(publication_terminal_reply(
+          expected_workflow_authority,
+          kPublishWorkflowGateStageRef,
+          "failed_precondition",
+          std::string(binding_status.message()),
+          std::string(binding_status.message())));
     }
     const auto subject_evaluation = evaluate_publication_subject(*target_publication_registry_, record, now);
     if (subject_evaluation.match_result == PublicationSubjectMatchResult::kOwnerLost) {
@@ -1567,6 +1858,15 @@ absl::StatusOr<std::optional<OwnerStageReply>> TargetPublishService::maybe_route
           std::string(scope_record_status.message()),
           std::string(scope_record_status.message())));
     }
+    auto binding_status = validate_binding_current_value_against_publication(d_.bindings, record, inspection_or->scope);
+    if (!binding_status.ok()) {
+      return std::optional<OwnerStageReply>(publication_terminal_reply(
+          expected_issuer_authority,
+          kPublishIssuerValidateStageRef,
+          "failed_precondition",
+          std::string(binding_status.message()),
+          std::string(binding_status.message())));
+    }
     const auto subject_evaluation = evaluate_publication_subject(*target_publication_registry_, record, now);
     if (subject_evaluation.match_result == PublicationSubjectMatchResult::kOwnerLost) {
       return std::optional<OwnerStageReply>(publication_terminal_reply(
@@ -1616,8 +1916,8 @@ grpc::Status TargetPublishService::publish_target_replica(
   if (rctx.allow_high_card_attrs() && req.has_operation_id()) {
     span->SetAttribute("tc.operation.id", req.operation_id());
   }
-  if (req.target_publication_token().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "target_publication_token is required"};
+  if (req.binding_current_value_publication_token().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "binding_current_value_publication_token is required"};
   }
   if (!d_.global_store_client || !d_.global_store_client->is_connected()) {
     return {StatusCode::FAILED_PRECONDITION, "Global Store client unavailable"};
@@ -1630,6 +1930,14 @@ grpc::Status TargetPublishService::publish_target_replica(
   auto publish_context = std::move(*publish_context_or);
   auto record = std::move(publish_context.record);
   populate_publication_workflow_state(&record);
+  if (record.request_operation_id.empty() && req.has_operation_id() && !req.operation_id().empty()) {
+    record.request_operation_id = req.operation_id();
+    record.workflow_binding_projection.reset();
+    record.replay_outcome_projection.reset();
+    populate_publication_workflow_state(&record);
+    record = target_publication_registry_->insert(std::move(record));
+    bind_record_to_target_publication_front_door_context(record, &publish_context.front_door_context);
+  }
   auto admitted_or = d_.lifecycle_kernel.admit_redemption(publish_context.front_door_context.parsed_credential);
   if (!admitted_or.ok()) {
     return to_grpc_status(admitted_or.status());
@@ -1655,6 +1963,10 @@ grpc::Status TargetPublishService::publish_target_replica(
   if (!scope_record_status.ok()) {
     return to_grpc_status(scope_record_status);
   }
+  auto binding_status = validate_binding_current_value_against_publication(d_.bindings, record, publish_context.scope);
+  if (!binding_status.ok()) {
+    return to_grpc_status(binding_status);
+  }
   const auto subject_evaluation = evaluate_publication_subject(*target_publication_registry_, record, absl::Now());
   if (subject_evaluation.match_result == PublicationSubjectMatchResult::kOwnerLost) {
     return {StatusCode::UNAVAILABLE, "publish workflow owner lost"};
@@ -1666,12 +1978,16 @@ grpc::Status TargetPublishService::publish_target_replica(
     const auto stale_current =
         publication_gate_decision(record, WorkflowDecisionClass::kStaleCurrent, "publish currentness rejected");
     span->SetAttribute("tc.workflow.decision_class", static_cast<int>(stale_current.decision_class));
-    return {StatusCode::FAILED_PRECONDITION, "target_publication_token is stale for target"};
+    return {StatusCode::FAILED_PRECONDITION, "binding_current_value_publication_token is stale for target"};
   }
 
   publish_context.record = record;
   auto result_or = execute_publish_target_replica(
-      d_, target_publication_registry_.get(), std::move(publish_context), req.has_ttl_ms() ? req.ttl_ms() : 0U);
+      d_,
+      target_publication_registry_,
+      std::move(publish_context),
+      req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view(),
+      req.has_ttl_ms() ? req.ttl_ms() : 0U);
   if (!result_or.ok()) {
     return to_grpc_status(result_or.status());
   }
@@ -1685,8 +2001,8 @@ grpc::Status TargetPublishService::start_publish_target_replica(
     const v2::PublishTargetReplicaRequest& req,
     v2::StartPublishTargetReplicaResponse& resp) {
   auto& span = rctx.span();
-  if (req.target_publication_token().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "target_publication_token is required"};
+  if (req.binding_current_value_publication_token().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "binding_current_value_publication_token is required"};
   }
   if (!d_.global_store_client || !d_.global_store_client->is_connected()) {
     return {StatusCode::FAILED_PRECONDITION, "Global Store client unavailable"};
@@ -1740,6 +2056,14 @@ grpc::Status TargetPublishService::start_publish_target_replica(
         << "publish_target_replica: failed to release lifecycle use guard after scope reject: " << release_status;
     return to_grpc_status(scope_record_status);
   }
+  auto binding_status = validate_binding_current_value_against_publication(d_.bindings, record, publish_context.scope);
+  if (!binding_status.ok()) {
+    auto release_status = d_.lifecycle_kernel.release_use_guard(admitted_or->use_guard);
+    LOG_IF(WARNING, !release_status.ok())
+        << "publish_target_replica: failed to release lifecycle use guard after binding-current reject: "
+        << release_status;
+    return to_grpc_status(binding_status);
+  }
   const auto subject_evaluation = evaluate_publication_subject(*target_publication_registry_, record, absl::Now());
   if (subject_evaluation.match_result == PublicationSubjectMatchResult::kOwnerLost ||
       subject_evaluation.match_result == PublicationSubjectMatchResult::kUnavailable) {
@@ -1761,7 +2085,7 @@ grpc::Status TargetPublishService::start_publish_target_replica(
     const auto stale_current =
         publication_gate_decision(record, WorkflowDecisionClass::kStaleCurrent, "publish currentness rejected");
     span->SetAttribute("tc.workflow.decision_class", static_cast<int>(stale_current.decision_class));
-    return {StatusCode::FAILED_PRECONDITION, "target_publication_token is stale for target"};
+    return {StatusCode::FAILED_PRECONDITION, "binding_current_value_publication_token is stale for target"};
   }
 
   resp.mutable_operation()->CopyFrom(operation_ref);
@@ -1770,7 +2094,8 @@ grpc::Status TargetPublishService::start_publish_target_replica(
   lease_request.set_kind(operation_ref.kind());
   lease_request.set_target_artifact_id(operation_ref.target_artifact_id());
   lease_request.set_owner_id(owner_id_for_operation(d_.identity));
-  lease_request.set_ttl_ms(static_cast<uint64_t>(absl::ToInt64Milliseconds(target_publication_token_ttl())));
+  lease_request.set_ttl_ms(
+      static_cast<uint64_t>(absl::ToInt64Milliseconds(binding_current_value_publication_token_ttl())));
 
   auto lease_or = d_.global_store_client->acquire_operation_lease(lease_request);
   if (!lease_or.ok()) {
@@ -1822,7 +2147,7 @@ grpc::Status TargetPublishService::start_publish_target_replica(
   const auto tracker = publish_operation_tracker_;
   const uint64_t lease_generation = lease_or->lease().lease_generation();
   const std::string lease_token = lease_or->lease().lease_token();
-  const std::string& operation_id = operation_ref.operation_id();
+  const std::string operation_id = operation_ref.operation_id();
   const uint32_t ttl_ms = req.has_ttl_ms() ? req.ttl_ms() : 0U;
   const auto use_guard = admitted_or->use_guard;
   d_.async_runtime.blocking_executor()->add([this,
@@ -1848,8 +2173,8 @@ grpc::Status TargetPublishService::start_publish_target_replica(
           << "publish_target_replica: failed to release lifecycle use guard: " << release_status;
     });
 
-    auto result_or =
-        execute_publish_target_replica(d_, target_publication_registry_.get(), std::move(publish_context), ttl_ms);
+    auto result_or = execute_publish_target_replica(
+        d_, target_publication_registry_, std::move(publish_context), operation_id, ttl_ms);
     operation::UpdateOperationRequest final_update;
     final_update.set_operation_id(operation_id);
     final_update.set_lease_generation(lease_generation);

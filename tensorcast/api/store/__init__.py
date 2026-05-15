@@ -1459,7 +1459,7 @@ class Store:
                 current_value_metadata=current_value_metadata,
                 device=device_obj,
                 device_id=device_id,
-                target_publication_token=None,
+                binding_current_value_publication_token=None,
                 restore_response=response if restore_tensors_async else None,
                 start_restore=restore_tensors_async,
             )
@@ -1638,7 +1638,7 @@ class Store:
             view_subset_hash=None,
             view_spec=None,
             current_value_metadata=current_value_metadata,
-            target_publication_token=None,
+            binding_current_value_publication_token=None,
             copy_plan=normalized_mapping,
         )
         return Binding(inplace_slot)

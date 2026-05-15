@@ -1408,6 +1408,7 @@ sc_cc_library(
     srcs = ["service/controllers/target_publish_service.cc"],
     hdrs = ["service/controllers/target_publish_service.h"],
     deps = [
+        ":binding_registry_lib",
         ":daemon_options_hdr",
         ":device_resolver_hdr",
         ":lifecycle_kernel_lib",

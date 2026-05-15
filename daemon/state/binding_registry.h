@@ -62,6 +62,17 @@ class BindingRegistry {
   };
 
   struct Record {
+    struct PublishedCurrentValue {
+      std::string binding_id;
+      std::string binding_layout_id;
+      std::string binding_value_id;
+      uint64_t seal_generation{0};
+      std::string publication_id;
+      std::string lease_id;
+      std::string replica_id;
+      std::string operation_id;
+    };
+
     mutable absl::Mutex mu;
     std::string binding_id;
     std::string binding_layout_id;
@@ -87,9 +98,10 @@ class BindingRegistry {
     std::string tensor_schema_hash;
     std::string current_artifact_id;
     std::string current_artifact_canonical_index_json;
-    std::string target_publication_token;
+    std::string binding_current_value_publication_token;
     std::string current_binding_value_id;
     uint64_t seal_generation{0};
+    std::optional<PublishedCurrentValue> active_published_current;
     std::optional<CommitLeaseResult> sealed_commit_result;
     v2::BindingValueVerificationState verification_state{v2::BINDING_VALUE_VERIFICATION_STATE_UNSPECIFIED};
     std::string verification_job_id;

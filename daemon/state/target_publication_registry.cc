@@ -59,7 +59,7 @@ TargetPublicationRegistry::Record TargetPublicationRegistry::insert(Record recor
     return record;
   }
   while (records_.size() > opts_.capacity) {
-    auto it = records_.begin();
+    auto it = std::find_if(records_.begin(), records_.end(), [](const auto& item) { return !item.second.published; });
     if (it == records_.end()) {
       break;
     }
@@ -94,7 +94,8 @@ TargetPublicationRegistry::StagedRecord TargetPublicationRegistry::insert_staged
       staged_records_.erase(it);
       continue;
     }
-    auto record_it = records_.begin();
+    auto record_it =
+        std::find_if(records_.begin(), records_.end(), [](const auto& item) { return !item.second.published; });
     if (record_it == records_.end()) {
       break;
     }
@@ -168,6 +169,9 @@ std::optional<TargetPublicationRegistry::Record> TargetPublicationRegistry::look
   if (it == records_.end()) {
     return std::nullopt;
   }
+  if (it->second.terminal) {
+    return std::nullopt;
+  }
   if (require_not_expired && it->second.expires_at != absl::InfinitePast() && now > it->second.expires_at) {
     return std::nullopt;
   }
@@ -187,6 +191,9 @@ std::optional<TargetPublicationRegistry::Record> TargetPublicationRegistry::look
   if (record_it == records_.end()) {
     return std::nullopt;
   }
+  if (record_it->second.terminal) {
+    return std::nullopt;
+  }
   if (require_not_expired && record_it->second.expires_at != absl::InfinitePast() &&
       now > record_it->second.expires_at) {
     return std::nullopt;
@@ -203,6 +210,49 @@ bool TargetPublicationRegistry::is_current_for_subject(
     return false;
   }
   return it->second == publication_id;
+}
+
+std::optional<TargetPublicationRegistry::Record> TargetPublicationRegistry::mark_published(
+    std::string_view publication_id,
+    std::string_view operation_id,
+    std::string_view lease_id,
+    std::string_view replica_id,
+    std::uint64_t published_lifecycle_lease_id,
+    absl::Time now) {
+  absl::MutexLock lock(&mu_);
+  auto it = records_.find(std::string(publication_id));
+  if (it == records_.end() || it->second.terminal) {
+    return std::nullopt;
+  }
+  it->second.published = true;
+  it->second.published_operation_id = std::string(operation_id);
+  it->second.published_lease_id = std::string(lease_id);
+  it->second.published_replica_id = std::string(replica_id);
+  it->second.published_lifecycle_lease_id = published_lifecycle_lease_id;
+  it->second.published_at = now;
+  return it->second;
+}
+
+std::optional<TargetPublicationRegistry::Record> TargetPublicationRegistry::terminalize(
+    std::string_view publication_id,
+    std::string_view reason) {
+  absl::MutexLock lock(&mu_);
+  auto it = records_.find(std::string(publication_id));
+  if (it == records_.end()) {
+    staged_records_.erase(std::string(publication_id));
+    return std::nullopt;
+  }
+  Record record = it->second;
+  record.terminal = true;
+  record.terminal_reason = std::string(reason);
+  record.terminal_at = absl::Now();
+  const std::string publication_subject_key = it->second.publication_subject_key.value;
+  records_.erase(it);
+  auto latest_it = latest_by_subject_.find(publication_subject_key);
+  if (latest_it != latest_by_subject_.end() && latest_it->second == publication_id) {
+    latest_by_subject_.erase(latest_it);
+  }
+  return record;
 }
 
 void TargetPublicationRegistry::erase(std::string_view publication_id) {
@@ -232,7 +282,7 @@ void TargetPublicationRegistry::prune_locked(absl::Time now) {
   std::vector<std::string> expired;
   expired.reserve(records_.size());
   for (const auto& [key, record] : records_) {
-    if (record.expires_at != absl::InfinitePast() && now > record.expires_at) {
+    if (!record.published && record.expires_at != absl::InfinitePast() && now > record.expires_at) {
       expired.push_back(key);
     }
   }

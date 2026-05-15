@@ -169,6 +169,11 @@ class MaterializationController {
       const v2::PublishTargetReplicaRequest& req,
       v2::StartPublishTargetReplicaResponse& resp);
 
+  [[nodiscard]] absl::Status terminalize_target_publication(
+      std::string_view publication_id,
+      std::string_view reason,
+      bool release_published_lifecycle_lease);
+
   [[nodiscard]] absl::StatusOr<TargetPublishService::TargetPublicationFrontDoorContext>
   inspect_target_publication_context_for_testing(const v2::PublishTargetReplicaRequest& req, absl::Time now);
 

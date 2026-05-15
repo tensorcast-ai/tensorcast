@@ -153,6 +153,8 @@ absl::Status BindingRegistry::retire_retained(std::string_view binding_id, std::
     record->retired = true;
     record->retained_ref = false;
     record->retired_reason = std::string(reason);
+    record->binding_current_value_publication_token.clear();
+    record->active_published_current.reset();
     record->staged_values_by_id.clear();
   }
   erase_if_reclaimable_(binding_id, record);
@@ -816,6 +818,8 @@ size_t BindingRegistry::sweep_retention(absl::Time now) {
         record->retired = true;
         record->retained_ref = false;
         record->retired_reason = std::move(reason);
+        record->binding_current_value_publication_token.clear();
+        record->active_published_current.reset();
         retired_count++;
       }
     }

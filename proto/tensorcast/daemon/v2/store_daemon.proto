@@ -900,8 +900,9 @@ message MaterializeIntoTargetResponse {
   ViewSubset view_subset = 5;
   bytes view_index_bytes = 6;
   uint64 generation = 7;
-  bytes target_publication_token = 8;
   tensorcast.common.v1.ArtifactSelection resolved_selection = 9;
+  reserved 8;
+  reserved "target_publication_token";
 }
 
 enum BatchItemStatus {
@@ -1427,9 +1428,10 @@ message CreateBindingRequest {
   string binding_layout_id = 6;
   tensorcast.common.v1.ArtifactSelection initial_selection = 7;
   optional string source_artifact_id = 8;
-  bytes target_publication_token = 9;
   CopyPlan copy_plan = 10;
   repeated MappedTensorSpec dst_tensors = 11;
+  reserved 9;
+  reserved "target_publication_token";
 }
 
 message CreateBindingResponse {
@@ -1465,7 +1467,7 @@ message CreateOwnedBindingResponse {
   MemCopyHandle mem_handle = 3;
   bytes target_index_bytes = 4;
   repeated TensorPayloadDescriptor payloads = 5;
-  bytes target_publication_token = 6;
+  bytes binding_current_value_publication_token = 6;
   tensorcast.common.v1.ArtifactSelection resolved_selection = 7;
   MaterializationSource source = 8;
   BindingState state = 9;
@@ -1532,7 +1534,8 @@ message CommitBindingArtifactRequest {
   string binding_id = 1;
   tensorcast.common.v1.ArtifactSelection selection = 2;
   optional string source_artifact_id = 3;
-  bytes target_publication_token = 4;
+  reserved 4;
+  reserved "target_publication_token";
 }
 
 message CommitBindingArtifactResponse {
@@ -1583,6 +1586,7 @@ message PromoteBindingCurrentValueResponse {
   BindingValue current_value = 3;
   bool existed = 4;
   ExecutionDiagnostics execution_diagnostics = 5;
+  bytes binding_current_value_publication_token = 6;
 }
 
 message StartPromoteBindingCurrentValueRequest {
@@ -1600,6 +1604,7 @@ message BindingPromotionStatus {
   tensorcast.common.v1.ArtifactDescriptor artifact_descriptor = 7;
   optional string failure_reason = 8;
   bool existed = 9;
+  bytes binding_current_value_publication_token = 10;
 }
 
 message StartPromoteBindingCurrentValueResponse {
@@ -1636,7 +1641,7 @@ message RefillOwnedBindingRequest {
 message RefillOwnedBindingResponse {
   string artifact_id = 1;
   MaterializationSource source = 2;
-  bytes target_publication_token = 3;
+  bytes binding_current_value_publication_token = 3;
   tensorcast.common.v1.ArtifactSelection resolved_selection = 4;
   BindingState state = 5;
   BindingValue current_value = 6;
@@ -2240,7 +2245,7 @@ message DeregisterArtifactResponse {
 }
 
 message PublishTargetReplicaRequest {
-  bytes target_publication_token = 1;
+  bytes binding_current_value_publication_token = 1;
   tensorcast.common.v1.ByteSpaceRef byte_space = 2;
   optional uint32 ttl_ms = 3;
   optional int32 owner_pid = 4;

@@ -505,7 +505,7 @@ def _register_client_binding(
     canonical_index_bytes: bytes,
     selection: common_pb2.ArtifactSelection | None,
     source_artifact_id: str | None,
-    target_publication_token: bytes | None,
+    binding_current_value_publication_token: bytes | None,
     ctx: CallContext | None,
 ) -> tuple[str, BindingLayout, BindingValueMetadata | None]:
     binding_layout = build_binding_layout(
@@ -523,7 +523,6 @@ def _register_client_binding(
         binding_layout_id=binding_layout.binding_layout_id,
         initial_selection=selection,
         source_artifact_id=source_artifact_id,
-        target_publication_token=target_publication_token,
         timeout_s=timeout_s if timeout_s is not None else 60.0,
     )
     try:
@@ -1339,8 +1338,8 @@ class Artifact:
                 else None
             ),
             source_artifact_id=self._ensure_identified(),
-            target_publication_token=getattr(
-                response, "target_publication_token", None
+            binding_current_value_publication_token=getattr(
+                response, "binding_current_value_publication_token", None
             ),
             ctx=ctx,
         )
@@ -1360,8 +1359,8 @@ class Artifact:
             view_subset_hash=region_layout.view_subset_hash,
             view_spec=view_spec_proto,
             current_value_metadata=current_value_metadata,
-            target_publication_token=getattr(
-                response, "target_publication_token", None
+            binding_current_value_publication_token=getattr(
+                response, "binding_current_value_publication_token", None
             ),
         )
         return Binding(slot, publish=publish, ctx=ctx)
@@ -1630,8 +1629,8 @@ class Artifact:
                 else None
             ),
             source_artifact_id=self._ensure_identified(),
-            target_publication_token=getattr(
-                response, "target_publication_token", None
+            binding_current_value_publication_token=getattr(
+                response, "binding_current_value_publication_token", None
             ),
             ctx=ctx,
         )
@@ -1652,8 +1651,8 @@ class Artifact:
             view_subset_hash=region_layout.view_subset_hash,
             view_spec=view_spec_proto,
             current_value_metadata=current_value_metadata,
-            target_publication_token=getattr(
-                response, "target_publication_token", None
+            binding_current_value_publication_token=getattr(
+                response, "binding_current_value_publication_token", None
             ),
             copy_plan=copy_plan,
         )
@@ -1979,12 +1978,12 @@ class Artifact:
             current_value_metadata=current_value_metadata,
             device=device,
             device_id=device_id,
-            target_publication_token=getattr(
-                response, "target_publication_token", None
+            binding_current_value_publication_token=getattr(
+                response, "binding_current_value_publication_token", None
             ),
             staged_value_metadata=staged_value_metadata,
             group_realization_acquire=group_realization_acquire,
-            target_publication_operation_id=operation_id,
+            binding_current_value_publication_operation_id=operation_id,
         )
         if slot.current_value_metadata is None and slot.staged_value_metadata is None:
             with contextlib.suppress(Exception):

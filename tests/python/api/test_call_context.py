@@ -180,7 +180,7 @@ def test_staged_owned_binding_response_is_not_current_value() -> None:
         group_realization_acquire=group_acquire,
         device=torch.device("cuda:0"),
         device_id=0,
-        target_publication_token=None,
+        binding_current_value_publication_token=None,
     )
     binding = Binding(slot)
 

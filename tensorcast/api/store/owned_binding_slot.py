@@ -440,10 +440,10 @@ class OwnedBindingSlot:
         current_value_metadata: BindingValueMetadata | None,
         device: torch.device,
         device_id: int,
-        target_publication_token: bytes | None,
+        binding_current_value_publication_token: bytes | None,
         staged_value_metadata: BindingValueMetadata | None = None,
         group_realization_acquire: GroupRealizationAcquireRef | None = None,
-        target_publication_operation_id: str | None = None,
+        binding_current_value_publication_operation_id: str | None = None,
         restore_response: store_daemon_pb2.CreateBindingResponse
         | store_daemon_pb2.CreateOwnedBindingResponse
         | None = None,
@@ -481,12 +481,14 @@ class OwnedBindingSlot:
         )
         self._device = device
         self._device_id = int(device_id)
-        self._target_publication_token = (
-            bytes(target_publication_token) if target_publication_token else None
+        self._binding_current_value_publication_token = (
+            bytes(binding_current_value_publication_token)
+            if binding_current_value_publication_token
+            else None
         )
-        self._target_publication_operation_id = (
-            str(target_publication_operation_id)
-            if target_publication_operation_id
+        self._binding_current_value_publication_operation_id = (
+            str(binding_current_value_publication_operation_id)
+            if binding_current_value_publication_operation_id
             else None
         )
         self._seal_generation_counter = (
@@ -703,18 +705,20 @@ class OwnedBindingSlot:
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-        if not self._target_publication_token:
+        if not self._binding_current_value_publication_token:
             raise ArtifactError(
-                "target_publication_token missing; daemon publish not available",
+                "binding_current_value_publication_token missing; daemon publish not available",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
         timeout_s = _ctx_timeout_s(ctx)
-        operation_id = self._target_publication_operation_id or uuid.uuid4().hex
+        operation_id = (
+            self._binding_current_value_publication_operation_id or uuid.uuid4().hex
+        )
         client = self._runtime.ensure_client()
         try:
             resp = client.publish_target_replica(
-                target_publication_token=self._target_publication_token,
+                binding_current_value_publication_token=self._binding_current_value_publication_token,
                 byte_space=self.byte_space,
                 ttl_ms=ttl_ms,
                 owner_pid=owner_pid,
@@ -784,18 +788,20 @@ class OwnedBindingSlot:
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-        if not self._target_publication_token:
+        if not self._binding_current_value_publication_token:
             raise ArtifactError(
-                "target_publication_token missing; daemon publish not available",
+                "binding_current_value_publication_token missing; daemon publish not available",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
         timeout_s = _ctx_timeout_s(ctx)
-        operation_id = self._target_publication_operation_id or uuid.uuid4().hex
+        operation_id = (
+            self._binding_current_value_publication_operation_id or uuid.uuid4().hex
+        )
         client = self._runtime.ensure_client()
         try:
             start_resp = client.start_publish_target_replica(
-                target_publication_token=self._target_publication_token,
+                binding_current_value_publication_token=self._binding_current_value_publication_token,
                 byte_space=self.byte_space,
                 ttl_ms=ttl_ms,
                 owner_pid=owner_pid,
@@ -914,8 +920,8 @@ class OwnedBindingSlot:
         self._active_update_epoch = update_epoch
         self._current_value_metadata = None
         self._selection = None
-        self._target_publication_token = None
-        self._target_publication_operation_id = None
+        self._binding_current_value_publication_token = None
+        self._binding_current_value_publication_operation_id = None
         self._dirty = False
         return BindingUpdateEpoch(
             binding_id=self._binding_id,
@@ -963,8 +969,8 @@ class OwnedBindingSlot:
         self._seal_generation_counter = int(metadata.seal_generation)
         self._current_value_metadata = metadata
         self._selection = None
-        self._target_publication_token = None
-        self._target_publication_operation_id = None
+        self._binding_current_value_publication_token = None
+        self._binding_current_value_publication_operation_id = None
         self._dirty = False
 
     def freeze_current(
@@ -1010,8 +1016,8 @@ class OwnedBindingSlot:
         self._seal_generation_counter = int(metadata.seal_generation)
         self._current_value_metadata = metadata
         self._selection = None
-        self._target_publication_token = None
-        self._target_publication_operation_id = None
+        self._binding_current_value_publication_token = None
+        self._binding_current_value_publication_operation_id = None
         self._dirty = False
 
     def promote_current_value(
@@ -1055,8 +1061,9 @@ class OwnedBindingSlot:
         self._selection = clone_selection(metadata.selection)
         self._contribution_selection = clone_selection(metadata.selection)
         self._contribution_source_artifact_id = metadata.source_artifact_id
-        self._target_publication_token = None
-        self._target_publication_operation_id = None
+        token = getattr(response, "binding_current_value_publication_token", b"")
+        self._binding_current_value_publication_token = bytes(token) if token else None
+        self._binding_current_value_publication_operation_id = None
         self._dirty = False
         self._last_execution_diagnostics = _execution_diagnostics_from_response(
             response
@@ -1104,6 +1111,9 @@ class OwnedBindingSlot:
         )
         if metadata is not None:
             self._current_value_metadata = metadata
+        token = getattr(response.status, "binding_current_value_publication_token", b"")
+        if token:
+            self._binding_current_value_publication_token = bytes(token)
         return response.status
 
     def get_promotion_status(
@@ -1145,6 +1155,9 @@ class OwnedBindingSlot:
         )
         if metadata is not None:
             self._current_value_metadata = metadata
+        token = getattr(response.status, "binding_current_value_publication_token", b"")
+        if token:
+            self._binding_current_value_publication_token = bytes(token)
         return response.status
 
     def realize_from(
@@ -1255,8 +1268,8 @@ class OwnedBindingSlot:
         self._selection = None
         self._contribution_selection = None
         self._contribution_source_artifact_id = None
-        self._target_publication_token = None
-        self._target_publication_operation_id = None
+        self._binding_current_value_publication_token = None
+        self._binding_current_value_publication_operation_id = None
         self._current_value_metadata = None
         self._last_execution_diagnostics = _execution_diagnostics_from_response(
             response
@@ -1348,14 +1361,14 @@ class OwnedBindingSlot:
         self._selection = clone_selection(response.resolved_selection)
         self._contribution_selection = clone_selection(response.resolved_selection)
         self._contribution_source_artifact_id = str(response.artifact_id)
-        self._target_publication_token = (
-            bytes(response.target_publication_token)
-            if getattr(response, "target_publication_token", b"")
+        self._binding_current_value_publication_token = (
+            bytes(response.binding_current_value_publication_token)
+            if getattr(response, "binding_current_value_publication_token", b"")
             else None
         )
-        self._target_publication_operation_id = (
+        self._binding_current_value_publication_operation_id = (
             str(operation_id)
-            if operation_id and self._target_publication_token
+            if operation_id and self._binding_current_value_publication_token
             else None
         )
         metadata = parse_binding_value_or_raise(
@@ -1551,8 +1564,8 @@ class OwnedBindingSlot:
         self._active_update_epoch = None
         self._current_value_metadata = None
         self._selection = None
-        self._target_publication_token = None
-        self._target_publication_operation_id = None
+        self._binding_current_value_publication_token = None
+        self._binding_current_value_publication_operation_id = None
         self._dirty = True
 
 
