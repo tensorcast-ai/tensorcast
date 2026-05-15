@@ -59,6 +59,7 @@ _ACTIVE_ASSIGNMENT_STATES = ("claimed", "reading")
 _TERMINAL_ASSIGNMENT_STATES = ("succeeded", "failed", "expired", "cancelled")
 _ACTIVE_COVERAGE_STATES = ("pending", "verified")
 _SOURCE_MEMORY_FIELD_COUNT = 9
+_ASSIGNMENT_FIELD_COUNT = 18
 
 
 def _dt(value: Any) -> datetime | None:
@@ -160,7 +161,12 @@ class ProgressiveCoverageRepository(BaseRepository):
     def _row_to_assignment(
         row: tuple[Any, ...], *, replica_id: str = ""
     ) -> ProgressiveAssignment:
-        source_fields = row[18:] if len(row) > 18 else ()
+        if len(row) < _ASSIGNMENT_FIELD_COUNT:
+            raise ValidationError(
+                "progressive assignment query returned "
+                f"{len(row)} fields; expected at least {_ASSIGNMENT_FIELD_COUNT}"
+            )
+        source_fields = row[_ASSIGNMENT_FIELD_COUNT:]
         source_memory = _source_memory_from_fields(source_fields)
         return ProgressiveAssignment(
             assignment_id=_text(row[0]),
@@ -697,8 +703,8 @@ class ProgressiveCoverageRepository(BaseRepository):
         seed_like_kinds = {"tcp", "p2p"}
         return (
             seed_kind in seed_like_kinds
-            and source
-            and requester
+            and source != ""
+            and requester != ""
             and source != requester
         )
 

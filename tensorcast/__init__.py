@@ -455,6 +455,7 @@ def __dir__() -> list[str]:
 
 
 if TYPE_CHECKING:
+    import tensorcast.serving as serving  # noqa: F401
     from tensorcast.api import (  # noqa: F401
         Artifact,
         ArtifactDescriptor,

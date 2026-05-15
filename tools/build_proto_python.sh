@@ -37,10 +37,16 @@ if [[ -d "${PY_OUT_DIR}" ]]; then
     -exec sed -i -E \
       -e '/^[[:space:]]*from[[:space:]]+tensorcast\.proto\./b' \
       -e 's/^[[:space:]]*from[[:space:]]+tensorcast\./from tensorcast.proto./' {} +
+
+  echo "[proto] Ensuring generated .pyi files import datetime when needed"
+  while IFS= read -r -d '' pyi_file; do
+    if grep -q 'datetime\.' "${pyi_file}" && ! grep -q '^import datetime$' "${pyi_file}"; then
+      sed -i '1i import datetime' "${pyi_file}"
+    fi
+  done < <(find "${PY_OUT_DIR}" -type f -name "*.pyi" -print0)
 else
   echo "[proto] Skipping import rewrite: directory not found: ${PY_OUT_DIR}"
 fi
 
 echo "[proto] Done."
-
 

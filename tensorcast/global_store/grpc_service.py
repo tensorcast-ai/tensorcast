@@ -182,6 +182,8 @@ class GlobalStoreServicer(
     business logic. Thread safety is handled by DuckDB's cursor artifact.
     """
 
+    progressive_replication_service: ProgressiveReplicationService
+
     _POLICY_FROM_PROTO = {
         global_store_pb2.PLACEMENT_POLICY_LOCAL_ONLY: "local_only",
         global_store_pb2.PLACEMENT_POLICY_REPLICATED: "replicated",

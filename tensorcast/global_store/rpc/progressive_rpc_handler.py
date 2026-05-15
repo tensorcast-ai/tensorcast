@@ -47,7 +47,7 @@ def _deadline_to_unix_nanos(value: datetime) -> int:
     return int(value.timestamp() * 1_000_000_000)
 
 
-def _memory_type_to_proto(value: str) -> int:
+def _memory_type_to_proto(value: str) -> common_pb2.MemoryType:
     normalized = str(value or "").strip().upper()
     if normalized == "GPU":
         return common_pb2.MEMORY_TYPE_GPU
