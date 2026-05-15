@@ -187,6 +187,15 @@ struct StoreEngineOptions {
   };
 
   PromotionOptions promotion{};
+
+  struct ProgressiveReplicationConfig {
+    bool enabled{false};
+    std::chrono::milliseconds report_interval{std::chrono::milliseconds{1000}};
+    uint64_t min_report_delta_bytes{16ULL * 1024ULL * 1024ULL};
+    bool verify_before_report{true};
+  };
+
+  ProgressiveReplicationConfig progressive_replication{};
 };
 
 } // namespace tensorcast::store

@@ -981,6 +981,19 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (cfg.engine().has_progressive_replication()) {
+    const auto& progressive = cfg.engine().progressive_replication();
+    opts.progressive_replication.enabled = progressive.enabled();
+    if (progressive.has_report_interval()) {
+      opts.progressive_replication.report_interval = duration_to_millis(progressive.report_interval());
+    }
+    if (progressive.min_report_delta_bytes() > 0) {
+      opts.progressive_replication.min_report_delta_bytes = progressive.min_report_delta_bytes();
+    }
+    opts.progressive_replication.verify_before_report =
+        progressive.has_verify_before_report() ? progressive.verify_before_report() : true;
+  }
+
   if (cfg.has_promotion()) {
     const auto& promo = cfg.promotion();
     switch (promo.policy()) {
@@ -1206,6 +1219,10 @@ int main(int argc, char** argv) {
   daemon_opts.cpu_shared_memory_enabled = opts.cpu_shared_memory_enabled;
   daemon_opts.external_target_verification_enabled = cfg.engine().enable_external_target_verification();
   daemon_opts.max_concurrency = std::max<uint32_t>(1, opts.promotion.max_concurrency);
+  daemon_opts.progressive_replication.enabled = opts.progressive_replication.enabled;
+  daemon_opts.progressive_replication.report_interval = opts.progressive_replication.report_interval;
+  daemon_opts.progressive_replication.min_report_delta_bytes = opts.progressive_replication.min_report_delta_bytes;
+  daemon_opts.progressive_replication.verify_before_report = opts.progressive_replication.verify_before_report;
   const auto& optimistic = cfg.optimistic_local_ready();
   switch (optimistic.mode()) {
     case tensorcast::config::v1::OptimisticLocalReady::MODE_STRICT_CANONICAL_BLOCKING:

@@ -7,12 +7,15 @@
 #include <format>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "absl/status/status.h"
 #include "absl/strings/escaping.h"
 #include "absl/strings/str_cat.h"
+#include "absl/types/span.h"
+#include "core/common/artifact_hash.h"
 #include "core/store/materialization/dataplane/view/view_identity.h"
 
 namespace tensorcast::daemon::materialization_policy {
@@ -24,6 +27,8 @@ namespace {
 using store::loader::ViewOp;
 
 constexpr std::string_view kGroupRealizationTransportKind = "group_realization_transport";
+constexpr std::string_view kGroupRealizationChildTransportRequestProfile =
+    "tensorcast.group_realization.child_transport_request.v1";
 
 store::loading::SourceLocalityHint to_source_locality(v2::SourceLocality locality) {
   switch (locality) {
@@ -272,6 +277,39 @@ std::string selection_view_identity(const tensorcast::common::v1::ArtifactSelect
   return "canonical";
 }
 
+void append_uint64_be(std::string* payload, uint64_t value) {
+  for (int shift = 56; shift >= 0; shift -= 8) {
+    payload->push_back(static_cast<char>((value >> shift) & 0xFF));
+  }
+}
+
+void append_length_prefixed_field(std::string* payload, std::string_view value) {
+  append_uint64_be(payload, value.size());
+  payload->append(value.data(), value.size());
+}
+
+std::string derive_group_realization_child_transport_request_id(
+    const GroupRealizationBeginContext& begin_context,
+    std::string_view operation_attempt_id) {
+  std::string payload;
+  append_length_prefixed_field(&payload, kGroupRealizationChildTransportRequestProfile);
+  append_length_prefixed_field(&payload, begin_context.transaction_id);
+  append_length_prefixed_field(&payload, begin_context.version_set.version_set_id());
+  append_length_prefixed_field(&payload, begin_context.version_set.manifest_hash());
+  append_length_prefixed_field(&payload, std::format("{}", begin_context.version_set.manifest_generation()));
+  append_length_prefixed_field(&payload, std::format("{}", static_cast<int>(begin_context.realization_kind)));
+  append_length_prefixed_field(&payload, begin_context.part_id);
+  append_length_prefixed_field(&payload, begin_context.part_selection.artifact_id());
+  append_length_prefixed_field(&payload, byte_space_identity(begin_context.requested_byte_space));
+  append_length_prefixed_field(&payload, selection_view_identity(begin_context.part_selection));
+  append_length_prefixed_field(&payload, begin_context.selection_hash);
+  append_length_prefixed_field(&payload, operation_attempt_id);
+  const auto digest = common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  return absl::StrCat(
+      "grt:", absl::BytesToHexString(std::string_view(reinterpret_cast<const char*>(digest.data()), digest.size())));
+}
+
 } // namespace
 
 absl::StatusOr<RetrievalPolicy> resolve_retrieval_policy_compat(const v2::SourcePolicy* policy) {
@@ -472,6 +510,8 @@ void apply_group_realization_begin_context_to_transport_context(
       "|selection_hash:",
       absl::BytesToHexString(begin_context.selection_hash));
   group.part_id = begin_context.part_id;
+  transport_context->transport_request_id =
+      derive_group_realization_child_transport_request_id(begin_context, transport_context->transport_request_id);
 }
 
 absl::StatusOr<std::optional<global_store::ReportGroupRealizationPreparedResponse>>

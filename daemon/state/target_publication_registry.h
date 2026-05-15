@@ -60,6 +60,8 @@ class TargetPublicationRegistry {
     std::string target_layout_hash;
     tensorcast::common::v1::ArtifactSelection selection;
     tensorcast::common::v1::ByteSpaceRef byte_space;
+    std::string group_version_set_id;
+    std::string group_part_id;
     std::string canonical_index_json;
     std::string index_key_hex;
     std::string device_uuid;

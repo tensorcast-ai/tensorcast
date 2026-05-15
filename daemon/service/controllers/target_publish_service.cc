@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -17,6 +18,8 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
+#include "absl/types/span.h"
+#include "core/common/artifact_hash.h"
 #include "daemon/state/routed_authority_protocol.h"
 #include "daemon/state/routed_authority_wire.h"
 #include "daemon/util/status_utils.h"
@@ -26,6 +29,7 @@ namespace tensorcast::daemon {
 
 using ::grpc::Status;
 using ::grpc::StatusCode;
+namespace global_store = tensorcast::global_store::v1;
 namespace operation = tensorcast::operation::v1;
 using status_utils::to_grpc_status;
 
@@ -42,12 +46,142 @@ constexpr std::string_view kPublishOperationKind = TargetPublishService::public_
 constexpr std::string_view kPublishAuthorityScopeKind = "workflow_owner";
 constexpr std::string_view kPublishAttachmentKind = "target_publication";
 constexpr std::string_view kPublishRecoveryClass = "ephemeral_process_local";
+constexpr std::string_view kProgressiveBytePrefixCoverageOrder{"tensorcast.progressive.byte_prefix.v1"};
+constexpr uint64_t kTargetPublicationExportGeneration{1};
 
 absl::Status await_state_sync_barrier(const TargetPublishService::Dep& dep) {
   if (!dep.await_state_sync_barrier) {
     return absl::OkStatus();
   }
   return dep.await_state_sync_barrier();
+}
+
+std::optional<std::string> mi2_index_multihash(std::string_view artifact_id) {
+  constexpr std::string_view kPrefix{"mi2:"};
+  if (!artifact_id.starts_with(kPrefix)) {
+    return std::nullopt;
+  }
+  const std::string_view suffix = artifact_id.substr(kPrefix.size());
+  const size_t separator = suffix.find(':');
+  if (separator == std::string_view::npos || separator == 0) {
+    return std::nullopt;
+  }
+  return std::string(suffix.substr(0, separator));
+}
+
+std::string digest_to_string(std::string_view payload) {
+  const std::vector<uint8_t> digest = common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  return std::string(reinterpret_cast<const char*>(digest.data()), digest.size());
+}
+
+std::string byte_prefix_coverage_order_hash() {
+  return digest_to_string(kProgressiveBytePrefixCoverageOrder);
+}
+
+std::optional<global_store::ProgressiveCoverageIdentity> build_progressive_publication_identity(
+    const TargetPublicationRegistry::Record& record) {
+  if (record.byte_space.kind() != tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL ||
+      !record.byte_space.id().empty()) {
+    return std::nullopt;
+  }
+  if (!record.selection.view_id().empty() || record.selection.tensor_names_size() > 0 ||
+      !record.selection.view_subset_hash().empty()) {
+    return std::nullopt;
+  }
+  auto index_multihash = mi2_index_multihash(record.selection.artifact_id());
+  if (!index_multihash.has_value() || record.selection.logical_layout_hash().empty() ||
+      record.selection.selection_hash().empty()) {
+    return std::nullopt;
+  }
+
+  global_store::ProgressiveCoverageIdentity identity;
+  identity.set_artifact_id(record.selection.artifact_id());
+  identity.mutable_byte_space()->set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  identity.set_selection_hash(record.selection.selection_hash());
+  identity.set_logical_layout_hash(record.selection.logical_layout_hash());
+  identity.mutable_hash_space()->mutable_byte_space()->set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  identity.mutable_hash_space()->set_canonical_index_multihash(*index_multihash);
+  identity.set_coverage_order_hash(byte_prefix_coverage_order_hash());
+  const bool has_group_version_set = !record.group_version_set_id.empty();
+  const bool has_group_part = !record.group_part_id.empty();
+  if (has_group_version_set != has_group_part) {
+    return std::nullopt;
+  }
+  if (has_group_version_set) {
+    identity.set_group_version_set_id(record.group_version_set_id);
+    identity.set_group_part_id(record.group_part_id);
+  }
+  return identity;
+}
+
+void maybe_report_progressive_published_target_coverage(
+    const TargetPublishService::Dep& dep,
+    const TargetPublicationRegistry::Record& record,
+    std::string_view replica_id,
+    uint64_t total_size) {
+  if (!dep.progressive_replication.enabled || dep.global_store_client == nullptr ||
+      !dep.global_store_client->is_connected()) {
+    return;
+  }
+  if (dep.shutdown_signal.is_shutting_down() || replica_id.empty() || total_size == 0) {
+    return;
+  }
+  auto identity = build_progressive_publication_identity(record);
+  if (!identity.has_value()) {
+    return;
+  }
+
+  std::string daemon_id = dep.identity.daemon_id();
+  if (daemon_id.empty()) {
+    daemon_id = dep.daemon_id;
+  }
+  const std::string worker_id = dep.identity.worker_id();
+  if (daemon_id.empty() || worker_id.empty()) {
+    VLOG(1) << "Skipping progressive target publication coverage because daemon or worker identity is unavailable";
+    return;
+  }
+  const std::string node_id = dep.identity.node_id();
+  const std::string source_domain = !node_id.empty() ? node_id : daemon_id;
+  const std::string materialization_attempt_id = absl::StrCat("target_publish:", record.publication_id.value);
+
+  global_store::ReportProgressiveCoverageRequest request;
+  request.set_coverage_id(
+      absl::StrCat(
+          "progressive:", materialization_attempt_id, ":", replica_id, ":", kTargetPublicationExportGeneration));
+  request.mutable_identity()->CopyFrom(*identity);
+  request.set_replica_id(std::string(replica_id));
+  request.set_daemon_id(daemon_id);
+  request.set_daemon_session_id(dep.daemon_session_id);
+  request.set_worker_id(worker_id);
+  request.set_source_export_generation(kTargetPublicationExportGeneration);
+  request.set_coverage_epoch(1);
+  request.set_coverage_kind(global_store::PROGRESSIVE_COVERAGE_KIND_BYTE_PREFIX);
+  request.set_state(global_store::PROGRESSIVE_COVERAGE_STATE_VERIFIED);
+  request.set_export_state(global_store::PROGRESSIVE_EXPORT_STATE_COMPLETE_EXPORTABLE);
+  request.set_verified_units(total_size);
+  request.set_verified_bytes(total_size);
+  request.set_completed_units(total_size);
+  request.set_completed_bytes(total_size);
+  request.set_total_units(total_size);
+  request.set_total_bytes(total_size);
+  request.set_materialization_attempt_id(materialization_attempt_id);
+  request.set_source_transport_id(record.publication_id.value);
+  request.set_source_domain(source_domain);
+  request.set_seed_transport_kind("local_replica");
+
+  auto response_or = dep.global_store_client->report_progressive_coverage(request);
+  if (!response_or.ok()) {
+    LOG(WARNING) << "ReportProgressiveCoverage failed for target publication artifact_id="
+                 << record.selection.artifact_id() << " replica_id=" << replica_id << ": " << response_or.status();
+    return;
+  }
+  if (response_or->status() != global_store::STATUS_OK) {
+    LOG(WARNING) << "ReportProgressiveCoverage returned status=" << static_cast<int>(response_or->status())
+                 << " reason=" << response_or->reason()
+                 << " for target publication artifact_id=" << record.selection.artifact_id()
+                 << " replica_id=" << replica_id;
+  }
 }
 
 class OperationLeaseGuard {
@@ -953,7 +1087,9 @@ absl::StatusOr<v2::PublishTargetReplicaResponse> execute_publish_target_replica(
       /*schema_version=*/"v3",
       /*max_concurrency=*/std::max<uint32_t>(1, d.max_concurrency),
       /*verification_json=*/std::nullopt,
-      view_id.empty() ? std::nullopt : std::optional<std::string_view>(view_id));
+      view_id.empty() ? std::nullopt : std::optional<std::string_view>(view_id),
+      /*descriptor=*/std::nullopt,
+      kTargetPublicationExportGeneration);
   if (!replica_id_or.ok()) {
     return replica_id_or.status();
   }
@@ -993,6 +1129,8 @@ absl::StatusOr<v2::PublishTargetReplicaResponse> execute_publish_target_replica(
   if (!barrier_status.ok()) {
     return barrier_status;
   }
+
+  maybe_report_progressive_published_target_coverage(d, record, replica_id, total_size);
 
   lip_rollback.release();
   replica_rollback.release();

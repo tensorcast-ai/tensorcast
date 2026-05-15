@@ -39,6 +39,7 @@ class ReplicaMaterializationService {
     HandleLeaseRegistry* handle_leases{nullptr};
     bool cpu_shared_memory_enabled{true};
     DaemonOptions::PostSealPolicy post_seal_policy{};
+    DaemonOptions::ProgressiveReplication progressive_replication{};
     std::string daemon_id;
     std::string daemon_session_id;
     std::filesystem::path storage_path;

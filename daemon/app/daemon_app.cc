@@ -254,6 +254,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .public_disk_source_policy = app->options_.daemon_options.public_disk_source_policy,
       .post_seal_policy = app->options_.daemon_options.post_seal_policy,
       .serving_prefetch = app->options_.daemon_options.serving_prefetch,
+      .progressive_replication = app->options_.daemon_options.progressive_replication,
       .daemon_id = app->options_.daemon_options.daemon_id,
       .await_state_sync_barrier = [app_ptr = app.get()]() { return app_ptr->await_worker_state_sync_barrier(); },
   };

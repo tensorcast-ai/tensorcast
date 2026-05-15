@@ -15,6 +15,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
 #include "core/common/capability_token.h"
+#include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "core/store/testing/recording_global_store_client.h"
@@ -22,6 +23,7 @@
 #include "daemon/state/routed_authority_wire.h"
 #include "daemon/state/target_publication_registry.h"
 #include "daemon/state/types.h"
+#include "daemon/testing/cuda_ipc_spawn_helper.h"
 #include "grpcpp/server_context.h"
 #include "tensorcast/common/v1/capability_token.pb.h"
 #include "tensorcast/common/v1/common.pb.h"
@@ -52,12 +54,14 @@ tensorcast::store::StoreEngineOptions make_engine_opts() {
 
 std::unique_ptr<tensorcast::daemon::DaemonServiceHarness> make_harness(
     const std::shared_ptr<tensorcast::store::StoreEngine>& engine,
-    const std::shared_ptr<tensorcast::store::testing::RecordingGlobalStoreClient>& gs) {
+    const std::shared_ptr<tensorcast::store::testing::RecordingGlobalStoreClient>& gs,
+    bool progressive_replication = false) {
   tensorcast::daemon::DaemonOptions options;
   options.storage_path = make_storage_root();
   options.daemon_id = "daemon-test";
   options.capability_tokens.active.version = 1;
   options.capability_tokens.active.secret = "secret";
+  options.progressive_replication.enabled = progressive_replication;
   auto harness_or = tensorcast::daemon::DaemonServiceHarness::create(engine, options, nullptr, gs);
   REQUIRE(harness_or.ok());
   auto harness = std::move(*harness_or);
@@ -139,12 +143,13 @@ tensorcast::daemon::TargetPublicationRegistry::Record make_record_from_scope(
 }
 
 tensorcast::daemon::TargetPublicationRegistry::Record make_publishable_record_from_scope(
-    const tensorcast::common::v1::TargetPublicationScope& scope) {
+    const tensorcast::common::v1::TargetPublicationScope& scope,
+    std::string handle_bytes = "fake-cuda-ipc-handle") {
   auto record = make_record_from_scope(scope);
   tensorcast::daemon::RegisterStorageMeta storage;
   storage.storage_id = "storage-0";
   storage.device_id = kDeviceId;
-  storage.handle_bytes = "fake-cuda-ipc-handle";
+  storage.handle_bytes = std::move(handle_bytes);
   storage.storage_length = 16;
   record.storages.push_back(storage);
   record.segments.push_back(
@@ -246,6 +251,64 @@ TEST_CASE("PublishTargetReplica allows packed selection for view byte-space", "[
   REQUIRE(resp.lease_id().empty());
   REQUIRE(resp.replica_id().empty());
   REQUIRE(gs->registered_replicas.empty());
+}
+
+TEST_CASE("PublishTargetReplica reports terminal progressive coverage when enabled", "[daemon][publish][progressive]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts());
+  auto gs = std::make_shared<tensorcast::store::testing::RecordingGlobalStoreClient>();
+  auto harness = make_harness(engine, gs, /*progressive_replication=*/true);
+  harness->kernel().worker_identity_store().set_registered("worker-test", "node-a");
+
+  const auto helper_path_or = tensorcast::daemon::testing::resolve_cuda_ipc_helper_path();
+  REQUIRE(helper_path_or.ok());
+  std::vector<tensorcast::daemon::testing::CudaIpcBufferSpec> buffers = {
+      {.size_bytes = 16, .fill_byte = 7},
+  };
+  auto child_or = tensorcast::daemon::testing::CudaIpcChild::Spawn(*helper_path_or, kDeviceId, buffers);
+  INFO("cuda_ipc_helper spawn status: " << child_or.status());
+  REQUIRE(child_or.ok());
+  auto child = std::move(*child_or);
+  REQUIRE(child.handle_bytes().size() == 1);
+
+  auto* tokens = harness->kernel().capability_tokens();
+  REQUIRE(tokens != nullptr);
+  const int owner_pid = child.pid();
+  const auto device_key = tensorcast::store::DeviceRegistry::instance().gpu_key(kDeviceId);
+  REQUIRE(!device_key.uuid.empty());
+  const auto scope = make_scope("write-progressive", "mi2:indexabc:data", device_key.uuid, owner_pid, true);
+  const std::string token = mint_token(*tokens, "daemon-test", scope);
+
+  auto record = make_publishable_record_from_scope(scope, child.handle_bytes().front());
+  auto inserted_or = harness->materialization_controller().insert_target_publication_for_testing(std::move(record));
+  REQUIRE(inserted_or.ok());
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::PublishTargetReplicaRequest req;
+  tensorcast::daemon::v2::PublishTargetReplicaResponse resp;
+  req.set_target_publication_token(token);
+  req.mutable_byte_space()->CopyFrom(scope.byte_space());
+  req.set_owner_pid(owner_pid);
+
+  auto st = harness->service().PublishTargetReplica(&ctx, &req, &resp);
+  INFO(st.error_message());
+  REQUIRE(st.ok());
+  REQUIRE(!resp.replica_id().empty());
+  REQUIRE(gs->progressive_coverage_reports.size() == 1);
+  const auto& report = gs->progressive_coverage_reports.front();
+  CHECK(report.replica_id() == resp.replica_id());
+  CHECK(report.daemon_id() == "daemon-test");
+  CHECK(report.worker_id() == "worker-test");
+  CHECK(report.source_domain() == "node-a");
+  CHECK(report.source_export_generation() == 1);
+  CHECK(report.coverage_kind() == tensorcast::global_store::v1::PROGRESSIVE_COVERAGE_KIND_BYTE_PREFIX);
+  CHECK(report.state() == tensorcast::global_store::v1::PROGRESSIVE_COVERAGE_STATE_VERIFIED);
+  CHECK(report.export_state() == tensorcast::global_store::v1::PROGRESSIVE_EXPORT_STATE_COMPLETE_EXPORTABLE);
+  CHECK(report.verified_bytes() == 16);
+  CHECK(report.total_bytes() == 16);
+  CHECK(report.identity().artifact_id() == scope.selection().artifact_id());
+  CHECK(report.identity().selection_hash() == scope.selection().selection_hash());
+  CHECK(report.identity().logical_layout_hash() == scope.selection().logical_layout_hash());
+  CHECK(report.identity().coverage_order_hash().size() == 32);
 }
 
 TEST_CASE(

@@ -3,6 +3,7 @@
 #include "daemon/service/controllers/materialization_policy_utils.h"
 
 #include <memory>
+#include <string>
 #include <string_view>
 
 #include <catch2/catch_test_macros.hpp>
@@ -36,6 +37,8 @@ class RecordingGroupRealizationClient : public tensorcast::store::testing::Globa
     response.set_status(global_store::STATUS_OK);
     response.set_transaction_id("txn-17");
     response.mutable_version_set()->set_version_set_id("vs-17");
+    response.mutable_version_set()->set_manifest_hash("manifest-hash-17");
+    response.mutable_version_set()->set_manifest_generation(17);
     response.set_realization_kind(global_store::GROUP_REALIZATION_KIND_PER_PART_SELECTION);
     response.mutable_part()->set_part_id(request.context().part_id());
     response.mutable_part()->mutable_selection()->set_artifact_id("artifact-frozen-rank0");
@@ -109,6 +112,45 @@ TEST_CASE(
   CHECK(group_id.find("byte_space:2:view-rank0") != std::string::npos);
   CHECK(group_id.find("view:view-rank0") != std::string::npos);
   CHECK(group_id.find("selection_hash:686173682d72616e6b30") != std::string::npos);
+}
+
+TEST_CASE(
+    "Group realization begin context derives stable child transport request id from frozen identity",
+    "[daemon][materialization][policy]") {
+  auto options = build_group_realization_options();
+  auto client = std::make_shared<RecordingGroupRealizationClient>();
+  auto begin_or = begin_or_join_group_realization_if_enabled(client, &options, "daemon-a", "session-a", "worker-a");
+  REQUIRE(begin_or.ok());
+  REQUIRE(begin_or->has_value());
+
+  auto context_or = resolve_group_realization_transport_context("op-17", &options);
+  REQUIRE(context_or.ok());
+  apply_group_realization_begin_context_to_transport_context(**begin_or, &*context_or);
+  const std::string child_transport_request_id = context_or->transport_request_id;
+
+  CHECK(child_transport_request_id.rfind("grt:", 0) == 0);
+  CHECK(child_transport_request_id != "op-17");
+
+  auto replay_or = resolve_group_realization_transport_context("op-17", &options);
+  REQUIRE(replay_or.ok());
+  apply_group_realization_begin_context_to_transport_context(**begin_or, &*replay_or);
+  CHECK(replay_or->transport_request_id == child_transport_request_id);
+
+  auto different_part_context = **begin_or;
+  different_part_context.part_id = "rank1";
+  different_part_context.part_selection.set_artifact_id("artifact-frozen-rank1");
+  different_part_context.part_selection.set_view_id("view-rank1");
+  different_part_context.requested_byte_space.set_id("view-rank1");
+  different_part_context.selection_hash = "hash-rank1";
+  auto different_part_or = resolve_group_realization_transport_context("op-17", &options);
+  REQUIRE(different_part_or.ok());
+  apply_group_realization_begin_context_to_transport_context(different_part_context, &*different_part_or);
+  CHECK(different_part_or->transport_request_id != child_transport_request_id);
+
+  auto different_attempt_or = resolve_group_realization_transport_context("op-18", &options);
+  REQUIRE(different_attempt_or.ok());
+  apply_group_realization_begin_context_to_transport_context(**begin_or, &*different_attempt_or);
+  CHECK(different_attempt_or->transport_request_id != child_transport_request_id);
 }
 
 TEST_CASE("Group realization prepared report carries staged member fences", "[daemon][materialization][policy]") {

@@ -17,6 +17,7 @@
 #include "core/common/capability_token.h"
 #include "core/store/components/global_store_client.h"
 #include "daemon/service/rpc_context.h"
+#include "daemon/state/daemon_options.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/lifecycle_kernel.h"
 #include "daemon/state/lip_manager.h"
@@ -45,6 +46,9 @@ class TargetPublishService {
     common::CapabilityTokenManager* capability_tokens{nullptr};
     uint32_t max_concurrency{4};
     std::function<absl::Status()> await_state_sync_barrier;
+    DaemonOptions::ProgressiveReplication progressive_replication{};
+    std::string daemon_id;
+    std::string daemon_session_id;
   };
 
   explicit TargetPublishService(Dep d);

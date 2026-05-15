@@ -190,6 +190,14 @@ message Engine {
     uint32 direct_write_batch_ops = 28;
   }
   MaterializationStrategy materialization_strategy = 14;
+
+  message ProgressiveReplication {
+    bool enabled = 1;
+    google.protobuf.Duration report_interval = 2;
+    uint64 min_report_delta_bytes = 3;
+    optional bool verify_before_report = 4;
+  }
+  ProgressiveReplication progressive_replication = 15;
 }
 
 message Promotion {

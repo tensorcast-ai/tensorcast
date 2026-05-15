@@ -206,6 +206,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .storage_path = options.storage_path,
       .public_disk_source_policy = options.public_disk_source_policy,
       .serving_prefetch = options.serving_prefetch,
+      .progressive_replication = options.progressive_replication,
       .daemon_id = options.daemon_id,
   };
   auto materialization_controller = std::make_unique<MaterializationController>(mdep);

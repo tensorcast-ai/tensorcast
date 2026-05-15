@@ -73,6 +73,7 @@ class MaterializationController {
     DaemonOptions::PublicDiskSourcePolicy public_disk_source_policy{};
     DaemonOptions::PostSealPolicy post_seal_policy{};
     DaemonOptions::ServingPrefetch serving_prefetch{};
+    DaemonOptions::ProgressiveReplication progressive_replication{};
     std::string daemon_id;
     std::function<absl::Status()> await_state_sync_barrier;
   };
