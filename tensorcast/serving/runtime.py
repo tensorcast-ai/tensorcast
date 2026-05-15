@@ -73,11 +73,12 @@ def _profile_resource_path(profile: str, filename: str) -> str:
     if profile_name is None:
         raise ValueError("runtime.profile must be non-empty")
     try:
-        resource = importlib.resources.files("tensorcast").joinpath(
-            "config",
-            "profiles",
-            profile_name,
-            filename,
+        resource = (
+            importlib.resources.files("tensorcast")
+            .joinpath("config")
+            .joinpath("profiles")
+            .joinpath(profile_name)
+            .joinpath(filename)
         )
     except (FileNotFoundError, ModuleNotFoundError) as exc:
         raise ValueError(
