@@ -437,6 +437,10 @@ plan: Any
 
 
 def __getattr__(name: str) -> Any:
+    if name == "serving":
+        module = importlib.import_module("tensorcast.serving")
+        globals()[name] = module
+        return module
     if name not in _LAZY_ATTRS:
         raise AttributeError(name)
     module_name, attr_name = _LAZY_ATTRS[name]
@@ -447,7 +451,7 @@ def __getattr__(name: str) -> Any:
 
 
 def __dir__() -> list[str]:
-    return sorted(set(globals()).union(_LAZY_ATTRS))
+    return sorted(set(globals()).union(_LAZY_ATTRS).union({"serving"}))
 
 
 if TYPE_CHECKING:
@@ -570,6 +574,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "__version__",
+    "serving",
     "init",
     "is_initialized",
     "shutdown",
