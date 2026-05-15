@@ -53,6 +53,15 @@ TC_WP_P0_EARLY_STOP="${TC_WP_P0_EARLY_STOP:-1}"
 TC_WP_P0_EARLY_STOP_GRACE_S="${TC_WP_P0_EARLY_STOP_GRACE_S:-20}"
 TC_WP_THROUGHPUT_SAMPLE_INTERVAL_S="${TC_WP_THROUGHPUT_SAMPLE_INTERVAL_S:-1.0}"
 TC_WP_THROUGHPUT_MAX_SAMPLES="${TC_WP_THROUGHPUT_MAX_SAMPLES:-20000}"
+TC_WP_PROGRESSIVE_ENABLE="${TC_WP_PROGRESSIVE_ENABLE:-0}"
+TC_WP_PROGRESSIVE_REPORT_INTERVAL="${TC_WP_PROGRESSIVE_REPORT_INTERVAL:-1s}"
+TC_WP_PROGRESSIVE_MIN_REPORT_DELTA_BYTES="${TC_WP_PROGRESSIVE_MIN_REPORT_DELTA_BYTES:-16777216}"
+TC_WP_PROGRESSIVE_VERIFY_BEFORE_REPORT="${TC_WP_PROGRESSIVE_VERIFY_BEFORE_REPORT:-1}"
+TC_WP_FAILURE_INJECTION_ENABLE="${TC_WP_FAILURE_INJECTION_ENABLE:-0}"
+TC_WP_FAILURE_INJECTION_MODE="${TC_WP_FAILURE_INJECTION_MODE:-stop-daemon}"
+TC_WP_FAILURE_INJECTION_TARGET="${TC_WP_FAILURE_INJECTION_TARGET:-receiver:0}"
+TC_WP_FAILURE_INJECTION_DELAY_S="${TC_WP_FAILURE_INJECTION_DELAY_S:-15}"
+TC_WP_FAILURE_INJECTION_RECEIVER_COUNT="${TC_WP_FAILURE_INJECTION_RECEIVER_COUNT:-0}"
 TC_SINGLE_HOST_FUNCTIONAL_ENABLE="${TC_SINGLE_HOST_FUNCTIONAL_ENABLE:-1}"
 TC_SINGLE_HOST_DAEMON_CONFIG="${TC_SINGLE_HOST_DAEMON_CONFIG:-${TC_DAEMON_CONFIG}}"
 TC_WP_TP_AUTO_KEEP_LAST_ONE="${TC_WP_TP_AUTO_KEEP_LAST_ONE:-1}"
@@ -243,6 +252,9 @@ run_case() {
   local num_versions=$3
   local publish_interval_s=$4
   local receiver_timeout_s=$5
+  local failure_injection_mode=${6:-none}
+  local failure_injection_target=${7:-${TC_WP_FAILURE_INJECTION_TARGET}}
+  local failure_injection_delay_s=${8:-${TC_WP_FAILURE_INJECTION_DELAY_S}}
   local receiver_procs
   receiver_procs="$(join_first_n RECEIVER_PROCS_ARR "${receiver_count}")"
   local model_name="${TC_MODEL_NAME_PREFIX}-${case_name}"
@@ -281,6 +293,9 @@ run_case() {
     --receiver-preflight-transient-overlap "${TC_WP_RECEIVER_PREFLIGHT_TRANSIENT_OVERLAP}"
     --throughput-sample-interval-s "${TC_WP_THROUGHPUT_SAMPLE_INTERVAL_S}"
     --throughput-max-samples "${TC_WP_THROUGHPUT_MAX_SAMPLES}"
+    --failure-injection-mode "${failure_injection_mode}"
+    --failure-injection-target "${failure_injection_target}"
+    --failure-injection-delay-s "${failure_injection_delay_s}"
     --p0-early-stop-grace-s "${TC_WP_P0_EARLY_STOP_GRACE_S}"
     --out-dir "${RUN_DIR}"
   )
@@ -304,10 +319,22 @@ run_case() {
   else
     cmd+=(--no-p0-early-stop)
   fi
+  if [[ "${TC_WP_PROGRESSIVE_ENABLE}" == "1" ]]; then
+    cmd+=(--enable-progressive-replication)
+  fi
+  cmd+=(
+    --progressive-report-interval "${TC_WP_PROGRESSIVE_REPORT_INTERVAL}"
+    --progressive-min-report-delta-bytes "${TC_WP_PROGRESSIVE_MIN_REPORT_DELTA_BYTES}"
+  )
+  if [[ "${TC_WP_PROGRESSIVE_VERIFY_BEFORE_REPORT}" == "1" ]]; then
+    cmd+=(--progressive-verify-before-report)
+  else
+    cmd+=(--no-progressive-verify-before-report)
+  fi
   if [[ "${TC_ALLOW_RECEIVER_SKIPS}" == "1" ]]; then
     cmd+=(--allow-receiver-skips)
   fi
-  echo "[wp-suite] running case=${case_name} receivers=${receiver_count} num_versions=${num_versions} publish_interval_s=${publish_interval_s} receiver_timeout_s=${receiver_timeout_s}"
+  echo "[wp-suite] running case=${case_name} receivers=${receiver_count} num_versions=${num_versions} publish_interval_s=${publish_interval_s} receiver_timeout_s=${receiver_timeout_s} failure_injection_mode=${failure_injection_mode}"
   "${cmd[@]}"
 }
 
@@ -315,6 +342,8 @@ echo "[wp-suite] run_id=${TC_RUN_ID} publisher=${TC_WP_PUBLISHER_PROC} receivers
 echo "[wp-suite] daemon_config=${TC_DAEMON_CONFIG} daemon_connect=${TC_DAEMON_CONNECT_ADDRESS} gs_addr=${TC_GS_ADDR}"
 echo "[wp-suite] payload_mode=${TC_WP_PAYLOAD_MODE} tp_world_size=${TC_WP_TP_WORLD_SIZE} tp_total_bytes=${TC_WP_TP_TOTAL_BYTES} tp_device_map_policy=${TC_WP_TP_DEVICE_MAP_POLICY} max_concurrency=${TC_WP_MAX_CONCURRENCY}"
 echo "[wp-suite] receiver_timeout_s=${TC_RECEIVER_TIMEOUT_S} receiver_timeout_auto_adjust=${TC_WP_RECEIVER_TIMEOUT_AUTO_ADJUST} keep_last_auto_adjust=${TC_WP_KEEP_LAST_AUTO_ADJUST} max_publish_to_apply_auto_adjust=${TC_WP_MAX_PUBLISH_TO_APPLY_AUTO_ADJUST} pre_publish_trim_margin=${TC_WP_PRE_PUBLISH_TRIM_MARGIN}"
+echo "[wp-suite] progressive_enable=${TC_WP_PROGRESSIVE_ENABLE} progressive_report_interval=${TC_WP_PROGRESSIVE_REPORT_INTERVAL} progressive_min_report_delta_bytes=${TC_WP_PROGRESSIVE_MIN_REPORT_DELTA_BYTES}"
+echo "[wp-suite] failure_injection_enable=${TC_WP_FAILURE_INJECTION_ENABLE} mode=${TC_WP_FAILURE_INJECTION_MODE} target=${TC_WP_FAILURE_INJECTION_TARGET} delay_s=${TC_WP_FAILURE_INJECTION_DELAY_S}"
 STRICT_NO_SKIP="true"
 if [[ "${TC_ALLOW_RECEIVER_SKIPS}" == "1" ]]; then
   STRICT_NO_SKIP="false"
@@ -418,6 +447,37 @@ else
     "TC_LONG_RUN_ENABLE=${TC_LONG_RUN_ENABLE}"
 fi
 
+if [[ "${TC_WP_FAILURE_INJECTION_ENABLE}" == "1" ]]; then
+  failure_receiver_count="${TC_WP_FAILURE_INJECTION_RECEIVER_COUNT}"
+  if [[ "${failure_receiver_count}" -eq 0 || "${failure_receiver_count}" -gt "${#RECEIVER_PROCS_ARR[@]}" ]]; then
+    failure_receiver_count="${#RECEIVER_PROCS_ARR[@]}"
+  fi
+  if [[ "${failure_receiver_count}" -ge 2 ]]; then
+    failure_case_name="suite_${TC_RUN_ID}_failure_injection_r${failure_receiver_count}"
+    run_case \
+      "${failure_case_name}" \
+      "${failure_receiver_count}" \
+      "${TC_SCALE_NUM_VERSIONS}" \
+      "${TC_SCALE_PUBLISH_INTERVAL_S}" \
+      "${TC_RECEIVER_TIMEOUT_S}" \
+      "${TC_WP_FAILURE_INJECTION_MODE}" \
+      "${TC_WP_FAILURE_INJECTION_TARGET}" \
+      "${TC_WP_FAILURE_INJECTION_DELAY_S}"
+    EXECUTED_CASES+=("${failure_case_name}")
+  else
+    echo "[wp-suite] skip failure-injection lane: at least two receiver processes are required"
+    append_skip_manifest \
+      "suite_${TC_RUN_ID}_failure_injection" \
+      "insufficient_receiver_processes" \
+      "requested=${TC_WP_FAILURE_INJECTION_RECEIVER_COUNT} available=${#RECEIVER_PROCS_ARR[@]}"
+  fi
+else
+  append_skip_manifest \
+    "suite_${TC_RUN_ID}_failure_injection" \
+    "failure_injection_disabled" \
+    "TC_WP_FAILURE_INJECTION_ENABLE=${TC_WP_FAILURE_INJECTION_ENABLE}"
+fi
+
 cat > "${RUN_DIR}/suite_meta.json" <<EOF
 {
   "run_id": "${TC_RUN_ID}",
@@ -450,6 +510,15 @@ cat > "${RUN_DIR}/suite_meta.json" <<EOF
   "receiver_preflight_transient_overlap": ${TC_WP_RECEIVER_PREFLIGHT_TRANSIENT_OVERLAP},
   "p0_early_stop": ${TC_WP_P0_EARLY_STOP},
   "p0_early_stop_grace_s": ${TC_WP_P0_EARLY_STOP_GRACE_S},
+  "progressive_enable": ${TC_WP_PROGRESSIVE_ENABLE},
+  "progressive_report_interval": "${TC_WP_PROGRESSIVE_REPORT_INTERVAL}",
+  "progressive_min_report_delta_bytes": ${TC_WP_PROGRESSIVE_MIN_REPORT_DELTA_BYTES},
+  "progressive_verify_before_report": ${TC_WP_PROGRESSIVE_VERIFY_BEFORE_REPORT},
+  "failure_injection_enable": ${TC_WP_FAILURE_INJECTION_ENABLE},
+  "failure_injection_mode": "${TC_WP_FAILURE_INJECTION_MODE}",
+  "failure_injection_target": "${TC_WP_FAILURE_INJECTION_TARGET}",
+  "failure_injection_delay_s": ${TC_WP_FAILURE_INJECTION_DELAY_S},
+  "failure_injection_receiver_count": ${TC_WP_FAILURE_INJECTION_RECEIVER_COUNT},
   "throughput_sample_interval_s": ${TC_WP_THROUGHPUT_SAMPLE_INTERVAL_S},
   "throughput_max_samples": ${TC_WP_THROUGHPUT_MAX_SAMPLES},
   "scale_num_versions": ${TC_SCALE_NUM_VERSIONS},

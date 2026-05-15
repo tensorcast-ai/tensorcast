@@ -90,6 +90,25 @@ worker_policy:
       group_source_min_candidates_for_enforce: 3
   group_realization:
     enabled: true
+  progressive_replication:
+    # Default off for benchmark configs. Enable explicitly for the 0118
+    # progressive lane once the daemon configs are also started with
+    # engine.progressive_replication.enabled=true.
+    enabled: false
+    max_outgoing_per_source: 1
+    coverage_ttl: 300s
+    assignment_ttl: 30s
+    allow_cross_domain_seed_sources: false
+    min_verified_bytes: 16777216
+    min_assignment_bytes: 16777216
+    max_assignment_bytes: 268435456
+    max_assignments_per_materialization: 1024
+    assignment_candidate_scan_limit: 64
+    max_claim_qps_per_daemon: 100
+    cleanup_batch_limit: 256
+    source_domain_policy: local_only
+    min_report_delta_bytes: 16777216
+    min_report_interval: 1s
 
 # v2 limits and retention policies.
 limits:

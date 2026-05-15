@@ -336,6 +336,10 @@ def test_start_remote_daemon_retries_transient_startup_exit(
         heartbeat_interval="5s",
         periodic_sync_interval="5s",
         max_concurrency=1,
+        progressive_enabled=False,
+        progressive_report_interval="1s",
+        progressive_min_report_delta_bytes=16 * 1024 * 1024,
+        progressive_verify_before_report=True,
         cuda_backend="",
         capability_token_secret="secret",
         timeout_sec=60.0,
@@ -344,6 +348,61 @@ def test_start_remote_daemon_retries_transient_startup_exit(
     assert len(calls) == 2
     assert len(stop_calls) == 1
     assert status["daemon"]["pid"] == 123
+
+
+def test_start_remote_daemon_progressive_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _load_runner_module()
+    captured: dict[str, str] = {}
+
+    def _fake_run_remote(process_id: str, inner_cmd: str, *, timeout_sec: float) -> str:
+        _ = process_id, timeout_sec
+        captured["inner_cmd"] = inner_cmd
+        return (
+            '{"daemon":{"pid":123,"address":"127.0.0.1:50052",'
+            '"p2p_address":"127.0.0.1:65090"},"started_at":1.0}'
+        )
+
+    monkeypatch.setattr(runner, "run_remote", _fake_run_remote)
+
+    status = runner.start_remote_daemon(
+        process_id="p1",
+        repo_root="/repo",
+        daemon_config="cfg.yaml",
+        gs_addr="127.0.0.1:50051",
+        daemon_session="s1",
+        daemon_id="d1",
+        daemon_connect_address="127.0.0.1:50052",
+        daemon_p2p_port=65090,
+        advertise_host="127.0.0.1",
+        cluster_id="",
+        heartbeat_interval="5s",
+        periodic_sync_interval="5s",
+        max_concurrency=1,
+        progressive_enabled=True,
+        progressive_report_interval="250ms",
+        progressive_min_report_delta_bytes=4096,
+        progressive_verify_before_report=False,
+        cuda_backend="",
+        capability_token_secret="secret",
+        timeout_sec=60.0,
+    )
+
+    assert status["daemon"]["pid"] == 123
+    assert "--set engine.progressive_replication.enabled=true" in captured["inner_cmd"]
+    assert (
+        "--set engine.progressive_replication.report_interval=250ms"
+        in captured["inner_cmd"]
+    )
+    assert (
+        "--set engine.progressive_replication.min_report_delta_bytes=4096"
+        in captured["inner_cmd"]
+    )
+    assert (
+        "--set engine.progressive_replication.verify_before_report=false"
+        in captured["inner_cmd"]
+    )
 
 
 def test_start_remote_daemon_does_not_retry_non_startup_error(
@@ -382,6 +441,10 @@ def test_start_remote_daemon_does_not_retry_non_startup_error(
             heartbeat_interval="5s",
             periodic_sync_interval="5s",
             max_concurrency=1,
+            progressive_enabled=False,
+            progressive_report_interval="1s",
+            progressive_min_report_delta_bytes=16 * 1024 * 1024,
+            progressive_verify_before_report=True,
             cuda_backend="",
             capability_token_secret="secret",
             timeout_sec=60.0,
@@ -425,6 +488,80 @@ def test_stop_remote_daemon_avoids_self_match_and_non_daemon_pids(
         'if [[ "${cmdline}" != *"tensorcast_daemon --config"* ]]; then continue; fi;'
         in inner_cmd
     )
+
+
+def test_resolve_failure_injection_plan_selects_receiver() -> None:
+    runner = _load_runner_module()
+    plan = runner.resolve_failure_injection_plan(
+        mode="stop-daemon",
+        target="receiver:1",
+        receiver_procs=["rx0", "rx1"],
+        daemon_sessions={"rx0": "sess-rx0", "rx1": "sess-rx1"},
+        delay_s=2.5,
+    )
+
+    assert plan.enabled is True
+    assert plan.mode == "stop-daemon"
+    assert plan.role == "receiver"
+    assert plan.process_id == "rx1"
+    assert plan.daemon_session == "sess-rx1"
+    assert plan.delay_s == pytest.approx(2.5)
+
+
+def test_resolve_failure_injection_plan_rejects_non_receiver_target() -> None:
+    runner = _load_runner_module()
+    with pytest.raises(ValueError, match="receiver:<zero-based-index>"):
+        runner.resolve_failure_injection_plan(
+            mode="stop-daemon",
+            target="publisher",
+            receiver_procs=["rx0"],
+            daemon_sessions={"rx0": "sess-rx0"},
+            delay_s=0.0,
+        )
+
+
+def test_run_failure_injection_stops_target_daemon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _load_runner_module()
+    slept: list[float] = []
+    stopped: list[tuple[str, str, str, float]] = []
+    plan = runner.FailureInjectionPlan(
+        enabled=True,
+        mode="stop-daemon",
+        target="receiver:0",
+        process_id="rx0",
+        role="receiver",
+        daemon_session="sess-rx0",
+        delay_s=0.25,
+    )
+
+    def _fake_sleep(seconds: float) -> None:
+        slept.append(float(seconds))
+
+    def _fake_stop_remote_daemon(
+        *,
+        process_id: str,
+        repo_root: str,
+        daemon_session: str,
+        timeout_sec: float,
+    ) -> None:
+        stopped.append(
+            (str(process_id), str(repo_root), str(daemon_session), float(timeout_sec))
+        )
+
+    monkeypatch.setattr(runner.time, "sleep", _fake_sleep)
+    monkeypatch.setattr(runner, "stop_remote_daemon", _fake_stop_remote_daemon)
+
+    result = runner.run_failure_injection(
+        plan,
+        repo_root="/repo",
+        timeout_sec=7.0,
+    )
+
+    assert result["status"] == "injected"
+    assert slept == [pytest.approx(0.25)]
+    assert stopped == [("rx0", "/repo", "sess-rx0", pytest.approx(7.0))]
 
 
 def test_compute_transport_metrics_rejects_missing_bytes_on_completed_rows() -> None:

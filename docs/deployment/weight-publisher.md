@@ -352,6 +352,30 @@ export TC_PROGRESS_POLL_S=10
 bash examples/cross_host/run_multihost_weight_publisher_suite.sh
 ```
 
+Progressive dissemination benchmark lane:
+
+- Keep it disabled for baseline runs. Enable it explicitly with
+  `TC_WP_PROGRESSIVE_ENABLE=1` after starting Global Store with
+  `worker_policy.progressive_replication.enabled=true`.
+- The suite propagates daemon-side reporting knobs:
+  `TC_WP_PROGRESSIVE_REPORT_INTERVAL`,
+  `TC_WP_PROGRESSIVE_MIN_REPORT_DELTA_BYTES`, and
+  `TC_WP_PROGRESSIVE_VERIFY_BEFORE_REPORT`.
+- Progressive and baseline runs should use the same receiver counts, payload
+  mode, publish interval, and timeout settings before comparing concentration or
+  tail-latency metrics.
+- Add the optional failure-injection lane with
+  `TC_WP_FAILURE_INJECTION_ENABLE=1`. The suite then appends one extra case
+  that stops a selected receiver daemon after publisher start
+  (`TC_WP_FAILURE_INJECTION_TARGET=receiver:0` by default) and records whether
+  the remaining receivers still complete. Tune
+  `TC_WP_FAILURE_INJECTION_DELAY_S` so the selected receiver has become a useful
+  progressive source in the target topology.
+- Use `examples/cross_host/summarize_scaleout_suite.py --tp-dir <RUN_DIR>` to
+  produce JSON and Markdown reports. The TP report groups cases into baseline,
+  progressive, and failure-injection lanes and summarizes source concentration
+  and publish-to-apply latency metrics.
+
 Timeout guidance:
 
 - `TC_RECEIVER_TIMEOUT_S` must be larger than publish interval.  

@@ -123,10 +123,14 @@ class FanoutCase:
 class TpCase:
     path: str
     case_name: str
+    lane: str
     workers: int | None
     receivers: int | None
     round_index: int | None
     order_slot: int | None
+    progressive_enabled: bool
+    failure_injection_enabled: bool
+    failure_injection_status: str
     passed: bool | None
     l0_pass: bool
     group_probe_enabled: bool | None
@@ -142,6 +146,35 @@ class TpCase:
     diffusion_unique_sources: int | None
     diffusion_top1_share: float | None
     diffusion_hhi: float | None
+
+
+def _first_bool(*values: Any, default: bool = False) -> bool:
+    for value in values:
+        parsed = _safe_bool(value)
+        if parsed is not None:
+            return bool(parsed)
+    return bool(default)
+
+
+def _first_str(*values: Any, default: str = "") -> str:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return default
+
+
+def _tp_lane(
+    *,
+    progressive_enabled: bool,
+    failure_injection_enabled: bool,
+) -> str:
+    if failure_injection_enabled and progressive_enabled:
+        return "progressive_failure_injection"
+    if failure_injection_enabled:
+        return "failure_injection"
+    if progressive_enabled:
+        return "progressive"
+    return "baseline"
 
 
 def _parse_fanout_case(path: Path) -> FanoutCase | None:
@@ -309,6 +342,37 @@ def _parse_tp_case(path: Path) -> TpCase | None:
     if not isinstance(throughput, dict):
         throughput = {}
 
+    params = payload.get("params", {})
+    if not isinstance(params, dict):
+        params = {}
+    progressive = summary.get("progressive", {})
+    if not isinstance(progressive, dict):
+        progressive = {}
+    failure_payload = payload.get("failure_injection", {})
+    if not isinstance(failure_payload, dict):
+        failures = summary.get("failures", {})
+        failure_payload = (
+            failures.get("failure_injection", {}) if isinstance(failures, dict) else {}
+        )
+    if not isinstance(failure_payload, dict):
+        failure_payload = {}
+
+    progressive_enabled = _first_bool(
+        progressive.get("enabled"),
+        params.get("enable_progressive_replication"),
+        default=False,
+    )
+    failure_injection_status = _first_str(
+        failure_payload.get("status"),
+        default="disabled",
+    )
+    failure_mode = str(params.get("failure_injection_mode", "")).strip().lower()
+    failure_injection_enabled = _first_bool(
+        failure_payload.get("enabled"),
+        failure_mode not in {"", "none"},
+        default=False,
+    )
+
     group_gate_ok = bool(
         window_has_transports is True
         and requester_tagged_complete is True
@@ -323,10 +387,17 @@ def _parse_tp_case(path: Path) -> TpCase | None:
     return TpCase(
         path=str(path),
         case_name=case_name,
+        lane=_tp_lane(
+            progressive_enabled=progressive_enabled,
+            failure_injection_enabled=failure_injection_enabled,
+        ),
         workers=workers,
         receivers=receivers,
         round_index=round_index,
         order_slot=order_slot,
+        progressive_enabled=progressive_enabled,
+        failure_injection_enabled=failure_injection_enabled,
+        failure_injection_status=failure_injection_status,
         passed=passed,
         l0_pass=l0_pass,
         group_probe_enabled=group_probe_enabled,
@@ -361,6 +432,44 @@ def _render_int(value: int | None) -> str:
     if value is None:
         return "NA"
     return str(value)
+
+
+def _mean_float(values: list[float | None]) -> float | None:
+    valid = [value for value in values if value is not None]
+    if not valid:
+        return None
+    return sum(valid) / float(len(valid))
+
+
+def _build_tp_lane_summary(tp_cases: list[TpCase]) -> list[dict[str, Any]]:
+    lanes = sorted({case.lane for case in tp_cases})
+    rows: list[dict[str, Any]] = []
+    for lane in lanes:
+        lane_cases = [case for case in tp_cases if case.lane == lane]
+        rows.append(
+            {
+                "lane": lane,
+                "case_count": len(lane_cases),
+                "passed_count": sum(1 for case in lane_cases if case.passed is True),
+                "l0_pass_count": sum(1 for case in lane_cases if case.l0_pass),
+                "failure_injection_count": sum(
+                    1 for case in lane_cases if case.failure_injection_enabled
+                ),
+                "publish_to_apply_p95_mean_s": _mean_float(
+                    [case.publish_to_apply_p95_s for case in lane_cases]
+                ),
+                "diffusion_top1_share_mean": _mean_float(
+                    [case.diffusion_top1_share for case in lane_cases]
+                ),
+                "diffusion_hhi_mean": _mean_float(
+                    [case.diffusion_hhi for case in lane_cases]
+                ),
+                "throughput_peak_active_gib_s_mean": _mean_float(
+                    [case.throughput_peak_active_gib_s for case in lane_cases]
+                ),
+            }
+        )
+    return rows
 
 
 def _build_markdown(
@@ -437,15 +546,16 @@ def _build_markdown(
         lines.append(f"- cases={len(tp_cases)} l0_all_pass={tp_l0_all}")
         lines.append("")
         lines.append(
-            "| case | workers | round | order | passed | L0 | grouped_transports | p95_publish_to_apply_s | top1_share | hhi |"
+            "| case | lane | workers | round | order | passed | L0 | grouped_transports | p95_publish_to_apply_s | top1_share | hhi | failure_injection |"
         )
-        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|")
         lines.extend(
             [
                 "| "
                 + " | ".join(
                     [
                         case.case_name,
+                        case.lane,
                         _render_int(case.workers),
                         _render_int(case.round_index),
                         _render_int(case.order_slot),
@@ -455,18 +565,47 @@ def _build_markdown(
                         _render_float(case.publish_to_apply_p95_s),
                         _render_float(case.diffusion_top1_share),
                         _render_float(case.diffusion_hhi),
+                        case.failure_injection_status,
                     ]
                 )
                 + " |"
                 for case in sorted(
                     tp_cases,
                     key=lambda x: (
+                        x.lane,
                         x.workers if x.workers is not None else 0,
                         x.round_index if x.round_index is not None else -1,
                         x.order_slot if x.order_slot is not None else -1,
                         x.case_name,
                     ),
                 )
+            ]
+        )
+        lines.append("")
+        lines.append("### TP Lane Summary")
+        lines.append("")
+        lines.append(
+            "| lane | cases | passed | L0 | failure_injection | p95_publish_to_apply_mean_s | top1_share_mean | hhi_mean | peak_gib_s_mean |"
+        )
+        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+        lines.extend(
+            [
+                "| "
+                + " | ".join(
+                    [
+                        str(row["lane"]),
+                        str(row["case_count"]),
+                        str(row["passed_count"]),
+                        str(row["l0_pass_count"]),
+                        str(row["failure_injection_count"]),
+                        _render_float(row["publish_to_apply_p95_mean_s"]),
+                        _render_float(row["diffusion_top1_share_mean"]),
+                        _render_float(row["diffusion_hhi_mean"]),
+                        _render_float(row["throughput_peak_active_gib_s_mean"]),
+                    ]
+                )
+                + " |"
+                for row in _build_tp_lane_summary(tp_cases)
             ]
         )
 
@@ -557,6 +696,7 @@ def main() -> None:
         "tp": {
             "case_count": len(tp_cases),
             "l0_all_pass": all(case.l0_pass for case in tp_cases) if tp_cases else None,
+            "lane_summary": _build_tp_lane_summary(tp_cases),
             "cases": [asdict(case) for case in tp_cases],
         },
     }

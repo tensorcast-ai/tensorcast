@@ -63,6 +63,17 @@ class TransportGroupPlan:
     priority: int
 
 
+@dataclass(frozen=True)
+class FailureInjectionPlan:
+    enabled: bool
+    mode: str
+    target: str
+    process_id: str
+    role: str
+    daemon_session: str
+    delay_s: float
+
+
 def estimate_remote_timeout_floor_sec(args: argparse.Namespace) -> float:
     # Conservative lower bound for full-case wall time to avoid timing out
     # long-running large payload runs while roles are still healthy.
@@ -1187,6 +1198,10 @@ def start_remote_daemon(
     heartbeat_interval: str,
     periodic_sync_interval: str,
     max_concurrency: int,
+    progressive_enabled: bool,
+    progressive_report_interval: str,
+    progressive_min_report_delta_bytes: int,
+    progressive_verify_before_report: bool,
     cuda_backend: str,
     capability_token_secret: str,
     timeout_sec: float,
@@ -1219,6 +1234,24 @@ def start_remote_daemon(
     ]
     if cluster_id:
         start_args.append(f"--set meta.cluster_token={shlex.quote(cluster_id)}")
+    if progressive_enabled:
+        start_args.extend(
+            [
+                "--set engine.progressive_replication.enabled=true",
+                (
+                    "--set engine.progressive_replication.report_interval="
+                    f"{shlex.quote(str(progressive_report_interval).strip())}"
+                ),
+                (
+                    "--set engine.progressive_replication.min_report_delta_bytes="
+                    f"{int(progressive_min_report_delta_bytes)}"
+                ),
+                (
+                    "--set engine.progressive_replication.verify_before_report="
+                    f"{str(bool(progressive_verify_before_report)).lower()}"
+                ),
+            ]
+        )
     start_args.append("--json")
     start_expr = " ".join(start_args)
     start_cmd = [
@@ -1363,6 +1396,101 @@ def stop_remote_daemon(
         "; ".join(stop_cmd),
         timeout_sec=max(20.0, timeout_sec),
     )
+
+
+def resolve_failure_injection_plan(
+    *,
+    mode: str,
+    target: str,
+    receiver_procs: list[str],
+    daemon_sessions: dict[str, str],
+    delay_s: float,
+) -> FailureInjectionPlan:
+    normalized_mode = str(mode).strip().lower()
+    normalized_target = str(target).strip().lower()
+    if normalized_mode in {"", "none"}:
+        return FailureInjectionPlan(
+            enabled=False,
+            mode="none",
+            target="",
+            process_id="",
+            role="",
+            daemon_session="",
+            delay_s=0.0,
+        )
+    if normalized_mode != "stop-daemon":
+        raise ValueError("failure-injection-mode must be none or stop-daemon")
+    if float(delay_s) < 0.0:
+        raise ValueError("failure-injection-delay-s must be >= 0")
+    if not normalized_target.startswith("receiver:"):
+        raise ValueError("failure-injection-target must be receiver:<zero-based-index>")
+    index_text = normalized_target.removeprefix("receiver:")
+    if not index_text.isdigit():
+        raise ValueError("failure-injection-target receiver index must be an integer")
+    receiver_index = int(index_text)
+    if receiver_index < 0 or receiver_index >= len(receiver_procs):
+        raise ValueError(
+            "failure-injection-target receiver index out of range: "
+            f"index={receiver_index}, receivers={len(receiver_procs)}"
+        )
+    process_id = receiver_procs[receiver_index]
+    daemon_session = str(daemon_sessions.get(process_id, "")).strip()
+    if not daemon_session:
+        raise ValueError(
+            f"failure-injection target has no daemon session: process={process_id}"
+        )
+    return FailureInjectionPlan(
+        enabled=True,
+        mode=normalized_mode,
+        target=normalized_target,
+        process_id=process_id,
+        role="receiver",
+        daemon_session=daemon_session,
+        delay_s=float(delay_s),
+    )
+
+
+def failure_injection_plan_payload(plan: FailureInjectionPlan) -> dict[str, Any]:
+    return {
+        "enabled": bool(plan.enabled),
+        "mode": str(plan.mode),
+        "target": str(plan.target),
+        "role": str(plan.role),
+        "process_id": str(plan.process_id),
+        "daemon_session": str(plan.daemon_session),
+        "delay_s": float(plan.delay_s),
+    }
+
+
+def run_failure_injection(
+    plan: FailureInjectionPlan,
+    *,
+    repo_root: str,
+    timeout_sec: float,
+) -> dict[str, Any]:
+    result = failure_injection_plan_payload(plan)
+    if not bool(plan.enabled):
+        result["status"] = "disabled"
+        return result
+    result["status"] = "scheduled"
+    result["scheduled_at_utc"] = _to_utc_sql_timestamp(datetime.now(timezone.utc))
+    if float(plan.delay_s) > 0.0:
+        time.sleep(float(plan.delay_s))
+    try:
+        stop_remote_daemon(
+            process_id=plan.process_id,
+            repo_root=repo_root,
+            daemon_session=plan.daemon_session,
+            timeout_sec=timeout_sec,
+        )
+    except Exception as exc:  # noqa: BLE001
+        result["status"] = "failed"
+        result["error"] = str(exc)
+        result["failed_at_utc"] = _to_utc_sql_timestamp(datetime.now(timezone.utc))
+        return result
+    result["status"] = "injected"
+    result["injected_at_utc"] = _to_utc_sql_timestamp(datetime.now(timezone.utc))
+    return result
 
 
 def preclean_remote_role_processes(
@@ -2863,6 +2991,28 @@ def build_parser() -> argparse.ArgumentParser:
         default="5s",
         help=("Daemon high_availability.periodic_sync_interval value (e.g. 5s, 60s)."),
     )
+    parser.add_argument(
+        "--enable-progressive-replication",
+        action="store_true",
+        help="Enable daemon progressive coverage reporting for this benchmark case.",
+    )
+    parser.add_argument(
+        "--progressive-report-interval",
+        default="1s",
+        help="Daemon engine.progressive_replication.report_interval override.",
+    )
+    parser.add_argument(
+        "--progressive-min-report-delta-bytes",
+        type=int,
+        default=16 * 1024 * 1024,
+        help="Daemon engine.progressive_replication.min_report_delta_bytes override.",
+    )
+    parser.add_argument(
+        "--progressive-verify-before-report",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether daemon progressive reporting requires known verification state.",
+    )
     parser.add_argument("--receiver-timeout-s", type=float, default=300.0)
     parser.add_argument(
         "--receiver-timeout-auto-adjust",
@@ -2995,6 +3145,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max throughput samples kept in payload (adaptive interval when exceeded).",
     )
     parser.add_argument(
+        "--failure-injection-mode",
+        choices=["none", "stop-daemon"],
+        default="none",
+        help=(
+            "Optional failure-injection lane. stop-daemon terminates the selected "
+            "receiver daemon after the publisher starts."
+        ),
+    )
+    parser.add_argument(
+        "--failure-injection-target",
+        default="receiver:0",
+        help="Failure injection target. Supported form: receiver:<zero-based-index>.",
+    )
+    parser.add_argument(
+        "--failure-injection-delay-s",
+        type=float,
+        default=0.0,
+        help="Seconds to wait after publisher start before injecting failure.",
+    )
+    parser.add_argument(
         "--max-publish-to-apply-s",
         type=float,
         default=30.0,
@@ -3105,6 +3275,10 @@ def main(argv: list[str]) -> int:
         )
     if int(args.max_concurrency) <= 0:
         raise ValueError("max-concurrency must be > 0")
+    if int(args.progressive_min_report_delta_bytes) < 0:
+        raise ValueError("progressive-min-report-delta-bytes must be >= 0")
+    if float(args.failure_injection_delay_s) < 0.0:
+        raise ValueError("failure-injection-delay-s must be >= 0")
     cuda_backend = normalize_cuda_backend(str(args.cuda_backend))
     if int(args.receiver_preflight_transient_overlap) <= 0:
         raise ValueError("receiver-preflight-transient-overlap must be > 0")
@@ -3387,6 +3561,13 @@ def main(argv: list[str]) -> int:
         process_id: f"weight-publisher-{run_tag}-{index + 1}"
         for index, process_id in enumerate(all_processes)
     }
+    failure_injection_plan = resolve_failure_injection_plan(
+        mode=str(args.failure_injection_mode),
+        target=str(args.failure_injection_target),
+        receiver_procs=receiver_procs,
+        daemon_sessions=daemon_sessions,
+        delay_s=float(args.failure_injection_delay_s),
+    )
 
     remote_advertise_hosts: dict[str, str] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(all_processes)) as pool:
@@ -3456,6 +3637,14 @@ def main(argv: list[str]) -> int:
             heartbeat_interval=str(args.daemon_heartbeat_interval),
             periodic_sync_interval=str(args.daemon_periodic_sync_interval),
             max_concurrency=int(args.max_concurrency),
+            progressive_enabled=bool(args.enable_progressive_replication),
+            progressive_report_interval=str(args.progressive_report_interval),
+            progressive_min_report_delta_bytes=int(
+                args.progressive_min_report_delta_bytes
+            ),
+            progressive_verify_before_report=bool(
+                args.progressive_verify_before_report
+            ),
             cuda_backend=cuda_backend,
             capability_token_secret=capability_token_secret,
             timeout_sec=120.0,
@@ -3574,10 +3763,15 @@ def main(argv: list[str]) -> int:
     }
     transport_rows_payload: dict[str, Any] = {}
     transport_metrics: dict[str, Any] = {}
+    failure_injection_result = failure_injection_plan_payload(failure_injection_plan)
+    failure_injection_result["status"] = (
+        "planned" if failure_injection_plan.enabled else "disabled"
+    )
+    injected_receiver_processes: set[str] = set()
     case_transport_window_start = datetime.now(timezone.utc)
 
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=len(receiver_specs) + 1
+        max_workers=len(receiver_specs) + 2
     ) as pool:
         receiver_futures = {
             spec.process_id: pool.submit(
@@ -3608,6 +3802,16 @@ def main(argv: list[str]) -> int:
             **receiver_futures,
             publisher_spec.process_id: publisher_future,
         }
+        failure_injection_future: concurrent.futures.Future[dict[str, Any]] | None = (
+            None
+        )
+        if failure_injection_plan.enabled:
+            failure_injection_future = pool.submit(
+                run_failure_injection,
+                failure_injection_plan,
+                repo_root=str(args.repo_root),
+                timeout_sec=40.0,
+            )
         progress_stop_event, progress_thread = start_progress_monitor(
             publisher_spec=publisher_spec,
             receiver_specs=receiver_specs,
@@ -3673,7 +3877,28 @@ def main(argv: list[str]) -> int:
                     except Exception as exc:  # noqa: BLE001
                         receiver_summaries[spec.process_id] = {"__error__": str(exc)}
             else:
+                if (
+                    failure_injection_future is not None
+                    and failure_injection_plan.role == "receiver"
+                ):
+                    failure_injection_result = failure_injection_future.result(
+                        timeout=max(60.0, float(failure_injection_plan.delay_s) + 60.0)
+                    )
+                    if str(failure_injection_result.get("status")) == "injected":
+                        injected_receiver_processes.add(
+                            failure_injection_plan.process_id
+                        )
+                        failure_injection_result["role_terminate_errors"] = (
+                            terminate_remote_e2e_roles(
+                                process_ids=[failure_injection_plan.process_id],
+                                model_name=model_name,
+                                timeout_sec=15.0,
+                            )
+                        )
+
                 for spec in receiver_specs:
+                    if spec.process_id in injected_receiver_processes:
+                        continue
                     wait_for_remote_file_or_fail_fast(
                         spec.process_id,
                         spec.output_json,
@@ -3687,7 +3912,9 @@ def main(argv: list[str]) -> int:
 
                 if published_artifact_ids:
                     probe_processes = [publisher_spec.process_id] + [
-                        spec.process_id for spec in receiver_specs
+                        spec.process_id
+                        for spec in receiver_specs
+                        if spec.process_id not in injected_receiver_processes
                     ]
                     for process_id in probe_processes:
                         try:
@@ -3706,6 +3933,16 @@ def main(argv: list[str]) -> int:
                             cluster_artifact_probe[process_id] = {"__error__": str(exc)}
 
                 for spec in receiver_specs:
+                    if spec.process_id in injected_receiver_processes:
+                        try:
+                            receiver_logs[spec.process_id] = receiver_futures[
+                                spec.process_id
+                            ].result(timeout=5.0)
+                        except Exception as exc:  # noqa: BLE001
+                            receiver_logs[spec.process_id] = (
+                                f"receiver interrupted by failure injection: {exc}"
+                            )
+                        continue
                     receiver_logs[spec.process_id] = receiver_futures[
                         spec.process_id
                     ].result()
@@ -3730,6 +3967,19 @@ def main(argv: list[str]) -> int:
         finally:
             progress_stop_event.set()
             progress_thread.join(timeout=5.0)
+            if failure_injection_future is not None and str(
+                failure_injection_result.get("status", "")
+            ) in {"planned", "scheduled"}:
+                try:
+                    failure_injection_result = failure_injection_future.result(
+                        timeout=max(10.0, float(failure_injection_plan.delay_s) + 10.0)
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    failure_injection_result = failure_injection_plan_payload(
+                        failure_injection_plan
+                    )
+                    failure_injection_result["status"] = "failed"
+                    failure_injection_result["error"] = str(exc)
     case_transport_window_end = datetime.now(timezone.utc)
 
     published = publisher_summary.get("published", [])
@@ -3841,7 +4091,7 @@ def main(argv: list[str]) -> int:
     missing_receiver_summaries = [
         {"process_id": proc, "reason": "receiver summary missing"}
         for proc in receiver_procs
-        if proc not in receiver_summaries
+        if proc not in receiver_summaries and proc not in injected_receiver_processes
     ]
     receiver_sequence_failures.extend(missing_receiver_summaries)
 
@@ -4109,10 +4359,17 @@ def main(argv: list[str]) -> int:
             "transport_timeout_observed": bool(
                 timeout_analysis.get("transport_timeout_observed")
             ),
+            "failure_injection_expected_receivers": sorted(injected_receiver_processes),
         },
         "retention_checks": {
             "global_store_probe": gs_checks,
             "cluster_probe": probe_checks,
+        },
+        "progressive": {
+            "enabled": bool(args.enable_progressive_replication),
+            "report_interval": str(args.progressive_report_interval),
+            "min_report_delta_bytes": int(args.progressive_min_report_delta_bytes),
+            "verify_before_report": bool(args.progressive_verify_before_report),
         },
         "timeout_analysis": timeout_analysis,
         "transport_checks": {
@@ -4128,6 +4385,7 @@ def main(argv: list[str]) -> int:
             "receiver_apply_failures": receiver_apply_failures,
             "pointer_stability_violations": pointer_stability_violations,
             "propagation_violations": propagation_violations,
+            "failure_injection": failure_injection_result,
         },
     }
     passed = (
@@ -4161,6 +4419,11 @@ def main(argv: list[str]) -> int:
     if bool(transport_metrics.get("enabled")):
         passed = passed and not bool(transport_metrics.get("error"))
         passed = passed and int(transport_metrics.get("transport_count", 0)) > 0
+    if bool(failure_injection_result.get("enabled")):
+        passed = passed and str(failure_injection_result.get("status")) == "injected"
+        passed = passed and not bool(
+            failure_injection_result.get("role_terminate_errors")
+        )
     summary["passed"] = bool(passed)
 
     payload = {
@@ -4207,6 +4470,17 @@ def main(argv: list[str]) -> int:
             "p0_early_stop_grace_s": float(args.p0_early_stop_grace_s),
             "throughput_sample_interval_s": float(args.throughput_sample_interval_s),
             "throughput_max_samples": int(args.throughput_max_samples),
+            "enable_progressive_replication": bool(args.enable_progressive_replication),
+            "progressive_report_interval": str(args.progressive_report_interval),
+            "progressive_min_report_delta_bytes": int(
+                args.progressive_min_report_delta_bytes
+            ),
+            "progressive_verify_before_report": bool(
+                args.progressive_verify_before_report
+            ),
+            "failure_injection_mode": str(args.failure_injection_mode),
+            "failure_injection_target": str(args.failure_injection_target),
+            "failure_injection_delay_s": float(args.failure_injection_delay_s),
             "max_publish_to_apply_s": float(args.max_publish_to_apply_s),
             "max_publish_to_apply_auto_adjust": bool(
                 args.max_publish_to_apply_auto_adjust
@@ -4254,6 +4528,7 @@ def main(argv: list[str]) -> int:
         "global_store_probe": gs_probe,
         "transport_group_probe": transport_group_probe,
         "p0_early_stop": p0_early_stop,
+        "failure_injection": failure_injection_result,
         "transport_rows_payload": transport_rows_payload,
         "transport_metrics": transport_metrics,
     }
@@ -4291,6 +4566,9 @@ def main(argv: list[str]) -> int:
                 "group_probe_error": transport_group_probe.get("error"),
                 "p0_early_stop_triggered": bool(
                     summary["stability"].get("p0_early_stop_triggered")
+                ),
+                "failure_injection_status": str(
+                    failure_injection_result.get("status", "disabled")
                 ),
                 "waiting_timeout_reasons": summary.get("timeout_analysis", {}).get(
                     "waiting_timeout_reason_counts", {}

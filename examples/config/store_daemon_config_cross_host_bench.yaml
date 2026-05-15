@@ -68,6 +68,14 @@ engine:
   streaming_buffer_chunks: 8
   # Enable external target verification for MaterializeIntoTarget (off by default).
   enable_external_target_verification: false
+  progressive_replication:
+    # Default off. Cross-host WeightPublisher progressive benchmark lanes turn
+    # this on through runner overrides together with Global Store progressive
+    # source eligibility.
+    enabled: false
+    report_interval: 1s
+    min_report_delta_bytes: 16777216
+    verify_before_report: true
   # Enable memfd-backed UMA CPU allocations for zero-copy CPU tensor materialization.
   cpu_shared_memory:
     enabled: true
