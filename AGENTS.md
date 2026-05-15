@@ -6,6 +6,20 @@ This file provides guidance to AI when working with code in this repository.
 
 TensorCast is a high-performance distributed artifact storage and loading system. It uses a distributed master-worker architecture; see Architecture Overview below for details.
 
+## Artifact-First Architecture Principle (Required)
+
+TensorCast should keep artifact as the primary system abstraction for durable
+identity, data movement, discovery, routing, and lifecycle. When a new workflow
+needs a capability that looks adjacent to loading, serving, publication, or
+sharing, first ask how the artifact model should express it and extend that
+model deeply.
+
+Avoid introducing parallel concepts, side channels, or feature-specific source
+authorities when the capability can be represented as stronger artifact
+metadata, artifact lifecycle, artifact publication, or artifact replica
+semantics. Add a new concept only when the artifact model is clearly
+insufficient, and document why extending artifact would be the wrong abstraction.
+
 ## Command Execution
 
 - You must use `pytest tests/python/xxxx` to run python tests
