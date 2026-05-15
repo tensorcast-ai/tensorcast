@@ -342,6 +342,7 @@ class KeyMappingRepository(BaseRepository):
                     kind = 'ALIAS',
                     target_kind = 'artifact_selection',
                     group_version_set_id = NULL,
+                    selection_hash = NULL,
                     manifest_hash = NULL,
                     updated_at = now()
                 WHERE key = ?
@@ -635,9 +636,13 @@ class KeyMappingRepository(BaseRepository):
                        km.target_kind,
                        km.artifact_id,
                        km.group_version_set_id,
+                       km.selection_hash,
+                       km.manifest_hash,
                        kvt.target_kind,
                        kvt.artifact_id,
-                       kvt.group_version_set_id
+                       kvt.group_version_set_id,
+                       kvt.selection_hash,
+                       kvt.manifest_hash
                 FROM key_mappings km
                 LEFT JOIN key_version_targets kvt
                   ON kvt.namespace = ''
@@ -647,6 +652,8 @@ class KeyMappingRepository(BaseRepository):
                    OR km.target_kind != kvt.target_kind
                    OR COALESCE(km.artifact_id, '') != COALESCE(kvt.artifact_id, '')
                    OR COALESCE(km.group_version_set_id, '') != COALESCE(kvt.group_version_set_id, '')
+                   OR km.selection_hash IS DISTINCT FROM kvt.selection_hash
+                   OR km.manifest_hash IS DISTINCT FROM kvt.manifest_hash
                 """
             ).fetchall()
             return [
@@ -656,9 +663,13 @@ class KeyMappingRepository(BaseRepository):
                     "fast_target_kind": row[2],
                     "fast_artifact_id": row[3],
                     "fast_group_version_set_id": row[4],
-                    "history_target_kind": row[5],
-                    "history_artifact_id": row[6],
-                    "history_group_version_set_id": row[7],
+                    "fast_selection_hash": row[5],
+                    "fast_manifest_hash": row[6],
+                    "history_target_kind": row[7],
+                    "history_artifact_id": row[8],
+                    "history_group_version_set_id": row[9],
+                    "history_selection_hash": row[10],
+                    "history_manifest_hash": row[11],
                 }
                 for row in rows
             ]

@@ -186,12 +186,23 @@ class GroupRealizationService:
         return expired
 
     def _transaction_deadline_unix_nanos(self, requested: int) -> int | None:
+        now_ns = time.time_ns()
+        ttl_ms = max(0, int(self._config.transaction_ttl_ms))
+        ttl_deadline = now_ns + ttl_ms * 1_000_000 if ttl_ms > 0 else None
         if requested > 0:
-            return int(requested)
-        ttl_ms = self._config.default_deadline_ms or self._config.transaction_ttl_ms
-        if ttl_ms <= 0:
-            return None
-        return time.time_ns() + int(ttl_ms) * 1_000_000
+            if ttl_deadline is None:
+                return int(requested)
+            return min(int(requested), ttl_deadline)
+        default_ms = max(
+            0,
+            int(self._config.default_deadline_ms or self._config.transaction_ttl_ms),
+        )
+        if default_ms <= 0:
+            return ttl_deadline
+        default_deadline = now_ns + default_ms * 1_000_000
+        if ttl_deadline is None:
+            return default_deadline
+        return min(default_deadline, ttl_deadline)
 
     def _remember_terminal(self, transaction: dict[str, Any]) -> None:
         if transaction["state"] not in {"published", "aborted", "expired"}:
@@ -421,6 +432,14 @@ class GroupRealizationService:
                 raise GroupRealizationPreconditionError(
                     "semantic slot already has a terminal transaction"
                 )
+            if required_part_ids != list(existing["required_part_ids"]) or int(
+                context.total_parts
+            ) != int(existing["total_parts"]):
+                raise ConflictError("semantic slot already froze another part set")
+            if request.transaction_fingerprint and bytes(
+                request.transaction_fingerprint
+            ) != bytes(existing["transaction_fingerprint"]):
+                raise ConflictError("transaction_fingerprint does not match request")
             resolved = self._version_sets.get(version_set_id=existing["version_set_id"])
             if resolved is None:
                 raise NotFoundError("frozen group version set not found")
@@ -462,26 +481,41 @@ class GroupRealizationService:
             part = part_by_id.get(context.part_id)
             if part is None:
                 raise ConflictError("frozen version set is missing requested part")
-            transaction = self._realizations.begin_or_join(
-                transaction_id=existing["transaction_id"],
-                group_kind=existing["group_kind"],
-                group_id=existing["group_id"],
-                epoch=int(existing["epoch"]),
-                version_set_id=version_set["version_set_id"],
-                realization_kind=version_set["realization_kind"],
-                transaction_fingerprint=existing["transaction_fingerprint"],
-                required_part_ids=existing["required_part_ids"],
-                total_parts=int(existing["total_parts"]),
-                part=part,
-                deadline_unix_nanos=existing["deadline_unix_nanos"],
-                namespace=existing.get("namespace"),
-                key=existing.get("key"),
-                key_generation=existing.get("key_generation"),
-                manifest_hash=existing.get("manifest_hash"),
-                daemon_id=request.daemon_id,
-                daemon_session_id=request.daemon_session_id or None,
-                worker_id=request.worker_id or None,
-            )
+            try:
+                transaction = self._realizations.begin_or_join(
+                    transaction_id=existing["transaction_id"],
+                    group_kind=existing["group_kind"],
+                    group_id=existing["group_id"],
+                    epoch=int(existing["epoch"]),
+                    version_set_id=version_set["version_set_id"],
+                    realization_kind=version_set["realization_kind"],
+                    transaction_fingerprint=existing["transaction_fingerprint"],
+                    required_part_ids=existing["required_part_ids"],
+                    total_parts=int(existing["total_parts"]),
+                    part=part,
+                    deadline_unix_nanos=existing["deadline_unix_nanos"],
+                    namespace=existing.get("namespace"),
+                    key=existing.get("key"),
+                    key_generation=existing.get("key_generation"),
+                    manifest_hash=existing.get("manifest_hash"),
+                    daemon_id=request.daemon_id,
+                    daemon_session_id=request.daemon_session_id or None,
+                    worker_id=request.worker_id or None,
+                )
+            except GroupRealizationConflictError as exc:
+                gs_metrics.inc_group_realization_db_conflict_retry(
+                    operation="begin_or_join",
+                    result="semantic_conflict",
+                )
+                raise ConflictError(str(exc)) from exc
+            except DatabaseError as exc:
+                if _is_group_realization_conflict(exc):
+                    gs_metrics.inc_group_realization_db_conflict_retry(
+                        operation="begin_or_join",
+                        result="db_conflict",
+                    )
+                    raise ConflictError(str(exc)) from exc
+                raise
             gs_metrics.inc_group_realization_control_write(
                 operation="begin_or_join",
                 table="group_realization_members",
@@ -550,6 +584,14 @@ class GroupRealizationService:
                 result="semantic_conflict",
             )
             raise ConflictError(str(exc)) from exc
+        except DatabaseError as exc:
+            if _is_group_realization_conflict(exc):
+                gs_metrics.inc_group_realization_db_conflict_retry(
+                    operation="begin_or_join",
+                    result="db_conflict",
+                )
+                raise ConflictError(str(exc)) from exc
+            raise
         gs_metrics.inc_group_realization_control_write(
             operation="begin_or_join",
             table="group_realization_transactions",

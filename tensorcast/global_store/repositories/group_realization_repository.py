@@ -26,6 +26,10 @@ def _parse_required_part_ids(raw: str) -> list[str]:
     return [str(item) for item in parsed]
 
 
+def _text(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
 class GroupRealizationConflictError(ValueError):
     """Raised when a semantic transaction or member fingerprint conflicts."""
 
@@ -323,6 +327,31 @@ class GroupRealizationRepository(BaseRepository):
                         part["selection_hash"],
                     ],
                 )
+            else:
+                if (
+                    member["artifact_id"] != part["artifact_id"]
+                    or _text(member.get("view_id")) != _text(part.get("view_id"))
+                    or member["requested_byte_space"] != part["requested_byte_space"]
+                    or bytes(member["selection_hash"]) != bytes(part["selection_hash"])
+                ):
+                    raise GroupRealizationConflictError(
+                        "member part identity does not match frozen version set"
+                    )
+                for field_name, incoming in (
+                    ("daemon_id", daemon_id),
+                    ("daemon_session_id", daemon_session_id),
+                    ("worker_id", worker_id),
+                ):
+                    existing_value = _text(member.get(field_name))
+                    incoming_value = _text(incoming)
+                    if (
+                        existing_value
+                        and incoming_value
+                        and existing_value != incoming_value
+                    ):
+                        raise GroupRealizationConflictError(
+                            f"member {field_name} does not match existing join"
+                        )
             return (
                 self._select_transaction_by_id(
                     cursor=cursor,
