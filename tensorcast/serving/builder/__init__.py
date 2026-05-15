@@ -63,6 +63,7 @@ from tensorcast.serving.builder.source_catalog import (
     SourceManifest,
     SourceTensorMeta,
     compute_source_metadata_fingerprint,
+    resolve_source_artifact_ref,
     source_catalog_from_all_safetensors_dir,
     source_catalog_from_canonical_index,
     source_catalog_from_manifest,
@@ -70,6 +71,13 @@ from tensorcast.serving.builder.source_catalog import (
 )
 from tensorcast.serving.builder.tensor_schema import (
     validate_tensor_schema_against_tensors,
+)
+from tensorcast.serving.builder.trace_cache import (
+    TRACE_PLAN_CACHE_PAYLOAD_VERSION,
+    dump_trace_plan_debug,
+    load_trace_plan_cache,
+    trace_plan_debug_payload,
+    write_trace_plan_cache,
 )
 from tensorcast.serving.builder.trace_ir import (
     CopyPlanEntry,
@@ -104,6 +112,7 @@ __all__ = [
     "ServingBuildObserver",
     "ServingFacts",
     "TargetShapes",
+    "TRACE_PLAN_CACHE_PAYLOAD_VERSION",
     "TracePlan",
     "TensorSchemaEntry",
     "TensorcastLogicalTopology",
@@ -124,6 +133,7 @@ __all__ = [
     "compute_recipe_compile_key",
     "copy_plan_from_dict",
     "copy_plan_to_dict",
+    "dump_trace_plan_debug",
     "dtype_from_string",
     "evaluate_semantic_validation_spec",
     "iter_ranges",
@@ -137,12 +147,14 @@ __all__ = [
     "range_from_dict",
     "range_to_dict",
     "filter_tensor_schema_for_trace_plan",
+    "resolve_source_artifact_ref",
     "single_range_from_dict",
     "source_catalog_from_all_safetensors_dir",
     "source_catalog_from_canonical_index",
     "source_catalog_from_manifest",
     "source_catalog_from_selected_safetensors",
     "tensorcast_view_slices_from_trace_plan",
+    "trace_plan_debug_payload",
     "trace_plan_from_dict",
     "trace_plan_to_dict",
     "update_dst_coverage",
@@ -152,4 +164,6 @@ __all__ = [
     "validate_recipe_for_builder_mode",
     "validate_source_tensor_names",
     "validate_tensor_schema_against_tensors",
+    "load_trace_plan_cache",
+    "write_trace_plan_cache",
 ]

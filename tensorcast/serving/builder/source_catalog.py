@@ -119,7 +119,7 @@ def source_catalog_from_canonical_index(
     selected_files: Sequence[SourceFileEntry] = (),
     canonical_index_bytes: bytes | None = None,
 ) -> SourceCatalog:
-    source_ref = _resolve_source_artifact_ref(source_artifact_ref)
+    source_ref = resolve_source_artifact_ref(source_artifact_ref)
     index_bytes = (
         bytes(canonical_index_bytes)
         if canonical_index_bytes is not None
@@ -234,14 +234,18 @@ def _build_selected_canonical_index_bytes(
         return build_canonical_index_from_safetensors(str(tmp_dir))
 
 
-def _resolve_source_artifact_ref(source_artifact_ref: str) -> str:
+def resolve_source_artifact_ref(source_artifact_ref: str) -> str:
     normalized_ref = str(source_artifact_ref).strip()
     if not normalized_ref:
-        raise ValueError("SourceCatalog requires a real source artifact identity")
+        raise ValueError(
+            "SourceCatalog requires a real source artifact identity "
+            "(real imported source artifact required)"
+        )
     if normalized_ref.startswith(("disk:", "key:")):
         raise ValueError(
             "SourceCatalog requires a real source artifact identity, "
-            "not a synthetic disk/key ref"
+            "not a synthetic disk/key ref "
+            "(real imported source artifact required)"
         )
     return normalized_ref
 
@@ -252,6 +256,7 @@ __all__ = [
     "SourceManifest",
     "SourceTensorMeta",
     "compute_source_metadata_fingerprint",
+    "resolve_source_artifact_ref",
     "source_catalog_from_all_safetensors_dir",
     "source_catalog_from_canonical_index",
     "source_catalog_from_manifest",

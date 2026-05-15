@@ -4,12 +4,14 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
+import time
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, ContextManager, Iterator
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -138,6 +140,12 @@ class ParsedExternalPreloadAuthority:
     readiness: str
     verification_state: str
     serving_artifact_id: str | None = None
+
+
+@dataclass(frozen=True)
+class BindingPromotionResult:
+    verification_state: str
+    verification_job_id: str | None
 
 
 class _PreloadLifecycleState:
@@ -683,6 +691,206 @@ def parse_external_preload_authority(
     )
     _validate_authority_consistency(authority)
     return authority
+
+
+def external_preload_mode(extra: Mapping[str, Any] | None) -> str:
+    if extra is None or not isinstance(extra, Mapping):
+        return "disabled"
+    from tensorcast.serving.config import ServingConfig
+
+    return ServingConfig.from_mapping(extra).preload.mode
+
+
+def external_preload_trusted_reservation_bytes(load_config_or_extra: Any) -> int:
+    extra = getattr(
+        load_config_or_extra, "model_loader_extra_config", load_config_or_extra
+    )
+    if extra is None or not isinstance(extra, Mapping):
+        return 0
+    if external_preload_mode(extra) != "external":
+        return 0
+    return parse_external_preload_authority(extra).reservation_bytes
+
+
+def external_preload_extra_from_prefetched_binding(
+    *,
+    prefetched: tc.PrefetchedServingBinding,
+    target: tc.ServingBindingTarget,
+    expected_member: tc.ServingBindingMemberRef | None = None,
+) -> dict[str, Any]:
+    member = prefetched.member
+    if expected_member is not None and member != expected_member:
+        raise ValueError(
+            "Prefetched serving binding member does not match expected "
+            f"placement: prefetched={member}, expected={expected_member}"
+        )
+    return {
+        "preload": {
+            "mode": "external",
+            "authority": {
+                "group_id": member.group_id or "",
+                "member_ref": _model_dump(member),
+                "daemon_id": prefetched.daemon_id,
+                "daemon_session_id": prefetched.daemon_session_id,
+                "device_uuid": prefetched.device_uuid,
+                "binding_value_ref": _model_dump(prefetched.binding_value_ref),
+                "reservation_capability": _model_dump(
+                    prefetched.reservation_capability
+                ),
+                "local_serving_ref": prefetched.local_serving_ref,
+                "readiness": str(
+                    getattr(prefetched.readiness, "value", prefetched.readiness)
+                ),
+                "verification_state": str(
+                    getattr(
+                        prefetched.verification_state,
+                        "value",
+                        prefetched.verification_state,
+                    )
+                ),
+                "serving_artifact_id": prefetched.serving_artifact_id,
+                "trusted_reservation_bytes": prefetched.reservation_bytes,
+                "expected": {
+                    "target_layout_hash": target.resolved_layout.target_layout_hash,
+                    "tensor_schema_hash": target.resolved_layout.tensor_schema_hash,
+                    "serving_build_digest": target.serving_build_digest,
+                    "resolved_spec_digest": target.resolved_layout.spec_digest,
+                },
+            },
+        },
+    }
+
+
+def external_preload_extra_json(
+    *,
+    prefetched: tc.PrefetchedServingBinding,
+    target: tc.ServingBindingTarget,
+    expected_member: tc.ServingBindingMemberRef | None = None,
+) -> str:
+    return json.dumps(
+        external_preload_extra_from_prefetched_binding(
+            prefetched=prefetched,
+            target=target,
+            expected_member=expected_member,
+        ),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def promote_current_value_and_wait(
+    *,
+    binding: Any,
+    current_value: Any,
+    timeout_s: float = 600.0,
+    poll_interval_s: float = 0.25,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    state_name_fn: Callable[[Any], str] | None = None,
+    start_scope: Callable[[], ContextManager[Any]] | None = None,
+    poll_scope: Callable[[], ContextManager[Any]] | None = None,
+    on_start: Callable[..., None] | None = None,
+    on_poll: Callable[..., None] | None = None,
+) -> BindingPromotionResult:
+    binding_value_id = str(getattr(current_value, "binding_value_id", "") or "")
+    if not binding_value_id:
+        raise RuntimeError(
+            "TensorCast promotion requires a binding_value_id before "
+            "serving publication"
+        )
+    with _promotion_scope(start_scope) as scope_payload:
+        status = binding.start_promote_current_value(binding_value_id=binding_value_id)
+        _notify_promotion_observer(on_start, status, scope_payload)
+    verification_job_id = str(getattr(status, "verification_job_id", "") or "") or None
+    deadline = clock() + float(timeout_s)
+    while True:
+        state_name = _promotion_state_name(status, state_name_fn=state_name_fn)
+        if state_name in {"succeeded", "failed", "canceled"}:
+            break
+        if clock() >= deadline:
+            raise TimeoutError("TensorCast promotion timed out")
+        sleep_fn(float(poll_interval_s))
+        with _promotion_scope(poll_scope) as scope_payload:
+            status = binding.get_promotion_status(
+                verification_job_id=verification_job_id,
+                binding_value_id=binding_value_id,
+            )
+            _notify_promotion_observer(on_poll, status, scope_payload)
+    state_name = _promotion_state_name(status, state_name_fn=state_name_fn)
+    if state_name != "succeeded":
+        failure = str(getattr(status, "failure_reason", "") or state_name)
+        raise RuntimeError(f"TensorCast promotion failed: {failure}")
+    return BindingPromotionResult(
+        verification_state="verified",
+        verification_job_id=verification_job_id,
+    )
+
+
+def _promotion_scope(
+    factory: Callable[[], ContextManager[Any]] | None,
+) -> ContextManager[Any]:
+    if factory is None:
+        return nullcontext(None)
+    return factory()
+
+
+def _notify_promotion_observer(
+    callback: Callable[..., None] | None,
+    status: Any,
+    scope_payload: Any,
+) -> None:
+    if callback is None:
+        return
+    if _promotion_observer_accepts_scope(callback):
+        callback(status, scope_payload)
+    else:
+        callback(status)
+
+
+def _promotion_observer_accepts_scope(callback: Callable[..., None]) -> bool:
+    try:
+        signature = inspect.signature(callback)
+    except (TypeError, ValueError):
+        return False
+    parameters = tuple(signature.parameters.values())
+    if any(param.kind == inspect.Parameter.VAR_POSITIONAL for param in parameters):
+        return True
+    positional = tuple(
+        param
+        for param in parameters
+        if param.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    )
+    return len(positional) >= 2
+
+
+def _promotion_state_name(
+    status: Any,
+    *,
+    state_name_fn: Callable[[Any], str] | None,
+) -> str:
+    if state_name_fn is not None:
+        return str(state_name_fn(status))
+    state = getattr(status, "state", status)
+    value = getattr(state, "value", state)
+    name = getattr(state, "name", None)
+    if isinstance(value, str):
+        return value.strip().lower()
+    if name is not None:
+        return str(name).strip().lower()
+    if isinstance(value, int):
+        mapped = tc.BindingPromotionStatusState.from_proto(int(value))
+        if mapped is not None:
+            return str(mapped.value).strip().lower()
+    return str(value).strip().lower()
+
+
+def _model_dump(value: Any) -> dict[str, Any]:
+    if hasattr(value, "model_dump"):
+        return dict(value.model_dump(mode="python"))
+    if isinstance(value, Mapping):
+        return dict(value)
+    raise TypeError(f"Cannot serialize {type(value)!r}")
 
 
 class PreloadSettings(BaseModel):

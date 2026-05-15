@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from tensorcast.serving.builder.source_catalog import resolve_source_artifact_ref
 from tensorcast.serving.builder.trace_ir import Range, TracePlan
 from tensorcast.types import FinalizeClass, ServingSupportLevel
 
@@ -115,7 +116,7 @@ def compile_serving_recipe(
 ) -> CompiledServingRecipe:
     """Assemble a serving recipe from framework-collected pure inputs."""
 
-    source_artifact_ref = _resolve_source_artifact_ref(
+    source_artifact_ref = resolve_source_artifact_ref(
         inputs.source_catalog.source_artifact_ref
     )
     source_metadata_fingerprint = str(inputs.source_catalog.metadata_fingerprint)
@@ -221,20 +222,6 @@ def compute_recipe_compile_key(
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True).encode("utf-8")
     ).hexdigest()
-
-
-def _resolve_source_artifact_ref(source_artifact_ref: str) -> str:
-    normalized_ref = str(source_artifact_ref).strip()
-    if not normalized_ref:
-        raise ValueError(
-            "Tensorcast bootstrap requires a real imported source artifact identity"
-        )
-    if normalized_ref.startswith(("disk:", "key:")):
-        raise ValueError(
-            "Tensorcast bootstrap requires a real imported source artifact "
-            "identity, not a synthetic disk/key ref"
-        )
-    return normalized_ref
 
 
 def _jsonable_semantic_validation_spec(
