@@ -238,6 +238,13 @@ message OptimisticLocalReady {
   FailureAction failure_action = 10;
 }
 
+message DaemonGroupRealizationConfig {
+  bool enabled = 1;
+  uint64 default_deadline_ms = 2;
+  uint64 staged_value_ttl_ms = 3;
+  uint64 max_staged_bytes = 4;
+}
+
 message PinnedMemory {
   message PinnedClass {
     string name = 1;
@@ -314,6 +321,7 @@ message DaemonConfig {
     google.protobuf.Duration default_materialization_timeout = 6;
   }
   ServingPrefetch serving_prefetch = 33;
+  DaemonGroupRealizationConfig group_realization = 34;
 
   message CapabilityDirectory {
     bool enabled = 1;

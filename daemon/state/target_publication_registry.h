@@ -75,9 +75,27 @@ class TargetPublicationRegistry {
     std::vector<RegisterStorageMeta> storages;
   };
 
+  struct GroupRealizationStaging {
+    std::string transaction_id;
+    std::string version_set_id;
+    std::string part_id;
+    std::string staging_token;
+    std::uint64_t staging_epoch{0};
+    bool publish_admitted{false};
+  };
+
+  struct StagedRecord {
+    Record publication;
+    GroupRealizationStaging staging;
+  };
+
   explicit TargetPublicationRegistry(Options opts);
 
   [[nodiscard]] Record insert(Record record);
+  [[nodiscard]] StagedRecord insert_staged(StagedRecord record);
+  [[nodiscard]] std::optional<StagedRecord> lookup_staged(std::string_view publication_id, absl::Time now) const;
+  [[nodiscard]] std::optional<StagedRecord> publish_staged(std::string_view publication_id);
+  [[nodiscard]] size_t erase_staged_for_transaction(std::string_view transaction_id, size_t max_to_erase = 0);
   [[nodiscard]] std::optional<Record> lookup(std::string_view publication_id, absl::Time now, bool require_not_expired)
       const;
   [[nodiscard]] std::optional<Record> lookup_current_for_subject(
@@ -97,6 +115,7 @@ class TargetPublicationRegistry {
   Options opts_;
   mutable absl::Mutex mu_;
   absl::flat_hash_map<std::string, Record> records_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<std::string, StagedRecord> staged_records_ ABSL_GUARDED_BY(mu_);
   absl::flat_hash_map<std::string, std::string> latest_by_subject_ ABSL_GUARDED_BY(mu_);
 };
 

@@ -159,6 +159,7 @@ sc_cc_library(
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:source_hash",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "//proto/tensorcast/global_store/v1:global_store_cc",
         "//proto/tensorcast/node_agent/v1:node_agent_cc",
         "//proto/tensorcast/node_agent/v1:node_agent_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -599,6 +600,16 @@ sc_cc_library(
     ],
 )
 
+cc_test(
+    name = "target_publication_registry_test",
+    srcs = ["state/target_publication_registry_test.cc"],
+    deps = [
+        ":target_publication_registry_lib",
+        "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
+    ],
+)
+
 sc_cc_library(
     name = "artifact_source_registry_lib",
     srcs = ["state/artifact_source_registry.cc"],
@@ -632,6 +643,9 @@ cc_test(
     srcs = ["state/binding_registry_test.cc"],
     deps = [
         ":binding_registry_lib",
+        ":sweep_tasks_hdr",
+        "//core/store:testing_global_store_client_stub",
+        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/time:time",
         "@catch2//:catch2_main",
     ],
@@ -824,6 +838,7 @@ sc_header_only_library(
         ":session_manager_hdr",
         ":transport_lock_manager_hdr",
         ":verification_tracker_hdr",
+        "//core/store:global_store_client",
         "//core/store:store_engine",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -1635,10 +1650,12 @@ sc_cc_library(
     srcs = ["service/controllers/materialization_policy_utils.cc"],
     hdrs = ["service/controllers/materialization_policy_utils.h"],
     deps = [
+        "//core/store:global_store_client",
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:view_identity",
         "//core/store/materialization/dataplane:view_planner",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "//proto/tensorcast/global_store/v1:global_store_grpc_cc",
     ],
 )
 
@@ -2039,8 +2056,10 @@ cc_test(
     deps = [
         ":daemon_service_harness_lib",
         ":grpc_service_impl",
+        ":types_hdr",
         "//core/store:store_engine",
         "//core/store:store_engine_options",
+        "//core/store:testing_recording_global_store_client",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],
@@ -2454,6 +2473,7 @@ cc_test(
     srcs = ["service/materialization_policy_utils_test.cc"],
     deps = [
         ":materialization_policy_utils_lib",
+        "//core/store:testing_global_store_client_stub",
         "@catch2//:catch2_main",
     ],
 )

@@ -1336,7 +1336,7 @@ class TestGRPCService:
                 request_id="query-window-req-1",
                 scheduling_group=global_store_pb2.TransportSchedulingGroup(
                     group_id="case-a0:v1",
-                    group_kind="tp_version",
+                    group_kind="group_realization_transport",
                     total_parts=16,
                     part_id="rx1:r0",
                     priority=0,
@@ -1375,7 +1375,7 @@ class TestGRPCService:
                 break
         assert matched is not None
         assert matched.requester_worker_id == "receiver-1"
-        assert matched.group_kind == "tp_version"
+        assert matched.group_kind == "group_realization_transport"
         assert matched.group_total_parts == 16
         assert matched.HasField("created_at")
 

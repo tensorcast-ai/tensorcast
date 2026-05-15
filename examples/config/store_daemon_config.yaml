@@ -380,6 +380,14 @@ observability:
     # Chrome trace output directory; empty disables.
     chrome_trace_dir: ""
 
+# Staged serving acquisition path used by final group realization.
+serving_prefetch:
+  enabled: true
+  same_daemon_acquire_enabled: true
+
+group_realization:
+  enabled: true
+
 # Compatibility toggles for legacy behavior.
 compatibility:
   # Require explicit disk_path for confirm RPCs; reserved for legacy clients.

@@ -290,6 +290,48 @@ class GlobalStoreClientStub : public components::IGlobalStoreClient {
     return absl::UnimplementedError("revoke_key_mapping not supported in GlobalStoreClientStub");
   }
 
+  absl::StatusOr<tensorcast::global_store::v1::RegisterGroupVersionSetResponse> register_group_version_set(
+      const tensorcast::global_store::v1::RegisterGroupVersionSetRequest&,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("register_group_version_set not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::BeginOrJoinGroupRealizationResponse> begin_or_join_group_realization(
+      const tensorcast::global_store::v1::BeginOrJoinGroupRealizationRequest&,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("begin_or_join_group_realization not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::ReportGroupRealizationPreparedResponse> report_group_realization_prepared(
+      const tensorcast::global_store::v1::ReportGroupRealizationPreparedRequest&,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("report_group_realization_prepared not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::PublishGroupRealizationResponse> publish_group_realization(
+      const tensorcast::global_store::v1::PublishGroupRealizationRequest&,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("publish_group_realization not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::WaitGroupRealizationPublishedResponse> wait_group_realization_published(
+      const tensorcast::global_store::v1::WaitGroupRealizationPublishedRequest&,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("wait_group_realization_published not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::AbortGroupRealizationResponse> abort_group_realization(
+      const tensorcast::global_store::v1::AbortGroupRealizationRequest&,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("abort_group_realization not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::GetGroupRealizationResponse> get_group_realization(
+      const tensorcast::global_store::v1::GetGroupRealizationRequest&,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("get_group_realization not supported in GlobalStoreClientStub");
+  }
+
   void update_local_endpoint(std::string, std::string, uint32_t, uint32_t) override {}
 
   absl::Status update_artifact_view_state(const components::ViewStateUpdate&) override {

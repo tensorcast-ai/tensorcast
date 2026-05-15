@@ -41,7 +41,7 @@ BYTE_UNITS: dict[str, int] = {
     "gb": 1024**3,
     "tb": 1024**4,
 }
-TRANSPORT_GROUP_KIND_TP_VERSION = "tp_version"
+TRANSPORT_GROUP_KIND_GROUP_REALIZATION = "group_realization_transport"
 TRANSPORT_GROUP_DEFAULT_PRIORITY = 0
 REMOTE_USER_RE = re.compile(r"^[a-z_][a-z0-9_.-]{0,63}$")
 _REMOTE_RUN_AS_USER = ""
@@ -58,7 +58,6 @@ class RoleSpec:
 
 @dataclass(frozen=True)
 class TransportGroupPlan:
-    mode: str
     kind: str
     total_parts: int
     priority: int
@@ -89,9 +88,6 @@ def estimate_remote_timeout_floor_sec(args: argparse.Namespace) -> float:
 
 
 def estimate_receiver_timeout_floor_sec(args: argparse.Namespace) -> float:
-    apply_mode = str(args.receiver_apply_mode).strip().lower()
-    if apply_mode not in {"tp_bind_into_swap", "tp4_bind_into_swap"}:
-        return max(30.0, float(args.receiver_timeout_s))
     tp_world_size = max(1, int(args.tp_world_size))
     total_payload_gib = float(max(0, int(args.tp_total_bytes))) / float(1024**3)
     per_rank_payload_gib = (
@@ -118,9 +114,6 @@ def estimate_keep_last_floor(args: argparse.Namespace) -> int:
     if str(args.payload_mode).strip().lower() != "tp_ranked":
         return keep_last
     if int(args.tp_total_bytes) <= 0:
-        return keep_last
-    apply_mode = str(args.receiver_apply_mode).strip().lower()
-    if apply_mode not in {"tp_bind_into_swap", "tp4_bind_into_swap"}:
         return keep_last
     if bool(args.allow_receiver_skips):
         return keep_last
@@ -150,10 +143,7 @@ def estimate_keep_last_stable_cap(args: argparse.Namespace) -> int | None:
 
 
 def estimate_publish_to_apply_floor_sec(args: argparse.Namespace) -> float:
-    apply_mode = str(args.receiver_apply_mode).strip().lower()
     configured = float(args.max_publish_to_apply_s)
-    if apply_mode not in {"tp_bind_into_swap", "tp4_bind_into_swap"}:
-        return max(20.0, configured)
     if str(args.payload_mode).strip().lower() != "tp_ranked":
         return max(20.0, configured)
     if int(args.tp_total_bytes) <= 0:
@@ -169,9 +159,7 @@ def estimate_publish_to_apply_floor_sec(args: argparse.Namespace) -> float:
         1.5, per_rank_apply_budget_s * 0.25
     )
     visibility_budget_s = max(8.0, float(args.publish_interval_s) * 2.0)
-    guard_s = (
-        10.0 if str(args.transport_group_mode).strip().lower() == "tp_version" else 6.0
-    )
+    guard_s = 10.0
     floor = visibility_budget_s + tp_wave_budget_s + queue_budget_s + guard_s
     return float(max(20.0, math.ceil(floor)))
 
@@ -489,29 +477,16 @@ def _wrap_remote_inner_cmd_for_user(
 
 def derive_transport_group_plan(
     *,
-    mode: str,
     receiver_count: int,
     tp_world_size: int,
 ) -> TransportGroupPlan:
-    normalized_mode = str(mode).strip().lower()
-    if normalized_mode not in {"none", "tp_version"}:
-        raise ValueError(f"unsupported transport-group-mode={normalized_mode!r}")
-    if normalized_mode == "none":
-        return TransportGroupPlan(
-            mode="none",
-            kind="",
-            total_parts=0,
-            priority=TRANSPORT_GROUP_DEFAULT_PRIORITY,
-        )
-
     total_parts = int(receiver_count) * int(tp_world_size)
     if total_parts <= 0:
         raise ValueError(
-            "transport-group-mode=tp_version requires receiver_count * tp_world_size > 0"
+            "group_realization requires receiver_count * tp_world_size > 0"
         )
     return TransportGroupPlan(
-        mode="tp_version",
-        kind=TRANSPORT_GROUP_KIND_TP_VERSION,
+        kind=TRANSPORT_GROUP_KIND_GROUP_REALIZATION,
         total_parts=total_parts,
         priority=TRANSPORT_GROUP_DEFAULT_PRIORITY,
     )
@@ -1473,13 +1448,11 @@ def build_e2e_command(
     output_json: str,
     weights_root: str,
     run_id: str,
-    receiver_apply_mode: str,
     materialize_device: str,
     allow_version_skip: bool,
     hold_after_finish_s: float,
     log_file: str,
     ready_file: str | None,
-    transport_group_mode: str,
     transport_group_kind: str,
     transport_group_namespace: str,
     transport_group_total_parts: int,
@@ -1517,8 +1490,6 @@ def build_e2e_command(
         str(tp_device_map_policy),
         "--tp-materialize-deadline-s",
         str(tp_materialize_deadline_s),
-        "--transport-group-mode",
-        transport_group_mode,
         "--transport-group-kind",
         transport_group_kind,
         "--transport-group-namespace",
@@ -1533,8 +1504,6 @@ def build_e2e_command(
         str(transport_group_epoch),
         "--publish-device",
         publish_device,
-        "--receiver-apply-mode",
-        receiver_apply_mode,
         "--materialize-device",
         materialize_device,
         "--output-json",
@@ -1783,15 +1752,13 @@ def query_transport_rows(
 def query_transport_group_probe(
     *,
     gs_addr: str,
-    group_mode: str,
     group_kind: str,
     started_at_utc: datetime,
     finished_at_utc: datetime,
 ) -> dict[str, Any]:
     probe: dict[str, Any] = {
         "enabled": True,
-        "mode": str(group_mode),
-        "expected_grouped": str(group_mode) == "tp_version",
+        "expected_grouped": True,
         "group_kind": str(group_kind),
         "audit_method": "gs_rpc",
         "gs_addr": str(gs_addr),
@@ -1805,7 +1772,7 @@ def query_transport_group_probe(
         "group_contract_transports": 0,
         "window_has_transports": False,
         "requester_tagged_complete": False,
-        "group_mode_consistent": False,
+        "grouping_present": False,
         "group_contract_consistent": False,
     }
     transport_rows_payload = query_transport_rows(
@@ -1856,16 +1823,12 @@ def query_transport_group_probe(
     probe["requester_tagged_complete"] = (
         total_transports > 0 and requester_tagged == total_transports
     )
-    if str(group_mode) == "tp_version":
-        probe["group_mode_consistent"] = grouped_transports > 0
-        probe["group_contract_consistent"] = (
-            grouped_transports > 0
-            and grouped_transports == kind_matched_transports
-            and grouped_transports == group_contract_transports
-        )
-    else:
-        probe["group_mode_consistent"] = grouped_transports == 0
-        probe["group_contract_consistent"] = grouped_transports == 0
+    probe["grouping_present"] = grouped_transports > 0
+    probe["group_contract_consistent"] = (
+        grouped_transports > 0
+        and grouped_transports == kind_matched_transports
+        and grouped_transports == group_contract_transports
+    )
     return probe
 
 
@@ -1890,7 +1853,6 @@ def _coerce_int(value: Any) -> int:
 def evaluate_group_probe_gate_failures(
     *,
     probe: dict[str, Any],
-    mode: str,
 ) -> list[str]:
     reasons: list[str] = []
     if bool(probe.get("error")):
@@ -1899,11 +1861,10 @@ def evaluate_group_probe_gate_failures(
         reasons.append("window_has_transports=false")
     if not bool(probe.get("requester_tagged_complete")):
         reasons.append("requester_tagged_complete=false")
-    if str(mode) == "tp_version":
-        if not bool(probe.get("group_mode_consistent")):
-            reasons.append("group_mode_consistent=false")
-        if not bool(probe.get("group_contract_consistent")):
-            reasons.append("group_contract_consistent=false")
+    if not bool(probe.get("grouping_present")):
+        reasons.append("grouping_present=false")
+    if not bool(probe.get("group_contract_consistent")):
+        reasons.append("group_contract_consistent=false")
     return reasons
 
 
@@ -1969,7 +1930,6 @@ def evaluate_waiting_lease(
 def run_transport_group_p0_guard(
     *,
     enabled: bool,
-    mode: str,
     group_kind: str,
     gs_addr: str,
     started_at_utc: datetime,
@@ -1979,8 +1939,7 @@ def run_transport_group_p0_guard(
     no_progress_limit_s = float(max(0.0, grace_s))
     effective_poll_interval_s = float(max(0.5, poll_interval_s))
     result: dict[str, Any] = {
-        "enabled": bool(enabled) and str(mode) == "tp_version",
-        "mode": str(mode),
+        "enabled": bool(enabled),
         "group_kind": str(group_kind),
         "grace_s": float(max(0.0, grace_s)),
         "no_progress_limit_s": no_progress_limit_s,
@@ -2010,14 +1969,12 @@ def run_transport_group_p0_guard(
         now_utc = datetime.now(timezone.utc)
         probe = query_transport_group_probe(
             gs_addr=str(gs_addr),
-            group_mode=str(mode),
             group_kind=str(group_kind),
             started_at_utc=started_at_utc,
             finished_at_utc=now_utc,
         )
         reasons = evaluate_group_probe_gate_failures(
             probe=probe,
-            mode=str(mode),
         )
         now_mono = time.monotonic()
         lease_eval = evaluate_waiting_lease(
@@ -2912,7 +2869,7 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Auto-adjust receiver-timeout-s upward for TP bind_into/swap cases "
+            "Auto-adjust receiver-timeout-s upward for TP staged group_realization cases "
             "using a conservative scaleout timeout floor."
         ),
     )
@@ -2921,14 +2878,14 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Auto-adjust keep-last upward for TP bind_into/swap scaleout cases "
+            "Auto-adjust keep-last upward for TP staged group_realization scaleout cases "
             "to avoid dropped-version false failures under queueing."
         ),
     )
     parser.add_argument(
         "--payload-mode",
         choices=["probe", "version_fill", "tp_ranked"],
-        default="probe",
+        default="tp_ranked",
         help=(
             "Payload mode forwarded to weight_publisher_e2e. "
             "Use version_fill for scalar full-value checks, tp_ranked for TP rank-tagged payloads."
@@ -2966,7 +2923,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=600.0,
         help=(
-            "TP bind_into/swap deadline in seconds passed to weight_publisher_e2e. "
+            "TP staged group_realization deadline in seconds passed to weight_publisher_e2e. "
             "Use larger values for large payload fanout."
         ),
     )
@@ -2984,14 +2941,6 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Optional CUDA backend override for daemon/role commands. "
             "Allowed values: real, fake. Empty keeps process default."
-        ),
-    )
-    parser.add_argument(
-        "--transport-group-mode",
-        choices=["none", "tp_version"],
-        default="none",
-        help=(
-            "Receiver transport scheduling-group mode passed to weight_publisher_e2e."
         ),
     )
     parser.add_argument(
@@ -3070,7 +3019,6 @@ def build_parser() -> argparse.ArgumentParser:
             "effective_pre_publish_keep = max(0, keep_last - margin)."
         ),
     )
-    parser.add_argument("--receiver-apply-mode", default="binding_swap")
     parser.add_argument(
         "--allow-receiver-skips",
         action="store_true",
@@ -3139,6 +3087,12 @@ def main(argv: list[str]) -> int:
         raise ValueError("tp-device-base-index must be >= 0")
     if float(args.tp_materialize_deadline_s) < 0.0:
         raise ValueError("tp-materialize-deadline-s must be >= 0")
+    if str(args.payload_mode).strip().lower() != "tp_ranked":
+        raise ValueError("group_realization receiver requires payload-mode=tp_ranked")
+    if float(args.tp_materialize_deadline_s) <= 0.0:
+        raise ValueError(
+            "group_realization receiver requires tp-materialize-deadline-s > 0"
+        )
     publish_device = str(args.publish_device).strip().lower()
     if publish_device == "auto":
         raise ValueError(
@@ -3152,8 +3106,6 @@ def main(argv: list[str]) -> int:
     if int(args.max_concurrency) <= 0:
         raise ValueError("max-concurrency must be > 0")
     cuda_backend = normalize_cuda_backend(str(args.cuda_backend))
-    if str(args.transport_group_mode) == "tp_version" and int(args.tp_world_size) <= 0:
-        raise ValueError("transport-group-mode=tp_version requires tp-world-size > 0")
     if int(args.receiver_preflight_transient_overlap) <= 0:
         raise ValueError("receiver-preflight-transient-overlap must be > 0")
     if float(args.progress_poll_s) <= 0:
@@ -3295,7 +3247,6 @@ def main(argv: list[str]) -> int:
     capability_token_secret = secrets.token_hex(32)
     run_id = f"{args.case_name}-{run_tag}"
     transport_group_plan = derive_transport_group_plan(
-        mode=str(args.transport_group_mode),
         receiver_count=len(receiver_procs),
         tp_world_size=int(args.tp_world_size),
     )
@@ -3541,16 +3492,14 @@ def main(argv: list[str]) -> int:
             output_json=publisher_output,
             weights_root=str(args.weights_root),
             run_id=f"{run_id}-publisher",
-            receiver_apply_mode=str(args.receiver_apply_mode),
             materialize_device=str(args.materialize_device),
             allow_version_skip=bool(args.allow_receiver_skips),
             hold_after_finish_s=float(args.publisher_hold_after_finish_s),
             log_file=publisher_log_file,
             ready_file=None,
-            transport_group_mode="none",
-            transport_group_kind=TRANSPORT_GROUP_KIND_TP_VERSION,
+            transport_group_kind=transport_group_plan.kind,
             transport_group_namespace=f"{transport_group_namespace_base}:publisher",
-            transport_group_total_parts=0,
+            transport_group_total_parts=transport_group_plan.total_parts,
             transport_group_receiver_index=0,
             transport_group_priority=TRANSPORT_GROUP_DEFAULT_PRIORITY,
             transport_group_epoch=transport_group_epoch,
@@ -3588,13 +3537,11 @@ def main(argv: list[str]) -> int:
                 output_json=receiver_outputs[proc],
                 weights_root=str(args.weights_root),
                 run_id=f"{run_id}-receiver",
-                receiver_apply_mode=str(args.receiver_apply_mode),
                 materialize_device=str(args.materialize_device),
                 allow_version_skip=bool(args.allow_receiver_skips),
                 hold_after_finish_s=float(args.receiver_hold_after_finish_s),
                 log_file=receiver_log_files[proc],
                 ready_file=(case_dir / f"receiver_{idx + 1}.ready.json").as_posix(),
-                transport_group_mode=transport_group_plan.mode,
                 transport_group_kind=transport_group_plan.kind,
                 transport_group_namespace=(
                     f"{transport_group_namespace_base}:receiver"
@@ -3616,9 +3563,7 @@ def main(argv: list[str]) -> int:
     cluster_artifact_probe: dict[str, dict[str, Any]] = {}
     transport_group_probe: dict[str, Any] = {}
     p0_early_stop: dict[str, Any] = {
-        "enabled": bool(args.p0_early_stop)
-        and transport_group_plan.mode == "tp_version",
-        "mode": transport_group_plan.mode,
+        "enabled": bool(args.p0_early_stop),
         "grace_s": float(args.p0_early_stop_grace_s),
         "triggered": False,
         "reasons": [],
@@ -3690,8 +3635,8 @@ def main(argv: list[str]) -> int:
 
             p0_result = run_transport_group_p0_guard(
                 enabled=bool(args.p0_early_stop),
-                mode=transport_group_plan.mode,
-                group_kind=transport_group_plan.kind or TRANSPORT_GROUP_KIND_TP_VERSION,
+                group_kind=transport_group_plan.kind
+                or TRANSPORT_GROUP_KIND_GROUP_REALIZATION,
                 gs_addr=str(args.gs_addr),
                 started_at_utc=case_transport_window_start,
                 grace_s=float(args.p0_early_stop_grace_s),
@@ -3844,8 +3789,7 @@ def main(argv: list[str]) -> int:
             }
     transport_group_probe = query_transport_group_probe(
         gs_addr=str(args.gs_addr),
-        group_mode=transport_group_plan.mode,
-        group_kind=transport_group_plan.kind or TRANSPORT_GROUP_KIND_TP_VERSION,
+        group_kind=transport_group_plan.kind or TRANSPORT_GROUP_KIND_GROUP_REALIZATION,
         started_at_utc=case_transport_window_start,
         finished_at_utc=case_transport_window_end,
     )
@@ -3885,7 +3829,7 @@ def main(argv: list[str]) -> int:
     receiver_skip_events_by_process = collect_receiver_skip_events_by_process(
         receiver_logs
     )
-    receiver_mode_failures: list[dict[str, Any]] = []
+    receiver_apply_failures: list[dict[str, Any]] = []
     propagation_violations: list[dict[str, Any]] = []
     publish_to_apply_limit_s = float(args.max_publish_to_apply_s)
 
@@ -3962,44 +3906,24 @@ def main(argv: list[str]) -> int:
             if not isinstance(row, dict):
                 continue
             apply_latencies.append(float(row.get("materialize_latency_s", 0.0)))
-            mode = str(row.get("apply_mode", ""))
             op = str(row.get("apply_operation", ""))
-            if mode != str(args.receiver_apply_mode):
-                receiver_mode_failures.append(
+            if op != "stage_acquire":
+                receiver_apply_failures.append(
                     {
                         "process_id": proc,
                         "version": int(row.get("version", 0)),
-                        "expected_mode": str(args.receiver_apply_mode),
-                        "actual_mode": mode,
+                        "expected_operation": "stage_acquire",
+                        "actual_operation": op,
                     }
                 )
-            receiver_mode = str(args.receiver_apply_mode)
-            if receiver_mode in {
-                "binding_swap",
-                "tp_bind_into_swap",
-                "tp4_bind_into_swap",
-            }:
-                if receiver_mode == "binding_swap":
-                    expected_op = "bind" if idx == 0 else "swap"
-                else:
-                    expected_op = "bind_into" if idx == 0 else "swap"
-                if op != expected_op:
-                    receiver_mode_failures.append(
-                        {
-                            "process_id": proc,
-                            "version": int(row.get("version", 0)),
-                            "expected_operation": expected_op,
-                            "actual_operation": op,
-                        }
-                    )
-                if idx > 0 and not bool(row.get("pointer_stable", False)):
-                    pointer_stability_violations.append(
-                        {
-                            "process_id": proc,
-                            "version": int(row.get("version", 0)),
-                            "pointer_stable": row.get("pointer_stable"),
-                        }
-                    )
+            if idx > 0 and not bool(row.get("pointer_stable", False)):
+                pointer_stability_violations.append(
+                    {
+                        "process_id": proc,
+                        "version": int(row.get("version", 0)),
+                        "pointer_stable": row.get("pointer_stable"),
+                    }
+                )
             version = int(row.get("version", 0))
             published_at_s = publish_ts_by_version.get(version)
             received_at_s = float(row.get("received_at_s", 0.0))
@@ -4174,7 +4098,7 @@ def main(argv: list[str]) -> int:
             "receiver_skips_present": bool(receiver_skips),
             "allow_receiver_skips": bool(args.allow_receiver_skips),
             "binding_pointer_stable": not pointer_stability_violations,
-            "receiver_mode_consistent": not receiver_mode_failures,
+            "receiver_apply_operation_consistent": not receiver_apply_failures,
             "publish_to_apply_within_limit": not propagation_violations,
             "publish_to_apply_limit_s": publish_to_apply_limit_s,
             "mechanism_keep_last_window_validated": bool(published_by_version),
@@ -4201,7 +4125,7 @@ def main(argv: list[str]) -> int:
             "receiver_sequence_failures": receiver_sequence_failures,
             "receiver_skips": receiver_skips,
             "receiver_skip_events": receiver_skip_events_by_process,
-            "receiver_mode_failures": receiver_mode_failures,
+            "receiver_apply_failures": receiver_apply_failures,
             "pointer_stability_violations": pointer_stability_violations,
             "propagation_violations": propagation_violations,
         },
@@ -4209,7 +4133,7 @@ def main(argv: list[str]) -> int:
     passed = (
         summary["stability"]["all_receivers_completed"]
         and summary["stability"]["binding_pointer_stable"]
-        and summary["stability"]["receiver_mode_consistent"]
+        and summary["stability"]["receiver_apply_operation_consistent"]
         and summary["stability"]["publish_to_apply_within_limit"]
         and not summary["stability"]["p0_early_stop_triggered"]
     )
@@ -4232,7 +4156,7 @@ def main(argv: list[str]) -> int:
         passed = passed and not bool(transport_group_probe.get("error"))
         passed = passed and bool(transport_group_probe.get("window_has_transports"))
         passed = passed and bool(transport_group_probe.get("requester_tagged_complete"))
-        passed = passed and bool(transport_group_probe.get("group_mode_consistent"))
+        passed = passed and bool(transport_group_probe.get("grouping_present"))
         passed = passed and bool(transport_group_probe.get("group_contract_consistent"))
     if bool(transport_metrics.get("enabled")):
         passed = passed and not bool(transport_metrics.get("error"))
@@ -4268,13 +4192,10 @@ def main(argv: list[str]) -> int:
             "tp_device_base_index": int(args.tp_device_base_index),
             "tp_device_map_policy": str(args.tp_device_map_policy),
             "tp_materialize_deadline_s": float(args.tp_materialize_deadline_s),
-            "transport_group_mode": transport_group_plan.mode,
             "transport_group_kind": transport_group_plan.kind,
             "transport_group_total_parts": transport_group_plan.total_parts,
             "transport_group_priority": transport_group_plan.priority,
-            "transport_group_total_parts_formula": (
-                "receiver_count*tp_world_size when mode=tp_version, else 0"
-            ),
+            "transport_group_total_parts_formula": ("receiver_count*tp_world_size"),
             "max_concurrency": int(args.max_concurrency),
             "cuda_backend": cuda_backend or "process-default",
             "receiver_preflight_transient_overlap": int(
@@ -4294,7 +4215,6 @@ def main(argv: list[str]) -> int:
                 getattr(args, "_max_publish_to_apply_preflight", {})
             ),
             "retention_timeout_s": float(args.retention_timeout_s),
-            "receiver_apply_mode": str(args.receiver_apply_mode),
             "allow_receiver_skips": bool(args.allow_receiver_skips),
             "materialize_device": str(args.materialize_device),
             "receiver_hold_after_finish_s": float(args.receiver_hold_after_finish_s),

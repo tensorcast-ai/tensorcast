@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from google.protobuf.any_pb2 import Any
 
+from tensorcast.api.context import GroupRealization
 from tensorcast.api.store.serving_binding_reference_consumer import (
     REFERENCE_RUNTIME,
     ReferenceServingAcquireResult,
@@ -21,6 +22,7 @@ from tensorcast.types import (
     BindingReservationCapability,
     BindingValueRef,
     BindingValueVerificationState,
+    GroupRealizationAcquireRef,
     PrefetchedServingBinding,
 )
 
@@ -50,16 +52,15 @@ class _FakeDaemonClient:
             lease_token=b"lease-token",
         )
         response = store_daemon_pb2.AcquireBindingValueResponse(mem_handle=mem_handle)
-        response.current_value.binding_id = self.prefetched.binding_value_ref.binding_id
-        response.current_value.binding_layout_id = (
-            self.prefetched.binding_value_ref.binding_layout_id
-        )
-        response.current_value.binding_value_id = (
-            self.prefetched.binding_value_ref.binding_value_id
-        )
-        response.current_value.seal_generation = (
-            self.prefetched.binding_value_ref.seal_generation
-        )
+        if self.prefetched.staged_value:
+            response.acquired_staged_value = True
+            target = response.acquired_value
+        else:
+            target = response.current_value
+        target.binding_id = self.prefetched.binding_value_ref.binding_id
+        target.binding_layout_id = self.prefetched.binding_value_ref.binding_layout_id
+        target.binding_value_id = self.prefetched.binding_value_ref.binding_value_id
+        target.seal_generation = self.prefetched.binding_value_ref.seal_generation
         return response
 
     def release_placement_lease(self, **kwargs: object):
@@ -100,6 +101,36 @@ def _prefetched() -> PrefetchedServingBinding:
         reservation_capability=capability,
         readiness="serving_local_ready",
         verification_state=BindingValueVerificationState.LOCAL_ONLY,
+    )
+
+
+def _staged_prefetched() -> PrefetchedServingBinding:
+    base = _prefetched()
+    ref = BindingValueRef(
+        binding_id=base.binding_value_ref.binding_id,
+        binding_layout_id=base.binding_value_ref.binding_layout_id,
+        binding_value_id="staged-value-1",
+        seal_generation=0,
+    )
+    capability = base.reservation_capability.model_copy(
+        update={
+            "capability_id": "capability-staged-1",
+            "binding_value_ref": ref,
+        }
+    )
+    return base.model_copy(
+        update={
+            "local_serving_ref": "binding-local:binding-1:staged-value-1",
+            "binding_value_ref": ref,
+            "reservation_capability": capability,
+            "staged_value": True,
+            "group_realization_acquire": GroupRealizationAcquireRef(
+                transaction_id="txn-1",
+                version_set_id="version-set-1",
+                part_id="member-0",
+                staging_token="stage-1",
+            ),
+        }
     )
 
 
@@ -157,3 +188,73 @@ def test_reference_consumer_prefetch_acquire_and_release_lifecycle(tmp_path) -> 
     assert fake_client.released_tokens == [b"lease-token"]
     assert fake_client.prefetch_calls[0]["operation_id"] == "op-1"
     assert fake_client.acquire_calls[0]["caller_pid"] == 1234
+
+
+def test_reference_consumer_passes_same_selection_group_realization_to_prefetch(
+    tmp_path,
+) -> None:
+    resolved = build_reference_resolved_spec(
+        source_artifact_id="mi2:source",
+        artifact_selection_digest="selection",
+        device_uuid="gpu-0",
+    )
+    record = write_reference_resolved_spec_cache_entry(
+        tmp_path,
+        resolved_spec=resolved,
+    )
+    target = target_from_reference_cache_record(record, device_uuid="gpu-0")
+    fake_client = _FakeDaemonClient(_staged_prefetched())
+    group = GroupRealization(
+        group_kind="serving_prefetch",
+        group_id="group-1",
+        epoch=1,
+        total_parts=1,
+        part_id="member-0",
+        required_part_ids=("member-0",),
+        require_staged_publish=True,
+    )
+
+    prefetched = prefetch_reference_binding(
+        fake_client,
+        source_artifact_id="mi2:source",
+        target=target,
+        operation_id="op-1",
+        group_realization=group,
+    )
+
+    assert prefetched.staged_value is True
+    assert fake_client.prefetch_calls[0]["group_realization"] == group
+
+
+def test_reference_consumer_passes_group_realization_acquire_for_staged_value(
+    tmp_path,
+) -> None:
+    resolved = build_reference_resolved_spec(
+        source_artifact_id="mi2:source",
+        artifact_selection_digest="selection",
+        device_uuid="gpu-0",
+    )
+    record = write_reference_resolved_spec_cache_entry(
+        tmp_path,
+        resolved_spec=resolved,
+    )
+    target = target_from_reference_cache_record(record, device_uuid="gpu-0")
+    fake_client = _FakeDaemonClient(_staged_prefetched())
+
+    prefetched = prefetch_reference_binding(
+        fake_client,
+        source_artifact_id="mi2:source",
+        target=target,
+        operation_id="op-1",
+    )
+    acquired = acquire_reference_binding(
+        fake_client,
+        prefetched=prefetched,
+        target=target,
+        caller_pid=1234,
+    )
+
+    assert acquired.binding_value_ref.seal_generation == 0
+    assert fake_client.acquire_calls[0]["group_realization_acquire"] == (
+        prefetched.group_realization_acquire
+    )

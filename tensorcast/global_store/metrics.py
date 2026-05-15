@@ -450,6 +450,54 @@ IDEMPOTENCY_REPLAY_COUNTER = Counter(
     labelnames=("operation_kind", "result"),  # result=hit|payload_conflict
 )
 
+GROUP_REALIZATION_EVENT_COUNTER = Counter(
+    "tc_group_realization_events_total",
+    "Total number of group realization control-plane events.",
+    labelnames=("operation", "result"),
+)
+
+GROUP_REALIZATION_LATENCY_SECONDS = Histogram(
+    "tc_group_realization_operation_seconds",
+    "Latency of group realization control-plane operations.",
+    labelnames=("operation",),
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+)
+
+GROUP_REALIZATION_WAITER_POLLS_COUNTER = Counter(
+    "tc_group_realization_waiter_polls_total",
+    "Total number of bounded group realization waiter polls.",
+    labelnames=("result",),
+)
+
+GROUP_REALIZATION_ACTIVE_WAITERS_GAUGE = Gauge(
+    "tc_group_realization_active_waiters",
+    "Current number of active group realization waiters.",
+)
+
+GROUP_REALIZATION_CLEANUP_COUNTER = Counter(
+    "tc_group_realization_cleanup_total",
+    "Total number of group realization cleanup outcomes.",
+    labelnames=("operation", "result"),
+)
+
+GROUP_REALIZATION_DB_CONFLICT_RETRY_COUNTER = Counter(
+    "tc_group_realization_db_conflict_retries_total",
+    "Total number of group realization DB conflict retry observations.",
+    labelnames=("operation", "result"),
+)
+
+GROUP_REALIZATION_CONTROL_WRITES_COUNTER = Counter(
+    "tc_group_realization_control_writes_total",
+    "Total number of group realization control-plane writes by operation and table.",
+    labelnames=("operation", "table"),
+)
+
+GROUP_REALIZATION_COUNTER_RECONCILIATION_COUNTER = Counter(
+    "tc_group_realization_counter_reconciliation_total",
+    "Total number of group realization counter reconciliation outcomes.",
+    labelnames=("result",),
+)
+
 # Memory tier telemetry ------------------------------------------------------
 
 MEMORY_TIER_STABLE_BYTES = Gauge(
@@ -793,6 +841,70 @@ def inc_idempotency_replay_conflict(*, operation_kind: str, count: int = 1) -> N
     IDEMPOTENCY_REPLAY_COUNTER.labels(
         operation_kind=operation_kind, result="payload_conflict"
     ).inc(count)
+
+
+def inc_group_realization_event(*, operation: str, result: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    GROUP_REALIZATION_EVENT_COUNTER.labels(operation=operation, result=result).inc(
+        count
+    )
+
+
+def observe_group_realization_latency(
+    *, operation: str, duration_seconds: float
+) -> None:
+    GROUP_REALIZATION_LATENCY_SECONDS.labels(operation=operation).observe(
+        max(0.0, duration_seconds)
+    )
+
+
+def inc_group_realization_waiter_poll(*, result: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    GROUP_REALIZATION_WAITER_POLLS_COUNTER.labels(result=result).inc(count)
+
+
+def set_group_realization_active_waiters(*, count: int) -> None:
+    GROUP_REALIZATION_ACTIVE_WAITERS_GAUGE.set(max(0, int(count)))
+
+
+def inc_group_realization_cleanup(
+    *, operation: str, result: str, count: int = 1
+) -> None:
+    if count <= 0:
+        return
+    GROUP_REALIZATION_CLEANUP_COUNTER.labels(operation=operation, result=result).inc(
+        count
+    )
+
+
+def inc_group_realization_db_conflict_retry(
+    *, operation: str, result: str, count: int = 1
+) -> None:
+    if count <= 0:
+        return
+    GROUP_REALIZATION_DB_CONFLICT_RETRY_COUNTER.labels(
+        operation=operation, result=result
+    ).inc(count)
+
+
+def inc_group_realization_control_write(
+    *, operation: str, table: str, count: int = 1
+) -> None:
+    if count <= 0:
+        return
+    GROUP_REALIZATION_CONTROL_WRITES_COUNTER.labels(
+        operation=operation, table=table
+    ).inc(count)
+
+
+def inc_group_realization_counter_reconciliation(
+    *, result: str, count: int = 1
+) -> None:
+    if count <= 0:
+        return
+    GROUP_REALIZATION_COUNTER_RECONCILIATION_COUNTER.labels(result=result).inc(count)
 
 
 # ---------------------------------------------------------------------------

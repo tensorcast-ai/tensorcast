@@ -210,11 +210,9 @@ It models two independent roles:
 
 - `publisher`: continuously publishes new weight versions through
   `WeightPublisher.publish(...)` (CUDA/CPU tensor dict -> local stable DRAM).
-- `receiver`: continuously receives and validates versioned weights by key.
-  It supports two apply modes:
-  - `tensor_dict` (default): materialize each version via `artifact.tensor_dict(...)`.
-  - `binding_swap`: create one `Binding` and update versions via
-    `binding.swap(...)`, which models online inference weight hot-swap.
+- `receiver`: continuously receives and validates versioned weights by key by
+  staging tensor-parallel rank-local values through `group_realization`,
+  waiting for the publish barrier, then acquiring the staged binding values.
 
 ### Single-host scenario (local)
 
@@ -233,9 +231,11 @@ python ./tensorcast/tools/weight_publisher_e2e.py single-host \
   --start-version 1 \
   --num-versions 3 \
   --keep-last 2 \
+  --payload-mode tp_ranked \
+  --tp-world-size 1 \
   --publish-interval-s 2 \
   --receiver-timeout-s 120 \
-  --receiver-apply-mode binding_swap
+  --materialize-device cuda:0
 
 tensorcast-cli daemon stop
 ```
@@ -277,6 +277,8 @@ python ./tensorcast/tools/weight_publisher_e2e.py publisher \
   --start-version 1 \
   --num-versions 6 \
   --keep-last 2 \
+  --payload-mode tp_ranked \
+  --tp-world-size 1 \
   --publish-interval-s 3 \
   --receiver-timeout-s 180 \
   --retention-timeout-s 90
@@ -297,8 +299,9 @@ python ./tensorcast/tools/weight_publisher_e2e.py receiver \
   --start-version 1 \
   --num-versions 6 \
   --receiver-timeout-s 180 \
-  --materialize-device cuda:0 \
-  --receiver-apply-mode binding_swap
+  --payload-mode tp_ranked \
+  --tp-world-size 1 \
+  --materialize-device cuda:0
 ```
 
 ```bash
@@ -322,8 +325,8 @@ Distributed checklist:
 
 ## Multi-host Suite (brainctl)
 
-For staged scale-out (`2-node -> 3-node`) with `binding.swap` updates and
-retention checks, use:
+For staged scale-out (`2-node -> 3-node`) with `group_realization` staged
+binding updates and retention checks, use:
 
 - `examples/cross_host/cross_host_weight_publisher_runner.py` (single case runner)
 - `examples/cross_host/run_multihost_weight_publisher_suite.sh` (suite entry)

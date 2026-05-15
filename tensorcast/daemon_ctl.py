@@ -24,6 +24,7 @@ from typing import (
     Literal,
     Mapping,
     NoReturn,
+    Sequence,
     cast,
     overload,
 )
@@ -65,6 +66,7 @@ from tensorcast.types import (
     CoalescedHandshake,
     CommitResult,
     DeregisterArtifactOutcome,
+    GroupRealizationAcquireRef,
     HostSharedRegionAttachment,
     HostSharedRegionClass,
     LeaseHandshake,
@@ -123,6 +125,116 @@ class SwapKeyMappingResult:
     ok: bool
     artifact_id: str
     generation: int
+
+
+def _copy_group_realization_options(
+    *,
+    group_realization: Any | None,
+    version_selection: common_pb2.ArtifactSelection,
+    target: store_daemon_pb2.GroupRealizationOptions,
+) -> None:
+    if group_realization is None:
+        return
+    version_set = getattr(group_realization, "version_set", None)
+    if version_set is None:
+        if not isinstance(version_selection, common_pb2.ArtifactSelection):
+            raise ValueError("group realization version_selection is required")
+        if not version_selection.artifact_id:
+            raise ValueError(
+                "group realization version_selection.artifact_id is required"
+            )
+    required_part_ids = tuple(
+        str(part_id) for part_id in group_realization.required_part_ids
+    )
+    if not required_part_ids:
+        raise ValueError("group realization required_part_ids is required")
+    target.enabled = True
+    target.require_staged_publish = bool(group_realization.require_staged_publish)
+    if int(group_realization.deadline_unix_nanos) > 0:
+        target.deadline_unix_nanos = int(group_realization.deadline_unix_nanos)
+    if version_set is not None:
+        if not getattr(version_set, "version_set_id", ""):
+            raise ValueError("group realization version_set.version_set_id is required")
+        target.version.explicit_version_set.version_set_id = str(
+            version_set.version_set_id
+        )
+        target.version.explicit_version_set.manifest_hash = bytes(
+            getattr(version_set, "manifest_hash", b"") or b""
+        )
+        target.version.explicit_version_set.manifest_generation = int(
+            getattr(version_set, "manifest_generation", 0) or 0
+        )
+    else:
+        target.version.explicit_selection.CopyFrom(version_selection)
+    target.group.group_kind = str(group_realization.group_kind)
+    target.group.group_id = str(group_realization.group_id)
+    target.group.epoch = int(group_realization.epoch)
+    target.group.total_parts = int(group_realization.total_parts)
+    target.group.part_id = str(group_realization.part_id)
+    target.group.required_part_ids.extend(required_part_ids)
+
+
+_GROUP_REALIZATION_KIND_BY_NAME = {
+    "same_selection": store_daemon_pb2.GROUP_REALIZATION_KIND_SAME_SELECTION,
+    "per_part_selection": store_daemon_pb2.GROUP_REALIZATION_KIND_PER_PART_SELECTION,
+}
+
+
+def _group_realization_kind_to_proto(
+    kind: str | int,
+) -> store_daemon_pb2.GroupRealizationKind:
+    if isinstance(kind, int):
+        valid_values = {
+            int(value) for value in _GROUP_REALIZATION_KIND_BY_NAME.values()
+        }
+        if int(kind) not in valid_values:
+            raise ValueError(
+                "group version set realization_kind must be one of "
+                f"{sorted(_GROUP_REALIZATION_KIND_BY_NAME)}"
+            )
+        return cast(store_daemon_pb2.GroupRealizationKind, kind)
+    normalized = str(kind).strip().lower()
+    try:
+        return _GROUP_REALIZATION_KIND_BY_NAME[normalized]
+    except KeyError as exc:
+        raise ValueError(
+            "group version set realization_kind must be one of "
+            f"{sorted(_GROUP_REALIZATION_KIND_BY_NAME)}"
+        ) from exc
+
+
+def _copy_group_version_set_part(
+    part: store_daemon_pb2.GroupVersionSetPart | Mapping[str, Any],
+    target: store_daemon_pb2.GroupVersionSetPart,
+) -> None:
+    if isinstance(part, store_daemon_pb2.GroupVersionSetPart):
+        target.CopyFrom(part)
+        return
+    part_id = str(part.get("part_id", "")).strip()
+    if not part_id:
+        raise ValueError("group version set part_id is required")
+    selection = part.get("selection")
+    if selection is None and part.get("artifact_id"):
+        selection = common_pb2.ArtifactSelection(
+            artifact_id=str(part["artifact_id"]),
+            view_id=str(part.get("view_id", "") or ""),
+        )
+    if not isinstance(selection, common_pb2.ArtifactSelection):
+        raise ValueError("group version set part selection is required")
+    if not selection.artifact_id:
+        raise ValueError("group version set part selection.artifact_id is required")
+    target.part_id = part_id
+    target.selection.CopyFrom(selection)
+    byte_space = part.get("requested_byte_space")
+    if byte_space is not None:
+        if not isinstance(byte_space, common_pb2.ByteSpaceRef):
+            raise ValueError(
+                "group version set requested_byte_space must be ByteSpaceRef"
+            )
+        target.requested_byte_space.CopyFrom(byte_space)
+    metadata = part.get("part_metadata_json")
+    if metadata is not None:
+        target.part_metadata_json = str(metadata)
 
 
 def _raise_grpc_error(err: Exception, *, cause: BaseException | None) -> NoReturn:
@@ -951,6 +1063,7 @@ class DaemonCtl:
         placement: store_daemon_pb2.TransformPlacement | None = None,
         pid: int | None = None,
         operation_id: str | None = None,
+        group_realization: Any | None = None,
         timeout_s: float = 600.0,
         return_response: bool = True,
     ) -> store_daemon_pb2.MaterializeIntoTargetResponse:
@@ -978,6 +1091,11 @@ class DaemonCtl:
                 request.placement = placement
             if operation_id:
                 request.operation_id = str(operation_id)
+            _copy_group_realization_options(
+                group_realization=group_realization,
+                version_selection=selection,
+                target=request.group_realization,
+            )
             try:
                 response: store_daemon_pb2.MaterializeIntoTargetResponse = (
                     self._unary_call(
@@ -1021,6 +1139,7 @@ class DaemonCtl:
         placement: store_daemon_pb2.TransformPlacement | None = None,
         pid: int | None = None,
         operation_id: str | None = None,
+        group_realization: Any | None = None,
         timeout_s: float = 600.0,
         return_response: bool = True,
     ) -> store_daemon_pb2.MaterializeIntoTargetResponse:
@@ -1079,6 +1198,11 @@ class DaemonCtl:
                 request.placement = placement
             if operation_id:
                 request.operation_id = str(operation_id)
+            _copy_group_realization_options(
+                group_realization=group_realization,
+                version_selection=selection,
+                target=request.group_realization,
+            )
             try:
                 response: store_daemon_pb2.MaterializeIntoTargetResponse = (
                     self._unary_call(
@@ -1128,6 +1252,7 @@ class DaemonCtl:
         dst_specs: Iterable[store_daemon_pb2.MappedTensorSpec] | None = None,
         pid: int | None = None,
         operation_id: str | None = None,
+        group_realization: Any | None = None,
         timeout_s: float = 600.0,
     ) -> store_daemon_pb2.CreateOwnedBindingResponse:
         if not isinstance(source_selection, common_pb2.ArtifactSelection):
@@ -1165,6 +1290,11 @@ class DaemonCtl:
                     request.dst_tensors.add().CopyFrom(spec)
             if operation_id:
                 request.operation_id = str(operation_id)
+            _copy_group_realization_options(
+                group_realization=group_realization,
+                version_selection=source_selection,
+                target=request.group_realization,
+            )
             try:
                 response: store_daemon_pb2.CreateOwnedBindingResponse = (
                     self._unary_call(
@@ -1195,6 +1325,7 @@ class DaemonCtl:
         requested_readiness: ServingBindingReadiness,
         retention_policy: PrefetchRetentionPolicy | None = None,
         operation_id: str | None = None,
+        group_realization: Any | None = None,
         timeout_s: float = 10.0,
     ) -> store_daemon_pb2.PrefetchServingBindingResponse:
         if not isinstance(source_selection, common_pb2.ArtifactSelection):
@@ -1223,6 +1354,11 @@ class DaemonCtl:
             request.retention_policy.CopyFrom(PrefetchRetentionPolicy().to_proto())
         if operation_id:
             request.operation_id = str(operation_id)
+        _copy_group_realization_options(
+            group_realization=group_realization,
+            version_selection=source_selection,
+            target=request.group_realization,
+        )
         with self._client_span("Client/PrefetchServingBinding") as span:
             try:
                 response: store_daemon_pb2.PrefetchServingBindingResponse = (
@@ -1250,6 +1386,49 @@ class DaemonCtl:
                 ) from e
         return response
 
+    def register_group_version_set(
+        self,
+        *,
+        realization_kind: str | int,
+        parts: Sequence[store_daemon_pb2.GroupVersionSetPart | Mapping[str, Any]],
+        namespace: str | None = None,
+        key: str | None = None,
+        key_generation: int | None = None,
+        timeout_s: float = 10.0,
+    ) -> store_daemon_pb2.RegisterGroupVersionSetResponse:
+        request = store_daemon_pb2.RegisterGroupVersionSetRequest(
+            realization_kind=_group_realization_kind_to_proto(realization_kind),
+        )
+        for part in parts:
+            _copy_group_version_set_part(part, request.parts.add())
+        if namespace:
+            request.namespace = str(namespace)
+        if key:
+            request.key = str(key)
+        if key_generation is not None:
+            request.key_generation = int(key_generation)
+        with self._client_span("Client/RegisterGroupVersionSet") as span:
+            try:
+                response: store_daemon_pb2.RegisterGroupVersionSetResponse = (
+                    self._unary_call(
+                        self.stub_v2.RegisterGroupVersionSet,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                if e.code() == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                raise RuntimeError(
+                    _grpc_message(e, fallback="RegisterGroupVersionSet RPC failed")
+                ) from e
+        return response
+
     def acquire_binding_value(
         self,
         *,
@@ -1263,6 +1442,7 @@ class DaemonCtl:
         expected_daemon_session_id: str | None = None,
         expected_member: ServingBindingMemberRef | None = None,
         local_serving_ref: str | None = None,
+        group_realization_acquire: GroupRealizationAcquireRef | None = None,
         caller_pid: int | None = None,
         timeout_s: float = 30.0,
     ) -> store_daemon_pb2.AcquireBindingValueResponse:
@@ -1289,6 +1469,10 @@ class DaemonCtl:
         request.expected_member.CopyFrom(member.to_proto())
         if local_serving_ref is not None:
             request.local_serving_ref = str(local_serving_ref)
+        if group_realization_acquire is not None:
+            request.group_realization_acquire.CopyFrom(
+                group_realization_acquire.to_proto()
+            )
         if caller_pid is not None:
             request.caller_pid = int(caller_pid)
         with self._client_span("Client/AcquireBindingValue") as span:
@@ -1315,6 +1499,61 @@ class DaemonCtl:
                     ) from e
                 raise RuntimeError(
                     _grpc_message(e, fallback="AcquireBindingValue RPC failed")
+                ) from e
+        return response
+
+    def acquire_group_staged_binding_value(
+        self,
+        *,
+        binding_value_ref: BindingValueRef,
+        group_realization_acquire: GroupRealizationAcquireRef,
+        expected_device_uuid: str,
+        expected_daemon_id: str | None = None,
+        expected_daemon_session_id: str | None = None,
+        expected_target_layout_hash: str | None = None,
+        caller_pid: int | None = None,
+        timeout_s: float = 30.0,
+    ) -> store_daemon_pb2.AcquireBindingValueResponse:
+        if not expected_device_uuid:
+            raise ValueError("expected_device_uuid is required")
+        request = store_daemon_pb2.AcquireBindingValueRequest(
+            expected_daemon_id=str(expected_daemon_id or ""),
+            expected_daemon_session_id=str(expected_daemon_session_id or ""),
+            expected_device_uuid=str(expected_device_uuid),
+            expected_target_layout_hash=str(expected_target_layout_hash or ""),
+        )
+        request.binding_value_ref.CopyFrom(binding_value_ref.to_proto())
+        request.group_realization_acquire.CopyFrom(group_realization_acquire.to_proto())
+        request.caller_pid = (
+            self._get_effective_pid() if caller_pid is None else int(caller_pid)
+        )
+        with self._client_span("Client/AcquireGroupStagedBindingValue") as span:
+            try:
+                response: store_daemon_pb2.AcquireBindingValueResponse = (
+                    self._unary_call(
+                        self.stub_v2.AcquireBindingValue,
+                        request,
+                        timeout=float(timeout_s),
+                        span=span,
+                        retries=0,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                if code == grpc.StatusCode.UNIMPLEMENTED:
+                    raise RuntimeError(
+                        "AcquireBindingValue is not supported by the connected StoreDaemon."
+                    ) from e
+                raise RuntimeError(
+                    _grpc_message(
+                        e,
+                        fallback="AcquireGroupStagedBindingValue RPC failed",
+                    )
                 ) from e
         return response
 
@@ -2238,6 +2477,7 @@ class DaemonCtl:
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
+        group_realization: Any | None = None,
         timeout_s: float | int | None = None,
         timing_out: dict[str, float] | None = None,
     ) -> store_daemon_pb2.MaterializeReplicaResponse: ...
@@ -2261,6 +2501,7 @@ class DaemonCtl:
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
+        group_realization: Any | None = None,
         timeout_s: float | int | None = None,
         timing_out: dict[str, float] | None = None,
     ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus]: ...
@@ -2283,6 +2524,7 @@ class DaemonCtl:
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
+        group_realization: Any | None = None,
         timeout_s: float | int | None = None,
         timing_out: dict[str, float] | None = None,
     ) -> bytes: ...
@@ -2304,6 +2546,7 @@ class DaemonCtl:
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         collective_load_group: store_daemon_pb2.CollectiveLoadGroup | None = None,
+        group_realization: Any | None = None,
         timeout_s: float | int | None = None,
         timing_out: dict[str, float] | None = None,
     ) -> (
@@ -2340,6 +2583,11 @@ class DaemonCtl:
             )
             if collective_load_group is not None:
                 request.collective_load_group.CopyFrom(collective_load_group)
+            _copy_group_realization_options(
+                group_realization=group_realization,
+                version_selection=selection,
+                target=request.group_realization,
+            )
             if wait_for_shared_disk_ms:
                 request.wait_for_shared_disk_ms = int(wait_for_shared_disk_ms)
             request.source_policy.CopyFrom(resolved_source_policy)

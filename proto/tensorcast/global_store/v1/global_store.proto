@@ -82,6 +82,15 @@ service ArtifactCatalogService {
   rpc SwapKeyMapping(SwapKeyMappingRequest) returns (SwapKeyMappingResponse) {}
   rpc ResolveKeyMapping(ResolveKeyMappingRequest) returns (ResolveKeyMappingResponse) {}
   rpc RevokeKeyMapping(RevokeKeyMappingRequest) returns (RevokeKeyMappingResponse) {}
+
+  // Group version-set realization and staged publish barrier.
+  rpc RegisterGroupVersionSet(RegisterGroupVersionSetRequest) returns (RegisterGroupVersionSetResponse) {}
+  rpc BeginOrJoinGroupRealization(BeginOrJoinGroupRealizationRequest) returns (BeginOrJoinGroupRealizationResponse) {}
+  rpc ReportGroupRealizationPrepared(ReportGroupRealizationPreparedRequest) returns (ReportGroupRealizationPreparedResponse) {}
+  rpc PublishGroupRealization(PublishGroupRealizationRequest) returns (PublishGroupRealizationResponse) {}
+  rpc WaitGroupRealizationPublished(WaitGroupRealizationPublishedRequest) returns (WaitGroupRealizationPublishedResponse) {}
+  rpc AbortGroupRealization(AbortGroupRealizationRequest) returns (AbortGroupRealizationResponse) {}
+  rpc GetGroupRealization(GetGroupRealizationRequest) returns (GetGroupRealizationResponse) {}
 }
 
 // Assembly/view domain: view coverage/proofs/layouts and assembly-oriented query model.
@@ -1371,4 +1380,222 @@ message RevokeKeyMappingRequest {
 }
 message RevokeKeyMappingResponse {
   Status status = 1;
+}
+
+// ========== Group Version-Set Realization Messages ==========
+
+enum GroupRealizationKind {
+  GROUP_REALIZATION_KIND_UNSPECIFIED = 0;
+  GROUP_REALIZATION_KIND_SAME_SELECTION = 1;
+  GROUP_REALIZATION_KIND_PER_PART_SELECTION = 2;
+}
+
+enum GroupRealizationState {
+  GROUP_REALIZATION_STATE_UNSPECIFIED = 0;
+  GROUP_REALIZATION_STATE_OPEN = 1;
+  GROUP_REALIZATION_STATE_RESOLVED = 2;
+  GROUP_REALIZATION_STATE_PREPARING = 3;
+  GROUP_REALIZATION_STATE_READY_TO_PUBLISH = 4;
+  GROUP_REALIZATION_STATE_PUBLISHED = 5;
+  GROUP_REALIZATION_STATE_ABORTED = 6;
+  GROUP_REALIZATION_STATE_EXPIRED = 7;
+}
+
+enum GroupRealizationMemberState {
+  GROUP_REALIZATION_MEMBER_STATE_UNSPECIFIED = 0;
+  GROUP_REALIZATION_MEMBER_STATE_JOINED = 1;
+  GROUP_REALIZATION_MEMBER_STATE_PREPARING = 2;
+  GROUP_REALIZATION_MEMBER_STATE_PREPARED = 3;
+  GROUP_REALIZATION_MEMBER_STATE_PUBLISHED = 4;
+  GROUP_REALIZATION_MEMBER_STATE_FAILED = 5;
+  GROUP_REALIZATION_MEMBER_STATE_CANCELLED = 6;
+  GROUP_REALIZATION_MEMBER_STATE_EXPIRED = 7;
+}
+
+message GroupVersionSetRef {
+  string version_set_id = 1;
+  bytes manifest_hash = 2;
+  uint64 manifest_generation = 3;
+}
+
+message GroupVersionSetPart {
+  string part_id = 1;
+  tensorcast.common.v1.ArtifactSelection selection = 2;
+  tensorcast.common.v1.ByteSpaceRef requested_byte_space = 3;
+  bytes selection_hash = 4;
+  bytes logical_layout_hash = 5;
+  string part_metadata_json = 6;
+}
+
+message KeyVersionReference {
+  string key = 1;
+  string namespace = 2;
+  string alias = 3;
+  optional uint64 expected_generation = 4;
+}
+
+message VersionReference {
+  oneof value {
+    tensorcast.common.v1.ArtifactSelection explicit_selection = 1;
+    GroupVersionSetRef explicit_version_set = 2;
+    KeyVersionReference key_reference = 3;
+  }
+}
+
+message GroupRealizationContext {
+  string group_kind = 1;
+  string group_id = 2;
+  uint64 epoch = 3;
+  uint32 total_parts = 4;
+  string part_id = 5;
+  repeated string required_part_ids = 6;
+}
+
+message RegisterGroupVersionSetRequest {
+  GroupRealizationKind realization_kind = 1;
+  repeated GroupVersionSetPart parts = 2;
+  string namespace = 3;
+  string key = 4;
+  optional uint64 key_generation = 5;
+}
+
+message RegisterGroupVersionSetResponse {
+  Status status = 1;
+  GroupVersionSetRef version_set = 2;
+  GroupRealizationKind realization_kind = 3;
+  repeated GroupVersionSetPart parts = 4;
+}
+
+message BeginOrJoinGroupRealizationRequest {
+  VersionReference version = 1;
+  GroupRealizationContext context = 2;
+  bytes transaction_fingerprint = 3;
+  uint64 deadline_unix_nanos = 4;
+  string daemon_id = 5;
+  string daemon_session_id = 6;
+  string worker_id = 7;
+}
+
+message BeginOrJoinGroupRealizationResponse {
+  Status status = 1;
+  string transaction_id = 2;
+  GroupVersionSetRef version_set = 3;
+  GroupRealizationKind realization_kind = 4;
+  GroupVersionSetPart part = 5;
+  GroupRealizationState state = 6;
+  bytes transaction_fingerprint = 7;
+  uint64 key_generation = 8;
+}
+
+message StagedBindingValueRef {
+  string daemon_id = 1;
+  string daemon_session_id = 2;
+  string binding_id = 3;
+  string binding_value_id = 4;
+  string staging_token = 5;
+  uint64 staging_epoch = 6;
+}
+
+message ReportGroupRealizationPreparedRequest {
+  string transaction_id = 1;
+  string part_id = 2;
+  StagedBindingValueRef staged_value = 3;
+  uint64 expected_previous_seal_generation = 4;
+  bytes prepared_value_hash = 5;
+  string daemon_id = 6;
+  string daemon_session_id = 7;
+  string worker_id = 8;
+  string materialization_attempt_id = 9;
+  bytes member_fingerprint = 10;
+  string source_replica_id = 11;
+  uint64 source_export_generation = 12;
+  string child_transport_request_id = 13;
+}
+
+message ReportGroupRealizationPreparedResponse {
+  Status status = 1;
+  GroupRealizationState state = 2;
+  GroupRealizationMemberState member_state = 3;
+  bytes member_fingerprint = 4;
+}
+
+message GroupPublishAuthority {
+  oneof value {
+    string operation_lease_id = 1;
+    bytes capability_token = 2;
+  }
+}
+
+message PublishGroupRealizationRequest {
+  string transaction_id = 1;
+  bool require_ready_to_publish = 2;
+  GroupPublishAuthority authority = 3;
+}
+
+message PublishGroupRealizationResponse {
+  Status status = 1;
+  GroupRealizationState state = 2;
+}
+
+message WaitGroupRealizationPublishedRequest {
+  string transaction_id = 1;
+  uint64 deadline_unix_nanos = 2;
+}
+
+message WaitGroupRealizationPublishedResponse {
+  Status status = 1;
+  GroupRealizationState state = 2;
+}
+
+message AbortGroupRealizationRequest {
+  string transaction_id = 1;
+  string failure_code = 2;
+  string failure_detail = 3;
+}
+
+message AbortGroupRealizationResponse {
+  Status status = 1;
+  GroupRealizationState state = 2;
+}
+
+message GroupRealizationMemberDiagnostic {
+  string part_id = 1;
+  GroupRealizationMemberState state = 2;
+  string daemon_id = 3;
+  string daemon_session_id = 4;
+  string worker_id = 5;
+  string materialization_attempt_id = 6;
+  StagedBindingValueRef staged_value = 7;
+  string source_replica_id = 8;
+  uint64 source_export_generation = 9;
+  string child_transport_request_id = 10;
+  string failure_code = 11;
+  string failure_detail = 12;
+  bytes member_fingerprint = 13;
+}
+
+message GetGroupRealizationRequest {
+  string transaction_id = 1;
+}
+
+message GetGroupRealizationResponse {
+  Status status = 1;
+  string transaction_id = 2;
+  GroupVersionSetRef version_set = 3;
+  GroupRealizationKind realization_kind = 4;
+  GroupRealizationState state = 5;
+  repeated string required_part_ids = 6;
+  repeated string missing_part_ids = 7;
+  repeated GroupRealizationMemberDiagnostic members = 8;
+  string group_kind = 9;
+  string group_id = 10;
+  uint64 epoch = 11;
+  uint32 total_parts = 12;
+  uint32 prepared_count = 13;
+  uint32 failed_count = 14;
+  uint32 published_count = 15;
+  string failure_code = 16;
+  string failure_detail = 17;
+  uint64 deadline_unix_nanos = 18;
+  string publish_authority_mode = 19;
 }

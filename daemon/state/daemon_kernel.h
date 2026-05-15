@@ -208,6 +208,7 @@ class DaemonKernel {
   std::shared_ptr<store::StoreEngine> engine_;
   std::shared_ptr<common::AsyncRuntime> async_runtime_;
   DaemonOptions options_;
+  std::shared_ptr<store::components::IGlobalStoreClient> global_store_client_;
 
   std::chrono::time_point<std::chrono::steady_clock> start_time_{std::chrono::steady_clock::now()};
 

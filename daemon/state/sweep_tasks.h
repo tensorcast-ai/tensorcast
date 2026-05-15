@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <unistd.h>
@@ -16,6 +17,7 @@
 #include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/clock.h"
+#include "core/store/components/global_store_client.h"
 #include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
 #include "daemon/state/binding_registry.h"
@@ -27,6 +29,8 @@
 #include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::daemon {
+
+namespace global_store = tensorcast::global_store::v1;
 
 class IBackgroundTask {
  public:
@@ -85,14 +89,22 @@ class RegionRegistrySweepTask final : public IBackgroundTask {
 
 class BindingRetentionSweepTask final : public IBackgroundTask {
  public:
-  explicit BindingRetentionSweepTask(BindingRegistry& registry) : registry_(registry) {}
+  explicit BindingRetentionSweepTask(
+      BindingRegistry& registry,
+      std::shared_ptr<store::components::IGlobalStoreClient> global_store_client = nullptr)
+      : registry_(registry), global_store_client_(std::move(global_store_client)) {}
 
   void run_once() override {
-    const size_t retired = registry_.sweep_retention(absl::Now());
-    if (retired == 0) {
+    const absl::Time now = absl::Now();
+    const size_t retired = registry_.sweep_retention(now);
+    const size_t staged_expired = registry_.sweep_staged_values(now);
+    const size_t staged_terminal = sweep_terminal_group_realizations_();
+    if (retired == 0 && staged_expired == 0 && staged_terminal == 0) {
       return;
     }
-    VLOG(1) << "BindingRetentionSweepTask: retired retained binding count=" << retired;
+    VLOG(1) << "BindingRetentionSweepTask: retired retained binding count=" << retired
+            << " expired_staged_value_count=" << staged_expired
+            << " terminal_group_staged_value_count=" << staged_terminal;
   }
 
   [[nodiscard]] std::string name() const override {
@@ -100,7 +112,48 @@ class BindingRetentionSweepTask final : public IBackgroundTask {
   }
 
  private:
+  [[nodiscard]] size_t sweep_terminal_group_realizations_() {
+    if (global_store_client_ == nullptr) {
+      return 0;
+    }
+
+    constexpr size_t kMaxTransactionChecksPerSweep = 64;
+    size_t removed = 0;
+    for (const auto& transaction_id : registry_.staged_transaction_ids(kMaxTransactionChecksPerSweep)) {
+      global_store::GetGroupRealizationRequest request;
+      request.set_transaction_id(transaction_id);
+      store::components::RpcOptions options;
+      options.timeout = absl::Seconds(1);
+      options.max_retries = 0;
+      auto response_or = global_store_client_->get_group_realization(request, options);
+      if (!response_or.ok()) {
+        VLOG(1) << "BindingRetentionSweepTask: group realization status check failed"
+                << " transaction_id=" << transaction_id << " status=" << response_or.status();
+        continue;
+      }
+      const auto status = response_or->status();
+      const auto state = response_or->state();
+      if (status == global_store::STATUS_NOT_FOUND) {
+        removed += registry_.remove_staged_values_for_transaction(
+            transaction_id, "group_realization_not_found", /*max_to_remove=*/0);
+        continue;
+      }
+      if (status != global_store::STATUS_OK) {
+        VLOG(1) << "BindingRetentionSweepTask: group realization status check returned non-ok"
+                << " transaction_id=" << transaction_id << " status=" << status;
+        continue;
+      }
+      if (state == global_store::GROUP_REALIZATION_STATE_ABORTED ||
+          state == global_store::GROUP_REALIZATION_STATE_EXPIRED) {
+        removed += registry_.remove_staged_values_for_transaction(
+            transaction_id, "group_realization_terminal", /*max_to_remove=*/0);
+      }
+    }
+    return removed;
+  }
+
   BindingRegistry& registry_;
+  std::shared_ptr<store::components::IGlobalStoreClient> global_store_client_;
 };
 
 class VerificationTask final : public IBackgroundTask {

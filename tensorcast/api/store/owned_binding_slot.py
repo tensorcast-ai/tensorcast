@@ -44,7 +44,9 @@ from tensorcast.api.store.types import ArtifactError
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import (
+    BindingValueRef,
     ExecutionDiagnostics,
+    GroupRealizationAcquireRef,
     PublicDiskSourceHandle,
     ServerConfig,
     ServingRuntimePolicy,
@@ -439,6 +441,8 @@ class OwnedBindingSlot:
         device: torch.device,
         device_id: int,
         target_publication_token: bytes | None,
+        staged_value_metadata: BindingValueMetadata | None = None,
+        group_realization_acquire: GroupRealizationAcquireRef | None = None,
         target_publication_operation_id: str | None = None,
         restore_response: store_daemon_pb2.CreateBindingResponse
         | store_daemon_pb2.CreateOwnedBindingResponse
@@ -462,6 +466,9 @@ class OwnedBindingSlot:
         self._binding_id = str(binding_id)
         self._binding_layout_id = str(layout.binding_layout_id)
         self._current_value_metadata = current_value_metadata
+        self._staged_value_metadata = staged_value_metadata
+        self._group_realization_acquire = group_realization_acquire
+        self._staged_value_acquired = False
         self._selection = clone_selection(
             None if current_value_metadata is None else current_value_metadata.selection
         )
@@ -594,9 +601,25 @@ class OwnedBindingSlot:
         return self._current_value_metadata
 
     @property
+    def staged_value_metadata(self) -> BindingValueMetadata | None:
+        return self._staged_value_metadata
+
+    @property
+    def group_realization_acquire(self) -> GroupRealizationAcquireRef | None:
+        return self._group_realization_acquire
+
+    @property
+    def staged_value_acquired(self) -> bool:
+        return self._staged_value_acquired
+
+    @property
     def artifact_id(self) -> str | None:
         if self._current_value_metadata is None:
-            return None
+            return (
+                None
+                if self._staged_value_metadata is None
+                else self._staged_value_metadata.source_artifact_id
+            )
         return self._current_value_metadata.source_artifact_id
 
     @property
@@ -654,6 +677,7 @@ class OwnedBindingSlot:
         ctx: CallContext | None = None,
     ) -> None:
         self._ensure_open()
+        self._reject_staged_value_mutation("publish_replica")
         if self._dirty:
             raise ArtifactError(
                 "Binding contents are dirty; materialize again before publishing",
@@ -726,6 +750,7 @@ class OwnedBindingSlot:
         ctx: CallContext | None = None,
     ) -> Operation[None]:
         self._ensure_open()
+        self._reject_staged_value_mutation("publish_replica_operation")
         if self._dirty:
             raise ArtifactError(
                 "Binding contents are dirty; materialize again before publishing",
@@ -869,6 +894,7 @@ class OwnedBindingSlot:
         from tensorcast.api.store.binding import BindingUpdateEpoch
 
         self._ensure_open()
+        self._reject_staged_value_mutation("begin_update")
         _raise_if_published_for_mutation(
             op_name="begin_update",
             published_lease_id=self._published_lease_id,
@@ -903,6 +929,7 @@ class OwnedBindingSlot:
         ctx: CallContext | None = None,
     ) -> None:
         self._ensure_open()
+        self._reject_staged_value_mutation("seal_current")
         update_epoch_token = self._normalize_update_epoch(update_epoch)
         timeout_s = _ctx_timeout_s(ctx)
         try:
@@ -948,6 +975,7 @@ class OwnedBindingSlot:
         ctx: CallContext | None = None,
     ) -> None:
         self._ensure_open()
+        self._reject_staged_value_mutation("freeze_current")
         update_epoch_token = self._normalize_update_epoch(update_epoch)
         timeout_s = _ctx_timeout_s(ctx)
         try:
@@ -993,6 +1021,7 @@ class OwnedBindingSlot:
         ctx: CallContext | None = None,
     ) -> store_daemon_pb2.PromoteBindingCurrentValueResponse:
         self._ensure_open()
+        self._reject_staged_value_mutation("promote_current_value")
         self._last_execution_diagnostics = None
         self._last_source_bound_plan_diagnostics = None
         timeout_s = _ctx_timeout_s(ctx)
@@ -1042,6 +1071,7 @@ class OwnedBindingSlot:
         ctx: CallContext | None = None,
     ) -> store_daemon_pb2.BindingPromotionStatus:
         self._ensure_open()
+        self._reject_staged_value_mutation("start_promote_current_value")
         timeout_s = _ctx_timeout_s(ctx)
         try:
             response = (
@@ -1129,6 +1159,7 @@ class OwnedBindingSlot:
         from tensorcast.api.store.binding import BindingUpdateEpoch
 
         self._ensure_open()
+        self._reject_staged_value_mutation("realize_from")
         _raise_if_published_for_mutation(
             op_name="realize_from",
             published_lease_id=self._published_lease_id,
@@ -1253,6 +1284,7 @@ class OwnedBindingSlot:
         publish_owner_pid: int | None = None,
     ) -> None:
         self._ensure_open()
+        self._reject_staged_value_mutation("swap")
         resolved = self._resolve_artifact(artifact)
         store, _, _ = resolved._require_components()
         if store is not self._store:
@@ -1354,6 +1386,81 @@ class OwnedBindingSlot:
                 ctx=ctx,
             )
 
+    def acquire_staged_value(
+        self,
+        *,
+        wait_for_publish: bool = True,
+        wait_timeout_s: float | None = None,
+        ctx: CallContext | None = None,
+    ) -> BindingValueMetadata:
+        self._ensure_open()
+        if self._staged_value_metadata is None:
+            raise ArtifactError(
+                "acquire_staged_value() requires a staged group-realization value",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        if self._group_realization_acquire is None:
+            raise ArtifactError(
+                "staged binding is missing group_realization_acquire",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        timeout_s = _ctx_timeout_s(ctx)
+        if wait_timeout_s is not None:
+            timeout_s = float(wait_timeout_s)
+        acquire_ref = self._group_realization_acquire.model_copy(
+            update={
+                "wait_for_publish": bool(wait_for_publish),
+                "wait_timeout_ms": max(
+                    0,
+                    int((timeout_s if timeout_s is not None else 30.0) * 1000.0),
+                ),
+            }
+        )
+        value_ref = self._binding_value_ref(self._staged_value_metadata)
+        response = self._runtime.ensure_client().acquire_group_staged_binding_value(
+            binding_value_ref=value_ref,
+            group_realization_acquire=acquire_ref,
+            expected_device_uuid=self._device_uuid(),
+            caller_pid=None,
+            timeout_s=timeout_s if timeout_s is not None else 30.0,
+        )
+        if not bool(getattr(response, "acquired_staged_value", False)):
+            raise ArtifactError(
+                "AcquireBindingValue did not return a staged value",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        metadata = parse_binding_value_or_raise(
+            response.acquired_value if response.HasField("acquired_value") else None,
+            rpc_name="AcquireBindingValue",
+            expected_binding_id=self._binding_id,
+            expected_binding_layout_id=self._binding_layout_id,
+        )
+        if metadata is None:
+            raise ArtifactError(
+                "AcquireBindingValue returned empty acquired_value",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        if metadata.binding_value_id != self._staged_value_metadata.binding_value_id:
+            raise ArtifactError(
+                "AcquireBindingValue returned a different staged value",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        lease_token = bytes(response.mem_handle.lease_token)
+        if lease_token:
+            with contextlib.suppress(Exception):
+                self._runtime.ensure_client().release_placement_lease(
+                    lease_token=lease_token,
+                    timeout_s=5.0,
+                )
+        self._staged_value_acquired = True
+        self._staged_value_metadata = metadata
+        return metadata
+
     def close(self) -> None:
         if self._closed:
             return
@@ -1379,6 +1486,37 @@ class OwnedBindingSlot:
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
+
+    def _reject_staged_value_mutation(self, op_name: str) -> None:
+        if self._staged_value_metadata is None:
+            return
+        raise ArtifactError(
+            f"{op_name}() is disabled for staged group-realization values; "
+            "wait/acquire the staged value or close it",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
+
+    def _device_uuid(self) -> str:
+        if self._staged_value_metadata is None and self._current_value_metadata is None:
+            return ""
+        try:
+            from tensorcast.api._device import device_uuid_for
+
+            return device_uuid_for(self._device_id)
+        except Exception:
+            return ""
+
+    def _binding_value_ref(
+        self,
+        metadata: BindingValueMetadata,
+    ) -> BindingValueRef:
+        return BindingValueRef(
+            binding_id=metadata.binding_id,
+            binding_layout_id=metadata.binding_layout_id,
+            binding_value_id=metadata.binding_value_id,
+            seal_generation=metadata.seal_generation,
+        )
 
     def _resolve_artifact(self, artifact: "Artifact | str") -> "Artifact":
         if isinstance(artifact, str):

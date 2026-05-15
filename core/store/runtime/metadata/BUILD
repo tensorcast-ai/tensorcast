@@ -112,6 +112,7 @@ cc_test(
         "//core/store:metrics_collector",
         "//core/store:replica_registry",
         "//core/store:store_engine_options",
+        "//core/store:testing_global_store_client_stub",
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/replica",
         "//core/store/runtime:ingestion_events",

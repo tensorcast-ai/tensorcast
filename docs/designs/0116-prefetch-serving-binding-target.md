@@ -104,6 +104,10 @@ sequenceDiagram
   - `serving_reserved`
   - `serving_local_ready`
   - `serving_published_ready`
+  - `serving_group_prepared` when a staged value is ready but its group publish
+    barrier has not admitted it
+  - `serving_group_published_ready` when a staged group value is eligible for
+    explicit acquire
 - Separate retained resource lifetime from worker attachment lifetime.
 - Provide a minimal GPU memory retention model:
   - expire if never acquired,
@@ -143,6 +147,10 @@ sequenceDiagram
   allows optimistic local-ready serving on trusted mounted source evidence; this
   design keeps local-ready same-daemon and requires later promotion for durable
   artifact-backed serving.
+- `0117-group-realization-transaction` may wrap serving prefetch in a
+  version-set publish barrier. This design is the v1 landing zone for that work:
+  group-prepared retained values remain staged and non-acquirable until `0117`
+  reports the transaction published.
 
 # Architecture & Interfaces
 
@@ -165,6 +173,11 @@ There are three distinct concepts:
   daemon-owned resource.
 - **Retained resource**: daemon-owned GPU memory plus binding value metadata.
 - **Attachment**: worker-owned IPC view with a fresh lease and tensor lifetime.
+
+For grouped serving prefetch, a retained resource can also carry a
+`GroupRealizationTransaction` and `GroupVersionSetPart` identity. That does not
+change the prefetch/attach split: the resource is prepared first, and attachment
+is allowed only after the group publish barrier admits the staged value.
 
 The names should preserve this separation. `prefetch` must not mean "attach",
 and `release` must not mean "close the whole binding".

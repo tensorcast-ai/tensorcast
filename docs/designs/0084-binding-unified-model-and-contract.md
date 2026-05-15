@@ -343,6 +343,25 @@ flattened enum to represent all combinations.
 
 This distinction is the main long-term consistency boundary.
 
+## Staged Values Are Not Current Values
+
+Group realization and serving prefetch may prepare a value before it is safe for
+ordinary callers to observe it. That prepared value is a `StagedBindingValue`,
+not a fourth current-value category.
+
+Normative rules:
+
+- a staged value must not change `current_binding_value_id`;
+- a staged value must not be returned by ordinary binding acquire;
+- a staged value must own or retain memory independently from the current value;
+- a staged value becomes eligible for explicit group-aware acquire only after
+  its owning publish barrier admits it;
+- abort, timeout, or failed publish cleanup must leave the previous current
+  sealed value untouched.
+
+This keeps the "at most one current sealed value" invariant intact while giving
+`0117` a feasible fail-closed landing zone.
+
 # Architecture & Interfaces
 
 ## Public Surface

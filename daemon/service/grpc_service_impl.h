@@ -99,6 +99,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::AcquireBindingValueRequest* req,
       v2::AcquireBindingValueResponse* resp) override;
 
+  grpc::Status RegisterGroupVersionSet(
+      grpc::ServerContext* ctx,
+      const v2::RegisterGroupVersionSetRequest* req,
+      v2::RegisterGroupVersionSetResponse* resp) override;
+
   grpc::Status CreateBinding(
       grpc::ServerContext* ctx,
       const v2::CreateBindingRequest* req,

@@ -137,14 +137,7 @@ class TransportService:
         requester_worker_id: str | None,
         scheduling_group: TransportSchedulingGroup | None,
     ) -> str:
-        group_kind = (
-            str(scheduling_group.group_kind).strip().lower()
-            if scheduling_group is not None
-            else ""
-        )
         normalized_view_id = view_id or ""
-        if group_kind == "tp_version":
-            normalized_view_id = ""
         payload = {
             "artifact_id": artifact_id,
             "view_id": normalized_view_id,
@@ -677,15 +670,8 @@ class TransportService:
             return
         group = scheduling_group
         normalized_view_id = view_id or ""
-        normalized_group_kind = str(group.group_kind).strip().lower()
         group_epoch = int(group.epoch)
         group_total_parts = int(group.total_parts)
-        # tp_version groups are keyed by logical version, and key remap retries
-        # may transiently produce different artifact ids within the same epoch.
-        # Keep total_parts/part_id invariants strict, but do not fail the whole
-        # request path on artifact/view variance for tp_version.
-        enforce_view_consistency = normalized_group_kind != "tp_version"
-        enforce_artifact_consistency = normalized_group_kind != "tp_version"
         if group_total_parts <= 0:
             raise ValidationError(
                 "group contract violation: total_parts must be > 0 for "
@@ -718,9 +704,9 @@ class TransportService:
                 group.group_id,
                 group_epoch,
                 request_id,
-                int(enforce_artifact_consistency),
+                1,
                 artifact_id,
-                int(enforce_view_consistency),
+                1,
                 normalized_view_id,
                 group_total_parts,
             ],
@@ -751,9 +737,9 @@ class TransportService:
                 group.group_id,
                 group_epoch,
                 request_id,
-                int(enforce_artifact_consistency),
+                1,
                 artifact_id,
-                int(enforce_view_consistency),
+                1,
                 normalized_view_id,
                 group_total_parts,
             ],

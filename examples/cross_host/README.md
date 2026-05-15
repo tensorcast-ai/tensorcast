@@ -349,7 +349,7 @@ Notes:
   - `<out-root>/<run-label>/results/` (per-phase runs + gate artifacts + phase gate review)
   - `<out-root>/<run-label>/meta/launcher_meta.json` (full launcher metadata)
 
-## 2.5 WeightPublisher Multi-host (binding.swap)
+## 2.5 WeightPublisher Multi-host (staged group_realization)
 
 入口脚本：`examples/cross_host/run_multihost_weight_publisher_suite.sh`
 
@@ -367,13 +367,9 @@ export TC_MAX_PUBLISH_TO_APPLY_S=30
 export TC_WP_MAX_PUBLISH_TO_APPLY_AUTO_ADJUST=1
 export TC_WP_SCALE_RECEIVER_COUNTS=1,2,4,8,16,31
 export TC_SCALE_NUM_VERSIONS=10
-export TC_WP_TRANSPORT_GROUP_MODES=none,tp_version
-export TC_WP_GROUP_PAIR_ORDER=abba
-export TC_WP_GROUP_PAIR_ROUNDS=3
 export TC_WP_PAYLOAD_MODE=tp_ranked
 export TC_WP_TP_WORLD_SIZE=4
 export TC_WP_TP_TOTAL_BYTES=42949672960
-export TC_WP_RECEIVER_APPLY_MODE=tp_bind_into_swap
 export TC_WP_MAX_CONCURRENCY=1
 export TC_WP_PRE_PUBLISH_TRIM_MARGIN=1
 export TC_WP_RECEIVER_PREFLIGHT_TRANSIENT_OVERLAP=1
@@ -391,22 +387,18 @@ bash examples/cross_host/run_multihost_weight_publisher_suite.sh
 ```
 
 流程与判定：
-1. 在 publisher 节点先执行 single-host 功能烟测（`tensor_dict`）。
+1. 在 publisher 节点先执行 single-host staged group realization 功能烟测。
 2. 按 `TC_WP_SCALE_RECEIVER_COUNTS` 逐级执行 receiver 规模 case。
-3. 每个规模按 `TC_WP_TRANSPORT_GROUP_MODES` 做组模式循环。
-4. 组模式顺序由 `TC_WP_GROUP_PAIR_ORDER` 控制：
-- `linear`（默认）：按配置顺序执行（例如 `none -> tp_version`）。
-- `abba`：当模式包含 `none,tp_version` 时执行 `none -> tp_version -> tp_version -> none`。
-5. 重复轮次由 `TC_WP_GROUP_PAIR_ROUNDS` 控制（建议 `>=3`，用于抑制 run-order 偏差并支撑 paired 对照统计）。
-6. 验证点包括：
-- receiver 通过 `binding.swap` 连续更新，首版 `bind`，后续全是 `swap`；
-- pointer 稳定（swap 后 `data_ptr` 不变）；
+3. 每个规模固定执行 unified `group_realization` staged publish/acquire 路径。
+4. 验证点包括：
+- receiver 通过 staged publish/acquire 连续更新，接收操作为 `stage_acquire`；
+- pointer 稳定；
 - `keep_last=2` 时旧版本去注册后不可物化；
 - 通过 GS RPC `BatchGetReplicaCounts` 审计，旧版本副本计数回到 0，且有副本的版本数不超过 2。
 - runner 显式管理每台机器的 daemon 生命周期，role/probe 均通过 `tc.init(mode="connect", address=127.0.0.1:50052)` 仅连接本地 daemon。
 - 建议将 `TC_RECEIVER_TIMEOUT_S` 设为大于发布间隔（例如 `publish=60s` 时用 `timeout=95s`），并通过
   `TC_MAX_PUBLISH_TO_APPLY_S` 约束“发布到应用”的时延上限；在 TP 扩容场景建议保持
-  `TC_WP_MAX_PUBLISH_TO_APPLY_AUTO_ADJUST=1`，由 runner 按 receiver 数、TP 字节规模与 group 模式自动抬升阈值下限。
+  `TC_WP_MAX_PUBLISH_TO_APPLY_AUTO_ADJUST=1`，由 runner 按 receiver 数、TP 字节规模与 group realization staging 开销自动抬升阈值下限。
 - 当 `allow_receiver_skips` 生效时，runner 会基于 receiver 日志中的显式
   `[receiver] skipped version=...` 记录做缺失版本记账：仅将“未被显式 skip 覆盖”的缺失版本计为 sequence failure，
   并在输出中给出 `timeout_analysis.waiting_timeout_reason_counts` 与
@@ -414,10 +406,10 @@ bash examples/cross_host/run_multihost_weight_publisher_suite.sh
 - 深度压测可通过 `TC_WP_SCALE_RECEIVER_COUNTS` 扩大到 32 worker 规模（1 publisher + 31 receivers），并用
   `TC_SCALE_NUM_VERSIONS`/`TC_LONG_RUN_NUM_VERSIONS` 与 `TC_LONG_RUN_TARGET_DURATION_S`
   组合出 10/20 版本、最长约 15 分钟的长跑 case。
-- TP 场景可通过 `TC_WP_TP_WORLD_SIZE`、`TC_WP_TP_TOTAL_BYTES`、`TC_WP_RECEIVER_APPLY_MODE`
-  固定为 TP4/TP8 接收路径，并通过 `TC_WP_TRANSPORT_GROUP_MODES` 做 group/non-group A/B。
+- TP 场景可通过 `TC_WP_TP_WORLD_SIZE`、`TC_WP_TP_TOTAL_BYTES`
+  固定为 TP4/TP8 接收规模；接收路径固定为 staged group realization publish/acquire。
 - 运行中会周期打印 `[progress]` 聚合状态，便于外部 `tail -f`/log poll 观察实时进展。
-- suite 输出目录包含 `suite_skips.jsonl`，用于记录无效 receiver count、不支持 group mode、long-run 跳过等结构化原因。
+- suite 输出目录包含 `suite_skips.jsonl`，用于记录无效 receiver count、long-run 跳过等结构化原因。
 
 ## 3. 输出说明
 
