@@ -116,6 +116,7 @@ def compile_serving_recipe(
 ) -> CompiledServingRecipe:
     """Assemble a serving recipe from framework-collected pure inputs."""
 
+    _validate_compile_identity_matches_facts(identity, inputs.serving_facts)
     source_artifact_ref = resolve_source_artifact_ref(
         inputs.source_catalog.source_artifact_ref
     )
@@ -168,7 +169,42 @@ def filter_tensor_schema_for_trace_plan(
     trace_plan: TracePlan,
 ) -> tuple[TensorSchemaEntry, ...]:
     expected = set(trace_plan.expected_dst_names)
+    schema_by_name = {entry.name: entry for entry in tensor_schema}
+    missing = expected - set(schema_by_name)
+    if missing:
+        raise ValueError(
+            "TensorCast serving recipe tensor_schema is missing destination "
+            f"entries: {sorted(missing)}"
+        )
     return tuple(entry for entry in tensor_schema if entry.name in expected)
+
+
+def _validate_compile_identity_matches_facts(
+    identity: RecipeCompileIdentity,
+    serving_facts: TensorcastServingFacts,
+) -> None:
+    mismatches = [
+        field_name
+        for field_name, identity_value, facts_value in (
+            ("framework_name", identity.framework_name, serving_facts.framework_name),
+            (
+                "adapter_version",
+                identity.adapter_version,
+                serving_facts.adapter_version,
+            ),
+            (
+                "serving_abi_version",
+                identity.serving_abi_version,
+                serving_facts.serving_abi_version,
+            ),
+        )
+        if str(identity_value) != str(facts_value)
+    ]
+    if mismatches:
+        raise ValueError(
+            "RecipeCompileIdentity must match TensorcastServingFacts for "
+            f"{', '.join(mismatches)}"
+        )
 
 
 def compute_recipe_compile_key(
@@ -190,6 +226,9 @@ def compute_recipe_compile_key(
         "framework_name": serving_facts.framework_name,
         "adapter_version": serving_facts.adapter_version,
         "serving_abi_version": serving_facts.serving_abi_version,
+        "identity_framework_name": identity.framework_name,
+        "identity_adapter_version": identity.adapter_version,
+        "identity_serving_abi_version": identity.serving_abi_version,
         "support_level": str(serving_facts.support_level),
         "runtime_only_tensor_names": list(serving_facts.runtime_only_tensor_names),
         "process_after_load_class": str(serving_facts.process_after_load_class),

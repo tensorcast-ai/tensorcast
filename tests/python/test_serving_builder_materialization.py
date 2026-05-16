@@ -30,10 +30,12 @@ def test_apply_copy_plan_handles_copy_fill_and_multi_range() -> None:
                 ckpt_name=None,
                 ckpt_range=None,
                 dst_name="w",
-                dst_range=MultiRange(ranges=(
-                    Range(dim=0, start=2, end=3),
-                    Range(dim=1, start=0, end=2),
-                )),
+                dst_range=MultiRange(
+                    ranges=(
+                        Range(dim=0, start=2, end=3),
+                        Range(dim=1, start=0, end=2),
+                    )
+                ),
                 fill_value=7,
             ),
         ],
@@ -70,3 +72,30 @@ def test_validate_dst_coverage_detects_gaps() -> None:
 
     with pytest.raises(RuntimeError, match="coverage gap"):
         validate_dst_coverage(plan, {"w": torch.empty((2,))})
+
+
+def test_validate_dst_coverage_rejects_multirange_writes() -> None:
+    plan = TracePlan(
+        copy_plan=[
+            CopyPlanEntry(
+                op="fill",
+                ckpt_name=None,
+                ckpt_range=None,
+                dst_name="w",
+                dst_range=MultiRange(
+                    ranges=(
+                        Range(dim=0, start=1, end=2),
+                        Range(dim=1, start=0, end=2),
+                    )
+                ),
+                fill_value=0,
+            )
+        ],
+        expected_src_names=set(),
+        expected_dst_names={"w"},
+        tensorcast_slices={},
+        src_hull={},
+    )
+
+    with pytest.raises(RuntimeError, match="MultiRange writes"):
+        validate_dst_coverage(plan, {"w": torch.empty((2, 2))})

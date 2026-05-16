@@ -155,6 +155,13 @@ def test_source_catalog_rejects_synthetic_source_identity(tmp_path: Path) -> Non
 
 def test_resolve_source_artifact_ref_is_public_contract() -> None:
     assert resolve_source_artifact_ref(" mi2:test:source ") == "mi2:test:source"
+    assert resolve_source_artifact_ref(" msa1:test:source ") == "msa1:test:source"
 
     with pytest.raises(ValueError, match="real source artifact identity"):
         resolve_source_artifact_ref("key:synthetic")
+    with pytest.raises(ValueError, match="real source artifact identity"):
+        resolve_source_artifact_ref("/tmp/not-an-artifact")
+    with pytest.raises(ValueError, match="real source artifact identity"):
+        resolve_source_artifact_ref(
+            "cgid:byte_artifact~ns~engine~b64u.bW9kZWw~b64u.djE~layout~b64u.a2V5"
+        )

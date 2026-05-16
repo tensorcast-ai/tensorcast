@@ -23,13 +23,12 @@ from tensorcast.types import FinalizeClass, ServingSupportLevel
 
 def _source_catalog(source_artifact_ref: str = "mi2:test:source") -> SourceCatalog:
     return SourceCatalog(
-        ordered_names=("x", ),
+        ordered_names=("x",),
         meta_by_name={
-            "x":
-            SourceTensorMeta(
+            "x": SourceTensorMeta(
                 dtype=torch.float16,
-                shape=(4, ),
-                stride=(1, ),
+                shape=(4,),
+                stride=(1,),
                 storage_offset=0,
             )
         },
@@ -65,7 +64,7 @@ def _serving_facts(adapter_version: str = "adapter-v1") -> TensorcastServingFact
         adapter_version=adapter_version,
         serving_abi_version="abi-v1",
         support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY,
-        runtime_only_tensor_names=("runtime_only", ),
+        runtime_only_tensor_names=("runtime_only",),
         process_after_load_class=FinalizeClass.RUNTIME_ONLY,
         post_bind_finalize_class=FinalizeClass.RUNTIME_ONLY,
     )
@@ -91,35 +90,30 @@ def _identity() -> RecipeCompileIdentity:
 
 def _inputs(**overrides) -> RecipeCompileInputs:
     values = {
-        "source_catalog":
-        _source_catalog(),
-        "trace_plan":
-        _trace_plan(),
-        "serving_facts":
-        _serving_facts(),
+        "source_catalog": _source_catalog(),
+        "trace_plan": _trace_plan(),
+        "serving_facts": _serving_facts(),
         "tensor_schema": (
             TensorSchemaEntry(
                 name="w",
                 dtype="torch.float16",
-                shape=(4, ),
-                stride=(1, ),
+                shape=(4,),
+                stride=(1,),
             ),
             TensorSchemaEntry(
                 name="runtime_buffer",
                 dtype="torch.float16",
-                shape=(1, ),
-                stride=(1, ),
+                shape=(1,),
+                stride=(1,),
             ),
         ),
-        "semantic_validation_spec":
-        TensorcastSemanticValidationSpec.empty(),
+        "semantic_validation_spec": TensorcastSemanticValidationSpec.empty(),
     }
     values.update(overrides)
     return RecipeCompileInputs(**values)
 
 
 class _Observer:
-
     def __init__(self) -> None:
         self.events: list[tuple[str, dict[str, object]]] = []
 
@@ -147,25 +141,27 @@ def test_compile_serving_recipe_assembles_recipe_from_pure_inputs() -> None:
         tensor_parallel_rank=0,
         tensor_parallel_world_size=1,
     )
-    assert observer.events == [(
-        "recipe_compiler.compile",
-        {
-            "compile_key": recipe.compile_key,
-            "source_artifact_ref": "mi2:test:source",
-            "source_metadata_fingerprint": "metadata-fingerprint",
-            "tensor_schema_count": 1,
-            "copy_plan_count": 1,
-            "expected_src_count": 1,
-            "expected_dst_count": 1,
-            "tensorcast_slice_count": 0,
-        },
-    )]
+    assert observer.events == [
+        (
+            "recipe_compiler.compile",
+            {
+                "compile_key": recipe.compile_key,
+                "source_artifact_ref": "mi2:test:source",
+                "source_metadata_fingerprint": "metadata-fingerprint",
+                "tensor_schema_count": 1,
+                "copy_plan_count": 1,
+                "expected_src_count": 1,
+                "expected_dst_count": 1,
+                "tensorcast_slice_count": 0,
+            },
+        )
+    ]
 
 
 def test_compile_serving_recipe_compile_key_invalidates_on_pure_inputs() -> None:
     recipe_a = compile_serving_recipe(identity=_identity(), inputs=_inputs())
     recipe_b = compile_serving_recipe(
-        identity=_identity(),
+        identity=replace(_identity(), adapter_version="adapter-v2"),
         inputs=_inputs(serving_facts=_serving_facts("adapter-v2")),
     )
     recipe_c = compile_serving_recipe(
@@ -181,6 +177,22 @@ def test_compile_serving_recipe_compile_key_invalidates_on_pure_inputs() -> None
 
     assert recipe_a.compile_key != recipe_b.compile_key
     assert recipe_a.compile_key != recipe_c.compile_key
+
+
+def test_compile_serving_recipe_rejects_identity_fact_mismatch() -> None:
+    with pytest.raises(ValueError, match="RecipeCompileIdentity must match"):
+        compile_serving_recipe(
+            identity=replace(_identity(), adapter_version="adapter-v2"),
+            inputs=_inputs(),
+        )
+
+
+def test_compile_serving_recipe_rejects_missing_destination_schema() -> None:
+    with pytest.raises(ValueError, match="tensor_schema is missing"):
+        compile_serving_recipe(
+            identity=_identity(),
+            inputs=_inputs(tensor_schema=()),
+        )
 
 
 def test_compile_serving_recipe_rejects_synthetic_source_identity() -> None:

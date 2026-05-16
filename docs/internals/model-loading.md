@@ -219,6 +219,27 @@ Important distinction:
 - this lets serving startup and reload fail closed without turning the whole
   artifact runtime into a serving-only surface
 
+### Serving-Builder Guardrails
+
+The Python serving builder keeps artifact identity as the source authority for
+compiled serving recipes:
+
+- `SourceCatalog.source_artifact_ref` must be a real artifact identity. The
+  builder accepts `mi2` content identities and daemon-attested `msa1` mounted
+  sources; synthetic `disk:`, `key:`, path, and cache-local references are
+  rejected before compile.
+- `RecipeCompileIdentity` must agree with `TensorcastServingFacts` for
+  `framework_name`, `adapter_version`, and `serving_abi_version`. The compile key
+  includes both the identity and facts fields, and destination tensor schema must
+  cover every trace-plan destination.
+- Mapped binding lowering accepts only single-axis source and destination ranges.
+  Destination `MultiRange` slices stay on the binding-realization path until the
+  mapped-binding protocol has an explicit flattened-layout contract; coverage
+  validation fails closed for unsupported `MultiRange` writes.
+- External preload authority may carry a `group_realization_acquire` reference.
+  Acquire passes it through to the Store Daemon, and preload attachment handles
+  own lease release unless ownership has been explicitly transferred to runtime.
+
 ### Lease-In-Place Fast Path & Use Leases
 
 `MaterializeReplica` consumes `ArtifactSelection` and uses `selection.artifact_id` as the request identity. Key workflows resolve key mapping first through `ResolveKeyMapping`, then issue `MaterializeReplica`. Before coordinating transport, the controller asks `LipManager::try_satisfy_from_lip` for a replica that already lives on the requested GPU. When this fast path hits, the daemon reuses the existing CUDA IPC handle, marks the status as `ALLOCATED`, and returns immediately (plus optional daemon-selected `used_disk_path`) without invoking the bulk materialization pipeline. If the fast path misses, the controller immediately falls through to the engine-backed path described below.

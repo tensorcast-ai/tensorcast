@@ -21,6 +21,7 @@ from tensorcast.api.store.common import (
     canonical_index_to_bytes,
 )
 from tensorcast.api.store.types import CanonicalIndex
+from tensorcast.common.identity import ArtifactIdKind, validate_artifact_id
 
 _SOURCE_CATALOG_FINGERPRINT_VERSION = "tensorcast-source-catalog-v1"
 
@@ -241,11 +242,18 @@ def resolve_source_artifact_ref(source_artifact_ref: str) -> str:
             "SourceCatalog requires a real source artifact identity "
             "(real imported source artifact required)"
         )
-    if normalized_ref.startswith(("disk:", "key:")):
+    try:
+        artifact_kind = validate_artifact_id(normalized_ref)
+    except ValueError as exc:
         raise ValueError(
             "SourceCatalog requires a real source artifact identity, "
-            "not a synthetic disk/key ref "
+            "not a synthetic disk/key/path ref "
             "(real imported source artifact required)"
+        ) from exc
+    if artifact_kind not in {ArtifactIdKind.MI2, ArtifactIdKind.MSA1}:
+        raise ValueError(
+            "SourceCatalog requires a real source artifact identity "
+            "(mi2 content identity or msa1 daemon-attested mounted source required)"
         )
     return normalized_ref
 

@@ -14,7 +14,7 @@ from tensorcast.serving.builder.trace_ir import (
 )
 
 
-def test_lower_trace_plan_for_binding_lowers_dst_multirange_entries() -> None:
+def test_lower_trace_plan_for_binding_keeps_dst_multirange_fallback() -> None:
     trace_plan = TracePlan(
         copy_plan=[
             CopyPlanEntry(
@@ -22,20 +22,24 @@ def test_lower_trace_plan_for_binding_lowers_dst_multirange_entries() -> None:
                 ckpt_name="gate_proj.weight",
                 ckpt_range=Range(dim=0, start=0, end=1),
                 dst_name="w13_weight",
-                dst_range=MultiRange(ranges=(
-                    Range(dim=0, start=0, end=1),
-                    Range(dim=1, start=0, end=3),
-                )),
+                dst_range=MultiRange(
+                    ranges=(
+                        Range(dim=0, start=0, end=1),
+                        Range(dim=1, start=0, end=3),
+                    )
+                ),
             ),
             CopyPlanEntry(
                 op="copy",
                 ckpt_name="up_proj.weight",
                 ckpt_range=Range(dim=0, start=0, end=1),
                 dst_name="w13_weight",
-                dst_range=MultiRange(ranges=(
-                    Range(dim=0, start=0, end=1),
-                    Range(dim=1, start=3, end=6),
-                )),
+                dst_range=MultiRange(
+                    ranges=(
+                        Range(dim=0, start=0, end=1),
+                        Range(dim=1, start=3, end=6),
+                    )
+                ),
             ),
         ],
         expected_src_names={"gate_proj.weight", "up_proj.weight"},
@@ -49,30 +53,23 @@ def test_lower_trace_plan_for_binding_lowers_dst_multirange_entries() -> None:
         {"w13_weight": (2, 6, 4)},
     )
 
-    assert fallback == ()
-    assert flattened_dims == (("w13_weight", 2), )
-    assert len(mapped) == 2
-    assert mapped[0].dst_range is not None
-    assert mapped[0].dst_range.dim == 0
-    assert mapped[0].dst_range.start == 0
-    assert mapped[0].dst_range.end == 3
-    assert mapped[1].dst_range is not None
-    assert mapped[1].dst_range.dim == 0
-    assert mapped[1].dst_range.start == 3
-    assert mapped[1].dst_range.end == 6
+    assert mapped == ()
+    assert len(fallback) == 2
+    assert flattened_dims == ()
 
 
-def test_lower_trace_plan_for_binding_keeps_unlowerable_multirange_fallback(
-) -> None:
+def test_lower_trace_plan_for_binding_keeps_unlowerable_multirange_fallback() -> None:
     entry = CopyPlanEntry(
         op="copy",
         ckpt_name="src",
         ckpt_range=Range(dim=0, start=0, end=1),
         dst_name="w",
-        dst_range=MultiRange(ranges=(
-            Range(dim=1, start=0, end=1),
-            Range(dim=0, start=0, end=4),
-        )),
+        dst_range=MultiRange(
+            ranges=(
+                Range(dim=1, start=0, end=1),
+                Range(dim=0, start=0, end=4),
+            )
+        ),
     )
     trace_plan = TracePlan(
         copy_plan=[entry],
@@ -88,12 +85,11 @@ def test_lower_trace_plan_for_binding_keeps_unlowerable_multirange_fallback(
     )
 
     assert mapped == ()
-    assert fallback == (entry, )
+    assert fallback == (entry,)
     assert flattened_dims == ()
 
 
-def test_lower_trace_plan_for_realization_preserves_multiaxis_copy_ranges(
-) -> None:
+def test_lower_trace_plan_for_realization_preserves_multiaxis_copy_ranges() -> None:
     trace_plan = TracePlan(
         copy_plan=[
             CopyPlanEntry(
@@ -101,10 +97,12 @@ def test_lower_trace_plan_for_realization_preserves_multiaxis_copy_ranges(
                 ckpt_name="src",
                 ckpt_range=Range(dim=0, start=0, end=1),
                 dst_name="w",
-                dst_range=MultiRange(ranges=(
-                    Range(dim=0, start=0, end=1),
-                    Range(dim=1, start=0, end=10),
-                )),
+                dst_range=MultiRange(
+                    ranges=(
+                        Range(dim=0, start=0, end=1),
+                        Range(dim=1, start=0, end=10),
+                    )
+                ),
             ),
             CopyPlanEntry(
                 op="fill",
@@ -121,8 +119,9 @@ def test_lower_trace_plan_for_realization_preserves_multiaxis_copy_ranges(
         src_hull={},
     )
 
-    realization_plan, fallback, flattened_dims = \
-        lower_trace_plan_for_realization(trace_plan, {})
+    realization_plan, fallback, flattened_dims = lower_trace_plan_for_realization(
+        trace_plan, {}
+    )
 
     assert fallback == ()
     assert flattened_dims == ()

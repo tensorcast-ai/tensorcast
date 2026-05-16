@@ -24,6 +24,7 @@ from tensorcast.types import (
     BindingReservationCapability,
     BindingValueRef,
     BindingValueVerificationState,
+    GroupRealizationAcquireRef,
     ServingBindingMemberRef,
     ServingBindingResolvedLayout,
     ServingBindingSourceRef,
@@ -270,6 +271,23 @@ def test_transfer_to_runtime_moves_close_ownership():
     assert client.released_tokens == [b"lease"]
 
 
+def test_restored_lease_releases_on_context_exit_when_not_transferred():
+    authority = _authority()
+    client = _Client(_response())
+
+    with (
+        pytest.raises(RuntimeError, match="attach failed"),
+        acquire_preload_lease(authority, runtime=_Runtime(client)) as lease,
+    ):
+        lease.restore(
+            target_device=torch.device("cuda:0"),
+            restore_fn=lambda **_kwargs: {"w": torch.empty((1,), dtype=torch.float32)},
+        )
+        raise RuntimeError("attach failed")
+
+    assert client.released_tokens == [b"lease"]
+
+
 def test_preload_lifecycle_rejects_invalid_transitions():
     authority = _authority()
     client = _Client(_response())
@@ -310,7 +328,20 @@ def test_acquire_preload_lease_rejects_mismatched_acquire_response():
     ):
         pass
 
-    assert client.released_tokens == []
+    assert client.released_tokens == [b"lease"]
+
+
+def test_acquire_preload_lease_releases_mismatched_reservation_response():
+    authority = _authority(reservation_bytes=4096)
+    client = _Client(_response(reservation_bytes=8192))
+
+    with (
+        pytest.raises(RuntimeError, match="reservation byte mismatch"),
+        acquire_preload_lease(authority, runtime=_Runtime(client)),
+    ):
+        pass
+
+    assert client.released_tokens == [b"lease"]
 
 
 def test_external_preload_public_helpers_build_extra_from_prefetched_binding():
@@ -344,6 +375,35 @@ def test_external_preload_public_helpers_build_extra_from_prefetched_binding():
         target=target,
         expected_member=member,
     )
+
+
+def test_external_preload_extra_preserves_group_realization_acquire():
+    member = _authority().member
+    target = _target(member)
+    prefetched = _prefetched(member).model_copy(
+        update={
+            "staged_value": True,
+            "group_realization_acquire": GroupRealizationAcquireRef(
+                transaction_id="txn-1",
+                version_set_id="version-set-1",
+                part_id="part-0",
+                staging_token="token-1",
+                wait_for_publish=True,
+                wait_timeout_ms=1234,
+            ),
+        }
+    )
+
+    extra = external_preload_extra_from_prefetched_binding(
+        prefetched=prefetched,
+        target=target,
+        expected_member=member,
+    )
+    authority = parse_external_preload_authority(extra)
+
+    assert authority.group_realization_acquire is not None
+    assert authority.group_realization_acquire.transaction_id == "txn-1"
+    assert authority.group_realization_acquire.wait_for_publish is True
 
 
 def test_external_preload_extra_rejects_unexpected_member():

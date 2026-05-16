@@ -183,7 +183,7 @@ def update_dst_coverage(
     dst_base: torch.Tensor,
 ) -> None:
     name = entry.dst_name
-    if entry.dst_range is None or isinstance(entry.dst_range, MultiRange):
+    if entry.dst_range is None:
         coverage[name] = {
             "full": True,
             "dim": None,
@@ -191,6 +191,11 @@ def update_dst_coverage(
             "extent": None,
         }
         return
+    if isinstance(entry.dst_range, MultiRange):
+        raise RuntimeError(
+            "TensorCast destination coverage validation does not yet support "
+            f"MultiRange writes for {name}"
+        )
     if coverage.get(name, {}).get("full"):
         return
     if int(entry.dst_range.start) >= int(entry.dst_range.end):

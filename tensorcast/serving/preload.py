@@ -9,7 +9,7 @@ import json
 import os
 import time
 from collections.abc import Mapping
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from typing import Any, Callable, ContextManager, Iterator
 
@@ -75,6 +75,7 @@ class ExternalPreloadAuthority(BaseModel):
     device_uuid: str
     binding_value_ref: dict[str, Any]
     reservation_capability: dict[str, Any]
+    group_realization_acquire: dict[str, Any] | None = None
     local_serving_ref: str | None = None
     readiness: str
     verification_state: str = "local_only"
@@ -140,6 +141,7 @@ class ParsedExternalPreloadAuthority:
     readiness: str
     verification_state: str
     serving_artifact_id: str | None = None
+    group_realization_acquire: tc.GroupRealizationAcquireRef | None = None
 
 
 @dataclass(frozen=True)
@@ -180,13 +182,11 @@ class _PreloadLifecycleState:
         self.state = "closed"
         if not self.lease_token:
             return
-        release = getattr(self.client, "release_placement_lease", None)
-        if not callable(release):
-            return
-        if timeout_s is None:
-            release(lease_token=self.lease_token)
-        else:
-            release(lease_token=self.lease_token, timeout_s=timeout_s)
+        _release_lease_token(
+            self.client,
+            lease_token=self.lease_token,
+            timeout_s=timeout_s,
+        )
 
 
 @dataclass(frozen=True)
@@ -207,6 +207,12 @@ class RuntimePreloadAttachmentHandle:
                 "ownership was transferred to runtime"
             )
         self._state.release()
+
+    def __enter__(self) -> RuntimePreloadAttachmentHandle:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
 
 
 @dataclass(frozen=True)
@@ -244,6 +250,12 @@ class AttachedPreloadBinding:
                 "AttachedPreloadBinding.close() requires a restored attachment owner"
             )
         self._state.release()
+
+    def __enter__(self) -> AttachedPreloadBinding:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
 
 
 @dataclass(frozen=True)
@@ -299,11 +311,11 @@ class BorrowedPreloadLease:
         )
 
     def close(self) -> None:
-        if self._state.state in {"restored", "runtime_owned", "closed"}:
+        if self._state.state in {"runtime_owned", "closed"}:
             return
-        if self._state.state != "acquired":
+        if self._state.state not in {"acquired", "restored"}:
             raise RuntimeError(
-                "BorrowedPreloadLease.close() requires an acquired lease"
+                "BorrowedPreloadLease.close() requires an acquired or restored lease"
             )
         self._state.release()
 
@@ -454,9 +466,28 @@ def _acquire_preload_response(
         "local_serving_ref": authority.local_serving_ref,
         "caller_pid": caller_pid,
     }
+    if authority.group_realization_acquire is not None:
+        kwargs["group_realization_acquire"] = authority.group_realization_acquire
     if timeout_s is not None:
         kwargs["timeout_s"] = timeout_s
     return client.acquire_binding_value(**kwargs)
+
+
+def _release_lease_token(
+    client: Any,
+    *,
+    lease_token: bytes,
+    timeout_s: float | None = None,
+) -> None:
+    if not lease_token:
+        return
+    release = getattr(client, "release_placement_lease", None)
+    if not callable(release):
+        return
+    if timeout_s is None:
+        release(lease_token=lease_token)
+    else:
+        release(lease_token=lease_token, timeout_s=timeout_s)
 
 
 @contextmanager
@@ -498,6 +529,7 @@ def acquire_local_ready_preload_lease(
         caller_pid=caller_pid or os.getpid(),
         timeout_s=30.0 if timeout_s is None else float(timeout_s),
     )
+    lease_token = _lease_token_from_response(response)
     missing_ref = tc.BindingValueRef(
         binding_id="missing",
         binding_layout_id="missing",
@@ -509,6 +541,8 @@ def acquire_local_ready_preload_lease(
         default=missing_ref,
     )
     if binding_value_ref == missing_ref:
+        with suppress(Exception):
+            _release_lease_token(client, lease_token=lease_token)
         raise RuntimeError(
             "TensorCast local-ready acquire did not return a binding value"
         )
@@ -570,7 +604,7 @@ def acquire_local_ready_preload_lease(
         binding_layout_id=binding_value_ref.binding_layout_id,
         member_ref=expected_member,
         reservation_bytes=reservation_bytes,
-        lease_token=_lease_token_from_response(response),
+        lease_token=lease_token,
     )
     lease = BorrowedPreloadLease(
         authority=authority,
@@ -613,7 +647,13 @@ def acquire_preload_lease(
         caller_pid=caller_pid or os.getpid(),
         timeout_s=timeout_s,
     )
-    acquired_ref = _validate_acquire_response(response, authority)
+    lease_token = _lease_token_from_response(response)
+    try:
+        acquired_ref = _validate_acquire_response(response, authority)
+    except Exception:
+        with suppress(Exception):
+            _release_lease_token(client, lease_token=lease_token)
+        raise
     state = _PreloadLifecycleState(
         client=client,
         response=response,
@@ -622,7 +662,7 @@ def acquire_preload_lease(
         binding_layout_id=authority.binding_value_ref.binding_layout_id,
         member_ref=authority.member,
         reservation_bytes=authority.reservation_bytes,
-        lease_token=_lease_token_from_response(response),
+        lease_token=lease_token,
     )
     lease = BorrowedPreloadLease(
         authority=authority,
@@ -675,6 +715,13 @@ def parse_external_preload_authority(
         capability_payload,
         field_name="preload.authority.reservation_capability",
     )
+    group_realization_acquire = None
+    if authority_config.group_realization_acquire is not None:
+        group_realization_acquire = _model_validate(
+            tc.GroupRealizationAcquireRef,
+            authority_config.group_realization_acquire,
+            field_name="preload.authority.group_realization_acquire",
+        )
 
     authority = ParsedExternalPreloadAuthority(
         group_id=authority_config.group_id,
@@ -690,6 +737,7 @@ def parse_external_preload_authority(
         readiness=authority_config.readiness,
         verification_state=authority_config.verification_state or "local_only",
         serving_artifact_id=authority_config.serving_artifact_id,
+        group_realization_acquire=group_realization_acquire,
     )
     _validate_authority_consistency(authority)
     return authority
@@ -726,39 +774,40 @@ def external_preload_extra_from_prefetched_binding(
             "Prefetched serving binding member does not match expected "
             f"placement: prefetched={member}, expected={expected_member}"
         )
+    authority: dict[str, Any] = {
+        "group_id": member.group_id or "",
+        "member_ref": _model_dump(member),
+        "daemon_id": prefetched.daemon_id,
+        "daemon_session_id": prefetched.daemon_session_id,
+        "device_uuid": prefetched.device_uuid,
+        "binding_value_ref": _model_dump(prefetched.binding_value_ref),
+        "reservation_capability": _model_dump(prefetched.reservation_capability),
+        "local_serving_ref": prefetched.local_serving_ref,
+        "readiness": str(getattr(prefetched.readiness, "value", prefetched.readiness)),
+        "verification_state": str(
+            getattr(
+                prefetched.verification_state,
+                "value",
+                prefetched.verification_state,
+            )
+        ),
+        "serving_artifact_id": prefetched.serving_artifact_id,
+        "trusted_reservation_bytes": prefetched.reservation_bytes,
+        "expected": {
+            "target_layout_hash": target.resolved_layout.target_layout_hash,
+            "tensor_schema_hash": target.resolved_layout.tensor_schema_hash,
+            "serving_build_digest": target.serving_build_digest,
+            "resolved_spec_digest": target.resolved_layout.spec_digest,
+        },
+    }
+    if prefetched.group_realization_acquire is not None:
+        authority["group_realization_acquire"] = _model_dump(
+            prefetched.group_realization_acquire
+        )
     return {
         "preload": {
             "mode": "external",
-            "authority": {
-                "group_id": member.group_id or "",
-                "member_ref": _model_dump(member),
-                "daemon_id": prefetched.daemon_id,
-                "daemon_session_id": prefetched.daemon_session_id,
-                "device_uuid": prefetched.device_uuid,
-                "binding_value_ref": _model_dump(prefetched.binding_value_ref),
-                "reservation_capability": _model_dump(
-                    prefetched.reservation_capability
-                ),
-                "local_serving_ref": prefetched.local_serving_ref,
-                "readiness": str(
-                    getattr(prefetched.readiness, "value", prefetched.readiness)
-                ),
-                "verification_state": str(
-                    getattr(
-                        prefetched.verification_state,
-                        "value",
-                        prefetched.verification_state,
-                    )
-                ),
-                "serving_artifact_id": prefetched.serving_artifact_id,
-                "trusted_reservation_bytes": prefetched.reservation_bytes,
-                "expected": {
-                    "target_layout_hash": target.resolved_layout.target_layout_hash,
-                    "tensor_schema_hash": target.resolved_layout.tensor_schema_hash,
-                    "serving_build_digest": target.serving_build_digest,
-                    "resolved_spec_digest": target.resolved_layout.spec_digest,
-                },
-            },
+            "authority": authority,
         },
     }
 
