@@ -1599,13 +1599,6 @@ class PreadMultiSafetensorsSource final : public loader::SeekableSource {
       const uint64_t within = cursor - segment.base_offset;
       const size_t available = static_cast<size_t>(segment.data_size - within);
       const size_t step = std::min(to_read - total, available);
-      const uint8_t* mapped = segment.file->mapped_base();
-      if (mapped != nullptr) {
-        std::memcpy(out + total, mapped + segment.data_start + within, step);
-        total += step;
-        cursor += step;
-        continue;
-      }
       auto got_or = pread_fully(segment.file->fd(), segment.data_start + within, out + total, step);
       if (!got_or.ok()) {
         return got_or.status();

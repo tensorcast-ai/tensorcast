@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import struct
 from collections import defaultdict
 from pathlib import Path
@@ -57,6 +58,8 @@ SAFE_TENSORS_TO_TORCH_DTYPE: dict[str, str] = {
     "I64": "torch.int64",
     "F16": "torch.float16",
     "BF16": "torch.bfloat16",
+    "F8_E4M3": "torch.float8_e4m3fn",
+    "F8_E5M2": "torch.float8_e5m2",
     "F32": "torch.float32",
     "F64": "torch.float64",
 }
@@ -99,15 +102,33 @@ def _load_source_metadata(model_dir: Path) -> dict[str, dict[str, Any]]:
     return meta_by_name
 
 
-def _load_trace_plan(path: Path) -> dict[str, Any]:
+def _infer_tp_rank_from_name(path: Path) -> int | None:
+    match = re.search(r"(?:^|[_-])tp(\d+)(?:[_\.-]|$)", path.name)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def _load_trace_plan(path: Path) -> tuple[dict[str, Any], int | None, int | None]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"Trace plan must be a JSON object: {path}")
-    if "copy_plan" not in data or not isinstance(data["copy_plan"], list):
+
+    trace_plan = data.get("trace_plan", data)
+    if not isinstance(trace_plan, dict):
+        raise ValueError(f"Trace plan wrapper must contain an object: {path}")
+    if "copy_plan" not in trace_plan or not isinstance(trace_plan["copy_plan"], list):
         raise ValueError(f"Trace plan missing copy_plan[]: {path}")
-    if "tp_rank" not in data or "tp_world_size" not in data:
-        raise ValueError(f"Trace plan missing tp_rank/tp_world_size: {path}")
-    return data
+
+    tp_rank = trace_plan.get("tp_rank", data.get("tp_rank"))
+    tp_world_size = trace_plan.get("tp_world_size", data.get("tp_world_size"))
+    if tp_rank is None:
+        tp_rank = _infer_tp_rank_from_name(path)
+    return (
+        trace_plan,
+        int(tp_rank) if tp_rank is not None else None,
+        int(tp_world_size) if tp_world_size is not None else None,
+    )
 
 
 def _range_spec_to_slices(range_spec: dict[str, Any] | None) -> list[dict[str, int]]:
@@ -141,6 +162,8 @@ def _build_rank_entry(
     trace_plan: dict[str, Any],
     source_meta_by_name: dict[str, dict[str, Any]],
     trace_plan_path: Path,
+    tp_rank: int,
+    tp_world_size: int,
 ) -> tuple[dict[str, Any], dict[str, int]]:
     tensors: dict[str, dict[str, Any]] = {}
     skipped_fill_ops = 0
@@ -183,8 +206,8 @@ def _build_rank_entry(
         sorted_tensors[tensor_name] = tensor_entry
 
     rank_entry = {
-        "tp_rank": int(trace_plan["tp_rank"]),
-        "tp_world_size": int(trace_plan["tp_world_size"]),
+        "tp_rank": int(tp_rank),
+        "tp_world_size": int(tp_world_size),
         "tensors": sorted_tensors,
     }
     stats = {
@@ -215,7 +238,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--trace-plan-dir",
         type=Path,
-        help="Directory containing tensorcast_trace_plan_tp*.json files.",
+        help="Directory containing TensorCast trace-plan JSON files.",
+    )
+    parser.add_argument(
+        "--tp-world-size",
+        type=int,
+        help=(
+            "TP world size to use when trace plans do not embed it. "
+            "Defaults to max inferred tp rank + 1."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -230,7 +261,7 @@ def main() -> int:
     args = _parse_args()
     trace_paths: list[Path] = list(args.trace_plan)
     if args.trace_plan_dir is not None:
-        trace_paths.extend(sorted(args.trace_plan_dir.glob("tensorcast_trace_plan_tp*.json")))
+        trace_paths.extend(sorted(args.trace_plan_dir.glob("*.json")))
     if not trace_paths:
         raise SystemExit("No trace plans provided. Use --trace-plan or --trace-plan-dir.")
 
@@ -238,9 +269,38 @@ def main() -> int:
     rank_entries: list[dict[str, Any]] = []
     rank_stats: list[dict[str, Any]] = []
 
+    loaded_trace_plans: list[tuple[Path, dict[str, Any], int | None, int | None]] = []
     for trace_path in sorted(set(trace_paths)):
-        trace_plan = _load_trace_plan(trace_path)
-        rank_entry, stats = _build_rank_entry(trace_plan, source_meta_by_name, trace_path)
+        trace_plan, tp_rank, tp_world_size = _load_trace_plan(trace_path)
+        loaded_trace_plans.append((trace_path, trace_plan, tp_rank, tp_world_size))
+
+    inferred_ranks = [rank for _, _, rank, _ in loaded_trace_plans if rank is not None]
+    default_tp_world_size = (
+        int(args.tp_world_size)
+        if args.tp_world_size is not None
+        else (max(inferred_ranks) + 1 if inferred_ranks else None)
+    )
+    if default_tp_world_size is None:
+        raise SystemExit(
+            "Trace plans do not include tp_world_size and tp rank could not be "
+            "inferred from filenames. Pass --tp-world-size and use filenames "
+            "containing tp<rank>, or provide trace files with embedded metadata."
+        )
+
+    for trace_path, trace_plan, tp_rank, tp_world_size in loaded_trace_plans:
+        if tp_rank is None:
+            raise SystemExit(
+                f"Trace plan {trace_path} does not include tp_rank and the rank "
+                "could not be inferred from its filename."
+            )
+        effective_tp_world_size = tp_world_size or default_tp_world_size
+        rank_entry, stats = _build_rank_entry(
+            trace_plan,
+            source_meta_by_name,
+            trace_path,
+            tp_rank=tp_rank,
+            tp_world_size=effective_tp_world_size,
+        )
         rank_entries.append(rank_entry)
         rank_stats.append(
             {

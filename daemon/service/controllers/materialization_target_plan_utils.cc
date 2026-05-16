@@ -245,7 +245,8 @@ uint64_t byte_range_map_covered_bytes(const store::loader::ByteRangeMap& map) {
 }
 
 bool work_item_has_collective_source_overlap(const store::materialization::contracts::RepresentationWorkItem& item) {
-  return item.kind == store::materialization::contracts::RepresentationWorkItemKind::kTensorCopy &&
+  using RepresentationWorkItemKind = store::materialization::contracts::RepresentationWorkItemKind;
+  return item.kind == RepresentationWorkItemKind::kTensorCopy &&
       item.partition_kind == store::materialization::contracts::WorkPartitionKind::kReplicated;
 }
 
