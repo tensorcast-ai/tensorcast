@@ -484,6 +484,8 @@ def acquire_local_ready_preload_lease(
         runtime = get_runtime_context()
     if client is None:
         client = runtime.ensure_client()
+    if client is None:
+        raise RuntimeError("TensorCast runtime did not provide a store daemon client")
     response = client.acquire_binding_value_by_local_ref(
         local_serving_ref=local_serving_ref,
         expected_device_uuid=expected_device_uuid,

@@ -47,7 +47,7 @@ class SourceBoundContractState:
         flags = int(getattr(server_config, "source_bound_capability_flags", 0) or 0)
         version = int(getattr(server_config, "source_bound_contract_version", 0) or 0)
         capability_names = tuple(
-            capability.name
+            str(capability.name)
             for capability in SourceBoundCapability
             if flags & int(capability)
         )

@@ -241,9 +241,7 @@ class TraceMode(TorchDispatchMode):
             else self._compose_ranges(base_range, range_spec, base_dim_map)
         )
         propagated_dim_map = (
-            base_dim_map
-            if dim_map is None
-            else tuple(base_dim_map[dim] for dim in dim_map)
+            base_dim_map if dim_map is None else self._remap_dims(base_dim_map, dim_map)
         )
         self._view_meta[id(result)] = (
             weakref.ref(result),
@@ -252,6 +250,15 @@ class TraceMode(TorchDispatchMode):
             propagated_dim_map,
         )
         return result
+
+    def _remap_dims(
+        self,
+        base_dim_map: Optional[tuple[int, ...]],
+        dim_map: tuple[int, ...],
+    ) -> tuple[int, ...]:
+        if base_dim_map is None:
+            raise RuntimeError("Missing dim map for remapped trace view")
+        return tuple(base_dim_map[dim] for dim in dim_map)
 
     def _compose_ranges(
         self,
@@ -539,7 +546,10 @@ def trace_model_load(
     try:
         with trace_mode:
             if native_load_weights is None:
-                model.load_weights(weights_iterator)
+                load_weights = getattr(model, "load_weights", None)
+                if not callable(load_weights):
+                    raise RuntimeError("model must provide callable load_weights")
+                load_weights(weights_iterator)
             else:
                 native_load_weights(model, weights_iterator)
     finally:

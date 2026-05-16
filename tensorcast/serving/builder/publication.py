@@ -22,6 +22,8 @@ from tensorcast.api.store.serving_builder import (
 )
 from tensorcast.api.store.types import CanonicalIndex
 from tensorcast.types import (
+    AssemblyReadinessPolicy,
+    AssemblyRequirementSetRef,
     BindingValueRef,
     BuilderMode,
     PureTransformPublicationSpec,
@@ -250,8 +252,8 @@ def build_binding_finalize_publication_bundle_from_context(
     serving_version_key: str | None = None,
     serving_manifest_ref: str | None = None,
     layout_id: str | None = None,
-    requirements: object = None,
-    readiness_policy: object = None,
+    requirements: AssemblyRequirementSetRef | None = None,
+    readiness_policy: AssemblyReadinessPolicy | None = None,
     structural_view_ids: tuple[str, ...] = (),
     admission_facts: ServingAdmissionFacts | None = None,
 ) -> RepresentationPublishSpec:

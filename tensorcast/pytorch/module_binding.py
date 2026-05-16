@@ -58,11 +58,8 @@ def attach_tensors_to_module(
             unexpected.append(full_name)
             continue
         module, local_name = _lookup_module_and_name(model, full_name)
-        if (
-            local_name in module._parameters
-            and module._parameters[local_name] is not None
-        ):
-            param = module._parameters[local_name]
+        param = module._parameters.get(local_name)
+        if param is not None:
             aliases = (
                 parameter_aliases.get(id(param), (full_name,))
                 if preserve_aliases
@@ -79,8 +76,8 @@ def attach_tensors_to_module(
                 param.data = tensor
             attached.update(aliases)
             continue
-        if local_name in module._buffers and module._buffers[local_name] is not None:
-            buf = module._buffers[local_name]
+        buf = module._buffers.get(local_name)
+        if buf is not None:
             replacement = _materialize_tensor_like(buf, tensor)
             aliases = (
                 buffer_aliases.get(id(buf), (full_name,))
@@ -171,11 +168,8 @@ def allocate_unbound_module_tensors(
     parameter_aliases, buffer_aliases = _collect_alias_registrations(model)
     for full_name in sorted({str(name) for name in tensor_names}):
         module, local_name = _lookup_module_and_name(model, full_name)
-        if (
-            local_name in module._parameters
-            and module._parameters[local_name] is not None
-        ):
-            param = module._parameters[local_name]
+        param = module._parameters.get(local_name)
+        if param is not None:
             if not param.is_meta:
                 allocated[full_name] = param.data
                 continue
@@ -188,8 +182,8 @@ def allocate_unbound_module_tensors(
                 alias_module._parameters[alias_local_name] = replacement
             allocated[full_name] = replacement.data
             continue
-        if local_name in module._buffers and module._buffers[local_name] is not None:
-            buf = module._buffers[local_name]
+        buf = module._buffers.get(local_name)
+        if buf is not None:
             if not buf.is_meta:
                 allocated[full_name] = buf
                 continue
