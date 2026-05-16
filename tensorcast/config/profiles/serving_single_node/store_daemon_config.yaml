@@ -46,15 +46,15 @@ pinned_memory:
   allocation_timeout: 30s
   classes:
     - name: engine
-      slice_bytes: 256MB
-      pool_bytes: 4GB
+      slice_bytes: 64MB
+      pool_bytes: 2GB
     - name: comm_gpu
       slice_bytes: 16MB
-      pool_bytes: 4GB
+      pool_bytes: 1GB
       rdma_preregister: false
     - name: comm_cpu
       slice_bytes: 4MB
-      pool_bytes: 512MB
+      pool_bytes: 256MB
       rdma_preregister: false
 
 high_availability:

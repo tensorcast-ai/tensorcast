@@ -112,6 +112,10 @@ def _resolve_advertise_address(
         port = explicit_port if explicit_port else bound_port
         return listen_host, port, "listen"
 
+    if listen_host and is_loopback_address(listen_host):
+        port = explicit_port if explicit_port else bound_port
+        return listen_host, port, "listen_loopback"
+
     detected = _resolve_default_advertise_host()
     if detected:
         port = explicit_port if explicit_port else bound_port

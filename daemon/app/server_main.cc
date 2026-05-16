@@ -13,6 +13,7 @@
 #include <ranges>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <fcntl.h>
 #include <linux/memfd.h>
@@ -48,6 +49,7 @@
 #include "daemon/app/daemon_app.h"
 #include "daemon/app/startup_memory_preflight.h"
 #include "daemon/util/identity_utils.h"
+#include "daemon/util/local_handle_socket_path.h"
 #include "grpcpp/server.h"
 #include "grpcpp/server_builder.h"
 #include "gsl/pointers"
@@ -154,19 +156,7 @@ absl::Status ensure_local_handle_parent_dir(const std::filesystem::path& dir) {
 }
 
 absl::Status ensure_local_handle_socket_path_ready(const std::string& socket_path) {
-  if (socket_path.empty()) {
-    return absl::InvalidArgumentError("local_handle_socket_path is empty");
-  }
-  if (socket_path.size() >= sizeof(sockaddr_un::sun_path)) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("local_handle_socket_path is too long for AF_UNIX (len=", socket_path.size(), "): ", socket_path));
-  }
-  const std::filesystem::path parent = std::filesystem::path(socket_path).parent_path();
-  if (parent.empty()) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("local_handle_socket_path must include a parent directory: ", socket_path));
-  }
-  return ensure_local_handle_parent_dir(parent);
+  return daemon::validate_local_handle_socket_path(socket_path);
 }
 
 absl::StatusOr<std::filesystem::path> tensorcast_home_dir() {
@@ -190,20 +180,6 @@ std::string trim_copy(std::string_view value) {
     --end;
   }
   return std::string(value.substr(begin, end - begin));
-}
-
-uint64_t fnv1a_hash_64(std::string_view value) {
-  uint64_t hash = 1469598103934665603ULL;
-  for (unsigned char c : value) {
-    hash ^= c;
-    hash *= 1099511628211ULL;
-  }
-  return hash;
-}
-
-std::string short_socket_name(std::string_view seed) {
-  const uint64_t hash = fnv1a_hash_64(seed);
-  return std::format("lh-{:016x}.sock", hash);
 }
 
 uint64_t saturating_mul_u64(uint64_t lhs, uint64_t rhs) {
@@ -242,23 +218,21 @@ std::string format_binary_bytes(uint64_t bytes) {
 
 absl::StatusOr<std::string> shorten_socket_path_if_needed(const std::filesystem::path& preferred) {
   const std::string preferred_str = preferred.string();
-  if (preferred_str.size() < sizeof(sockaddr_un::sun_path)) {
-    return preferred_str;
-  }
+  std::vector<std::filesystem::path> fallback_dirs;
   auto home_or = tensorcast_home_dir();
-  if (!home_or.ok()) {
-    return home_or.status();
+  if (home_or.ok()) {
+    fallback_dirs.push_back(*home_or / "uds");
   }
-  const std::filesystem::path fallback = *home_or / "uds" / short_socket_name(preferred_str);
-  const std::string fallback_str = fallback.string();
-  if (fallback_str.size() >= sizeof(sockaddr_un::sun_path)) {
-    return absl::InvalidArgumentError(
-        absl::StrCat(
-            "local_handle_socket_path too long even after shortening (len=", fallback_str.size(), "): ", fallback_str));
+  auto selected_or = daemon::select_local_handle_socket_path(preferred, preferred_str, std::move(fallback_dirs));
+  if (!selected_or.ok()) {
+    return selected_or.status();
   }
-  LOG(WARNING) << "local_handle_socket_path too long (len=" << preferred_str.size()
-               << "); using shortened path=" << fallback_str;
-  return fallback_str;
+  if (*selected_or != preferred_str) {
+    LOG(WARNING) << "local_handle_socket_path too long (len=" << preferred_str.size()
+                 << ", max=" << daemon::local_handle_socket_path_limit_bytes()
+                 << "); using shortened path=" << *selected_or;
+  }
+  return *selected_or;
 }
 
 absl::StatusOr<std::filesystem::path> tensorcast_host_root_dir() {

@@ -170,7 +170,7 @@ class GlobalStoreConfig(BaseModel):
     )
 
     # Server settings
-    listen_host: str = "127.0.0.1"
+    listen_host: str = "0.0.0.0"
     listen_port: int = 50051
     advertise_host: str | None = None
     advertise_port: int | None = None
@@ -224,7 +224,7 @@ class GlobalStoreConfig(BaseModel):
             Path(pb.database.db_file).expanduser() if pb.database.db_file else None
         )
         # Server
-        listen_host = "127.0.0.1"
+        listen_host = "0.0.0.0"
         listen_port = 50051
         advertise_host: str | None = None
         advertise_port: int | None = None
@@ -683,7 +683,7 @@ class GlobalStoreConfig(BaseModel):
             transport_scheduler=scheduler_policy,
             group_realization=group_realization,
             progressive_replication=progressive_replication,
-            listen_host=listen_host or "127.0.0.1",
+            listen_host=listen_host or "0.0.0.0",
             listen_port=listen_port if listen_port >= 0 else 0,
             advertise_host=advertise_host,
             advertise_port=advertise_port,

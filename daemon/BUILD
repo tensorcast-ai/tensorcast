@@ -89,6 +89,15 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "local_handle_socket_path_lib",
+    srcs = ["util/local_handle_socket_path.cc"],
+    hdrs = ["util/local_handle_socket_path.h"],
+    deps = [
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_cc_library(
     name = "startup_coordinator_lib",
     srcs = ["app/startup_coordinator.cc"],
     hdrs = ["app/startup_coordinator.h"],
@@ -259,6 +268,7 @@ sc_cc_library(
         ":key_mapping_controller_lib",
         ":lease_controller_lib",
         ":local_handle_server_lib",
+        ":local_handle_socket_path_lib",
         ":persistence_rpc_controller_lib",
         ":replica_session_controller_lib",
         ":startup_coordinator_lib",
@@ -680,6 +690,7 @@ cc_binary(
     deps = [
         ":daemon_app_lib",
         ":identity_utils_lib",
+        ":local_handle_socket_path_lib",
         ":startup_memory_preflight_lib",
         "//core/common:artifact_hash_lib",
         "//core/common:async_runtime_lib",
@@ -1845,6 +1856,15 @@ cc_test(
     deps = [
         ":path_utils_lib",
         "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "local_handle_socket_path_test",
+    srcs = ["util/local_handle_socket_path_test.cc"],
+    deps = [
+        ":local_handle_socket_path_lib",
         "@catch2//:catch2_main",
     ],
 )
