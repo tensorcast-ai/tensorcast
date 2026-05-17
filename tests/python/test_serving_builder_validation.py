@@ -14,14 +14,11 @@ from tensorcast.serving.builder.compiler import (
     TensorcastServingFacts,
 )
 from tensorcast.serving.builder.recipe_validation import (
-    validate_recipe_for_builder_mode,
-)
+    validate_recipe_for_builder_mode, )
 from tensorcast.serving.builder.semantic_validation import (
-    evaluate_semantic_validation_spec,
-)
+    evaluate_semantic_validation_spec, )
 from tensorcast.serving.builder.tensor_schema import (
-    validate_tensor_schema_against_tensors,
-)
+    validate_tensor_schema_against_tensors, )
 from tensorcast.serving.builder.trace_ir import TracePlan
 from tensorcast.types import BuilderMode, FinalizeClass, ServingSupportLevel
 
@@ -49,6 +46,8 @@ def _recipe() -> CompiledServingRecipe:
         ),
         tensor_schema=(),
         source_hull=(),
+        realization_plan=(),
+        realization_fallback_plan=(),
         logical_topology=None,
         semantic_validation_spec=TensorcastSemanticValidationSpec.empty(),
     )
@@ -69,7 +68,8 @@ def test_validate_recipe_for_builder_mode_rejects_binding_finalize_fact_mismatch
         validate_recipe_for_builder_mode(recipe, BuilderMode.BINDING_FINALIZE)
 
 
-def test_validate_recipe_for_builder_mode_rejects_non_publication_ready() -> None:
+def test_validate_recipe_for_builder_mode_rejects_non_publication_ready(
+) -> None:
     recipe = replace(
         _recipe(),
         serving_facts=replace(
@@ -97,7 +97,9 @@ def test_evaluate_semantic_validation_spec_normalizes_and_compares_payload(
     assert evaluate_semantic_validation_spec(
         spec,
         _ProbePayload(values=(1, 2, 3)),
-    ) == {"values": [1, 2, 3]}
+    ) == {
+        "values": [1, 2, 3]
+    }
 
 
 def test_evaluate_semantic_validation_spec_rejects_explicit_mismatch() -> None:

@@ -1,5 +1,4 @@
 #  Copyright (c) 2026, TensorCast Team.
-
 """Framework-neutral serving recipe compiler primitives."""
 
 from __future__ import annotations
@@ -11,8 +10,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from tensorcast.api.store import BindingRealizationEntry
+from tensorcast.api.store.common import canonical_index_to_bytes
+from tensorcast.api.store.common import dtype_from_string as store_dtype_from_string
+from tensorcast.api.store.realization_plan import binding_realization_plan_to_proto
+from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry
+from tensorcast.serving.builder.binding_plan import lower_trace_plan_for_realization
 from tensorcast.serving.builder.source_catalog import resolve_source_artifact_ref
-from tensorcast.serving.builder.trace_ir import Range, TracePlan
+from tensorcast.serving.builder.trace_ir import CopyPlanEntry, Range, TracePlan
 from tensorcast.types import FinalizeClass, ServingSupportLevel
 
 
@@ -72,8 +77,12 @@ class CompiledServingRecipe:
     trace_plan: TracePlan
     tensor_schema: tuple[TensorSchemaEntry, ...]
     source_hull: tuple[SourceHullEntry, ...]
+    realization_plan: tuple[BindingRealizationEntry, ...]
+    realization_fallback_plan: tuple[CopyPlanEntry, ...]
     logical_topology: TensorcastLogicalTopology | None
     semantic_validation_spec: TensorcastSemanticValidationSpec
+    realization_plan_proto: bytes = b""
+    realization_plan_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -125,6 +134,18 @@ def compile_serving_recipe(
         inputs.tensor_schema,
         inputs.trace_plan,
     )
+    target_shapes = {entry.name: entry.shape for entry in tensor_schema}
+    realization_plan, realization_fallback_plan, _prefix_dims = (
+        lower_trace_plan_for_realization(
+            inputs.trace_plan,
+            target_shapes,
+        )
+    )
+    del _prefix_dims
+    realization_plan_proto = binding_realization_plan_proto_bytes(
+        realization_plan,
+        tensor_schema,
+    )
     compile_key = compute_recipe_compile_key(
         identity=identity,
         source_artifact_ref=source_artifact_ref,
@@ -144,8 +165,12 @@ def compile_serving_recipe(
             SourceHullEntry(name=name, range=rng)
             for name, rng in sorted(inputs.trace_plan.src_hull.items())
         ),
+        realization_plan=realization_plan,
+        realization_fallback_plan=realization_fallback_plan,
         logical_topology=identity.logical_topology,
         semantic_validation_spec=inputs.semantic_validation_spec,
+        realization_plan_proto=realization_plan_proto,
+        realization_plan_count=len(realization_plan),
     )
     if observer is not None:
         observer.event(
@@ -159,9 +184,62 @@ def compile_serving_recipe(
                 "expected_src_count": len(recipe.trace_plan.expected_src_names),
                 "expected_dst_count": len(recipe.trace_plan.expected_dst_names),
                 "tensorcast_slice_count": len(recipe.trace_plan.tensorcast_slices),
+                "realization_plan_count": compiled_recipe_realization_plan_count(
+                    recipe
+                ),
+                "realization_fallback_count": len(recipe.realization_fallback_plan),
             },
         )
     return recipe
+
+
+def tensor_schema_target_index_bytes(
+    tensor_schema: Sequence[TensorSchemaEntry],
+) -> bytes:
+    entries: list[CanonicalIndexEntry] = []
+    cursor = 0
+    for entry in tensor_schema:
+        dtype = store_dtype_from_string(entry.dtype)
+        numel = 1
+        for dim in entry.shape:
+            numel *= int(dim)
+        size_bytes = int(numel * dtype.itemsize)
+        entries.append(
+            CanonicalIndexEntry(
+                name=str(entry.name),
+                dtype=dtype,
+                shape=tuple(int(dim) for dim in entry.shape),
+                stride=tuple(int(dim) for dim in entry.stride),
+                storage_offset=0,
+                segment_offset=cursor,
+                size_bytes=size_bytes,
+            )
+        )
+        cursor += size_bytes
+    return canonical_index_to_bytes(
+        CanonicalIndex(
+            entries=tuple(entries),
+            total_size_bytes=cursor,
+            avbs_hash="",
+        )
+    )
+
+
+def binding_realization_plan_proto_bytes(
+    realization_plan: Sequence[object],
+    tensor_schema: Sequence[TensorSchemaEntry],
+) -> bytes:
+    proto = binding_realization_plan_to_proto(
+        realization_plan,
+        target_index_bytes=tensor_schema_target_index_bytes(tensor_schema),
+    )
+    return proto.SerializeToString(deterministic=True)
+
+
+def compiled_recipe_realization_plan_count(
+    recipe: CompiledServingRecipe,
+) -> int:
+    return int(recipe.realization_plan_count or len(recipe.realization_plan))
 
 
 def filter_tensor_schema_for_trace_plan(
@@ -298,7 +376,10 @@ __all__ = [
     "TensorcastLogicalTopology",
     "TensorcastSemanticValidationSpec",
     "TensorcastServingFacts",
+    "binding_realization_plan_proto_bytes",
     "compile_serving_recipe",
+    "compiled_recipe_realization_plan_count",
     "compute_recipe_compile_key",
     "filter_tensor_schema_for_trace_plan",
+    "tensor_schema_target_index_bytes",
 ]

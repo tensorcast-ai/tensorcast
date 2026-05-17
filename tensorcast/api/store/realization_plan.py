@@ -81,10 +81,12 @@ def normalize_binding_realization_plan(
 
 
 def binding_realization_plan_to_proto(
-    plan: Sequence[object],
+    plan: Sequence[object] | store_daemon_pb2.BindingRealizationPlan,
     *,
     target_index_bytes: bytes,
 ) -> store_daemon_pb2.BindingRealizationPlan:
+    if isinstance(plan, store_daemon_pb2.BindingRealizationPlan):
+        return plan
     if not isinstance(plan, Sequence) or not plan:
         raise ArtifactError(
             "realization_plan must be a non-empty sequence of BindingRealizationEntry objects",

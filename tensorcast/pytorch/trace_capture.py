@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import gc
 import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -543,7 +544,10 @@ def trace_model_load(
     )
     trace_mode = TraceMode(src_registry=src_registry, dst_registry=dst_registry)
     trace_token = activation.set_active() if activation is not None else None
+    gc_was_enabled = gc.isenabled()
     try:
+        if gc_was_enabled:
+            gc.disable()
         with trace_mode:
             if native_load_weights is None:
                 load_weights = getattr(model, "load_weights", None)
@@ -553,6 +557,9 @@ def trace_model_load(
             else:
                 native_load_weights(model, weights_iterator)
     finally:
+        src_keepalive.clear()
+        if gc_was_enabled:
+            gc.enable()
         if activation is not None:
             activation.reset_active(trace_token)
 

@@ -216,7 +216,7 @@ std::string format_binary_bytes(uint64_t bytes) {
   return std::format("{}B", bytes);
 }
 
-absl::StatusOr<std::string> shorten_socket_path_if_needed(const std::filesystem::path& preferred) {
+absl::StatusOr<std::string> select_auto_local_handle_socket_path(const std::filesystem::path& preferred) {
   const std::string preferred_str = preferred.string();
   std::vector<std::filesystem::path> fallback_dirs;
   auto home_or = tensorcast_home_dir();
@@ -228,9 +228,9 @@ absl::StatusOr<std::string> shorten_socket_path_if_needed(const std::filesystem:
     return selected_or.status();
   }
   if (*selected_or != preferred_str) {
-    LOG(WARNING) << "local_handle_socket_path too long (len=" << preferred_str.size()
-                 << ", max=" << daemon::local_handle_socket_path_limit_bytes()
-                 << "); using shortened path=" << *selected_or;
+    LOG(INFO) << "Auto-selected bounded lifecycle.handle_leases.local_handle_socket_path=" << *selected_or
+              << " preferred_len=" << preferred_str.size()
+              << " max_len=" << daemon::local_handle_socket_path_limit_bytes();
   }
   return *selected_or;
 }
@@ -413,7 +413,7 @@ absl::StatusOr<std::string> discover_local_handle_socket_path(std::string_view d
       return st;
     }
     std::filesystem::path sock = dir / "local_handle.sock";
-    return shorten_socket_path_if_needed(sock);
+    return select_auto_local_handle_socket_path(sock);
   }
   auto runtime_dir_or = discover_daemon_runtime_dir(daemon_id);
   if (!runtime_dir_or.ok()) {
@@ -425,7 +425,7 @@ absl::StatusOr<std::string> discover_local_handle_socket_path(std::string_view d
     return st;
   }
   std::filesystem::path sock = dir / "local_handle.sock";
-  return shorten_socket_path_if_needed(sock);
+  return select_auto_local_handle_socket_path(sock);
 }
 
 absl::StatusOr<std::optional<uint64_t>> read_cgroup_v2_memory_max() {

@@ -49,6 +49,13 @@ from tensorcast.serving.builder.publication import (
     prepare_binding_finalize_serving_registration_from_context,
     prepare_pure_transform_serving_registration_from_context,
 )
+from tensorcast.serving.builder.recipe_cache import (
+    RECIPE_CACHE_PAYLOAD_VERSION,
+    compiled_recipe_from_dict,
+    compiled_recipe_to_dict,
+    load_compiled_recipe_cache,
+    write_compiled_recipe_cache,
+)
 from tensorcast.serving.builder.recipe_validation import (
     serving_support_level_at_least,
     serving_support_level_display_name,
@@ -103,6 +110,7 @@ __all__ = [
     "RecipeCompileIdentity",
     "RecipeCompileInputs",
     "RecipePublicationContext",
+    "RECIPE_CACHE_PAYLOAD_VERSION",
     "SemanticValidationSpec",
     "SourceCatalog",
     "SourceFileEntry",
@@ -133,6 +141,8 @@ __all__ = [
     "compute_recipe_compile_key",
     "copy_plan_from_dict",
     "copy_plan_to_dict",
+    "compiled_recipe_from_dict",
+    "compiled_recipe_to_dict",
     "dump_trace_plan_debug",
     "dtype_from_string",
     "evaluate_semantic_validation_spec",
@@ -165,5 +175,7 @@ __all__ = [
     "validate_source_tensor_names",
     "validate_tensor_schema_against_tensors",
     "load_trace_plan_cache",
+    "load_compiled_recipe_cache",
     "write_trace_plan_cache",
+    "write_compiled_recipe_cache",
 ]

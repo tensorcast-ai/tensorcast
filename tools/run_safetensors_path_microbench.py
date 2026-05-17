@@ -156,6 +156,106 @@ def _run_case(
     }
 
 
+def _run_concurrent_case(
+    *,
+    name: str,
+    rank_cmds: list[tuple[int, list[str]]],
+    output_dir: Path,
+    sample_interval_sec: float,
+    env: dict[str, str],
+) -> dict[str, Any]:
+    samples_path = output_dir / f"{name}.samples.jsonl"
+    started_at = time.time()
+    procs: list[dict[str, Any]] = []
+    for rank, cmd in rank_cmds:
+        log_path = output_dir / f"{name}_rank{rank}.log"
+        log_file = log_path.open("w", encoding="utf-8")
+        proc = subprocess.Popen(
+            cmd,
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+        )
+        procs.append(
+            {
+                "rank": rank,
+                "cmd": cmd,
+                "log_path": log_path,
+                "log_file": log_file,
+                "proc": proc,
+            }
+        )
+
+    peak_proc_by_rank: dict[str, dict[str, int]] = {}
+    peak_gpu: dict[str, int] = {}
+    with samples_path.open("w", encoding="utf-8") as samples_file:
+        while any(item["proc"].poll() is None for item in procs):
+            proc_samples: dict[str, dict[str, int]] = {}
+            for item in procs:
+                rank_key = str(item["rank"])
+                proc_status = _read_proc_status(item["proc"].pid)
+                proc_samples[rank_key] = proc_status
+                rank_peak = peak_proc_by_rank.setdefault(rank_key, {})
+                for key, value in proc_status.items():
+                    rank_peak[key] = max(rank_peak.get(key, 0), value)
+            gpu = _sample_gpu_memory()
+            for key, value in gpu.items():
+                peak_gpu[key] = max(peak_gpu.get(key, 0), value)
+            samples_file.write(
+                json.dumps(
+                    {
+                        "time": time.time(),
+                        "procs": proc_samples,
+                        "gpu_memory_mib": gpu,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            samples_file.flush()
+            time.sleep(sample_interval_sec)
+
+    ended_at = time.time()
+    rank_results: list[dict[str, Any]] = []
+    combined_results: list[dict[str, Any]] = []
+    returncodes: list[int] = []
+    for item in procs:
+        proc = item["proc"]
+        returncodes.append(proc.wait())
+        item["log_file"].close()
+        log_text = item["log_path"].read_text(encoding="utf-8")
+        parsed_results = _parse_result_lines(log_text)
+        for parsed in parsed_results:
+            combined_results.append({"rank": item["rank"], **parsed})
+        rank_results.append(
+            {
+                "rank": item["rank"],
+                "cmd": item["cmd"],
+                "returncode": proc.returncode,
+                "log_path": str(item["log_path"]),
+                "peak_proc_kib": peak_proc_by_rank.get(str(item["rank"]), {}),
+                "results": parsed_results,
+            }
+        )
+
+    failed = [rc for rc in returncodes if rc != 0]
+    return {
+        "name": name,
+        "kind": "concurrent",
+        "returncode": failed[0] if failed else 0,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "elapsed_sec": ended_at - started_at,
+        "samples_path": str(samples_path),
+        "peak_proc_by_rank_kib": peak_proc_by_rank,
+        "peak_gpu_mib": peak_gpu,
+        "rank_results": rank_results,
+        "results": combined_results,
+    }
+
+
 def _convert_trace_plan(args: argparse.Namespace, load_plan: Path) -> None:
     if load_plan.exists() and not args.force_convert:
         return
@@ -187,6 +287,38 @@ def _base_bench_cmd(args: argparse.Namespace) -> list[str]:
         f"--buffer_chunks={args.buffer_chunks}",
         f"--pinned_numa_node={args.pinned_numa_node}",
         f"--pinned_numa_prefault={str(args.pinned_numa_prefault).lower()}",
+    ]
+
+
+def _loader_strategies(args: argparse.Namespace) -> list[str]:
+    loader_strategies: list[str] = []
+    if "loader_b" in args.case:
+        loader_strategies.append("b")
+    if "loader_c" in args.case:
+        loader_strategies.append("c")
+    if args.include_strategy_a:
+        loader_strategies.insert(0, "a")
+    return loader_strategies
+
+
+def _build_loader_cmd(
+    args: argparse.Namespace,
+    load_plan: Path,
+    *,
+    rank: int,
+    strategy: str,
+    devices: list[int],
+    world_size: int,
+) -> list[str]:
+    return [
+        *_base_bench_cmd(args),
+        "--mode=loader",
+        f"--strategy={strategy}",
+        f"--tp_world_size={world_size}",
+        f"--tp_rank={rank}",
+        f"--device_id={devices[rank % len(devices)]}",
+        f"--load_plan_json_path={load_plan}",
+        f"--strategy_c_staging_bytes={args.strategy_c_staging_bytes}",
     ]
 
 
@@ -233,28 +365,20 @@ def _build_cases(args: argparse.Namespace, load_plan: Path) -> list[tuple[str, l
             )
         )
 
-    loader_strategies: list[str] = []
-    if "loader_b" in args.case:
-        loader_strategies.append("b")
-    if "loader_c" in args.case:
-        loader_strategies.append("c")
-    if args.include_strategy_a:
-        loader_strategies.insert(0, "a")
+    loader_strategies = _loader_strategies(args)
     for rank in args.rank:
         for strategy in loader_strategies:
             cases.append(
                 (
                     f"loader_rank{rank}_strategy_{strategy}",
-                    [
-                        *base,
-                        "--mode=loader",
-                        f"--strategy={strategy}",
-                        f"--tp_world_size={world_size}",
-                        f"--tp_rank={rank}",
-                        f"--device_id={devices[rank % len(devices)]}",
-                        f"--load_plan_json_path={load_plan}",
-                        f"--strategy_c_staging_bytes={args.strategy_c_staging_bytes}",
-                    ],
+                    _build_loader_cmd(
+                        args,
+                        load_plan,
+                        rank=rank,
+                        strategy=strategy,
+                        devices=devices,
+                        world_size=world_size,
+                    ),
                 )
             )
     return cases
@@ -271,6 +395,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--tp-world-size", type=int, default=0)
     parser.add_argument("--tp-devices", default="0,1,2,3")
     parser.add_argument("--rank", type=int, action="append")
+    parser.add_argument(
+        "--concurrent-ranks",
+        action="store_true",
+        help=(
+            "Run loader strategy cases for the selected ranks concurrently. "
+            "This models TP startup disk contention and records per-rank logs."
+        ),
+    )
     parser.add_argument(
         "--case",
         action="append",
@@ -298,40 +430,92 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
+    devices = _parse_csv_ints(args.tp_devices)
+    world_size = args.tp_world_size or len(devices)
     if args.rank is None:
-        args.rank = [0]
+        args.rank = list(range(world_size)) if args.concurrent_ranks else [0]
+    bad_ranks = [rank for rank in args.rank if rank < 0 or rank >= world_size]
+    if bad_ranks:
+        raise SystemExit(f"--rank must be in [0,{world_size}); got {bad_ranks}")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if not args.case:
-        args.case = ["odirect_host", "h2d_1gpu", "h2d_tp", "loader_b", "loader_c"]
+        args.case = (
+            ["loader_c"]
+            if args.concurrent_ranks
+            else ["odirect_host", "h2d_1gpu", "h2d_tp", "loader_b", "loader_c"]
+        )
     load_plan = args.load_plan or (args.output_dir / "load_plan.json")
     _convert_trace_plan(args, load_plan)
     if any(case.startswith("loader_") for case in args.case) and not load_plan.exists():
         raise SystemExit("--load-plan or --trace-plan-dir is required for loader cases")
+    if args.concurrent_ranks:
+        unsupported_cases = [
+            case for case in args.case if case not in ("loader_b", "loader_c")
+        ]
+        if unsupported_cases:
+            raise SystemExit(
+                "--concurrent-ranks supports loader_b/loader_c only; got "
+                f"{unsupported_cases}"
+            )
 
     env = os.environ.copy()
-    cases = _build_cases(args, load_plan)
     summary: dict[str, Any] = {
         "model_dir": str(args.model_dir),
         "load_plan": str(load_plan),
         "benchmark_bin": str(args.benchmark_bin),
+        "concurrent_ranks": args.concurrent_ranks,
+        "ranks": args.rank,
         "cases": [],
     }
-    for name, cmd in cases:
-        print(f"running {name}", flush=True)
-        result = _run_case(
-            name=name,
-            cmd=cmd,
-            output_dir=args.output_dir,
-            sample_interval_sec=args.sample_interval_sec,
-            env=env,
-        )
-        summary["cases"].append(result)
-        (args.output_dir / "summary.partial.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        if result["returncode"] != 0:
-            break
+    if args.concurrent_ranks:
+        for strategy in _loader_strategies(args):
+            name = f"loader_tp{world_size}_strategy_{strategy}_concurrent"
+            print(f"running {name}", flush=True)
+            rank_cmds = [
+                (
+                    rank,
+                    _build_loader_cmd(
+                        args,
+                        load_plan,
+                        rank=rank,
+                        strategy=strategy,
+                        devices=devices,
+                        world_size=world_size,
+                    ),
+                )
+                for rank in args.rank
+            ]
+            result = _run_concurrent_case(
+                name=name,
+                rank_cmds=rank_cmds,
+                output_dir=args.output_dir,
+                sample_interval_sec=args.sample_interval_sec,
+                env=env,
+            )
+            summary["cases"].append(result)
+            (args.output_dir / "summary.partial.json").write_text(
+                json.dumps(summary, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            if result["returncode"] != 0:
+                break
+    else:
+        for name, cmd in _build_cases(args, load_plan):
+            print(f"running {name}", flush=True)
+            result = _run_case(
+                name=name,
+                cmd=cmd,
+                output_dir=args.output_dir,
+                sample_interval_sec=args.sample_interval_sec,
+                env=env,
+            )
+            summary["cases"].append(result)
+            (args.output_dir / "summary.partial.json").write_text(
+                json.dumps(summary, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            if result["returncode"] != 0:
+                break
 
     (args.output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n",

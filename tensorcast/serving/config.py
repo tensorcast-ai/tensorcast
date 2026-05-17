@@ -53,7 +53,6 @@ class BootstrapSettings(BaseModel):
     mode: str = "auto"
     cache_dir: str | None = None
     verify_source_checksums: bool = True
-    publication_name: str | None = None
 
     @field_validator("mode", mode="before")
     @classmethod
@@ -66,7 +65,7 @@ class BootstrapSettings(BaseModel):
             field_name="bootstrap.mode",
         )
 
-    @field_validator("cache_dir", "publication_name", mode="before")
+    @field_validator("cache_dir", mode="before")
     @classmethod
     def _normalize_optional_fields(cls, value: Any) -> Any:
         return _normalize_optional_text(value)

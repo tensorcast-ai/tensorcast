@@ -18,10 +18,11 @@ server:
 public_disk_source:
   trusted_root_policies:
     - root_path: "/data/models"
+    - root_path: "/mnt/host0"
 
 engine:
   artifact_chunk_bytes: 256MB
-  streaming_buffer_chunks: 4
+  streaming_buffer_chunks: 2
   enable_external_target_verification: false
   materialization_strategy:
     enable_local_batched_disk_load: true
