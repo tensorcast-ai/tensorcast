@@ -13,6 +13,19 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+// glibc < 2.30 does not define SYS_pidfd_open
+#ifndef SYS_pidfd_open
+#if defined(__x86_64__)
+#define SYS_pidfd_open 434
+#elif defined(__aarch64__)
+#define SYS_pidfd_open 434
+#elif defined(__i386__)
+#define SYS_pidfd_open 381
+#else
+#error "Unsupported architecture for SYS_pidfd_open"
+#endif
+#endif
+
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "daemon/common/safe_sys.h"
