@@ -102,8 +102,8 @@ ensure_uv() {
 ensure_release_deps() {
     ensure_uv
     cd "${PROJECT_ROOT}"
-    echo "==> uv sync --group release"
-    uv sync --group release
+    echo "==> uv sync --group release --no-install-project"
+    uv sync --group release --no-install-project
 }
 
 # Filter dist/ for wheels eligible for PyPI upload (manylinux_*, not linux_*).
@@ -177,7 +177,7 @@ cmd_build() {
         cp pyproject.toml pyproject.toml.bak
         restore_pyproject=1
         echo "==> Patching pyproject.toml to torch==${torch_version}"
-        uv run python "${SCRIPT_DIR}/update_torch_version.py" "${torch_version}"
+        uv run --no-project python "${SCRIPT_DIR}/update_torch_version.py" "${torch_version}"
         trap '[[ ${restore_pyproject} -eq 1 ]] && mv pyproject.toml.bak pyproject.toml' EXIT
     fi
 
@@ -203,7 +203,7 @@ cache_uv_lock('${torch_version}', '${cuda_version}' or None)
     fi
 
     echo "==> Validating torch version consistency"
-    if ! uv run python -c "
+    if ! uv run --no-project python -c "
 import sys; sys.path.insert(0, '${SCRIPT_DIR}')
 from torch_version_manager import validate_torch_versions
 ok, _ = validate_torch_versions(raise_on_error=False)
@@ -214,7 +214,7 @@ sys.exit(0 if ok else 1)
     fi
 
     echo "==> Sync MODULE.bazel http_archives from uv.lock"
-    uv run python "${SCRIPT_DIR}/update_module_http_archives.py" \
+    uv run --no-project python "${SCRIPT_DIR}/update_module_http_archives.py" \
         --lockfile uv.lock --module MODULE.bazel
 
     echo "==> Building wheel"
@@ -243,7 +243,7 @@ sys.exit(0 if ok else 1)
     export BAZEL_BUILD_FLAGS="--curses=yes --show_progress_rate_limit=0 --ui_event_filters=progress,warning,error,info"
 
     rm -rf build dist
-    env "${build_env[@]}" uv run -vvv python setup.py bdist_wheel
+    env "${build_env[@]}" uv run --no-project -v python setup.py bdist_wheel
 
     if [[ ${restore_pyproject} -eq 1 ]]; then
         mv pyproject.toml.bak pyproject.toml
@@ -286,14 +286,14 @@ cmd_post_process() {
         echo "usage: tools/release.sh post-process WHEEL_PATH" >&2; exit 2
     fi
     ensure_release_deps
-    uv run python "${SCRIPT_DIR}/wheel_post_process.py" "${whl}"
+    uv run --no-project python "${SCRIPT_DIR}/wheel_post_process.py" "${whl}"
 }
 
 # ---- check -----------------------------------------------------------------
 cmd_check() {
     ensure_release_deps
     echo "==> twine check dist/*.whl"
-    uv run twine check dist/*.whl
+    uv run --no-project twine check dist/*.whl
 }
 
 # ---- publish ---------------------------------------------------------------
@@ -307,7 +307,7 @@ cmd_publish_test() {
     read -r -p "Continue? [y/N] " confirm
     [[ "${confirm}" == "y" || "${confirm}" == "Y" ]] || { echo "aborted."; exit 1; }
     # shellcheck disable=SC2086
-    uv run twine upload --repository testpypi ${wheels}
+    uv run --no-project twine upload --repository testpypi ${wheels}
 }
 
 cmd_publish() {
@@ -326,7 +326,7 @@ cmd_publish() {
         exit 1
     fi
     # shellcheck disable=SC2086
-    uv run twine upload ${wheels}
+    uv run --no-project twine upload ${wheels}
 }
 
 # ---- dispatch --------------------------------------------------------------

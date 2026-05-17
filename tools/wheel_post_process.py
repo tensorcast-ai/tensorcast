@@ -110,7 +110,7 @@ AUDITWHEEL_EXCLUDES = [
     "libcusparseLt.so.0",
     "libcusolver.so.11",
     "libcufft.so.11",
-    "libnvjitlink.so.12",
+    "libnvJitLink.so.12",
     "libnvrtc.so.12",
     "libnvToolsExt.so.1",
     "libnvidia-ml.so.1",
@@ -133,9 +133,9 @@ def _require(name: str) -> str:
     return path
 
 
-def _run(cmd: list[str]) -> None:
+def _run(cmd: list[str], env: dict[str, str] | None = None) -> None:
     print("+ " + " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, env=env)
 
 
 def _patchelf_set_rpath(elf: Path, rpath: str) -> None:
@@ -189,12 +189,77 @@ def _wheel_pack(unpacked_dir: Path, dest_dir: Path) -> Path:
 
 def _auditwheel_repair(wheel: Path, dest_dir: Path, plat: str) -> Path:
     auditwheel = _require("auditwheel")
+
+    # auditwheel needs to locate shared libraries (e.g. libnvJitLink.so.12)
+    # that are shipped inside the virtual-environment site-packages.
+    # Assemble every site-packages sub-directory that contains .so files.
+    env = os.environ.copy()
+    venv_site = Path(sys.executable).parent.parent / "lib" / f"python{sys.version_info[0]}.{sys.version_info[1]}" / "site-packages"
+    lib_dirs: list[str] = []
+
+    # Collect potential site-packages paths (venv + system)
+    site_paths: list[Path] = []
+
+    # 1. Try the currently-active venv (if any)
+    venv_site = Path(sys.executable).parent.parent / "lib" / f"python{sys.version_info[0]}.{sys.version_info[1]}" / "site-packages"
+    if venv_site.exists():
+        site_paths.append(venv_site)
+
+    # 2. Try project-local .venv (e.g. uv-managed, even when uv run --no-project
+    #    launches a *different* interpreter)
+    _project_venv = Path.cwd() / ".venv"
+    if _project_venv.exists():
+        _py_ver = f"python{sys.version_info[0]}.{sys.version_info[1]}"
+        _site = _project_venv / "lib" / _py_ver / "site-packages"
+        if _site.exists() and _site not in site_paths:
+            site_paths.append(_site)
+        # Also try common fallback patterns (e.g. conda, pyenv)
+        for _fallback in (_project_venv / "lib" / "python3.10" / "site-packages",
+                          _project_venv / "lib" / "python3.11" / "site-packages",
+                          _project_venv / "lib" / "python3.12" / "site-packages"):
+            if _fallback.exists() and _fallback not in site_paths:
+                site_paths.append(_fallback)
+
+    # 3. Also check system-level site-packages (e.g. inside docker with --no-venv or pip install as root)
+    try:
+        import site
+        for sp in site.getsitepackages():
+            p = Path(sp)
+            if p.exists() and p not in site_paths:
+                site_paths.append(p)
+    except Exception:
+        pass
+
+    # Find all directories that contain nvidia .so files or torch/lib
+    for sp in site_paths:
+        torch_lib = sp / "torch" / "lib"
+        if torch_lib.exists():
+            lib_dirs.append(str(torch_lib))
+        lib_dirs.extend(
+            str(p.parent)
+            for p in sp.rglob("*.so")
+            if "nvidia" in str(p)
+        )
+
+    if lib_dirs:
+        # Register all discovered directories with ldconfig so auditwheel's
+        # internal lddtree can resolve them.
+        extra = ":".join(dict.fromkeys(lib_dirs))  # dedup, preserve order
+        env["LD_LIBRARY_PATH"] = extra + ":" + env.get("LD_LIBRARY_PATH", "")
+        # write a transient ld.so.conf.d snippet and run ldconfig
+        _ldconf = Path("/etc/ld.so.conf.d/tensorcast-wheel-post-process.conf")
+        try:
+            _ldconf.write_text("\n".join(dict.fromkeys(lib_dirs)))
+            subprocess.run(["ldconfig"], check=True)
+        except Exception as exc:
+            print(f"warning: ldconfig registration failed: {exc}")
+
     cmd = [auditwheel, "repair", "--plat", plat, "-w", str(dest_dir)]
     for libname in AUDITWHEEL_EXCLUDES:
         cmd.extend(["--exclude", libname])
     cmd.append(str(wheel))
     before = set(dest_dir.glob("*.whl"))
-    _run(cmd)
+    _run(cmd, env=env)
     after = set(dest_dir.glob("*.whl"))
     produced = after - before
     if len(produced) != 1:
