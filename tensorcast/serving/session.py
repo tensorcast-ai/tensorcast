@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from tensorcast.serving.policy import ServingSelector
+from tensorcast.types import BindingValueRef
 
 
 class ServingBindingState(BaseModel):
@@ -21,6 +22,9 @@ class ServingBindingState(BaseModel):
     manifest_ref: str | None = None
     representation_contract_hash: str | None = None
     serving_build_digest: str | None = None
+    binding_value_ref: BindingValueRef | None = None
+    local_serving_ref: str | None = None
+    readiness: str | None = None
     updated_at: str | None = None
 
     def to_response(self) -> dict[str, Any]:

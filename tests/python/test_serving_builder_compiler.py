@@ -61,6 +61,7 @@ def _trace_plan() -> TracePlan:
 def _serving_facts(adapter_version: str = "adapter-v1") -> TensorcastServingFacts:
     return TensorcastServingFacts(
         framework_name="vllm",
+        framework_version="vllm-test",
         adapter_version=adapter_version,
         serving_abi_version="abi-v1",
         support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY,

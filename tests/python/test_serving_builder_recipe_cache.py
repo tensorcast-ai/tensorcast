@@ -45,6 +45,7 @@ def _recipe() -> CompiledServingRecipe:
         source_metadata_fingerprint="metadata-fingerprint",
         serving_facts=TensorcastServingFacts(
             framework_name="vllm",
+            framework_version="vllm-test",
             adapter_version="adapter-v1",
             serving_abi_version="abi-v1",
             support_level=ServingSupportLevel.RUNTIME_BIND_SWAP_READY,
@@ -104,6 +105,8 @@ def test_compiled_recipe_cache_round_trips(tmp_path: Path) -> None:
     assert "trace_plan" not in payload["compiled_recipe"]
     assert payload["compiled_recipe"]["trace_plan_summary"][
         "expected_dst_names"] == ["w"]
+    assert payload["compiled_recipe"]["serving_facts"][
+        "framework_version"] == "vllm-test"
 
 
 def test_compiled_recipe_cache_ignores_missing_and_unknown_version(
