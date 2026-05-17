@@ -6,12 +6,16 @@ import pytest
 
 from tensorcast.serving import (
     BootstrapSummary,
+    FrameworkIntegrationContext,
     PreparedServingArtifact,
+    RuntimeTensorView,
     ServingConfig,
+    ServingPlacement,
     ServingPolicy,
     ServingSelector,
     parse_external_preload_authority,
 )
+from tensorcast.types import ServingBindingMemberRef, ServingTopologyRef
 
 
 def test_serving_config_parses_nested_schema_defaults() -> None:
@@ -172,13 +176,22 @@ def test_external_preload_authority_parses_typed_refs() -> None:
 
 
 def test_serving_bootstrap_summary_round_trips_prefixed_payload() -> None:
+    binding_value_ref = {
+        "binding_id": "binding-1",
+        "binding_layout_id": "layout-1",
+        "binding_value_id": "value-1",
+        "seal_generation": 1,
+    }
     summary = BootstrapSummary(
         source_artifact_ref="disk:/model",
-        serving_artifact_ref="mi2:test:serving",
+        serving_artifact_ref=None,
         serving_manifest_ref="tensor:manifest",
         representation_contract_hash="repr-hash",
         serving_build_digest="build-digest",
+        binding_value_ref=binding_value_ref,
+        readiness="serving_local_ready",
         binding_layout_id="layout-1",
+        local_serving_ref="binding-local:binding-1:value-1",
         realize_collective_used=True,
         realize_actual_local_typed_bytes=128,
         source_bound_capability_flags=("FIRST_CLASS_COLLECTIVE_INGRESS", ),
@@ -188,6 +201,9 @@ def test_serving_bootstrap_summary_round_trips_prefixed_payload() -> None:
     restored = BootstrapSummary.from_dict(payload)
 
     assert payload["bootstrap_serving_manifest_ref"] == "tensor:manifest"
+    assert payload["bootstrap_serving_artifact_ref"] is None
+    assert payload["bootstrap_readiness"] == "serving_local_ready"
+    assert payload["bootstrap_binding_value_ref"] == binding_value_ref
     assert payload["bootstrap_rank_local_artifact_ids_present"] is True
     assert restored == summary
     assert restored.manifest_ref == "tensor:manifest"
@@ -216,4 +232,85 @@ def test_prepared_serving_artifact_builds_reload_request() -> None:
             "representation_contract_hash": "repr-hash",
             "serving_build_digest": "build-digest",
         },
+    }
+
+
+def test_local_ready_prepared_serving_artifact_cannot_build_reload_request(
+) -> None:
+    artifact = PreparedServingArtifact(
+        source_artifact_ref="disk:/model",
+        serving_artifact_ref=None,
+        manifest_ref="tensor:manifest",
+        representation_contract_hash="repr-hash",
+        serving_build_digest="build-digest",
+        binding_value_ref={
+            "binding_id": "binding-1",
+            "binding_layout_id": "layout-1",
+            "binding_value_id": "value-1",
+            "seal_generation": 1,
+        },
+        readiness="serving_local_ready",
+        local_serving_ref="binding-local:binding-1:value-1",
+        family="demo",
+        tensor_schema_hash="schema-hash",
+    )
+
+    with pytest.raises(RuntimeError, match="cannot be used as a reload"):
+        artifact.to_reload_request()
+
+    payload = artifact.to_dict()
+    assert payload["serving_artifact_ref"] is None
+    assert payload["binding_value_ref"]["binding_value_id"] == "value-1"
+    assert payload["readiness"] == "serving_local_ready"
+    assert payload["reload_request"] is None
+
+
+def test_framework_context_and_runtime_tensor_view_are_identity_only() -> None:
+    placement = ServingPlacement(
+        topology=ServingTopologyRef(
+            schema_topology_digest="topology-digest",
+            logical_topology_ref="vllm://parallelism?tp=2&pp=1&dp=1",
+        ),
+        member=ServingBindingMemberRef(
+            member_id="dp0:pp0:tp1",
+            member_index=1,
+            member_count=2,
+            group_id="group-1",
+        ),
+        framework_payload={
+            "family": "vllm_parallelism",
+            "version": "v1",
+        },
+        identity_payload={
+            "tp_rank": 1,
+            "tp_world_size": 2,
+        },
+    )
+    context = FrameworkIntegrationContext(
+        framework_name="vllm",
+        framework_version="0.test",
+        adapter_version="adapter-v1",
+        serving_abi_version="abi-v1",
+        placement=placement,
+        source_identity={"model": "demo"},
+    )
+    tensor_view = RuntimeTensorView(
+        name="model.embed_tokens.weight",
+        dtype="torch.float16",
+        shape=(4, 8),
+        stride=(8, 1),
+        storage_offset=0,
+        element_size=2,
+    )
+
+    assert context.stable_identity_payload()["framework_version"] == "0.test"
+    assert context.stable_identity_payload()["placement"] == \
+        placement.stable_identity_payload()
+    assert tensor_view.model_dump(mode="python") == {
+        "name": "model.embed_tokens.weight",
+        "dtype": "torch.float16",
+        "shape": (4, 8),
+        "stride": (8, 1),
+        "storage_offset": 0,
+        "element_size": 2,
     }

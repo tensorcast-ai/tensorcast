@@ -61,6 +61,7 @@ def _trace_plan() -> TracePlan:
 def _serving_facts(adapter_version: str = "adapter-v1") -> TensorcastServingFacts:
     return TensorcastServingFacts(
         framework_name="vllm",
+        framework_version="vllm-test",
         adapter_version=adapter_version,
         serving_abi_version="abi-v1",
         support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY,
@@ -153,6 +154,8 @@ def test_compile_serving_recipe_assembles_recipe_from_pure_inputs() -> None:
                 "expected_src_count": 1,
                 "expected_dst_count": 1,
                 "tensorcast_slice_count": 0,
+                "realization_plan_count": 1,
+                "realization_fallback_count": 0,
             },
         )
     ]

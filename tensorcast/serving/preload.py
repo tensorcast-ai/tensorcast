@@ -751,6 +751,85 @@ def external_preload_mode(extra: Mapping[str, Any] | None) -> str:
     return ServingConfig.from_mapping(extra).preload.mode
 
 
+@contextmanager
+def acquire_retained_serving_binding(
+    *,
+    authority: ParsedExternalPreloadAuthority | None = None,
+    local_serving_ref: str | None = None,
+    target_device: torch.device | str | None = None,
+    expected_member: tc.ServingBindingMemberRef | None = None,
+    expected_tensor_schema_hash: str | None = None,
+    expected_serving_build_digest: str | None = None,
+    expected_target_layout_hash: str | None = None,
+    expected_daemon_id: str | None = None,
+    expected_daemon_session_id: str | None = None,
+    serving_artifact_id: str | None = None,
+    caller_pid: int | None = None,
+    runtime: Any | None = None,
+    client: Any | None = None,
+    timeout_s: float | None = None,
+) -> Iterator[BorrowedPreloadLease]:
+    if authority is not None:
+        if local_serving_ref is not None:
+            raise ValueError(
+                "acquire_retained_serving_binding accepts either authority "
+                "or local_serving_ref, not both"
+            )
+        with acquire_preload_lease(
+            authority,
+            caller_pid=caller_pid,
+            runtime=runtime,
+            client=client,
+            timeout_s=timeout_s,
+        ) as lease:
+            yield lease
+        return
+
+    if local_serving_ref is None:
+        raise ValueError(
+            "acquire_retained_serving_binding requires authority or local_serving_ref"
+        )
+    if target_device is None or expected_member is None:
+        raise ValueError(
+            "local-ready retained acquire requires target_device and expected_member"
+        )
+    if not expected_tensor_schema_hash or not expected_serving_build_digest:
+        raise ValueError(
+            "local-ready retained acquire requires expected tensor schema "
+            "hash and serving build digest"
+        )
+
+    device = torch.device(target_device)
+    device_index = device.index
+    if device_index is None:
+        raise RuntimeError(
+            "TensorCast local-ready retained acquire requires an explicit "
+            "CUDA device index"
+        )
+    if runtime is None:
+        from tensorcast.api.store import get_runtime_context
+
+        runtime = get_runtime_context()
+    from tensorcast.api.store import device_uuid_for
+
+    with acquire_local_ready_preload_lease(
+        local_serving_ref=local_serving_ref,
+        expected_device_uuid=device_uuid_for(int(device_index)),
+        expected_member=expected_member,
+        expected_tensor_schema_hash=expected_tensor_schema_hash,
+        expected_serving_build_digest=expected_serving_build_digest,
+        expected_target_layout_hash=expected_target_layout_hash,
+        expected_daemon_id=expected_daemon_id,
+        expected_daemon_session_id=expected_daemon_session_id,
+        serving_artifact_id=serving_artifact_id,
+        caller_pid=caller_pid,
+        runtime=runtime,
+        client=client,
+        timeout_s=timeout_s,
+    ) as lease:
+        yield lease
+
+
 def external_preload_trusted_reservation_bytes(load_config_or_extra: Any) -> int:
     extra = getattr(
         load_config_or_extra, "model_loader_extra_config", load_config_or_extra

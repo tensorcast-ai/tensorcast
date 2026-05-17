@@ -7,9 +7,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from tensorcast.serving.policy import ServingSelector
+from tensorcast.types import (
+    BindingValueRef,
+    ServingBindingMemberRef,
+    ServingTopologyRef,
+)
 
 
 def _normalize_manifest_ref_payload(data: Any) -> Any:
@@ -30,6 +35,17 @@ def _optional_text(value: Any) -> str | None:
         return None
     normalized = str(value)
     return normalized or None
+
+
+def _model_dump_or_none(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        return dict(dump(mode="python"))
+    if isinstance(value, Mapping):
+        return dict(value)
+    raise TypeError(f"Cannot serialize {type(value)!r} as a mapping")
 
 
 def _text(payload: Mapping[str, Any], *keys: str, default: str = "") -> str:
@@ -58,10 +74,12 @@ class BootstrapSummary(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     source_artifact_ref: str
-    serving_artifact_ref: str
+    serving_artifact_ref: str | None = None
     serving_manifest_ref: str
     representation_contract_hash: str
     serving_build_digest: str
+    binding_value_ref: BindingValueRef | None = None
+    readiness: str = "serving_published_ready"
     binding_layout_id: str | None = None
     local_serving_ref: str | None = None
     verification_state: str = "verified"
@@ -140,6 +158,8 @@ class BootstrapSummary(BaseModel):
             "bootstrap_serving_manifest_ref": self.serving_manifest_ref,
             "bootstrap_representation_contract_hash": self.representation_contract_hash,
             "bootstrap_serving_build_digest": self.serving_build_digest,
+            "bootstrap_binding_value_ref": _model_dump_or_none(self.binding_value_ref),
+            "bootstrap_readiness": self.readiness,
             "bootstrap_binding_layout_id": self.binding_layout_id,
             "bootstrap_local_serving_ref": self.local_serving_ref,
             "bootstrap_verification_state": self.verification_state,
@@ -225,13 +245,27 @@ class BootstrapSummary(BaseModel):
 
         return cls(
             source_artifact_ref=_text(payload, "bootstrap_source_artifact_ref"),
-            serving_artifact_ref=_text(payload, "bootstrap_serving_artifact_ref"),
+            serving_artifact_ref=_optional_text(
+                payload.get("bootstrap_serving_artifact_ref")
+            ),
             serving_manifest_ref=_text(payload, "bootstrap_serving_manifest_ref"),
             representation_contract_hash=_text(
                 payload,
                 "bootstrap_representation_contract_hash",
             ),
             serving_build_digest=_text(payload, "bootstrap_serving_build_digest"),
+            binding_value_ref=(
+                None
+                if payload.get("bootstrap_binding_value_ref") is None
+                else BindingValueRef.model_validate(
+                    payload.get("bootstrap_binding_value_ref")
+                )
+            ),
+            readiness=_text(
+                payload,
+                "bootstrap_readiness",
+                default="serving_published_ready",
+            ),
             binding_layout_id=_optional_text(
                 payload.get("bootstrap_binding_layout_id")
             ),
@@ -414,10 +448,12 @@ class PreparedServingArtifact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     source_artifact_ref: str
-    serving_artifact_ref: str
+    serving_artifact_ref: str | None = None
     serving_manifest_ref: str
     representation_contract_hash: str
     serving_build_digest: str
+    binding_value_ref: BindingValueRef | None = None
+    readiness: str = "serving_published_ready"
     family: str
     tensor_schema_hash: str
     serving_version_key: str | None = None
@@ -447,11 +483,17 @@ class PreparedServingArtifact(BaseModel):
                 "kind": "version_key",
                 "value": self.serving_version_key,
             }
-        else:
+        elif self.serving_artifact_ref is not None:
             selector = {
                 "kind": "artifact_ref",
                 "value": self.serving_artifact_ref,
             }
+        else:
+            raise RuntimeError(
+                "TensorCast local-ready serving result does not reference a "
+                "durable serving artifact and cannot be used as a reload "
+                "request"
+            )
         return {
             "selector": selector,
             "policy": {
@@ -470,6 +512,8 @@ class PreparedServingArtifact(BaseModel):
             "serving_manifest_ref": self.serving_manifest_ref,
             "representation_contract_hash": self.representation_contract_hash,
             "serving_build_digest": self.serving_build_digest,
+            "binding_value_ref": _model_dump_or_none(self.binding_value_ref),
+            "readiness": self.readiness,
             "family": self.family,
             "tensor_schema_hash": self.tensor_schema_hash,
             "binding_layout_id": self.binding_layout_id,
@@ -478,8 +522,17 @@ class PreparedServingArtifact(BaseModel):
             "verification_job_id": self.verification_job_id,
             "tp_rank": self.tp_rank,
             "tp_world_size": self.tp_world_size,
-            "reload_request": self.to_reload_request(),
         }
+        try:
+            payload["reload_request"] = self.to_reload_request()
+        except RuntimeError:
+            if (
+                self.selector is not None
+                or self.serving_version_key is not None
+                or self.serving_artifact_ref is not None
+            ):
+                raise
+            payload["reload_request"] = None
         if self.bootstrap_summary is not None:
             payload["bootstrap_summary"] = self.bootstrap_summary.to_dict()
         return payload
@@ -493,6 +546,8 @@ class PreparedServingArtifact(BaseModel):
             serving_manifest_ref=self.serving_manifest_ref,
             representation_contract_hash=self.representation_contract_hash,
             serving_build_digest=self.serving_build_digest,
+            binding_value_ref=self.binding_value_ref,
+            readiness=self.readiness,
             binding_layout_id=self.binding_layout_id,
             local_serving_ref=self.local_serving_ref,
             verification_state=self.verification_state,
@@ -514,7 +569,68 @@ class FamilyReadiness(BaseModel):
     notes: str = ""
 
 
+class RuntimeTensorView(BaseModel):
+    """Framework-neutral tensor identity view without live tensor payload."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str
+    dtype: str
+    shape: tuple[int, ...]
+    stride: tuple[int, ...]
+    storage_offset: int = 0
+    element_size: int | None = None
+
+
+class ServingPlacement(BaseModel):
+    """Stable runtime placement identity shared with framework integrations."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    topology: ServingTopologyRef
+    member: ServingBindingMemberRef
+    framework_payload: dict[str, Any]
+    identity_payload: dict[str, Any]
+
+    def stable_identity_payload(self) -> dict[str, Any]:
+        return {
+            "topology": self.topology.model_dump(mode="python"),
+            "member": self.member.model_dump(mode="python"),
+            "framework_payload": self.framework_payload,
+            "identity_payload": self.identity_payload,
+        }
+
+
+class FrameworkIntegrationContext(BaseModel):
+    """Serializable framework identity facts used by core-owned facades."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    framework_name: str
+    framework_version: str
+    adapter_version: str
+    serving_abi_version: str
+    placement: ServingPlacement | None = None
+    source_identity: dict[str, Any] = Field(default_factory=dict)
+
+    def stable_identity_payload(self) -> dict[str, Any]:
+        return {
+            "framework_name": self.framework_name,
+            "framework_version": self.framework_version,
+            "adapter_version": self.adapter_version,
+            "serving_abi_version": self.serving_abi_version,
+            "placement": (
+                None
+                if self.placement is None
+                else self.placement.stable_identity_payload()
+            ),
+            "source_identity": dict(self.source_identity),
+        }
+
+
 class FrameworkAdapter(Protocol):
     def framework_name(self) -> str: ...
+
+    def framework_version(self) -> str: ...
 
     def adapter_version(self) -> str: ...

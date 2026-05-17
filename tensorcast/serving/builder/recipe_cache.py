@@ -35,6 +35,7 @@ RECIPE_CACHE_PAYLOAD_VERSION = 4
 def _serving_facts_to_dict(facts: TensorcastServingFacts) -> dict[str, Any]:
     return {
         "framework_name": facts.framework_name,
+        "framework_version": facts.framework_version,
         "adapter_version": facts.adapter_version,
         "serving_abi_version": facts.serving_abi_version,
         "support_level": facts.support_level.value,
@@ -47,6 +48,11 @@ def _serving_facts_to_dict(facts: TensorcastServingFacts) -> dict[str, Any]:
 def _serving_facts_from_dict(data: Mapping[str, Any]) -> TensorcastServingFacts:
     return TensorcastServingFacts(
         framework_name=str(data["framework_name"]),
+        framework_version=(
+            None
+            if data.get("framework_version") is None
+            else str(data["framework_version"])
+        ),
         adapter_version=str(data["adapter_version"]),
         serving_abi_version=str(data["serving_abi_version"]),
         support_level=ServingSupportLevel(str(data["support_level"])),

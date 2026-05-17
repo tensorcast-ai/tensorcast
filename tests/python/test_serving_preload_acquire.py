@@ -12,6 +12,7 @@ import tensorcast as tc
 from tensorcast.serving import (
     ExternalPreloadExpectedDigests,
     acquire_preload_lease,
+    acquire_retained_serving_binding,
     external_preload_extra_from_prefetched_binding,
     external_preload_extra_json,
     external_preload_mode,
@@ -189,6 +190,10 @@ class _Client:
         self.acquire_calls.append(kwargs)
         return self.response
 
+    def acquire_binding_value_by_local_ref(self, **kwargs):
+        self.acquire_calls.append(kwargs)
+        return self.response
+
     def release_placement_lease(self, *, lease_token: bytes, **_kwargs):
         self.released_tokens.append(bytes(lease_token))
 
@@ -216,6 +221,54 @@ def test_acquire_preload_lease_releases_unrestored_lease_on_context_exit():
 
     assert client.acquire_calls[0]["caller_pid"] == 123
     assert client.acquire_calls[0]["expected_tensor_schema_hash"] == "schema-hash"
+    assert client.released_tokens == [b"lease"]
+
+
+def test_acquire_retained_serving_binding_uses_external_authority():
+    authority = _authority()
+    client = _Client(_response())
+
+    with acquire_retained_serving_binding(
+        authority=authority,
+        runtime=_Runtime(client),
+        caller_pid=456,
+    ) as lease:
+        assert lease.binding_value_ref == authority.binding_value_ref
+
+    assert client.acquire_calls[0]["caller_pid"] == 456
+    assert client.acquire_calls[0]["binding_value_ref"] == \
+        authority.binding_value_ref
+    assert client.released_tokens == [b"lease"]
+
+
+def test_acquire_retained_serving_binding_acquires_local_ready(monkeypatch):
+    member = ServingBindingMemberRef(
+        member_id="member-0",
+        member_index=0,
+        member_count=1,
+        group_id="group-1",
+    )
+    client = _Client(_response())
+    import tensorcast.api.store as store_api
+
+    monkeypatch.setattr(store_api, "device_uuid_for",
+                        lambda device_index: f"gpu-{device_index}")
+
+    with acquire_retained_serving_binding(
+        local_serving_ref="binding-local:binding-1:value-1",
+        target_device=torch.device("cuda:3"),
+        expected_member=member,
+        expected_tensor_schema_hash="schema-hash",
+        expected_serving_build_digest="build-digest",
+        runtime=_Runtime(client),
+        caller_pid=789,
+    ) as lease:
+        assert lease.authority.readiness == "serving_local_ready"
+
+    assert client.acquire_calls[0]["local_serving_ref"] == \
+        "binding-local:binding-1:value-1"
+    assert client.acquire_calls[0]["expected_device_uuid"] == "gpu-3"
+    assert client.acquire_calls[0]["caller_pid"] == 789
     assert client.released_tokens == [b"lease"]
 
 

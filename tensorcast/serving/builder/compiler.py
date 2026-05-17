@@ -30,6 +30,7 @@ class TensorcastServingFacts:
     runtime_only_tensor_names: tuple[str, ...]
     process_after_load_class: FinalizeClass
     post_bind_finalize_class: FinalizeClass
+    framework_version: str | None = None
 
 
 ServingFacts = TensorcastServingFacts
@@ -266,6 +267,11 @@ def _validate_compile_identity_matches_facts(
         for field_name, identity_value, facts_value in (
             ("framework_name", identity.framework_name, serving_facts.framework_name),
             (
+                "framework_version",
+                identity.framework_version,
+                serving_facts.framework_version,
+            ),
+            (
                 "adapter_version",
                 identity.adapter_version,
                 serving_facts.adapter_version,
@@ -276,7 +282,9 @@ def _validate_compile_identity_matches_facts(
                 serving_facts.serving_abi_version,
             ),
         )
-        if str(identity_value) != str(facts_value)
+        if identity_value is not None
+        and facts_value is not None
+        and str(identity_value) != str(facts_value)
     ]
     if mismatches:
         raise ValueError(
@@ -302,9 +310,11 @@ def compute_recipe_compile_key(
         "source_artifact_ref": source_artifact_ref,
         "metadata_fingerprint": source_metadata_fingerprint,
         "framework_name": serving_facts.framework_name,
+        "framework_version": serving_facts.framework_version,
         "adapter_version": serving_facts.adapter_version,
         "serving_abi_version": serving_facts.serving_abi_version,
         "identity_framework_name": identity.framework_name,
+        "identity_framework_version": identity.framework_version,
         "identity_adapter_version": identity.adapter_version,
         "identity_serving_abi_version": identity.serving_abi_version,
         "support_level": str(serving_facts.support_level),
@@ -332,7 +342,6 @@ def compute_recipe_compile_key(
             semantic_validation_spec
         ),
         "trace_cache_schema_version": identity.trace_cache_schema_version,
-        "framework_version": identity.framework_version,
         "version": identity.framework_version,
         "identity_extra": _jsonable(identity.extra),
     }
