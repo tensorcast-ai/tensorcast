@@ -153,6 +153,8 @@ def test_compile_serving_recipe_assembles_recipe_from_pure_inputs() -> None:
                 "expected_src_count": 1,
                 "expected_dst_count": 1,
                 "tensorcast_slice_count": 0,
+                "realization_plan_count": 1,
+                "realization_fallback_count": 0,
             },
         )
     ]
