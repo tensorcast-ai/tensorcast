@@ -230,6 +230,15 @@ http_archive(
 )
 
 http_archive(
+    name = "nvshmem",
+    build_file = "@//third_party/nvshmem:BUILD",
+    integrity = "sha256-BC8lAPJMAh24oGxe7CU5An1XRg4cGnYgVaZVT3LDab0=",
+    urls = [
+        "https://files.pythonhosted.org/packages/b5/09/6ea3ea725f82e1e76684f0708bbedd871fc96da89945adeba65c3835a64c/nvidia_nvshmem_cu12-3.4.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+    ],
+)
+
+http_archive(
     name = "triton",
     build_file = "@//third_party/triton:BUILD",
     integrity = "sha256-plUPrkKeBmfjl+XeZLMy0eVpW3NlDudaYUbi6QJ3C+o=",
