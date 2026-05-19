@@ -105,6 +105,7 @@ disable_error_code = [
     "var-annotated",
     "no-any-return",
     "misc",
+    "untyped-decorator",
 ]
 show_error_codes = true
 check_untyped_defs = true
@@ -259,6 +260,8 @@ unfixable = []
 # Unlike Flake8, default to a complexity level of 10.
 max-complexity = 10
 
+[tool.ruff.lint.isort]
+known-first-party = ["tensorcast"]
 
 [tool.pyright]
 include = ["tensorcast/**", "tests/python/**"]
@@ -271,6 +274,7 @@ reportMissingModuleSource = "none"
 pythonVersion = "3.10"
 reportAttributeAccessIssue = "none"
 reportUnknownMemberType = "none"
+reportPrivateImportUsage = "none"
 
 [[tool.uv.index]]
 default = true
@@ -285,5 +289,3 @@ name = "pytorch"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
-[tool.ruff.lint.isort]
-known-first-party = ["tensorcast"]

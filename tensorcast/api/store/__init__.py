@@ -2979,7 +2979,7 @@ class Store:
                     ),
                 )
             return OperationStatus(
-                state=state,  # type: ignore[arg-type]
+                state=state,
                 message=result.degraded_reason or None,
                 progress=float(result.progress),
                 as_of_ms=int(time.time() * 1000),
