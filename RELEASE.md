@@ -64,7 +64,7 @@ docker run --rm \
   -w /io \
   -e IN_DOCKER=1 \
   tensorcast-builder:latest \
-  bash docker/build_in_docker.sh --pypi --skip-uv-sync
+  bash docker/build_in_docker.sh --pypi
 # → dist/tensorcast-0.1.0-cp310-cp310-manylinux_2_28_x86_64.whl
 ```
 

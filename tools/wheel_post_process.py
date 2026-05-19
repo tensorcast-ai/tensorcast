@@ -67,6 +67,7 @@ _RPATH_PARTS_FROM_PACKAGE_ROOT = [
     "nvidia/nccl/lib",
     "nvidia/nvjitlink/lib",
     "nvidia/nvtx/lib",
+    "nvidia/cufile/lib",
 ]
 
 
@@ -80,11 +81,13 @@ def _rpath(levels_up: int) -> str:
     return ":".join(parts)
 
 
-# `tensorcast/_C*.so` and `tensorcast/lib/*.so` are one level inside the package
-# root (site-packages/tensorcast/). To reach site-packages we go up by 1.
+# `tensorcast/_C*.so` and other top-level package .so files are one level inside the
+# package root (site-packages/tensorcast/). To reach site-packages we go up by 1.
 RPATH_PACKAGE_ROOT = _rpath(levels_up=1)
 # `tensorcast/bin/tensorcast_daemon` is two levels inside site-packages.
 RPATH_BIN = _rpath(levels_up=2)
+# `tensorcast/lib/*.so` are two levels inside site-packages (one extra for lib/).
+RPATH_LIB = _rpath(levels_up=2)
 
 
 # Libraries we exclude from auditwheel — they belong to the user's torch /
@@ -288,7 +291,7 @@ def _patch_directory(unpacked: Path) -> None:
         for so in lib_dir.glob("*.so*"):
             if so.is_symlink():
                 continue
-            _patchelf_set_rpath(so, RPATH_PACKAGE_ROOT)
+            _patchelf_set_rpath(so, RPATH_LIB)
 
 
 def main(argv: list[str] | None = None) -> int:
