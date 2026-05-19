@@ -284,3 +284,6 @@ torch = { index = "pytorch" }
 name = "pytorch"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
+
+[tool.ruff.lint.isort]
+known-first-party = ["tensorcast"]
