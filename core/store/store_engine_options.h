@@ -139,6 +139,12 @@ struct StoreEngineOptions {
       kVerbose = 2,
     };
 
+    enum class LocalMappedSafetensorsIoMode : std::uint8_t {
+      kAutoByFilesystem = 0,
+      kBuffered = 1,
+      kDirectAlignedEdges = 2,
+    };
+
     bool enable_tensor_aware_mapped_executor{true};
     bool enable_local_batched_disk_load{false};
     bool enable_owner_file_collective{false};
@@ -167,6 +173,7 @@ struct StoreEngineOptions {
     std::chrono::milliseconds owner_file_collective_group_assemble_timeout{std::chrono::milliseconds(15000)};
     bool owner_file_collective_allow_mixed_residual{false};
     uint32_t owner_file_collective_planner_cache_entries{256};
+    LocalMappedSafetensorsIoMode local_mapped_safetensors_io_mode{LocalMappedSafetensorsIoMode::kAutoByFilesystem};
   };
 
   MaterializationStrategyConfig materialization_strategy{};
@@ -187,6 +194,15 @@ struct StoreEngineOptions {
   };
 
   PromotionOptions promotion{};
+
+  struct ProgressiveReplicationConfig {
+    bool enabled{false};
+    std::chrono::milliseconds report_interval{std::chrono::milliseconds{1000}};
+    uint64_t min_report_delta_bytes{16ULL * 1024ULL * 1024ULL};
+    bool verify_before_report{true};
+  };
+
+  ProgressiveReplicationConfig progressive_replication{};
 };
 
 } // namespace tensorcast::store

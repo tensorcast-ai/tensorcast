@@ -150,7 +150,7 @@ class FakeSlotClient:
         selection.CopyFrom(kwargs["selection"])
         return types.SimpleNamespace(
             status=store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED,
-            target_publication_token=token,
+            binding_current_value_publication_token=token,
             resolved_selection=selection,
         )
 
@@ -254,7 +254,9 @@ class FakeSlotClient:
             artifact_id=str(selection.artifact_id),
             target_index_bytes=bytes(kwargs["target_index_bytes"]),
             resolved_selection=selection,
-            target_publication_token=f"token-{self._token_counter}".encode("utf-8"),
+            binding_current_value_publication_token=f"token-{self._token_counter}".encode(
+                "utf-8"
+            ),
             current_value=self._make_binding_value(
                 binding_id=binding_id,
                 selection=selection,
@@ -300,7 +302,9 @@ class FakeSlotClient:
         return types.SimpleNamespace(
             artifact_id=str(selection.artifact_id),
             resolved_selection=selection,
-            target_publication_token=f"token-{self._token_counter}".encode("utf-8"),
+            binding_current_value_publication_token=f"token-{self._token_counter}".encode(
+                "utf-8"
+            ),
             current_value=self._make_binding_value(
                 binding_id=binding_id,
                 selection=selection,

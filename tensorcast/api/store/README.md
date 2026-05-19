@@ -333,10 +333,10 @@ Canonical binding design: `../../../docs/designs/0084-binding-unified-model-and-
 - Packed/subset selections become publishable when TensorCast can derive a
   stable `view_id`; publish routing is then scoped to that derived byte-space
   instead of the canonical artifact id.
-- Mapped binding supports publish on bind/swap (`publish=True`): the daemon can
-  mint `target_publication_token` for mapped writes, and publish routes through a VIEW
-  byte-space id derived from canonical index + source view identity + copy plan +
-  target layout.
+- Mapped binding publish on bind/swap (`publish=True`) now uses a
+  `binding_current_value_publication_token` minted from the artifact-backed
+  daemon-owned binding current value. `MaterializeIntoTarget` and
+  `MaterializeIntoMappedTarget` do not mint standalone publish authority.
 - Because mapped binding retains the copy plan for future `swap(...)`, it is not
   the preferred steady-state host object when mapped source semantics are needed
   only for one bootstrap fill. In that case, prefer a layout-seeded serving

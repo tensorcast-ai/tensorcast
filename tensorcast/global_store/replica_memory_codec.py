@@ -170,9 +170,6 @@ def replica_to_memory_info(
         memory_size=replica.memory_size,
         memory_type=memory_type_to_proto(replica.memory_type),
         device_id=replica.device_id,
-        remote_memory_keys=replica.remote_memory_keys,
-        buffer_sizes=replica.buffer_sizes,
-        verification_json=replica.verification_json or "",
     )
     transport = memory_info.transport
     transport.export_state = export_state_to_proto(replica.export_state)

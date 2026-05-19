@@ -1672,7 +1672,7 @@ class TestServices:
                 "suite:v3:rx4:r1:a0suite:v3:rx4:r1:a0",
                 "worker-aworker-a",
                 "suite:v3suite:v3",
-                "tp_versiontp_version",
+                "group_realization_transportgroup_realization_transport",
                 "rx4:r1rx4:r1",
                 28,
                 created_at,
@@ -1693,7 +1693,7 @@ class TestServices:
         assert target.request_id == "suite:v3:rx4:r1:a0"
         assert target.requester_worker_id == "worker-a"
         assert target.group_id == "suite:v3"
-        assert target.group_kind == "tp_version"
+        assert target.group_kind == "group_realization_transport"
         assert target.group_part_id == "rx4:r1"
         assert target.group_total_parts == 28
 
@@ -2654,12 +2654,12 @@ worker_policy:
         finally:
             set_config(legacy_cfg)
 
-    def test_group_dispatch_tp_version_allows_cross_view_group_epoch(
+    def test_group_dispatch_strict_group_rejects_cross_view_group_epoch(
         self, tmp_path, repositories
     ):
-        """tp_version groups allow per-part view variance in the same group epoch."""
+        """Strict groups reject per-part view variance in the same group epoch."""
         legacy_cfg = GlobalStoreConfig()
-        cfg_path = tmp_path / "group_dispatch_tp_version_view_contract.yaml"
+        cfg_path = tmp_path / "group_dispatch_strict_view_contract.yaml"
         cfg_path.write_text(
             """
 database:
@@ -2692,8 +2692,8 @@ worker_policy:
 
             worker = worker_service.register_worker(
                 Worker(
-                    daemon_id="daemon_group_dispatch_tp_version_view_contract",
-                    node_id="node_group_dispatch_tp_version_view_contract",
+                    daemon_id="daemon_group_dispatch_strict_view_contract",
+                    node_id="node_group_dispatch_strict_view_contract",
                     node_address="192.168.10.21",
                     grpc_port=50051,
                     p2p_port=50052,
@@ -2703,9 +2703,9 @@ worker_policy:
             )
             artifact_service.register_replica(
                 Replica(
-                    artifact_id="group_dispatch_tp_version_view_contract_artifact",
+                    artifact_id="group_dispatch_strict_view_contract_artifact",
                     byte_space=ByteSpaceRef.view("view-a"),
-                    node_id="node_group_dispatch_tp_version_view_contract",
+                    node_id="node_group_dispatch_strict_view_contract",
                     node_address="192.168.10.21",
                     node_port=8080,
                     memory_size=1024,
@@ -2720,9 +2720,9 @@ worker_policy:
             )
             artifact_service.register_replica(
                 Replica(
-                    artifact_id="group_dispatch_tp_version_view_contract_artifact",
+                    artifact_id="group_dispatch_strict_view_contract_artifact",
                     byte_space=ByteSpaceRef.view("view-b"),
-                    node_id="node_group_dispatch_tp_version_view_contract",
+                    node_id="node_group_dispatch_strict_view_contract",
                     node_address="192.168.10.21",
                     node_port=8080,
                     memory_size=1024,
@@ -2737,15 +2737,15 @@ worker_policy:
             )
 
             _, first_transport_id = transport_service.request_transport(
-                artifact_id="group_dispatch_tp_version_view_contract_artifact",
+                artifact_id="group_dispatch_strict_view_contract_artifact",
                 view_id="view-a",
                 source_node_id="source_node",
                 source_address="192.168.2.1",
                 source_port=9090,
                 request_id="group-tp-version-view-req-1",
                 scheduling_group=TransportSchedulingGroup(
-                    group_id="group-tp-version-view-contract",
-                    group_kind="tp_version",
+                    group_id="group-strict-view-contract",
+                    group_kind="group_realization_transport",
                     total_parts=2,
                     part_id="part-0",
                     priority=0,
@@ -2757,36 +2757,34 @@ worker_policy:
                 outcome=TransportCompletionOutcome.SUCCESS,
             )
 
-            _, second_transport_id = transport_service.request_transport(
-                artifact_id="group_dispatch_tp_version_view_contract_artifact",
-                view_id="view-b",
-                source_node_id="source_node",
-                source_address="192.168.2.1",
-                source_port=9090,
-                request_id="group-tp-version-view-req-2",
-                scheduling_group=TransportSchedulingGroup(
-                    group_id="group-tp-version-view-contract",
-                    group_kind="tp_version",
-                    total_parts=2,
-                    part_id="part-1",
-                    priority=0,
-                    epoch=3,
-                ),
-            )
-            assert second_transport_id is not None
-            transport_service.complete_transport(
-                second_transport_id,
-                outcome=TransportCompletionOutcome.SUCCESS,
-            )
+            with pytest.raises(
+                ValidationError, match="artifact/view/total_parts mismatch"
+            ):
+                transport_service.request_transport(
+                    artifact_id="group_dispatch_strict_view_contract_artifact",
+                    view_id="view-b",
+                    source_node_id="source_node",
+                    source_address="192.168.2.1",
+                    source_port=9090,
+                    request_id="group-strict-view-req-2",
+                    scheduling_group=TransportSchedulingGroup(
+                        group_id="group-strict-view-contract",
+                        group_kind="group_realization_transport",
+                        total_parts=2,
+                        part_id="part-1",
+                        priority=0,
+                        epoch=3,
+                    ),
+                )
         finally:
             set_config(legacy_cfg)
 
-    def test_group_dispatch_tp_version_allows_cross_artifact_group_epoch(
+    def test_group_dispatch_strict_group_rejects_cross_artifact_group_epoch(
         self, tmp_path, repositories
     ):
-        """tp_version groups allow per-part artifact variance in the same group epoch."""
+        """Strict groups reject per-part artifact variance in the same group epoch."""
         legacy_cfg = GlobalStoreConfig()
-        cfg_path = tmp_path / "group_dispatch_tp_version_artifact_contract.yaml"
+        cfg_path = tmp_path / "group_dispatch_strict_artifact_contract.yaml"
         cfg_path.write_text(
             """
 database:
@@ -2819,8 +2817,8 @@ worker_policy:
 
             worker = worker_service.register_worker(
                 Worker(
-                    daemon_id="daemon_group_dispatch_tp_version_artifact_contract",
-                    node_id="node_group_dispatch_tp_version_artifact_contract",
+                    daemon_id="daemon_group_dispatch_strict_artifact_contract",
+                    node_id="node_group_dispatch_strict_artifact_contract",
                     node_address="192.168.10.23",
                     grpc_port=50051,
                     p2p_port=50052,
@@ -2830,9 +2828,9 @@ worker_policy:
             )
             artifact_service.register_replica(
                 Replica(
-                    artifact_id="group_dispatch_tp_version_artifact_contract_artifact_a",
+                    artifact_id="group_dispatch_strict_artifact_contract_artifact_a",
                     byte_space=ByteSpaceRef.view("view-a"),
-                    node_id="node_group_dispatch_tp_version_artifact_contract",
+                    node_id="node_group_dispatch_strict_artifact_contract",
                     node_address="192.168.10.23",
                     node_port=8080,
                     memory_size=1024,
@@ -2847,9 +2845,9 @@ worker_policy:
             )
             artifact_service.register_replica(
                 Replica(
-                    artifact_id="group_dispatch_tp_version_artifact_contract_artifact_b",
+                    artifact_id="group_dispatch_strict_artifact_contract_artifact_b",
                     byte_space=ByteSpaceRef.view("view-a"),
-                    node_id="node_group_dispatch_tp_version_artifact_contract",
+                    node_id="node_group_dispatch_strict_artifact_contract",
                     node_address="192.168.10.23",
                     node_port=8080,
                     memory_size=1024,
@@ -2864,15 +2862,15 @@ worker_policy:
             )
 
             _, first_transport_id = transport_service.request_transport(
-                artifact_id="group_dispatch_tp_version_artifact_contract_artifact_a",
+                artifact_id="group_dispatch_strict_artifact_contract_artifact_a",
                 view_id="view-a",
                 source_node_id="source_node",
                 source_address="192.168.2.1",
                 source_port=9090,
                 request_id="group-tp-version-artifact-req-1",
                 scheduling_group=TransportSchedulingGroup(
-                    group_id="group-tp-version-artifact-contract",
-                    group_kind="tp_version",
+                    group_id="group-strict-artifact-contract",
+                    group_kind="group_realization_transport",
                     total_parts=2,
                     part_id="part-0",
                     priority=0,
@@ -2884,42 +2882,38 @@ worker_policy:
                 outcome=TransportCompletionOutcome.SUCCESS,
             )
 
-            _, second_transport_id = transport_service.request_transport(
-                artifact_id="group_dispatch_tp_version_artifact_contract_artifact_b",
-                view_id="view-a",
-                source_node_id="source_node",
-                source_address="192.168.2.1",
-                source_port=9090,
-                request_id="group-tp-version-artifact-req-2",
-                scheduling_group=TransportSchedulingGroup(
-                    group_id="group-tp-version-artifact-contract",
-                    group_kind="tp_version",
-                    total_parts=2,
-                    part_id="part-1",
-                    priority=0,
-                    epoch=3,
-                ),
-            )
-            assert second_transport_id is not None
-            transport_service.complete_transport(
-                second_transport_id,
-                outcome=TransportCompletionOutcome.SUCCESS,
-            )
+            with pytest.raises(
+                ValidationError, match="artifact/view/total_parts mismatch"
+            ):
+                transport_service.request_transport(
+                    artifact_id="group_dispatch_strict_artifact_contract_artifact_b",
+                    view_id="view-a",
+                    source_node_id="source_node",
+                    source_address="192.168.2.1",
+                    source_port=9090,
+                    request_id="group-strict-artifact-req-2",
+                    scheduling_group=TransportSchedulingGroup(
+                        group_id="group-strict-artifact-contract",
+                        group_kind="group_realization_transport",
+                        total_parts=2,
+                        part_id="part-1",
+                        priority=0,
+                        epoch=3,
+                    ),
+                )
         finally:
             set_config(legacy_cfg)
 
-    def test_transport_service_tp_version_request_id_replay_allows_view_change(
-        self, services
-    ):
-        """tp_version request replay should not fail on view_id variance."""
+    def test_transport_service_request_id_replay_rejects_view_change(self, services):
+        """Request-id replay rejects payload changes, including view changes."""
         transport_service = services["transport"]
         artifact_service = services["artifact"]
         worker_service = services["worker"]
 
         worker = worker_service.register_worker(
             Worker(
-                daemon_id="daemon_tp_version_replay_view_change",
-                node_id="node_tp_version_replay_view_change",
+                daemon_id="daemon_strict_replay_view_change",
+                node_id="node_strict_replay_view_change",
                 node_address="192.168.10.22",
                 grpc_port=50051,
                 p2p_port=50052,
@@ -2929,9 +2923,9 @@ worker_policy:
         )
         artifact_service.register_replica(
             Replica(
-                artifact_id="tp_version_replay_view_change_artifact",
+                artifact_id="strict_replay_view_change_artifact",
                 byte_space=ByteSpaceRef.view("view-a"),
-                node_id="node_tp_version_replay_view_change",
+                node_id="node_strict_replay_view_change",
                 node_address="192.168.10.22",
                 node_port=8080,
                 memory_size=1024,
@@ -2946,9 +2940,9 @@ worker_policy:
         )
         artifact_service.register_replica(
             Replica(
-                artifact_id="tp_version_replay_view_change_artifact",
+                artifact_id="strict_replay_view_change_artifact",
                 byte_space=ByteSpaceRef.view("view-b"),
-                node_id="node_tp_version_replay_view_change",
+                node_id="node_strict_replay_view_change",
                 node_address="192.168.10.22",
                 node_port=8080,
                 memory_size=1024,
@@ -2963,34 +2957,36 @@ worker_policy:
         )
 
         group = TransportSchedulingGroup(
-            group_id="group-tp-version-request-replay-view-change",
-            group_kind="tp_version",
+            group_id="group-strict-request-replay-view-change",
+            group_kind="group_realization_transport",
             total_parts=2,
             part_id="part-0",
             priority=0,
             epoch=7,
         )
         replica_first, transport_id_first = transport_service.request_transport(
-            artifact_id="tp_version_replay_view_change_artifact",
+            artifact_id="strict_replay_view_change_artifact",
             view_id="view-a",
             source_node_id="source_node",
             source_address="192.168.2.1",
             source_port=9090,
-            request_id="group-tp-version-request-replay-view-change",
+            request_id="group-strict-request-replay-view-change",
             scheduling_group=group,
         )
-        replica_second, transport_id_second = transport_service.request_transport(
-            artifact_id="tp_version_replay_view_change_artifact",
-            view_id="view-b",
-            source_node_id="source_node",
-            source_address="192.168.2.1",
-            source_port=9090,
-            request_id="group-tp-version-request-replay-view-change",
-            scheduling_group=group,
-        )
+        with pytest.raises(
+            ValidationError, match="already used with different payload"
+        ):
+            transport_service.request_transport(
+                artifact_id="strict_replay_view_change_artifact",
+                view_id="view-b",
+                source_node_id="source_node",
+                source_address="192.168.2.1",
+                source_port=9090,
+                request_id="group-strict-request-replay-view-change",
+                scheduling_group=group,
+            )
 
-        assert transport_id_first == transport_id_second
-        assert replica_first.replica_id == replica_second.replica_id
+        assert replica_first is not None
         transport_service.complete_transport(
             transport_id_first,
             outcome=TransportCompletionOutcome.SUCCESS,

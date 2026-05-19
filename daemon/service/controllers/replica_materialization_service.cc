@@ -18,7 +18,9 @@
 #include "absl/strings/escaping.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "absl/time/clock.h"
 #include "absl/types/span.h"
+#include "core/common/artifact_hash.h"
 #include "core/common/artifact_identity.h"
 #include "opentelemetry/metrics/provider.h"
 
@@ -37,6 +39,7 @@
 #include "daemon/service/controllers/serving_artifact_manifest_utils.h"
 #include "daemon/util/deadline_utils.h"
 #include "daemon/util/status_utils.h"
+#include "tensorcast/global_store/v1/global_store.pb.h"
 
 namespace tensorcast::daemon {
 
@@ -51,15 +54,20 @@ using materialization_index_source::load_descriptor_metadata;
 using materialization_index_source::validate_descriptor_against_index;
 using materialization_payload::populate_materialize_payloads;
 using materialization_payload::resolve_layout_json;
+using materialization_policy::apply_group_realization_begin_context_to_transport_context;
+using materialization_policy::apply_operation_transport_context;
 using materialization_policy::apply_request_context_to_hints;
+using materialization_policy::begin_or_join_group_realization_if_enabled;
 using materialization_policy::build_view_spec_proto;
 using materialization_policy::compute_view_id_from_spec;
 using materialization_policy::convert_view_spec;
 using materialization_policy::NormalizedMaterializationRequestContext;
 using materialization_policy::resolve_collective_group_hint;
+using materialization_policy::resolve_group_realization_transport_context;
 using materialization_policy::resolve_materialization_request_context;
 using materialization_policy::resolve_transform_placement;
 using materialization_policy::to_hint_export_policy;
+using materialization_policy::validate_group_realization_staged_publish_supported;
 using materialization_post_seal::check_post_seal_view_reuse_safe;
 using materialization_replica_handle::bind_replica_handle_for_response;
 using materialization_request_common::LeaseContext;
@@ -74,6 +82,8 @@ using selection_validation::validate_request_tensor_names;
 using store::loader::ViewSpec;
 
 using store::loading::MaterializationSource;
+
+namespace global_store = tensorcast::global_store::v1;
 
 std::string artifact_id_kind_attr(std::string_view artifact_id) {
   switch (common::infer_artifact_id_kind(artifact_id)) {
@@ -120,6 +130,179 @@ v2::MaterializationSource to_proto_source(MaterializationSource source) {
     case MaterializationSource::kUnspecified:
     default:
       return v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED;
+  }
+}
+
+std::optional<std::string> mi2_index_multihash(std::string_view artifact_id) {
+  constexpr std::string_view kPrefix{"mi2:"};
+  if (!artifact_id.starts_with(kPrefix)) {
+    return std::nullopt;
+  }
+  const std::string_view suffix = artifact_id.substr(kPrefix.size());
+  const size_t separator = suffix.find(':');
+  if (separator == std::string_view::npos || separator == 0) {
+    return std::nullopt;
+  }
+  return std::string(suffix.substr(0, separator));
+}
+
+std::string byte_prefix_coverage_order_hash() {
+  constexpr std::string_view kProgressiveBytePrefixCoverageOrder{"tensorcast.progressive.byte_prefix.v1"};
+  const std::vector<uint8_t> digest = common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(
+          reinterpret_cast<const uint8_t*>(kProgressiveBytePrefixCoverageOrder.data()),
+          kProgressiveBytePrefixCoverageOrder.size()));
+  return std::string(reinterpret_cast<const char*>(digest.data()), digest.size());
+}
+
+std::optional<global_store::ProgressiveCoverageIdentity> build_progressive_coverage_identity(
+    std::string_view artifact_id,
+    const tensorcast::common::v1::ArtifactSelection& resolved_selection,
+    const std::optional<std::string>& resolved_view_id,
+    absl::Span<const std::string> selection_names,
+    const std::optional<materialization_policy::GroupRealizationBeginContext>* group_context) {
+  if (resolved_view_id.has_value() || !selection_names.empty()) {
+    return std::nullopt;
+  }
+  auto index_multihash = mi2_index_multihash(artifact_id);
+  if (!index_multihash.has_value() || resolved_selection.logical_layout_hash().empty() ||
+      resolved_selection.selection_hash().empty()) {
+    return std::nullopt;
+  }
+
+  global_store::ProgressiveCoverageIdentity identity;
+  identity.set_artifact_id(std::string(artifact_id));
+  identity.mutable_byte_space()->set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  identity.set_selection_hash(resolved_selection.selection_hash());
+  identity.set_logical_layout_hash(resolved_selection.logical_layout_hash());
+  identity.mutable_hash_space()->mutable_byte_space()->set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  identity.mutable_hash_space()->set_canonical_index_multihash(*index_multihash);
+  identity.set_coverage_order_hash(byte_prefix_coverage_order_hash());
+
+  if (group_context != nullptr && group_context->has_value()) {
+    const auto& group = **group_context;
+    if (!group.version_set.version_set_id().empty() && !group.part_id.empty()) {
+      identity.set_group_version_set_id(group.version_set.version_set_id());
+      identity.set_group_part_id(group.part_id);
+    }
+  }
+  return identity;
+}
+
+std::string source_kind_for_progressive_report(MaterializationSource source) {
+  switch (source) {
+    case MaterializationSource::kDisk:
+      return "disk";
+    case MaterializationSource::kP2P:
+      return "p2p";
+    case MaterializationSource::kLocalReplica:
+      return "local_replica";
+    case MaterializationSource::kUnspecified:
+    default:
+      return "unspecified";
+  }
+}
+
+void maybe_report_progressive_terminal_coverage(
+    const ReplicaMaterializationService::Dep& dep,
+    const store::loading::ReplicaHandle& handle,
+    const tensorcast::common::v1::ArtifactSelection& resolved_selection,
+    const std::optional<std::string>& resolved_view_id,
+    absl::Span<const std::string> selection_names,
+    const std::optional<materialization_policy::GroupRealizationBeginContext>* group_context,
+    bool verification_known) {
+  if (!dep.progressive_replication.enabled) {
+    return;
+  }
+  if (dep.progressive_replication.verify_before_report && !verification_known) {
+    VLOG(1) << "Skipping progressive coverage report because verification is not known for "
+            << handle.replica_key.artifact_id;
+    return;
+  }
+  if (dep.global_store_client == nullptr || !dep.global_store_client->is_connected()) {
+    return;
+  }
+  if (dep.shutdown_signal.is_shutting_down()) {
+    return;
+  }
+
+  auto identity = build_progressive_coverage_identity(
+      handle.replica_key.artifact_id, resolved_selection, resolved_view_id, selection_names, group_context);
+  if (!identity.has_value()) {
+    return;
+  }
+  auto replica_id = dep.engine.get_replica_global_store_id(handle.replica_key);
+  if (!replica_id.has_value() || replica_id->empty()) {
+    VLOG(1) << "Skipping progressive coverage report for " << handle.replica_key
+            << " because the Global Store replica id is not available";
+    return;
+  }
+  auto backing_or = dep.engine.inspect_replica_backing(handle.replica_key);
+  if (!backing_or.ok()) {
+    LOG(WARNING) << "Skipping progressive coverage report for " << handle.replica_key
+                 << ": inspect_replica_backing failed: " << backing_or.status();
+    return;
+  }
+  const auto& backing = *backing_or;
+  if (!backing.remote_access_enabled || backing.remote_export_generation == 0) {
+    VLOG(1) << "Skipping progressive coverage report for " << handle.replica_key
+            << " because remote export is not active";
+    return;
+  }
+
+  std::string daemon_id = dep.identity != nullptr ? dep.identity->daemon_id() : std::string();
+  if (daemon_id.empty()) {
+    daemon_id = dep.daemon_id;
+  }
+  const std::string worker_id = dep.identity != nullptr ? dep.identity->worker_id() : std::string();
+  if (daemon_id.empty() || worker_id.empty()) {
+    VLOG(1) << "Skipping progressive coverage report for " << handle.replica_key
+            << " because daemon or worker identity is unavailable";
+    return;
+  }
+  const std::string node_id = dep.identity != nullptr ? dep.identity->node_id() : std::string();
+  const std::string source_domain = !node_id.empty() ? node_id : daemon_id;
+  const std::string materialization_attempt_id = absl::StrCat(
+      dep.daemon_session_id,
+      ":",
+      handle.replica_key.artifact_id,
+      ":",
+      handle.replica_key.device.ordinal,
+      ":",
+      absl::ToUnixNanos(absl::Now()));
+
+  global_store::ReportProgressiveCoverageRequest request;
+  request.set_coverage_id(
+      absl::StrCat(
+          "progressive:", materialization_attempt_id, ":", *replica_id, ":", backing.remote_export_generation));
+  request.mutable_identity()->CopyFrom(*identity);
+  request.set_replica_id(*replica_id);
+  request.set_daemon_id(daemon_id);
+  request.set_daemon_session_id(dep.daemon_session_id);
+  request.set_worker_id(worker_id);
+  request.set_source_export_generation(backing.remote_export_generation);
+  request.set_coverage_epoch(1);
+  request.set_coverage_kind(global_store::PROGRESSIVE_COVERAGE_KIND_BYTE_PREFIX);
+  request.set_verified_units(backing.size_bytes);
+  request.set_verified_bytes(backing.size_bytes);
+  request.set_completed_units(backing.size_bytes);
+  request.set_completed_bytes(backing.size_bytes);
+  request.set_total_units(backing.size_bytes);
+  request.set_total_bytes(backing.size_bytes);
+  request.set_materialization_attempt_id(materialization_attempt_id);
+  request.set_state(global_store::PROGRESSIVE_COVERAGE_STATE_VERIFIED);
+  request.set_export_state(global_store::PROGRESSIVE_EXPORT_STATE_COMPLETE_EXPORTABLE);
+  request.set_source_domain(source_domain);
+  request.set_seed_transport_kind(source_kind_for_progressive_report(handle.source));
+
+  auto response_or = dep.global_store_client->report_progressive_coverage(request);
+  if (!response_or.ok()) {
+    LOG(WARNING) << "ReportProgressiveCoverage failed for " << handle.replica_key << ": " << response_or.status();
+    return;
+  }
+  if (response_or->status() != global_store::STATUS_OK) {
+    LOG(WARNING) << "ReportProgressiveCoverage returned status=" << static_cast<int>(response_or->status())
+                 << " reason=" << response_or->reason() << " for " << handle.replica_key;
   }
 }
 
@@ -249,7 +432,21 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     const v2::MaterializeReplicaRequest& req,
     v2::MaterializeReplicaResponse& resp) {
   auto& span = rctx.span();
-  store::loading::ExecutionTopologyContext execution_topology;
+  auto transport_context_or = resolve_group_realization_transport_context(
+      std::string_view(), req.has_group_realization() ? &req.group_realization() : nullptr);
+  if (!transport_context_or.ok()) {
+    resp.set_status(v2::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(transport_context_or.status());
+  }
+  auto staged_publish_status = validate_group_realization_staged_publish_supported(
+      req.has_group_realization() ? &req.group_realization() : nullptr,
+      /*staged_publish_supported=*/false);
+  if (!staged_publish_status.ok()) {
+    resp.set_status(v2::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(staged_publish_status);
+  }
+  auto transport_context = std::move(*transport_context_or);
+  store::loading::ExecutionTopologyContext execution_topology = transport_context.execution_topology;
   // Collective disk load is an explicit request contract. Do not infer it from
   // replica_uuid or ambient process state.
   execution_topology.collective_load_group =
@@ -286,10 +483,33 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
-  if (!req.has_selection() || req.selection().artifact_id().empty()) {
+  tensorcast::common::v1::ArtifactSelection effective_selection;
+  if (req.has_selection()) {
+    effective_selection = req.selection();
+  }
+  std::string daemon_id = d_.identity != nullptr ? d_.identity->daemon_id() : std::string();
+  if (daemon_id.empty()) {
+    daemon_id = d_.daemon_id;
+  }
+  const std::string worker_id = d_.identity != nullptr ? d_.identity->worker_id() : std::string();
+  auto begin_context_or = begin_or_join_group_realization_if_enabled(
+      d_.global_store_client,
+      req.has_group_realization() ? &req.group_realization() : nullptr,
+      daemon_id,
+      d_.daemon_session_id,
+      worker_id);
+  if (!begin_context_or.ok()) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(begin_context_or.status());
+  }
+  if (begin_context_or->has_value()) {
+    effective_selection = (*begin_context_or)->part_selection;
+    apply_group_realization_begin_context_to_transport_context(**begin_context_or, &transport_context);
+  }
+  if (effective_selection.artifact_id().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "selection.artifact_id is required"};
   }
-  const auto& selection = req.selection();
+  const auto& selection = effective_selection;
 
   const auto dev = d_.devices.From(req.target_device_type(), req.device_uuid(), std::nullopt);
   const bool cpu_target = dev.type == DeviceType::CPU;
@@ -651,6 +871,8 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     return selection_identity_status;
   }
 
+  v2::MaterializeReplicaRequest effective_req = req;
+  effective_req.mutable_selection()->CopyFrom(selection);
   auto finalize_response = [&]() -> grpc::Status {
     if (no_lease) {
       resp.clear_mem_handle();
@@ -659,7 +881,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
       resp.set_view_index_bytes(resp.view_index_json());
     }
 
-    auto layout_or = resolve_layout_json(resp, req, d_.engine);
+    auto layout_or = resolve_layout_json(resp, effective_req, d_.engine);
     if (!layout_or.ok()) {
       return to_grpc_status(layout_or.status());
     }
@@ -725,6 +947,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   hints.transport_wait_timeout = request_budget;
   hints.verify = verify_checksums ? store::loading::MaterializeHints::Verify::CHECKSUM
                                   : store::loading::MaterializeHints::Verify::NONE;
+  apply_operation_transport_context(transport_context, &hints);
   apply_request_context_to_hints(request_context, &hints);
   if (prefer_direct_disk_for_local_import) {
     hints.set_retrieval_policy(
@@ -1019,6 +1242,14 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   if (handle.view_data_hash.has_value()) {
     resp.set_view_data_hash(*handle.view_data_hash);
   }
+  maybe_report_progressive_terminal_coverage(
+      d_,
+      handle,
+      resolved_selection,
+      resolved_view_id,
+      absl::MakeConstSpan(selection_names),
+      &(*begin_context_or),
+      verify_checksums);
   return finalize_response();
 }
 

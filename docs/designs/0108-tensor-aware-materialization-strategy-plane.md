@@ -156,9 +156,11 @@ plane, but execution is now intentionally split:
 - same-binding serving-path closure, mounted operator evidence, and delete-gate
   cleanup now live under `0112` plus
   `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`;
-- no separate long-term design owner remains for `0113`, `0114`, `0115`, or
-  `0117`; their still-relevant normative content must live in the surviving
-  owners named above.
+- no separate long-term design owner remains for `0113`, `0114`, or `0115`;
+  their still-relevant normative content must live in the surviving owners named
+  above;
+- `0117` remains the normative owner for group version-set realization and the
+  staged publish barrier. It must not be folded back into the strategy plane.
 
 # Implementation Status
 

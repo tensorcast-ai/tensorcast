@@ -21,7 +21,7 @@ from tensorcast.cli_utils.process import read_json_default
 def _isolate_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("TENSORCAST_HOME", str(tmp_path))
     monkeypatch.setattr(startup, "discover_daemon_config", lambda: None)
-    monkeypatch.setattr(startup, "wait_for_daemon", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(startup, "wait_for_daemon", lambda *_args, **_kwargs: True)
 
 
 def test_auto_mode_connects_existing_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -147,6 +147,7 @@ def test_auto_mode_multiprocess_singleflight_shares_one_daemon(
 
 def test_auto_mode_creates_daemon_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     started: dict[str, object] = {}
+    waited: list[tuple[str, float | None]] = []
     daemon_address = "127.0.0.1:61002"
 
     def _fake_start(**kwargs):
@@ -165,6 +166,12 @@ def test_auto_mode_creates_daemon_when_missing(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(startup.runtime, "start", _fake_start)
     monkeypatch.setattr(startup, "ping_daemon", lambda _address: True)
     monkeypatch.setattr(
+        startup,
+        "wait_for_daemon",
+        lambda address, *, timeout=None, **_kwargs: waited.append(
+            (address, timeout)) or True,
+    )
+    monkeypatch.setattr(
         "tensorcast.daemon_ctl.get_daemon_client", lambda _address: object()
     )
     monkeypatch.setattr(startup.runtime, "stop", lambda **_kwargs: None)
@@ -177,12 +184,22 @@ def test_auto_mode_creates_daemon_when_missing(monkeypatch: pytest.MonkeyPatch) 
         assert started["session_id"] is None
         assert started["register_current"] is True
         assert started["ephemeral"] is False
+        assert started["restrict_to_localhost"] is False
         auto_state = read_json_default(startup._auto_state_path(), {})
-        assert auto_state["status"] == "LISTENING"
+        assert auto_state["status"] == "READY"
         assert auto_state["session_id"] == "sess-auto"
         assert auto_state["address"] == daemon_address
+        assert waited == [(daemon_address, startup._AUTO_WAIT_TIMEOUT_SECONDS)]
     finally:
         startup.shutdown()
+
+
+def test_auto_launch_config_does_not_force_loopback_without_explicit_config() -> None:
+    cfg_path, cfg, restrict_localhost = startup._resolve_launch_config(None)
+
+    assert cfg_path is None
+    assert cfg is None
+    assert restrict_localhost is False
 
 
 def test_auto_mode_recovers_from_stale_starting_owner_dead(
@@ -237,7 +254,7 @@ def test_auto_mode_recovers_from_stale_starting_owner_dead(
         assert ctx.address == daemon_address
         assert started["session_id"] is None
         auto_state = read_json_default(startup._auto_state_path(), {})
-        assert auto_state["status"] == "LISTENING"
+        assert auto_state["status"] == "READY"
         assert auto_state["session_id"] == "sess-starting-recovered"
         assert auto_state["address"] == daemon_address
     finally:
@@ -434,7 +451,7 @@ def test_auto_mode_recovers_from_stale_ready_owner_dead(
         assert ctx.address == daemon_address
         assert started["session_id"] is None
         auto_state = read_json_default(startup._auto_state_path(), {})
-        assert auto_state["status"] == "LISTENING"
+        assert auto_state["status"] == "READY"
         assert auto_state["session_id"] == "sess-recovered"
         assert auto_state["address"] == daemon_address
     finally:
@@ -501,7 +518,7 @@ def test_auto_mode_recovers_from_stale_failed_owner_dead(
         assert ctx.is_owner is True
         assert ctx.address == daemon_address
         auto_state = read_json_default(startup._auto_state_path(), {})
-        assert auto_state["status"] == "LISTENING"
+        assert auto_state["status"] == "READY"
         assert auto_state["session_id"] == "sess-failed-recover"
     finally:
         startup.shutdown()

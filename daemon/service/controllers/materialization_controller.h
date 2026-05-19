@@ -73,6 +73,7 @@ class MaterializationController {
     DaemonOptions::PublicDiskSourcePolicy public_disk_source_policy{};
     DaemonOptions::PostSealPolicy post_seal_policy{};
     DaemonOptions::ServingPrefetch serving_prefetch{};
+    DaemonOptions::ProgressiveReplication progressive_replication{};
     std::string daemon_id;
     std::function<absl::Status()> await_state_sync_barrier;
   };
@@ -167,6 +168,11 @@ class MaterializationController {
       RpcContext& rctx,
       const v2::PublishTargetReplicaRequest& req,
       v2::StartPublishTargetReplicaResponse& resp);
+
+  [[nodiscard]] absl::Status terminalize_target_publication(
+      std::string_view publication_id,
+      std::string_view reason,
+      bool release_published_lifecycle_lease);
 
   [[nodiscard]] absl::StatusOr<TargetPublishService::TargetPublicationFrontDoorContext>
   inspect_target_publication_context_for_testing(const v2::PublishTargetReplicaRequest& req, absl::Time now);

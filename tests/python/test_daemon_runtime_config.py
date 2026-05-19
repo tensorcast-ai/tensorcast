@@ -9,6 +9,52 @@ import pytest
 from tensorcast.daemon_runtime_config import load_daemon_config
 
 
+def test_load_daemon_config_normalizes_collective_budget_byte_units(
+    tmp_path: Path,
+) -> None:
+    cfg_path = tmp_path / "daemon.yaml"
+    cfg_path.write_text(
+        """
+server:
+  listen: {host: "127.0.0.1", port: 50052}
+  p2p_listen: {host: "127.0.0.1", port: 65090}
+  storage_path: "/tmp/models"
+  num_threads: 2
+engine:
+  materialization_strategy:
+    owner_file_collective_peak_bytes_budget: 8GB
+    owner_file_collective_batch_bytes: 512MB
+    owner_file_collective_dim1_staging_bytes: 256MB
+    owner_file_collective_min_dedup_saving_bytes: 64MB
+pinned_memory:
+  allocation_timeout: 30s
+  classes: []
+""",
+        encoding="utf-8",
+    )
+
+    cfg = load_daemon_config(cfg_path)
+    strategy = cfg.engine.materialization_strategy
+
+    assert strategy.owner_file_collective_peak_bytes_budget == 8 * 1024**3
+    assert strategy.owner_file_collective_batch_bytes == 512 * 1024**2
+    assert strategy.owner_file_collective_dim1_staging_bytes == 256 * 1024**2
+    assert strategy.owner_file_collective_min_dedup_saving_bytes == 64 * 1024**2
+
+
+def test_example_daemon_config_loads_with_humanized_collective_units() -> None:
+    cfg = load_daemon_config(
+        Path(__file__).resolve().parents[2]
+        / "examples"
+        / "config"
+        / "store_daemon_config.yaml"
+    )
+
+    strategy = cfg.engine.materialization_strategy
+    assert strategy.owner_file_collective_peak_bytes_budget == 8 * 1024**3
+    assert strategy.owner_file_collective_batch_bytes == 512 * 1024**2
+
+
 def test_load_daemon_config_defaults_public_disk_source_from_storage_path(
     tmp_path: Path,
 ) -> None:

@@ -1,0 +1,95 @@
+meta:
+  schema_version: "v1"
+  description: "TensorCast single-node serving daemon profile"
+  cluster_token: ""
+
+server:
+  listen:
+    host: 0.0.0.0
+    port: 50052
+  advertise:
+    host: null
+  p2p_listen:
+    host: 0.0.0.0
+    port: 0
+  storage_path: "/data/models"
+  num_threads: 8
+
+public_disk_source:
+  trusted_root_policies:
+    - root_path: "/data/models"
+    - root_path: "/mnt/host0"
+
+engine:
+  artifact_chunk_bytes: 256MB
+  streaming_buffer_chunks: 2
+  enable_external_target_verification: false
+  materialization_strategy:
+    enable_local_batched_disk_load: true
+    enable_tensor_aware_mapped_executor: true
+    allow_mixed_execution: true
+    enable_owner_file_collective: true
+    executor_preference: MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO
+  cpu_shared_memory:
+    enabled: true
+  memory_tiers:
+    enable_preemptible: false
+    stable_bytes: 64GB
+    preemptible_limit_bytes: 0
+    preemptible_low_watermark_ratio: 0.4
+
+promotion:
+  policy: PROMOTION_POLICY_ON_HOTNESS
+  require_verified: false
+  demotion_drain_timeout: 30s
+
+pinned_memory:
+  allocation_timeout: 30s
+  classes:
+    - name: engine
+      slice_bytes: 64MB
+      pool_bytes: 2GB
+    - name: comm_gpu
+      slice_bytes: 16MB
+      pool_bytes: 1GB
+      rdma_preregister: false
+    - name: comm_cpu
+      slice_bytes: 4MB
+      pool_bytes: 256MB
+      rdma_preregister: false
+
+high_availability:
+  enabled: true
+  global_store_endpoints:
+    - host: 127.0.0.1
+      port: 50051
+  heartbeat_interval: 5s
+  periodic_sync_interval: 10s
+
+lifecycle:
+  gpu_memory_limit_fraction: 0.8
+  enable_periodic_eviction: true
+  eviction_loop_interval: 2s
+  sessions_ttl: 120s
+  locks_ttl: 240s
+
+serving_prefetch:
+  enabled: true
+  same_daemon_acquire_enabled: true
+  default_expire_if_unacquired: 30s
+  default_idle_ttl_after_last_release: 30s
+  default_materialization_timeout: 60s
+
+observability:
+  logging:
+    level: INFO
+    file: ""
+
+# Debug-only toggles; keep disabled in production unless explicitly needed.
+debug:
+  cuda:
+    # Local serving bootstrap can promote daemon-owned bindings from the same
+    # daemon process that exported the CUDA handle. Keep the guarded fallback on
+    # so same-process opens use the original pointer while cross-process IPC
+    # still exercises the normal CUDA IPC path.
+    enable_same_process_ipc_fallback: true

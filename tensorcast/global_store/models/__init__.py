@@ -14,6 +14,20 @@ from .persistence import (
     PlacementShard,
     PlacementTarget,
 )
+from .progressive import (
+    ProgressiveAssignment,
+    ProgressiveAssignmentState,
+    ProgressiveClaimResult,
+    ProgressiveCoverageIdentity,
+    ProgressiveCoverageKind,
+    ProgressiveCoverageReport,
+    ProgressiveCoverageRow,
+    ProgressiveCoverageState,
+    ProgressiveExportState,
+    ProgressiveReportResult,
+    ProgressiveSourceMemory,
+    ProgressiveSourceTransport,
+)
 from .replica import ByteSpaceKind, ByteSpaceRef, ExportState, MemoryType, Replica
 from .shard_home_lease import ShardHomeLease
 from .transport import (
@@ -36,6 +50,18 @@ __all__ = [
     "ByteSpaceKind",
     "ByteSpaceRef",
     "ExportState",
+    "ProgressiveAssignment",
+    "ProgressiveAssignmentState",
+    "ProgressiveClaimResult",
+    "ProgressiveCoverageIdentity",
+    "ProgressiveCoverageKind",
+    "ProgressiveCoverageReport",
+    "ProgressiveCoverageRow",
+    "ProgressiveCoverageState",
+    "ProgressiveExportState",
+    "ProgressiveReportResult",
+    "ProgressiveSourceMemory",
+    "ProgressiveSourceTransport",
 ]
 __all__ += [
     "PlacementPlan",

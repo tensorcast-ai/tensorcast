@@ -60,7 +60,12 @@ from tensorcast.api.store.batch_context import (
     BatchContext,
     MaterializationBatcher,
 )
-from tensorcast.api.store.binding import Binding, BindingUpdateEpoch, SealedBindingValue
+from tensorcast.api.store.binding import (
+    Binding,
+    BindingUpdateEpoch,
+    SealedBindingValue,
+    StagedBindingValue,
+)
 from tensorcast.api.store.binding_state import parse_binding_value_or_raise
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import (
@@ -191,6 +196,7 @@ from tensorcast.types import (
     DeregisterArtifactOutcome,
     ExecutionDiagnostics,
     FinalizeClass,
+    GroupRealizationAcquireRef,
     HashBackend,
     HashLocation,
     HostSharedRegionAttachment,
@@ -1453,7 +1459,7 @@ class Store:
                 current_value_metadata=current_value_metadata,
                 device=device_obj,
                 device_id=device_id,
-                target_publication_token=None,
+                binding_current_value_publication_token=None,
                 restore_response=response if restore_tensors_async else None,
                 start_restore=restore_tensors_async,
             )
@@ -1632,7 +1638,7 @@ class Store:
             view_subset_hash=None,
             view_spec=None,
             current_value_metadata=current_value_metadata,
-            target_publication_token=None,
+            binding_current_value_publication_token=None,
             copy_plan=normalized_mapping,
         )
         return Binding(inplace_slot)
@@ -4499,6 +4505,7 @@ __all__ = [
     "BindingPromotionStatusState",
     "Binding",
     "BindingValueRef",
+    "GroupRealizationAcquireRef",
     "BindingValueVerificationState",
     "BindingLayout",
     "BindingUpdateEpoch",
@@ -4541,6 +4548,7 @@ __all__ = [
     "RetryPolicy",
     "SERVING_MANIFEST_TENSOR_NAME",
     "SealedBindingValue",
+    "StagedBindingValue",
     "ServingArtifactManifest",
     "ServingAdmissionFacts",
     "ServingBindingMemberRef",

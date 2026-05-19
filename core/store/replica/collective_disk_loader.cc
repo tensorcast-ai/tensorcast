@@ -3,13 +3,19 @@
 #include "core/store/replica/collective_disk_loader.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/statfs.h>
 #include <unistd.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -106,6 +112,10 @@ bool enable_mapped_concat_jobs(const StrategyConfig& strategy) {
 
 bool enable_mapped_concat_execution(const StrategyConfig& strategy) {
   return strategy.enable_mapped_concat_execution;
+}
+
+bool allow_source_ordered_for_mapped(const StrategyConfig& strategy) {
+  return strategy.allow_source_ordered_for_mapped;
 }
 
 bool enable_mapped_multirange_concat_jobs(const StrategyConfig& strategy) {
@@ -530,6 +540,15 @@ struct LocalMappedConcatExecutionStats {
   uint64_t layout_bytes{0};
   uint64_t strided_bytes{0};
   double exec_sec{0.0};
+};
+
+struct LocalMappedSourceOrderedExecutionStats {
+  LocalMappedTensorExecutionStats tensor;
+  LocalMappedConcatExecutionStats concat;
+  size_t tasks{0};
+  double exec_sec{0.0};
+  double tensor_copy_sec{0.0};
+  double concat_copy_sec{0.0};
 };
 
 struct Dim1PackWorkspace {
@@ -1599,13 +1618,6 @@ class PreadMultiSafetensorsSource final : public loader::SeekableSource {
       const uint64_t within = cursor - segment.base_offset;
       const size_t available = static_cast<size_t>(segment.data_size - within);
       const size_t step = std::min(to_read - total, available);
-      const uint8_t* mapped = segment.file->mapped_base();
-      if (mapped != nullptr) {
-        std::memcpy(out + total, mapped + segment.data_start + within, step);
-        total += step;
-        cursor += step;
-        continue;
-      }
       auto got_or = pread_fully(segment.file->fd(), segment.data_start + within, out + total, step);
       if (!got_or.ok()) {
         return got_or.status();
@@ -1630,6 +1642,561 @@ class PreadMultiSafetensorsSource final : public loader::SeekableSource {
   absl::Mutex offset_mu_;
   uint64_t current_offset_ ABSL_GUARDED_BY(offset_mu_){0};
 };
+
+constexpr uint64_t kLocalMappedDirectIoAlignment = 512;
+constexpr uint64_t kLocalMappedDirectIoMinSourceBytes = 1ULL << 30;
+constexpr uint64_t kLocalMappedPageCacheSamplePagesPerFile = 4096;
+constexpr double kLocalMappedBufferedPageCacheResidencyThreshold = 0.75;
+constexpr uint64_t kLocalMappedBufferedProbeMaxBytes = 256ULL << 20;
+constexpr uint64_t kLocalMappedBufferedProbeChunkBytes = 16ULL << 20;
+constexpr double kLocalMappedBufferedHotProbeMinGiBPerSec = 3.0;
+
+struct LocalMappedSafetensorsAutoIoDecision {
+  bool use_direct_aligned_edges{false};
+  double page_cache_residency_ratio{-1.0};
+  uint64_t buffered_probe_bytes{0};
+  double buffered_probe_sec{-1.0};
+  double buffered_probe_gib_per_sec{-1.0};
+  std::string reason;
+};
+
+struct LocalMappedBufferedProbeResult {
+  uint64_t bytes{0};
+  double sec{0.0};
+  double gib_per_sec{0.0};
+};
+
+struct LocalMappedBufferedProbeRead {
+  const loader::SharedSafetensorsSegment* segment{nullptr};
+  uint64_t file_offset{0};
+  size_t bytes{0};
+};
+
+uint64_t align_down_u64(uint64_t value, uint64_t alignment) {
+  return value - (value % alignment);
+}
+
+uint64_t align_up_u64(uint64_t value, uint64_t alignment) {
+  return ((value + alignment - 1) / alignment) * alignment;
+}
+
+bool is_aligned_address(const void* ptr, uint64_t alignment) {
+  return (reinterpret_cast<uintptr_t>(ptr) % alignment) == 0;
+}
+
+bool is_direct_friendly_fs_type(uint64_t fs_type) {
+  // Linux magic values for local filesystems where O_DIRECT is expected to be
+  // stable for large regular files. Unknown, network, and memory filesystems
+  // intentionally stay on the buffered path in auto mode.
+  constexpr uint64_t kExtSuperMagic = 0xEF53;
+  constexpr uint64_t kXfsSuperMagic = 0x58465342;
+  constexpr uint64_t kBtrfsSuperMagic = 0x9123683E;
+  constexpr uint64_t kF2fsSuperMagic = 0xF2F52010;
+  return fs_type == kExtSuperMagic || fs_type == kXfsSuperMagic || fs_type == kBtrfsSuperMagic ||
+      fs_type == kF2fsSuperMagic;
+}
+
+absl::StatusOr<double> estimate_file_page_cache_residency(const std::filesystem::path& path, uint64_t file_size) {
+  if (file_size == 0) {
+    return 1.0;
+  }
+  const long page_size_long = ::sysconf(_SC_PAGESIZE);
+  if (page_size_long <= 0) {
+    return absl::FailedPreconditionError("sysconf(_SC_PAGESIZE) failed while estimating page-cache residency");
+  }
+  const uint64_t page_size = static_cast<uint64_t>(page_size_long);
+  const uint64_t page_count = (file_size + page_size - 1) / page_size;
+  const uint64_t samples =
+      std::max<uint64_t>(1, std::min<uint64_t>(page_count, kLocalMappedPageCacheSamplePagesPerFile));
+
+  const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    return absl::ErrnoToStatus(
+        errno, absl::StrCat("open failed while estimating page-cache residency: ", path.string()));
+  }
+  absl::Cleanup close_fd = [fd] { ::close(fd); };
+
+  void* mapping = ::mmap(nullptr, static_cast<size_t>(file_size), PROT_NONE, MAP_PRIVATE, fd, 0);
+  if (mapping == MAP_FAILED) {
+    return absl::ErrnoToStatus(
+        errno, absl::StrCat("mmap failed while estimating page-cache residency: ", path.string()));
+  }
+  absl::Cleanup unmap_file = [mapping, file_size] { ::munmap(mapping, static_cast<size_t>(file_size)); };
+
+  uint64_t resident = 0;
+  auto* base = static_cast<char*>(mapping);
+  for (uint64_t i = 0; i < samples; ++i) {
+    const uint64_t page_index = std::min<uint64_t>((i * page_count) / samples, page_count - 1);
+    unsigned char vec = 0;
+    if (::mincore(base + page_index * page_size, static_cast<size_t>(page_size), &vec) != 0) {
+      return absl::ErrnoToStatus(
+          errno, absl::StrCat("mincore failed while estimating page-cache residency: ", path.string()));
+    }
+    if ((vec & 0x1U) != 0) {
+      ++resident;
+    }
+  }
+  return static_cast<double>(resident) / static_cast<double>(samples);
+}
+
+absl::StatusOr<double> estimate_source_page_cache_residency(
+    absl::Span<const loader::SharedSafetensorsSegment> segments) {
+  absl::flat_hash_map<std::string, uint64_t> files;
+  for (const auto& segment : segments) {
+    if (segment.path.empty()) {
+      continue;
+    }
+    auto [it, inserted] = files.emplace(segment.path.string(), 0);
+    if (inserted) {
+      struct stat st{};
+      if (::stat(segment.path.c_str(), &st) != 0) {
+        return absl::ErrnoToStatus(
+            errno, absl::StrCat("stat failed while estimating page-cache residency: ", segment.path.string()));
+      }
+      if (st.st_size < 0) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("negative file size while estimating page-cache residency: ", segment.path.string()));
+      }
+      it->second = static_cast<uint64_t>(st.st_size);
+    }
+  }
+  if (files.empty()) {
+    return 0.0;
+  }
+
+  double weighted_residency = 0.0;
+  uint64_t total_bytes = 0;
+  for (const auto& [path, file_size] : files) {
+    double residency = 0.0;
+    TC_ASSIGN_OR_RETURN(residency, estimate_file_page_cache_residency(std::filesystem::path(path), file_size));
+    weighted_residency += residency * static_cast<double>(file_size);
+    total_bytes += file_size;
+  }
+  if (total_bytes == 0) {
+    return 1.0;
+  }
+  return weighted_residency / static_cast<double>(total_bytes);
+}
+
+std::vector<LocalMappedBufferedProbeRead> plan_buffered_probe_reads(
+    absl::Span<const loader::SharedSafetensorsSegment> segments,
+    uint64_t total_bytes) {
+  std::vector<const loader::SharedSafetensorsSegment*> sorted_segments;
+  sorted_segments.reserve(segments.size());
+  for (const auto& segment : segments) {
+    if (segment.data_size > 0) {
+      sorted_segments.push_back(&segment);
+    }
+  }
+  std::sort(sorted_segments.begin(), sorted_segments.end(), [](const auto* lhs, const auto* rhs) {
+    return lhs->base_offset < rhs->base_offset;
+  });
+  if (sorted_segments.empty() || total_bytes == 0) {
+    return {};
+  }
+
+  const uint64_t target_bytes = std::min<uint64_t>(total_bytes, kLocalMappedBufferedProbeMaxBytes);
+  const uint64_t sample_count = std::max<uint64_t>(
+      1, (target_bytes + kLocalMappedBufferedProbeChunkBytes - 1) / kLocalMappedBufferedProbeChunkBytes);
+
+  std::vector<LocalMappedBufferedProbeRead> reads;
+  reads.reserve(static_cast<size_t>(sample_count));
+  uint64_t planned_bytes = 0;
+  for (uint64_t i = 0; i < sample_count && planned_bytes < target_bytes; ++i) {
+    const uint64_t logical_offset = std::min<uint64_t>((i * total_bytes) / sample_count, total_bytes - 1);
+    auto it = std::upper_bound(
+        sorted_segments.begin(),
+        sorted_segments.end(),
+        logical_offset,
+        [](uint64_t value, const loader::SharedSafetensorsSegment* segment) {
+          return value < segment->base_offset + segment->data_size;
+        });
+    if (it == sorted_segments.end()) {
+      continue;
+    }
+    const auto* segment = *it;
+    if (logical_offset < segment->base_offset) {
+      continue;
+    }
+    const uint64_t within_segment = logical_offset - segment->base_offset;
+    const uint64_t available = segment->data_size - within_segment;
+    const uint64_t remaining = target_bytes - planned_bytes;
+    const size_t bytes =
+        static_cast<size_t>(std::min<uint64_t>({kLocalMappedBufferedProbeChunkBytes, available, remaining}));
+    if (bytes == 0) {
+      continue;
+    }
+    reads.push_back(
+        LocalMappedBufferedProbeRead{
+            .segment = segment,
+            .file_offset = segment->data_start + within_segment,
+            .bytes = bytes,
+        });
+    planned_bytes += bytes;
+  }
+  return reads;
+}
+
+absl::StatusOr<LocalMappedBufferedProbeResult> probe_buffered_source_throughput(
+    absl::Span<const loader::SharedSafetensorsSegment> segments,
+    uint64_t total_bytes) {
+  auto reads = plan_buffered_probe_reads(segments, total_bytes);
+  if (reads.empty()) {
+    return LocalMappedBufferedProbeResult{};
+  }
+
+  std::vector<char> buffer(static_cast<size_t>(kLocalMappedBufferedProbeChunkBytes));
+  uint64_t read_bytes = 0;
+  const auto start = std::chrono::steady_clock::now();
+  for (const auto& read : reads) {
+    if (read.segment == nullptr || read.segment->file == nullptr) {
+      return absl::FailedPreconditionError("buffered source probe is missing a file handle");
+    }
+    size_t got = 0;
+    TC_ASSIGN_OR_RETURN(got, pread_fully(read.segment->file->fd(), read.file_offset, buffer.data(), read.bytes));
+    if (got != read.bytes) {
+      return absl::OutOfRangeError(absl::StrCat("short buffered source probe read: got=", got, " want=", read.bytes));
+    }
+    read_bytes += static_cast<uint64_t>(got);
+  }
+  const auto end = std::chrono::steady_clock::now();
+  const double sec = std::chrono::duration<double>(end - start).count();
+  const double safe_sec = std::max(sec, 1e-9);
+  const double gib_per_sec = (static_cast<double>(read_bytes) / static_cast<double>(1ULL << 30)) / safe_sec;
+  return LocalMappedBufferedProbeResult{
+      .bytes = read_bytes,
+      .sec = sec,
+      .gib_per_sec = gib_per_sec,
+  };
+}
+
+absl::StatusOr<LocalMappedSafetensorsAutoIoDecision> choose_auto_local_mapped_safetensors_io(
+    absl::Span<const loader::SharedSafetensorsSegment> segments) {
+  const uint64_t total_bytes = total_source_bytes(segments);
+  if (total_bytes < kLocalMappedDirectIoMinSourceBytes) {
+    return LocalMappedSafetensorsAutoIoDecision{
+        .use_direct_aligned_edges = false,
+        .reason = "source_below_direct_threshold",
+    };
+  }
+  for (const auto& segment : segments) {
+    if (segment.path.empty()) {
+      return LocalMappedSafetensorsAutoIoDecision{
+          .use_direct_aligned_edges = false,
+          .reason = "segment_path_missing",
+      };
+    }
+    struct stat st{};
+    if (::stat(segment.path.c_str(), &st) != 0) {
+      return absl::ErrnoToStatus(errno, absl::StrCat("stat failed for safetensors source: ", segment.path.string()));
+    }
+    if (!S_ISREG(st.st_mode)) {
+      return LocalMappedSafetensorsAutoIoDecision{
+          .use_direct_aligned_edges = false,
+          .reason = "source_not_regular_file",
+      };
+    }
+    struct statfs fs{};
+    if (::statfs(segment.path.c_str(), &fs) != 0) {
+      return absl::ErrnoToStatus(errno, absl::StrCat("statfs failed for safetensors source: ", segment.path.string()));
+    }
+    if (!is_direct_friendly_fs_type(static_cast<uint64_t>(fs.f_type))) {
+      return LocalMappedSafetensorsAutoIoDecision{
+          .use_direct_aligned_edges = false,
+          .reason = "filesystem_not_direct_friendly",
+      };
+    }
+  }
+  double page_cache_residency = 0.0;
+  TC_ASSIGN_OR_RETURN(page_cache_residency, estimate_source_page_cache_residency(segments));
+  if (page_cache_residency >= kLocalMappedBufferedPageCacheResidencyThreshold) {
+    LocalMappedBufferedProbeResult probe;
+    TC_ASSIGN_OR_RETURN(probe, probe_buffered_source_throughput(segments, total_bytes));
+    if (probe.gib_per_sec >= kLocalMappedBufferedHotProbeMinGiBPerSec) {
+      return LocalMappedSafetensorsAutoIoDecision{
+          .use_direct_aligned_edges = false,
+          .page_cache_residency_ratio = page_cache_residency,
+          .buffered_probe_bytes = probe.bytes,
+          .buffered_probe_sec = probe.sec,
+          .buffered_probe_gib_per_sec = probe.gib_per_sec,
+          .reason = "page_cache_hot_probe_fast",
+      };
+    }
+    return LocalMappedSafetensorsAutoIoDecision{
+        .use_direct_aligned_edges = true,
+        .page_cache_residency_ratio = page_cache_residency,
+        .buffered_probe_bytes = probe.bytes,
+        .buffered_probe_sec = probe.sec,
+        .buffered_probe_gib_per_sec = probe.gib_per_sec,
+        .reason = "page_cache_resident_probe_slow",
+    };
+  }
+  return LocalMappedSafetensorsAutoIoDecision{
+      .use_direct_aligned_edges = true,
+      .page_cache_residency_ratio = page_cache_residency,
+      .reason = "page_cache_cold_or_partial",
+  };
+}
+
+class DirectAlignedSafetensorsSource final : public loader::SeekableSource {
+ public:
+  explicit DirectAlignedSafetensorsSource(std::vector<loader::SharedSafetensorsSegment> segments)
+      : total_bytes_(total_source_bytes(segments)) {
+    segments_.reserve(segments.size());
+    for (auto& segment : segments) {
+      segments_.push_back(Segment{.segment = std::move(segment)});
+    }
+    std::sort(segments_.begin(), segments_.end(), [](const auto& a, const auto& b) {
+      return a.segment.base_offset < b.segment.base_offset;
+    });
+  }
+
+  ~DirectAlignedSafetensorsSource() override {
+    for (auto& segment : segments_) {
+      if (segment.direct_fd >= 0) {
+        ::close(segment.direct_fd);
+        segment.direct_fd = -1;
+      }
+    }
+  }
+
+  DirectAlignedSafetensorsSource(const DirectAlignedSafetensorsSource&) = delete;
+  DirectAlignedSafetensorsSource& operator=(const DirectAlignedSafetensorsSource&) = delete;
+
+  absl::Status initialize() {
+    for (auto& segment : segments_) {
+      if (segment.segment.path.empty()) {
+        return absl::FailedPreconditionError("direct safetensors source requires segment paths");
+      }
+      const int fd = ::open(segment.segment.path.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECT);
+      if (fd < 0) {
+        return absl::ErrnoToStatus(
+            errno, absl::StrCat("O_DIRECT open failed for safetensors source: ", segment.segment.path.string()));
+      }
+      struct stat st{};
+      if (::fstat(fd, &st) != 0) {
+        const int err = errno;
+        ::close(fd);
+        return absl::ErrnoToStatus(
+            err, absl::StrCat("fstat failed for safetensors source: ", segment.segment.path.string()));
+      }
+      if (st.st_size < 0) {
+        ::close(fd);
+        return absl::InvalidArgumentError(
+            absl::StrCat("negative file size for safetensors source: ", segment.segment.path.string()));
+      }
+      segment.direct_fd = fd;
+      segment.file_size = static_cast<uint64_t>(st.st_size);
+      segment.direct_file_floor = align_down_u64(segment.file_size, kLocalMappedDirectIoAlignment);
+    }
+    return absl::OkStatus();
+  }
+
+  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
+    absl::MutexLock lock(&offset_mu_);
+    auto read_or = read_at(current_offset_, dst, max_bytes);
+    if (read_or.ok()) {
+      current_offset_ += *read_or;
+    }
+    return read_or;
+  }
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return total_bytes_;
+  }
+
+  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
+    if (offset >= total_bytes_) {
+      return static_cast<size_t>(0);
+    }
+    const size_t to_read = static_cast<size_t>(std::min<uint64_t>(bytes, total_bytes_ - offset));
+    size_t total = 0;
+    auto* out = static_cast<char*>(dst);
+    uint64_t cursor = offset;
+    while (total < to_read) {
+      Segment* segment = find_segment_for_offset(cursor);
+      if (segment == nullptr) {
+        return absl::InternalError("direct safetensors source contains an uncovered gap");
+      }
+      if (segment->segment.file == nullptr) {
+        return absl::FailedPreconditionError("direct safetensors source is missing a buffered file handle");
+      }
+      if (segment->direct_fd < 0) {
+        return absl::FailedPreconditionError("direct safetensors source was not initialized");
+      }
+      const uint64_t within = cursor - segment->segment.base_offset;
+      const size_t available = static_cast<size_t>(segment->segment.data_size - within);
+      const size_t step = std::min(to_read - total, available);
+      TC_RETURN_IF_ERROR(read_file_range(*segment, segment->segment.data_start + within, out + total, step));
+      total += step;
+      cursor += step;
+    }
+    if (total != to_read) {
+      return absl::OutOfRangeError(
+          absl::StrCat("short logical read in DirectAlignedSafetensorsSource: got=", total, " want=", to_read));
+    }
+    return total;
+  }
+
+ private:
+  struct Segment {
+    loader::SharedSafetensorsSegment segment;
+    int direct_fd{-1};
+    uint64_t file_size{0};
+    uint64_t direct_file_floor{0};
+  };
+
+  class AlignedScratch {
+   public:
+    ~AlignedScratch() {
+      std::free(ptr_);
+    }
+
+    AlignedScratch(const AlignedScratch&) = delete;
+    AlignedScratch& operator=(const AlignedScratch&) = delete;
+    AlignedScratch() = default;
+
+    absl::Status ensure(size_t bytes) {
+      if (bytes <= capacity_) {
+        return absl::OkStatus();
+      }
+      void* next = nullptr;
+      const int rc = ::posix_memalign(&next, kLocalMappedDirectIoAlignment, bytes);
+      if (rc != 0) {
+        return absl::ErrnoToStatus(rc, "posix_memalign failed for O_DIRECT scratch");
+      }
+      std::free(ptr_);
+      ptr_ = next;
+      capacity_ = bytes;
+      return absl::OkStatus();
+    }
+
+    void* data() {
+      return ptr_;
+    }
+
+   private:
+    void* ptr_{nullptr};
+    size_t capacity_{0};
+  };
+
+  static AlignedScratch& thread_scratch() {
+    thread_local AlignedScratch scratch;
+    return scratch;
+  }
+
+  Segment* find_segment_for_offset(uint64_t offset) {
+    auto it = std::upper_bound(segments_.begin(), segments_.end(), offset, [](uint64_t value, const Segment& segment) {
+      return value < segment.segment.base_offset;
+    });
+    if (it == segments_.begin()) {
+      return nullptr;
+    }
+    --it;
+    const uint64_t end = it->segment.base_offset + it->segment.data_size;
+    if (offset >= end) {
+      return nullptr;
+    }
+    return &*it;
+  }
+
+  absl::Status read_file_range(Segment& segment, uint64_t file_offset, char* dst, size_t bytes) {
+    if (bytes == 0) {
+      return absl::OkStatus();
+    }
+    const uint64_t begin = file_offset;
+    const uint64_t end = file_offset + static_cast<uint64_t>(bytes);
+    const bool direct_to_dst = (begin % kLocalMappedDirectIoAlignment) == 0 &&
+        (static_cast<uint64_t>(bytes) % kLocalMappedDirectIoAlignment) == 0 && end <= segment.direct_file_floor &&
+        is_aligned_address(dst, kLocalMappedDirectIoAlignment);
+    if (direct_to_dst) {
+      size_t got = 0;
+      TC_ASSIGN_OR_RETURN(got, pread_fully(segment.direct_fd, begin, dst, bytes));
+      if (got != bytes) {
+        return absl::OutOfRangeError(
+            absl::StrCat("short O_DIRECT read: got=", got, " want=", bytes, " offset=", begin));
+      }
+      return absl::OkStatus();
+    }
+
+    const uint64_t direct_begin = align_down_u64(begin, kLocalMappedDirectIoAlignment);
+    const uint64_t direct_end =
+        std::min<uint64_t>(align_up_u64(end, kLocalMappedDirectIoAlignment), segment.direct_file_floor);
+    if (direct_end > direct_begin) {
+      const size_t direct_bytes = static_cast<size_t>(direct_end - direct_begin);
+      auto& scratch = thread_scratch();
+      TC_RETURN_IF_ERROR(scratch.ensure(direct_bytes));
+      size_t got = 0;
+      TC_ASSIGN_OR_RETURN(got, pread_fully(segment.direct_fd, direct_begin, scratch.data(), direct_bytes));
+      if (got != direct_bytes) {
+        return absl::OutOfRangeError(
+            absl::StrCat("short O_DIRECT scratch read: got=", got, " want=", direct_bytes, " offset=", direct_begin));
+      }
+      const uint64_t useful_begin = std::max(begin, direct_begin);
+      const uint64_t useful_end = std::min(end, direct_end);
+      if (useful_end > useful_begin) {
+        std::memcpy(
+            dst + static_cast<size_t>(useful_begin - begin),
+            static_cast<const char*>(scratch.data()) + static_cast<size_t>(useful_begin - direct_begin),
+            static_cast<size_t>(useful_end - useful_begin));
+      }
+    }
+
+    if (end > direct_end) {
+      const uint64_t tail_begin = std::max(begin, direct_end);
+      const size_t tail_bytes = static_cast<size_t>(end - tail_begin);
+      size_t got = 0;
+      TC_ASSIGN_OR_RETURN(
+          got,
+          pread_fully(
+              segment.segment.file->fd(), tail_begin, dst + static_cast<size_t>(tail_begin - begin), tail_bytes));
+      if (got != tail_bytes) {
+        return absl::OutOfRangeError(
+            absl::StrCat("short buffered EOF-edge read: got=", got, " want=", tail_bytes, " offset=", tail_begin));
+      }
+    }
+    return absl::OkStatus();
+  }
+
+  std::vector<Segment> segments_;
+  uint64_t total_bytes_{0};
+  absl::Mutex offset_mu_;
+  uint64_t current_offset_ ABSL_GUARDED_BY(offset_mu_){0};
+};
+
+absl::StatusOr<std::unique_ptr<loader::SeekableSource>> make_local_mapped_safetensors_source(
+    absl::Span<const loader::SharedSafetensorsSegment> segments,
+    const StrategyConfig& strategy) {
+  using IoMode = StrategyConfig::LocalMappedSafetensorsIoMode;
+  IoMode mode = strategy.local_mapped_safetensors_io_mode;
+  if (mode == IoMode::kAutoByFilesystem) {
+    LocalMappedSafetensorsAutoIoDecision decision;
+    TC_ASSIGN_OR_RETURN(decision, choose_auto_local_mapped_safetensors_io(segments));
+    mode = decision.use_direct_aligned_edges ? IoMode::kDirectAlignedEdges : IoMode::kBuffered;
+    LOG(INFO) << "local_mapped_safetensors_auto source_bytes=" << total_source_bytes(segments)
+              << " page_cache_residency_ratio=" << decision.page_cache_residency_ratio
+              << " buffered_probe_bytes=" << decision.buffered_probe_bytes
+              << " buffered_probe_sec=" << decision.buffered_probe_sec
+              << " buffered_probe_gib_per_sec=" << decision.buffered_probe_gib_per_sec
+              << " decision=" << (decision.use_direct_aligned_edges ? "direct_aligned_edges" : "buffered")
+              << " reason=" << decision.reason;
+  }
+
+  std::vector<loader::SharedSafetensorsSegment> owned_segments(segments.begin(), segments.end());
+  if (mode == IoMode::kBuffered) {
+    LOG(INFO) << "local_mapped_safetensors_io_mode=buffered source_bytes=" << total_source_bytes(segments);
+    std::unique_ptr<loader::SeekableSource> source =
+        std::make_unique<PreadMultiSafetensorsSource>(std::move(owned_segments));
+    return source;
+  }
+
+  auto source = std::make_unique<DirectAlignedSafetensorsSource>(std::move(owned_segments));
+  TC_RETURN_IF_ERROR(source->initialize());
+  LOG(INFO) << "local_mapped_safetensors_io_mode=direct_aligned_edges source_bytes=" << total_source_bytes(segments)
+            << " direct_alignment=" << kLocalMappedDirectIoAlignment;
+  std::unique_ptr<loader::SeekableSource> base_source = std::move(source);
+  return base_source;
+}
 
 class RemappedSource final : public loader::SeekableSource {
  public:
@@ -7049,6 +7616,296 @@ absl::StatusOr<LocalMappedTensorExecutionStats> execute_local_mapped_tensor_jobs
   return stats;
 }
 
+absl::StatusOr<LocalMappedSourceOrderedExecutionStats> execute_local_mapped_source_ordered_tasks(
+    const ParsedMappedParticipant& participant,
+    const LocalMappedTensorTaskBuildResult& tensor_task_build,
+    const LocalMappedConcatTaskBuildResult& concat_task_build,
+    loader::SeekableSource& source,
+    const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
+    std::chrono::milliseconds pinned_timeout,
+    size_t host_buffer_bytes,
+    size_t streaming_buffer_chunks,
+    loader::TargetLayoutGpuSink& sink) {
+  struct SourceOrderedTask {
+    enum class Kind : std::uint8_t {
+      kTensor = 0,
+      kConcat = 1,
+    };
+    Kind kind{Kind::kTensor};
+    size_t index{0};
+    uint64_t source_offset{0};
+    uint64_t read_bytes{0};
+  };
+
+  LocalMappedSourceOrderedExecutionStats stats;
+  stats.tensor = tensor_task_build.stats;
+  stats.concat.tasks = concat_task_build.tasks.size();
+  stats.concat.direct_tasks = concat_task_build.direct_tasks;
+  stats.concat.layout_tasks = concat_task_build.layout_tasks;
+  stats.concat.strided_tasks = concat_task_build.strided_tasks;
+  stats.concat.read_bytes = concat_task_build.source_bytes;
+  stats.concat.direct_bytes = concat_task_build.direct_bytes;
+  stats.concat.layout_bytes = concat_task_build.layout_bytes;
+  stats.concat.strided_bytes = concat_task_build.strided_bytes;
+
+  const auto total_start = std::chrono::steady_clock::now();
+  if (tensor_task_build.tasks.empty() && concat_task_build.tasks.empty()) {
+    return stats;
+  }
+  if (pinned_pool == nullptr) {
+    return absl::InvalidArgumentError("local mapped source-ordered streaming requires a pinned pool");
+  }
+
+  std::vector<SourceOrderedTask> tasks;
+  tasks.reserve(tensor_task_build.tasks.size() + concat_task_build.tasks.size());
+  for (size_t idx = 0; idx < tensor_task_build.tasks.size(); ++idx) {
+    const auto& task = tensor_task_build.tasks[idx];
+    tasks.push_back(
+        SourceOrderedTask{
+            .kind = SourceOrderedTask::Kind::kTensor,
+            .index = idx,
+            .source_offset = task.source_offset,
+            .read_bytes = task.read_bytes,
+        });
+  }
+  for (size_t idx = 0; idx < concat_task_build.tasks.size(); ++idx) {
+    const auto& task = concat_task_build.tasks[idx];
+    tasks.push_back(
+        SourceOrderedTask{
+            .kind = SourceOrderedTask::Kind::kConcat,
+            .index = idx,
+            .source_offset = task.source_offset,
+            .read_bytes = task.total_bytes(),
+        });
+  }
+  std::stable_sort(tasks.begin(), tasks.end(), [](const SourceOrderedTask& lhs, const SourceOrderedTask& rhs) {
+    if (lhs.source_offset != rhs.source_offset) {
+      return lhs.source_offset < rhs.source_offset;
+    }
+    if (lhs.kind != rhs.kind) {
+      return static_cast<std::uint8_t>(lhs.kind) < static_cast<std::uint8_t>(rhs.kind);
+    }
+    return lhs.index < rhs.index;
+  });
+
+  const size_t concurrency = std::max<size_t>(1, streaming_buffer_chunks);
+  auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
+      /*num_chunks=*/concurrency, host_buffer_bytes, pinned_pool);
+  TC_RETURN_IF_ERROR(session_spb->initialize(
+      pinned_timeout, absl::StrCat("local_mapped_source_ordered artifact_id=", participant.artifact_id)));
+
+  TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(participant.device_id));
+  cudaStream_t stream = nullptr;
+  TC_RETURN_IF_ERROR(tensorcast::cuda::stream_create_with_flags(&stream, cudaStreamNonBlocking));
+  absl::Cleanup destroy_stream = [&stream]() {
+    if (stream != nullptr) {
+      (void)tensorcast::cuda::stream_destroy(stream);
+    }
+  };
+
+  absl::Mutex status_mu;
+  absl::Status first_status;
+  std::atomic<bool> stop{false};
+  std::atomic<size_t> next_task{0};
+  std::atomic<uint64_t> producer_get_free_ns{0};
+  std::atomic<uint64_t> producer_read_ns{0};
+  std::atomic<uint64_t> producer_mark_ready_ns{0};
+  std::atomic<uint64_t> producer_tasks{0};
+  std::atomic<uint64_t> producer_bytes{0};
+  auto producers_done = std::make_shared<absl::BlockingCounter>(static_cast<int>(concurrency));
+  auto producers_remaining = std::make_shared<std::atomic<size_t>>(concurrency);
+
+  auto record_failure = [&](absl::Status status) {
+    if (status.ok()) {
+      return;
+    }
+    {
+      absl::MutexLock lock(&status_mu);
+      if (first_status.ok()) {
+        first_status = std::move(status);
+      }
+    }
+    stop.store(true, std::memory_order_release);
+  };
+
+  auto executor = whole_source_load_runtime().blocking_executor();
+  for (size_t worker = 0; worker < concurrency; ++worker) {
+    executor->add([&, producers_done, producers_remaining]() {
+      while (!stop.load(std::memory_order_acquire)) {
+        const size_t task_index = next_task.fetch_add(1, std::memory_order_acq_rel);
+        if (task_index >= tasks.size()) {
+          break;
+        }
+        const auto& task = tasks[task_index];
+        const auto get_free_start = std::chrono::steady_clock::now();
+        auto slot_or = session_spb->get_free_chunk();
+        producer_get_free_ns.fetch_add(elapsed_ns_since(get_free_start), std::memory_order_relaxed);
+        if (!slot_or.ok()) {
+          if (!stop.load(std::memory_order_acquire)) {
+            record_failure(slot_or.status());
+          }
+          break;
+        }
+        const int slot_id = *slot_or;
+        if (stop.load(std::memory_order_acquire)) {
+          (void)session_spb->abort_producer_slot(slot_id);
+          break;
+        }
+        char* host_ptr = session_spb->get_chunk_ptr(slot_id);
+        if (host_ptr == nullptr) {
+          (void)session_spb->abort_producer_slot(slot_id);
+          record_failure(absl::InternalError("local mapped source-ordered streaming got a null pinned chunk"));
+          break;
+        }
+        if (task.read_bytes > std::numeric_limits<size_t>::max()) {
+          (void)session_spb->abort_producer_slot(slot_id);
+          record_failure(absl::OutOfRangeError("local mapped source-ordered task exceeds host size_t limit"));
+          break;
+        }
+        const size_t bytes = static_cast<size_t>(task.read_bytes);
+        const auto read_start = std::chrono::steady_clock::now();
+        auto got_or = source.read_at(task.source_offset, host_ptr, bytes);
+        producer_read_ns.fetch_add(elapsed_ns_since(read_start), std::memory_order_relaxed);
+        if (!got_or.ok()) {
+          (void)session_spb->abort_producer_slot(slot_id);
+          record_failure(got_or.status());
+          break;
+        }
+        if (*got_or != bytes) {
+          (void)session_spb->abort_producer_slot(slot_id);
+          record_failure(
+              absl::OutOfRangeError(
+                  absl::StrCat("short read in local mapped source-ordered streaming: got=", *got_or, " want=", bytes)));
+          break;
+        }
+        const auto mark_ready_start = std::chrono::steady_clock::now();
+        const absl::Status ready_status = session_spb->mark_chunk_ready(slot_id, task_index, bytes);
+        producer_mark_ready_ns.fetch_add(elapsed_ns_since(mark_ready_start), std::memory_order_relaxed);
+        if (!ready_status.ok()) {
+          (void)session_spb->abort_producer_slot(slot_id);
+          record_failure(ready_status);
+          break;
+        }
+        producer_tasks.fetch_add(1, std::memory_order_relaxed);
+        producer_bytes.fetch_add(static_cast<uint64_t>(bytes), std::memory_order_relaxed);
+      }
+      if (producers_remaining->fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        session_spb->signal_production_complete();
+      }
+      producers_done->DecrementCount();
+    });
+  }
+
+  uint64_t consumer_get_ready_ns = 0;
+  uint64_t consumer_copy_ns = 0;
+  uint64_t consumer_return_ns = 0;
+  uint64_t consumer_tasks = 0;
+  uint64_t consumer_tensor_tasks = 0;
+  uint64_t consumer_concat_tasks = 0;
+  uint64_t consumer_bytes = 0;
+  uint64_t tensor_copy_ns = 0;
+  uint64_t concat_copy_ns = 0;
+  while (true) {
+    const auto get_ready_start = std::chrono::steady_clock::now();
+    auto chunk_or = session_spb->get_ready_chunk();
+    consumer_get_ready_ns += elapsed_ns_since(get_ready_start);
+    if (!chunk_or.ok()) {
+      if (!absl::IsOutOfRange(chunk_or.status()) && !absl::IsUnavailable(chunk_or.status())) {
+        record_failure(chunk_or.status());
+        session_spb->signal_production_complete();
+      }
+      break;
+    }
+    auto chunk = *chunk_or;
+    absl::Cleanup return_chunk = [&]() {
+      const auto return_start = std::chrono::steady_clock::now();
+      const absl::Status return_status = session_spb->return_chunk(chunk.slot_id);
+      consumer_return_ns += elapsed_ns_since(return_start);
+      if (!return_status.ok()) {
+        record_failure(return_status);
+      }
+    };
+
+    if (chunk.global_chunk_id >= tasks.size()) {
+      record_failure(absl::InternalError("local mapped source-ordered chunk id out of range"));
+      continue;
+    }
+    const auto& task = tasks[chunk.global_chunk_id];
+    if (chunk.bytes_in_chunk != task.read_bytes) {
+      record_failure(absl::InternalError("local mapped source-ordered chunk size mismatch"));
+      continue;
+    }
+    if (stop.load(std::memory_order_acquire)) {
+      continue;
+    }
+
+    const auto copy_start = std::chrono::steady_clock::now();
+    absl::Status copy_status;
+    if (task.kind == SourceOrderedTask::Kind::kTensor) {
+      if (task.index >= tensor_task_build.tasks.size()) {
+        copy_status = absl::InternalError("local mapped source-ordered tensor task index out of range");
+      } else {
+        copy_status =
+            execute_local_mapped_tensor_task_copy(tensor_task_build.tasks[task.index], chunk.data_ptr, stream);
+      }
+      const uint64_t elapsed = elapsed_ns_since(copy_start);
+      tensor_copy_ns += elapsed;
+      consumer_copy_ns += elapsed;
+      consumer_tensor_tasks += 1;
+    } else {
+      if (task.index >= concat_task_build.tasks.size()) {
+        copy_status = absl::InternalError("local mapped source-ordered concat task index out of range");
+      } else {
+        copy_status = execute_local_mapped_concat_task_copy(
+            participant, concat_task_build.tasks[task.index], chunk.data_ptr, sink, stream);
+      }
+      const uint64_t elapsed = elapsed_ns_since(copy_start);
+      concat_copy_ns += elapsed;
+      consumer_copy_ns += elapsed;
+      consumer_concat_tasks += 1;
+    }
+    consumer_tasks += 1;
+    consumer_bytes += static_cast<uint64_t>(chunk.bytes_in_chunk);
+    if (!copy_status.ok()) {
+      record_failure(std::move(copy_status));
+    }
+  }
+
+  producers_done->Wait();
+  {
+    absl::MutexLock lock(&status_mu);
+    if (!first_status.ok()) {
+      return first_status;
+    }
+  }
+
+  stats.tasks = tasks.size();
+  stats.exec_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - total_start).count();
+  stats.tensor_copy_sec = seconds_from_ns(tensor_copy_ns);
+  stats.concat_copy_sec = seconds_from_ns(concat_copy_ns);
+  stats.tensor.exec_sec = stats.tensor_copy_sec;
+  stats.concat.exec_sec = stats.concat_copy_sec;
+  LOG(INFO) << "local_mapped_source_ordered_streaming_summary"
+            << " artifact_id=" << participant.artifact_id << " tasks=" << stats.tasks
+            << " tensor_tasks=" << tensor_task_build.tasks.size() << " concat_tasks=" << concat_task_build.tasks.size()
+            << " tensor_read_bytes=" << stats.tensor.read_bytes << " tensor_dst_bytes=" << stats.tensor.dst_bytes
+            << " concat_read_bytes=" << stats.concat.read_bytes << " concat_direct_bytes=" << stats.concat.direct_bytes
+            << " concat_strided_bytes=" << stats.concat.strided_bytes << " chunk_bytes=" << host_buffer_bytes
+            << " streaming_buffer_chunks=" << concurrency
+            << " producer_tasks=" << producer_tasks.load(std::memory_order_relaxed)
+            << " producer_bytes=" << producer_bytes.load(std::memory_order_relaxed)
+            << " producer_get_free_sec=" << seconds_from_ns(producer_get_free_ns.load(std::memory_order_relaxed))
+            << " producer_read_sec=" << seconds_from_ns(producer_read_ns.load(std::memory_order_relaxed))
+            << " producer_mark_ready_sec=" << seconds_from_ns(producer_mark_ready_ns.load(std::memory_order_relaxed))
+            << " consumer_tasks=" << consumer_tasks << " consumer_tensor_tasks=" << consumer_tensor_tasks
+            << " consumer_concat_tasks=" << consumer_concat_tasks << " consumer_bytes=" << consumer_bytes
+            << " consumer_get_ready_sec=" << seconds_from_ns(consumer_get_ready_ns)
+            << " consumer_copy_sec=" << seconds_from_ns(consumer_copy_ns)
+            << " tensor_copy_sec=" << stats.tensor_copy_sec << " concat_copy_sec=" << stats.concat_copy_sec
+            << " consumer_return_sec=" << seconds_from_ns(consumer_return_ns) << " exec=" << stats.exec_sec << "s";
+  return stats;
+}
+
 absl::StatusOr<LocalMappedTargetExecutionResult> execute_local_mapped_target(
     ParsedMappedParticipant participant,
     const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
@@ -7068,10 +7925,10 @@ absl::StatusOr<LocalMappedTargetExecutionResult> execute_local_mapped_target(
   const auto total_start = std::chrono::steady_clock::now();
   const size_t chunk_bytes = pinned_pool->slice_bytes();
 
-  std::unique_ptr<loader::SeekableSource> source_owner =
-      std::make_unique<PreadMultiSafetensorsSource>(std::vector<loader::SharedSafetensorsSegment>(
-          participant.disk_context->safetensors_segments().begin(),
-          participant.disk_context->safetensors_segments().end()));
+  std::unique_ptr<loader::SeekableSource> source_owner;
+  TC_ASSIGN_OR_RETURN(
+      source_owner,
+      make_local_mapped_safetensors_source(participant.disk_context->safetensors_segments(), options.strategy_config));
   loader::SeekableSource& source = *source_owner;
 
   TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(participant.device_id));
@@ -7180,35 +8037,83 @@ absl::StatusOr<LocalMappedTargetExecutionResult> execute_local_mapped_target(
   TC_RETURN_IF_ERROR(validate_local_mapped_concat_jobs_admission(concat_job_build.jobs, chunk_bytes));
 
   const size_t streaming_buffer_chunks = std::max<size_t>(1, options.streaming_buffer_chunks);
-  auto tensor_stats_or = execute_local_mapped_tensor_jobs(
-      local_tensor_jobs,
-      participant.device_id,
-      source,
-      pinned_pool,
-      pinned_timeout,
-      chunk_bytes,
-      streaming_buffer_chunks,
-      participant.artifact_id);
-  if (!tensor_stats_or.ok()) {
-    return tensor_stats_or.status();
-  }
-  const LocalMappedTensorExecutionStats tensor_stats = *tensor_stats_or;
-
+  LocalMappedTensorExecutionStats tensor_stats;
   LocalMappedConcatExecutionStats concat_stats;
-  if (!concat_job_build.jobs.empty()) {
-    auto concat_stats_or = execute_local_mapped_concat_jobs_streaming(
+  bool source_ordered_local_mapped = false;
+  double source_ordered_exec_sec = 0.0;
+  if (allow_source_ordered_for_mapped(options.strategy_config) && !local_tensor_jobs.empty() &&
+      !concat_job_build.jobs.empty()) {
+    const auto tensor_task_build_start = std::chrono::steady_clock::now();
+    auto tensor_task_build_or = build_local_mapped_tensor_tasks(local_tensor_jobs, participant.device_id, chunk_bytes);
+    if (!tensor_task_build_or.ok()) {
+      return tensor_task_build_or.status();
+    }
+    auto tensor_task_build = std::move(*tensor_task_build_or);
+    const double tensor_task_build_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - tensor_task_build_start).count();
+
+    const auto concat_task_build_start = std::chrono::steady_clock::now();
+    auto concat_task_build_or = build_local_mapped_concat_tasks(participant, concat_job_build.jobs, chunk_bytes);
+    if (!concat_task_build_or.ok()) {
+      return concat_task_build_or.status();
+    }
+    auto concat_task_build = std::move(*concat_task_build_or);
+    const double concat_task_build_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - concat_task_build_start).count();
+
+    auto combined_stats_or = execute_local_mapped_source_ordered_tasks(
         participant,
-        concat_job_build.jobs,
+        tensor_task_build,
+        concat_task_build,
         source,
         pinned_pool,
         pinned_timeout,
         chunk_bytes,
         streaming_buffer_chunks,
         target_sink);
-    if (!concat_stats_or.ok()) {
-      return concat_stats_or.status();
+    if (!combined_stats_or.ok()) {
+      return combined_stats_or.status();
     }
-    concat_stats = *concat_stats_or;
+    auto combined_stats = *combined_stats_or;
+    tensor_stats = combined_stats.tensor;
+    concat_stats = combined_stats.concat;
+    source_ordered_local_mapped = true;
+    source_ordered_exec_sec = combined_stats.exec_sec;
+    LOG(INFO) << "local_mapped_source_ordered_task_build"
+              << " artifact_id=" << participant.artifact_id << " tensor_task_build_sec=" << tensor_task_build_sec
+              << " concat_task_build_sec=" << concat_task_build_sec
+              << " tensor_tasks=" << tensor_task_build.tasks.size()
+              << " concat_tasks=" << concat_task_build.tasks.size();
+  } else {
+    auto tensor_stats_or = execute_local_mapped_tensor_jobs(
+        local_tensor_jobs,
+        participant.device_id,
+        source,
+        pinned_pool,
+        pinned_timeout,
+        chunk_bytes,
+        streaming_buffer_chunks,
+        participant.artifact_id);
+    if (!tensor_stats_or.ok()) {
+      return tensor_stats_or.status();
+    }
+    tensor_stats = *tensor_stats_or;
+
+    if (!concat_job_build.jobs.empty()) {
+      auto concat_stats_or = execute_local_mapped_concat_jobs_streaming(
+          participant,
+          concat_job_build.jobs,
+          source,
+          pinned_pool,
+          pinned_timeout,
+          chunk_bytes,
+          streaming_buffer_chunks,
+          target_sink);
+      if (!concat_stats_or.ok()) {
+        return concat_stats_or.status();
+      }
+      concat_stats = *concat_stats_or;
+    }
   }
 
   const uint64_t unique_source_bytes = tensor_stats.read_bytes + concat_job_build.handled_source_bytes;
@@ -7229,6 +8134,8 @@ absl::StatusOr<LocalMappedTargetExecutionResult> execute_local_mapped_target(
             << " concat_job_root_dst_bytes=" << concat_job_build.handled_root_dst_bytes
             << " concat_job_build=" << concat_build_sec << "s"
             << " concat_job_exec=" << concat_stats.exec_sec << "s"
+            << " source_ordered_local_mapped=" << (source_ordered_local_mapped ? "true" : "false")
+            << " source_ordered_exec=" << source_ordered_exec_sec << "s"
             << " concat_streaming_tasks=" << concat_stats.tasks << " concat_direct_tasks=" << concat_stats.direct_tasks
             << " concat_layout_tasks=" << concat_stats.layout_tasks
             << " concat_strided_tasks=" << concat_stats.strided_tasks << " lane_range_bytes=" << lane_range_bytes

@@ -503,21 +503,15 @@ TEST_CASE("RefillOwnedBinding rejects live assembly contributions before overwri
   REQUIRE(record->current_binding_value_id == "value-1");
 }
 
-TEST_CASE(
-    "RefillOwnedBinding ignores operation_id collective metadata once first-class topology is present",
-    "[daemon][binding]") {
+TEST_CASE("RefillOwnedBinding uses first-class collective topology", "[daemon][binding]") {
   Fixture fix;
   const auto record = fix.insert_ready_artifact_record();
 
-  auto build_request = [&](bool with_operation_metadata) {
+  auto build_request = [&] {
     v2::RefillOwnedBindingRequest req;
     req.set_binding_id(record->binding_id);
     req.set_artifact_id("artifact-new");
-    if (with_operation_metadata) {
-      req.set_operation_id("binding-op#tcg:clid=compat-group;clws=8;clrk=1");
-    } else {
-      req.set_operation_id("binding-op");
-    }
+    req.set_operation_id("binding-op");
     auto* topology = req.mutable_execution_topology();
     topology->mutable_collective_load_group()->set_group_id("first-class-group");
     topology->mutable_collective_load_group()->set_world_size(8);
@@ -526,19 +520,11 @@ TEST_CASE(
     return req;
   };
 
-  v2::RefillOwnedBindingResponse resp_without_metadata;
-  const auto status_without_metadata =
-      run_refill_owned_binding(fix.service, build_request(/*with_operation_metadata=*/false), resp_without_metadata);
+  v2::RefillOwnedBindingResponse resp;
+  const auto status = run_refill_owned_binding(fix.service, build_request(), resp);
 
-  v2::RefillOwnedBindingResponse resp_with_metadata;
-  const auto status_with_metadata =
-      run_refill_owned_binding(fix.service, build_request(/*with_operation_metadata=*/true), resp_with_metadata);
-
-  REQUIRE(status_with_metadata.error_code() == status_without_metadata.error_code());
-  REQUIRE(status_with_metadata.error_message() == status_without_metadata.error_message());
-  REQUIRE(
-      status_with_metadata.error_message().find("conflicts with operation_id collective metadata") ==
-      std::string::npos);
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_message().find("operation_id collective metadata") == std::string::npos);
 }
 
 TEST_CASE("RefillOwnedBinding strict preflight rejection preserves ready artifact state", "[daemon][binding]") {

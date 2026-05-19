@@ -460,10 +460,10 @@ binding.
 
 Current rule:
 
-- `tensorcast_enable_runtime_binding=true` does not by itself turn ordinary
+- runtime initialization settings do not by themselves turn ordinary
   `disk:<model_path>` startup into the preferred mapped startup path,
-- startup source binding is only attempted when an explicit
-  `tensorcast_source_artifact_key` is provided,
+- startup binding is attempted only through an explicit serving selector,
+  external preload authority, or local-directory bootstrap,
 - otherwise ordinary disk startup stays on the `tensor_dict` strategy described
   above.
 

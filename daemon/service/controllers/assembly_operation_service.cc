@@ -1592,7 +1592,7 @@ absl::StatusOr<RepresentationPublishValidationResult> finalize_binding_subject_c
     record->current_artifact_id = closeout_commit_result.artifact_id;
     record->current_artifact_canonical_index_json = registration_index_json;
     record->current_selection = selection;
-    record->target_publication_token.clear();
+    record->binding_current_value_publication_token.clear();
     record->state = v2::BINDING_STATE_READY_ARTIFACT;
     record->active_update_epoch.clear();
     record->verification_state = v2::BINDING_VALUE_VERIFICATION_STATE_VERIFIED;

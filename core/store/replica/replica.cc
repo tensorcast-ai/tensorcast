@@ -770,33 +770,44 @@ absl::Status Replica::verify_artifact_data(
     common::memory::MemoryLocation location,
     const tensorcast::common::ArtifactVerificationInfo& expected_info,
     tensorcast::common::VerificationLevel level) const {
-  absl::MutexLock lock(&mutex_);
-
-  // Check if data is loaded at the specified location
-  MemoryState state = memory_manager_->get_state(location);
-  if (state != MemoryState::LOADED) {
-    return absl::FailedPreconditionError(
-        absl::StrCat(
-            "Replica data must be loaded at ",
-            location_to_string(location),
-            " before verification. Current state: ",
-            state_to_string(state)));
-  }
-
-  // Get data pointers and sizes
-  std::vector<void*> data_ptrs = memory_manager_->get_pointer(location);
-  if (data_ptrs.empty()) {
-    return absl::InternalError("No data pointers available for loaded replica.");
-  }
-
+  std::vector<void*> data_ptrs;
   std::vector<size_t> data_sizes;
-  uint64_t artifact_size = memory_manager_->get_artifact_size();
+  int device_id = -1;
+  std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation_guard;
 
-  // Single contiguous buffer for both GPU and CPU under VS
-  data_sizes.push_back(artifact_size);
+  {
+    absl::MutexLock lock(&mutex_);
 
-  // Determine device ID for verification
-  int device_id = (location == common::memory::MemoryLocation::GPU) ? memory_manager_->get_local_device_id() : -1;
+    // Check if data is loaded at the specified location
+    MemoryState state = memory_manager_->get_state(location);
+    if (state != MemoryState::LOADED) {
+      return absl::FailedPreconditionError(
+          absl::StrCat(
+              "Replica data must be loaded at ",
+              location_to_string(location),
+              " before verification. Current state: ",
+              state_to_string(state)));
+    }
+
+    // Get data pointers and sizes
+    data_ptrs = memory_manager_->get_pointer(location);
+    if (data_ptrs.empty()) {
+      return absl::InternalError("No data pointers available for loaded replica.");
+    }
+
+    uint64_t artifact_size = memory_manager_->get_artifact_size();
+
+    // Single contiguous buffer for both GPU and CPU under VS
+    data_sizes.push_back(artifact_size);
+
+    if (location == common::memory::MemoryLocation::GPU) {
+      device_id = memory_manager_->get_local_device_id();
+      gpu_allocation_guard = memory_manager_->get_gpu_allocation_shared();
+      if (!gpu_allocation_guard) {
+        return absl::FailedPreconditionError("GPU allocation not available for verification");
+      }
+    }
+  }
 
   LOG(INFO) << "Replica(" << key_.artifact_id << "): Verifying " << location_to_string(location) << " data at level "
             << static_cast<int>(level);

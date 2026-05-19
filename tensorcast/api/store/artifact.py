@@ -18,10 +18,7 @@ from typing import (
     Any,
     Mapping,
     Sequence,
-    SupportsIndex,
-    SupportsInt,
     TypedDict,
-    cast,
 )
 
 import torch
@@ -108,6 +105,7 @@ from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.operation.v1 import operation_pb2
 from tensorcast.types import (
+    GroupRealizationAcquireRef,
     PrefetchedServingBinding,
     PrefetchedServingBindingSet,
     PrefetchRetentionPolicy,
@@ -490,135 +488,12 @@ def _bind_region_registration_error(
     )
 
 
-_TRANSPORT_GROUP_OPID_MARKER = "#tcg:"
-_TRANSPORT_GROUP_KIND_TAG = "tc.transport.group.kind"
-_TRANSPORT_GROUP_ID_TAG = "tc.transport.group.id"
-_TRANSPORT_GROUP_TOTAL_PARTS_TAG = "tc.transport.group.total_parts"
-_TRANSPORT_GROUP_PART_ID_TAG = "tc.transport.group.part_id"
-_TRANSPORT_GROUP_PRIORITY_TAG = "tc.transport.group.priority"
-_TRANSPORT_GROUP_EPOCH_TAG = "tc.transport.group.epoch"
-_TRANSPORT_REQUEST_ID_TAG = "tc.transport.request_id"
-_COLLECTIVE_GROUP_ID_OPID_KEY = "clid"
-_COLLECTIVE_GROUP_WORLD_SIZE_OPID_KEY = "clws"
-_COLLECTIVE_GROUP_RANK_OPID_KEY = "clrk"
-_ALLOWED_OPERATION_TOKEN_CHARS = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:"
-)
-
-
-def _sanitize_operation_token(value: str | None) -> str:
-    raw = "" if value is None else str(value).strip()
-    if not raw:
-        return ""
-    return "".join(ch if ch in _ALLOWED_OPERATION_TOKEN_CHARS else "_" for ch in raw)
-
-
-def _read_context_tag_str(
-    tags: Mapping[str, object] | None,
-    key: str,
-) -> str:
-    if not tags:
-        return ""
-    value = tags.get(key)
-    if value is None:
-        return ""
-    return _sanitize_operation_token(str(value))
-
-
-def _read_context_tag_int(
-    tags: Mapping[str, object] | None,
-    key: str,
-    *,
-    default: int,
-) -> int:
-    if not tags:
-        return default
-    value = tags.get(key)
-    if value is None:
-        return default
-    try:
-        return int(cast(SupportsInt | SupportsIndex | str | bytes | bytearray, value))
-    except (TypeError, ValueError):
-        return default
-
-
 def _build_transport_operation_id(
     *,
     base_operation_id: str,
     ctx: CallContext | None,
 ) -> str:
-    if ctx is None:
-        return base_operation_id
-    tags = ctx.tags
-    group_kind = _read_context_tag_str(tags, _TRANSPORT_GROUP_KIND_TAG)
-    group_id = _read_context_tag_str(tags, _TRANSPORT_GROUP_ID_TAG)
-    part_id = _read_context_tag_str(tags, _TRANSPORT_GROUP_PART_ID_TAG)
-    total_parts = _read_context_tag_int(
-        tags,
-        _TRANSPORT_GROUP_TOTAL_PARTS_TAG,
-        default=0,
-    )
-    priority = _read_context_tag_int(
-        tags,
-        _TRANSPORT_GROUP_PRIORITY_TAG,
-        default=0,
-    )
-    epoch = _read_context_tag_int(
-        tags,
-        _TRANSPORT_GROUP_EPOCH_TAG,
-        default=0,
-    )
-    request_id = _read_context_tag_str(tags, _TRANSPORT_REQUEST_ID_TAG)
-    collective_group_id = ""
-    collective_world_size = 0
-    collective_rank = 0
-    collective = ctx.collective
-    if collective is not None:
-        collective_group_id = _sanitize_operation_token(collective.group_id)
-        try:
-            collective_world_size = int(collective.world_size)
-            collective_rank = int(collective.rank)
-        except (TypeError, ValueError):
-            collective_group_id = ""
-            collective_world_size = 0
-            collective_rank = 0
-
-    metadata_parts: list[str] = []
-    if group_kind and group_id and part_id and total_parts > 0:
-        if not request_id:
-            request_id = _sanitize_operation_token(f"{group_id}:{part_id}")
-        metadata_parts.extend(
-            [
-                f"kind={group_kind}",
-                f"gid={group_id}",
-                f"tot={int(total_parts)}",
-                f"part={part_id}",
-                f"pri={int(priority)}",
-                f"ep={int(epoch)}",
-            ]
-        )
-    if (
-        collective_group_id
-        and collective_world_size > 1
-        and 0 <= collective_rank < collective_world_size
-    ):
-        metadata_parts.extend(
-            [
-                f"{_COLLECTIVE_GROUP_ID_OPID_KEY}={collective_group_id}",
-                f"{_COLLECTIVE_GROUP_WORLD_SIZE_OPID_KEY}={int(collective_world_size)}",
-                f"{_COLLECTIVE_GROUP_RANK_OPID_KEY}={int(collective_rank)}",
-            ]
-        )
-
-    if request_id:
-        metadata_parts.append(f"rid={request_id}")
-
-    if metadata_parts:
-        return (
-            f"{base_operation_id}{_TRANSPORT_GROUP_OPID_MARKER}"
-            f"{';'.join(metadata_parts)}"
-        )
-
+    _ = ctx
     return base_operation_id
 
 
@@ -630,7 +505,7 @@ def _register_client_binding(
     canonical_index_bytes: bytes,
     selection: common_pb2.ArtifactSelection | None,
     source_artifact_id: str | None,
-    target_publication_token: bytes | None,
+    binding_current_value_publication_token: bytes | None,
     ctx: CallContext | None,
 ) -> tuple[str, BindingLayout, BindingValueMetadata | None]:
     binding_layout = build_binding_layout(
@@ -648,7 +523,6 @@ def _register_client_binding(
         binding_layout_id=binding_layout.binding_layout_id,
         initial_selection=selection,
         source_artifact_id=source_artifact_id,
-        target_publication_token=target_publication_token,
         timeout_s=timeout_s if timeout_s is not None else 60.0,
     )
     try:
@@ -1388,6 +1262,9 @@ class Artifact:
                             serving_runtime_policy
                         ),
                         operation_id=operation_id,
+                        group_realization=ctx.group_realization
+                        if ctx is not None
+                        else None,
                         timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -1461,8 +1338,8 @@ class Artifact:
                 else None
             ),
             source_artifact_id=self._ensure_identified(),
-            target_publication_token=getattr(
-                response, "target_publication_token", None
+            binding_current_value_publication_token=getattr(
+                response, "binding_current_value_publication_token", None
             ),
             ctx=ctx,
         )
@@ -1482,8 +1359,8 @@ class Artifact:
             view_subset_hash=region_layout.view_subset_hash,
             view_spec=view_spec_proto,
             current_value_metadata=current_value_metadata,
-            target_publication_token=getattr(
-                response, "target_publication_token", None
+            binding_current_value_publication_token=getattr(
+                response, "binding_current_value_publication_token", None
             ),
         )
         return Binding(slot, publish=publish, ctx=ctx)
@@ -1664,6 +1541,9 @@ class Artifact:
                         copy_plan=copy_plan,
                         dst_tensors=target_tensors,
                         operation_id=operation_id,
+                        group_realization=ctx.group_realization
+                        if ctx is not None
+                        else None,
                         timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
                     )
                     materialize_rpc_sec += time.perf_counter() - stage_start
@@ -1749,8 +1629,8 @@ class Artifact:
                 else None
             ),
             source_artifact_id=self._ensure_identified(),
-            target_publication_token=getattr(
-                response, "target_publication_token", None
+            binding_current_value_publication_token=getattr(
+                response, "binding_current_value_publication_token", None
             ),
             ctx=ctx,
         )
@@ -1771,8 +1651,8 @@ class Artifact:
             view_subset_hash=region_layout.view_subset_hash,
             view_spec=view_spec_proto,
             current_value_metadata=current_value_metadata,
-            target_publication_token=getattr(
-                response, "target_publication_token", None
+            binding_current_value_publication_token=getattr(
+                response, "binding_current_value_publication_token", None
             ),
             copy_plan=copy_plan,
         )
@@ -1966,6 +1846,9 @@ class Artifact:
                     copy_plan=copy_plan_proto,
                     dst_specs=dst_specs,
                     operation_id=operation_id,
+                    group_realization=ctx.group_realization
+                    if ctx is not None
+                    else None,
                     timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
                 )
                 if profile is not None:
@@ -2022,34 +1905,69 @@ class Artifact:
                 )
             raise
 
+        current_value_metadata = None
+        staged_value_metadata = None
+        group_realization_acquire = None
         try:
             with tensorcast_profile_stage(
                 "tensorcast",
-                "artifact.bind_owned.parse_current_value",
+                "artifact.bind_owned.parse_binding_value",
                 logger=logger,
                 extra={
                     "artifact_id": self._artifact_id,
                     "binding_id": str(response.binding_id),
+                    "created_staged_value": bool(
+                        getattr(response, "created_staged_value", False)
+                    ),
                 },
             ) as profile:
-                current_value_metadata = parse_binding_value_or_raise(
-                    response.current_value
-                    if hasattr(response, "current_value")
-                    else None,
-                    rpc_name="CreateOwnedBinding",
-                    expected_binding_id=str(response.binding_id),
-                    expected_binding_layout_id=owner_layout.binding_layout_id,
-                )
-                if profile is not None and current_value_metadata is not None:
-                    profile["sealed_artifact_id"] = getattr(
-                        current_value_metadata, "artifact_id", None
+                if bool(getattr(response, "created_staged_value", False)):
+                    staged_value_metadata = parse_binding_value_or_raise(
+                        response.staged_value
+                        if hasattr(response, "staged_value")
+                        else None,
+                        rpc_name="CreateOwnedBinding staged_value",
+                        expected_binding_id=str(response.binding_id),
+                        expected_binding_layout_id=owner_layout.binding_layout_id,
                     )
+                    group_realization_acquire = GroupRealizationAcquireRef.from_proto(
+                        response.group_realization_acquire
+                    )
+                    if profile is not None and staged_value_metadata is not None:
+                        profile["staged_artifact_id"] = getattr(
+                            staged_value_metadata,
+                            "artifact_id",
+                            None,
+                        )
+                else:
+                    current_value_metadata = parse_binding_value_or_raise(
+                        response.current_value
+                        if hasattr(response, "current_value")
+                        else None,
+                        rpc_name="CreateOwnedBinding",
+                        expected_binding_id=str(response.binding_id),
+                        expected_binding_layout_id=owner_layout.binding_layout_id,
+                    )
+                    if profile is not None and current_value_metadata is not None:
+                        profile["sealed_artifact_id"] = getattr(
+                            current_value_metadata, "artifact_id", None
+                        )
         except ArtifactError:
             with contextlib.suppress(Exception):
                 runtime.ensure_client().close_owned_binding(
                     binding_id=str(response.binding_id)
                 )
             raise
+        except ValueError as exc:
+            with contextlib.suppress(Exception):
+                runtime.ensure_client().close_owned_binding(
+                    binding_id=str(response.binding_id)
+                )
+            raise ArtifactError(
+                f"CreateOwnedBinding returned malformed staged metadata: {exc}",
+                status_code="DATA_LOSS",
+                retryable=False,
+            ) from exc
 
         slot = OwnedBindingSlot(
             store=store,
@@ -2060,18 +1978,20 @@ class Artifact:
             current_value_metadata=current_value_metadata,
             device=device,
             device_id=device_id,
-            target_publication_token=getattr(
-                response, "target_publication_token", None
+            binding_current_value_publication_token=getattr(
+                response, "binding_current_value_publication_token", None
             ),
-            target_publication_operation_id=operation_id,
+            staged_value_metadata=staged_value_metadata,
+            group_realization_acquire=group_realization_acquire,
+            binding_current_value_publication_operation_id=operation_id,
         )
-        if slot.current_value_metadata is None:
+        if slot.current_value_metadata is None and slot.staged_value_metadata is None:
             with contextlib.suppress(Exception):
                 runtime.ensure_client().close_owned_binding(
                     binding_id=str(response.binding_id)
                 )
             raise ArtifactError(
-                "CreateOwnedBinding returned empty current_value",
+                "CreateOwnedBinding returned neither current_value nor staged_value",
                 status_code="DATA_LOSS",
                 retryable=False,
             )
@@ -2226,6 +2146,7 @@ class Artifact:
                 requested_readiness=readiness,
                 retention_policy=retention,
                 operation_id=operation_id,
+                group_realization=ctx.group_realization if ctx is not None else None,
             )
         except RuntimeError as exc:
             raise ArtifactError(

@@ -161,7 +161,7 @@ def test_create_if_absent_normalizes_exact_doubled_tokens(repositories):
     pending_repo = repositories["pending_transport_request"]
     canonical_request_id = "suite:v3:rx4:r1:a0"
     canonical_group_id = "suite:v3"
-    canonical_group_kind = "tp_version"
+    canonical_group_kind = "group_realization_transport"
     canonical_group_part_id = "rx4:r1"
     canonical_fingerprint = "fp-dedupe-1"
     canonical_artifact_id = "cgid:artifact-v3"
@@ -218,7 +218,7 @@ def test_purge_malformed_rows_heals_exact_doubled_tokens(repositories):
                 source_port=9000,
                 requester_worker_id="worker-a",
                 group_id="heal:v3",
-                group_kind="tp_version",
+                group_kind="group_realization_transport",
                 group_total_parts=28,
                 group_part_id="rx4:r1",
                 group_priority=0,
@@ -248,7 +248,7 @@ def test_purge_malformed_rows_heals_exact_doubled_tokens(repositories):
                 _double("192.168.10.1"),
                 _double("worker-a"),
                 _double("heal:v3"),
-                _double("tp_version"),
+                _double("group_realization_transport"),
                 _double("rx4:r1"),
                 request_id,
             ],
@@ -265,5 +265,5 @@ def test_purge_malformed_rows_heals_exact_doubled_tokens(repositories):
     assert healed.source_address == "192.168.10.1"
     assert healed.requester_worker_id == "worker-a"
     assert healed.group_id == "heal:v3"
-    assert healed.group_kind == "tp_version"
+    assert healed.group_kind == "group_realization_transport"
     assert healed.group_part_id == "rx4:r1"

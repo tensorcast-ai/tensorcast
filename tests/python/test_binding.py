@@ -196,7 +196,7 @@ class FakeBindingClient:
         selection.CopyFrom(kwargs["selection"])
         return types.SimpleNamespace(
             status=store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED,
-            target_publication_token=token,
+            binding_current_value_publication_token=token,
             resolved_selection=selection,
         )
 
@@ -297,7 +297,9 @@ class FakeBindingClient:
             artifact_id=str(selection.artifact_id),
             target_index_bytes=bytes(kwargs["target_index_bytes"]),
             resolved_selection=selection,
-            target_publication_token=f"token-{self._token_counter}".encode("utf-8"),
+            binding_current_value_publication_token=f"token-{self._token_counter}".encode(
+                "utf-8"
+            ),
             current_value=self._make_binding_value(
                 binding_id=binding_id,
                 selection=selection,
@@ -392,7 +394,9 @@ class FakeBindingClient:
         response = types.SimpleNamespace(
             artifact_id=str(selection.artifact_id),
             resolved_selection=selection,
-            target_publication_token=f"token-{self._token_counter}".encode("utf-8"),
+            binding_current_value_publication_token=f"token-{self._token_counter}".encode(
+                "utf-8"
+            ),
             current_value=self._make_binding_value(
                 binding_id=binding_id,
                 selection=selection,
@@ -694,7 +698,7 @@ def test_binding_swap_forwards_first_class_execution_topology(
         refill_call["collective_policy"]
         == store_daemon_pb2.COLLECTIVE_POLICY_REQUIRE_COLLECTIVE
     )
-    assert "#tcg:" not in str(refill_call["operation_id"])
+    assert "clid=same-host-tp-load" not in str(refill_call["operation_id"])
 
 
 def test_binding_swap_rejects_ctx_collective_for_source_bound_path(
@@ -1091,7 +1095,7 @@ def test_binding_realize_from_accepts_rank_zero_collective_group(
         refill_call["collective_policy"]
         == store_daemon_pb2.COLLECTIVE_POLICY_REQUIRE_COLLECTIVE
     )
-    assert "#tcg:" not in str(refill_call["operation_id"])
+    assert "clid=same-host-tp-load" not in str(refill_call["operation_id"])
 
 
 def test_binding_realize_from_serializes_partial_const_fill_ranges(
@@ -2232,18 +2236,13 @@ def test_binding_freeze_current_and_async_promotion_surface_pending_metadata() -
     assert polled.verification_job_id == "bpj:test"
 
 
-def test_binding_swap_encodes_transport_group_tags_into_operation_id() -> None:
+def test_binding_swap_does_not_encode_transport_group_tags_into_operation_id() -> None:
     slot = _FakeBindingSlot()
     binding = Binding(slot)
     ctx = tc_context(
         tags={
-            "tc.transport.group.kind": "tp_version",
-            "tc.transport.group.id": "case-a1:v2",
-            "tc.transport.group.total_parts": 16,
-            "tc.transport.group.part_id": "rx1:r0",
-            "tc.transport.group.priority": 0,
-            "tc.transport.group.epoch": 0,
-            "tc.transport.request_id": "case-a1:v2:rx1:r0",
+            "legacy.semantic.group": "ignored",
+            "legacy.semantic.part": "rx1:r0",
         }
     )
 
@@ -2251,12 +2250,9 @@ def test_binding_swap_encodes_transport_group_tags_into_operation_id() -> None:
 
     assert len(slot.swap_calls) == 1
     operation_id = str(slot.swap_calls[0].get("operation_id", ""))
-    assert "#tcg:" in operation_id
-    assert "kind=tp_version" in operation_id
-    assert "gid=case-a1:v2" in operation_id
-    assert "tot=16" in operation_id
-    assert "part=rx1:r0" in operation_id
-    assert "rid=case-a1:v2:rx1:r0" in operation_id
+    assert "kind=" not in operation_id
+    assert "gid=case-a1:v2" not in operation_id
+    assert "part=rx1:r0" not in operation_id
 
 
 def test_binding_swap_coerces_published_model_version_into_runtime_policy() -> None:

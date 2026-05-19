@@ -34,6 +34,25 @@ uint64_t missing_coverage_bytes(uint64_t required_bytes, uint64_t covered_bytes)
   return covered_bytes >= required_bytes ? 0 : required_bytes - covered_bytes;
 }
 
+bool typed_work_item_has_collective_source_overlap(const RepresentationWorkItem& item) {
+  return item.kind == RepresentationWorkItemKind::kTensorCopy && item.partition_kind == WorkPartitionKind::kReplicated;
+}
+
+void add_reject_reason_bytes(
+    absl::flat_hash_map<std::string, uint64_t>* buckets,
+    std::string_view reason,
+    uint64_t bytes);
+
+void add_deferred_typed_work(
+    const RepresentationWorkItem& item,
+    SourceBoundExecutionPlanSummary* summary,
+    SourceBoundLanePlan* lane_plan) {
+  summary->planned_non_admitted_typed_bytes += item.committed_bytes;
+  lane_plan->deferred_typed_bytes += item.committed_bytes;
+  add_reject_reason_bytes(
+      &summary->planner_reject_reason_buckets, "typed_work_without_source_overlap", item.committed_bytes);
+}
+
 void add_reject_reason_bytes(
     absl::flat_hash_map<std::string, uint64_t>* buckets,
     std::string_view reason,
@@ -90,26 +109,15 @@ void summarize_work_plan(
   for (const auto& item : work_plan.items) {
     switch (item.kind) {
       case RepresentationWorkItemKind::kTensorCopy:
-        if (item.partition_kind == WorkPartitionKind::kReplicated) {
+        if (typed_work_item_has_collective_source_overlap(item)) {
           summary->planned_collective_candidate_bytes += item.committed_bytes;
         } else {
-          summary->planned_non_admitted_typed_bytes += item.committed_bytes;
-          lane_plan->deferred_typed_bytes += item.committed_bytes;
-          add_reject_reason_bytes(
-              &summary->planner_reject_reason_buckets, "typed_work_without_source_overlap", item.committed_bytes);
+          add_deferred_typed_work(item, summary, lane_plan);
         }
         break;
       case RepresentationWorkItemKind::kExpertDim0Concat:
-        summary->planned_non_admitted_typed_bytes += item.committed_bytes;
-        lane_plan->deferred_typed_bytes += item.committed_bytes;
-        add_reject_reason_bytes(
-            &summary->planner_reject_reason_buckets, "typed_work_without_source_overlap", item.committed_bytes);
-        break;
       case RepresentationWorkItemKind::kConcatAssemble: {
-        summary->planned_non_admitted_typed_bytes += item.committed_bytes;
-        lane_plan->deferred_typed_bytes += item.committed_bytes;
-        add_reject_reason_bytes(
-            &summary->planner_reject_reason_buckets, "typed_work_without_source_overlap", item.committed_bytes);
+        add_deferred_typed_work(item, summary, lane_plan);
       } break;
       case RepresentationWorkItemKind::kConstFill:
       case RepresentationWorkItemKind::kScalarBroadcastFill:
@@ -146,7 +154,7 @@ uint64_t estimate_collective_dedup_saving_bytes(const RepresentationWorkPlan& wo
   uint64_t saving = 0;
   const uint64_t peer_count = static_cast<uint64_t>(world_size - 1);
   for (const auto& item : work_plan.items) {
-    if (item.kind == RepresentationWorkItemKind::kTensorCopy && item.partition_kind == WorkPartitionKind::kReplicated) {
+    if (typed_work_item_has_collective_source_overlap(item)) {
       const uint64_t item_saving = saturating_multiply_u64(item.committed_bytes, peer_count);
       saving = std::numeric_limits<uint64_t>::max() - saving < item_saving ? std::numeric_limits<uint64_t>::max()
                                                                            : saving + item_saving;
@@ -172,11 +180,6 @@ absl::StatusOr<SourceBoundStrategyPlan> build_source_bound_execution_strategy_pl
   const bool disk_source_available = source_facts.disk_source_available;
   const bool safetensors_disk_source_available = disk_source_available && source_facts.disk_source_is_safetensors;
 
-  if (resolved_plan.representation_work_plan.has_value()) {
-    summarize_work_plan(*resolved_plan.representation_work_plan, &strategy_plan.summary, &strategy_plan.lane_plan);
-    strategy_plan.lane_plan.true_residual_map = resolved_plan.representation_work_plan->residual_fallback_map;
-  }
-
   if (lowering_artifacts.has_value()) {
     if (lowering_artifacts->collective_data_map.has_value()) {
       strategy_plan.summary.compatibility_lowered_bytes =
@@ -186,6 +189,11 @@ absl::StatusOr<SourceBoundStrategyPlan> build_source_bound_execution_strategy_pl
     if (lowering_artifacts->executor_generic_data_map.has_value()) {
       strategy_plan.lane_plan.generic_backend_map = *lowering_artifacts->executor_generic_data_map;
     }
+  }
+
+  if (resolved_plan.representation_work_plan.has_value()) {
+    summarize_work_plan(*resolved_plan.representation_work_plan, &strategy_plan.summary, &strategy_plan.lane_plan);
+    strategy_plan.lane_plan.true_residual_map = resolved_plan.representation_work_plan->residual_fallback_map;
   }
 
   const bool has_collective_group = execution_topology.collective_load_group.has_value();

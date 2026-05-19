@@ -16,6 +16,7 @@
 #include "absl/time/time.h"
 #include "core/communicator/transport/request.h"
 #include "daemon/ha/worker_lifecycle_ports.h"
+#include "daemon/util/local_handle_socket_path.h"
 
 namespace tensorcast::daemon {
 namespace {
@@ -154,8 +155,12 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
     return absl::FailedPreconditionError(absl::StrCat("IMPORT_ROOT_UNAVAILABLE: ", import_root_status.message()));
   }
   if (options.daemon_options.cpu_shared_memory_enabled && options.daemon_options.local_handle_socket_path.empty()) {
-    options.daemon_options.local_handle_socket_path =
-        (options.daemon_options.import_root / "local_handle.sock").string();
+    auto socket_path_or = select_local_handle_socket_path(
+        options.daemon_options.import_root / "local_handle.sock", options.daemon_options.import_root.string(), {});
+    if (!socket_path_or.ok()) {
+      return socket_path_or.status();
+    }
+    options.daemon_options.local_handle_socket_path = *socket_path_or;
     LOG(INFO) << "Auto-selected lifecycle.handle_leases.local_handle_socket_path="
               << options.daemon_options.local_handle_socket_path;
   }
@@ -254,6 +259,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .public_disk_source_policy = app->options_.daemon_options.public_disk_source_policy,
       .post_seal_policy = app->options_.daemon_options.post_seal_policy,
       .serving_prefetch = app->options_.daemon_options.serving_prefetch,
+      .progressive_replication = app->options_.daemon_options.progressive_replication,
       .daemon_id = app->options_.daemon_options.daemon_id,
       .await_state_sync_barrier = [app_ptr = app.get()]() { return app_ptr->await_worker_state_sync_barrier(); },
   };

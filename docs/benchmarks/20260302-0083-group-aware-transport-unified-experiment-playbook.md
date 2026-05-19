@@ -1,14 +1,28 @@
-# 0083 Group-Aware Transport 统一实验手册（Steady 口径）
+# 0083 Group-Aware Transport 历史实验手册（Steady 口径）
 
 日期：2026-03-04  
-状态：Active（本文件为 0083 实验方法、最终数据与分析的唯一维护入口）
+状态：Archived baseline（本文件保留 0083 历史实验方法、最终数据与分析；当前执行口径见下方 2026-05-14 更新）
+
+2026-05-14 更新：`0117` 已完成最终 cutover。当前 WeightPublisher
+grouped 模式为 `group_realization`，旧的 relaxed grouped transport mode
+不再是有效 CLI/runner 模式。本文后续表格中的旧模式名只表示 2026-03-04
+原始历史数据标签，不代表当前可运行配置。
+
+当前 0117/0083 联合验证入口：
+
+```bash
+export TC_WP_PAYLOAD_MODE=tp_ranked
+```
+
+当前 suite 不再执行 group mode matrix 或 ABBA 对照；默认只运行
+`group_realization` staged publish/acquire。
 
 ## 1. 实验目标
 
-本实验回答三个问题：
+本历史实验回答三个问题：
 
 1. 在统一口径下，`tp_bind_into_swap` 的 steady 路径是否稳定（`keep_last=2`，`publish_interval=40~60s`）。
-2. `group=none` 与 `group=tp_version` 的 group contract 是否严格成立。
+2. `group=none` 与历史 grouped mode 的 group contract 是否严格成立。
 3. 在 ABBA 多轮执行下，最终可复用的性能与 timeout 画像是什么。
 
 ## 2. 实验方法（唯一执行口径）
@@ -28,7 +42,7 @@
 | TP | `tp_world_size=4` |
 | 单版本数据量 | `tp_total_bytes=42949672960`（40GiB） |
 | receiver apply | `tp_bind_into_swap` |
-| group 对照 | `none` vs `tp_version` |
+| group 对照 | `none` vs 历史 grouped mode |
 | 执行顺序 | `ABBA` |
 | 轮次要求 | `>=3` |
 | keep_last | `2` |
@@ -43,14 +57,10 @@
 
 ```bash
 export TC_WP_SCALE_RECEIVER_COUNTS=7
-export TC_WP_TRANSPORT_GROUP_MODES=none,tp_version
-export TC_WP_GROUP_PAIR_ORDER=abba
-export TC_WP_GROUP_PAIR_ROUNDS=3
 
 export TC_WP_PAYLOAD_MODE=tp_ranked
 export TC_WP_TP_WORLD_SIZE=4
 export TC_WP_TP_TOTAL_BYTES=42949672960
-export TC_WP_RECEIVER_APPLY_MODE=tp_bind_into_swap
 export TC_WP_KEEP_LAST=2
 export TC_WP_PUBLISH_INTERVAL_S=60
 export TC_WP_PRE_PUBLISH_TRIM_MARGIN=0
@@ -62,21 +72,21 @@ export TC_WP_PRE_PUBLISH_TRIM_MARGIN=0
 
 1. 每版本 artifact：`40GiB`（`tp_total_bytes=42949672960`）
 2. TP 分片：`tp_world_size=4`，等价 `10GiB/rank`
-3. 每轮固定 4 个 case，顺序：`o1=none`、`o2=tp_version`、`o3=tp_version`、`o4=none`
+3. 当前 suite 每轮固定运行 `group_realization`。下表保留历史 ABBA 数据标签。
 
 | round | order | mode | versions | artifact/版本 | artifact/TP rank | 单 case artifact 总量 |
 |---:|---:|---|---:|---:|---:|---:|
 | 1 | o1 | none | 10 | 40GiB | 10GiB | 400GiB |
-| 1 | o2 | tp_version | 10 | 40GiB | 10GiB | 400GiB |
-| 1 | o3 | tp_version | 10 | 40GiB | 10GiB | 400GiB |
+| 1 | o2 | legacy_grouped | 10 | 40GiB | 10GiB | 400GiB |
+| 1 | o3 | legacy_grouped | 10 | 40GiB | 10GiB | 400GiB |
 | 1 | o4 | none | 10 | 40GiB | 10GiB | 400GiB |
 | 2 | o1 | none | 10 | 40GiB | 10GiB | 400GiB |
-| 2 | o2 | tp_version | 10 | 40GiB | 10GiB | 400GiB |
-| 2 | o3 | tp_version | 10 | 40GiB | 10GiB | 400GiB |
+| 2 | o2 | legacy_grouped | 10 | 40GiB | 10GiB | 400GiB |
+| 2 | o3 | legacy_grouped | 10 | 40GiB | 10GiB | 400GiB |
 | 2 | o4 | none | 10 | 40GiB | 10GiB | 400GiB |
 | 3 | o1 | none | 4 | 40GiB | 10GiB | 160GiB |
-| 3 | o2 | tp_version | 4 | 40GiB | 10GiB | 160GiB |
-| 3 | o3 | tp_version | 4 | 40GiB | 10GiB | 160GiB |
+| 3 | o2 | legacy_grouped | 4 | 40GiB | 10GiB | 160GiB |
+| 3 | o3 | legacy_grouped | 4 | 40GiB | 10GiB | 160GiB |
 | 3 | o4 | none | 4 | 40GiB | 10GiB | 160GiB |
 
 按轮汇总：
@@ -128,7 +138,7 @@ export TC_WP_PRE_PUBLISH_TRIM_MARGIN=0
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | overall | 12 | 96 | 20.700 | 92.886 | 52.819 | 12 | 2 | 1344/2690 |
 | bind=none | 6 | 48 | 20.705 | 92.745 | 52.792 | 6 | 2 | 0/1346 |
-| bind=tp_version | 6 | 48 | 20.694 | 93.028 | 52.846 | 6 | 0 | 1344/1344 |
+| bind=legacy_grouped | 6 | 48 | 20.694 | 93.028 | 52.846 | 6 | 0 | 1344/1344 |
 | versions=10 | 8 | 80 | 20.620 | 92.655 | 52.639 | 8 | 1 | 1120/2241 |
 | versions=4 | 4 | 16 | 21.098 | 94.041 | 53.722 | 4 | 1 | 224/449 |
 
@@ -137,16 +147,16 @@ export TC_WP_PRE_PUBLISH_TRIM_MARGIN=0
 | round | order | mode | versions | passed | publish_mean_s | apply_mean_s | publish_to_apply_p95_s | grouped/total | transport_timeout_reasons |
 |---:|---:|---|---:|---|---:|---:|---:|---:|---|
 | 1 | o1 | none | 10 | true | 20.676 | 93.107 | 65.173 | 0/280 | {} |
-| 1 | o2 | tp_version | 10 | true | 21.045 | 93.089 | 59.646 | 280/280 | {} |
-| 1 | o3 | tp_version | 10 | true | 20.584 | 92.209 | 62.554 | 280/280 | {} |
+| 1 | o2 | legacy_grouped | 10 | true | 21.045 | 93.089 | 59.646 | 280/280 | {} |
+| 1 | o3 | legacy_grouped | 10 | true | 20.584 | 92.209 | 62.554 | 280/280 | {} |
 | 1 | o4 | none | 10 | true | 20.927 | 93.252 | 109.198 | 0/281 | {"deadline_exceeded":1} |
 | 2 | o1 | none | 10 | true | 20.214 | 91.765 | 60.314 | 0/280 | {} |
-| 2 | o2 | tp_version | 10 | true | 20.338 | 92.455 | 64.776 | 280/280 | {} |
-| 2 | o3 | tp_version | 10 | true | 20.265 | 92.972 | 66.173 | 280/280 | {} |
+| 2 | o2 | legacy_grouped | 10 | true | 20.338 | 92.455 | 64.776 | 280/280 | {} |
+| 2 | o3 | legacy_grouped | 10 | true | 20.265 | 92.972 | 66.173 | 280/280 | {} |
 | 2 | o4 | none | 10 | true | 20.911 | 92.394 | 59.466 | 0/280 | {} |
 | 3 | o1 | none | 4 | true | 18.574 | 90.913 | 62.332 | 0/112 | {} |
-| 3 | o2 | tp_version | 4 | true | 21.418 | 94.867 | 61.944 | 112/112 | {} |
-| 3 | o3 | tp_version | 4 | true | 21.330 | 94.657 | 61.225 | 112/112 | {} |
+| 3 | o2 | legacy_grouped | 4 | true | 21.418 | 94.867 | 61.944 | 112/112 | {} |
+| 3 | o3 | legacy_grouped | 4 | true | 21.330 | 94.657 | 61.225 | 112/112 | {} |
 | 3 | o4 | none | 4 | true | 23.069 | 95.727 | 93.359 | 0/113 | {"deadline_exceeded":1} |
 
 ## 3.5 Timeout 汇总
@@ -174,7 +184,7 @@ export TC_WP_PRE_PUBLISH_TRIM_MARGIN=0
 本轮实际生效（来自 case params）：
 
 1. `receiver_timeout_s=287`
-2. `max_publish_to_apply_s=173/177`（none/tp_version）
+2. `max_publish_to_apply_s=173/177`（none/legacy_grouped）
 3. `remote_timeout_sec=2466`
 4. `progress_poll_s=10`
 5. `poll_interval_s=0.5`
@@ -216,11 +226,11 @@ export TC_POLL_INTERVAL_S=0.5
 | mode | publish_bw_mean_gib_s | put_bw_mean_gib_s | transport_mean_active_gib_s | transport_p95_active_gib_s | transport_peak_active_gib_s | diffusion_top1_share_mean | diffusion_hhi_mean | diffusion_unique_sources_mean | grouped_ratio |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | none | 1.971 | 2.534 | 17.243 | 21.046 | 24.151 | 0.150 | 0.145 | 12.167 | 0.000 |
-| tp_version | 1.975 | 2.528 | 17.591 | 20.435 | 21.385 | 0.150 | 0.150 | 8.000 | 1.000 |
+| legacy_grouped | 1.975 | 2.528 | 17.591 | 20.435 | 21.385 | 0.150 | 0.150 | 8.000 | 1.000 |
 
-## 3.7 ABBA 逐轮配对（tp_version - none）
+## 3.7 ABBA 逐轮配对（legacy_grouped - none）
 
-说明：每轮按 `none=(o1,o4)`、`tp_version=(o2,o3)` 求均值后对比。
+说明：每轮按 `none=(o1,o4)`、`legacy_grouped=(o2,o3)` 求均值后对比。
 
 | round | none_p95_s | tp_p95_s | delta_p95_s | none_mean_active | tp_mean_active | delta_mean_active | none_peak_active | tp_peak_active | delta_peak_active | delta_publish_bw | delta_put_bw |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -233,7 +243,7 @@ export TC_POLL_INTERVAL_S=0.5
 | mode | publish_to_apply_p95_mean_s | transport_mean_active_gib_s | transport_peak_active_gib_s | publish_bw_mean_gib_s | put_bw_mean_gib_s |
 |---|---:|---:|---:|---:|---:|
 | none(no-timeout) | 61.821 | 17.792 | 22.020 | 2.003 | 2.583 |
-| tp_version(no-timeout) | 62.720 | 17.591 | 21.385 | 1.975 | 2.528 |
+| legacy_grouped(no-timeout) | 62.720 | 17.591 | 21.385 | 1.975 | 2.528 |
 
 ## 4. 数据分析
 
@@ -242,7 +252,7 @@ export TC_POLL_INTERVAL_S=0.5
 1. 功能结果：`12/12 passed`。
 2. receiver 行为一致：`all_receivers_completed=true`、`receiver_skips=0`。
 3. group contract 全通过：
-   - `tp_version` 全部 `grouped_transports = total_transports`。
+   - `legacy_grouped` 全部 `grouped_transports = total_transports`。
    - `none` 全部 `grouped_transports = 0`。
 
 结论：group 语义生效且边界清晰，没有“误分组/漏分组”现象。
@@ -250,15 +260,15 @@ export TC_POLL_INTERVAL_S=0.5
 ## 4.2 吞吐与带宽分析
 
 1. 发布带宽与写入带宽：`publish_bw` 和 `put_bw` 在两种 mode 下几乎重合（`publish_bw` 差异 `+0.224%`，`put_bw` 差异 `-0.259%`），说明 group 模式未改变 publisher 侧写入效率。
-2. 传输活跃吞吐：`tp_version` 的 `mean_active` 相对 `none` 为 `+2.017%`，但 `p95_active` 为 `-2.905%`、`peak_active` 为 `-11.456%`，呈现“均值接近、峰值更平滑”的形态。
+2. 传输活跃吞吐：`legacy_grouped` 的 `mean_active` 相对 `none` 为 `+2.017%`，但 `p95_active` 为 `-2.905%`、`peak_active` 为 `-11.456%`，呈现“均值接近、峰值更平滑”的形态。
 3. 逐轮配对看，`delta_mean_active` 在三轮内正负交替（`+0.667 / -0.804 / +1.181`），说明在当前口径下吞吐差异尚不稳定，不能宣称 group 带来确定吞吐增益。
-4. 全量样本中 `publish_to_apply_p95` 的 mode 差异主要受少量 tail 事件影响；去除 transport-timeout 后，`none/tp_version` 的 p95 分别为 `61.821s/62.720s`，差异回到同一量级。
+4. 全量样本中 `publish_to_apply_p95` 的 mode 差异主要受少量 tail 事件影响；去除 transport-timeout 后，`none/legacy_grouped` 的 p95 分别为 `61.821s/62.720s`，差异回到同一量级。
 
 ## 4.3 Group 作用分析
 
-1. 语义作用（强）：`grouped_ratio` 在 `tp_version` 为 `1.000`，在 `none` 为 `0.000`，且 `group_mode_consistent/group_contract_consistent` 为 `12/12` 通过，说明 group contract 严格生效。
+1. 语义作用（强）：`grouped_ratio` 在 `legacy_grouped` 为 `1.000`，在 `none` 为 `0.000`，且 `group_mode_consistent/group_contract_consistent` 为 `12/12` 通过，说明 group contract 严格生效。
 2. 性能作用（当前口径下有限）：在 `max_concurrency=1` 的 steady 设置里，活跃并发大多接近 1（`active_transport_peak=1` 的 case 为 `10/12`），调度器可发挥的并发重排空间有限，因此 group 的性能增益不显著。
-3. 负载扩散：`diffusion_top1_share` 两组几乎一致（`0.150`），`diffusion_unique_sources` 在 `tp_version` 更低（`8.0` vs `12.167`），说明该口径下 group 更偏向“按组约束传输路径”，而不是追求 source 扩散数最大化。
+3. 负载扩散：`diffusion_top1_share` 两组几乎一致（`0.150`），`diffusion_unique_sources` 在 `legacy_grouped` 更低（`8.0` vs `12.167`），说明该口径下 group 更偏向“按组约束传输路径”，而不是追求 source 扩散数最大化。
 
 ## 4.4 Timeout 合理性与可信度
 
@@ -279,8 +289,9 @@ export TC_POLL_INTERVAL_S=0.5
 ## 5.1 最终结论
 
 1. 本轮在你指定口径下完成了可复用的最终数据集：12 个 case 全通过。
-2. `group=none` 与 `group=tp_version` 的合同语义完全符合预期。
-3. steady 推荐口径可固定为：
+2. `group=none` 与历史 grouped mode 的合同语义完全符合预期。
+3. 这批数据是旧 relaxed grouped mode 的历史基线。当前 grouped 执行和后续采数必须使用 `group_realization`。
+4. steady 推荐资源口径可继续参考：
    - `keep_last=2`
    - `publish_interval_s=60`
    - publisher `stable120/300Gi`，receiver `stable80/200Gi`

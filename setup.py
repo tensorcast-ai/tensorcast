@@ -1038,6 +1038,7 @@ setup(
             "lib/*.so.*",
             "bin/*",
             "examples/config/*.yaml",
+            "config/profiles/*/*.yaml",
         ],
         "tensorcast.proto": ["**/*.py", "**/*.pyi"],
     },

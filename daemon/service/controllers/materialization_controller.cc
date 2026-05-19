@@ -22,6 +22,7 @@
 namespace tensorcast::daemon {
 
 using status_utils::to_grpc_status;
+namespace global_store = tensorcast::global_store::v1;
 
 namespace {
 
@@ -115,6 +116,52 @@ std::string verification_state_string(v2::BindingValueVerificationState state) {
   }
 }
 
+void cleanup_prefetch_created_binding(
+    BindingRegistry& registry,
+    HandleLeaseRegistry* handle_leases,
+    const v2::CreateOwnedBindingResponse& create_resp,
+    std::string_view reason) {
+  if (create_resp.binding_id().empty()) {
+    return;
+  }
+
+  bool safe_to_close = true;
+  if (create_resp.created_staged_value() && !create_resp.staged_value().binding_value_id().empty()) {
+    const auto remove_status =
+        registry.remove_staged_value(create_resp.binding_id(), create_resp.staged_value().binding_value_id(), reason);
+    if (!remove_status.ok() && !absl::IsNotFound(remove_status)) {
+      LOG(WARNING) << "failed to remove staged serving binding value during cleanup reason=" << reason
+                   << " binding_id=" << create_resp.binding_id()
+                   << " binding_value_id=" << create_resp.staged_value().binding_value_id() << ": " << remove_status;
+      if (absl::IsFailedPrecondition(remove_status)) {
+        safe_to_close = false;
+      }
+    }
+  }
+
+  if (!create_resp.mem_handle().lease_token().empty() && handle_leases != nullptr) {
+    const auto release_status = handle_leases->release(create_resp.mem_handle().lease_token());
+    if (!release_status.ok() && !absl::IsNotFound(release_status)) {
+      LOG(WARNING) << "failed to release serving prefetch bootstrap lease during cleanup reason=" << reason
+                   << " binding_id=" << create_resp.binding_id() << ": " << release_status;
+    }
+  }
+
+  if (!safe_to_close) {
+    return;
+  }
+  const auto retire_status = registry.retire_retained(create_resp.binding_id(), reason);
+  if (!retire_status.ok()) {
+    if (absl::IsNotFound(retire_status)) {
+      VLOG(1) << "serving prefetch cleanup could not find binding_id=" << create_resp.binding_id()
+              << " reason=" << reason;
+      return;
+    }
+    LOG(WARNING) << "failed to retire serving prefetch binding during cleanup reason=" << reason
+                 << " binding_id=" << create_resp.binding_id() << ": " << retire_status;
+  }
+}
+
 std::string grpc_code_name(grpc::StatusCode code) {
   switch (code) {
     case grpc::StatusCode::OK:
@@ -161,6 +208,13 @@ void fill_binding_value_ref(const BindingRegistry::Record& record, tensorcast::p
   ref->set_binding_layout_id(record.binding_layout_id);
   ref->set_binding_value_id(record.current_binding_value_id);
   ref->set_seal_generation(record.seal_generation);
+}
+
+void fill_binding_value_ref(const v2::BindingValue& value, tensorcast::publication::v1::BindingValueRef* ref) {
+  ref->set_binding_id(value.binding_id());
+  ref->set_binding_layout_id(value.binding_layout_id());
+  ref->set_binding_value_id(value.binding_value_id());
+  ref->set_seal_generation(value.seal_generation());
 }
 
 std::string make_daemon_session_id() {
@@ -210,10 +264,14 @@ MaterializationController::MaterializationController(Dep d)
               .disk_imports = d.disk_imports,
               .shutdown_signal = d.shutdown_signal,
               .global_store_client = d.global_store_client,
+              .identity = &d.identity,
               .lifecycle = d.lifecycle,
               .handle_leases = d.handle_leases,
               .cpu_shared_memory_enabled = d.cpu_shared_memory_enabled,
               .post_seal_policy = d.post_seal_policy,
+              .progressive_replication = d.progressive_replication,
+              .daemon_id = daemon_id_,
+              .daemon_session_id = daemon_session_id_,
               .storage_path = d.storage_path,
           }),
       replica_lifecycle_service_(
@@ -228,6 +286,7 @@ MaterializationController::MaterializationController(Dep d)
           TargetMaterializationService::Dep{
               .engine = d.engine,
               .lip_manager = d.lip_manager,
+              .bindings = d.binding_registry,
               .devices = d.devices,
               .regions = d.regions,
               .disk_imports = d.disk_imports,
@@ -238,9 +297,12 @@ MaterializationController::MaterializationController(Dep d)
               .identity = d.identity,
               .external_target_access_service = d.external_target_access_service,
               .global_store_client = d.global_store_client,
-              .max_concurrency = d.max_concurrency,
               .capability_tokens = d.capability_tokens,
+              .max_concurrency = d.max_concurrency,
               .external_target_verification_enabled = d.external_target_verification_enabled,
+              .progressive_replication = d.progressive_replication,
+              .daemon_id = daemon_id_,
+              .daemon_session_id = daemon_session_id_,
               .storage_path = d.storage_path,
               .await_state_sync_barrier = d.await_state_sync_barrier,
           }),
@@ -263,6 +325,8 @@ MaterializationController::MaterializationController(Dep d)
               .max_concurrency = d.max_concurrency,
               .capability_tokens = d.capability_tokens,
               .target_materialization_service = &target_materialization_service_,
+              .daemon_id = daemon_id_,
+              .daemon_session_id = daemon_session_id_,
               .storage_path = d.storage_path,
               .await_state_sync_barrier = d.await_state_sync_barrier,
           }) {
@@ -317,6 +381,13 @@ absl::Status validate_serving_member_target(const tensorcast::operation::v1::Ser
   return absl::OkStatus();
 }
 
+bool same_serving_member_ref(
+    const tensorcast::operation::v1::ServingBindingMemberRef& lhs,
+    const tensorcast::operation::v1::ServingBindingMemberRef& rhs) {
+  return lhs.member_id() == rhs.member_id() && lhs.member_index() == rhs.member_index() &&
+      lhs.member_count() == rhs.member_count() && lhs.group_id() == rhs.group_id();
+}
+
 absl::Status validate_serving_prefetch_request(const v2::PrefetchServingBindingRequest& req) {
   switch (req.target_case()) {
     case v2::PrefetchServingBindingRequest::kServingBindingTarget:
@@ -361,6 +432,81 @@ void fill_current_binding_value(const BindingRegistry::Record& record, v2::Bindi
   }
 }
 
+void fill_staged_binding_value(
+    const BindingRegistry::Record& record,
+    const BindingRegistry::StagedBindingValue& staged,
+    v2::BindingValue* value) {
+  value->set_binding_id(record.binding_id);
+  value->set_binding_layout_id(record.binding_layout_id);
+  value->set_binding_value_id(staged.binding_value_id);
+  value->set_seal_generation(staged.expected_previous_seal_generation);
+  if (!staged.artifact_id.empty()) {
+    value->set_source_artifact_id(staged.artifact_id);
+  }
+  if (!staged.selection.artifact_id().empty()) {
+    value->mutable_selection()->CopyFrom(staged.selection);
+  }
+  value->set_is_artifact_backed(!staged.artifact_id.empty());
+  value->set_verification_state(staged.verification_state);
+  if (!staged.verification_failure_reason.empty()) {
+    value->set_verification_failure_reason(staged.verification_failure_reason);
+  }
+}
+
+struct GroupRealizationPublishCheck {
+  grpc::Status status;
+  bool terminal_not_published{false};
+};
+
+GroupRealizationPublishCheck group_realization_status_to_grpc(
+    global_store::Status status,
+    global_store::GroupRealizationState state) {
+  if (status == global_store::STATUS_OK && state == global_store::GROUP_REALIZATION_STATE_PUBLISHED) {
+    return {.status = grpc::Status::OK};
+  }
+  if (status == global_store::STATUS_NOT_FOUND) {
+    return {.status = {grpc::StatusCode::NOT_FOUND, "group realization transaction not found"}};
+  }
+  if (status == global_store::STATUS_TIMED_OUT) {
+    return {
+        .status = {
+            grpc::StatusCode::DEADLINE_EXCEEDED, "group realization transaction is not published before deadline"}};
+  }
+  if (state == global_store::GROUP_REALIZATION_STATE_ABORTED ||
+      state == global_store::GROUP_REALIZATION_STATE_EXPIRED) {
+    return {
+        .status =
+            {grpc::StatusCode::FAILED_PRECONDITION, "group realization transaction is terminal but not published"},
+        .terminal_not_published = true};
+  }
+  return {.status = {grpc::StatusCode::FAILED_PRECONDITION, "group realization transaction is not published"}};
+}
+
+GroupRealizationPublishCheck verify_group_realization_published(
+    const std::shared_ptr<store::components::IGlobalStoreClient>& global_store_client,
+    const v2::GroupRealizationAcquireRef& acquire) {
+  if (acquire.transaction_id().empty()) {
+    return {.status = {grpc::StatusCode::INVALID_ARGUMENT, "group_realization_acquire.transaction_id is required"}};
+  }
+  if (global_store_client == nullptr || !global_store_client->is_connected()) {
+    return {.status = {grpc::StatusCode::FAILED_PRECONDITION, "GlobalStoreClient is required for group-aware acquire"}};
+  }
+  global_store::WaitGroupRealizationPublishedRequest request;
+  request.set_transaction_id(acquire.transaction_id());
+  if (acquire.wait_for_publish()) {
+    const uint32_t timeout_ms = acquire.wait_timeout_ms() == 0 ? 1U : acquire.wait_timeout_ms();
+    request.set_deadline_unix_nanos(
+        static_cast<uint64_t>(absl::ToUnixNanos(absl::Now() + absl::Milliseconds(timeout_ms))));
+  } else {
+    request.set_deadline_unix_nanos(0);
+  }
+  auto response_or = global_store_client->wait_group_realization_published(request);
+  if (!response_or.ok()) {
+    return {.status = to_grpc_status(response_or.status())};
+  }
+  return group_realization_status_to_grpc(response_or->status(), response_or->state());
+}
+
 } // namespace
 
 grpc::Status MaterializationController::prefetch_serving_binding(
@@ -387,6 +533,10 @@ grpc::Status MaterializationController::prefetch_serving_binding(
       member_req.mutable_retention_policy()->CopyFrom(req.retention_policy());
       if (req.has_operation_id() && !req.operation_id().empty()) {
         member_req.set_operation_id(absl::StrCat(req.operation_id(), ":", member_target.member().member_id()));
+      }
+      if (req.has_group_realization()) {
+        member_req.mutable_group_realization()->CopyFrom(req.group_realization());
+        member_req.mutable_group_realization()->mutable_group()->set_part_id(member_target.member().member_id());
       }
 
       v2::PrefetchServingBindingResponse member_resp;
@@ -476,8 +626,14 @@ grpc::Status MaterializationController::prefetch_serving_binding(
   create_req.set_pid(static_cast<int32_t>(::getpid()));
   create_req.set_device_uuid(target.device_uuid());
   create_req.set_binding_layout_id(layout.binding_layout_id());
+  if (req.has_operation_id() && !req.operation_id().empty()) {
+    create_req.set_operation_id(req.operation_id());
+  }
   if (!layout.copy_plan_bytes().empty()) {
     return {grpc::StatusCode::UNIMPLEMENTED, "serving binding mapped copy plans are not implemented"};
+  }
+  if (req.has_group_realization()) {
+    create_req.mutable_group_realization()->CopyFrom(req.group_realization());
   }
 
   v2::CreateOwnedBindingResponse create_resp;
@@ -485,16 +641,24 @@ grpc::Status MaterializationController::prefetch_serving_binding(
   if (!create_status.ok()) {
     return create_status;
   }
+  if (rctx.server_context().IsCancelled()) {
+    cleanup_prefetch_created_binding(
+        *binding_registry_, handle_leases_, create_resp, "prefetch_serving_caller_cancelled");
+    return {grpc::StatusCode::CANCELLED, "PrefetchServingBinding request was cancelled"};
+  }
 
   auto record_or = binding_registry_->get(create_resp.binding_id());
   if (!record_or.ok()) {
-    if (!create_resp.mem_handle().lease_token().empty()) {
-      auto release_status = handle_leases_->release(create_resp.mem_handle().lease_token());
-      if (!release_status.ok()) {
-        LOG(WARNING) << "failed to release serving prefetch bootstrap lease after missing record: " << release_status;
-      }
-    }
+    cleanup_prefetch_created_binding(
+        *binding_registry_, handle_leases_, create_resp, "prefetch_serving_missing_record");
     return to_grpc_status(record_or.status());
+  }
+  const bool created_staged_value = create_resp.created_staged_value();
+  const v2::BindingValue& serving_value =
+      created_staged_value ? create_resp.staged_value() : create_resp.current_value();
+  if (serving_value.binding_value_id().empty()) {
+    cleanup_prefetch_created_binding(*binding_registry_, handle_leases_, create_resp, "prefetch_serving_empty_value");
+    return {grpc::StatusCode::FAILED_PRECONDITION, "serving prefetch produced no binding value"};
   }
 
   const absl::Time now = absl::Now();
@@ -510,10 +674,11 @@ grpc::Status MaterializationController::prefetch_serving_binding(
   (void)idle_ttl;
   const uint64_t reservation_bytes = logical_total_size(*target_layout_or);
   const std::string capability_id =
-      absl::StrCat("capability:", create_resp.binding_id(), ":", create_resp.current_value().binding_value_id());
+      absl::StrCat("capability:", create_resp.binding_id(), ":", serving_value.binding_value_id());
   const absl::Time expires_at = now + absl::Milliseconds(unacquired_ttl.count());
 
   tensorcast::operation::v1::PrefetchServingBindingResult result;
+  bool staged_value_missing = false;
   {
     const auto record = *record_or;
     absl::MutexLock lock(&record->mu);
@@ -537,30 +702,65 @@ grpc::Status MaterializationController::prefetch_serving_binding(
     record->source_artifact_ref = target.source().has_source_artifact_ref() ? target.source().source_artifact_ref()
                                                                             : req.source_selection().artifact_id();
     record->local_serving_ref =
-        absl::StrCat("binding-local:", record->binding_id, ":", record->current_binding_value_id);
+        absl::StrCat("binding-local:", record->binding_id, ":", serving_value.binding_value_id());
     record->serving_artifact_id.clear();
+    if (created_staged_value) {
+      auto staged_it = record->staged_values_by_id.find(serving_value.binding_value_id());
+      if (staged_it == record->staged_values_by_id.end()) {
+        staged_value_missing = true;
+      } else {
+        staged_it->second.target_layout_hash = record->target_layout_hash;
+        staged_it->second.tensor_schema_hash = record->tensor_schema_hash;
+        staged_it->second.expires_at = expires_at;
+        staged_it->second.verification_state = record->verification_state;
+      }
+    }
 
-    result.set_local_serving_ref(record->local_serving_ref);
-    fill_binding_value_ref(*record, result.mutable_binding_value_ref());
-    result.set_daemon_id(record->daemon_id);
-    result.set_daemon_session_id(record->daemon_session_id);
-    result.set_device_uuid(record->device_uuid);
-    result.mutable_member()->CopyFrom(record->serving_member);
-    result.set_reservation_bytes(reservation_bytes);
-    result.set_readiness(tensorcast::operation::v1::SERVING_BINDING_READINESS_LOCAL_READY);
-    result.set_verification_state(verification_state_string(record->verification_state));
-    result.set_expires_at_ms(static_cast<uint64_t>(absl::ToUnixMillis(expires_at)));
-    auto* capability = result.mutable_reservation_capability();
-    capability->set_capability_id(capability_id);
-    capability->mutable_binding_value_ref()->CopyFrom(result.binding_value_ref());
-    capability->set_daemon_id(record->daemon_id);
-    capability->set_daemon_session_id(record->daemon_session_id);
-    capability->set_device_uuid(record->device_uuid);
-    capability->mutable_member()->CopyFrom(record->serving_member);
-    capability->set_reservation_bytes(reservation_bytes);
-    capability->set_scope_digest(
-        absl::StrCat(record->target_layout_hash, ":", record->tensor_schema_hash, ":", record->serving_build_digest));
-    capability->set_expires_at_ms(static_cast<uint64_t>(absl::ToUnixMillis(expires_at)));
+    if (!staged_value_missing) {
+      result.set_local_serving_ref(record->local_serving_ref);
+      if (created_staged_value) {
+        fill_binding_value_ref(serving_value, result.mutable_binding_value_ref());
+      } else {
+        fill_binding_value_ref(*record, result.mutable_binding_value_ref());
+      }
+      result.set_daemon_id(record->daemon_id);
+      result.set_daemon_session_id(record->daemon_session_id);
+      result.set_device_uuid(record->device_uuid);
+      result.mutable_member()->CopyFrom(record->serving_member);
+      result.set_reservation_bytes(reservation_bytes);
+      result.set_readiness(tensorcast::operation::v1::SERVING_BINDING_READINESS_LOCAL_READY);
+      result.set_verification_state(verification_state_string(record->verification_state));
+      result.set_expires_at_ms(static_cast<uint64_t>(absl::ToUnixMillis(expires_at)));
+      result.set_staged_value(created_staged_value);
+      if (created_staged_value) {
+        result.set_group_realization_transaction_id(create_resp.group_realization_acquire().transaction_id());
+        result.set_group_realization_version_set_id(create_resp.group_realization_acquire().version_set_id());
+        result.set_group_realization_part_id(create_resp.group_realization_acquire().part_id());
+        result.set_group_realization_staging_token(create_resp.group_realization_acquire().staging_token());
+      }
+      auto* capability = result.mutable_reservation_capability();
+      capability->set_capability_id(capability_id);
+      capability->mutable_binding_value_ref()->CopyFrom(result.binding_value_ref());
+      capability->set_daemon_id(record->daemon_id);
+      capability->set_daemon_session_id(record->daemon_session_id);
+      capability->set_device_uuid(record->device_uuid);
+      capability->mutable_member()->CopyFrom(record->serving_member);
+      capability->set_reservation_bytes(reservation_bytes);
+      capability->set_scope_digest(
+          absl::StrCat(record->target_layout_hash, ":", record->tensor_schema_hash, ":", record->serving_build_digest));
+      capability->set_expires_at_ms(static_cast<uint64_t>(absl::ToUnixMillis(expires_at)));
+    }
+  }
+
+  if (staged_value_missing) {
+    cleanup_prefetch_created_binding(
+        *binding_registry_, handle_leases_, create_resp, "prefetch_serving_missing_staged");
+    return {grpc::StatusCode::FAILED_PRECONDITION, "staged serving binding value missing from registry"};
+  }
+  if (rctx.server_context().IsCancelled()) {
+    cleanup_prefetch_created_binding(
+        *binding_registry_, handle_leases_, create_resp, "prefetch_serving_caller_cancelled");
+    return {grpc::StatusCode::CANCELLED, "PrefetchServingBinding request was cancelled"};
   }
 
   if (!create_resp.mem_handle().lease_token().empty()) {
@@ -607,6 +807,178 @@ grpc::Status MaterializationController::acquire_binding_value(
   if (!is_loopback_grpc_peer(rctx.server_context().peer())) {
     return {grpc::StatusCode::PERMISSION_DENIED, "AcquireBindingValue is local-only (loopback/UDS)"};
   }
+  if (!req.has_group_realization_acquire() && req.binding_value_ref().binding_id().empty() &&
+      !req.local_serving_ref().empty()) {
+    if (req.expected_device_uuid().empty()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT, "expected_device_uuid is required"};
+    }
+    if (!req.has_expected_member() || req.expected_member().member_id().empty()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT, "expected_member is required"};
+    }
+    if (req.expected_tensor_schema_hash().empty()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT, "expected_tensor_schema_hash is required"};
+    }
+    if (req.expected_serving_build_digest().empty()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT, "expected_serving_build_digest is required"};
+    }
+
+    auto record_or = binding_registry_->get_by_local_serving_ref(req.local_serving_ref());
+    if (!record_or.ok()) {
+      return to_grpc_status(record_or.status());
+    }
+    const auto record = *record_or;
+
+    struct LocalAcquireSnapshot {
+      std::string binding_id;
+      bool retained_ref{false};
+      cuda::IpcHandleBytes handle_bytes;
+      std::string target_index_json;
+      std::vector<v2::TensorPayloadDescriptor> payloads;
+      v2::TargetLayout target_layout;
+      v2::BindingValue current_value;
+    } snapshot;
+
+    {
+      absl::MutexLock lock(&record->mu);
+      if (record->retired) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "binding is retired"};
+      }
+      snapshot.retained_ref = record->retained_ref;
+      if (!snapshot.retained_ref && record->owner_pid != req.caller_pid()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "binding is not retained"};
+      }
+      if (record->current_binding_value_id.empty()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "binding has no current value"};
+      }
+      if (!req.expected_daemon_id().empty() && record->daemon_id != req.expected_daemon_id()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "daemon_id mismatch"};
+      }
+      if (!req.expected_daemon_session_id().empty() && record->daemon_session_id != req.expected_daemon_session_id()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "daemon_session_id mismatch"};
+      }
+      if (record->device_uuid != req.expected_device_uuid()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "device_uuid mismatch"};
+      }
+      if (!record->serving_member.member_id().empty() &&
+          !same_serving_member_ref(record->serving_member, req.expected_member())) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "member mismatch"};
+      }
+      if (!req.expected_target_layout_hash().empty() &&
+          record->target_layout_hash != req.expected_target_layout_hash()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "target_layout_hash mismatch"};
+      }
+      if (snapshot.retained_ref && record->tensor_schema_hash != req.expected_tensor_schema_hash()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "tensor_schema_hash mismatch"};
+      }
+      if (snapshot.retained_ref && record->serving_build_digest != req.expected_serving_build_digest()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "serving_build_digest mismatch"};
+      }
+      if (record->allowed_caller_pid.has_value() && *record->allowed_caller_pid != req.caller_pid()) {
+        return {grpc::StatusCode::PERMISSION_DENIED, "caller_pid mismatch"};
+      }
+      snapshot.binding_id = record->binding_id;
+      snapshot.handle_bytes = record->handle_bytes;
+      snapshot.target_index_json = record->target_index_json;
+      snapshot.payloads = record->payloads;
+      snapshot.target_layout = record->target_layout;
+      fill_current_binding_value(*record, &snapshot.current_value);
+      if (snapshot.retained_ref) {
+        const absl::Time now = absl::Now();
+        if (record->active_attachment_refs == 0 && record->first_acquired_at == absl::InfinitePast()) {
+          record->first_acquired_at = now;
+        }
+        record->last_acquired_at = now;
+        record->idle_deadline = absl::InfiniteFuture();
+        record->active_attachment_refs++;
+      }
+    }
+    auto token_or = snapshot.retained_ref ? handle_leases_->mint_external_cuda_lease(
+                                                req.caller_pid(),
+                                                [registry = binding_registry_, binding_id = snapshot.binding_id]() {
+                                                  registry->release_attachment_ref(binding_id, absl::Now());
+                                                })
+                                          : handle_leases_->mint_external_cuda_lease(req.caller_pid(), []() {});
+    if (!token_or.ok()) {
+      if (snapshot.retained_ref) {
+        binding_registry_->release_attachment_ref(snapshot.binding_id, absl::Now());
+      }
+      return to_grpc_status(token_or.status());
+    }
+    resp.set_lease_token(*token_or);
+    resp.mutable_mem_handle()->set_cuda_ipc_handle(
+        snapshot.handle_bytes.as_string_view().data(), snapshot.handle_bytes.as_string_view().size());
+    resp.mutable_mem_handle()->set_lease_token(*token_or);
+    resp.set_target_index_bytes(snapshot.target_index_json);
+    for (const auto& payload : snapshot.payloads) {
+      *resp.add_payloads() = payload;
+    }
+    resp.set_reservation_bytes(logical_total_size(snapshot.target_layout));
+    resp.mutable_current_value()->CopyFrom(snapshot.current_value);
+    resp.mutable_acquired_value()->CopyFrom(snapshot.current_value);
+    return grpc::Status::OK;
+  }
+  if (req.has_group_realization_acquire()) {
+    const auto publish_check =
+        verify_group_realization_published(global_store_client_, req.group_realization_acquire());
+    if (!publish_check.status.ok()) {
+      if (publish_check.terminal_not_published) {
+        const auto cleanup_status = binding_registry_->remove_staged_value(
+            req.binding_value_ref().binding_id(),
+            req.binding_value_ref().binding_value_id(),
+            "group_realization_terminal_not_published");
+        if (!cleanup_status.ok() && !absl::IsNotFound(cleanup_status)) {
+          LOG(WARNING) << "failed to remove terminal group staged binding value binding_id="
+                       << req.binding_value_ref().binding_id()
+                       << " binding_value_id=" << req.binding_value_ref().binding_value_id() << ": " << cleanup_status;
+        }
+      }
+      return publish_check.status;
+    }
+    if (auto status = binding_registry_->validate_and_acquire_group_staged_attachment_ref(req, absl::Now());
+        !status.ok()) {
+      return to_grpc_status(status);
+    }
+    const std::string binding_id = req.binding_value_ref().binding_id();
+    const std::string binding_value_id = req.binding_value_ref().binding_value_id();
+    auto token_or = handle_leases_->mint_external_cuda_lease(
+        req.caller_pid(),
+        [registry = binding_registry_, binding_id]() { registry->release_attachment_ref(binding_id, absl::Now()); });
+    if (!token_or.ok()) {
+      binding_registry_->release_attachment_ref(binding_id, absl::Now());
+      return to_grpc_status(token_or.status());
+    }
+
+    auto record_or = binding_registry_->get(binding_id);
+    if (!record_or.ok()) {
+      auto release_status = handle_leases_->release(*token_or);
+      if (!release_status.ok()) {
+        LOG(WARNING) << "failed to release staged acquire lease after binding lookup failure: " << release_status;
+      }
+      return to_grpc_status(record_or.status());
+    }
+    auto staged_or = binding_registry_->get_staged_value(binding_id, binding_value_id);
+    if (!staged_or.ok()) {
+      auto release_status = handle_leases_->release(*token_or);
+      if (!release_status.ok()) {
+        LOG(WARNING) << "failed to release staged acquire lease after staged lookup failure: " << release_status;
+      }
+      return to_grpc_status(staged_or.status());
+    }
+    const auto record = *record_or;
+    const auto staged = *staged_or;
+    resp.set_lease_token(*token_or);
+    resp.mutable_mem_handle()->set_cuda_ipc_handle(
+        staged.handle_bytes.as_string_view().data(), staged.handle_bytes.as_string_view().size());
+    resp.mutable_mem_handle()->set_lease_token(*token_or);
+    resp.set_target_index_bytes(staged.target_index_json);
+    for (const auto& payload : staged.payloads) {
+      *resp.add_payloads() = payload;
+    }
+    resp.set_reservation_bytes(req.reservation_capability().reservation_bytes());
+    resp.set_acquired_staged_value(true);
+    fill_staged_binding_value(*record, staged, resp.mutable_acquired_value());
+    return grpc::Status::OK;
+  }
   if (auto status = binding_registry_->validate_and_acquire_attachment_ref(req, absl::Now()); !status.ok()) {
     return to_grpc_status(status);
   }
@@ -621,7 +993,10 @@ grpc::Status MaterializationController::acquire_binding_value(
 
   auto record_or = binding_registry_->get(binding_id);
   if (!record_or.ok()) {
-    (void)handle_leases_->release(*token_or);
+    auto release_status = handle_leases_->release(*token_or);
+    if (!release_status.ok()) {
+      LOG(WARNING) << "failed to release acquire lease after binding lookup failure: " << release_status;
+    }
     return to_grpc_status(record_or.status());
   }
   const auto record = *record_or;
@@ -636,6 +1011,7 @@ grpc::Status MaterializationController::acquire_binding_value(
   }
   resp.set_reservation_bytes(req.reservation_capability().reservation_bytes());
   fill_current_binding_value(*record, resp.mutable_current_value());
+  resp.mutable_acquired_value()->CopyFrom(resp.current_value());
   return grpc::Status::OK;
 }
 
@@ -761,6 +1137,14 @@ grpc::Status MaterializationController::start_publish_target_replica(
     const v2::PublishTargetReplicaRequest& req,
     v2::StartPublishTargetReplicaResponse& resp) {
   return target_materialization_service_.start_publish_target_replica(rctx, req, resp);
+}
+
+absl::Status MaterializationController::terminalize_target_publication(
+    std::string_view publication_id,
+    std::string_view reason,
+    bool release_published_lifecycle_lease) {
+  return target_materialization_service_.terminalize_target_publication(
+      publication_id, reason, release_published_lifecycle_lease);
 }
 
 absl::StatusOr<TargetPublishService::TargetPublicationFrontDoorContext> MaterializationController::

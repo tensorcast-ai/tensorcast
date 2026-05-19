@@ -178,7 +178,7 @@ class InplaceSlot:
         view_subset_hash: bytes | None,
         view_spec: common_pb2.ViewSpec | None,
         current_value_metadata: BindingValueMetadata | None,
-        target_publication_token: bytes | None,
+        binding_current_value_publication_token: bytes | None,
         copy_plan: Sequence[CopyPlanEntry] | None = None,
     ) -> None:
         if not tensors:
@@ -207,8 +207,10 @@ class InplaceSlot:
             else None
         )
         self._contribution_source_artifact_id = self._artifact_id
-        self._target_publication_token = (
-            bytes(target_publication_token) if target_publication_token else None
+        self._binding_current_value_publication_token = (
+            bytes(binding_current_value_publication_token)
+            if binding_current_value_publication_token
+            else None
         )
         self._copy_plan = tuple(copy_plan) if copy_plan is not None else None
 
@@ -348,9 +350,9 @@ class InplaceSlot:
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-        if not self._target_publication_token:
+        if not self._binding_current_value_publication_token:
             raise ArtifactError(
-                "target_publication_token missing; daemon publish not available",
+                "binding_current_value_publication_token missing; daemon publish not available",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
@@ -359,7 +361,7 @@ class InplaceSlot:
         client = self._runtime.ensure_client()
         try:
             start_resp = client.start_publish_target_replica(
-                target_publication_token=self._target_publication_token,
+                binding_current_value_publication_token=self._binding_current_value_publication_token,
                 byte_space=self.byte_space,
                 ttl_ms=ttl_ms,
                 owner_pid=owner_pid,
@@ -446,9 +448,9 @@ class InplaceSlot:
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-        if not self._target_publication_token:
+        if not self._binding_current_value_publication_token:
             raise ArtifactError(
-                "target_publication_token missing; daemon publish not available",
+                "binding_current_value_publication_token missing; daemon publish not available",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
@@ -457,7 +459,7 @@ class InplaceSlot:
         client = self._runtime.ensure_client()
         try:
             resp = client.publish_target_replica(
-                target_publication_token=self._target_publication_token,
+                binding_current_value_publication_token=self._binding_current_value_publication_token,
                 byte_space=self.byte_space,
                 ttl_ms=ttl_ms,
                 owner_pid=owner_pid,
@@ -529,7 +531,7 @@ class InplaceSlot:
         self._active_update_epoch = update_epoch
         self._current_value_metadata = None
         self._artifact_id = None
-        self._target_publication_token = None
+        self._binding_current_value_publication_token = None
         self._dirty = False
         return BindingUpdateEpoch(
             binding_id=self._binding_id,
@@ -576,7 +578,7 @@ class InplaceSlot:
         self._seal_generation_counter = int(metadata.seal_generation)
         self._current_value_metadata = metadata
         self._artifact_id = None
-        self._target_publication_token = None
+        self._binding_current_value_publication_token = None
         self._dirty = False
 
     def swap(
@@ -741,15 +743,15 @@ class InplaceSlot:
             self._update_state_from_layout(
                 region_layout=region_layout,
                 view_spec=view_spec_proto,
-                target_publication_token=getattr(
-                    response, "target_publication_token", None
+                binding_current_value_publication_token=getattr(
+                    response, "binding_current_value_publication_token", None
                 ),
             )
             self._mark_artifact_backed_current(
                 artifact_id=artifact_id,
                 selection=selection,
-                target_publication_token=getattr(
-                    response, "target_publication_token", None
+                binding_current_value_publication_token=getattr(
+                    response, "binding_current_value_publication_token", None
                 ),
             )
             if publish:
@@ -867,15 +869,15 @@ class InplaceSlot:
         self._update_state_from_layout(
             region_layout=region_layout,
             view_spec=view_spec_proto,
-            target_publication_token=getattr(
-                response, "target_publication_token", None
+            binding_current_value_publication_token=getattr(
+                response, "binding_current_value_publication_token", None
             ),
         )
         self._mark_artifact_backed_current(
             artifact_id=artifact_id,
             selection=selection,
-            target_publication_token=getattr(
-                response, "target_publication_token", None
+            binding_current_value_publication_token=getattr(
+                response, "binding_current_value_publication_token", None
             ),
         )
 
@@ -1034,9 +1036,9 @@ class InplaceSlot:
         owner_pid: int | None = None,
         ctx: CallContext | None,
     ) -> None:
-        if not self._target_publication_token:
+        if not self._binding_current_value_publication_token:
             raise ArtifactError(
-                "target_publication_token missing; daemon publish not available",
+                "binding_current_value_publication_token missing; daemon publish not available",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
@@ -1044,7 +1046,7 @@ class InplaceSlot:
         client = self._runtime.ensure_client()
         try:
             resp = client.publish_target_replica(
-                target_publication_token=self._target_publication_token,
+                binding_current_value_publication_token=self._binding_current_value_publication_token,
                 byte_space=self.byte_space,
                 ttl_ms=ttl_ms,
                 owner_pid=owner_pid,
@@ -1083,7 +1085,7 @@ class InplaceSlot:
         *,
         region_layout: "_RegionBackedLayout",
         view_spec: common_pb2.ViewSpec | None,
-        target_publication_token: bytes | None,
+        binding_current_value_publication_token: bytes | None,
     ) -> None:
         self._region_ids = tuple(region_layout.region_ids)
         self._view_spec = view_spec
@@ -1107,8 +1109,10 @@ class InplaceSlot:
             view_id=self._view_id,
             view_subset_hash=self._view_subset_hash,
         )
-        self._target_publication_token = (
-            bytes(target_publication_token) if target_publication_token else None
+        self._binding_current_value_publication_token = (
+            bytes(binding_current_value_publication_token)
+            if binding_current_value_publication_token
+            else None
         )
 
     def _mark_artifact_backed_current(
@@ -1116,7 +1120,7 @@ class InplaceSlot:
         *,
         artifact_id: str,
         selection: common_pb2.ArtifactSelection,
-        target_publication_token: bytes | None,
+        binding_current_value_publication_token: bytes | None,
     ) -> None:
         self._artifact_id = str(artifact_id)
         self._contribution_source_artifact_id = str(artifact_id)
@@ -1125,7 +1129,6 @@ class InplaceSlot:
                 binding_id=self._binding_id,
                 selection=selection,
                 source_artifact_id=artifact_id,
-                target_publication_token=target_publication_token,
                 timeout_s=30.0,
             )
         except Exception as exc:  # noqa: BLE001
@@ -1153,8 +1156,10 @@ class InplaceSlot:
             )
         self._seal_generation_counter = int(metadata.seal_generation)
         self._current_value_metadata = metadata
-        self._target_publication_token = (
-            bytes(target_publication_token) if target_publication_token else None
+        self._binding_current_value_publication_token = (
+            bytes(binding_current_value_publication_token)
+            if binding_current_value_publication_token
+            else None
         )
         self._dirty = False
 
@@ -1162,7 +1167,7 @@ class InplaceSlot:
         self._active_update_epoch = None
         self._current_value_metadata = None
         self._artifact_id = None
-        self._target_publication_token = None
+        self._binding_current_value_publication_token = None
         self._dirty = True
 
     def _normalize_update_epoch(

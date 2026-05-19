@@ -424,7 +424,6 @@ TEST_CASE("MaterializeIntoMappedTarget maps slices into target regions", "[daemo
   REQUIRE(status.ok());
   REQUIRE(resp.status() == tensorcast::daemon::v2::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   REQUIRE(resp.source() == tensorcast::daemon::v2::MATERIALIZATION_SOURCE_DISK);
-  REQUIRE(!resp.target_publication_token().empty());
 
   std::array<char, 4> out0{};
   std::array<char, 4> out1{};

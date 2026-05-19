@@ -58,11 +58,14 @@ from tensorcast.global_store.repositories import (
     AssemblySlotOccupancyRepository,
     ChunkDirectoryRepository,
     ClusterInfoRepository,
+    GroupRealizationRepository,
+    GroupVersionSetRepository,
     InstanceRepository,
     LayoutSpecRepository,
     LeafRepository,
     OperationRepository,
     PendingTransportRequestRepository,
+    ProgressiveCoverageRepository,
     ProofRepository,
     ReplicaRepository,
     ShardHomeLeaseRepository,
@@ -102,6 +105,9 @@ from tensorcast.global_store.rpc.assembly_slot_occupancy_rpc_handler import (
 )
 from tensorcast.global_store.rpc.chunk_rpc_handler import ChunkRpcHandler
 from tensorcast.global_store.rpc.disk_location_rpc_handler import DiskLocationRpcHandler
+from tensorcast.global_store.rpc.group_realization_rpc_handler import (
+    GroupRealizationRpcHandler,
+)
 from tensorcast.global_store.rpc.instance_rpc_handler import InstanceRpcHandler
 from tensorcast.global_store.rpc.key_mapping_rpc_handler import KeyMappingRpcHandler
 from tensorcast.global_store.rpc.layout_binding_rpc_handler import (
@@ -112,6 +118,7 @@ from tensorcast.global_store.rpc.operation_rpc_handler import OperationRpcHandle
 from tensorcast.global_store.rpc.placement_persistence_rpc_handler import (
     PlacementPersistenceRpcHandler,
 )
+from tensorcast.global_store.rpc.progressive_rpc_handler import ProgressiveRpcHandler
 from tensorcast.global_store.rpc.replica_lifecycle_rpc_handler import (
     ReplicaLifecycleRpcHandler,
 )
@@ -136,8 +143,10 @@ from tensorcast.global_store.rpc_servicer_mixins import (
 from tensorcast.global_store.services import (
     ArtifactService,
     ChunkService,
+    GroupRealizationService,
     InstanceService,
     PlacementService,
+    ProgressiveReplicationService,
     RecoveryService,
     ShardHomeLeaseService,
     TransportService,
@@ -172,6 +181,8 @@ class GlobalStoreServicer(
     This class handles gRPC requests and delegates to service layer for
     business logic. Thread safety is handled by DuckDB's cursor artifact.
     """
+
+    progressive_replication_service: ProgressiveReplicationService
 
     _POLICY_FROM_PROTO = {
         global_store_pb2.PLACEMENT_POLICY_LOCAL_ONLY: "local_only",
@@ -239,6 +250,8 @@ class GlobalStoreServicer(
         self.leaf_repository = LeafRepository(self.connection)
         self.binding_repository = ArtifactBindingRepository(self.connection)
         self.key_mapping_repository = KeyMappingRepository(self.connection)
+        self.group_version_set_repository = GroupVersionSetRepository(self.connection)
+        self.group_realization_repository = GroupRealizationRepository(self.connection)
         self.cluster_info_repository = ClusterInfoRepository(self.connection)
         self.disk_location_repository = ArtifactDiskLocationRepository(self.connection)
         self.placement_repository = ArtifactPlacementRepository(self.connection)
@@ -262,6 +275,9 @@ class GlobalStoreServicer(
         self.proof_repository = ProofRepository(self.connection)
         self.operation_repository = OperationRepository(self.connection)
         self.shard_home_lease_repository = ShardHomeLeaseRepository(self.connection)
+        self.progressive_coverage_repository = ProgressiveCoverageRepository(
+            self.connection
+        )
 
     def _init_catalog_handlers(self) -> None:
         """Initialize handlers for artifact catalog and workflow metadata."""
@@ -293,6 +309,17 @@ class GlobalStoreServicer(
             artifact_index_repository=self.artifact_indices,
             multibase_sha256_to_hex=multibase_sha256_to_hex,
             alias_cache_ttl_seconds=alias_cache_ttl_seconds,
+            logger=logger,
+        )
+        self.group_realization_service = GroupRealizationService(
+            version_set_repository=self.group_version_set_repository,
+            realization_repository=self.group_realization_repository,
+            key_mapping_repository=self.key_mapping_repository,
+            config=self.config.group_realization,
+        )
+        self.group_realization_rpc_handler = GroupRealizationRpcHandler(
+            group_realization_service=self.group_realization_service,
+            operation_repository=self.operation_repository,
             logger=logger,
         )
         self.artifact_index_rpc_handler = ArtifactIndexRpcHandler(
@@ -381,6 +408,8 @@ class GlobalStoreServicer(
             get_worker_service=lambda: self.worker_service,
             get_instance_service=lambda: self.instance_service,
             get_transport_service=lambda: self.transport_service,
+            get_group_realization_service=lambda: self.group_realization_service,
+            get_progressive_replication_service=lambda: self.progressive_replication_service,
             logger=logger,
         )
         self.cleanup_thread = self._maintenance_coordinator.start()
@@ -470,6 +499,13 @@ class GlobalStoreServicer(
         self.transport_rpc_handler = TransportRpcHandler(
             transport_service=self.transport_service,
             replica_to_memory_info=self._replica_to_memory_info,
+            logger=logger,
+        )
+        self.progressive_replication_service = ProgressiveReplicationService(
+            self.progressive_coverage_repository
+        )
+        self.progressive_rpc_handler = ProgressiveRpcHandler(
+            service=self.progressive_replication_service,
             logger=logger,
         )
         self.replica_lifecycle_rpc_handler = ReplicaLifecycleRpcHandler(
@@ -908,8 +944,12 @@ class GlobalStoreServicer(
         self.pending_transport_request_repository = PendingTransportRequestRepository(
             self.connection
         )
+        self.key_mapping_repository = KeyMappingRepository(self.connection)
+        self.group_version_set_repository = GroupVersionSetRepository(self.connection)
+        self.group_realization_repository = GroupRealizationRepository(self.connection)
         self.worker_repository = WorkerRepository(self.connection)
         self.instance_repository = InstanceRepository(self.connection)
+        self._init_catalog_handlers()
         self._rebuild_runtime_services_and_handlers()
 
         logger.debug("GlobalStoreServicer state has been reset for the next test run")

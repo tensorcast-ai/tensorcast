@@ -215,6 +215,15 @@ struct DaemonOptions {
   // Max concurrent transport requests per registered memory replica.
   uint32_t max_concurrency{4};
 
+  struct ProgressiveReplication {
+    bool enabled{false};
+    std::chrono::milliseconds report_interval{std::chrono::milliseconds{1000}};
+    uint64_t min_report_delta_bytes{16ULL * 1024ULL * 1024ULL};
+    bool verify_before_report{true};
+  };
+
+  ProgressiveReplication progressive_replication{};
+
   // API behavior flags
   // If true, GetLoadedReplicasV2 uses opaque cursor tokens based on a stable
   // ordering (artifact_id, device_id). If false (default), uses numeric

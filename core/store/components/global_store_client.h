@@ -509,7 +509,8 @@ class IGlobalStoreClient {
       uint32_t max_concurrency = 1,
       const std::optional<std::string>& verification_json = std::nullopt,
       std::optional<std::string_view> view_id = std::nullopt,
-      const std::optional<common::v1::ArtifactDescriptor>& descriptor = std::nullopt) = 0;
+      const std::optional<common::v1::ArtifactDescriptor>& descriptor = std::nullopt,
+      uint64_t export_generation = 1) = 0;
 
   virtual absl::StatusOr<std::string> register_memory_replica_idempotent(
       std::string_view artifact_id,
@@ -526,7 +527,8 @@ class IGlobalStoreClient {
       const std::optional<std::string>& verification_json = std::nullopt,
       std::optional<std::string_view> view_id = std::nullopt,
       const std::optional<common::v1::ArtifactDescriptor>& descriptor = std::nullopt,
-      std::optional<std::string_view> client_request_id = std::nullopt) {
+      std::optional<std::string_view> client_request_id = std::nullopt,
+      uint64_t export_generation = 1) {
     (void)client_request_id;
     return register_memory_replica(
         artifact_id,
@@ -542,7 +544,8 @@ class IGlobalStoreClient {
         max_concurrency,
         verification_json,
         view_id,
-        descriptor);
+        descriptor,
+        export_generation);
   }
 
   virtual absl::Status unregister_replica(std::string_view artifact_id, std::string_view replica_id) = 0;
@@ -592,6 +595,46 @@ class IGlobalStoreClient {
       std::string_view transport_id,
       TransportCompletionOutcome outcome,
       std::string_view outcome_detail = {}) = 0;
+
+  virtual absl::StatusOr<global_store::ReportProgressiveCoverageResponse> report_progressive_coverage(
+      const global_store::ReportProgressiveCoverageRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) {
+    (void)request;
+    (void)rpc_options;
+    return absl::UnimplementedError("ReportProgressiveCoverage not available");
+  }
+
+  virtual absl::StatusOr<global_store::FindProgressiveSourceResponse> find_progressive_source(
+      const global_store::FindProgressiveSourceRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) {
+    (void)request;
+    (void)rpc_options;
+    return absl::UnimplementedError("FindProgressiveSource not available");
+  }
+
+  virtual absl::StatusOr<global_store::CompleteProgressiveAssignmentResponse> complete_progressive_assignment(
+      const global_store::CompleteProgressiveAssignmentRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) {
+    (void)request;
+    (void)rpc_options;
+    return absl::UnimplementedError("CompleteProgressiveAssignment not available");
+  }
+
+  virtual absl::StatusOr<global_store::RetireProgressiveCoverageResponse> retire_progressive_coverage(
+      const global_store::RetireProgressiveCoverageRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) {
+    (void)request;
+    (void)rpc_options;
+    return absl::UnimplementedError("RetireProgressiveCoverage not available");
+  }
+
+  virtual absl::StatusOr<global_store::ExpireProgressiveStateResponse> expire_progressive_state(
+      const global_store::ExpireProgressiveStateRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) {
+    (void)request;
+    (void)rpc_options;
+    return absl::UnimplementedError("ExpireProgressiveState not available");
+  }
 
   virtual absl::StatusOr<std::vector<RemoteReplicaInfo>> get_artifact_replicas(
       std::string_view artifact_id,
@@ -674,6 +717,34 @@ class IGlobalStoreClient {
       std::optional<uint64_t> expected_generation) = 0;
 
   virtual absl::Status revoke_key_mapping(std::string_view key) = 0;
+
+  virtual absl::StatusOr<global_store::RegisterGroupVersionSetResponse> register_group_version_set(
+      const global_store::RegisterGroupVersionSetRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<global_store::BeginOrJoinGroupRealizationResponse> begin_or_join_group_realization(
+      const global_store::BeginOrJoinGroupRealizationRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<global_store::ReportGroupRealizationPreparedResponse> report_group_realization_prepared(
+      const global_store::ReportGroupRealizationPreparedRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<global_store::PublishGroupRealizationResponse> publish_group_realization(
+      const global_store::PublishGroupRealizationRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<global_store::WaitGroupRealizationPublishedResponse> wait_group_realization_published(
+      const global_store::WaitGroupRealizationPublishedRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<global_store::AbortGroupRealizationResponse> abort_group_realization(
+      const global_store::AbortGroupRealizationRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+
+  virtual absl::StatusOr<global_store::GetGroupRealizationResponse> get_group_realization(
+      const global_store::GetGroupRealizationRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
 
   virtual absl::StatusOr<std::string> get_cluster_id() = 0;
 
@@ -960,7 +1031,8 @@ class GlobalStoreClient : public IGlobalStoreClient {
       uint32_t max_concurrency = 1,
       const std::optional<std::string>& verification_json = std::nullopt,
       std::optional<std::string_view> view_id = std::nullopt,
-      const std::optional<common::v1::ArtifactDescriptor>& descriptor = std::nullopt) override;
+      const std::optional<common::v1::ArtifactDescriptor>& descriptor = std::nullopt,
+      uint64_t export_generation = 1) override;
   absl::StatusOr<std::string> register_memory_replica_idempotent(
       std::string_view artifact_id,
       std::string_view worker_id,
@@ -976,7 +1048,8 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const std::optional<std::string>& verification_json = std::nullopt,
       std::optional<std::string_view> view_id = std::nullopt,
       const std::optional<common::v1::ArtifactDescriptor>& descriptor = std::nullopt,
-      std::optional<std::string_view> client_request_id = std::nullopt) override;
+      std::optional<std::string_view> client_request_id = std::nullopt,
+      uint64_t export_generation = 1) override;
 
   absl::Status unregister_replica(std::string_view artifact_id, std::string_view replica_id) override;
 
@@ -1093,6 +1166,54 @@ class GlobalStoreClient : public IGlobalStoreClient {
       std::optional<uint64_t> expected_generation) override;
 
   absl::Status revoke_key_mapping(std::string_view key) override;
+
+  absl::StatusOr<global_store::RegisterGroupVersionSetResponse> register_group_version_set(
+      const global_store::RegisterGroupVersionSetRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<global_store::BeginOrJoinGroupRealizationResponse> begin_or_join_group_realization(
+      const global_store::BeginOrJoinGroupRealizationRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<global_store::ReportGroupRealizationPreparedResponse> report_group_realization_prepared(
+      const global_store::ReportGroupRealizationPreparedRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<global_store::PublishGroupRealizationResponse> publish_group_realization(
+      const global_store::PublishGroupRealizationRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<global_store::WaitGroupRealizationPublishedResponse> wait_group_realization_published(
+      const global_store::WaitGroupRealizationPublishedRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<global_store::AbortGroupRealizationResponse> abort_group_realization(
+      const global_store::AbortGroupRealizationRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<global_store::GetGroupRealizationResponse> get_group_realization(
+      const global_store::GetGroupRealizationRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<global_store::ReportProgressiveCoverageResponse> report_progressive_coverage(
+      const global_store::ReportProgressiveCoverageRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<global_store::FindProgressiveSourceResponse> find_progressive_source(
+      const global_store::FindProgressiveSourceRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<global_store::CompleteProgressiveAssignmentResponse> complete_progressive_assignment(
+      const global_store::CompleteProgressiveAssignmentRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<global_store::RetireProgressiveCoverageResponse> retire_progressive_coverage(
+      const global_store::RetireProgressiveCoverageRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
+
+  absl::StatusOr<global_store::ExpireProgressiveStateResponse> expire_progressive_state(
+      const global_store::ExpireProgressiveStateRequest& request,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
 
   absl::StatusOr<std::string> get_cluster_id() override;
 

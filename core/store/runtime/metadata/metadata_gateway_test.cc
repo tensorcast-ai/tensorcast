@@ -34,6 +34,7 @@
 #include "core/store/runtime/metadata/registration_backend.h"
 #include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/store_engine_options.h"
+#include "core/store/testing/global_store_client_stub.h"
 #include "core/testing/test_helpers.h"
 
 using tensorcast::DeviceType;
@@ -239,11 +240,11 @@ ReplicaKey MakeReplicaKey(std::string artifact_id, DeviceKey device) {
   };
 }
 
-class TestGlobalStoreClient final : public tensorcast::store::components::IGlobalStoreClient {
+class TestGlobalStoreClient final : public tensorcast::store::testing::GlobalStoreClientStub {
  public:
-  bool connected{true};
   absl::Status next_register_status{absl::OkStatus()};
   int register_calls{0};
+  uint64_t last_memory_export_generation{0};
   std::vector<std::string> registered_artifacts;
 
   void set_register_blocking(bool enabled) {
@@ -267,61 +268,6 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     absl::MutexLock lock(&register_mu_);
     allow_register_continue_ = true;
     register_cv_.SignalAll();
-  }
-
-  absl::Status initialize() override {
-    return absl::OkStatus();
-  }
-
-  absl::StatusOr<tensorcast::store::components::WorkerRegistrationInfo> register_worker(
-      std::string_view,
-      std::string_view,
-      uint32_t,
-      uint32_t,
-      uint64_t,
-      uint64_t,
-      bool,
-      std::string_view,
-      std::string_view,
-      uint64_t) override {
-    return absl::UnimplementedError("register_worker not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::global_store::v1::WorkerHeartbeatResponse> send_heartbeat_enhanced(
-      std::string_view,
-      uint64_t,
-      bool,
-      uint64_t,
-      std::string_view,
-      const std::vector<std::string>&,
-      int64_t,
-      tensorcast::global_store::v1::ConnectionStatus,
-      const tensorcast::store::components::RpcOptions&,
-      std::string_view,
-      uint64_t) override {
-    return absl::UnimplementedError("send_heartbeat_enhanced not used in tests");
-  }
-
-  absl::Status unregister_worker(std::string_view, bool) override {
-    return absl::UnimplementedError("unregister_worker not used in tests");
-  }
-
-  absl::StatusOr<std::vector<tensorcast::store::components::ActiveWorkerInfo>> list_active_workers(
-      bool,
-      uint64_t,
-      const tensorcast::store::components::RpcOptions&) override {
-    return absl::UnimplementedError("list_active_workers not used in tests");
-  }
-
-  absl::StatusOr<std::vector<tensorcast::store::components::ActiveInstanceInfo>> list_active_instances(
-      bool,
-      uint64_t,
-      const tensorcast::store::components::RpcOptions&) override {
-    return absl::UnimplementedError("list_active_instances not used in tests");
-  }
-
-  absl::StatusOr<std::vector<std::string>> list_active_worker_identities(bool) override {
-    return absl::UnimplementedError("list_active_worker_identities not used in tests");
   }
 
   absl::StatusOr<std::string> register_replica(
@@ -369,8 +315,10 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
       uint32_t,
       const std::optional<std::string>&,
       std::optional<std::string_view>,
-      const std::optional<tensorcast::common::v1::ArtifactDescriptor>&) override {
+      const std::optional<tensorcast::common::v1::ArtifactDescriptor>&,
+      uint64_t export_generation) override {
     registered_artifacts.emplace_back(artifact_id);
+    last_memory_export_generation = export_generation;
     ++register_calls;
     if (!next_register_status.ok()) {
       return next_register_status;
@@ -412,242 +360,12 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::OkStatus();
   }
 
-  absl::StatusOr<std::vector<tensorcast::store::components::ViewInfo>> list_views(std::string_view) override {
-    return absl::UnimplementedError("list_views not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::global_store::v1::AssemblyLayoutBinding> get_assembly_layout_binding(
-      std::string_view) override {
-    return absl::UnimplementedError("get_assembly_layout_binding not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::layout::v1::LayoutSpecRecord> get_layout_spec(std::string_view) override {
-    return absl::UnimplementedError("get_layout_spec not used in tests");
-  }
-
-  absl::Status attach_layout_to_artifact(std::string_view, std::string_view) override {
-    return absl::UnimplementedError("attach_layout_to_artifact not used in tests");
-  }
-
-  absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view) override {
-    return absl::UnimplementedError("list_artifact_layouts not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::global_store::v1::WriteTensorProofCommitmentsResponse> write_tensor_proof_commitments(
-      const tensorcast::global_store::v1::WriteTensorProofCommitmentsRequest&) override {
-    return absl::UnimplementedError("write_tensor_proof_commitments not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::global_store::v1::CheckProofCommitmentsMatchResponse> check_proof_commitments_match(
-      const tensorcast::global_store::v1::CheckProofCommitmentsMatchRequest&) override {
-    return absl::UnimplementedError("check_proof_commitments_match not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::operation::v1::AcquireOperationLeaseResponse> acquire_operation_lease(
-      const tensorcast::operation::v1::AcquireOperationLeaseRequest&) override {
-    return absl::UnimplementedError("acquire_operation_lease not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::operation::v1::KeepaliveOperationLeaseResponse> keepalive_operation_lease(
-      const tensorcast::operation::v1::KeepaliveOperationLeaseRequest&) override {
-    return absl::UnimplementedError("keepalive_operation_lease not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::operation::v1::ReleaseOperationLeaseResponse> release_operation_lease(
-      const tensorcast::operation::v1::ReleaseOperationLeaseRequest&) override {
-    return absl::UnimplementedError("release_operation_lease not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::operation::v1::GetOperationResponse> get_operation(
-      const tensorcast::operation::v1::GetOperationRequest&) override {
-    return absl::UnimplementedError("get_operation not used in tests");
-  }
-
-  absl::Status update_operation(const tensorcast::operation::v1::UpdateOperationRequest&) override {
-    return absl::UnimplementedError("update_operation not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::store::components::ArtifactBinding> get_artifact_binding(std::string_view) override {
-    return absl::UnimplementedError("get_artifact_binding not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::store::components::ArtifactBindingResult> upsert_artifact_binding(
-      const tensorcast::store::components::ArtifactBinding&) override {
-    return absl::UnimplementedError("upsert_artifact_binding not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::store::components::TransportSession> request_replica_transport(
-      std::string_view,
-      std::string_view,
-      std::string_view,
-      uint32_t,
-      const DeviceKey&,
-      uint32_t,
-      const std::optional<tensorcast::store::components::TransportSchedulingGroupHint>&,
-      std::string_view,
-      std::string_view) override {
-    return absl::UnimplementedError("request_replica_transport not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::store::components::TransportSession> request_view_transport(
-      std::string_view,
-      std::string_view,
-      std::string_view,
-      std::string_view,
-      uint32_t,
-      const DeviceKey&,
-      uint32_t,
-      const std::optional<tensorcast::store::components::TransportSchedulingGroupHint>&,
-      std::string_view,
-      std::string_view) override {
-    return absl::UnimplementedError("request_view_transport not used in tests");
-  }
-
   absl::Status complete_replica_transport(
       std::string_view,
       tensorcast::store::components::TransportCompletionOutcome,
       std::string_view) override {
     return absl::OkStatus();
   }
-
-  absl::StatusOr<std::vector<tensorcast::store::components::RemoteReplicaInfo>> get_artifact_replicas(
-      std::string_view,
-      std::optional<std::string_view>) override {
-    return absl::UnimplementedError("get_artifact_replicas not used in tests");
-  }
-
-  absl::StatusOr<std::vector<tensorcast::store::components::ChunkLocationInfo>> query_chunk_locations(
-      std::string_view,
-      const std::vector<uint32_t>&) override {
-    return absl::UnimplementedError("query_chunk_locations not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::store::components::StateSyncResult> reconcile_worker_state(
-      std::string_view,
-      std::string_view,
-      const std::vector<tensorcast::common::v1::ReplicaInfo>&,
-      bool,
-      const tensorcast::store::components::StateSyncToken&,
-      const tensorcast::store::components::RpcOptions&) override {
-    return absl::UnimplementedError("reconcile_worker_state not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::store::components::AcquireShardHomeLeaseResult> acquire_shard_home_lease(
-      uint64_t,
-      std::string_view,
-      uint64_t,
-      const tensorcast::store::components::RpcOptions&) override {
-    return absl::UnimplementedError("acquire_shard_home_lease not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::store::components::ShardHomeLeaseDescriptor> keepalive_shard_home_lease(
-      std::string_view,
-      uint64_t,
-      const tensorcast::store::components::RpcOptions&) override {
-    return absl::UnimplementedError("keepalive_shard_home_lease not used in tests");
-  }
-
-  absl::StatusOr<std::vector<tensorcast::store::components::ShardHomeLeaseKeepaliveOutcome>>
-  batch_keepalive_shard_home_leases(
-      const std::vector<tensorcast::store::components::ShardHomeLeaseKeepaliveInput>&,
-      uint64_t,
-      const tensorcast::store::components::RpcOptions&) override {
-    return absl::UnimplementedError("batch_keepalive_shard_home_leases not used in tests");
-  }
-
-  absl::StatusOr<bool> release_shard_home_lease(std::string_view, const tensorcast::store::components::RpcOptions&)
-      override {
-    return absl::UnimplementedError("release_shard_home_lease not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::store::components::ShardHomeRouteInfo> get_shard_home_lease(
-      uint64_t,
-      const tensorcast::store::components::RpcOptions&) override {
-    return absl::UnimplementedError("get_shard_home_lease not used in tests");
-  }
-
-  absl::StatusOr<std::vector<tensorcast::store::components::ShardHomeRouteInfo>> batch_get_shard_home_leases(
-      const std::vector<uint64_t>&,
-      const tensorcast::store::components::RpcOptions&) override {
-    return absl::UnimplementedError("batch_get_shard_home_leases not used in tests");
-  }
-
-  bool is_connected() const override {
-    return connected;
-  }
-
-  absl::Status batch_update_chunk_states(
-      std::string_view,
-      std::string_view,
-      const std::vector<tensorcast::store::components::ChunkStateUpdate>&) override {
-    return absl::UnimplementedError("batch_update_chunk_states not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::store::components::KeyMapping> resolve_key_mapping(std::string_view) override {
-    return absl::UnimplementedError("resolve_key_mapping not used in tests");
-  }
-
-  absl::Status upsert_artifact_metadata(const tensorcast::common::v1::ArtifactDescriptor&, std::string_view) override {
-    return absl::UnimplementedError("upsert_artifact_metadata not used in tests");
-  }
-
-  absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view) override {
-    return absl::UnimplementedError("get_artifact_index_by_id not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::store::components::ViewMetadata> get_view_metadata(std::string_view, std::string_view)
-      override {
-    return absl::UnimplementedError("get_view_metadata not used in tests");
-  }
-
-  absl::Status upsert_key_mapping(std::string_view, std::string_view, absl::Duration) override {
-    return absl::UnimplementedError("upsert_key_mapping not used in tests");
-  }
-
-  absl::StatusOr<std::string> get_cluster_id() override {
-    return absl::UnimplementedError("get_cluster_id not used in tests");
-  }
-
-  absl::Status upsert_artifact_disk_location(
-      std::string_view,
-      std::string_view,
-      std::string_view,
-      tensorcast::global_store::v1::DiskLocationKind,
-      bool) override {
-    return absl::UnimplementedError("upsert_artifact_disk_location not used in tests");
-  }
-
-  absl::StatusOr<std::vector<tensorcast::store::components::ArtifactDiskLocation>> list_artifact_disk_locations(
-      std::string_view,
-      bool) override {
-    return absl::UnimplementedError("list_artifact_disk_locations not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::store::components::KeyMappingSwapResult> swap_key_mapping(
-      std::string_view,
-      std::string_view,
-      std::optional<std::string_view>,
-      std::optional<uint64_t>) override {
-    return absl::UnimplementedError("swap_key_mapping not used in tests");
-  }
-
-  absl::Status revoke_key_mapping(std::string_view) override {
-    return absl::UnimplementedError("revoke_key_mapping not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::store::components::PlacementPlanResult> plan_placement(
-      std::string_view,
-      tensorcast::global_store::v1::PlacementPolicy,
-      const std::vector<tensorcast::store::components::PlacementShardSpec>&,
-      std::string_view) override {
-    return absl::UnimplementedError("plan_placement not used in tests");
-  }
-
-  absl::Status report_persistence_status(const tensorcast::store::components::PersistenceReport&) override {
-    return absl::UnimplementedError("report_persistence_status not used in tests");
-  }
-
-  void update_local_endpoint(std::string, std::string, uint32_t, uint32_t) override {}
 
  private:
   mutable absl::Mutex register_mu_;
@@ -696,6 +414,17 @@ ReplicaKey CreateCpuReplica(RuntimeContext& context, ReplicaRuntime& runtime, co
   REQUIRE(replica != nullptr);
   DeviceKey cpu_device{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
   return MakeReplicaKey(artifact_id, cpu_device);
+}
+
+ReplicaKey CreateGpuReplica(RuntimeContext& context, ReplicaRuntime& runtime, const std::string& artifact_id) {
+  constexpr size_t kBytes = 4096;
+  auto backing = std::make_shared<std::vector<uint8_t>>(kBytes, 0xCD);
+  auto view = std::shared_ptr<const void>(backing, static_cast<const void*>(backing->data()));
+  auto config = MakeInlineReplicaConfig(context, artifact_id, DeviceType::GPU, 0, view, kBytes);
+  auto replica = runtime.get_or_create_replica(artifact_id, config);
+  REQUIRE(replica != nullptr);
+  DeviceKey gpu_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  return MakeReplicaKey(artifact_id, gpu_device);
 }
 
 } // namespace
@@ -1187,6 +916,25 @@ TEST_CASE("MetadataGateway deduplicates publish contexts", "[metadata_gateway][r
   auto second_status = harness.gateway->register_replica(replica_key, {}, "ctx-2");
   CHECK(second_status.ok());
   CHECK(harness.client->register_calls == 2);
+}
+
+TEST_CASE("MetadataGateway preserves memory replica export generation", "[metadata_gateway][runtime]") {
+  SKIP_IF_NO_CUDA();
+
+  MetadataGatewayHarness harness;
+  auto replica_key = CreateGpuReplica(harness.context, harness.replica_runtime, "mi2:export_generation:data");
+
+  tensorcast::store::runtime::ReplicaTransportState state;
+  state.export_state = tensorcast::store::runtime::ReplicaExportState::kExportable;
+  state.export_generation = 17;
+  state.remote_memory_keys = {"remote-key"};
+  state.buffer_sizes = {4096};
+  harness.replica_runtime.update_transport_state(replica_key, state);
+
+  auto status = harness.gateway->register_replica(replica_key, {}, "ctx-export-generation");
+  REQUIRE(status.ok());
+  CHECK(harness.client->register_calls == 1);
+  CHECK(harness.client->last_memory_export_generation == 17);
 }
 
 TEST_CASE("MetadataGateway suppresses concurrent publish context duplicates", "[metadata_gateway][runtime]") {

@@ -51,24 +51,27 @@ consumer model we want to preserve:
 
 - `tensorcast_loader.py` can:
   - load directly from a serving artifact with `artifact.bind(...)`
-  - or bootstrap a runtime binding with `bind_into(...)`
+  - or bootstrap a local/source input into a serving artifact and then bind it
+  - or attach an externally preloaded serving binding through explicit authority
   - and later reload through `binding.swap(...)`
-- `gpu_model_runner.py` already treats `weight_version` as a serialized stale
-  filtered reload selector
-- `api_server.py` already gates `/set_model_weight` with drain + serialized
-  reload
+- `gpu_model_runner.py` consumes the dedicated TensorCast serving reload path
+  using `selector.kind` / `selector.value` and runtime policy
+- `api_server.py` gates `/reload_serving_artifact` with drain + serialized
+  reload, while `/set_model_weight` is rejected for `load_format="tensorcast"`
 
 Concrete current anchors:
 
 - direct serving-artifact startup path in
   `internal-vllm/vllm/model_executor/model_loader/tensorcast_loader.py`
-  around lines 1411-1471
-- runtime binding bootstrap path in the same file around lines 1492-1533
-- reload-by-swap path in the same file around lines 1564-1599
-- stale version handling in
-  `internal-vllm/vllm/v1/worker/gpu_model_runner.py` around lines 3372-3434
-- HTTP drain + serialized reload in
-  `internal-vllm/vllm/entrypoints/openai/api_server.py` around lines 1741-1835
+  (`TensorcastModelLoader.load_model(...)`)
+- external preload attach path in
+  `internal-vllm/vllm/model_executor/model_loader/tensorcast_builder/preloaded_binding.py`
+- local bootstrap path in
+  `internal-vllm/vllm/model_executor/model_loader/tensorcast_builder/local_dir_prepare.py`
+- reload-by-swap path in
+  `internal-vllm/vllm/model_executor/model_loader/tensorcast_loader.py`
+- HTTP drain + serialized serving reload in
+  `internal-vllm/vllm/entrypoints/openai/api_server.py`
 
 This means the integration goal is not to redesign vLLM reload semantics. It is
 to make training publish the right versions in the right representation.
@@ -255,14 +258,16 @@ TensorCast must own:
 The best consumer contract remains:
 
 - `steptron` publishes serving-compatible versions
-- `internal-vllm` resolves those versions by key/version
-- `internal-vllm` reloads through the current runtime binding path
+- `internal-vllm` receives those versions as a serving selector
+  (`selector.kind="version_key"` or `selector.kind="artifact_ref"`)
+- `internal-vllm` reloads through `/reload_serving_artifact` and the current
+  runtime binding path
 
 This keeps `internal-vllm` close to its current design:
 
 - startup may still use direct serving-artifact bind or bootstrap bind-into
 - reload stays `binding.swap(...)`
-- stale-version rejection and unhealthy handling stay in place
+- selector durability and unhealthy handling stay in place
 
 ### Representation Boundary
 
@@ -316,7 +321,8 @@ layouts at reload time.
 4. Land typed child closeout contracts for source -> serving publication.
 5. Land serving publication and immutable serving-key output on that same
    lineage.
-6. Point `internal-vllm` at the published serving versions and validate reload.
+6. Point `internal-vllm` at the published serving selector and validate
+   `/reload_serving_artifact`.
 7. Only after that, expand toward `TP > 1` range coverage and
    transform-aware assembly.
 

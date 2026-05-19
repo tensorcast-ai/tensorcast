@@ -956,9 +956,7 @@ class ReplicaRepository(BaseRepository):
         else:
             return self.create(replica)
 
-    def create_or_update_atomic(
-        self, replica: Replica, cursor, *, preserve_transport: bool = False
-    ) -> Replica:
+    def create_or_update_atomic(self, replica: Replica, cursor) -> Replica:
         """
         Atomically create or update a replica within a transaction.
 
@@ -975,7 +973,7 @@ class ReplicaRepository(BaseRepository):
         # First, try to find existing replica within the transaction
         existing_result = cursor.execute(
             """
-            SELECT replica_id, memory_size FROM artifact_replicas
+            SELECT replica_id FROM artifact_replicas
             WHERE artifact_id = ? AND COALESCE(view_id, '') = COALESCE(?, '')
               AND node_id = ? AND node_address = ?
               AND node_port = ? AND memory_type = ?
@@ -995,71 +993,37 @@ class ReplicaRepository(BaseRepository):
         if existing_result:
             # Update existing replica
             existing_replica_id = existing_result[0]
-            existing_memory_size = int(existing_result[1] or 0)
-            if preserve_transport:
-                cursor.execute(
-                    """
-                    UPDATE artifact_replicas
-                    SET
-                        updated_at = CURRENT_TIMESTAMP,
-                        is_available = ?,
-                        max_concurrency = ?,
-                        worker_id = ?,
-                        expires_at = ?
-                    WHERE replica_id = ?
-                    """,
-                    [
-                        replica.is_available,
-                        replica.max_concurrency,
-                        replica.worker_id,
-                        replica.expires_at,
-                        str(existing_replica_id),
-                    ],
-                )
-                if (
-                    existing_memory_size > 0
-                    and replica.memory_size != existing_memory_size
-                ):
-                    logger.warning(
-                        "RegisterReplica preserving transport metadata for replica_id=%s but memory_size differs (existing=%s new=%s); keeping existing",
-                        existing_replica_id,
-                        existing_memory_size,
-                        replica.memory_size,
-                    )
-                if existing_memory_size > 0:
-                    replica.memory_size = existing_memory_size
-            else:
-                cursor.execute(
-                    """
-                    UPDATE artifact_replicas
-                    SET
-                        updated_at = CURRENT_TIMESTAMP,
-                        is_available = ?,
-                        max_concurrency = ?,
-                        remote_memory_keys = ?,
-                        buffer_sizes = ?,
-                        export_state = ?,
-                        export_generation = ?,
-                        verification_json = ?,
-                        memory_size = ?,
-                        worker_id = ?,
-                        expires_at = ?
-                    WHERE replica_id = ?
-                    """,
-                    [
-                        replica.is_available,
-                        replica.max_concurrency,
-                        list(replica.remote_memory_keys),
-                        list(replica.buffer_sizes),
-                        replica.export_state.value,
-                        replica.export_generation,
-                        replica.verification_json,
-                        replica.memory_size,
-                        replica.worker_id,
-                        replica.expires_at,
-                        str(existing_replica_id),
-                    ],
-                )
+            cursor.execute(
+                """
+                UPDATE artifact_replicas
+                SET
+                    updated_at = CURRENT_TIMESTAMP,
+                    is_available = ?,
+                    max_concurrency = ?,
+                    remote_memory_keys = ?,
+                    buffer_sizes = ?,
+                    export_state = ?,
+                    export_generation = ?,
+                    verification_json = ?,
+                    memory_size = ?,
+                    worker_id = ?,
+                    expires_at = ?
+                WHERE replica_id = ?
+                """,
+                [
+                    replica.is_available,
+                    replica.max_concurrency,
+                    list(replica.remote_memory_keys),
+                    list(replica.buffer_sizes),
+                    replica.export_state.value,
+                    replica.export_generation,
+                    replica.verification_json,
+                    replica.memory_size,
+                    replica.worker_id,
+                    replica.expires_at,
+                    str(existing_replica_id),
+                ],
+            )
             replica.replica_id = UUID(str(existing_replica_id))
         else:
             # Create new replica

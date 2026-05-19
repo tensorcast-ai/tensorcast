@@ -1025,7 +1025,8 @@ double seconds_since(absl::Time start) {
 }
 
 size_t dtype_elem_size_bytes(std::string_view torch_dtype) {
-  if (torch_dtype == "torch.uint8" || torch_dtype == "torch.int8") {
+  if (torch_dtype == "torch.uint8" || torch_dtype == "torch.int8" || torch_dtype == "torch.float8_e4m3fn" ||
+      torch_dtype == "torch.float8_e5m2") {
     return 1;
   }
   if (torch_dtype == "torch.int16") {
@@ -1766,6 +1767,36 @@ std::vector<std::pair<uint64_t, size_t>> split_even_ranges(uint64_t base, uint64
     const uint64_t start = base + (bytes * static_cast<uint64_t>(i)) / static_cast<uint64_t>(parts);
     const uint64_t end = base + (bytes * static_cast<uint64_t>(i + 1)) / static_cast<uint64_t>(parts);
     if (end > start) {
+      out.push_back({start, static_cast<size_t>(end - start)});
+    }
+  }
+  return out;
+}
+
+std::vector<std::pair<uint64_t, size_t>> split_even_aligned_ranges(
+    uint64_t base,
+    uint64_t bytes,
+    int parts,
+    uint64_t alignment) {
+  if (alignment == 0 || base % alignment != 0 || bytes % alignment != 0) {
+    return split_even_ranges(base, bytes, parts);
+  }
+  std::vector<std::pair<uint64_t, size_t>> out;
+  if (bytes == 0 || parts <= 0) {
+    return out;
+  }
+  const uint64_t units = bytes / alignment;
+  if (units == 0) {
+    return out;
+  }
+  const uint64_t effective_parts = std::min<uint64_t>(static_cast<uint64_t>(parts), units);
+  out.reserve(static_cast<size_t>(effective_parts));
+  for (uint64_t i = 0; i < effective_parts; ++i) {
+    const uint64_t start_units = (units * i) / effective_parts;
+    const uint64_t end_units = (units * (i + 1)) / effective_parts;
+    if (end_units > start_units) {
+      const uint64_t start = base + start_units * alignment;
+      const uint64_t end = base + end_units * alignment;
       out.push_back({start, static_cast<size_t>(end - start)});
     }
   }
@@ -5207,7 +5238,7 @@ absl::Status run_safetensors_o_direct_host_baseline(
 
   NullPositionedSink sink(total_bytes);
   const auto t0 = absl::Now();
-  auto ranges = split_even_ranges(/*base=*/0, total_bytes, io_threads);
+  auto ranges = split_even_aligned_ranges(/*base=*/0, total_bytes, io_threads, /*alignment=*/512);
   TC_RETURN_IF_ERROR(
       loader::pump_ranges(src, sink, *pool_ptr, ranges, io_threads, pump_benchmark_runtime().blocking_executor()));
   const double sec = seconds_since(t0);
@@ -5267,7 +5298,7 @@ absl::Status run_safetensors_o_direct_disk_baseline(
 
   const auto sched_before = loader::get_gpu_scheduler_stats(cfg.device_id);
   const auto t0 = absl::Now();
-  auto ranges = split_even_ranges(/*base=*/0, total_bytes, io_threads);
+  auto ranges = split_even_aligned_ranges(/*base=*/0, total_bytes, io_threads, /*alignment=*/512);
   TC_RETURN_IF_ERROR(
       loader::pump_ranges(src, sink, *pool_ptr, ranges, io_threads, pump_benchmark_runtime().blocking_executor()));
   TC_RETURN_IF_ERROR(sink.close());

@@ -206,6 +206,7 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "BindingReservationCapability",
     ),
     "BindingValueRef": ("tensorcast.api", "BindingValueRef"),
+    "GroupRealizationAcquireRef": ("tensorcast.api", "GroupRealizationAcquireRef"),
     "BindingRealizationEntry": ("tensorcast.api", "BindingRealizationEntry"),
     "BindingRealizationPlan": ("tensorcast.api", "BindingRealizationPlan"),
     "BuilderMode": ("tensorcast.api", "BuilderMode"),
@@ -271,6 +272,8 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     ),
     "CallContext": ("tensorcast.api", "CallContext"),
     "CollectiveLoadGroup": ("tensorcast.api", "CollectiveLoadGroup"),
+    "GroupRealization": ("tensorcast.api", "GroupRealization"),
+    "GroupVersionSetRef": ("tensorcast.api", "GroupVersionSetRef"),
     "GovernanceContext": ("tensorcast.api", "GovernanceContext"),
     "DirectorySnapshot": ("tensorcast.api", "DirectorySnapshot"),
     "CapabilityDirectoryClient": (
@@ -525,6 +528,10 @@ plan: Any
 
 
 def __getattr__(name: str) -> Any:
+    if name == "serving":
+        module = importlib.import_module("tensorcast.serving")
+        globals()[name] = module
+        return module
     if name not in _LAZY_ATTRS:
         raise AttributeError(name)
     module_name, attr_name = _LAZY_ATTRS[name]
@@ -535,10 +542,11 @@ def __getattr__(name: str) -> Any:
 
 
 def __dir__() -> list[str]:
-    return sorted(set(globals()).union(_LAZY_ATTRS))
+    return sorted(set(globals()).union(_LAZY_ATTRS).union({"serving"}))
 
 
 if TYPE_CHECKING:
+    import tensorcast.serving as serving  # noqa: F401
     from tensorcast.api import (  # noqa: F401
         Artifact,
         ArtifactDescriptor,
@@ -561,6 +569,9 @@ if TYPE_CHECKING:
         ExecutionTopologyContext,
         GetArtifactOptions,
         GovernanceContext,
+        GroupRealization,
+        GroupRealizationAcquireRef,
+        GroupVersionSetRef,
         HashBackend,
         HashLocation,
         IdentityMintStrategy,
@@ -655,6 +666,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "__version__",
+    "serving",
     "init",
     "is_initialized",
     "shutdown",
@@ -666,6 +678,7 @@ __all__ = [
     "ArtifactFuture",
     "BindingReservationCapability",
     "BindingValueRef",
+    "GroupRealizationAcquireRef",
     "BindingRealizationEntry",
     "BindingRealizationPlan",
     "BlobRef",
@@ -685,6 +698,8 @@ __all__ = [
     "binding_realization_plan_to_proto",
     "CallContext",
     "CollectiveLoadGroup",
+    "GroupRealization",
+    "GroupVersionSetRef",
     "ExecutionDiagnostics",
     "BindingUpdateEpoch",
     "HashBackend",

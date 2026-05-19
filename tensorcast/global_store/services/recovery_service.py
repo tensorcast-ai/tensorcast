@@ -257,9 +257,6 @@ class RecoveryService:
                     int(mem.device_id),
                     int(mem.memory_size),
                     bool(replica.stats.is_available),
-                    tuple(mem.remote_memory_keys),
-                    tuple(mem.buffer_sizes),
-                    mem.verification_json,
                     transport_export_state,
                     transport_export_generation,
                     transport_remote_keys,
@@ -1007,19 +1004,6 @@ class RecoveryService:
                 verification_changed = (local_verification_json or "") != (
                     global_replica.verification_json or ""
                 )
-            else:
-                if local_remote_keys:
-                    remote_keys_changed = local_remote_keys != list(
-                        global_replica.remote_memory_keys
-                    )
-                if local_buffer_sizes:
-                    buffer_sizes_changed = local_buffer_sizes != list(
-                        global_replica.buffer_sizes
-                    )
-                if local_verification_json:
-                    verification_changed = local_verification_json != (
-                        global_replica.verification_json or ""
-                    )
 
             if not any(
                 [
@@ -1065,11 +1049,6 @@ class RecoveryService:
                 transport.remote_memory_keys[:] = local_remote_keys
                 transport.buffer_sizes[:] = local_buffer_sizes
                 transport.verification_json = local_verification_json or ""
-                updated_proto.memory_info.remote_memory_keys[:] = local_remote_keys
-                updated_proto.memory_info.buffer_sizes[:] = local_buffer_sizes
-                updated_proto.memory_info.verification_json = (
-                    local_verification_json or ""
-                )
                 if export_state_changed:
                     reasons.append("export_state")
                 if export_generation_changed:
@@ -1079,18 +1058,6 @@ class RecoveryService:
                 if buffer_sizes_changed:
                     reasons.append("buffer_sizes")
                 if verification_changed:
-                    reasons.append("verification_json")
-            else:
-                if remote_keys_changed:
-                    updated_proto.memory_info.remote_memory_keys[:] = local_remote_keys
-                    reasons.append("remote_memory_keys")
-                if buffer_sizes_changed:
-                    updated_proto.memory_info.buffer_sizes[:] = local_buffer_sizes
-                    reasons.append("buffer_sizes")
-                if verification_changed:
-                    updated_proto.memory_info.verification_json = (
-                        local_verification_json or ""
-                    )
                     reasons.append("verification_json")
 
             change = global_store_pb2.StateChange(

@@ -355,9 +355,7 @@ TEST_CASE(
       tensorcast::store::materialization::contracts::RepresentationWorkItemKind::kConstFill);
 }
 
-TEST_CASE(
-    "copy-plan collective compatibility map only keeps compatibility-admitted tensors",
-    "[materialization_target_plan]") {
+TEST_CASE("copy-plan collective map only keeps source-overlap tensors", "[materialization_target_plan]") {
   const std::string source_index_json = R"({
     "copy":[0,8,[4],[1],"torch.float16",0],
     "left":[8,4,[2],[1],"torch.float16",0],
@@ -477,6 +475,8 @@ TEST_CASE(
   CHECK(strategy_plan_or->summary.planned_non_admitted_typed_bytes == 8);
   CHECK(strategy_plan_or->summary.planned_collective_admitted_bytes == 8);
   CHECK(covered_bytes(strategy_plan_or->lane_plan.collective_lane_map) == 8);
+  REQUIRE(strategy_plan_or->summary.planner_reject_reason_buckets.contains("typed_work_without_source_overlap"));
+  CHECK(strategy_plan_or->summary.planner_reject_reason_buckets.at("typed_work_without_source_overlap") == 8);
   CHECK_FALSE(strategy_plan_or->summary.planner_reject_reason_buckets.contains("generic_backend_coverage_unproven"));
 }
 

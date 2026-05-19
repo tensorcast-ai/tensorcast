@@ -45,6 +45,11 @@ service ClusterRuntimeService {
   rpc RequestReplicaTransport(RequestReplicaTransportRequest) returns (RequestReplicaTransportResponse) {}
   rpc CompleteReplicaTransport(CompleteReplicaTransportRequest) returns (CompleteReplicaTransportResponse) {}
   rpc QueryTransportWindow(QueryTransportWindowRequest) returns (QueryTransportWindowResponse) {}
+  rpc ReportProgressiveCoverage(ReportProgressiveCoverageRequest) returns (ReportProgressiveCoverageResponse) {}
+  rpc FindProgressiveSource(FindProgressiveSourceRequest) returns (FindProgressiveSourceResponse) {}
+  rpc CompleteProgressiveAssignment(CompleteProgressiveAssignmentRequest) returns (CompleteProgressiveAssignmentResponse) {}
+  rpc RetireProgressiveCoverage(RetireProgressiveCoverageRequest) returns (RetireProgressiveCoverageResponse) {}
+  rpc ExpireProgressiveState(ExpireProgressiveStateRequest) returns (ExpireProgressiveStateResponse) {}
 
   // Chunk directory operations
   rpc QueryChunkLocations(QueryChunkLocationsRequest) returns (QueryChunkLocationsResponse) {}
@@ -82,6 +87,15 @@ service ArtifactCatalogService {
   rpc SwapKeyMapping(SwapKeyMappingRequest) returns (SwapKeyMappingResponse) {}
   rpc ResolveKeyMapping(ResolveKeyMappingRequest) returns (ResolveKeyMappingResponse) {}
   rpc RevokeKeyMapping(RevokeKeyMappingRequest) returns (RevokeKeyMappingResponse) {}
+
+  // Group version-set realization and staged publish barrier.
+  rpc RegisterGroupVersionSet(RegisterGroupVersionSetRequest) returns (RegisterGroupVersionSetResponse) {}
+  rpc BeginOrJoinGroupRealization(BeginOrJoinGroupRealizationRequest) returns (BeginOrJoinGroupRealizationResponse) {}
+  rpc ReportGroupRealizationPrepared(ReportGroupRealizationPreparedRequest) returns (ReportGroupRealizationPreparedResponse) {}
+  rpc PublishGroupRealization(PublishGroupRealizationRequest) returns (PublishGroupRealizationResponse) {}
+  rpc WaitGroupRealizationPublished(WaitGroupRealizationPublishedRequest) returns (WaitGroupRealizationPublishedResponse) {}
+  rpc AbortGroupRealization(AbortGroupRealizationRequest) returns (AbortGroupRealizationResponse) {}
+  rpc GetGroupRealization(GetGroupRealizationRequest) returns (GetGroupRealizationResponse) {}
 }
 
 // Assembly/view domain: view coverage/proofs/layouts and assembly-oriented query model.
@@ -1059,6 +1073,158 @@ message QueryTransportWindowResponse {
   repeated TransportWindowRow rows = 2;
 }
 
+enum ProgressiveCoverageKind {
+  PROGRESSIVE_COVERAGE_KIND_UNSPECIFIED = 0;
+  PROGRESSIVE_COVERAGE_KIND_BYTE_PREFIX = 1;
+  PROGRESSIVE_COVERAGE_KIND_TENSOR_PREFIX = 2; // Reserved for v1.1.
+}
+
+enum ProgressiveCoverageState {
+  PROGRESSIVE_COVERAGE_STATE_UNSPECIFIED = 0;
+  PROGRESSIVE_COVERAGE_STATE_PENDING = 1;
+  PROGRESSIVE_COVERAGE_STATE_VERIFIED = 2;
+  PROGRESSIVE_COVERAGE_STATE_FAILED = 3;
+  PROGRESSIVE_COVERAGE_STATE_RETIRED = 4;
+}
+
+enum ProgressiveExportState {
+  PROGRESSIVE_EXPORT_STATE_UNSPECIFIED = 0;
+  PROGRESSIVE_EXPORT_STATE_NOT_EXPORTABLE = 1;
+  PROGRESSIVE_EXPORT_STATE_IN_PROGRESS_EXPORTABLE = 2;
+  PROGRESSIVE_EXPORT_STATE_COMPLETE_EXPORTABLE = 3;
+}
+
+enum ProgressiveAssignmentState {
+  PROGRESSIVE_ASSIGNMENT_STATE_UNSPECIFIED = 0;
+  PROGRESSIVE_ASSIGNMENT_STATE_CLAIMED = 1;
+  PROGRESSIVE_ASSIGNMENT_STATE_READING = 2;
+  PROGRESSIVE_ASSIGNMENT_STATE_SUCCEEDED = 3;
+  PROGRESSIVE_ASSIGNMENT_STATE_FAILED = 4;
+  PROGRESSIVE_ASSIGNMENT_STATE_EXPIRED = 5;
+  PROGRESSIVE_ASSIGNMENT_STATE_CANCELLED = 6;
+}
+
+message ProgressiveCoverageIdentity {
+  string artifact_id = 1;
+  tensorcast.common.v1.ByteSpaceRef byte_space = 2;
+  bytes selection_hash = 3;
+  bytes logical_layout_hash = 4;
+  tensorcast.common.v1.HashSpaceRef hash_space = 5;
+  bytes coverage_order_hash = 6;
+  string group_version_set_id = 7;
+  string group_part_id = 8;
+}
+
+message ReportProgressiveCoverageRequest {
+  string coverage_id = 1;
+  ProgressiveCoverageIdentity identity = 2;
+  string replica_id = 3;
+  string daemon_id = 4;
+  string daemon_session_id = 5;
+  string worker_id = 6;
+  uint64 source_export_generation = 7;
+  uint64 coverage_epoch = 8;
+  ProgressiveCoverageKind coverage_kind = 9;
+  uint64 verified_units = 10;
+  uint64 verified_bytes = 11;
+  uint64 completed_units = 12;
+  uint64 completed_bytes = 13;
+  uint64 total_units = 14;
+  uint64 total_bytes = 15;
+  string materialization_attempt_id = 16;
+  string source_transport_id = 17;
+  ProgressiveCoverageState state = 18;
+  ProgressiveExportState export_state = 19;
+  string source_domain = 20;
+  string seed_transport_kind = 21;
+  uint64 deadline_unix_nanos = 22;
+}
+
+message ReportProgressiveCoverageResponse {
+  Status status = 1;
+  string coverage_id = 2;
+  ProgressiveCoverageState state = 3;
+  bool updated = 4;
+  bool throttled = 5;
+  string reason = 6;
+}
+
+message FindProgressiveSourceRequest {
+  ProgressiveCoverageIdentity identity = 1;
+  uint64 next_unit = 2;
+  uint64 max_units = 3;
+  string requester_daemon_id = 4;
+  string requester_worker_id = 5;
+  string requester_source_domain = 6;
+  bytes request_fingerprint = 7;
+  uint64 deadline_unix_nanos = 8;
+  string requester_materialization_attempt_id = 9;
+}
+
+message ProgressiveSourceAssignment {
+  string assignment_id = 1;
+  string coverage_id = 2;
+  string replica_id = 3;
+  string source_daemon_id = 4;
+  string source_worker_id = 5;
+  string source_domain = 6;
+  string seed_transport_kind = 7;
+  string requester_daemon_id = 8;
+  string requester_worker_id = 9;
+  uint64 start_unit = 10;
+  uint64 end_unit_exclusive = 11;
+  uint64 start_byte = 12;
+  uint64 end_byte_exclusive = 13;
+  uint64 source_export_generation = 14;
+  uint64 deadline_unix_nanos = 15;
+  ProgressiveAssignmentState state = 16;
+  tensorcast.common.v1.MemoryInfo source_memory_info = 17;
+}
+
+message FindProgressiveSourceResponse {
+  Status status = 1;
+  ProgressiveSourceAssignment assignment = 2;
+  bool replayed = 3;
+  string no_eligible_reason = 4;
+}
+
+message CompleteProgressiveAssignmentRequest {
+  string assignment_id = 1;
+  ProgressiveAssignmentState outcome = 2;
+  string outcome_detail = 3;
+}
+
+message CompleteProgressiveAssignmentResponse {
+  Status status = 1;
+  bool released_counter = 2;
+}
+
+message RetireProgressiveCoverageRequest {
+  string coverage_id = 1;
+  string replica_id = 2;
+  string daemon_id = 3;
+  uint64 source_export_generation = 4;
+  ProgressiveCoverageState state = 5;
+  string reason = 6;
+}
+
+message RetireProgressiveCoverageResponse {
+  Status status = 1;
+  uint32 retired_coverage_rows = 2;
+  uint32 retired_assignments = 3;
+}
+
+message ExpireProgressiveStateRequest {
+  uint32 coverage_batch_limit = 1;
+  uint32 assignment_batch_limit = 2;
+}
+
+message ExpireProgressiveStateResponse {
+  Status status = 1;
+  uint32 expired_coverage_rows = 2;
+  uint32 expired_assignments = 3;
+}
+
 // ========== Health Check ==========
 
 // Simple ping request to verify connectivity.
@@ -1371,4 +1537,222 @@ message RevokeKeyMappingRequest {
 }
 message RevokeKeyMappingResponse {
   Status status = 1;
+}
+
+// ========== Group Version-Set Realization Messages ==========
+
+enum GroupRealizationKind {
+  GROUP_REALIZATION_KIND_UNSPECIFIED = 0;
+  GROUP_REALIZATION_KIND_SAME_SELECTION = 1;
+  GROUP_REALIZATION_KIND_PER_PART_SELECTION = 2;
+}
+
+enum GroupRealizationState {
+  GROUP_REALIZATION_STATE_UNSPECIFIED = 0;
+  GROUP_REALIZATION_STATE_OPEN = 1;
+  GROUP_REALIZATION_STATE_RESOLVED = 2;
+  GROUP_REALIZATION_STATE_PREPARING = 3;
+  GROUP_REALIZATION_STATE_READY_TO_PUBLISH = 4;
+  GROUP_REALIZATION_STATE_PUBLISHED = 5;
+  GROUP_REALIZATION_STATE_ABORTED = 6;
+  GROUP_REALIZATION_STATE_EXPIRED = 7;
+}
+
+enum GroupRealizationMemberState {
+  GROUP_REALIZATION_MEMBER_STATE_UNSPECIFIED = 0;
+  GROUP_REALIZATION_MEMBER_STATE_JOINED = 1;
+  GROUP_REALIZATION_MEMBER_STATE_PREPARING = 2;
+  GROUP_REALIZATION_MEMBER_STATE_PREPARED = 3;
+  GROUP_REALIZATION_MEMBER_STATE_PUBLISHED = 4;
+  GROUP_REALIZATION_MEMBER_STATE_FAILED = 5;
+  GROUP_REALIZATION_MEMBER_STATE_CANCELLED = 6;
+  GROUP_REALIZATION_MEMBER_STATE_EXPIRED = 7;
+}
+
+message GroupVersionSetRef {
+  string version_set_id = 1;
+  bytes manifest_hash = 2;
+  uint64 manifest_generation = 3;
+}
+
+message GroupVersionSetPart {
+  string part_id = 1;
+  tensorcast.common.v1.ArtifactSelection selection = 2;
+  tensorcast.common.v1.ByteSpaceRef requested_byte_space = 3;
+  bytes selection_hash = 4;
+  bytes logical_layout_hash = 5;
+  string part_metadata_json = 6;
+}
+
+message KeyVersionReference {
+  string key = 1;
+  string namespace = 2;
+  string alias = 3;
+  optional uint64 expected_generation = 4;
+}
+
+message VersionReference {
+  oneof value {
+    tensorcast.common.v1.ArtifactSelection explicit_selection = 1;
+    GroupVersionSetRef explicit_version_set = 2;
+    KeyVersionReference key_reference = 3;
+  }
+}
+
+message GroupRealizationContext {
+  string group_kind = 1;
+  string group_id = 2;
+  uint64 epoch = 3;
+  uint32 total_parts = 4;
+  string part_id = 5;
+  repeated string required_part_ids = 6;
+}
+
+message RegisterGroupVersionSetRequest {
+  GroupRealizationKind realization_kind = 1;
+  repeated GroupVersionSetPart parts = 2;
+  string namespace = 3;
+  string key = 4;
+  optional uint64 key_generation = 5;
+}
+
+message RegisterGroupVersionSetResponse {
+  Status status = 1;
+  GroupVersionSetRef version_set = 2;
+  GroupRealizationKind realization_kind = 3;
+  repeated GroupVersionSetPart parts = 4;
+}
+
+message BeginOrJoinGroupRealizationRequest {
+  VersionReference version = 1;
+  GroupRealizationContext context = 2;
+  bytes transaction_fingerprint = 3;
+  uint64 deadline_unix_nanos = 4;
+  string daemon_id = 5;
+  string daemon_session_id = 6;
+  string worker_id = 7;
+}
+
+message BeginOrJoinGroupRealizationResponse {
+  Status status = 1;
+  string transaction_id = 2;
+  GroupVersionSetRef version_set = 3;
+  GroupRealizationKind realization_kind = 4;
+  GroupVersionSetPart part = 5;
+  GroupRealizationState state = 6;
+  bytes transaction_fingerprint = 7;
+  uint64 key_generation = 8;
+}
+
+message StagedBindingValueRef {
+  string daemon_id = 1;
+  string daemon_session_id = 2;
+  string binding_id = 3;
+  string binding_value_id = 4;
+  string staging_token = 5;
+  uint64 staging_epoch = 6;
+}
+
+message ReportGroupRealizationPreparedRequest {
+  string transaction_id = 1;
+  string part_id = 2;
+  StagedBindingValueRef staged_value = 3;
+  uint64 expected_previous_seal_generation = 4;
+  bytes prepared_value_hash = 5;
+  string daemon_id = 6;
+  string daemon_session_id = 7;
+  string worker_id = 8;
+  string materialization_attempt_id = 9;
+  bytes member_fingerprint = 10;
+  string source_replica_id = 11;
+  uint64 source_export_generation = 12;
+  string child_transport_request_id = 13;
+}
+
+message ReportGroupRealizationPreparedResponse {
+  Status status = 1;
+  GroupRealizationState state = 2;
+  GroupRealizationMemberState member_state = 3;
+  bytes member_fingerprint = 4;
+}
+
+message GroupPublishAuthority {
+  oneof value {
+    string operation_lease_id = 1;
+    bytes capability_token = 2;
+  }
+}
+
+message PublishGroupRealizationRequest {
+  string transaction_id = 1;
+  bool require_ready_to_publish = 2;
+  GroupPublishAuthority authority = 3;
+}
+
+message PublishGroupRealizationResponse {
+  Status status = 1;
+  GroupRealizationState state = 2;
+}
+
+message WaitGroupRealizationPublishedRequest {
+  string transaction_id = 1;
+  uint64 deadline_unix_nanos = 2;
+}
+
+message WaitGroupRealizationPublishedResponse {
+  Status status = 1;
+  GroupRealizationState state = 2;
+}
+
+message AbortGroupRealizationRequest {
+  string transaction_id = 1;
+  string failure_code = 2;
+  string failure_detail = 3;
+}
+
+message AbortGroupRealizationResponse {
+  Status status = 1;
+  GroupRealizationState state = 2;
+}
+
+message GroupRealizationMemberDiagnostic {
+  string part_id = 1;
+  GroupRealizationMemberState state = 2;
+  string daemon_id = 3;
+  string daemon_session_id = 4;
+  string worker_id = 5;
+  string materialization_attempt_id = 6;
+  StagedBindingValueRef staged_value = 7;
+  string source_replica_id = 8;
+  uint64 source_export_generation = 9;
+  string child_transport_request_id = 10;
+  string failure_code = 11;
+  string failure_detail = 12;
+  bytes member_fingerprint = 13;
+}
+
+message GetGroupRealizationRequest {
+  string transaction_id = 1;
+}
+
+message GetGroupRealizationResponse {
+  Status status = 1;
+  string transaction_id = 2;
+  GroupVersionSetRef version_set = 3;
+  GroupRealizationKind realization_kind = 4;
+  GroupRealizationState state = 5;
+  repeated string required_part_ids = 6;
+  repeated string missing_part_ids = 7;
+  repeated GroupRealizationMemberDiagnostic members = 8;
+  string group_kind = 9;
+  string group_id = 10;
+  uint64 epoch = 11;
+  uint32 total_parts = 12;
+  uint32 prepared_count = 13;
+  uint32 failed_count = 14;
+  uint32 published_count = 15;
+  string failure_code = 16;
+  string failure_detail = 17;
+  uint64 deadline_unix_nanos = 18;
+  string publish_authority_mode = 19;
 }

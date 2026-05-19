@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -18,6 +19,8 @@
 #include "daemon/service/controllers/target_publish_service.h"
 #include "daemon/service/rpc_context.h"
 #include "daemon/state/artifact_source_registry.h"
+#include "daemon/state/binding_registry.h"
+#include "daemon/state/daemon_options.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lifecycle_kernel.h"
@@ -36,6 +39,7 @@ class TargetMaterializationService {
   struct Dep {
     store::StoreEngine& engine;
     LipManager& lip_manager;
+    BindingRegistry& bindings;
     DeviceResolver& devices;
     IpcRegionRegistry& regions;
     ArtifactSourceRegistry& disk_imports;
@@ -49,6 +53,9 @@ class TargetMaterializationService {
     common::CapabilityTokenManager* capability_tokens{nullptr};
     uint32_t max_concurrency{4};
     bool external_target_verification_enabled{false};
+    DaemonOptions::ProgressiveReplication progressive_replication{};
+    std::string daemon_id;
+    std::string daemon_session_id;
     std::filesystem::path storage_path;
     std::function<absl::Status()> await_state_sync_barrier;
   };
@@ -93,6 +100,11 @@ class TargetMaterializationService {
 
   [[nodiscard]] absl::StatusOr<TargetPublicationRegistry::Record> remember_target_publication(
       TargetPublicationRegistry::Record record);
+
+  [[nodiscard]] absl::Status terminalize_target_publication(
+      std::string_view publication_id,
+      std::string_view reason,
+      bool release_published_lifecycle_lease);
 
   [[nodiscard]] absl::StatusOr<TargetPublicationRegistry::Record> insert_target_publication_for_testing(
       TargetPublicationRegistry::Record record);

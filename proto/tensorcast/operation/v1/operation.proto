@@ -271,6 +271,11 @@ message PrefetchServingBindingResult {
   string verification_state = 10;
   optional string serving_artifact_id = 11;
   optional uint64 expires_at_ms = 12;
+  bool staged_value = 13;
+  optional string group_realization_transaction_id = 14;
+  optional string group_realization_version_set_id = 15;
+  optional string group_realization_part_id = 16;
+  optional string group_realization_staging_token = 17;
 }
 
 message PrefetchServingBindingMemberFailure {

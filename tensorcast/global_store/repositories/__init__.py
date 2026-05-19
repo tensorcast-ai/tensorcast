@@ -11,6 +11,8 @@ from .assembly_readiness_cut_repository import AssemblyReadinessCutRepository
 from .assembly_slot_occupancy_repository import AssemblySlotOccupancyRepository
 from .chunk_directory_repository import ChunkDirectoryRepository
 from .cluster_info_repository import ClusterInfoRepository
+from .group_realization_repository import GroupRealizationRepository
+from .group_version_set_repository import GroupVersionSetRepository
 from .idempotency_repository import IdempotencyRepository
 from .instance_repository import InstanceRepository
 from .layout_spec_repository import LayoutSpecRepository
@@ -23,6 +25,7 @@ from .placement_repository import (
     ArtifactPersistenceStatusRepository,
     ArtifactPlacementRepository,
 )
+from .progressive_repository import ProgressiveCoverageRepository
 from .proof_repository import ProofRepository
 from .replica_repository import ReplicaRepository
 from .shard_home_lease_repository import ShardHomeLeaseRepository
@@ -45,11 +48,14 @@ __all__ = [
     "MemoryTierLeaseRepository",
     "ChunkDirectoryRepository",
     "ClusterInfoRepository",
+    "GroupRealizationRepository",
+    "GroupVersionSetRepository",
     "LeafRepository",
     "LayoutSpecRepository",
     "OperationRepository",
     "PendingTransportRequestRepository",
     "ProofRepository",
+    "ProgressiveCoverageRepository",
     "ReplicaRepository",
     "ShardHomeLeaseRepository",
     "TransportRepository",

@@ -1,0 +1,34 @@
+meta:
+  schema_version: "v1"
+  description: "TensorCast local development daemon profile"
+  cluster_token: ""
+
+server:
+  listen:
+    host: 127.0.0.1
+    port: 0
+  p2p_listen:
+    host: 127.0.0.1
+    port: 0
+  storage_path: ""
+  num_threads: 4
+
+engine:
+  artifact_chunk_bytes: 64MB
+  streaming_buffer_chunks: 2
+  memory_tiers:
+    enable_preemptible: false
+    stable_bytes: 1GB
+    preemptible_limit_bytes: 0
+
+pinned_memory:
+  allocation_timeout: 30s
+  classes: []
+
+high_availability:
+  enabled: false
+
+observability:
+  logging:
+    level: INFO
+    file: ""

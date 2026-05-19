@@ -28,6 +28,7 @@ def _isolate_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("TENSORCAST_HOME", str(tmp_path))
     monkeypatch.setattr(startup, "_current_ctx", None)
     monkeypatch.setattr(startup, "discover_daemon_config", lambda: None)
+    monkeypatch.setattr(startup, "wait_for_daemon", lambda *_args, **_kwargs: True)
 
 
 def test_port_config_validation_rejects_invalid_port() -> None:

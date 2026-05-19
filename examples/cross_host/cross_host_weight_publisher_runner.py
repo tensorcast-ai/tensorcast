@@ -41,7 +41,7 @@ BYTE_UNITS: dict[str, int] = {
     "gb": 1024**3,
     "tb": 1024**4,
 }
-TRANSPORT_GROUP_KIND_TP_VERSION = "tp_version"
+TRANSPORT_GROUP_KIND_GROUP_REALIZATION = "group_realization_transport"
 TRANSPORT_GROUP_DEFAULT_PRIORITY = 0
 REMOTE_USER_RE = re.compile(r"^[a-z_][a-z0-9_.-]{0,63}$")
 _REMOTE_RUN_AS_USER = ""
@@ -58,10 +58,20 @@ class RoleSpec:
 
 @dataclass(frozen=True)
 class TransportGroupPlan:
-    mode: str
     kind: str
     total_parts: int
     priority: int
+
+
+@dataclass(frozen=True)
+class FailureInjectionPlan:
+    enabled: bool
+    mode: str
+    target: str
+    process_id: str
+    role: str
+    daemon_session: str
+    delay_s: float
 
 
 def estimate_remote_timeout_floor_sec(args: argparse.Namespace) -> float:
@@ -89,9 +99,6 @@ def estimate_remote_timeout_floor_sec(args: argparse.Namespace) -> float:
 
 
 def estimate_receiver_timeout_floor_sec(args: argparse.Namespace) -> float:
-    apply_mode = str(args.receiver_apply_mode).strip().lower()
-    if apply_mode not in {"tp_bind_into_swap", "tp4_bind_into_swap"}:
-        return max(30.0, float(args.receiver_timeout_s))
     tp_world_size = max(1, int(args.tp_world_size))
     total_payload_gib = float(max(0, int(args.tp_total_bytes))) / float(1024**3)
     per_rank_payload_gib = (
@@ -118,9 +125,6 @@ def estimate_keep_last_floor(args: argparse.Namespace) -> int:
     if str(args.payload_mode).strip().lower() != "tp_ranked":
         return keep_last
     if int(args.tp_total_bytes) <= 0:
-        return keep_last
-    apply_mode = str(args.receiver_apply_mode).strip().lower()
-    if apply_mode not in {"tp_bind_into_swap", "tp4_bind_into_swap"}:
         return keep_last
     if bool(args.allow_receiver_skips):
         return keep_last
@@ -150,10 +154,7 @@ def estimate_keep_last_stable_cap(args: argparse.Namespace) -> int | None:
 
 
 def estimate_publish_to_apply_floor_sec(args: argparse.Namespace) -> float:
-    apply_mode = str(args.receiver_apply_mode).strip().lower()
     configured = float(args.max_publish_to_apply_s)
-    if apply_mode not in {"tp_bind_into_swap", "tp4_bind_into_swap"}:
-        return max(20.0, configured)
     if str(args.payload_mode).strip().lower() != "tp_ranked":
         return max(20.0, configured)
     if int(args.tp_total_bytes) <= 0:
@@ -169,9 +170,7 @@ def estimate_publish_to_apply_floor_sec(args: argparse.Namespace) -> float:
         1.5, per_rank_apply_budget_s * 0.25
     )
     visibility_budget_s = max(8.0, float(args.publish_interval_s) * 2.0)
-    guard_s = (
-        10.0 if str(args.transport_group_mode).strip().lower() == "tp_version" else 6.0
-    )
+    guard_s = 10.0
     floor = visibility_budget_s + tp_wave_budget_s + queue_budget_s + guard_s
     return float(max(20.0, math.ceil(floor)))
 
@@ -489,29 +488,16 @@ def _wrap_remote_inner_cmd_for_user(
 
 def derive_transport_group_plan(
     *,
-    mode: str,
     receiver_count: int,
     tp_world_size: int,
 ) -> TransportGroupPlan:
-    normalized_mode = str(mode).strip().lower()
-    if normalized_mode not in {"none", "tp_version"}:
-        raise ValueError(f"unsupported transport-group-mode={normalized_mode!r}")
-    if normalized_mode == "none":
-        return TransportGroupPlan(
-            mode="none",
-            kind="",
-            total_parts=0,
-            priority=TRANSPORT_GROUP_DEFAULT_PRIORITY,
-        )
-
     total_parts = int(receiver_count) * int(tp_world_size)
     if total_parts <= 0:
         raise ValueError(
-            "transport-group-mode=tp_version requires receiver_count * tp_world_size > 0"
+            "group_realization requires receiver_count * tp_world_size > 0"
         )
     return TransportGroupPlan(
-        mode="tp_version",
-        kind=TRANSPORT_GROUP_KIND_TP_VERSION,
+        kind=TRANSPORT_GROUP_KIND_GROUP_REALIZATION,
         total_parts=total_parts,
         priority=TRANSPORT_GROUP_DEFAULT_PRIORITY,
     )
@@ -1212,6 +1198,10 @@ def start_remote_daemon(
     heartbeat_interval: str,
     periodic_sync_interval: str,
     max_concurrency: int,
+    progressive_enabled: bool,
+    progressive_report_interval: str,
+    progressive_min_report_delta_bytes: int,
+    progressive_verify_before_report: bool,
     cuda_backend: str,
     capability_token_secret: str,
     timeout_sec: float,
@@ -1244,6 +1234,24 @@ def start_remote_daemon(
     ]
     if cluster_id:
         start_args.append(f"--set meta.cluster_token={shlex.quote(cluster_id)}")
+    if progressive_enabled:
+        start_args.extend(
+            [
+                "--set engine.progressive_replication.enabled=true",
+                (
+                    "--set engine.progressive_replication.report_interval="
+                    f"{shlex.quote(str(progressive_report_interval).strip())}"
+                ),
+                (
+                    "--set engine.progressive_replication.min_report_delta_bytes="
+                    f"{int(progressive_min_report_delta_bytes)}"
+                ),
+                (
+                    "--set engine.progressive_replication.verify_before_report="
+                    f"{str(bool(progressive_verify_before_report)).lower()}"
+                ),
+            ]
+        )
     start_args.append("--json")
     start_expr = " ".join(start_args)
     start_cmd = [
@@ -1390,6 +1398,101 @@ def stop_remote_daemon(
     )
 
 
+def resolve_failure_injection_plan(
+    *,
+    mode: str,
+    target: str,
+    receiver_procs: list[str],
+    daemon_sessions: dict[str, str],
+    delay_s: float,
+) -> FailureInjectionPlan:
+    normalized_mode = str(mode).strip().lower()
+    normalized_target = str(target).strip().lower()
+    if normalized_mode in {"", "none"}:
+        return FailureInjectionPlan(
+            enabled=False,
+            mode="none",
+            target="",
+            process_id="",
+            role="",
+            daemon_session="",
+            delay_s=0.0,
+        )
+    if normalized_mode != "stop-daemon":
+        raise ValueError("failure-injection-mode must be none or stop-daemon")
+    if float(delay_s) < 0.0:
+        raise ValueError("failure-injection-delay-s must be >= 0")
+    if not normalized_target.startswith("receiver:"):
+        raise ValueError("failure-injection-target must be receiver:<zero-based-index>")
+    index_text = normalized_target.removeprefix("receiver:")
+    if not index_text.isdigit():
+        raise ValueError("failure-injection-target receiver index must be an integer")
+    receiver_index = int(index_text)
+    if receiver_index < 0 or receiver_index >= len(receiver_procs):
+        raise ValueError(
+            "failure-injection-target receiver index out of range: "
+            f"index={receiver_index}, receivers={len(receiver_procs)}"
+        )
+    process_id = receiver_procs[receiver_index]
+    daemon_session = str(daemon_sessions.get(process_id, "")).strip()
+    if not daemon_session:
+        raise ValueError(
+            f"failure-injection target has no daemon session: process={process_id}"
+        )
+    return FailureInjectionPlan(
+        enabled=True,
+        mode=normalized_mode,
+        target=normalized_target,
+        process_id=process_id,
+        role="receiver",
+        daemon_session=daemon_session,
+        delay_s=float(delay_s),
+    )
+
+
+def failure_injection_plan_payload(plan: FailureInjectionPlan) -> dict[str, Any]:
+    return {
+        "enabled": bool(plan.enabled),
+        "mode": str(plan.mode),
+        "target": str(plan.target),
+        "role": str(plan.role),
+        "process_id": str(plan.process_id),
+        "daemon_session": str(plan.daemon_session),
+        "delay_s": float(plan.delay_s),
+    }
+
+
+def run_failure_injection(
+    plan: FailureInjectionPlan,
+    *,
+    repo_root: str,
+    timeout_sec: float,
+) -> dict[str, Any]:
+    result = failure_injection_plan_payload(plan)
+    if not bool(plan.enabled):
+        result["status"] = "disabled"
+        return result
+    result["status"] = "scheduled"
+    result["scheduled_at_utc"] = _to_utc_sql_timestamp(datetime.now(timezone.utc))
+    if float(plan.delay_s) > 0.0:
+        time.sleep(float(plan.delay_s))
+    try:
+        stop_remote_daemon(
+            process_id=plan.process_id,
+            repo_root=repo_root,
+            daemon_session=plan.daemon_session,
+            timeout_sec=timeout_sec,
+        )
+    except Exception as exc:  # noqa: BLE001
+        result["status"] = "failed"
+        result["error"] = str(exc)
+        result["failed_at_utc"] = _to_utc_sql_timestamp(datetime.now(timezone.utc))
+        return result
+    result["status"] = "injected"
+    result["injected_at_utc"] = _to_utc_sql_timestamp(datetime.now(timezone.utc))
+    return result
+
+
 def preclean_remote_role_processes(
     *,
     process_id: str,
@@ -1473,13 +1576,11 @@ def build_e2e_command(
     output_json: str,
     weights_root: str,
     run_id: str,
-    receiver_apply_mode: str,
     materialize_device: str,
     allow_version_skip: bool,
     hold_after_finish_s: float,
     log_file: str,
     ready_file: str | None,
-    transport_group_mode: str,
     transport_group_kind: str,
     transport_group_namespace: str,
     transport_group_total_parts: int,
@@ -1517,8 +1618,6 @@ def build_e2e_command(
         str(tp_device_map_policy),
         "--tp-materialize-deadline-s",
         str(tp_materialize_deadline_s),
-        "--transport-group-mode",
-        transport_group_mode,
         "--transport-group-kind",
         transport_group_kind,
         "--transport-group-namespace",
@@ -1533,8 +1632,6 @@ def build_e2e_command(
         str(transport_group_epoch),
         "--publish-device",
         publish_device,
-        "--receiver-apply-mode",
-        receiver_apply_mode,
         "--materialize-device",
         materialize_device,
         "--output-json",
@@ -1783,15 +1880,13 @@ def query_transport_rows(
 def query_transport_group_probe(
     *,
     gs_addr: str,
-    group_mode: str,
     group_kind: str,
     started_at_utc: datetime,
     finished_at_utc: datetime,
 ) -> dict[str, Any]:
     probe: dict[str, Any] = {
         "enabled": True,
-        "mode": str(group_mode),
-        "expected_grouped": str(group_mode) == "tp_version",
+        "expected_grouped": True,
         "group_kind": str(group_kind),
         "audit_method": "gs_rpc",
         "gs_addr": str(gs_addr),
@@ -1805,7 +1900,7 @@ def query_transport_group_probe(
         "group_contract_transports": 0,
         "window_has_transports": False,
         "requester_tagged_complete": False,
-        "group_mode_consistent": False,
+        "grouping_present": False,
         "group_contract_consistent": False,
     }
     transport_rows_payload = query_transport_rows(
@@ -1856,16 +1951,12 @@ def query_transport_group_probe(
     probe["requester_tagged_complete"] = (
         total_transports > 0 and requester_tagged == total_transports
     )
-    if str(group_mode) == "tp_version":
-        probe["group_mode_consistent"] = grouped_transports > 0
-        probe["group_contract_consistent"] = (
-            grouped_transports > 0
-            and grouped_transports == kind_matched_transports
-            and grouped_transports == group_contract_transports
-        )
-    else:
-        probe["group_mode_consistent"] = grouped_transports == 0
-        probe["group_contract_consistent"] = grouped_transports == 0
+    probe["grouping_present"] = grouped_transports > 0
+    probe["group_contract_consistent"] = (
+        grouped_transports > 0
+        and grouped_transports == kind_matched_transports
+        and grouped_transports == group_contract_transports
+    )
     return probe
 
 
@@ -1890,7 +1981,6 @@ def _coerce_int(value: Any) -> int:
 def evaluate_group_probe_gate_failures(
     *,
     probe: dict[str, Any],
-    mode: str,
 ) -> list[str]:
     reasons: list[str] = []
     if bool(probe.get("error")):
@@ -1899,11 +1989,10 @@ def evaluate_group_probe_gate_failures(
         reasons.append("window_has_transports=false")
     if not bool(probe.get("requester_tagged_complete")):
         reasons.append("requester_tagged_complete=false")
-    if str(mode) == "tp_version":
-        if not bool(probe.get("group_mode_consistent")):
-            reasons.append("group_mode_consistent=false")
-        if not bool(probe.get("group_contract_consistent")):
-            reasons.append("group_contract_consistent=false")
+    if not bool(probe.get("grouping_present")):
+        reasons.append("grouping_present=false")
+    if not bool(probe.get("group_contract_consistent")):
+        reasons.append("group_contract_consistent=false")
     return reasons
 
 
@@ -1969,7 +2058,6 @@ def evaluate_waiting_lease(
 def run_transport_group_p0_guard(
     *,
     enabled: bool,
-    mode: str,
     group_kind: str,
     gs_addr: str,
     started_at_utc: datetime,
@@ -1979,8 +2067,7 @@ def run_transport_group_p0_guard(
     no_progress_limit_s = float(max(0.0, grace_s))
     effective_poll_interval_s = float(max(0.5, poll_interval_s))
     result: dict[str, Any] = {
-        "enabled": bool(enabled) and str(mode) == "tp_version",
-        "mode": str(mode),
+        "enabled": bool(enabled),
         "group_kind": str(group_kind),
         "grace_s": float(max(0.0, grace_s)),
         "no_progress_limit_s": no_progress_limit_s,
@@ -2010,14 +2097,12 @@ def run_transport_group_p0_guard(
         now_utc = datetime.now(timezone.utc)
         probe = query_transport_group_probe(
             gs_addr=str(gs_addr),
-            group_mode=str(mode),
             group_kind=str(group_kind),
             started_at_utc=started_at_utc,
             finished_at_utc=now_utc,
         )
         reasons = evaluate_group_probe_gate_failures(
             probe=probe,
-            mode=str(mode),
         )
         now_mono = time.monotonic()
         lease_eval = evaluate_waiting_lease(
@@ -2906,13 +2991,35 @@ def build_parser() -> argparse.ArgumentParser:
         default="5s",
         help=("Daemon high_availability.periodic_sync_interval value (e.g. 5s, 60s)."),
     )
+    parser.add_argument(
+        "--enable-progressive-replication",
+        action="store_true",
+        help="Enable daemon progressive coverage reporting for this benchmark case.",
+    )
+    parser.add_argument(
+        "--progressive-report-interval",
+        default="1s",
+        help="Daemon engine.progressive_replication.report_interval override.",
+    )
+    parser.add_argument(
+        "--progressive-min-report-delta-bytes",
+        type=int,
+        default=16 * 1024 * 1024,
+        help="Daemon engine.progressive_replication.min_report_delta_bytes override.",
+    )
+    parser.add_argument(
+        "--progressive-verify-before-report",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether daemon progressive reporting requires known verification state.",
+    )
     parser.add_argument("--receiver-timeout-s", type=float, default=300.0)
     parser.add_argument(
         "--receiver-timeout-auto-adjust",
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Auto-adjust receiver-timeout-s upward for TP bind_into/swap cases "
+            "Auto-adjust receiver-timeout-s upward for TP staged group_realization cases "
             "using a conservative scaleout timeout floor."
         ),
     )
@@ -2921,14 +3028,14 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Auto-adjust keep-last upward for TP bind_into/swap scaleout cases "
+            "Auto-adjust keep-last upward for TP staged group_realization scaleout cases "
             "to avoid dropped-version false failures under queueing."
         ),
     )
     parser.add_argument(
         "--payload-mode",
         choices=["probe", "version_fill", "tp_ranked"],
-        default="probe",
+        default="tp_ranked",
         help=(
             "Payload mode forwarded to weight_publisher_e2e. "
             "Use version_fill for scalar full-value checks, tp_ranked for TP rank-tagged payloads."
@@ -2966,7 +3073,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=600.0,
         help=(
-            "TP bind_into/swap deadline in seconds passed to weight_publisher_e2e. "
+            "TP staged group_realization deadline in seconds passed to weight_publisher_e2e. "
             "Use larger values for large payload fanout."
         ),
     )
@@ -2984,14 +3091,6 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Optional CUDA backend override for daemon/role commands. "
             "Allowed values: real, fake. Empty keeps process default."
-        ),
-    )
-    parser.add_argument(
-        "--transport-group-mode",
-        choices=["none", "tp_version"],
-        default="none",
-        help=(
-            "Receiver transport scheduling-group mode passed to weight_publisher_e2e."
         ),
     )
     parser.add_argument(
@@ -3046,6 +3145,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max throughput samples kept in payload (adaptive interval when exceeded).",
     )
     parser.add_argument(
+        "--failure-injection-mode",
+        choices=["none", "stop-daemon"],
+        default="none",
+        help=(
+            "Optional failure-injection lane. stop-daemon terminates the selected "
+            "receiver daemon after the publisher starts."
+        ),
+    )
+    parser.add_argument(
+        "--failure-injection-target",
+        default="receiver:0",
+        help="Failure injection target. Supported form: receiver:<zero-based-index>.",
+    )
+    parser.add_argument(
+        "--failure-injection-delay-s",
+        type=float,
+        default=0.0,
+        help="Seconds to wait after publisher start before injecting failure.",
+    )
+    parser.add_argument(
         "--max-publish-to-apply-s",
         type=float,
         default=30.0,
@@ -3070,7 +3189,6 @@ def build_parser() -> argparse.ArgumentParser:
             "effective_pre_publish_keep = max(0, keep_last - margin)."
         ),
     )
-    parser.add_argument("--receiver-apply-mode", default="binding_swap")
     parser.add_argument(
         "--allow-receiver-skips",
         action="store_true",
@@ -3139,6 +3257,12 @@ def main(argv: list[str]) -> int:
         raise ValueError("tp-device-base-index must be >= 0")
     if float(args.tp_materialize_deadline_s) < 0.0:
         raise ValueError("tp-materialize-deadline-s must be >= 0")
+    if str(args.payload_mode).strip().lower() != "tp_ranked":
+        raise ValueError("group_realization receiver requires payload-mode=tp_ranked")
+    if float(args.tp_materialize_deadline_s) <= 0.0:
+        raise ValueError(
+            "group_realization receiver requires tp-materialize-deadline-s > 0"
+        )
     publish_device = str(args.publish_device).strip().lower()
     if publish_device == "auto":
         raise ValueError(
@@ -3151,9 +3275,11 @@ def main(argv: list[str]) -> int:
         )
     if int(args.max_concurrency) <= 0:
         raise ValueError("max-concurrency must be > 0")
+    if int(args.progressive_min_report_delta_bytes) < 0:
+        raise ValueError("progressive-min-report-delta-bytes must be >= 0")
+    if float(args.failure_injection_delay_s) < 0.0:
+        raise ValueError("failure-injection-delay-s must be >= 0")
     cuda_backend = normalize_cuda_backend(str(args.cuda_backend))
-    if str(args.transport_group_mode) == "tp_version" and int(args.tp_world_size) <= 0:
-        raise ValueError("transport-group-mode=tp_version requires tp-world-size > 0")
     if int(args.receiver_preflight_transient_overlap) <= 0:
         raise ValueError("receiver-preflight-transient-overlap must be > 0")
     if float(args.progress_poll_s) <= 0:
@@ -3295,7 +3421,6 @@ def main(argv: list[str]) -> int:
     capability_token_secret = secrets.token_hex(32)
     run_id = f"{args.case_name}-{run_tag}"
     transport_group_plan = derive_transport_group_plan(
-        mode=str(args.transport_group_mode),
         receiver_count=len(receiver_procs),
         tp_world_size=int(args.tp_world_size),
     )
@@ -3436,6 +3561,13 @@ def main(argv: list[str]) -> int:
         process_id: f"weight-publisher-{run_tag}-{index + 1}"
         for index, process_id in enumerate(all_processes)
     }
+    failure_injection_plan = resolve_failure_injection_plan(
+        mode=str(args.failure_injection_mode),
+        target=str(args.failure_injection_target),
+        receiver_procs=receiver_procs,
+        daemon_sessions=daemon_sessions,
+        delay_s=float(args.failure_injection_delay_s),
+    )
 
     remote_advertise_hosts: dict[str, str] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(all_processes)) as pool:
@@ -3505,6 +3637,14 @@ def main(argv: list[str]) -> int:
             heartbeat_interval=str(args.daemon_heartbeat_interval),
             periodic_sync_interval=str(args.daemon_periodic_sync_interval),
             max_concurrency=int(args.max_concurrency),
+            progressive_enabled=bool(args.enable_progressive_replication),
+            progressive_report_interval=str(args.progressive_report_interval),
+            progressive_min_report_delta_bytes=int(
+                args.progressive_min_report_delta_bytes
+            ),
+            progressive_verify_before_report=bool(
+                args.progressive_verify_before_report
+            ),
             cuda_backend=cuda_backend,
             capability_token_secret=capability_token_secret,
             timeout_sec=120.0,
@@ -3541,16 +3681,14 @@ def main(argv: list[str]) -> int:
             output_json=publisher_output,
             weights_root=str(args.weights_root),
             run_id=f"{run_id}-publisher",
-            receiver_apply_mode=str(args.receiver_apply_mode),
             materialize_device=str(args.materialize_device),
             allow_version_skip=bool(args.allow_receiver_skips),
             hold_after_finish_s=float(args.publisher_hold_after_finish_s),
             log_file=publisher_log_file,
             ready_file=None,
-            transport_group_mode="none",
-            transport_group_kind=TRANSPORT_GROUP_KIND_TP_VERSION,
+            transport_group_kind=transport_group_plan.kind,
             transport_group_namespace=f"{transport_group_namespace_base}:publisher",
-            transport_group_total_parts=0,
+            transport_group_total_parts=transport_group_plan.total_parts,
             transport_group_receiver_index=0,
             transport_group_priority=TRANSPORT_GROUP_DEFAULT_PRIORITY,
             transport_group_epoch=transport_group_epoch,
@@ -3588,13 +3726,11 @@ def main(argv: list[str]) -> int:
                 output_json=receiver_outputs[proc],
                 weights_root=str(args.weights_root),
                 run_id=f"{run_id}-receiver",
-                receiver_apply_mode=str(args.receiver_apply_mode),
                 materialize_device=str(args.materialize_device),
                 allow_version_skip=bool(args.allow_receiver_skips),
                 hold_after_finish_s=float(args.receiver_hold_after_finish_s),
                 log_file=receiver_log_files[proc],
                 ready_file=(case_dir / f"receiver_{idx + 1}.ready.json").as_posix(),
-                transport_group_mode=transport_group_plan.mode,
                 transport_group_kind=transport_group_plan.kind,
                 transport_group_namespace=(
                     f"{transport_group_namespace_base}:receiver"
@@ -3616,9 +3752,7 @@ def main(argv: list[str]) -> int:
     cluster_artifact_probe: dict[str, dict[str, Any]] = {}
     transport_group_probe: dict[str, Any] = {}
     p0_early_stop: dict[str, Any] = {
-        "enabled": bool(args.p0_early_stop)
-        and transport_group_plan.mode == "tp_version",
-        "mode": transport_group_plan.mode,
+        "enabled": bool(args.p0_early_stop),
         "grace_s": float(args.p0_early_stop_grace_s),
         "triggered": False,
         "reasons": [],
@@ -3629,10 +3763,15 @@ def main(argv: list[str]) -> int:
     }
     transport_rows_payload: dict[str, Any] = {}
     transport_metrics: dict[str, Any] = {}
+    failure_injection_result = failure_injection_plan_payload(failure_injection_plan)
+    failure_injection_result["status"] = (
+        "planned" if failure_injection_plan.enabled else "disabled"
+    )
+    injected_receiver_processes: set[str] = set()
     case_transport_window_start = datetime.now(timezone.utc)
 
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=len(receiver_specs) + 1
+        max_workers=len(receiver_specs) + 2
     ) as pool:
         receiver_futures = {
             spec.process_id: pool.submit(
@@ -3663,6 +3802,16 @@ def main(argv: list[str]) -> int:
             **receiver_futures,
             publisher_spec.process_id: publisher_future,
         }
+        failure_injection_future: concurrent.futures.Future[dict[str, Any]] | None = (
+            None
+        )
+        if failure_injection_plan.enabled:
+            failure_injection_future = pool.submit(
+                run_failure_injection,
+                failure_injection_plan,
+                repo_root=str(args.repo_root),
+                timeout_sec=40.0,
+            )
         progress_stop_event, progress_thread = start_progress_monitor(
             publisher_spec=publisher_spec,
             receiver_specs=receiver_specs,
@@ -3690,8 +3839,8 @@ def main(argv: list[str]) -> int:
 
             p0_result = run_transport_group_p0_guard(
                 enabled=bool(args.p0_early_stop),
-                mode=transport_group_plan.mode,
-                group_kind=transport_group_plan.kind or TRANSPORT_GROUP_KIND_TP_VERSION,
+                group_kind=transport_group_plan.kind
+                or TRANSPORT_GROUP_KIND_GROUP_REALIZATION,
                 gs_addr=str(args.gs_addr),
                 started_at_utc=case_transport_window_start,
                 grace_s=float(args.p0_early_stop_grace_s),
@@ -3728,7 +3877,28 @@ def main(argv: list[str]) -> int:
                     except Exception as exc:  # noqa: BLE001
                         receiver_summaries[spec.process_id] = {"__error__": str(exc)}
             else:
+                if (
+                    failure_injection_future is not None
+                    and failure_injection_plan.role == "receiver"
+                ):
+                    failure_injection_result = failure_injection_future.result(
+                        timeout=max(60.0, float(failure_injection_plan.delay_s) + 60.0)
+                    )
+                    if str(failure_injection_result.get("status")) == "injected":
+                        injected_receiver_processes.add(
+                            failure_injection_plan.process_id
+                        )
+                        failure_injection_result["role_terminate_errors"] = (
+                            terminate_remote_e2e_roles(
+                                process_ids=[failure_injection_plan.process_id],
+                                model_name=model_name,
+                                timeout_sec=15.0,
+                            )
+                        )
+
                 for spec in receiver_specs:
+                    if spec.process_id in injected_receiver_processes:
+                        continue
                     wait_for_remote_file_or_fail_fast(
                         spec.process_id,
                         spec.output_json,
@@ -3742,7 +3912,9 @@ def main(argv: list[str]) -> int:
 
                 if published_artifact_ids:
                     probe_processes = [publisher_spec.process_id] + [
-                        spec.process_id for spec in receiver_specs
+                        spec.process_id
+                        for spec in receiver_specs
+                        if spec.process_id not in injected_receiver_processes
                     ]
                     for process_id in probe_processes:
                         try:
@@ -3761,6 +3933,16 @@ def main(argv: list[str]) -> int:
                             cluster_artifact_probe[process_id] = {"__error__": str(exc)}
 
                 for spec in receiver_specs:
+                    if spec.process_id in injected_receiver_processes:
+                        try:
+                            receiver_logs[spec.process_id] = receiver_futures[
+                                spec.process_id
+                            ].result(timeout=5.0)
+                        except Exception as exc:  # noqa: BLE001
+                            receiver_logs[spec.process_id] = (
+                                f"receiver interrupted by failure injection: {exc}"
+                            )
+                        continue
                     receiver_logs[spec.process_id] = receiver_futures[
                         spec.process_id
                     ].result()
@@ -3785,6 +3967,19 @@ def main(argv: list[str]) -> int:
         finally:
             progress_stop_event.set()
             progress_thread.join(timeout=5.0)
+            if failure_injection_future is not None and str(
+                failure_injection_result.get("status", "")
+            ) in {"planned", "scheduled"}:
+                try:
+                    failure_injection_result = failure_injection_future.result(
+                        timeout=max(10.0, float(failure_injection_plan.delay_s) + 10.0)
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    failure_injection_result = failure_injection_plan_payload(
+                        failure_injection_plan
+                    )
+                    failure_injection_result["status"] = "failed"
+                    failure_injection_result["error"] = str(exc)
     case_transport_window_end = datetime.now(timezone.utc)
 
     published = publisher_summary.get("published", [])
@@ -3844,8 +4039,7 @@ def main(argv: list[str]) -> int:
             }
     transport_group_probe = query_transport_group_probe(
         gs_addr=str(args.gs_addr),
-        group_mode=transport_group_plan.mode,
-        group_kind=transport_group_plan.kind or TRANSPORT_GROUP_KIND_TP_VERSION,
+        group_kind=transport_group_plan.kind or TRANSPORT_GROUP_KIND_GROUP_REALIZATION,
         started_at_utc=case_transport_window_start,
         finished_at_utc=case_transport_window_end,
     )
@@ -3885,7 +4079,7 @@ def main(argv: list[str]) -> int:
     receiver_skip_events_by_process = collect_receiver_skip_events_by_process(
         receiver_logs
     )
-    receiver_mode_failures: list[dict[str, Any]] = []
+    receiver_apply_failures: list[dict[str, Any]] = []
     propagation_violations: list[dict[str, Any]] = []
     publish_to_apply_limit_s = float(args.max_publish_to_apply_s)
 
@@ -3897,7 +4091,7 @@ def main(argv: list[str]) -> int:
     missing_receiver_summaries = [
         {"process_id": proc, "reason": "receiver summary missing"}
         for proc in receiver_procs
-        if proc not in receiver_summaries
+        if proc not in receiver_summaries and proc not in injected_receiver_processes
     ]
     receiver_sequence_failures.extend(missing_receiver_summaries)
 
@@ -3962,44 +4156,24 @@ def main(argv: list[str]) -> int:
             if not isinstance(row, dict):
                 continue
             apply_latencies.append(float(row.get("materialize_latency_s", 0.0)))
-            mode = str(row.get("apply_mode", ""))
             op = str(row.get("apply_operation", ""))
-            if mode != str(args.receiver_apply_mode):
-                receiver_mode_failures.append(
+            if op != "stage_acquire":
+                receiver_apply_failures.append(
                     {
                         "process_id": proc,
                         "version": int(row.get("version", 0)),
-                        "expected_mode": str(args.receiver_apply_mode),
-                        "actual_mode": mode,
+                        "expected_operation": "stage_acquire",
+                        "actual_operation": op,
                     }
                 )
-            receiver_mode = str(args.receiver_apply_mode)
-            if receiver_mode in {
-                "binding_swap",
-                "tp_bind_into_swap",
-                "tp4_bind_into_swap",
-            }:
-                if receiver_mode == "binding_swap":
-                    expected_op = "bind" if idx == 0 else "swap"
-                else:
-                    expected_op = "bind_into" if idx == 0 else "swap"
-                if op != expected_op:
-                    receiver_mode_failures.append(
-                        {
-                            "process_id": proc,
-                            "version": int(row.get("version", 0)),
-                            "expected_operation": expected_op,
-                            "actual_operation": op,
-                        }
-                    )
-                if idx > 0 and not bool(row.get("pointer_stable", False)):
-                    pointer_stability_violations.append(
-                        {
-                            "process_id": proc,
-                            "version": int(row.get("version", 0)),
-                            "pointer_stable": row.get("pointer_stable"),
-                        }
-                    )
+            if idx > 0 and not bool(row.get("pointer_stable", False)):
+                pointer_stability_violations.append(
+                    {
+                        "process_id": proc,
+                        "version": int(row.get("version", 0)),
+                        "pointer_stable": row.get("pointer_stable"),
+                    }
+                )
             version = int(row.get("version", 0))
             published_at_s = publish_ts_by_version.get(version)
             received_at_s = float(row.get("received_at_s", 0.0))
@@ -4174,7 +4348,7 @@ def main(argv: list[str]) -> int:
             "receiver_skips_present": bool(receiver_skips),
             "allow_receiver_skips": bool(args.allow_receiver_skips),
             "binding_pointer_stable": not pointer_stability_violations,
-            "receiver_mode_consistent": not receiver_mode_failures,
+            "receiver_apply_operation_consistent": not receiver_apply_failures,
             "publish_to_apply_within_limit": not propagation_violations,
             "publish_to_apply_limit_s": publish_to_apply_limit_s,
             "mechanism_keep_last_window_validated": bool(published_by_version),
@@ -4185,10 +4359,17 @@ def main(argv: list[str]) -> int:
             "transport_timeout_observed": bool(
                 timeout_analysis.get("transport_timeout_observed")
             ),
+            "failure_injection_expected_receivers": sorted(injected_receiver_processes),
         },
         "retention_checks": {
             "global_store_probe": gs_checks,
             "cluster_probe": probe_checks,
+        },
+        "progressive": {
+            "enabled": bool(args.enable_progressive_replication),
+            "report_interval": str(args.progressive_report_interval),
+            "min_report_delta_bytes": int(args.progressive_min_report_delta_bytes),
+            "verify_before_report": bool(args.progressive_verify_before_report),
         },
         "timeout_analysis": timeout_analysis,
         "transport_checks": {
@@ -4201,15 +4382,16 @@ def main(argv: list[str]) -> int:
             "receiver_sequence_failures": receiver_sequence_failures,
             "receiver_skips": receiver_skips,
             "receiver_skip_events": receiver_skip_events_by_process,
-            "receiver_mode_failures": receiver_mode_failures,
+            "receiver_apply_failures": receiver_apply_failures,
             "pointer_stability_violations": pointer_stability_violations,
             "propagation_violations": propagation_violations,
+            "failure_injection": failure_injection_result,
         },
     }
     passed = (
         summary["stability"]["all_receivers_completed"]
         and summary["stability"]["binding_pointer_stable"]
-        and summary["stability"]["receiver_mode_consistent"]
+        and summary["stability"]["receiver_apply_operation_consistent"]
         and summary["stability"]["publish_to_apply_within_limit"]
         and not summary["stability"]["p0_early_stop_triggered"]
     )
@@ -4232,11 +4414,16 @@ def main(argv: list[str]) -> int:
         passed = passed and not bool(transport_group_probe.get("error"))
         passed = passed and bool(transport_group_probe.get("window_has_transports"))
         passed = passed and bool(transport_group_probe.get("requester_tagged_complete"))
-        passed = passed and bool(transport_group_probe.get("group_mode_consistent"))
+        passed = passed and bool(transport_group_probe.get("grouping_present"))
         passed = passed and bool(transport_group_probe.get("group_contract_consistent"))
     if bool(transport_metrics.get("enabled")):
         passed = passed and not bool(transport_metrics.get("error"))
         passed = passed and int(transport_metrics.get("transport_count", 0)) > 0
+    if bool(failure_injection_result.get("enabled")):
+        passed = passed and str(failure_injection_result.get("status")) == "injected"
+        passed = passed and not bool(
+            failure_injection_result.get("role_terminate_errors")
+        )
     summary["passed"] = bool(passed)
 
     payload = {
@@ -4268,13 +4455,10 @@ def main(argv: list[str]) -> int:
             "tp_device_base_index": int(args.tp_device_base_index),
             "tp_device_map_policy": str(args.tp_device_map_policy),
             "tp_materialize_deadline_s": float(args.tp_materialize_deadline_s),
-            "transport_group_mode": transport_group_plan.mode,
             "transport_group_kind": transport_group_plan.kind,
             "transport_group_total_parts": transport_group_plan.total_parts,
             "transport_group_priority": transport_group_plan.priority,
-            "transport_group_total_parts_formula": (
-                "receiver_count*tp_world_size when mode=tp_version, else 0"
-            ),
+            "transport_group_total_parts_formula": ("receiver_count*tp_world_size"),
             "max_concurrency": int(args.max_concurrency),
             "cuda_backend": cuda_backend or "process-default",
             "receiver_preflight_transient_overlap": int(
@@ -4286,6 +4470,17 @@ def main(argv: list[str]) -> int:
             "p0_early_stop_grace_s": float(args.p0_early_stop_grace_s),
             "throughput_sample_interval_s": float(args.throughput_sample_interval_s),
             "throughput_max_samples": int(args.throughput_max_samples),
+            "enable_progressive_replication": bool(args.enable_progressive_replication),
+            "progressive_report_interval": str(args.progressive_report_interval),
+            "progressive_min_report_delta_bytes": int(
+                args.progressive_min_report_delta_bytes
+            ),
+            "progressive_verify_before_report": bool(
+                args.progressive_verify_before_report
+            ),
+            "failure_injection_mode": str(args.failure_injection_mode),
+            "failure_injection_target": str(args.failure_injection_target),
+            "failure_injection_delay_s": float(args.failure_injection_delay_s),
             "max_publish_to_apply_s": float(args.max_publish_to_apply_s),
             "max_publish_to_apply_auto_adjust": bool(
                 args.max_publish_to_apply_auto_adjust
@@ -4294,7 +4489,6 @@ def main(argv: list[str]) -> int:
                 getattr(args, "_max_publish_to_apply_preflight", {})
             ),
             "retention_timeout_s": float(args.retention_timeout_s),
-            "receiver_apply_mode": str(args.receiver_apply_mode),
             "allow_receiver_skips": bool(args.allow_receiver_skips),
             "materialize_device": str(args.materialize_device),
             "receiver_hold_after_finish_s": float(args.receiver_hold_after_finish_s),
@@ -4334,6 +4528,7 @@ def main(argv: list[str]) -> int:
         "global_store_probe": gs_probe,
         "transport_group_probe": transport_group_probe,
         "p0_early_stop": p0_early_stop,
+        "failure_injection": failure_injection_result,
         "transport_rows_payload": transport_rows_payload,
         "transport_metrics": transport_metrics,
     }
@@ -4371,6 +4566,9 @@ def main(argv: list[str]) -> int:
                 "group_probe_error": transport_group_probe.get("error"),
                 "p0_early_stop_triggered": bool(
                     summary["stability"].get("p0_early_stop_triggered")
+                ),
+                "failure_injection_status": str(
+                    failure_injection_result.get("status", "disabled")
                 ),
                 "waiting_timeout_reasons": summary.get("timeout_analysis", {}).get(
                     "waiting_timeout_reason_counts", {}

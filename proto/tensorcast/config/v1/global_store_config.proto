@@ -68,6 +68,46 @@ message TransportSchedulerPolicy {
   GroupDispatchPolicy group_dispatch = 3;
 }
 
+enum GroupPublishAuthorityMode {
+  GROUP_PUBLISH_AUTHORITY_MODE_UNSPECIFIED = 0;
+  GROUP_PUBLISH_AUTHORITY_MODE_AUTO_WHEN_READY = 1;
+  GROUP_PUBLISH_AUTHORITY_MODE_COORDINATOR_EXPLICIT = 2;
+}
+
+message GroupRealizationConfig {
+  bool enabled = 1;
+  uint64 default_deadline_ms = 2;
+  uint32 max_total_parts = 3;
+  uint64 transaction_ttl_ms = 4;
+  uint64 expiration_scan_interval_ms = 5;
+  uint32 max_parts_per_version_set = 6;
+  GroupPublishAuthorityMode publish_authority_mode = 7;
+  uint32 max_active_transactions = 8;
+  uint32 max_waiters_per_transaction = 9;
+  uint64 min_wait_poll_interval_ms = 10;
+  uint64 max_wait_poll_interval_ms = 11;
+  uint32 max_member_reports_per_rpc = 12;
+  uint32 cleanup_batch_limit = 13;
+}
+
+message ProgressiveReplicationConfig {
+  bool enabled = 1;
+  uint32 max_outgoing_per_source = 2;
+  google.protobuf.Duration coverage_ttl = 3;
+  google.protobuf.Duration assignment_ttl = 4;
+  bool allow_cross_domain_seed_sources = 5;
+  uint64 min_verified_bytes = 6;
+  uint64 min_assignment_bytes = 7;
+  uint64 max_assignment_bytes = 8;
+  uint32 max_assignments_per_materialization = 9;
+  uint32 assignment_candidate_scan_limit = 10;
+  uint32 max_claim_qps_per_daemon = 11;
+  uint32 cleanup_batch_limit = 12;
+  string source_domain_policy = 13;
+  uint64 min_report_delta_bytes = 14;
+  google.protobuf.Duration min_report_interval = 15;
+}
+
 message WorkerPolicy {
   google.protobuf.Duration heartbeat_timeout = 1;
   google.protobuf.Duration cleanup_interval = 2;
@@ -76,6 +116,8 @@ message WorkerPolicy {
   WorkerControlReducerPolicy control_reducer = 5;
   KeyMappingPolicy key_mapping = 6;
   TransportSchedulerPolicy transport_scheduler = 7;
+  GroupRealizationConfig group_realization = 8;
+  ProgressiveReplicationConfig progressive_replication = 9;
 }
 
 message WorkerControlReducerPolicy {

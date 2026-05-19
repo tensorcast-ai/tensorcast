@@ -857,6 +857,15 @@ Status StoreDaemonServiceImpl::RetirePublishedReplica(
     return to_grpc_status(drained_or.status());
   }
   const auto& drain = drained_or->drain;
+  if (!drained_or->lease.registration_id.empty() && materialization_controller_ != nullptr) {
+    auto terminalize_status = materialization_controller_->terminalize_target_publication(
+        drained_or->lease.registration_id,
+        req->has_operation_id() && !req->operation_id().empty() ? req->operation_id() : "retire_published_replica",
+        /*release_published_lifecycle_lease=*/true);
+    if (!terminalize_status.ok() && !absl::IsNotFound(terminalize_status)) {
+      return to_grpc_status(terminalize_status);
+    }
+  }
 
   resp->set_drained(drain.drained);
   resp->set_removed(true);

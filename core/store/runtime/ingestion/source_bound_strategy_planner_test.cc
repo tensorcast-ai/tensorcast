@@ -439,6 +439,163 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "Source-bound strategy planner keeps concat work local even when collective lane covers its target range",
+    "[source_bound_strategy_planner]") {
+  RepresentationWorkPlan work_plan;
+  RepresentationWorkItem concat_item;
+  concat_item.kind = RepresentationWorkItemKind::kConcatAssemble;
+  concat_item.committed_bytes = 8;
+  concat_item.dst_name = "concat";
+  concat_item.dst_spec = RepresentationTensorSpec{
+      .name = "concat",
+      .shape = {4},
+      .stride = {1},
+      .dtype = "torch.float16",
+      .logical_offset = 0,
+      .logical_length = 8,
+      .element_size = 2,
+  };
+  concat_item.sources = {
+      RepresentationWorkSourceFragment{
+          .fragment =
+              SourceFragment{
+                  .source_spec =
+                      RepresentationTensorSpec{
+                          .name = "left",
+                          .shape = {2},
+                          .stride = {1},
+                          .dtype = "torch.float16",
+                          .logical_length = 4,
+                          .element_size = 2,
+                      },
+                  .source_range =
+                      TensorCoordinateSpec{
+                          .axes = {TensorAxisRange{.dim = 0, .start = 0, .end = 2}},
+                      },
+                  .destination_range =
+                      TensorCoordinateSpec{
+                          .axes = {TensorAxisRange{.dim = 0, .start = 0, .end = 2}},
+                      },
+              },
+      },
+      RepresentationWorkSourceFragment{
+          .fragment =
+              SourceFragment{
+                  .source_spec =
+                      RepresentationTensorSpec{
+                          .name = "right",
+                          .shape = {2},
+                          .stride = {1},
+                          .dtype = "torch.float16",
+                          .logical_length = 4,
+                          .element_size = 2,
+                      },
+                  .source_range =
+                      TensorCoordinateSpec{
+                          .axes = {TensorAxisRange{.dim = 0, .start = 0, .end = 2}},
+                      },
+                  .destination_range =
+                      TensorCoordinateSpec{
+                          .axes = {TensorAxisRange{.dim = 0, .start = 2, .end = 4}},
+                      },
+              },
+      },
+  };
+  work_plan.items.push_back(std::move(concat_item));
+  auto plan = make_plan(std::move(work_plan));
+
+  SourceBoundLoweringArtifacts lowering_artifacts;
+  lowering_artifacts.collective_data_map = make_data_map(8);
+  lowering_artifacts.executor_generic_data_map = make_data_map(8);
+
+  auto strategy_plan_or = build_source_bound_execution_strategy_plan(
+      plan,
+      lowering_artifacts,
+      SourceBoundPolicy::kCollectiveFirst,
+      make_strategy_config(),
+      make_collective_topology(),
+      safetensors_disk_source());
+  REQUIRE(strategy_plan_or.ok());
+  CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kLocalMappedTyped);
+  CHECK(strategy_plan_or->summary.planned_collective_candidate_bytes == 0);
+  CHECK(strategy_plan_or->summary.planned_non_admitted_typed_bytes == 8);
+  CHECK(strategy_plan_or->summary.planned_collective_admitted_bytes == 0);
+  CHECK(strategy_plan_or->summary.estimated_collective_dedup_saving_bytes == 0);
+  REQUIRE(strategy_plan_or->summary.planner_reject_reason_buckets.contains("typed_work_without_source_overlap"));
+  CHECK(strategy_plan_or->summary.planner_reject_reason_buckets.at("typed_work_without_source_overlap") == 8);
+}
+
+TEST_CASE(
+    "Source-bound strategy planner keeps expert concat work local even when collective lane covers destination spans",
+    "[source_bound_strategy_planner]") {
+  RepresentationWorkPlan work_plan;
+  RepresentationWorkItem expert_item;
+  expert_item.kind = RepresentationWorkItemKind::kExpertDim0Concat;
+  expert_item.partition_kind = WorkPartitionKind::kUnknown;
+  expert_item.committed_bytes = 4;
+  expert_item.dst_name = "expert";
+  expert_item.dst_spec = RepresentationTensorSpec{
+      .name = "expert",
+      .shape = {2, 2},
+      .stride = {2, 1},
+      .dtype = "torch.float16",
+      .logical_offset = 0,
+      .logical_length = 8,
+      .element_size = 2,
+  };
+  expert_item.sources = {
+      RepresentationWorkSourceFragment{
+          .fragment =
+              SourceFragment{
+                  .source_spec =
+                      RepresentationTensorSpec{
+                          .name = "expert_src",
+                          .shape = {1, 2},
+                          .stride = {2, 1},
+                          .dtype = "torch.float16",
+                          .logical_length = 4,
+                          .element_size = 2,
+                      },
+                  .source_range =
+                      TensorCoordinateSpec{
+                          .axes = {TensorAxisRange{.dim = 0, .start = 0, .end = 1}},
+                      },
+                  .destination_range =
+                      TensorCoordinateSpec{
+                          .axes =
+                              {
+                                  TensorAxisRange{.dim = 0, .start = 0, .end = 1},
+                                  TensorAxisRange{.dim = 1, .start = 0, .end = 2},
+                              },
+                      },
+              },
+      },
+  };
+  work_plan.items.push_back(std::move(expert_item));
+  auto plan = make_plan(std::move(work_plan));
+
+  SourceBoundLoweringArtifacts lowering_artifacts;
+  lowering_artifacts.collective_data_map = make_data_map(4);
+  lowering_artifacts.executor_generic_data_map = make_data_map(4);
+
+  auto strategy_plan_or = build_source_bound_execution_strategy_plan(
+      plan,
+      lowering_artifacts,
+      SourceBoundPolicy::kCollectiveFirst,
+      make_strategy_config(),
+      make_collective_topology(),
+      safetensors_disk_source());
+  REQUIRE(strategy_plan_or.ok());
+  CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kLocalMappedTyped);
+  CHECK(strategy_plan_or->summary.planned_collective_candidate_bytes == 0);
+  CHECK(strategy_plan_or->summary.planned_non_admitted_typed_bytes == 4);
+  CHECK(strategy_plan_or->summary.planned_collective_admitted_bytes == 0);
+  CHECK(strategy_plan_or->summary.estimated_collective_dedup_saving_bytes == 0);
+  REQUIRE(strategy_plan_or->summary.planner_reject_reason_buckets.contains("typed_work_without_source_overlap"));
+  CHECK(strategy_plan_or->summary.planner_reject_reason_buckets.at("typed_work_without_source_overlap") == 4);
+}
+
+TEST_CASE(
     "Source-bound strategy planner keeps expert dim0 concat on executor lane without source overlap",
     "[source_bound_strategy_planner]") {
   RepresentationWorkPlan work_plan;
