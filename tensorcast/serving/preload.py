@@ -676,20 +676,62 @@ def acquire_preload_lease(
         lease.close()
 
 
+def _select_external_preload_authority_config(
+    config: Any,
+    *,
+    expected_member: tc.ServingBindingMemberRef | None = None,
+) -> ExternalPreloadAuthority:
+    authority_config = config.preload.authority
+    if authority_config is not None:
+        return authority_config
+
+    authority_configs = tuple(config.preload.authorities)
+    if not authority_configs:
+        raise ValueError(
+            "TensorCast external preload authority requires "
+            "preload.mode='external' and preload.authority or preload.authorities"
+        )
+    if expected_member is None:
+        if len(authority_configs) == 1:
+            return authority_configs[0]
+        raise ValueError(
+            "TensorCast external preload authority set requires an expected "
+            "serving member to select the worker authority"
+        )
+
+    for index, candidate in enumerate(authority_configs):
+        member = _model_validate(
+            tc.ServingBindingMemberRef,
+            candidate.member_ref,
+            field_name=f"preload.authorities[{index}].member_ref",
+        )
+        if member == expected_member:
+            return candidate
+    raise ValueError(
+        "TensorCast external preload authority set has no authority for "
+        f"expected member {expected_member!r}"
+    )
+
+
 def parse_external_preload_authority(
     extra: Mapping[str, Any] | Any,
+    *,
+    expected_member: tc.ServingBindingMemberRef | None = None,
 ) -> ParsedExternalPreloadAuthority:
     from tensorcast.serving.config import ServingConfig
 
     config = (
         extra if isinstance(extra, ServingConfig) else ServingConfig.from_mapping(extra)
     )
-    authority_config = config.preload.authority
-    if config.preload.mode != "external" or authority_config is None:
+    if config.preload.mode != "external":
         raise ValueError(
             "TensorCast external preload authority requires "
             "preload.mode='external' and preload.authority"
         )
+    authority_config = _select_external_preload_authority_config(
+        config,
+        expected_member=expected_member,
+    )
 
     binding_value_ref = _model_validate(
         tc.BindingValueRef,
@@ -739,6 +781,12 @@ def parse_external_preload_authority(
         group_realization_acquire=group_realization_acquire,
     )
     _validate_authority_consistency(authority)
+    if expected_member is not None and authority.member != expected_member:
+        raise ValueError(
+            "TensorCast external preload authority member does not match "
+            f"expected member: authority={authority.member!r}, "
+            f"expected={expected_member!r}"
+        )
     return authority
 
 
@@ -835,7 +883,11 @@ def acquire_retained_serving_binding(
         yield lease
 
 
-def external_preload_trusted_reservation_bytes(load_config_or_extra: Any) -> int:
+def external_preload_trusted_reservation_bytes(
+    load_config_or_extra: Any,
+    *,
+    expected_member: tc.ServingBindingMemberRef | None = None,
+) -> int:
     extra = getattr(
         load_config_or_extra, "model_loader_extra_config", load_config_or_extra
     )
@@ -843,7 +895,10 @@ def external_preload_trusted_reservation_bytes(load_config_or_extra: Any) -> int
         return 0
     if external_preload_mode(extra) != "external":
         return 0
-    return parse_external_preload_authority(extra).reservation_bytes
+    return parse_external_preload_authority(
+        extra,
+        expected_member=expected_member,
+    ).reservation_bytes
 
 
 def external_preload_extra_from_prefetched_binding(
@@ -1033,6 +1088,7 @@ class PreloadSettings(BaseModel):
 
     mode: str = "disabled"
     authority: ExternalPreloadAuthority | None = None
+    authorities: tuple[ExternalPreloadAuthority, ...] = ()
 
     @field_validator("mode", mode="before")
     @classmethod
@@ -1047,12 +1103,20 @@ class PreloadSettings(BaseModel):
 
     @model_validator(mode="after")
     def _validate_authority(self) -> PreloadSettings:
-        if self.mode == "external" and self.authority is None:
+        has_authority = self.authority is not None
+        has_authorities = bool(self.authorities)
+        if self.mode == "external" and not (has_authority or has_authorities):
             raise ValueError(
-                "preload.authority is required when preload.mode='external'"
+                "preload.authority or preload.authorities is required when "
+                "preload.mode='external'"
             )
-        if self.mode != "external" and self.authority is not None:
+        if self.mode == "external" and has_authority and has_authorities:
             raise ValueError(
-                "preload.authority is only valid when preload.mode='external'"
+                "preload.authority and preload.authorities are mutually exclusive"
+            )
+        if self.mode != "external" and (has_authority or has_authorities):
+            raise ValueError(
+                "preload.authority and preload.authorities are only valid when "
+                "preload.mode='external'"
             )
         return self
