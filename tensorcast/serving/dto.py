@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -42,9 +42,12 @@ def _model_dump_or_none(value: Any) -> dict[str, Any] | None:
         return None
     dump = getattr(value, "model_dump", None)
     if callable(dump):
-        return dict(dump(mode="python"))
+        payload = dump(mode="python")
+        if isinstance(payload, Mapping):
+            return {str(key): payload[key] for key in payload}
+        raise TypeError(f"Cannot serialize {type(value)!r} as a mapping")
     if isinstance(value, Mapping):
-        return dict(value)
+        return {str(key): value[key] for key in value}
     raise TypeError(f"Cannot serialize {type(value)!r} as a mapping")
 
 
@@ -626,11 +629,3 @@ class FrameworkIntegrationContext(BaseModel):
             ),
             "source_identity": dict(self.source_identity),
         }
-
-
-class FrameworkAdapter(Protocol):
-    def framework_name(self) -> str: ...
-
-    def framework_version(self) -> str: ...
-
-    def adapter_version(self) -> str: ...

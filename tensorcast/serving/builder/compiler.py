@@ -16,8 +16,8 @@ from tensorcast.api.store.common import dtype_from_string as store_dtype_from_st
 from tensorcast.api.store.realization_plan import binding_realization_plan_to_proto
 from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry
 from tensorcast.serving.builder.binding_plan import lower_trace_plan_for_realization
-from tensorcast.serving.builder.source_catalog import resolve_source_artifact_ref
 from tensorcast.serving.builder.trace_ir import CopyPlanEntry, Range, TracePlan
+from tensorcast.serving.source_catalog import resolve_source_artifact_ref
 from tensorcast.types import FinalizeClass, ServingSupportLevel
 
 

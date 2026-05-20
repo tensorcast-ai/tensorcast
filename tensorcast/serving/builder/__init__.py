@@ -25,14 +25,22 @@ from tensorcast.serving.builder.compiler import (
     filter_tensor_schema_for_trace_plan,
 )
 from tensorcast.serving.builder.materialization import (
+    BindingFinalizeMaterializationResult,
     allocate_tensors_from_schema,
     apply_copy_plan,
+    collect_serving_tensors_from_model,
     dtype_from_string,
     iter_ranges,
+    load_source_tensors_for_recipe,
+    materialize_binding_finalize_serving_tensors,
+    materialize_pure_transform_serving_tensors,
+    materialize_recipe_copy_plan_tensors,
     narrow_by_range_spec,
     narrow_source_view,
+    run_binding_finalize_semantic_validation,
     tensorcast_view_slices_from_trace_plan,
     update_dst_coverage,
+    validate_binding_finalize_tensor_schema,
     validate_dst_coverage,
     validate_source_tensor_names,
 )
@@ -46,6 +54,7 @@ from tensorcast.serving.builder.publication import (
     build_pure_transform_publication_spec_from_context,
     build_pure_transform_serving_args_from_context,
     build_recipe_serving_build_intent,
+    complete_pure_transform_recipe_publication,
     prepare_binding_finalize_serving_registration_from_context,
     prepare_pure_transform_serving_registration_from_context,
 )
@@ -63,18 +72,6 @@ from tensorcast.serving.builder.recipe_validation import (
 )
 from tensorcast.serving.builder.semantic_validation import (
     evaluate_semantic_validation_spec,
-)
-from tensorcast.serving.builder.source_catalog import (
-    SourceCatalog,
-    SourceFileEntry,
-    SourceManifest,
-    SourceTensorMeta,
-    compute_source_metadata_fingerprint,
-    resolve_source_artifact_ref,
-    source_catalog_from_all_safetensors_dir,
-    source_catalog_from_canonical_index,
-    source_catalog_from_manifest,
-    source_catalog_from_selected_safetensors,
 )
 from tensorcast.serving.builder.tensor_schema import (
     validate_tensor_schema_against_tensors,
@@ -100,8 +97,21 @@ from tensorcast.serving.builder.trace_ir import (
     trace_plan_from_dict,
     trace_plan_to_dict,
 )
+from tensorcast.serving.source_catalog import (
+    SourceCatalog,
+    SourceFileEntry,
+    SourceManifest,
+    SourceTensorMeta,
+    compute_source_metadata_fingerprint,
+    resolve_source_artifact_ref,
+    source_catalog_from_all_safetensors_dir,
+    source_catalog_from_canonical_index,
+    source_catalog_from_manifest,
+    source_catalog_from_selected_safetensors,
+)
 
 __all__ = [
+    "BindingFinalizeMaterializationResult",
     "CompiledServingRecipe",
     "CopyPlanEntry",
     "MultiRange",
@@ -136,7 +146,9 @@ __all__ = [
     "build_pure_transform_publication_spec_from_context",
     "build_pure_transform_serving_args_from_context",
     "build_recipe_serving_build_intent",
+    "collect_serving_tensors_from_model",
     "compile_serving_recipe",
+    "complete_pure_transform_recipe_publication",
     "compute_source_metadata_fingerprint",
     "compute_recipe_compile_key",
     "copy_plan_from_dict",
@@ -147,8 +159,12 @@ __all__ = [
     "dtype_from_string",
     "evaluate_semantic_validation_spec",
     "iter_ranges",
+    "load_source_tensors_for_recipe",
     "lower_trace_plan_for_binding",
     "lower_trace_plan_for_realization",
+    "materialize_binding_finalize_serving_tensors",
+    "materialize_pure_transform_serving_tensors",
+    "materialize_recipe_copy_plan_tensors",
     "narrow_by_range_spec",
     "narrow_source_view",
     "prepare_binding_finalize_serving_registration_from_context",
@@ -158,6 +174,7 @@ __all__ = [
     "range_to_dict",
     "filter_tensor_schema_for_trace_plan",
     "resolve_source_artifact_ref",
+    "run_binding_finalize_semantic_validation",
     "single_range_from_dict",
     "source_catalog_from_all_safetensors_dir",
     "source_catalog_from_canonical_index",
@@ -170,6 +187,7 @@ __all__ = [
     "update_dst_coverage",
     "serving_support_level_at_least",
     "serving_support_level_display_name",
+    "validate_binding_finalize_tensor_schema",
     "validate_dst_coverage",
     "validate_recipe_for_builder_mode",
     "validate_source_tensor_names",

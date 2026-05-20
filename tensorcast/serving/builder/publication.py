@@ -10,6 +10,7 @@ from typing import Any
 
 import torch
 
+import tensorcast as tc
 from tensorcast.api.store.handles import RegisteredArtifact
 from tensorcast.api.store.serving_builder import (
     build_binding_finalize_admission_facts,
@@ -21,6 +22,10 @@ from tensorcast.api.store.serving_builder import (
     prepare_pure_transform_serving_registration,
 )
 from tensorcast.api.store.types import CanonicalIndex
+from tensorcast.serving.builder.materialization import (
+    load_source_tensors_for_recipe,
+    materialize_pure_transform_serving_tensors,
+)
 from tensorcast.types import (
     AssemblyReadinessPolicy,
     AssemblyRequirementSetRef,
@@ -283,11 +288,80 @@ def build_binding_finalize_publication_bundle_from_context(
     )
 
 
+def complete_pure_transform_recipe_publication(
+    recipe: Any,
+    *,
+    publication_context: RecipePublicationContext,
+    source_artifact: Any,
+    build_pipeline_version: str,
+    source_tensors: Mapping[str, torch.Tensor] | None = None,
+    materialization_device: str | torch.device = "cpu",
+    representation_contract_hash: str | None = None,
+    contract_family: str | None = None,
+    artifact_id: str | None = None,
+    key: str | None = None,
+    policy: Any = None,
+    device: int | torch.device | None = None,
+    source_version_key: str | None = None,
+    serving_version_key: str | None = None,
+    serving_manifest_ref: str | None = None,
+    layout_id: str | None = None,
+    readiness_policy: Any = None,
+    structural_view_ids: tuple[str, ...] = (),
+    source_contribution_device: str | int | None = None,
+    source_contribution_artifacts: Any = None,
+    timeout_s: float | None = None,
+) -> Any:
+    resolved_source_tensors = (
+        load_source_tensors_for_recipe(
+            recipe,
+            source_artifact,
+            target_device=materialization_device,
+        )
+        if source_tensors is None
+        else {str(name): tensor for name, tensor in dict(source_tensors).items()}
+    )
+    serving_tensors = materialize_pure_transform_serving_tensors(
+        recipe,
+        resolved_source_tensors,
+        target_device=materialization_device,
+    )
+    return tc.complete_pure_transform_publication(
+        serving_tensors,
+        build_intent=build_pure_transform_build_intent(
+            publication_context,
+            build_pipeline_version=build_pipeline_version,
+            representation_contract_hash=representation_contract_hash,
+        ),
+        source_artifact=source_artifact,
+        contract_family=contract_family,
+        artifact_id=artifact_id,
+        key=key,
+        policy=policy,
+        device=device,
+        source_version_key=source_version_key,
+        serving_version_key=serving_version_key,
+        logical_topology_json=publication_context.logical_topology_json,
+        serving_manifest_ref=serving_manifest_ref,
+        layout_id=layout_id,
+        readiness_policy=readiness_policy,
+        structural_view_ids=tuple(
+            str(view_id).strip()
+            for view_id in structural_view_ids
+            if str(view_id).strip()
+        ),
+        source_contribution_device=source_contribution_device,
+        source_contribution_artifacts=source_contribution_artifacts,
+        timeout_s=timeout_s,
+    )
+
+
 __all__ = [
     "RecipePublicationContext",
     "build_binding_finalize_admission_facts_from_context",
     "build_binding_finalize_build_intent",
     "build_binding_finalize_publication_bundle_from_context",
+    "complete_pure_transform_recipe_publication",
     "build_pure_transform_build_intent",
     "build_pure_transform_publication_bundle_from_context",
     "build_pure_transform_publication_spec_from_context",

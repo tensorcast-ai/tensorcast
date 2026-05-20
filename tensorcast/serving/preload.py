@@ -1,5 +1,4 @@
 #  Copyright (c) 2026, TensorCast Team.
-
 """External preloaded serving binding authority schema."""
 
 from __future__ import annotations
@@ -774,6 +773,12 @@ def acquire_retained_serving_binding(
             raise ValueError(
                 "acquire_retained_serving_binding accepts either authority "
                 "or local_serving_ref, not both"
+            )
+        if expected_member is not None and authority.member != expected_member:
+            raise RuntimeError(
+                "TensorCast retained binding authority does not match "
+                "the expected runtime placement: "
+                f"authority={authority.member}, expected={expected_member}"
             )
         with acquire_preload_lease(
             authority,

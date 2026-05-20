@@ -1,14 +1,16 @@
 #  Copyright (c) 2026, TensorCast Team.
-
 """Generic PyTorch module tensor attach and collection helpers."""
 
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch import nn
+
+import tensorcast.serving.contract as tc_contract
 
 _RESERVED_TENSORCAST_PREFIX = "__tensorcast_meta__."
 
@@ -158,6 +160,95 @@ def collect_module_tensors(
     return tensors
 
 
+def collect_module_tensor_names(model: nn.Module) -> set[str]:
+    names = {str(name) for name, _ in model.named_parameters(remove_duplicate=False)}
+    names.update(
+        str(name)
+        for name, buf in model.named_buffers(remove_duplicate=False)
+        if buf is not None
+    )
+    return names
+
+
+def align_runtime_binding_exclude_names(
+    model: nn.Module,
+    canonical_names: Iterable[str],
+    set_excluded_names: Any,
+    *,
+    fail_on_missing: bool,
+) -> int:
+    canonical = {str(name) for name in canonical_names}
+    all_names = collect_module_tensor_names(model)
+    missing = sorted(canonical - all_names)
+    if fail_on_missing and missing:
+        sample = ", ".join(missing[:8])
+        if len(missing) > 8:
+            sample = f"{sample}, ..."
+        raise RuntimeError(
+            "TensorCast serving artifact tensor names are missing from "
+            f"the model: missing_count={len(missing)} [{sample}]"
+        )
+    extra_excluded = sorted(all_names - canonical)
+    if extra_excluded:
+        set_excluded_names(model, extra_excluded)
+    return len(extra_excluded)
+
+
+def assert_runtime_tensors_match_expected_names(
+    tensors: Mapping[str, torch.Tensor],
+    expected_names: Iterable[str],
+) -> None:
+    runtime_names = {str(name) for name in tensors}
+    expected = {str(name) for name in expected_names}
+    missing = sorted(expected - runtime_names)
+    unexpected = sorted(runtime_names - expected)
+    if not missing and not unexpected:
+        return
+    missing_sample = ", ".join(missing[:8])
+    unexpected_sample = ", ".join(unexpected[:8])
+    if len(missing) > 8:
+        missing_sample = f"{missing_sample}, ..."
+    if len(unexpected) > 8:
+        unexpected_sample = f"{unexpected_sample}, ..."
+    raise RuntimeError(
+        "TensorCast serving artifact tensor set mismatch: "
+        f"missing_count={len(missing)} [{missing_sample}], "
+        f"unexpected_count={len(unexpected)} [{unexpected_sample}]"
+    )
+
+
+def assert_module_tensors_are_meta(
+    model: nn.Module,
+    *,
+    context: str,
+) -> None:
+    """Fail if a module skeleton already has materialized tensors."""
+
+    materialized: list[str] = []
+    total_bytes = 0
+    for name, param in model.named_parameters(remove_duplicate=False):
+        tensor = param.data
+        if tensor.is_meta:
+            continue
+        materialized.append(f"{name}:{tensor.device}:{tuple(tensor.shape)}")
+        total_bytes += tensor.numel() * tensor.element_size()
+    for name, buf in model.named_buffers(remove_duplicate=False):
+        if buf is None or buf.is_meta:
+            continue
+        materialized.append(f"{name}:{buf.device}:{tuple(buf.shape)}")
+        total_bytes += buf.numel() * buf.element_size()
+    if not materialized:
+        return
+    sample = ", ".join(materialized[:8])
+    if len(materialized) > 8:
+        sample = f"{sample}, ..."
+    raise RuntimeError(
+        f"{context} requires a meta model skeleton before TensorCast "
+        f"binding creation; found {len(materialized)} materialized "
+        f"tensors totaling {total_bytes} bytes [{sample}]"
+    )
+
+
 def allocate_unbound_module_tensors(
     model: nn.Module,
     tensor_names: Iterable[str],
@@ -200,6 +291,128 @@ def allocate_unbound_module_tensors(
             f"TensorCast fallback attach target '{full_name}' is missing"
         )
     return allocated
+
+
+def compute_runtime_tensor_schema_hash(
+    tensors: Mapping[str, torch.Tensor],
+    *,
+    remove_duplicate: bool = False,
+) -> str:
+    """Compute TensorCast runtime schema hash for a PyTorch tensor mapping."""
+
+    return tc_contract.compute_runtime_tensor_schema_hash(
+        tc_contract.collect_runtime_tensor_schema(
+            tensors,
+            remove_duplicate=remove_duplicate,
+        )
+    )
+
+
+def snapshot_tensor_invariants(
+    tensors: Mapping[str, torch.Tensor],
+) -> dict[str, TensorInvariant]:
+    return {
+        str(name): TensorInvariant(
+            data_ptr=int(tensor.data_ptr()),
+            shape=tuple(int(dim) for dim in tensor.shape),
+            stride=tuple(int(dim) for dim in tensor.stride()),
+            dtype=tensor.dtype,
+        )
+        for name, tensor in tensors.items()
+    }
+
+
+def validate_tensor_invariants(
+    before: Mapping[str, TensorInvariant],
+    after: Mapping[str, torch.Tensor],
+) -> None:
+    if set(before) != set(after):
+        raise RuntimeError("TensorCast canonical tensor set changed")
+    for name, invariant in before.items():
+        tensor = after[name]
+        after_invariant = TensorInvariant(
+            data_ptr=int(tensor.data_ptr()),
+            shape=tuple(int(dim) for dim in tensor.shape),
+            stride=tuple(int(dim) for dim in tensor.stride()),
+            dtype=tensor.dtype,
+        )
+        if after_invariant != invariant:
+            raise RuntimeError(
+                "TensorCast canonical tensor invariant changed for "
+                f"{name}: before={invariant}, after={after_invariant}"
+            )
+
+
+class TorchModuleAdapterMixin:
+    """Default PyTorch tensor binding operations for framework adapters."""
+
+    def runtime_only_tensor_names(self, model: nn.Module) -> tuple[str, ...]:
+        del model
+        return ()
+
+    def collect_runtime_binding_tensors(
+        self,
+        model: nn.Module,
+        *,
+        remove_duplicate: bool = False,
+    ) -> dict[str, torch.Tensor]:
+        return collect_module_tensors(
+            model,
+            exclude_names=self.runtime_only_tensor_names(model),
+            reject_reserved_tensor_names=True,
+            remove_duplicate=remove_duplicate,
+        )
+
+    def compute_runtime_tensor_schema_hash(
+        self,
+        tensors: Mapping[str, torch.Tensor],
+        *,
+        remove_duplicate: bool = False,
+    ) -> str:
+        return compute_runtime_tensor_schema_hash(
+            tensors,
+            remove_duplicate=remove_duplicate,
+        )
+
+    def attach_bound_tensors(
+        self,
+        model: nn.Module,
+        tensors: Mapping[str, torch.Tensor],
+        *,
+        replace_meta_params: bool = False,
+    ) -> AttachResult:
+        return attach_tensors_to_module(
+            model,
+            tensors,
+            replace_meta_params=replace_meta_params,
+            skip_reserved_tensor_names=True,
+            fail_on_missing=False,
+            fail_on_unexpected=True,
+        )
+
+    def allocate_runtime_only_tensors(
+        self,
+        model: nn.Module,
+        target_device: torch.device,
+    ) -> dict[str, torch.Tensor]:
+        return allocate_unbound_module_tensors(
+            model,
+            self.runtime_only_tensor_names(model),
+            target_device=target_device,
+        )
+
+    def snapshot_tensor_invariants(
+        self,
+        tensors: Mapping[str, torch.Tensor],
+    ) -> dict[str, TensorInvariant]:
+        return snapshot_tensor_invariants(tensors)
+
+    def validate_tensor_invariants(
+        self,
+        before: Mapping[str, TensorInvariant],
+        after: Mapping[str, torch.Tensor],
+    ) -> None:
+        validate_tensor_invariants(before, after)
 
 
 def _maybe_collect_tensor(
@@ -318,7 +531,15 @@ def _is_reserved_tensorcast_name(name: str) -> bool:
 __all__ = [
     "AttachResult",
     "TensorInvariant",
+    "TorchModuleAdapterMixin",
     "allocate_unbound_module_tensors",
+    "align_runtime_binding_exclude_names",
+    "assert_module_tensors_are_meta",
+    "assert_runtime_tensors_match_expected_names",
     "attach_tensors_to_module",
+    "collect_module_tensor_names",
     "collect_module_tensors",
+    "compute_runtime_tensor_schema_hash",
+    "snapshot_tensor_invariants",
+    "validate_tensor_invariants",
 ]

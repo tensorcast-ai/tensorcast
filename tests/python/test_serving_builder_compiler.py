@@ -16,8 +16,8 @@ from tensorcast.serving.builder.compiler import (
     TensorSchemaEntry,
     compile_serving_recipe,
 )
-from tensorcast.serving.builder.source_catalog import SourceCatalog, SourceTensorMeta
 from tensorcast.serving.builder.trace_ir import CopyPlanEntry, Range, TracePlan
+from tensorcast.serving.source_catalog import SourceCatalog, SourceTensorMeta
 from tensorcast.types import FinalizeClass, ServingSupportLevel
 
 

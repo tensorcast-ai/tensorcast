@@ -292,18 +292,20 @@ def test_resolved_spec_cache_rejects_unsupported_manifest_producer_version(
         read_resolved_spec_cache_entry(tmp_path, entry.cache_key_digest)
 
 
-def test_resolved_spec_cache_rejects_unsupported_runtime(tmp_path) -> None:
+def test_resolved_spec_cache_accepts_framework_runtime_names(tmp_path) -> None:
     blob = b"layout-bytes"
     entry = _with_recomputed_digests(
-        _entry(blob=blob).model_copy(update={"runtime": "unknown-runtime"})
+        _entry(blob=blob).model_copy(update={"runtime": "fake-framework"})
     )
 
-    with pytest.raises(ValueError, match="unsupported serving runtime"):
-        write_resolved_spec_cache_entry(
-            tmp_path,
-            entry=entry,
-            blobs={"target_layout": blob},
-        )
+    write_resolved_spec_cache_entry(
+        tmp_path,
+        entry=entry,
+        blobs={"target_layout": blob},
+    )
+
+    record = read_resolved_spec_cache_entry(tmp_path, entry.cache_key_digest)
+    assert record.entry.runtime == "fake-framework"
 
 
 def test_resolved_spec_cache_cleans_tmp_after_publish(tmp_path) -> None:
@@ -405,6 +407,28 @@ def test_resolved_spec_cache_group_index_roundtrip(tmp_path) -> None:
     assert set(read_index.member_cache_key_digests) == {"member-0", "member-1"}
 
 
+def test_resolved_spec_cache_group_index_rejects_empty_runtime(tmp_path) -> None:
+    entry = _entry()
+    write_resolved_spec_cache_entry(
+        tmp_path,
+        entry=entry,
+        blobs={"target_layout": b"layout-bytes"},
+    )
+    draft = ServingBindingSpecCacheGroupIndex(
+        group_cache_key_digest="placeholder",
+        runtime="",
+        topology=entry.topology,
+        group_id="group-1",
+        member_cache_key_digests={entry.member.member_id: entry.cache_key_digest},
+    )
+    index = draft.model_copy(
+        update={"group_cache_key_digest": draft.computed_group_cache_key_digest()}
+    )
+
+    with pytest.raises(ValueError, match="runtime must not be empty"):
+        write_resolved_spec_cache_group_index(tmp_path, index=index)
+
+
 def test_resolved_spec_cache_group_index_rejects_member_mismatch(tmp_path) -> None:
     blob = b"layout-member-0"
     entry = _entry(blob=blob, member_index=0, member_count=2)
@@ -457,5 +481,5 @@ def test_resolved_spec_cache_group_lookup_validates_member_cache(tmp_path) -> No
     payload["entry"]["runtime"] = "other-runtime"
     key_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="unsupported serving runtime|match cache key"):
+    with pytest.raises(ValueError, match="match cache key"):
         read_resolved_spec_cache_group_index(tmp_path, index.group_cache_key_digest)
