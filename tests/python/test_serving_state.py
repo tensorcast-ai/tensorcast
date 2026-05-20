@@ -8,7 +8,10 @@ from tensorcast.serving.integration import (
     RuntimeBindingView,
     RuntimeWorkerView,
 )
-from tensorcast.serving.state import ModelAttributeRuntimeState
+from tensorcast.serving.state import (
+    ModelAttributeRuntimeState,
+    RuntimeAttachmentStore,
+)
 
 
 def _attachment(value_id: str) -> RuntimeAttachment:
@@ -64,3 +67,41 @@ def test_model_attribute_runtime_state_failure_clear_is_generation_scoped():
     state.clear_failure(model, attachment=first)
 
     assert model._test_tensorcast_runtime_binding_failure is None
+
+
+def test_runtime_attachment_store_compare_and_attach_fences_generation():
+    store = RuntimeAttachmentStore()
+    key = "model-1"
+    first = _attachment("value-1")
+    stale_replacement = _attachment("value-stale")
+    current = _attachment("value-2")
+
+    store.attach_runtime_attachment(key, first)
+    store.attach_runtime_attachment(key, current)
+
+    assert (
+        store.compare_and_attach_runtime_attachment(
+            key,
+            expected_attachment=first,
+            replacement_attachment=stale_replacement,
+        )
+        is False
+    )
+    assert store.get_runtime_attachment(key) is current
+
+
+def test_runtime_attachment_store_failure_clear_is_generation_scoped():
+    store = RuntimeAttachmentStore()
+    key = "model-1"
+    first = _attachment("value-1")
+    current = _attachment("value-2")
+
+    store.attach_runtime_attachment(key, current)
+    store.mark_failure(key, RuntimeError("old failure"), attachment=first)
+    store.clear_failure(key, attachment=current)
+
+    assert store.get_failure(key) == "old failure"
+
+    store.clear_failure(key, attachment=first)
+
+    assert store.get_failure(key) is None

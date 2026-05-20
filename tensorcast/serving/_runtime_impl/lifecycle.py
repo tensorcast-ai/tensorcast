@@ -250,6 +250,28 @@ class CapabilityMissingError(ServingIntegrationError):
     operation = "capability_validation"
 
 
+def _capability_missing(
+    message: str,
+    *,
+    level: str,
+    capability: str,
+    operation: str,
+    required_methods: Sequence[str] = (),
+    next_action: str,
+) -> CapabilityMissingError:
+    return CapabilityMissingError(
+        message,
+        operation=operation,
+        details={
+            "level": level,
+            "capability": capability,
+            "operation": operation,
+            "required_methods": tuple(required_methods),
+            "next_action": next_action,
+        },
+    )
+
+
 class AdmissionRejectedError(ServingIntegrationError):
     """Core admission rejected a serving lifecycle request."""
 
@@ -861,6 +883,133 @@ def _source_selection_projection_from_value(
     )
 
 
+def _diagnostic_value(
+    diagnostics: Any,
+    name: str,
+    default: object | None = None,
+) -> object | None:
+    if isinstance(diagnostics, Mapping):
+        return diagnostics.get(name, default)
+    return getattr(diagnostics, name, default)
+
+
+def _dominant_reason_bucket(value: object | None) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    candidates: list[tuple[int, str]] = []
+    for key, count in value.items():
+        name = _optional_text(key)
+        weight = _optional_int(count) or 0
+        if name is not None and weight > 0:
+            candidates.append((weight, name))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    return candidates[0][1]
+
+
+def source_selection_projection_from_materialization_diagnostics(
+    diagnostics: Any | None,
+) -> SourceSelectionProjection | None:
+    """Project store materialization diagnostics into the runtime endpoint DTO."""
+
+    if diagnostics is None:
+        return None
+    source = _optional_text(_diagnostic_value(diagnostics, "source"))
+    if source is None:
+        return None
+    total_bytes = _optional_int(_diagnostic_value(diagnostics, "total_bytes")) or 0
+    reselection_attempts = max(
+        0,
+        (_optional_int(_diagnostic_value(diagnostics, "retry_attempts")) or 1) - 1,
+    )
+    reason_bucket = _dominant_reason_bucket(
+        _diagnostic_value(diagnostics, "retry_reason_buckets")
+    )
+    replica_id = _optional_text(
+        _diagnostic_value(diagnostics, "ticket_replica_uuid")
+    ) or _optional_text(_diagnostic_value(diagnostics, "replica_uuid"))
+    if source == "p2p":
+        return SourceSelectionProjection(
+            selected_source_kind="published_memory_replica",
+            selected_replica_id=replica_id,
+            p2p_bytes=total_bytes,
+            reselection_attempts=reselection_attempts,
+            reject_reason_bucket=reason_bucket,
+        )
+    if source == "local_replica":
+        return SourceSelectionProjection(
+            selected_source_kind="local_memory_replica",
+            selected_replica_id=replica_id,
+            reselection_attempts=reselection_attempts,
+            reject_reason_bucket=reason_bucket,
+        )
+    if source == "disk":
+        return SourceSelectionProjection(
+            selected_source_kind="canonical_fallback",
+            fallback_bytes=total_bytes,
+            disk_bytes=total_bytes,
+            reselection_attempts=reselection_attempts,
+            fallback_reason_bucket=reason_bucket,
+        )
+    return None
+
+
+def source_selection_projection_from_execution_diagnostics(
+    diagnostics: Any | None,
+) -> SourceSelectionProjection | None:
+    """Summarize daemon execution diagnostics as low-cardinality source choice."""
+
+    if diagnostics is None:
+        return None
+    collective_bytes = (
+        _optional_int(
+            _diagnostic_value(diagnostics, "actual_collective_committed_bytes")
+        )
+        or 0
+    )
+    peer_transfer_bytes = (
+        _optional_int(_diagnostic_value(diagnostics, "collective_peer_transfer_bytes"))
+        or 0
+    )
+    local_typed_bytes = (
+        _optional_int(_diagnostic_value(diagnostics, "actual_local_typed_bytes")) or 0
+    )
+    generic_bytes = (
+        _optional_int(_diagnostic_value(diagnostics, "actual_generic_backend_bytes"))
+        or 0
+    )
+    fallback_bytes = (
+        _optional_int(_diagnostic_value(diagnostics, "fallback_bytes")) or 0
+    )
+    residual_bytes = (
+        _optional_int(_diagnostic_value(diagnostics, "residual_bytes")) or 0
+    )
+    skip_reason = _optional_text(
+        _diagnostic_value(diagnostics, "collective_skip_reason")
+    )
+    if collective_bytes or peer_transfer_bytes:
+        return SourceSelectionProjection(
+            selected_source_kind="published_memory_replica",
+            p2p_bytes=peer_transfer_bytes or collective_bytes,
+            fallback_bytes=fallback_bytes,
+            fallback_reason_bucket=skip_reason if fallback_bytes else None,
+        )
+    if local_typed_bytes:
+        return SourceSelectionProjection(
+            selected_source_kind="local_memory_replica",
+            fallback_bytes=fallback_bytes,
+            fallback_reason_bucket=skip_reason if fallback_bytes else None,
+        )
+    if fallback_bytes or residual_bytes or generic_bytes:
+        return SourceSelectionProjection(
+            selected_source_kind="canonical_fallback",
+            fallback_bytes=fallback_bytes or residual_bytes or generic_bytes,
+            fallback_reason_bucket=skip_reason,
+        )
+    return None
+
+
 @dataclass(frozen=True)
 class WeightVersionProjection:
     source_artifact_ref: str | None
@@ -1002,7 +1151,7 @@ class RuntimeWorkerView:
         bootstrap_projection = None
         if bootstrap_summary is not None:
             bootstrap_projection = BootstrapEndpointProjection(
-                bootstrap_summary.model_dump(mode="python")
+                bootstrap_summary.to_dict()
             )
         source_bound_projection = _source_bound_projection_from_bootstrap(
             bootstrap_summary
@@ -1304,9 +1453,23 @@ class RuntimeBindingMaterialization:
 
     def _surface(self) -> TensorSurfaceHost:
         if self.host.tensor_surface is None:
-            raise CapabilityMissingError(
+            raise _capability_missing(
                 "IntegrationHost requires TensorSurfaceHost for runtime "
-                "tensor attach/schema/invariant operations"
+                "tensor attach/schema/invariant operations",
+                level="level1-runtime",
+                capability="tensor_surface",
+                operation="runtime_tensor_surface",
+                required_methods=(
+                    "attach_bound_tensors",
+                    "collect_runtime_tensors",
+                    "compute_runtime_tensor_schema_hash",
+                    "snapshot_tensor_invariants",
+                    "validate_tensor_invariants",
+                ),
+                next_action=(
+                    "Pass IntegrationHost(tensor_surface=...) or use "
+                    "TorchTensorHost for PyTorch module carriers."
+                ),
             )
         return self.host.tensor_surface
 
@@ -3602,9 +3765,17 @@ class ServingIntegration:
                     f"{catalog_artifact_ref!r}, expected {source_artifact_ref!r}"
                 )
             return source_catalog
-        raise CapabilityMissingError(
+        raise _capability_missing(
             "ServingIntegration.start(LocalSourceBootstrap) requires "
-            "IntegrationHost.source_catalog when recipe is not supplied"
+            "IntegrationHost.source_catalog when recipe is not supplied",
+            level="level2-local-bootstrap",
+            capability="source_catalog",
+            operation="local_bootstrap.source_catalog",
+            required_methods=("build_catalog",),
+            next_action=(
+                "Add IntegrationHost(source_catalog=...) or provide a prepared "
+                "recipe through the admin/offline bootstrap path."
+            ),
         )
 
     @staticmethod
@@ -4419,8 +4590,19 @@ class ServingIntegration:
     def _framework_host(self) -> FrameworkHost:
         if self.host is not None:
             return self.host.framework
-        raise CapabilityMissingError(
-            "ServingIntegration requires IntegrationHost.framework"
+        raise _capability_missing(
+            "ServingIntegration requires IntegrationHost.framework",
+            level="level1-runtime",
+            capability="framework",
+            operation="framework_host",
+            required_methods=(
+                "identity",
+                "build_runtime_model",
+                "assert_model_ready_for_runtime_binding",
+            ),
+            next_action=(
+                "Construct ServingRuntimeSession with IntegrationHost.framework."
+            ),
         )
 
     def _framework_identity(
@@ -4442,13 +4624,36 @@ class ServingIntegration:
     def _surface(self) -> TensorSurfaceHost:
         if self.host is not None:
             if self.host.tensor_surface is None:
-                raise CapabilityMissingError(
+                raise _capability_missing(
                     "IntegrationHost requires TensorSurfaceHost for runtime "
-                    "tensor operations"
+                    "tensor operations",
+                    level="level1-runtime",
+                    capability="tensor_surface",
+                    operation="runtime_tensor_surface",
+                    required_methods=(
+                        "attach_bound_tensors",
+                        "collect_runtime_tensors",
+                        "compute_runtime_tensor_schema_hash",
+                    ),
+                    next_action=(
+                        "Pass IntegrationHost(tensor_surface=...) or use "
+                        "TorchTensorHost for PyTorch module carriers."
+                    ),
                 )
             return self.host.tensor_surface
-        raise CapabilityMissingError(
-            "ServingIntegration requires IntegrationHost.tensor_surface"
+        raise _capability_missing(
+            "ServingIntegration requires IntegrationHost.tensor_surface",
+            level="level1-runtime",
+            capability="tensor_surface",
+            operation="runtime_tensor_surface",
+            required_methods=(
+                "attach_bound_tensors",
+                "collect_runtime_tensors",
+                "compute_runtime_tensor_schema_hash",
+            ),
+            next_action=(
+                "Construct ServingRuntimeSession with IntegrationHost.tensor_surface."
+            ),
         )
 
     @staticmethod
@@ -4592,9 +4797,17 @@ class ServingIntegration:
         host = self._framework_host()
         trace = getattr(host, "trace_model_load", None)
         if not callable(trace):
-            raise CapabilityMissingError(
+            raise _capability_missing(
                 "ServingIntegration host requires RecipeTraceHost."
-                "trace_model_load on recipe cache miss"
+                "trace_model_load on recipe cache miss",
+                level="level2-local-bootstrap",
+                capability="recipe_trace",
+                operation="local_bootstrap.trace_model_load",
+                required_methods=("trace_model_load",),
+                next_action=(
+                    "Implement RecipeTraceHost.trace_model_load or precompute "
+                    "a recipe through the admin/offline builder path."
+                ),
             )
         return cast(
             TracePlan,
@@ -4633,9 +4846,17 @@ class ServingIntegration:
         host = self._framework_host()
         native_load = getattr(host, "native_load_weights", None)
         if not callable(native_load):
-            raise CapabilityMissingError(
+            raise _capability_missing(
                 "ServingIntegration host requires NativeLoadHost for native "
-                "checkpoint/source loading"
+                "checkpoint/source loading",
+                level="level2-local-bootstrap",
+                capability="native_load",
+                operation="local_bootstrap.native_load_weights",
+                required_methods=("native_load_weights",),
+                next_action=(
+                    "Implement NativeLoadHost.native_load_weights for source "
+                    "bootstrap cache misses."
+                ),
             )
         native_load(model, weights)
 
@@ -4831,8 +5052,16 @@ class ServingIntegration:
 
     def _materializer(self) -> RuntimeBindingMaterialization:
         if self.host is None:
-            raise CapabilityMissingError(
-                "ServingIntegration runtime materialization requires IntegrationHost"
+            raise _capability_missing(
+                "ServingIntegration runtime materialization requires IntegrationHost",
+                level="level1-runtime",
+                capability="integration_host",
+                operation="runtime_materialization",
+                required_methods=("framework", "placement", "tensor_surface"),
+                next_action=(
+                    "Construct ServingRuntimeSession with an IntegrationHost "
+                    "instead of calling lifecycle helpers without host facts."
+                ),
             )
         return RuntimeBindingMaterialization(
             host=self.host,
@@ -4858,6 +5087,11 @@ class ServingIntegration:
         diagnostics = {}
         if execution_diagnostics is not None:
             diagnostics["execution"] = execution_diagnostics
+            source_selection = source_selection_projection_from_execution_diagnostics(
+                execution_diagnostics
+            )
+            if source_selection is not None:
+                diagnostics["source_selection"] = source_selection
         if serving_build_digest:
             diagnostics["serving_build_digest"] = str(serving_build_digest)
         binding_value_ref = getattr(binding_handle, "current_value", None)
@@ -6121,6 +6355,8 @@ __all__ = [
     "resolve_source_artifact_ref",
     "restore_prepared_local_ready_binding",
     "restore_retained_binding",
+    "source_selection_projection_from_execution_diagnostics",
+    "source_selection_projection_from_materialization_diagnostics",
     "source_subject_broadcast_payload",
     "source_subject_from_broadcast_payload",
     "source_subject_slice_count",

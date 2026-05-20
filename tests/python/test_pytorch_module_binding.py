@@ -1,5 +1,7 @@
 #  Copyright (c) 2026, TensorCast Team.
 
+from collections.abc import Mapping
+
 import pytest
 import torch
 from torch import nn
@@ -17,6 +19,7 @@ from tensorcast.pytorch.module_binding import (
     snapshot_tensor_invariants,
     validate_tensor_invariants,
 )
+from tensorcast.serving.hosts import TorchTensorHost
 
 
 class _TaggedParameter(nn.Parameter):
@@ -291,3 +294,74 @@ def test_torch_module_adapter_mixin_provides_default_binding_ops() -> None:
     assert set(allocated) == {"runtime_only"}
     invariants = adapter.snapshot_tensor_invariants({"w": model.w})
     adapter.validate_tensor_invariants(invariants, {"w": model.w})
+
+
+def test_torch_module_adapter_mixin_rehydrates_runtime_only_tensors(
+) -> None:
+
+    class _Adapter(TorchModuleAdapterMixin):
+
+        def runtime_only_tensor_names(self,
+                                      model: nn.Module) -> tuple[str, ...]:
+            del model
+            return ("runtime_only", )
+
+        def rehydrate_runtime_only_tensors(
+            self,
+            model: nn.Module,
+            allocated: Mapping[str, torch.Tensor],
+            target_device: torch.device,
+        ) -> Mapping[str, torch.Tensor]:
+            assert set(allocated) == {"runtime_only"}
+            tensor = torch.full((2, ), 7.0, device=target_device)
+            model._buffers["runtime_only"] = tensor
+            return {"runtime_only": tensor}
+
+    model = nn.Module()
+    model.register_buffer(
+        "runtime_only",
+        torch.empty((2, ), device="meta", dtype=torch.float32),
+    )
+
+    allocated = _Adapter().allocate_runtime_only_tensors(
+        model,
+        torch.device("cpu"),
+    )
+
+    assert torch.equal(model.runtime_only, torch.full((2, ), 7.0))
+    assert torch.equal(allocated["runtime_only"], torch.full((2, ), 7.0))
+
+
+def test_torch_tensor_host_rehydrates_runtime_only_tensors() -> None:
+
+    class _Surface(TorchTensorHost):
+
+        def runtime_only_tensor_names(self,
+                                      model: object) -> tuple[str, ...]:
+            del model
+            return ("runtime_only", )
+
+        def rehydrate_runtime_only_tensors(
+            self,
+            model: object,
+            allocated: Mapping[str, object],
+            target_device: object,
+        ) -> Mapping[str, object]:
+            del allocated
+            tensor = torch.full((2, ), 11.0, device=target_device)
+            model._buffers["runtime_only"] = tensor
+            return {"runtime_only": tensor}
+
+    model = nn.Module()
+    model.register_buffer(
+        "runtime_only",
+        torch.empty((2, ), device="meta", dtype=torch.float32),
+    )
+
+    allocated = _Surface().allocate_runtime_only_tensors(
+        model,
+        torch.device("cpu"),
+    )
+
+    assert torch.equal(model.runtime_only, torch.full((2, ), 11.0))
+    assert torch.equal(allocated["runtime_only"], torch.full((2, ), 11.0))

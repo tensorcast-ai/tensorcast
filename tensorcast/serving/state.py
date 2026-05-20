@@ -259,9 +259,123 @@ class ModelAttributeRuntimeState:
         setattr(model, self.names.runtime_binding_exclude_names, tuple(sorted(merged)))
 
 
+@dataclass(frozen=True)
+class RuntimeAttachmentRecord:
+    """Snapshot of key-value runtime attachment state."""
+
+    attachment: RuntimeAttachment | None = None
+    failure: str | None = None
+    failure_generation: tuple[object, ...] | None = None
+
+
+class RuntimeAttachmentStore:
+    """Thread-safe key-value attachment store for non model-object frameworks."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._records: dict[object, RuntimeAttachmentRecord] = {}
+
+    def get_record(self, key: object) -> RuntimeAttachmentRecord:
+        with self._lock:
+            return self._records.get(key, RuntimeAttachmentRecord())
+
+    def get_runtime_attachment(self, key: object) -> RuntimeAttachment | None:
+        return self.get_record(key).attachment
+
+    def attach_runtime_attachment(
+        self,
+        key: object,
+        attachment: RuntimeAttachment,
+        *,
+        clear_failure: bool = True,
+    ) -> None:
+        with self._lock:
+            record = self._records.get(key, RuntimeAttachmentRecord())
+            failure = record.failure
+            failure_generation = record.failure_generation
+            if clear_failure:
+                failure = None
+                failure_generation = None
+            self._records[key] = RuntimeAttachmentRecord(
+                attachment=attachment,
+                failure=failure,
+                failure_generation=failure_generation,
+            )
+
+    def compare_and_attach_runtime_attachment(
+        self,
+        key: object,
+        *,
+        expected_attachment: RuntimeAttachment,
+        replacement_attachment: RuntimeAttachment,
+        clear_failure_for_generation: bool = False,
+    ) -> bool:
+        with self._lock:
+            record = self._records.get(key, RuntimeAttachmentRecord())
+            if record.attachment is not expected_attachment:
+                return False
+            failure = record.failure
+            failure_generation = record.failure_generation
+            if clear_failure_for_generation and failure_generation == (
+                attachment_generation_key(expected_attachment)
+            ):
+                failure = None
+                failure_generation = None
+            self._records[key] = RuntimeAttachmentRecord(
+                attachment=replacement_attachment,
+                failure=failure,
+                failure_generation=failure_generation,
+            )
+            return True
+
+    def mark_failure(
+        self,
+        key: object,
+        exc: BaseException,
+        *,
+        attachment: RuntimeAttachment | None = None,
+    ) -> None:
+        with self._lock:
+            record = self._records.get(key, RuntimeAttachmentRecord())
+            self._records[key] = RuntimeAttachmentRecord(
+                attachment=record.attachment,
+                failure=str(exc),
+                failure_generation=attachment_generation_key(attachment),
+            )
+
+    def clear_failure(
+        self,
+        key: object,
+        *,
+        attachment: RuntimeAttachment | None = None,
+    ) -> None:
+        with self._lock:
+            record = self._records.get(key, RuntimeAttachmentRecord())
+            if (
+                attachment is not None
+                and record.failure_generation is not None
+                and record.failure_generation != attachment_generation_key(attachment)
+            ):
+                return
+            self._records[key] = RuntimeAttachmentRecord(
+                attachment=record.attachment,
+                failure=None,
+                failure_generation=None,
+            )
+
+    def get_failure(self, key: object) -> str | None:
+        return self.get_record(key).failure
+
+    def discard(self, key: object) -> None:
+        with self._lock:
+            self._records.pop(key, None)
+
+
 __all__ = [
     "ModelAttributeNames",
     "ModelAttributeRuntimeState",
     "OneShotRuntimeHook",
+    "RuntimeAttachmentRecord",
+    "RuntimeAttachmentStore",
     "attachment_generation_key",
 ]

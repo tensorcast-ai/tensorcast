@@ -640,3 +640,24 @@ def test_fake_second_framework_runtime_conformance_kit():
     assert retained.checks["failure_path_used_retained_restore"]
     assert retained.checks["failure_cleanup_closes_untransferred_handle"]
     assert retained.checks["rejects_arbitrary_retained_authority"]
+
+
+def test_conformance_failure_summary_includes_onboarding_hint():
+    from tensorcast.serving.testing import ConformanceResult
+
+    result = ConformanceResult(
+        checks={"direct_start": False},
+        messages={"direct_start": "provide a tensor surface"},
+        level="level1-runtime",
+    )
+
+    try:
+        result.assert_passed()
+    except AssertionError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected conformance failure")
+
+    assert "level1-runtime" in message
+    assert "direct_start" in message
+    assert "provide a tensor surface" in message

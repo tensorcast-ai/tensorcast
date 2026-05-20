@@ -97,6 +97,8 @@ from tensorcast.serving.integration import (
     restore_retained_binding,
     runtime_binding_state_from_runtime_view,
     serving_placement_from_framework_facts,
+    source_selection_projection_from_execution_diagnostics,
+    source_selection_projection_from_materialization_diagnostics,
     source_subject_broadcast_payload,
     source_subject_from_broadcast_payload,
     swap_serving_artifact,
@@ -757,6 +759,100 @@ def test_runtime_worker_view_accepts_typed_source_selection_projection():
     }
 
 
+def test_source_selection_projection_from_materialization_diagnostics():
+    p2p = source_selection_projection_from_materialization_diagnostics(
+        SimpleNamespace(
+            source="p2p",
+            total_bytes=4096,
+            replica_uuid="local-replica",
+            ticket_replica_uuid="source-replica",
+            retry_attempts=2,
+            retry_reason_buckets={"source_visibility_stale": 1},
+        )
+    )
+
+    assert p2p is not None
+    assert p2p.to_dict() == {
+        "schema_version": 1,
+        "selected_source_kind": "published_memory_replica",
+        "selected_replica_id": "source-replica",
+        "p2p_bytes": 4096,
+        "fallback_bytes": 0,
+        "disk_bytes": 0,
+        "reselection_attempts": 1,
+        "reject_reason_bucket": "source_visibility_stale",
+    }
+
+    disk = source_selection_projection_from_materialization_diagnostics(
+        SimpleNamespace(
+            source="disk",
+            total_bytes=2048,
+            retry_attempts=3,
+            retry_reason_buckets={"transport_unavailable": 2},
+        )
+    )
+
+    assert disk is not None
+    assert disk.to_dict() == {
+        "schema_version": 1,
+        "selected_source_kind": "canonical_fallback",
+        "p2p_bytes": 0,
+        "fallback_bytes": 2048,
+        "disk_bytes": 2048,
+        "reselection_attempts": 2,
+        "fallback_reason_bucket": "transport_unavailable",
+    }
+
+
+def test_execution_diagnostics_seed_runtime_source_selection_projection():
+    projection = source_selection_projection_from_execution_diagnostics(
+        SimpleNamespace(
+            actual_collective_committed_bytes=4096,
+            collective_peer_transfer_bytes=1024,
+            fallback_bytes=0,
+        )
+    )
+    assert projection is not None
+    assert projection.to_dict() == {
+        "schema_version": 1,
+        "selected_source_kind": "published_memory_replica",
+        "p2p_bytes": 1024,
+        "fallback_bytes": 0,
+        "disk_bytes": 0,
+        "reselection_attempts": 0,
+    }
+
+    resolved = SimpleNamespace(
+        artifact_ref="mi2:serving",
+        manifest=SimpleNamespace(
+            representation_contract_hash="repr",
+            source_artifact_ref="mi2:source",
+            serving_build_digest="build",
+        ),
+    )
+    seed = ServingIntegration._state_seed(
+        resolved,
+        tensor_schema_hash="schema",
+        execution_diagnostics=SimpleNamespace(
+            actual_collective_committed_bytes=4096,
+            collective_peer_transfer_bytes=1024,
+            fallback_bytes=0,
+        ),
+        binding_handle=SimpleNamespace(current_value=None),
+    )
+    worker_view = RuntimeWorkerView.from_runtime_view(seed.runtime_view())
+    payload = worker_view.endpoint.to_weight_version_payload()
+
+    assert payload["source_selection"] == {
+        "schema_version": 1,
+        "selected_source_kind": "published_memory_replica",
+        "p2p_bytes": 1024,
+        "fallback_bytes": 0,
+        "disk_bytes": 0,
+        "reselection_attempts": 0,
+    }
+
+
 def test_local_bootstrap_requires_host_source_catalog_provider():
     service = ServingIntegration(host=IntegrationHost(
         framework=_ContractFrameworkHost(),
@@ -768,7 +864,7 @@ def test_local_bootstrap_requires_host_source_catalog_provider():
     )
 
     with pytest.raises(CapabilityMissingError,
-                       match="IntegrationHost.source_catalog"):
+                       match="IntegrationHost.source_catalog") as exc_info:
         service._local_ready_source_catalog(
             _LocalReadyBootstrap(
                 source_selector=SourceSelector.local_path("/tmp/model"),
@@ -778,6 +874,11 @@ def test_local_bootstrap_requires_host_source_catalog_provider():
             source_subject=source_subject,
             source_artifact_ref="mi2:source",
         )
+    assert exc_info.value.details["level"] == "level2-local-bootstrap"
+    assert exc_info.value.details["capability"] == "source_catalog"
+    assert exc_info.value.details["operation"] == \
+        "local_bootstrap.source_catalog"
+    assert exc_info.value.details["required_methods"] == ("build_catalog", )
 
 
 def test_source_catalog_provider_uses_integration_host():
@@ -1043,7 +1144,8 @@ def test_host_start_fails_clearly_without_tensor_surface():
         ),
     )
 
-    with pytest.raises(ServingIntegrationError, match="TensorSurfaceHost"):
+    with pytest.raises(ServingIntegrationError,
+                       match="TensorSurfaceHost") as exc_info:
         service.start(
             ExistingServingArtifact(
                 ServingArtifactSelector.artifact_ref("mi2:serving")),
@@ -1053,6 +1155,10 @@ def test_host_start_fails_clearly_without_tensor_surface():
                 target_device=torch.device("cpu"),
             ),
         )
+    assert isinstance(exc_info.value, CapabilityMissingError)
+    assert exc_info.value.details["level"] == "level1-runtime"
+    assert exc_info.value.details["capability"] == "tensor_surface"
+    assert exc_info.value.details["operation"] == "runtime_tensor_surface"
 
 
 def test_integration_host_delegates_recipe_trace_capabilities():
