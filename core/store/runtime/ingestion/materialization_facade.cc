@@ -417,10 +417,16 @@ uint64_t planned_generic_backend_bytes_after_local_mapped(const strategy::Source
       summary.planned_collective_candidate_bytes > summary.planned_collective_admitted_bytes
       ? summary.planned_collective_candidate_bytes - summary.planned_collective_admitted_bytes
       : 0;
-  if (summary.planned_generic_residual_bytes > std::numeric_limits<uint64_t>::max() - non_admitted_collective_bytes) {
+  if (summary.planned_non_admitted_typed_bytes > std::numeric_limits<uint64_t>::max() - non_admitted_collective_bytes) {
     return std::numeric_limits<uint64_t>::max();
   }
-  return non_admitted_collective_bytes + summary.planned_generic_residual_bytes;
+  const uint64_t local_mapped_fallback_candidate_bytes =
+      non_admitted_collective_bytes + summary.planned_non_admitted_typed_bytes;
+  if (summary.planned_generic_residual_bytes >
+      std::numeric_limits<uint64_t>::max() - local_mapped_fallback_candidate_bytes) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return local_mapped_fallback_candidate_bytes + summary.planned_generic_residual_bytes;
 }
 
 std::string format_reject_reason_buckets(const absl::flat_hash_map<std::string, uint64_t>& buckets) {

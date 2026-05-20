@@ -319,6 +319,8 @@ _PUBLIC_RUNTIME_EXPORTS = {
     "ServingRuntimeSession",
     "ReplicaPublicationPolicy",
     "SourceSelectionProjection",
+    "source_selection_projection_from_execution_diagnostics",
+    "source_selection_projection_from_materialization_diagnostics",
     "SourceProviderError",
     "SourceSelector",
     "TensorCastServingRuntimeError",
@@ -347,7 +349,14 @@ _PUBLIC_STATE_EXPORTS = {
     "ModelAttributeNames",
     "ModelAttributeRuntimeState",
     "OneShotRuntimeHook",
+    "RuntimeAttachmentRecord",
+    "RuntimeAttachmentStore",
     "attachment_generation_key",
+}
+
+_PUBLIC_RUNTIME_VIEW_EXPORTS = {
+    "aggregate_runtime_view_outputs",
+    "publication_aggregate",
 }
 
 
@@ -380,6 +389,10 @@ def __getattr__(name: str) -> object:
         from tensorcast.serving import state as tc_state
 
         return getattr(tc_state, name)
+    if name in _PUBLIC_RUNTIME_VIEW_EXPORTS:
+        from tensorcast.serving import runtime_view as tc_runtime_view
+
+        return getattr(tc_runtime_view, name)
     raise AttributeError(
         f"module 'tensorcast.serving.runtime' has no attribute {name!r}"
     )
@@ -413,6 +426,8 @@ __all__ = [  # noqa: F822 - names are resolved lazily by __getattr__.
     "ModelAttributeNames",
     "ModelAttributeRuntimeState",
     "OneShotRuntimeHook",
+    "RuntimeAttachmentRecord",
+    "RuntimeAttachmentStore",
     "RuntimeSettings",
     "RuntimeSwapError",
     "RuntimeWorkerView",
@@ -425,12 +440,15 @@ __all__ = [  # noqa: F822 - names are resolved lazily by __getattr__.
     "ServingRuntimeSession",
     "ReplicaPublicationPolicy",
     "SourceSelectionProjection",
+    "source_selection_projection_from_execution_diagnostics",
+    "source_selection_projection_from_materialization_diagnostics",
     "SourceProviderError",
     "SourceSelector",
     "TensorCastServingRuntimeError",
     "WeightVersionProjection",
     "ReadinessInventoryAdmissionPolicy",
     "attachment_generation_key",
+    "aggregate_runtime_view_outputs",
     "coerce_finalize_class",
     "coerce_serving_support_level",
     "is_binding_finalize_publication_allowlisted",
@@ -446,4 +464,5 @@ __all__ = [  # noqa: F822 - names are resolved lazily by __getattr__.
     "resolve_runtime_config_profile",
     "serving_support_level_at_least",
     "serving_support_level_display_name",
+    "publication_aggregate",
 ]

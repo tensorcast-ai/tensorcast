@@ -506,6 +506,10 @@ Required interpretation:
   tensor set; TensorCast must not guess it,
 - `runtime_only_tensor_names` is authoritative for tensors that must not enter
   the serving artifact's canonical schema,
+- runtime-only tensors still need explicit runtime semantics: TensorCast may
+  allocate storage for unbound meta tensors, and frameworks may rehydrate
+  deterministic derived buffers through the tensor surface without changing
+  canonical serving bytes,
 - `adapter_version` and `serving_abi_version` are builder/publication identity
   inputs above the `0110` semantic core,
 - and `finalize_class` answers whether builder or runtime may rely on any
@@ -809,7 +813,8 @@ In particular:
 - physical execution topology, routing, communicator channels, and rank-to-device
   placement remain out of scope,
 - runtime-only derived state that does not affect canonical serving bytes must
-  not perturb either digest,
+  not perturb either digest; deterministic rehydration of such state is a
+  tensor-surface/runtime responsibility, not a second artifact identity,
 - and if a field already participates in `representation_contract_hash`, it must
   not be silently renormalized under a different meaning in
   `serving_build_digest`.

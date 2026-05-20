@@ -1,5 +1,4 @@
 #  Copyright (c) 2026, TensorCast Team.
-
 """Serving builder primitives shared by framework integrations."""
 
 from tensorcast.serving.builder.binding_plan import (
@@ -73,6 +72,17 @@ from tensorcast.serving.builder.recipe_validation import (
 from tensorcast.serving.builder.semantic_validation import (
     evaluate_semantic_validation_spec,
 )
+from tensorcast.serving.builder.tensor_parity import (
+    TensorParityMismatch,
+    TensorParityProbe,
+    TensorParityReport,
+    build_tensor_parity_probes_from_realization_plan,
+    build_tensor_parity_probes_from_realization_plan_proto,
+    build_tensor_parity_probes_from_recipe,
+    build_tensor_parity_probes_from_trace_plan,
+    evaluate_recipe_tensor_parity,
+    evaluate_tensor_parity_probes,
+)
 from tensorcast.serving.builder.tensor_schema import (
     validate_tensor_schema_against_tensors,
 )
@@ -133,6 +143,9 @@ __all__ = [
     "TRACE_PLAN_CACHE_PAYLOAD_VERSION",
     "TracePlan",
     "TensorSchemaEntry",
+    "TensorParityMismatch",
+    "TensorParityProbe",
+    "TensorParityReport",
     "TensorcastLogicalTopology",
     "TensorcastSemanticValidationSpec",
     "TensorcastServingFacts",
@@ -146,6 +159,10 @@ __all__ = [
     "build_pure_transform_publication_spec_from_context",
     "build_pure_transform_serving_args_from_context",
     "build_recipe_serving_build_intent",
+    "build_tensor_parity_probes_from_realization_plan",
+    "build_tensor_parity_probes_from_realization_plan_proto",
+    "build_tensor_parity_probes_from_recipe",
+    "build_tensor_parity_probes_from_trace_plan",
     "collect_serving_tensors_from_model",
     "compile_serving_recipe",
     "complete_pure_transform_recipe_publication",
@@ -158,6 +175,8 @@ __all__ = [
     "dump_trace_plan_debug",
     "dtype_from_string",
     "evaluate_semantic_validation_spec",
+    "evaluate_recipe_tensor_parity",
+    "evaluate_tensor_parity_probes",
     "iter_ranges",
     "load_source_tensors_for_recipe",
     "lower_trace_plan_for_binding",

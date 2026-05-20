@@ -80,6 +80,14 @@ _RUNTIME_EXPORTS = {
         "tensorcast.serving.integration",
         "SourceSelectionProjection",
     ),
+    "source_selection_projection_from_execution_diagnostics": (
+        "tensorcast.serving.integration",
+        "source_selection_projection_from_execution_diagnostics",
+    ),
+    "source_selection_projection_from_materialization_diagnostics": (
+        "tensorcast.serving.integration",
+        "source_selection_projection_from_materialization_diagnostics",
+    ),
     "SourceProviderError": ("tensorcast.serving.integration", "SourceProviderError"),
     "TensorCastServingRuntimeError": (
         "tensorcast.serving.integration",
@@ -221,9 +229,28 @@ _STATE_EXPORTS = {
         "ModelAttributeRuntimeState",
     ),
     "OneShotRuntimeHook": ("tensorcast.serving.state", "OneShotRuntimeHook"),
+    "RuntimeAttachmentRecord": (
+        "tensorcast.serving.state",
+        "RuntimeAttachmentRecord",
+    ),
+    "RuntimeAttachmentStore": (
+        "tensorcast.serving.state",
+        "RuntimeAttachmentStore",
+    ),
     "attachment_generation_key": (
         "tensorcast.serving.state",
         "attachment_generation_key",
+    ),
+}
+
+_RUNTIME_VIEW_EXPORTS = {
+    "aggregate_runtime_view_outputs": (
+        "tensorcast.serving.runtime_view",
+        "aggregate_runtime_view_outputs",
+    ),
+    "publication_aggregate": (
+        "tensorcast.serving.runtime_view",
+        "publication_aggregate",
     ),
 }
 
@@ -332,6 +359,7 @@ _CURATED_EXPORTS = {
     **_CONFIG_EXPORTS,
     **_READINESS_EXPORTS,
     **_STATE_EXPORTS,
+    **_RUNTIME_VIEW_EXPORTS,
     **_TESTING_EXPORTS,
     **_SCHEMA_EXPORTS,
     **_DTO_EXPORTS,

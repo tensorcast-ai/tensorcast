@@ -183,6 +183,13 @@ class TensorSurfaceHost(Protocol):
         target_device: object,
     ) -> Mapping[str, object]: ...
 
+    def rehydrate_runtime_only_tensors(
+        self,
+        model: object,
+        allocated: Mapping[str, object],
+        target_device: object,
+    ) -> Mapping[str, object]: ...
+
     def snapshot_tensor_invariants(
         self,
         tensors: Mapping[str, object],
@@ -297,11 +304,23 @@ class TorchTensorHost:
 
         from tensorcast.pytorch import module_binding as tc_module_binding
 
-        return tc_module_binding.allocate_unbound_module_tensors(
+        device = torch.device(target_device)
+        allocated = tc_module_binding.allocate_unbound_module_tensors(
             cast(Any, model),
             self.runtime_only_tensor_names(model),
-            target_device=torch.device(target_device),
+            target_device=device,
         )
+        allocated.update(self.rehydrate_runtime_only_tensors(model, allocated, device))
+        return allocated
+
+    def rehydrate_runtime_only_tensors(
+        self,
+        model: object,
+        allocated: Mapping[str, object],
+        target_device: Any,
+    ) -> Mapping[str, object]:
+        del model, allocated, target_device
+        return {}
 
     def snapshot_tensor_invariants(
         self,

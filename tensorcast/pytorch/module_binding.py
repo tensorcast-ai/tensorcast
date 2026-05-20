@@ -395,11 +395,28 @@ class TorchModuleAdapterMixin:
         model: nn.Module,
         target_device: torch.device,
     ) -> dict[str, torch.Tensor]:
-        return allocate_unbound_module_tensors(
+        allocated = allocate_unbound_module_tensors(
             model,
             self.runtime_only_tensor_names(model),
             target_device=target_device,
         )
+        allocated.update(
+            self.rehydrate_runtime_only_tensors(
+                model,
+                allocated,
+                target_device,
+            )
+        )
+        return allocated
+
+    def rehydrate_runtime_only_tensors(
+        self,
+        model: nn.Module,
+        allocated: Mapping[str, torch.Tensor],
+        target_device: torch.device,
+    ) -> Mapping[str, torch.Tensor]:
+        del model, allocated, target_device
+        return {}
 
     def snapshot_tensor_invariants(
         self,

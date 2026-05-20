@@ -3721,6 +3721,223 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "MaterializationFacade continues generic residual after partial local mapped typed execution",
+    "[materialization_facade][local_mapped]") {
+  SKIP_IF_NO_CUDA();
+
+  auto artifact_root = make_temp_dir("materialization_facade_local_mapped_partial_residual");
+  std::vector<unsigned char> payload(8);
+  for (size_t index = 0; index < payload.size(); ++index) {
+    payload[index] = static_cast<unsigned char>(0x60 + index);
+  }
+  create_safetensors_file(
+      artifact_root / "weights.safetensors",
+      "{\"rep\":{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[0,4]},"
+      "\"src3d\":{\"dtype\":\"U8\",\"shape\":[2,2,1],\"data_offsets\":[4,8]}}",
+      payload);
+
+  auto opts = MakeOptions(artifact_root);
+  opts.materialization_strategy.allow_mixed_execution = true;
+  opts.materialization_strategy.enable_tensor_aware_mapped_executor = true;
+  opts.materialization_strategy.enable_mapped_concat_jobs = true;
+  opts.materialization_strategy.enable_mapped_concat_execution = true;
+  FacadeHarness harness(opts);
+  harness.initialize();
+
+  void* gpu_buffer = nullptr;
+  REQUIRE(tensorcast::cuda::malloc(&gpu_buffer, 8).ok());
+  absl::Cleanup free_gpu = [&]() {
+    auto st = tensorcast::cuda::free(gpu_buffer);
+    (void)st;
+  };
+  std::array<uint8_t, 8> initial{};
+  initial.fill(0xEE);
+  REQUIRE(tensorcast::cuda::memcpy(gpu_buffer, initial.data(), initial.size(), cudaMemcpyHostToDevice).ok());
+
+  loading::IntoTargetLayout target_layout{
+      .storages =
+          {
+              loading::IntoTargetStorage{
+                  .base_ptr = gsl::not_null<void*>{gpu_buffer},
+                  .length = 8,
+              },
+          },
+      .total_size = 8,
+  };
+
+  tensorcast::store::loader::ByteRangeMap executor_map;
+  executor_map.total_bytes = 8;
+  executor_map.num_sources = 1;
+  executor_map.segments = {
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 0,
+          .length = 4,
+          .src_offset = 0,
+          .source_index = 0,
+      },
+      tensorcast::store::loader::ByteRangeSegment{
+          .kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = 4,
+          .length = 4,
+          .src_offset = 4,
+          .source_index = 0,
+      },
+  };
+
+  tensorcast::store::runtime::ingestion::strategy::ResolvedMaterializationPlan resolved_plan;
+  resolved_plan.artifact_id = "cgid:local_mapped_partial_residual";
+  resolved_plan.generation = 1;
+  resolved_plan.canonical_index_json =
+      R"({"rep_dst":[0,4,[4],[1],"torch.uint8",0],"dst":[4,4,[2,2],[2,1],"torch.uint8",0]})";
+  resolved_plan.target_layout = target_layout;
+  tensorcast::common::v1::ByteSpaceRef byte_space;
+  byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  resolved_plan.representation_transform_contract =
+      tensorcast::store::materialization::contracts::RepresentationTransformContract{
+          .source_byte_space = byte_space,
+          .target_representation =
+              {.family = "ephemeral_into_target",
+               .realization_kind =
+                   tensorcast::store::materialization::contracts::RealizationKind::kEphemeralIntoTarget},
+      };
+
+  const auto rep_src_spec = tensorcast::store::materialization::contracts::RepresentationTensorSpec{
+      .name = "rep",
+      .shape = {4},
+      .stride = {1},
+      .dtype = "torch.uint8",
+      .logical_offset = 0,
+      .logical_length = 4,
+      .storage_offset = 0,
+      .element_size = 1,
+  };
+  const auto rep_dst_spec = tensorcast::store::materialization::contracts::RepresentationTensorSpec{
+      .name = "rep_dst",
+      .shape = {4},
+      .stride = {1},
+      .dtype = "torch.uint8",
+      .logical_offset = 0,
+      .logical_length = 4,
+      .storage_offset = 0,
+      .element_size = 1,
+  };
+  tensorcast::store::materialization::contracts::RepresentationWorkItem replicated;
+  replicated.kind = tensorcast::store::materialization::contracts::RepresentationWorkItemKind::kTensorCopy;
+  replicated.partition_kind = tensorcast::store::materialization::contracts::WorkPartitionKind::kReplicated;
+  replicated.dst_name = "rep_dst";
+  replicated.dst_spec = rep_dst_spec;
+  replicated.committed_bytes = 4;
+  replicated.sources.push_back(
+      tensorcast::store::materialization::contracts::RepresentationWorkSourceFragment{
+          .fragment =
+              tensorcast::store::materialization::contracts::SourceFragment{
+                  .source_spec = rep_src_spec,
+                  .source_range = tensorcast::store::materialization::contracts::TensorCoordinateSpec{},
+                  .destination_range = tensorcast::store::materialization::contracts::TensorCoordinateSpec{},
+              },
+      });
+
+  const auto src3d_spec = tensorcast::store::materialization::contracts::RepresentationTensorSpec{
+      .name = "src3d",
+      .shape = {2, 2, 1},
+      .stride = {2, 1, 1},
+      .dtype = "torch.uint8",
+      .logical_offset = 4,
+      .logical_length = 4,
+      .storage_offset = 0,
+      .element_size = 1,
+  };
+  const auto dst_spec = tensorcast::store::materialization::contracts::RepresentationTensorSpec{
+      .name = "dst",
+      .shape = {2, 2},
+      .stride = {2, 1},
+      .dtype = "torch.uint8",
+      .logical_offset = 4,
+      .logical_length = 4,
+      .storage_offset = 0,
+      .element_size = 1,
+  };
+  tensorcast::store::materialization::contracts::RepresentationWorkItem unsupported_typed;
+  unsupported_typed.kind = tensorcast::store::materialization::contracts::RepresentationWorkItemKind::kTensorCopy;
+  unsupported_typed.partition_kind = tensorcast::store::materialization::contracts::WorkPartitionKind::kUnknown;
+  unsupported_typed.dst_name = "dst";
+  unsupported_typed.dst_spec = dst_spec;
+  unsupported_typed.committed_bytes = 4;
+  unsupported_typed.sources.push_back(
+      tensorcast::store::materialization::contracts::RepresentationWorkSourceFragment{
+          .fragment =
+              tensorcast::store::materialization::contracts::SourceFragment{
+                  .source_spec = src3d_spec,
+                  .source_range =
+                      tensorcast::store::materialization::contracts::TensorCoordinateSpec{
+                          .axes =
+                              {
+                                  tensorcast::store::materialization::contracts::TensorAxisRange{
+                                      .dim = 0, .start = 0, .end = 2},
+                                  tensorcast::store::materialization::contracts::TensorAxisRange{
+                                      .dim = 1, .start = 0, .end = 2},
+                                  tensorcast::store::materialization::contracts::TensorAxisRange{
+                                      .dim = 2, .start = 0, .end = 1},
+                              },
+                      },
+                  .destination_range =
+                      tensorcast::store::materialization::contracts::TensorCoordinateSpec{
+                          .axes =
+                              {
+                                  tensorcast::store::materialization::contracts::TensorAxisRange{
+                                      .dim = 0, .start = 0, .end = 2},
+                                  tensorcast::store::materialization::contracts::TensorAxisRange{
+                                      .dim = 1, .start = 0, .end = 2},
+                              },
+                      },
+              },
+      });
+  resolved_plan.representation_work_plan = tensorcast::store::materialization::contracts::RepresentationWorkPlan{
+      .items = {replicated, unsupported_typed},
+  };
+
+  auto prepared_execution = make_prepared_source_bound_execution_plan(resolved_plan, executor_map);
+  prepared_execution.strategy_plan = make_source_bound_strategy_plan(
+      tensorcast::store::runtime::ingestion::strategy::SourceBoundExecutionMode::kLocalMappedTyped,
+      tensorcast::store::runtime::ingestion::strategy::SourceBoundLanePlan{
+          .generic_backend_map = executor_map,
+          .deferred_typed_bytes = 4,
+          .selection_reason = "local_mapped_typed",
+      },
+      tensorcast::store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary{
+          .execution_plan_kind = "local_mapped_typed",
+          .planned_non_admitted_typed_bytes = 4,
+      });
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = resolved_plan.artifact_id;
+  DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  auto result_or = harness.facade->materialize_mapped_into_target(
+      target_device,
+      prepared_execution,
+      hints,
+      loading::DiskSource{.path = artifact_root, .expected_size = std::nullopt});
+  REQUIRE(result_or.ok());
+  CHECK(result_or->fallback_bytes == 4);
+  CHECK(result_or->actual_local_typed_bytes == 4);
+  CHECK(result_or->actual_generic_backend_bytes == 4);
+  CHECK(result_or->committed_bytes == 8);
+  CHECK(result_or->dominant_executor == "TensorMappedLocalExecutor+GenericByteRangeExecutor");
+
+  std::array<uint8_t, 8> actual{};
+  REQUIRE(tensorcast::cuda::memcpy(actual.data(), gpu_buffer, actual.size(), cudaMemcpyDeviceToHost).ok());
+  for (size_t index = 0; index < actual.size(); ++index) {
+    CHECK(actual[index] == payload[index]);
+  }
+
+  harness.shutdown();
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(artifact_root, cleanup_ec);
+}
+
+TEST_CASE(
     "MaterializationFacade does not let local source selection steal explicit collective lane ownership",
     "[materialization_facade]") {
   SKIP_IF_NO_CUDA();

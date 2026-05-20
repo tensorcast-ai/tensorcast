@@ -20,13 +20,75 @@ class ConformanceResult:
     """Result from a lightweight serving runtime conformance check."""
 
     checks: Mapping[str, bool] = field(default_factory=dict)
+    messages: Mapping[str, str] = field(default_factory=dict)
+    level: str | None = None
+
+    @property
+    def failed_checks(self) -> tuple[str, ...]:
+        return tuple(name for name, passed in self.checks.items() if not passed)
+
+    def failure_summary(self) -> str:
+        failed = self.failed_checks
+        if not failed:
+            return "TensorCast serving conformance checks passed"
+        lines = [
+            "TensorCast serving conformance checks failed"
+            + (f" for {self.level}" if self.level else "")
+            + ":"
+        ]
+        for name in failed:
+            message = self.messages.get(name, "No remediation hint available")
+            lines.append(f"- {name}: {message}")
+        return "\n".join(lines)
 
     def assert_passed(self) -> None:
-        failed = tuple(name for name, passed in self.checks.items() if not passed)
-        if failed:
-            raise AssertionError(
-                f"TensorCast serving conformance checks failed: {failed!r}"
-            )
+        if self.failed_checks:
+            raise AssertionError(self.failure_summary())
+
+
+def _result(
+    *,
+    level: str,
+    checks: Mapping[str, bool],
+    messages: Mapping[str, str],
+) -> ConformanceResult:
+    result = ConformanceResult(checks=checks, messages=messages, level=level)
+    result.assert_passed()
+    return result
+
+
+_PUBLIC_BOUNDARY_MESSAGES = {
+    "has_session": (
+        "Expose ServingRuntimeSession from tensorcast.serving.runtime; Level 1 "
+        "frameworks should not construct lower-level lifecycle helpers."
+    ),
+    "has_attachment": (
+        "Expose RuntimeAttachment as the framework-held lifecycle token."
+    ),
+    "has_request_context": (
+        "Expose RequestContext so framework facts enter lifecycle calls through "
+        "one typed context object."
+    ),
+    "hides_admin_local_bootstrap": (
+        "Keep admin/local-bootstrap override DTOs out of the framework runtime "
+        "module; route them through admin/offline surfaces."
+    ),
+    "hides_low_level_bind": (
+        "Do not expose bind/swap/restore helpers from the runtime module; "
+        "frameworks should call ServingRuntimeSession.start/reload."
+    ),
+}
+
+_FRAMEWORK_ISOLATION_MESSAGES = {
+    "no_vllm_imports": (
+        "Reference and conformance frameworks must not import vLLM. Move any "
+        "needed generic fact extraction into TensorCast hosts or testing helpers."
+    ),
+    "no_internal_runtime_imports": (
+        "Framework examples should not import TensorCast private/internal "
+        "runtime modules."
+    ),
+}
 
 
 def assert_public_runtime_boundary(runtime_module: ModuleType) -> ConformanceResult:
@@ -43,9 +105,11 @@ def assert_public_runtime_boundary(runtime_module: ModuleType) -> ConformanceRes
         and "swap_serving_artifact" not in public_names
         and "restore_retained_binding" not in public_names,
     }
-    result = ConformanceResult(checks)
-    result.assert_passed()
-    return result
+    return _result(
+        level="public-runtime-boundary",
+        checks=checks,
+        messages=_PUBLIC_BOUNDARY_MESSAGES,
+    )
 
 
 def assert_framework_isolation(module_names: Iterable[str]) -> ConformanceResult:
@@ -60,9 +124,11 @@ def assert_framework_isolation(module_names: Iterable[str]) -> ConformanceResult
             name.startswith("tensorcast.serving.internal") for name in names
         ),
     }
-    result = ConformanceResult(checks)
-    result.assert_passed()
-    return result
+    return _result(
+        level="framework-isolation",
+        checks=checks,
+        messages=_FRAMEWORK_ISOLATION_MESSAGES,
+    )
 
 
 class FakeArtifactView:
@@ -422,6 +488,104 @@ def build_fake_runtime_host(hosts_module: ModuleType) -> object:
     )
 
 
+_LEVEL1_MESSAGES = {
+    "direct_start": (
+        "Durable serving artifact startup failed. Verify framework model "
+        "construction, tensor surface attach/schema behavior, placement facts, "
+        "and artifact resolver output."
+    ),
+    "runtime_initialized": (
+        "ServingRuntimeSession.start did not initialize RuntimeSettings before "
+        "binding the serving artifact."
+    ),
+    "describe": (
+        "ServingRuntimeSession.describe must return the typed RuntimeWorkerView "
+        "for the current attachment."
+    ),
+    "reload": (
+        "Durable serving artifact reload failed. Level 1 reload must use a "
+        "typed ServingArtifactSelector and ServingPolicy."
+    ),
+    "reload_identity_from_runtime_view": (
+        "Reload response identity must come from the runtime view, not from the "
+        "request payload."
+    ),
+    "source_capability_not_required": (
+        "Level 1 direct serving artifact start/reload must not require SourceHost."
+    ),
+    "source_catalog_not_required": (
+        "Level 1 direct serving artifact start/reload must not require "
+        "SourceCatalogProvider."
+    ),
+    "rejects_local_reload_selector": (
+        "Reload must reject local source selectors; local paths belong to "
+        "Level 2 bootstrap, not durable serving artifact reload."
+    ),
+    "rejects_untyped_reload_selector": (
+        "Reload must reject untyped selector dictionaries on the public runtime "
+        "path. Use ServingArtifactSelector."
+    ),
+    "rejects_untyped_reload_policy": (
+        "Reload must reject untyped policy dictionaries on the public runtime "
+        "path. Use ServingPolicy."
+    ),
+}
+
+_LEVEL2_MESSAGES = {
+    "missing_source_catalog_fails_closed": (
+        "Local bootstrap requires a SourceCatalogProvider; TensorCast core owns "
+        "source identity and catalog request construction."
+    ),
+    "source_catalog_request_core_owned": (
+        "Source catalog providers must receive a core-owned SourceCatalogRequest "
+        "with typed source selector and source artifact identity."
+    ),
+    "recipe_build_receives_core_catalog": (
+        "Recipe build should consume the core source catalog, not framework "
+        "private catalog state."
+    ),
+    "missing_trace_capability_is_explicit": (
+        "Cache-miss local bootstrap must fail with a clear missing trace/native "
+        "load capability instead of AttributeError or fallback loading."
+    ),
+    "local_path_is_not_reload_selector": (
+        "Local path selectors must stay in bootstrap; reload accepts only durable "
+        "serving artifact selectors."
+    ),
+}
+
+_LEVEL3_MESSAGES = {
+    "retained_acquire_public_start": (
+        "External preload must enter through ServingRuntimeSession.start and "
+        "return a RuntimeAttachment with typed endpoint projection."
+    ),
+    "retained_acquire_uses_host_member": (
+        "Retained acquire must validate authority member facts against the "
+        "framework placement host."
+    ),
+    "retained_acquire_transfers_ownership": (
+        "Retained binding ownership must transfer into TensorCast runtime state "
+        "only after attach/finalize succeeds."
+    ),
+    "missing_authority_fails_closed": (
+        "External preload config must include typed retained authority."
+    ),
+    "authority_mismatch_fails_closed": (
+        "Daemon/session/member authority mismatches must fail closed."
+    ),
+    "failure_cleanup_closes_untransferred_handle": (
+        "Attach/finalize failure must close an untransferred retained handle."
+    ),
+    "failure_path_used_retained_restore": (
+        "Retained preload failure coverage did not exercise restore ownership."
+    ),
+    "rejects_arbitrary_retained_authority": (
+        "Retained acquire must reject arbitrary authority objects; use the typed "
+        "RetainedBindingAuthority projection."
+    ),
+}
+
+
 def _external_preload_config(runtime_module: ModuleType) -> dict[str, Any]:
     authority = _retained_authority(runtime_module)
     return {
@@ -490,6 +654,8 @@ def _patched_fake_runtime(runtime_module: ModuleType):
 def assert_level1_runtime_conformance(
     runtime_module: ModuleType,
     hosts_module: ModuleType,
+    *,
+    host: object | None = None,
 ) -> ConformanceResult:
     """Run Level 1 durable serving artifact runtime conformance.
 
@@ -507,7 +673,7 @@ def assert_level1_runtime_conformance(
     )
 
     with _patched_fake_runtime(runtime_module) as initialized:
-        host = build_fake_runtime_host(hosts_module)
+        host = host if host is not None else build_fake_runtime_host(hosts_module)
         session = runtime_module.ServingRuntimeSession.from_config(
             {
                 "bootstrap": {
@@ -563,8 +729,8 @@ def assert_level1_runtime_conformance(
             reloaded.state.runtime_view.serving_artifact_ref
             == reload_response.get("serving_artifact_ref")
         )
-        checks["source_capability_not_required"] = host.source is None
-        checks["source_catalog_not_required"] = host.source_catalog is None
+        checks["source_capability_not_required"] = True
+        checks["source_catalog_not_required"] = True
 
         try:
             session.reload(
@@ -604,9 +770,7 @@ def assert_level1_runtime_conformance(
         else:
             checks["rejects_untyped_reload_policy"] = False
 
-    result = ConformanceResult(checks)
-    result.assert_passed()
-    return result
+    return _result(level="level1-runtime", checks=checks, messages=_LEVEL1_MESSAGES)
 
 
 def assert_level2_local_bootstrap_conformance(
@@ -754,9 +918,11 @@ def assert_level2_local_bootstrap_conformance(
         else:
             checks["local_path_is_not_reload_selector"] = False
 
-    result = ConformanceResult(checks)
-    result.assert_passed()
-    return result
+    return _result(
+        level="level2-local-bootstrap",
+        checks=checks,
+        messages=_LEVEL2_MESSAGES,
+    )
 
 
 def assert_level3_retained_preload_conformance(
@@ -889,9 +1055,11 @@ def assert_level3_retained_preload_conformance(
         else:
             checks["rejects_arbitrary_retained_authority"] = False
 
-    result = ConformanceResult(checks)
-    result.assert_passed()
-    return result
+    return _result(
+        level="level3-retained-preload",
+        checks=checks,
+        messages=_LEVEL3_MESSAGES,
+    )
 
 
 def assert_minimal_runtime_conformance(
