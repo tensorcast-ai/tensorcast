@@ -1,6 +1,6 @@
 #  Copyright (c) 2026, TensorCast Team.
 
-"""Selected-file source catalog primitives for serving builders."""
+"""Source catalog primitives for serving local bootstrap and builders."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from tensorcast.api.store.types import CanonicalIndex
 from tensorcast.common.identity import ArtifactIdKind, validate_artifact_id
 
 _SOURCE_CATALOG_FINGERPRINT_VERSION = "tensorcast-source-catalog-v1"
+SOURCE_CATALOG_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,7 @@ class SourceFileEntry:
 class SourceManifest:
     canonical_index_bytes: bytes
     selected_files: tuple[SourceFileEntry, ...]
+    schema_version: int = SOURCE_CATALOG_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,7 @@ class SourceCatalog:
     canonical_index_hash: str
     metadata_fingerprint: str
     canonical_index_bytes: bytes
+    schema_version: int = SOURCE_CATALOG_SCHEMA_VERSION
 
 
 def source_catalog_from_selected_safetensors(
@@ -104,6 +107,12 @@ def source_catalog_from_manifest(
     *,
     source_artifact_ref: str,
 ) -> SourceCatalog:
+    if int(manifest.schema_version) != SOURCE_CATALOG_SCHEMA_VERSION:
+        raise ValueError(
+            "SourceManifest schema_version mismatch: "
+            f"expected={SOURCE_CATALOG_SCHEMA_VERSION}, "
+            f"actual={manifest.schema_version}"
+        )
     canonical_index_bytes = bytes(manifest.canonical_index_bytes)
     return source_catalog_from_canonical_index(
         canonical_index_from_bytes(canonical_index_bytes),
@@ -263,6 +272,7 @@ __all__ = [
     "SourceFileEntry",
     "SourceManifest",
     "SourceTensorMeta",
+    "SOURCE_CATALOG_SCHEMA_VERSION",
     "compute_source_metadata_fingerprint",
     "resolve_source_artifact_ref",
     "source_catalog_from_all_safetensors_dir",

@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -141,7 +141,7 @@ def prepare_same_binding_manifest_carrier(
     logical_topology_json_payload: str | None = None,
 ) -> tuple[str, bytes]:
     base_canonical_index = canonical_index_from_recipe(recipe)
-    build_pipeline_version = "vllm-tensorcast-bootstrap-v1"
+    build_pipeline_version = "tensorcast-bootstrap-v1"
     publication_context = publication_context_from_recipe(
         recipe,
         logical_topology_json_payload=logical_topology_json_payload,
@@ -243,8 +243,11 @@ def build_binding_layout_for_recipe(
     return build_owned_layout(
         entries=canonical_index_entries_from_tensor_schema(tensor_schema),
         device_id=int(device_index),
-        index_kind=store_daemon_pb2.TargetLayout.IndexKind.Value(
-            "INDEX_KIND_CANONICAL_UNSPECIFIED"
+        index_kind=cast(
+            store_daemon_pb2.TargetLayout.IndexKind,
+            store_daemon_pb2.TargetLayout.IndexKind.Value(
+                "INDEX_KIND_CANONICAL_UNSPECIFIED"
+            ),
         ),
         logical_layout_hash=None,
         ordered_names=tuple(entry.name for entry in tensor_schema),
@@ -396,11 +399,11 @@ def binding_value_verification_state_name(value: Any) -> str:
         )
         or 0
     )
-    mapping = {
-        store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_PENDING: "pending",
-        store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_VERIFIED: "verified",
-        store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_FAILED: "failed",
-        store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY: "local_only",
+    mapping: dict[int, str] = {
+        int(store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_PENDING): "pending",
+        int(store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_VERIFIED): "verified",
+        int(store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_FAILED): "failed",
+        int(store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY): "local_only",
     }
     return mapping.get(raw, "unspecified")
 

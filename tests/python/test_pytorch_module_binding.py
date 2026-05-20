@@ -5,9 +5,17 @@ import torch
 from torch import nn
 
 from tensorcast.pytorch.module_binding import (
+    TorchModuleAdapterMixin,
+    align_runtime_binding_exclude_names,
     allocate_unbound_module_tensors,
+    assert_module_tensors_are_meta,
+    assert_runtime_tensors_match_expected_names,
     attach_tensors_to_module,
+    collect_module_tensor_names,
     collect_module_tensors,
+    compute_runtime_tensor_schema_hash,
+    snapshot_tensor_invariants,
+    validate_tensor_invariants,
 )
 
 
@@ -88,9 +96,10 @@ def test_attach_tensors_skips_reserved_tensorcast_names() -> None:
     result = attach_tensors_to_module(
         model,
         {
-            "w": torch.ones((1, )),
-            "__tensorcast_meta__.manifest_json": torch.ones((4, ),
-                                                           dtype=torch.uint8),
+            "w":
+            torch.ones((1, )),
+            "__tensorcast_meta__.manifest_json":
+            torch.ones((4, ), dtype=torch.uint8),
         },
         replace_meta_params=False,
         fail_on_missing=False,
@@ -195,3 +204,90 @@ def test_allocate_unbound_module_tensors_materializes_aliases() -> None:
     assert model.b.dtype == torch.float32
     assert allocated["w"].data_ptr() == model.w.data.data_ptr()
     assert allocated["b"].data_ptr() == model.b.data_ptr()
+
+
+def test_align_and_assert_runtime_tensor_names() -> None:
+    model = nn.Module()
+    model.register_parameter("w", nn.Parameter(torch.ones((1, ))))
+    model.register_buffer("runtime_only", torch.ones((1, )))
+    captured: list[tuple[str, ...]] = []
+
+    count = align_runtime_binding_exclude_names(
+        model,
+        {"w"},
+        lambda _model, names: captured.append(tuple(names)),
+        fail_on_missing=True,
+    )
+
+    assert count == 1
+    assert captured == [("runtime_only", )]
+    assert collect_module_tensor_names(model) == {"w", "runtime_only"}
+    assert_runtime_tensors_match_expected_names({"w": model.w}, {"w"})
+    with pytest.raises(RuntimeError, match="tensor set mismatch"):
+        assert_runtime_tensors_match_expected_names({"w": model.w},
+                                                    {"missing"})
+
+
+def test_assert_module_tensors_are_meta_reports_materialized_tensors() -> None:
+    meta_model = nn.Module()
+    meta_model.register_parameter(
+        "w",
+        nn.Parameter(torch.empty((1, ), device="meta")),
+    )
+    assert_module_tensors_are_meta(meta_model, context="test context")
+
+    materialized = nn.Module()
+    materialized.register_parameter("w", nn.Parameter(torch.ones((2, ))))
+    with pytest.raises(RuntimeError, match="test context"):
+        assert_module_tensors_are_meta(materialized, context="test context")
+
+
+def test_runtime_tensor_schema_hash_and_invariants() -> None:
+    tensors = {"w": torch.ones((2, ), dtype=torch.float32)}
+
+    schema_hash = compute_runtime_tensor_schema_hash(tensors)
+    before = snapshot_tensor_invariants(tensors)
+    validate_tensor_invariants(before, tensors)
+
+    assert schema_hash
+    changed = {"w": torch.ones((3, ), dtype=torch.float32)}
+    with pytest.raises(RuntimeError, match="invariant changed"):
+        validate_tensor_invariants(before, changed)
+
+
+def test_torch_module_adapter_mixin_provides_default_binding_ops() -> None:
+
+    class _Adapter(TorchModuleAdapterMixin):
+
+        def runtime_only_tensor_names(self,
+                                      model: nn.Module) -> tuple[str, ...]:
+            del model
+            return ("runtime_only", )
+
+    model = nn.Module()
+    model.register_parameter(
+        "w",
+        nn.Parameter(torch.ones((1, ), dtype=torch.float32),
+                     requires_grad=False),
+    )
+    model.register_buffer(
+        "runtime_only",
+        torch.empty((1, ), device="meta", dtype=torch.float32),
+    )
+
+    adapter = _Adapter()
+    tensors = adapter.collect_runtime_binding_tensors(model)
+    assert tuple(tensors) == ("w", )
+    assert adapter.compute_runtime_tensor_schema_hash(tensors)
+
+    bound = torch.tensor([2.0], dtype=torch.float32)
+    adapter.attach_bound_tensors(model, {"w": bound})
+    allocated = adapter.allocate_runtime_only_tensors(
+        model,
+        torch.device("cpu"),
+    )
+
+    assert torch.equal(model.w, bound)
+    assert set(allocated) == {"runtime_only"}
+    invariants = adapter.snapshot_tensor_invariants({"w": model.w})
+    adapter.validate_tensor_invariants(invariants, {"w": model.w})

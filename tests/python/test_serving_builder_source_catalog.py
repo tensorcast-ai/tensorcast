@@ -7,7 +7,8 @@ import torch
 from safetensors.torch import save_file
 
 from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry
-from tensorcast.serving.builder.source_catalog import (
+from tensorcast.serving.source_catalog import (
+    SOURCE_CATALOG_SCHEMA_VERSION,
     SourceManifest,
     resolve_source_artifact_ref,
     source_catalog_from_all_safetensors_dir,
@@ -34,6 +35,7 @@ def test_source_catalog_from_selected_safetensors_ignores_unselected_files(
     )
 
     assert catalog.ordered_names == ("a",)
+    assert catalog.schema_version == SOURCE_CATALOG_SCHEMA_VERSION
     assert tuple(catalog.meta_by_name) == ("a",)
     assert catalog.meta_by_name["a"].dtype == torch.float32
     assert catalog.meta_by_name["a"].shape == (4,)
@@ -99,8 +101,19 @@ def test_source_catalog_manifest_round_trips_canonical_identity(tmp_path: Path) 
     )
 
     assert roundtrip.ordered_names == catalog.ordered_names
+    assert roundtrip.schema_version == SOURCE_CATALOG_SCHEMA_VERSION
     assert roundtrip.canonical_index_hash == catalog.canonical_index_hash
     assert roundtrip.metadata_fingerprint == catalog.metadata_fingerprint
+
+    with pytest.raises(ValueError, match="schema_version"):
+        source_catalog_from_manifest(
+            SourceManifest(
+                canonical_index_bytes=catalog.canonical_index_bytes,
+                selected_files=catalog.selected_files,
+                schema_version=999,
+            ),
+            source_artifact_ref="mi2:test:source",
+        )
 
 
 def test_source_catalog_from_canonical_index_preserves_stride_storage_offset() -> None:

@@ -13,8 +13,9 @@ from tensorcast.serving import (
     ServingPlacement,
     ServingPolicy,
     ServingSelector,
-    parse_external_preload_authority,
+    merge_serving_reload_extra_config,
 )
+from tensorcast.serving.preload import parse_external_preload_authority
 from tensorcast.types import ServingBindingMemberRef, ServingTopologyRef
 
 
@@ -74,6 +75,46 @@ def test_serving_policy_pinned_requires_identity_fields() -> None:
     )
 
     assert policy.manifest_ref == "tensor:__tensorcast_meta__.manifest_json"
+
+
+def test_merge_serving_reload_extra_config_normalizes_wire_shape() -> None:
+    extra = {
+        "runtime": {
+            "mode": "connect",
+        },
+        "serving": {
+            "policy": {
+                "mode": "from_manifest",
+            },
+        },
+    }
+
+    merged = merge_serving_reload_extra_config(
+        extra,
+        selector={
+            "kind": "artifact_ref",
+            "value": "mi2:test:serving",
+        },
+        policy={
+            "mode": "pinned",
+            "manifest_ref": "tensor:manifest",
+            "representation_contract_hash": "repr-hash",
+            "serving_build_digest": "build-digest",
+        },
+    )
+
+    assert merged["runtime"] == {"mode": "connect"}
+    assert merged["serving"]["selector"] == {
+        "kind": "artifact_ref",
+        "value": "mi2:test:serving",
+    }
+    assert merged["serving"]["policy"] == {
+        "mode": "pinned",
+        "manifest_ref": "tensor:manifest",
+        "representation_contract_hash": "repr-hash",
+        "serving_build_digest": "build-digest",
+    }
+    assert extra["serving"]["policy"] == {"mode": "from_manifest"}
 
 
 def test_serving_config_parses_external_preload_authority() -> None:

@@ -76,10 +76,23 @@ def read_source_bound_contract_state(
     return SourceBoundContractState.from_server_config(server_config)
 
 
+def source_bound_contract_profile_fields(
+    state: SourceBoundContractState,
+    path: str,
+) -> dict[str, object]:
+    return {
+        "source_bound_contract_version": int(state.source_bound_contract_version),
+        "source_bound_capability_flags": list(state.source_bound_capability_names),
+        "source_bound_contract_ready": bool(state.source_bound_contract_ready),
+        "source_bound_contract_path": path,
+    }
+
+
 __all__ = [
     "MIN_SOURCE_BOUND_CONTRACT_VERSION",
     "REQUIRED_SOURCE_BOUND_CAPABILITIES",
     "SOURCE_BOUND_CONTRACT_PATH_COLLECTIVE_FIRST_V4",
     "SourceBoundContractState",
     "read_source_bound_contract_state",
+    "source_bound_contract_profile_fields",
 ]

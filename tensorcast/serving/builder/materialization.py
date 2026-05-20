@@ -4,11 +4,26 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import torch
+from torch import nn
 
+from tensorcast.pytorch.module_binding import (
+    attach_tensors_to_module,
+    collect_module_tensors,
+)
+from tensorcast.serving.builder.recipe_validation import (
+    validate_recipe_for_builder_mode,
+)
+from tensorcast.serving.builder.semantic_validation import (
+    evaluate_semantic_validation_spec,
+)
+from tensorcast.serving.builder.tensor_schema import (
+    validate_tensor_schema_against_tensors,
+)
 from tensorcast.serving.builder.trace_ir import (
     CopyPlanEntry,
     MultiRange,
@@ -16,6 +31,14 @@ from tensorcast.serving.builder.trace_ir import (
     RangeSpec,
     TracePlan,
 )
+from tensorcast.types import BuilderMode
+
+
+@dataclass(frozen=True)
+class BindingFinalizeMaterializationResult:
+    model: nn.Module
+    serving_tensors: dict[str, torch.Tensor]
+    semantic_probe_result: Any = None
 
 
 def tensorcast_view_slices_from_trace_plan(
@@ -257,15 +280,163 @@ def validate_dst_coverage(
             )
 
 
+def load_source_tensors_for_recipe(
+    recipe: Any,
+    source_artifact: Any,
+    *,
+    target_device: str | torch.device = "cpu",
+) -> dict[str, torch.Tensor]:
+    artifact_view = source_artifact.subset(
+        sorted(recipe.trace_plan.expected_src_names)
+    ).view(slices=tensorcast_view_slices_from_trace_plan(recipe.trace_plan))
+    return {
+        str(name): tensor
+        for name, tensor in artifact_view.tensor_dict(
+            device=str(torch.device(target_device))
+        ).items()
+    }
+
+
+def materialize_pure_transform_serving_tensors(
+    recipe: Any,
+    source_tensors: Mapping[str, torch.Tensor],
+    *,
+    target_device: str | torch.device = "cpu",
+) -> dict[str, torch.Tensor]:
+    validate_recipe_for_builder_mode(recipe, BuilderMode.PURE_TRANSFORM)
+    return materialize_recipe_copy_plan_tensors(
+        recipe,
+        source_tensors,
+        target_device=target_device,
+    )
+
+
+def materialize_recipe_copy_plan_tensors(
+    recipe: Any,
+    source_tensors: Mapping[str, torch.Tensor],
+    *,
+    target_device: str | torch.device = "cpu",
+) -> dict[str, torch.Tensor]:
+    resolved_source_tensors = {
+        str(name): tensor for name, tensor in dict(source_tensors).items()
+    }
+    validate_source_tensor_names(recipe.trace_plan, resolved_source_tensors)
+    serving_tensors = allocate_tensors_from_schema(
+        recipe.tensor_schema,
+        target_device=torch.device(target_device),
+    )
+    with torch.no_grad():
+        apply_copy_plan(
+            recipe.trace_plan,
+            resolved_source_tensors,
+            serving_tensors,
+        )
+    validate_dst_coverage(recipe.trace_plan, serving_tensors)
+    return serving_tensors
+
+
+def materialize_binding_finalize_serving_tensors(
+    recipe: Any,
+    source_tensors: Mapping[str, torch.Tensor],
+    *,
+    model_config: Any,
+    framework_adapter: Any,
+    build_runtime_model: Callable[[torch.device], nn.Module],
+    target_device: str | torch.device = "cpu",
+) -> BindingFinalizeMaterializationResult:
+    validate_recipe_for_builder_mode(recipe, BuilderMode.BINDING_FINALIZE)
+    resolved_target_device = torch.device(target_device)
+    serving_tensors = materialize_recipe_copy_plan_tensors(
+        recipe,
+        source_tensors,
+        target_device=resolved_target_device,
+    )
+    model = build_runtime_model(resolved_target_device)
+    attach_tensors_to_module(
+        model,
+        serving_tensors,
+        replace_meta_params=True,
+        skip_reserved_tensor_names=True,
+        preserve_aliases=True,
+        fail_on_missing=False,
+        fail_on_unexpected=True,
+    )
+    framework_adapter.run_process_after_load(
+        model,
+        model_config,
+        resolved_target_device,
+    )
+    semantic_probe_result = run_binding_finalize_semantic_validation(
+        recipe=recipe,
+        model=model,
+        model_config=model_config,
+        framework_adapter=framework_adapter,
+    )
+    finalized_tensors = collect_serving_tensors_from_model(
+        model,
+        runtime_only_tensor_names=recipe.serving_facts.runtime_only_tensor_names,
+    )
+    validate_tensor_schema_against_tensors(recipe.tensor_schema, finalized_tensors)
+    return BindingFinalizeMaterializationResult(
+        model=model,
+        serving_tensors=finalized_tensors,
+        semantic_probe_result=semantic_probe_result,
+    )
+
+
+def run_binding_finalize_semantic_validation(
+    *,
+    recipe: Any,
+    model: nn.Module,
+    model_config: Any,
+    framework_adapter: Any,
+) -> Any:
+    spec = recipe.semantic_validation_spec
+    if spec.kind == "none":
+        return evaluate_semantic_validation_spec(spec, None)
+    return evaluate_semantic_validation_spec(
+        spec,
+        framework_adapter.semantic_probes(model, model_config),
+    )
+
+
+def collect_serving_tensors_from_model(
+    model: nn.Module,
+    *,
+    runtime_only_tensor_names: Sequence[str],
+) -> dict[str, torch.Tensor]:
+    return collect_module_tensors(
+        model,
+        exclude_names=tuple(str(name) for name in runtime_only_tensor_names),
+        reject_reserved_tensor_names=True,
+        remove_duplicate=True,
+    )
+
+
+def validate_binding_finalize_tensor_schema(
+    tensor_schema: Sequence[Any],
+    tensors: Mapping[str, torch.Tensor],
+) -> None:
+    validate_tensor_schema_against_tensors(tensor_schema, tensors)
+
+
 __all__ = [
+    "BindingFinalizeMaterializationResult",
     "allocate_tensors_from_schema",
     "apply_copy_plan",
+    "collect_serving_tensors_from_model",
     "dtype_from_string",
     "iter_ranges",
+    "load_source_tensors_for_recipe",
+    "materialize_binding_finalize_serving_tensors",
+    "materialize_pure_transform_serving_tensors",
+    "materialize_recipe_copy_plan_tensors",
     "narrow_by_range_spec",
     "narrow_source_view",
+    "run_binding_finalize_semantic_validation",
     "tensorcast_view_slices_from_trace_plan",
     "update_dst_coverage",
+    "validate_binding_finalize_tensor_schema",
     "validate_dst_coverage",
     "validate_source_tensor_names",
 ]

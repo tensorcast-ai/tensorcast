@@ -9,8 +9,9 @@ import pytest
 import torch
 
 import tensorcast as tc
-from tensorcast.serving import (
+from tensorcast.serving.preload import (
     ExternalPreloadExpectedDigests,
+    ParsedExternalPreloadAuthority,
     acquire_preload_lease,
     acquire_retained_serving_binding,
     external_preload_extra_from_prefetched_binding,
@@ -20,7 +21,6 @@ from tensorcast.serving import (
     parse_external_preload_authority,
     promote_current_value_and_wait,
 )
-from tensorcast.serving.preload import ParsedExternalPreloadAuthority
 from tensorcast.types import (
     BindingReservationCapability,
     BindingValueRef,

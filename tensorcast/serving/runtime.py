@@ -285,3 +285,165 @@ class RuntimeSettings(BaseModel):
                 return
             tc.init(**init_kwargs)
             _INIT_KWARGS = dict(init_kwargs)
+
+
+_PUBLIC_RUNTIME_EXPORTS = {
+    "AdmissionRejectedError",
+    "AttachFinalizeError",
+    "AuthorityValidationError",
+    "BootstrapPolicy",
+    "CapabilityMissingError",
+    "ConfigConflictError",
+    "ExistingServingArtifact",
+    "LocalSourceBootstrap",
+    "OwnershipTransferError",
+    "PlacementAdmissionError",
+    "PolicyMismatchError",
+    "PublishedReplicaProjection",
+    "PublicationRequiredError",
+    "ReplicaPublicationError",
+    "ReloadResponseProjection",
+    "RequestContext",
+    "RetainedBindingAcquire",
+    "RetainedBindingAuthority",
+    "RuntimeAttachment",
+    "RuntimeEndpointProjection",
+    "RuntimeSwapError",
+    "RuntimeWorkerView",
+    "SchemaMismatchError",
+    "SelectorResolutionError",
+    "ServingArtifactSelector",
+    "ServingConfig",
+    "ServingIntegrationError",
+    "ServingPolicy",
+    "ServingRuntimeSession",
+    "ReplicaPublicationPolicy",
+    "SourceSelectionProjection",
+    "SourceProviderError",
+    "SourceSelector",
+    "TensorCastServingRuntimeError",
+    "WeightVersionProjection",
+    "merge_serving_reload_extra_config",
+    "normalize_serving_reload_request_payload",
+}
+
+_PUBLIC_READINESS_EXPORTS = {
+    "ReadinessInventoryAdmissionPolicy",
+    "coerce_finalize_class",
+    "coerce_serving_support_level",
+    "is_binding_finalize_publication_allowlisted",
+    "is_pure_transform_publication_allowlisted",
+    "is_runtime_bind_swap_allowlisted",
+    "readiness_family",
+    "readiness_post_bind_finalize_class",
+    "readiness_process_after_load_class",
+    "readiness_publication_modes",
+    "readiness_support_level",
+    "serving_support_level_at_least",
+    "serving_support_level_display_name",
+}
+
+_PUBLIC_STATE_EXPORTS = {
+    "ModelAttributeNames",
+    "ModelAttributeRuntimeState",
+    "OneShotRuntimeHook",
+    "attachment_generation_key",
+}
+
+
+def __getattr__(name: str) -> object:
+    """Lazily expose the public serving runtime API.
+
+    ``ServingConfig`` imports ``RuntimeSettings`` from this module, while the
+    runtime session implementation imports this module for daemon settings.
+    Lazy exports avoid a circular import while making
+    ``tensorcast.serving.runtime`` the framework-facing import path.
+    """
+
+    if name == "ServingPolicy":
+        from tensorcast.serving.policy import ServingPolicy
+
+        return ServingPolicy
+    if name == "ServingConfig":
+        from tensorcast.serving.config import ServingConfig
+
+        return ServingConfig
+    if name in _PUBLIC_RUNTIME_EXPORTS:
+        from tensorcast.serving import integration as tc_integration
+
+        return getattr(tc_integration, name)
+    if name in _PUBLIC_READINESS_EXPORTS:
+        from tensorcast.serving import readiness as tc_readiness
+
+        return getattr(tc_readiness, name)
+    if name in _PUBLIC_STATE_EXPORTS:
+        from tensorcast.serving import state as tc_state
+
+        return getattr(tc_state, name)
+    raise AttributeError(
+        f"module 'tensorcast.serving.runtime' has no attribute {name!r}"
+    )
+
+
+__all__ = [  # noqa: F822 - names are resolved lazily by __getattr__.
+    "AdmissionRejectedError",
+    "AttachFinalizeError",
+    "AuthorityValidationError",
+    "BootstrapPolicy",
+    "CapabilityMissingError",
+    "ConfigConflictError",
+    "DEFAULT_RUNTIME_PROFILE",
+    "ExistingServingArtifact",
+    "LocalSourceBootstrap",
+    "OwnershipTransferError",
+    "PlacementAdmissionError",
+    "PolicyMismatchError",
+    "PublishedReplicaProjection",
+    "PublicationRequiredError",
+    "ReplicaPublicationError",
+    "ReloadResponseProjection",
+    "RequestContext",
+    "RetainedBindingAcquire",
+    "RetainedBindingAuthority",
+    "RuntimeConfigProfile",
+    "RuntimeDaemonSettings",
+    "RuntimeAttachment",
+    "RuntimeEndpointProjection",
+    "RuntimeGlobalStoreSettings",
+    "ModelAttributeNames",
+    "ModelAttributeRuntimeState",
+    "OneShotRuntimeHook",
+    "RuntimeSettings",
+    "RuntimeSwapError",
+    "RuntimeWorkerView",
+    "SchemaMismatchError",
+    "SelectorResolutionError",
+    "ServingArtifactSelector",
+    "ServingConfig",
+    "ServingIntegrationError",
+    "ServingPolicy",
+    "ServingRuntimeSession",
+    "ReplicaPublicationPolicy",
+    "SourceSelectionProjection",
+    "SourceProviderError",
+    "SourceSelector",
+    "TensorCastServingRuntimeError",
+    "WeightVersionProjection",
+    "ReadinessInventoryAdmissionPolicy",
+    "attachment_generation_key",
+    "coerce_finalize_class",
+    "coerce_serving_support_level",
+    "is_binding_finalize_publication_allowlisted",
+    "is_pure_transform_publication_allowlisted",
+    "is_runtime_bind_swap_allowlisted",
+    "merge_serving_reload_extra_config",
+    "normalize_serving_reload_request_payload",
+    "readiness_family",
+    "readiness_post_bind_finalize_class",
+    "readiness_process_after_load_class",
+    "readiness_publication_modes",
+    "readiness_support_level",
+    "resolve_runtime_config_profile",
+    "serving_support_level_at_least",
+    "serving_support_level_display_name",
+]

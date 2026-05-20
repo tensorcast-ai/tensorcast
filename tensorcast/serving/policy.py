@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
@@ -12,6 +13,8 @@ import tensorcast as tc
 
 _SELECTOR_KINDS = {"version_key", "artifact_ref"}
 _POLICY_MODES = {"from_manifest", "pinned"}
+SERVING_SELECTOR_SCHEMA_VERSION = 1
+SERVING_POLICY_SCHEMA_VERSION = 1
 
 
 def _normalize_optional_text(value: Any) -> str | None:
@@ -35,6 +38,7 @@ class ServingSelector(BaseModel):
 
     kind: str
     value: str
+    schema_version: int = SERVING_SELECTOR_SCHEMA_VERSION
 
     @field_validator("kind", mode="before")
     @classmethod
@@ -52,6 +56,14 @@ class ServingSelector(BaseModel):
         if normalized is None:
             raise ValueError("serving.selector.value is required")
         return normalized
+
+    @classmethod
+    def artifact_ref(cls, artifact_ref: str) -> ServingSelector:
+        return cls(kind="artifact_ref", value=str(artifact_ref))
+
+    @classmethod
+    def version_key(cls, version_key: str) -> ServingSelector:
+        return cls(kind="version_key", value=str(version_key))
 
     def resolve_artifact_ref(self) -> str:
         if self.kind == "artifact_ref":
@@ -77,6 +89,7 @@ class ServingPolicy(BaseModel):
     manifest_ref: str | None = None
     representation_contract_hash: str | None = None
     serving_build_digest: str | None = None
+    schema_version: int = SERVING_POLICY_SCHEMA_VERSION
 
     @field_validator("mode", mode="before")
     @classmethod
@@ -130,3 +143,56 @@ class ServingPolicy(BaseModel):
             expected_representation_contract_hash=(self.representation_contract_hash),
             expected_serving_build_digest=self.serving_build_digest,
         )
+
+
+def normalize_serving_reload_request_payload(
+    *,
+    selector: ServingSelector | Mapping[str, Any],
+    policy: ServingPolicy | Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Normalize public reload selector/policy data to the stable wire shape."""
+
+    parsed_selector = (
+        selector
+        if isinstance(selector, ServingSelector)
+        else ServingSelector.model_validate(selector)
+    )
+    parsed_policy = (
+        policy
+        if isinstance(policy, ServingPolicy)
+        else ServingPolicy.model_validate(policy or {"mode": "from_manifest"})
+    )
+    selector_payload = {
+        "kind": parsed_selector.kind,
+        "value": parsed_selector.value,
+    }
+    policy_payload: dict[str, Any] = {"mode": parsed_policy.mode}
+    if parsed_policy.manifest_ref is not None:
+        policy_payload["manifest_ref"] = parsed_policy.manifest_ref
+    if parsed_policy.representation_contract_hash is not None:
+        policy_payload["representation_contract_hash"] = (
+            parsed_policy.representation_contract_hash
+        )
+    if parsed_policy.serving_build_digest is not None:
+        policy_payload["serving_build_digest"] = parsed_policy.serving_build_digest
+    return selector_payload, policy_payload
+
+
+def merge_serving_reload_extra_config(
+    extra: Mapping[str, Any] | None,
+    *,
+    selector: ServingSelector | Mapping[str, Any],
+    policy: ServingPolicy | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return model_loader_extra_config with a normalized serving reload request."""
+
+    normalized_selector, normalized_policy = normalize_serving_reload_request_payload(
+        selector=selector,
+        policy=policy,
+    )
+    merged_extra = dict(extra or {})
+    serving = dict(merged_extra.get("serving", {}))
+    serving["selector"] = normalized_selector
+    serving["policy"] = normalized_policy
+    merged_extra["serving"] = serving
+    return merged_extra

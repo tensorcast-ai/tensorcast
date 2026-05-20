@@ -10,8 +10,9 @@ import torch
 
 import tensorcast as tc
 import tensorcast.serving.resolver as resolver_mod
-from tensorcast.serving import PreparedServingArtifact, ServingArtifactResolver
 from tensorcast.serving.artifact_manifest import ServingArtifactManifestHint
+from tensorcast.serving.dto import PreparedServingArtifact
+from tensorcast.serving.resolver import ServingArtifactResolver
 
 
 class _FakeArtifact:

@@ -12,6 +12,7 @@ import torch
 import tensorcast as tc
 import tensorcast.serving.artifact_manifest as tc_artifact_manifest
 import tensorcast.serving.builder.materialization as tc_core_materialization
+from tensorcast.api.store import artifact as open_artifact
 from tensorcast.api.store.types import CanonicalIndexEntry
 
 ServingArtifactManifest = tc.ServingArtifactManifest
@@ -111,7 +112,7 @@ class ServingArtifactResolver:
         self._schema_version = schema_version
 
     def open(self, artifact_ref: str) -> Any:
-        artifact = tc.artifact(ref=str(artifact_ref))
+        artifact = open_artifact(ref=str(artifact_ref))
         artifact.describe()
         return artifact
 

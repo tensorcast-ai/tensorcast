@@ -22,7 +22,11 @@ from tensorcast.types import (
 
 _MANIFEST_PRODUCER = "tensorcast.serving_binding_spec_cache"
 _MANIFEST_PRODUCER_VERSION = 1
-_SUPPORTED_RUNTIMES = frozenset({"tensorcast-reference", "vllm"})
+
+
+def _validate_runtime(runtime: str) -> None:
+    if not str(runtime).strip():
+        raise ValueError("serving runtime must not be empty")
 
 
 class ServingBindingSpecCacheRecord(BaseModel):
@@ -92,8 +96,7 @@ def _validate_blob_ref(name: str, blob_ref: BlobRef, data: bytes) -> None:
 def _validate_entry(
     entry: ServingBindingResolvedSpecCacheEntry, blobs: Mapping[str, bytes]
 ) -> None:
-    if entry.runtime not in _SUPPORTED_RUNTIMES:
-        raise ValueError(f"unsupported serving runtime: {entry.runtime}")
+    _validate_runtime(entry.runtime)
     if entry.cache_key_digest != entry.computed_cache_key_digest():
         raise ValueError("cache_key_digest does not match canonical key")
     if entry.spec_digest != entry.computed_spec_digest():
@@ -136,8 +139,7 @@ def _validate_group_index(index: ServingBindingSpecCacheGroupIndex) -> None:
         raise ValueError("unsupported group index schema_version")
     if index.group_cache_key_digest != index.computed_group_cache_key_digest():
         raise ValueError("group_cache_key_digest does not match canonical group key")
-    if index.runtime not in _SUPPORTED_RUNTIMES:
-        raise ValueError(f"unsupported serving runtime: {index.runtime}")
+    _validate_runtime(index.runtime)
     if not index.group_id:
         raise ValueError("group_id must not be empty")
     if not index.member_cache_key_digests:

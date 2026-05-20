@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import tensorcast as tc
+from tensorcast.api._config import CollectivePolicyMode, SourceLocalityHint
 from tensorcast.types import CollectivePolicy
 
 
@@ -40,13 +41,13 @@ def build_materialization_execution_context(
     if collective_context_unavailable:
         profile_fields["collective_reason"] = "collective_context_unavailable"
 
-    source_locality = "auto"
+    source_locality = SourceLocalityHint.AUTO
     if tp_world_size <= 1:
         profile_fields.setdefault("collective_reason", "single_rank")
     elif not same_node_tp:
         profile_fields.setdefault("collective_reason", "tp_not_same_node")
     else:
-        source_locality = "shared_source"
+        source_locality = SourceLocalityHint.SHARED_SOURCE
 
     collective = None
     if (
@@ -80,7 +81,9 @@ def build_materialization_execution_context(
     options = tc.GetArtifactOptions(
         execution_topology=tc.ExecutionTopologyContext(
             collective_group=collective,
-            collective_policy=str(profile_fields["collective_policy"]),
+            collective_policy=CollectivePolicyMode.parse(
+                profile_fields["collective_policy"]
+            ),
             source_locality=source_locality,
         )
     )
