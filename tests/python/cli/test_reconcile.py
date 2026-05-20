@@ -1,11 +1,11 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
 import contextlib
 import subprocess
 
-from tensorcast import runtime
+from tensorcast.runtime import reconcile
 from tensorcast.cli_utils import paths
 from tensorcast.cli_utils.paths import set_current_session_id
 from tensorcast.cli_utils.process import (
@@ -46,7 +46,7 @@ def test_reconcile_removes_stale_session(monkeypatch, tmp_path):
         fingerprint=instance_fingerprint(999999),
     )
 
-    session = runtime.reconcile(inst.id)
+    session = reconcile(inst.id)
     assert session is None
     state = read_runtime_state(paths.runtime_state_path())
     assert "daemon" not in state
@@ -83,7 +83,7 @@ def test_reconcile_keeps_live_pid_without_address(monkeypatch, tmp_path):
             fingerprint=instance_fingerprint(proc.pid),
         )
 
-        session = runtime.reconcile(inst.id)
+        session = reconcile(inst.id)
         assert session is not None
         assert session.session_id == inst.id
         assert session.daemon_pid == proc.pid
@@ -127,7 +127,7 @@ def test_reconcile_fingerprint_mismatch_preserves_global_state(monkeypatch, tmp_
         write_runtime_state(paths.runtime_state_path(), state)
         set_current_session_id(inst.id)
 
-        session = runtime.reconcile(inst.id)
+        session = reconcile(inst.id)
         assert session is None
 
         updated_state = read_runtime_state(paths.runtime_state_path())

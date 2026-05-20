@@ -354,4 +354,5 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/tensorcast/lib:${{ env.LD_LIBRARY_PATH }}
           TENSORCAST_CUDA_BACKEND: fake
+          PYTHONFAULTHANDLER: 1
         shell: bash
