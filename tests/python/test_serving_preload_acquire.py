@@ -35,37 +35,43 @@ from tensorcast.types import (
 )
 
 
-def _authority(*, reservation_bytes: int = 4096) -> ParsedExternalPreloadAuthority:
+def _authority(
+    *,
+    reservation_bytes: int = 4096,
+    member_index: int = 0,
+    member_count: int = 1,
+) -> ParsedExternalPreloadAuthority:
+    suffix = member_index + 1
     member = ServingBindingMemberRef(
-        member_id="member-0",
-        member_index=0,
-        member_count=1,
+        member_id=f"member-{member_index}",
+        member_index=member_index,
+        member_count=member_count,
         group_id="group-1",
     )
     binding_ref = BindingValueRef(
-        binding_id="binding-1",
+        binding_id=f"binding-{suffix}",
         binding_layout_id="layout-1",
-        binding_value_id="value-1",
+        binding_value_id=f"value-{suffix}",
         seal_generation=1,
     )
     capability = BindingReservationCapability(
-        capability_id="capability-1",
+        capability_id=f"capability-{suffix}",
         binding_value_ref=binding_ref,
         daemon_id="daemon-1",
         daemon_session_id="session-1",
-        device_uuid="gpu-0",
+        device_uuid=f"gpu-{member_index}",
         member=member,
         reservation_bytes=reservation_bytes,
         scope_digest="scope-1",
     )
     return ParsedExternalPreloadAuthority(
         group_id="group-1",
-        local_serving_ref="binding-local:binding-1:value-1",
+        local_serving_ref=f"binding-local:binding-{suffix}:value-{suffix}",
         binding_value_ref=binding_ref,
         reservation_capability=capability,
         daemon_id="daemon-1",
         daemon_session_id="session-1",
-        device_uuid="gpu-0",
+        device_uuid=f"gpu-{member_index}",
         member=member,
         reservation_bytes=reservation_bytes,
         expected=ExternalPreloadExpectedDigests(
@@ -77,6 +83,29 @@ def _authority(*, reservation_bytes: int = 4096) -> ParsedExternalPreloadAuthori
         readiness="serving_local_ready",
         verification_state="local_only",
     )
+
+
+def _authority_payload(authority: ParsedExternalPreloadAuthority) -> dict[str, object]:
+    return {
+        "group_id": authority.group_id,
+        "member_ref": authority.member.model_dump(mode="python"),
+        "daemon_id": authority.daemon_id,
+        "daemon_session_id": authority.daemon_session_id,
+        "device_uuid": authority.device_uuid,
+        "binding_value_ref": authority.binding_value_ref.model_dump(mode="python"),
+        "reservation_capability": authority.reservation_capability.model_dump(
+            mode="python"
+        ),
+        "group_realization_acquire": None
+        if authority.group_realization_acquire is None
+        else authority.group_realization_acquire.model_dump(mode="python"),
+        "local_serving_ref": authority.local_serving_ref,
+        "readiness": authority.readiness,
+        "verification_state": authority.verification_state,
+        "serving_artifact_id": authority.serving_artifact_id,
+        "trusted_reservation_bytes": authority.reservation_bytes,
+        "expected": authority.expected.model_dump(mode="python"),
+    }
 
 
 def _response(*, reservation_bytes: int = 4096, lease_token: bytes = b"lease"):
@@ -428,6 +457,60 @@ def test_external_preload_public_helpers_build_extra_from_prefetched_binding():
         target=target,
         expected_member=member,
     )
+
+
+def test_external_preload_authority_set_selects_expected_member():
+    authority0 = _authority(
+        reservation_bytes=4096,
+        member_index=0,
+        member_count=2,
+    )
+    authority1 = _authority(
+        reservation_bytes=8192,
+        member_index=1,
+        member_count=2,
+    )
+    extra = {
+        "preload": {
+            "mode": "external",
+            "authorities": [
+                _authority_payload(authority0),
+                _authority_payload(authority1),
+            ],
+        },
+    }
+
+    selected = parse_external_preload_authority(
+        extra,
+        expected_member=authority1.member,
+    )
+
+    assert selected.member == authority1.member
+    assert selected.reservation_bytes == 8192
+    assert (
+        external_preload_trusted_reservation_bytes(
+            extra,
+            expected_member=authority1.member,
+        )
+        == 8192
+    )
+
+
+def test_external_preload_authority_set_requires_expected_member():
+    authority0 = _authority(member_index=0, member_count=2)
+    authority1 = _authority(member_index=1, member_count=2)
+    extra = {
+        "preload": {
+            "mode": "external",
+            "authorities": [
+                _authority_payload(authority0),
+                _authority_payload(authority1),
+            ],
+        },
+    }
+
+    with pytest.raises(ValueError, match="expected serving member"):
+        parse_external_preload_authority(extra)
 
 
 def test_external_preload_extra_preserves_group_realization_acquire():

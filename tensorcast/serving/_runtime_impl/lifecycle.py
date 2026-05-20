@@ -5759,7 +5759,18 @@ class ServingRuntimeSession:
                 "preload authority or durable serving selector"
             )
         if external:
-            authority = parse_external_preload_authority(config)
+            expected_member = None
+            if self.host is not None:
+                placement = self._framework_context(
+                    context.framework_config,
+                    context.model_config,
+                ).placement
+                if placement is not None:
+                    expected_member = placement.member
+            authority = parse_external_preload_authority(
+                config,
+                expected_member=expected_member,
+            )
             return RetainedBindingAcquire(
                 RetainedBindingAuthority.from_preload_authority(authority)
             )
