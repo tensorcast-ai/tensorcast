@@ -6,6 +6,7 @@ copyright: Copyright &copy; 2025-2026 TensorCast Team
 
 theme:
   name: material
+  logo: assets/logo.png
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
@@ -88,6 +89,9 @@ extra:
       link: https://github.com/tensorcast-ai/tensorcast
   version:
     provider: mike
+
+extra_css:
+  - stylesheets/extra.css
 
 plugins:
   - search
