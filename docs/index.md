@@ -209,3 +209,17 @@ For P2P/RDMA and communicator coverage, see [Testing Guide](development/testing.
 
 For CPU-only development, set `TENSORCAST_CUDA_BACKEND=fake` (test-only) and
 use `--test_env=TENSORCAST_CUDA_BACKEND=fake` for Bazel tests. See [AGENTS.md](AGENTS.md).
+
+## Contributors
+
+<div class="contributors-grid">
+
+<a href="https://www.stepfun.com/company" target="_blank">
+  <img src="assets/contributors/stepfun-logo.jpg" alt="Stepfun" title="Stepfun">
+</a>
+
+<a href="https://soar.group/chenren/research/" target="_blank">
+  <img src="assets/contributors/wais-logo.png" alt="WAIS" title="WAIS">
+</a>
+
+</div>
