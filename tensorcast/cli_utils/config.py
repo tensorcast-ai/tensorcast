@@ -42,10 +42,20 @@ _CLUSTER_TOKEN_HMAC_KEY = b"tensorcast-cluster-token"
 
 
 def _discover_repo_example_config(filename: str) -> Path | None:
-    for parent in Path(__file__).resolve().parents:
-        candidate = parent / "examples" / "config" / filename
-        if candidate.exists():
-            return candidate
+    """Discover an example config file in the repository root.
+
+    Walks up from this file's location looking for the repository root
+    (identified by the presence of pyproject.toml) and then checks
+    ``examples/config/<filename>`` only at that level.
+    """
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        if (parent / "pyproject.toml").exists():
+            candidate = parent / "examples" / "config" / filename
+            if candidate.exists():
+                return candidate
+            # Found repo root but no example config there; stop searching.
+            return None
     return None
 
 

@@ -226,7 +226,9 @@ jobs:
 
       - name: Install Python dependencies
         shell: bash
-        run: uv sync --locked --all-extras --dev
+        run: |
+          uv lock
+          uv sync --locked --all-extras --dev
 
       - name: Run Python linting
         run: |
@@ -352,4 +354,5 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/tensorcast/lib:${{ env.LD_LIBRARY_PATH }}
           TENSORCAST_CUDA_BACKEND: fake
+          PYTHONFAULTHANDLER: 1
         shell: bash

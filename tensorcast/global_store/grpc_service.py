@@ -409,7 +409,9 @@ class GlobalStoreServicer(
             get_instance_service=lambda: self.instance_service,
             get_transport_service=lambda: self.transport_service,
             get_group_realization_service=lambda: self.group_realization_service,
-            get_progressive_replication_service=lambda: self.progressive_replication_service,
+            get_progressive_replication_service=lambda: (
+                self.progressive_replication_service
+            ),
             logger=logger,
         )
         self.cleanup_thread = self._maintenance_coordinator.start()

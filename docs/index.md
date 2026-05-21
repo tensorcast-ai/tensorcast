@@ -3,9 +3,7 @@
 <p>The shared tensor layer — load once, share everywhere.</p>
 </div>
 
-TensorCast is a high-performance distributed artifact storage system. Load
-model weights and KV cache once, then share them across processes and
-services.
+TensorCast is a high-performance distributed artifact storage system. Load model weights and KV cache once, then share them across processes and services.
 
 ## Install
 
@@ -86,23 +84,21 @@ tensors = handle.tensor_dict(device="cuda:0")
 print(tensors)
 ```
 
-For production deployments, see the [SDK Startup User Guide](docs/guides/sdk-startup-user-guide.md) for config files, auto-discovery, and multi-process patterns.
+For production deployments, see the [SDK Startup User Guide](guides/sdk-startup-user-guide.md) for config files, auto-discovery, and multi-process patterns.
 
 For advanced flows (async, views, prefetch, policies), see
-[API Architecture](docs/architecture/api/README.md).
+[API Architecture](architecture/api/index.md).
 
 ## Docs
 
-- [Developer Guides](docs/README.md) — architecture map and developer docs
-- [Architecture Overview](docs/architecture/architecture-overview.md) — system overview
-- [API Architecture](docs/architecture/api/README.md) — SDK surface and flows
-- [SDK Startup User Guide](docs/guides/sdk-startup-user-guide.md) — `tensorcast.init`, API/SDK startup, TP multi-process usage
-- [Store Daemon Deployment](docs/deployment/store-daemon.md) — daemon deployment and config
-- [Global Store Deployment](docs/deployment/global-store-deployment.md) — Global Store deployment
-- [Testing Guide](docs/development/testing.md) — Python, C++, P2P, and RDMA tests
-- [Python Tests](tests/python/README.md) — test layout and commands
-- [Release Guide](RELEASE.md) — how releases are cut
-- [Repo Automation Rules](AGENTS.md) — automation and sandbox rules
+- [Developer Guides](README.md) — architecture map and developer docs
+- [Architecture Overview](architecture/architecture-overview.md) — system overview
+- [API Architecture](architecture/api/index.md) — SDK surface and flows
+- [SDK Startup User Guide](guides/sdk-startup-user-guide.md) — `tensorcast.init`, API/SDK startup, TP multi-process usage
+- [Store Daemon Deployment](deployment/store-daemon.md) — daemon deployment and config
+- [Global Store Deployment](deployment/global-store-deployment.md) — Global Store deployment
+- [Testing Guide](development/testing.md) — Python, C++, P2P, and RDMA tests
+- [Release Guide](release/RELEASE.md) — how releases are cut
 
 ## Build from source
 
@@ -116,8 +112,8 @@ unsupported distro, or want to develop against a checkout.
 - Bazel (via `tools/install-bazel.sh`)
 - `gcc-13`/`g++-13`, `libstdc++-12-dev`, `libxml2`
 - Release toolchain (`wheel`, `auditwheel`, `patchelf`, `twine`) is installed
-  via the `release` dependency group when needed — `tools/release.sh` calls
-  `uv sync --group release` automatically; no system `apt install patchelf`
+  via the `release` dependency group when needed — `tools/release.sh`
+  calls `uv sync --group release` automatically; no system `apt install patchelf`
   required.
 
 ```bash
@@ -166,7 +162,7 @@ pip install dist/tensorcast-*.whl
 The fail-fast ABI guard reads the torch version baked into the wheel at
 build time, so source edits are not needed when bumping torch versions.
 
-#### Troubleshoot
+### Troubleshoot
 
 - If Bazel fails to download LLVM, run `bash tools/download_and_set_local_llvm.sh`.
 
@@ -209,7 +205,7 @@ uv run pytest tests/python/
 bazel test //core/...
 ```
 
-For P2P/RDMA and communicator coverage, see [Testing Guide](docs/development/testing.md).
+For P2P/RDMA and communicator coverage, see [Testing Guide](development/testing.md).
 
 For CPU-only development, set `TENSORCAST_CUDA_BACKEND=fake` (test-only) and
 use `--test_env=TENSORCAST_CUDA_BACKEND=fake` for Bazel tests. See [AGENTS.md](AGENTS.md).

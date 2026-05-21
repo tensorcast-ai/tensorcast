@@ -1,27 +1,30 @@
+"""TensorCast Bazel module configuration for Docker builds."""
+
 module(name = "tensorcast")
 
 bazel_dep(name = "platforms", version = "1.0.0")
-bazel_dep(name = "toolchains_llvm", version = "1.6.0")
-
-llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
-llvm.toolchain(
-    llvm_version = "21.1.0",
-    sha256 = {"linux-x86_64": "4a8c4b07646a4a2eb76ccf1d73522c3e13519745b72ef09d631c09b7577b0ed2"},
-    stdlib = {"linux-x86_64": "stdc++"},
-    strip_prefix = {
-        "linux-x86_64": "LLVM-21.1.0-Linux-X64",
-    },
-    urls = {
-        "linux-x86_64": [
-            "file://./downloads/LLVM-21.1.0-Linux-X64.tar.xz",
-            "https://githubfast.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/LLVM-21.1.0-Linux-X64.tar.xz",
-            "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/LLVM-21.1.0-Linux-X64.tar.xz",
-        ],
-    },
-)
-use_repo(llvm, "llvm_toolchain")
-
-register_toolchains("@llvm_toolchain//:all")
+#bazel_dep(name = "toolchains_llvm", version = "1.6.0")
+#
+#llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
+#llvm.toolchain(
+#    llvm_version = "21.1.0",
+#    sha256 = {"linux-x86_64": "4a8c4b07646a4a2eb76ccf1d73522c3e13519745b72ef09d631c09b7577b0ed2"},
+#    stdlib = {"linux-x86_64": "stdc++"},
+#    strip_prefix = {
+#        "linux-x86_64": "LLVM-21.1.0-Linux-X64",
+#    },
+#    urls = {
+#        "linux-x86_64": [
+#            "file:///io/LLVM-21.1.0-Linux-X64.tar.xz",
+#            "file://./downloads/LLVM-21.1.0-Linux-X64.tar.xz",
+#            "https://githubfast.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/LLVM-21.1.0-Linux-X64.tar.xz",
+#            "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/LLVM-21.1.0-Linux-X64.tar.xz",
+#        ],
+#    },
+#)
+#use_repo(llvm, "llvm_toolchain")
+#
+#register_toolchains("@llvm_toolchain//:all")
 
 bazel_dep(name = "rules_cc", version = "0.2.14")
 bazel_dep(name = "rules_python", version = "1.7.0")
