@@ -495,6 +495,8 @@ class GlobalStoreServicer(
             self.replica_repository,
             self.transport_repository,
             self.pending_transport_request_repository,
+            self.artifacts_repo,
+            self.artifact_indices,
         )
         self.transport_rpc_handler = TransportRpcHandler(
             transport_service=self.transport_service,

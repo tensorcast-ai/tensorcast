@@ -669,6 +669,13 @@ class Binding:
             diagnostics if isinstance(diagnostics, SourceBoundPlanDiagnostics) else None
         )
 
+    @property
+    def last_materialization_diagnostics(self) -> Mapping[str, object] | None:
+        diagnostics = getattr(self._slot, "last_materialization_diagnostics", None)
+        if isinstance(diagnostics, Mapping):
+            return dict(diagnostics)
+        return None
+
     def swap(
         self,
         artifact: "Artifact | str",

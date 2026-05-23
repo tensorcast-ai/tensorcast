@@ -5,11 +5,15 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
-from tensorcast.serving import ServingPlacement
+from tensorcast.serving.dto import ServingPlacement
 from tensorcast.serving.recipe_build import (
+    COMPILED_RECIPE_MEMORY_CACHE,
+    DEFAULT_RECIPE_BUILD_MEMORY_CACHE_ENTRIES,
+    TRACE_PLAN_MEMORY_CACHE,
     RecipeBuildCacheConfig,
-    RecipeBuildIdentity,
+    RecipeBuildMemoryCache,
     RecipeBuildSession,
+    ServingBindingPlan,
     compute_recipe_cache_key,
     compute_trace_cache_key,
 )
@@ -17,6 +21,16 @@ from tensorcast.types import ServingBindingMemberRef, ServingTopologyRef
 
 
 def _identity(**updates):
+    topology = ServingTopologyRef(
+        schema_topology_digest="topology-a",
+        logical_topology_ref="tensorcast://topology/a",
+    )
+    member = ServingBindingMemberRef(
+        member_id="dp0:pp0:tp0",
+        member_index=0,
+        member_count=1,
+        group_id="group-1",
+    )
     payload = {
         "model_hash": "model-hash",
         "model_id": "model",
@@ -30,18 +44,12 @@ def _identity(**updates):
         "trace_cache_schema_version": 7,
         "tp_rank": 0,
         "tp_world_size": 1,
-        "topology_ref": {
-            "topology": "a"
-        },
-        "member_ref": {
-            "member": "a"
-        },
-        "placement": {
-            "tp_rank": 0
-        },
+        "topology_ref": topology,
+        "member_ref": member,
+        "placement": {"tp_rank": 0},
     }
     payload.update(updates)
-    return RecipeBuildIdentity(**payload)
+    return ServingBindingPlan(**payload)
 
 
 def test_recipe_build_session_keys_track_framework_and_placement():
@@ -51,16 +59,22 @@ def test_recipe_build_session_keys_track_framework_and_placement():
     trace_key = session.trace_cache_key(metadata_fingerprint="meta-a")
     recipe_key = session.recipe_cache_key(metadata_fingerprint="meta-a")
 
-    assert trace_key == compute_trace_cache_key(identity,
-                                                metadata_fingerprint="meta-a")
+    assert trace_key == compute_trace_cache_key(identity, metadata_fingerprint="meta-a")
     assert recipe_key == compute_recipe_cache_key(
-        identity, metadata_fingerprint="meta-a")
+        identity, metadata_fingerprint="meta-a"
+    )
     assert recipe_key != RecipeBuildSession(
-        _identity(adapter_version="adapter-v2")).recipe_cache_key(
-            metadata_fingerprint="meta-a")
+        _identity(adapter_version="adapter-v2")
+    ).recipe_cache_key(metadata_fingerprint="meta-a")
     assert recipe_key != RecipeBuildSession(
-        _identity(placement={"tp_rank": 1},
-                  tp_rank=1)).recipe_cache_key(metadata_fingerprint="meta-a")
+        _identity(placement={"tp_rank": 1}, tp_rank=1)
+    ).recipe_cache_key(metadata_fingerprint="meta-a")
+    assert trace_key != RecipeBuildSession(
+        _identity(extra={"variant": "a"})
+    ).trace_cache_key(metadata_fingerprint="meta-a")
+    assert recipe_key != RecipeBuildSession(
+        _identity(extra={"variant": "a"})
+    ).recipe_cache_key(metadata_fingerprint="meta-a")
 
 
 def test_recipe_build_session_paths_include_cache_key_and_rank():
@@ -81,6 +95,39 @@ def test_recipe_build_session_paths_include_cache_key_and_rank():
     assert recipe_path.endswith("_tp3.json")
 
 
+def test_serving_binding_plan_absorbs_resolved_spec_cache_entry():
+    identity = _identity()
+    entry = SimpleNamespace(
+        source_schema_hash="source-schema",
+        source_reuse={"mode": "serving_transform"},
+        model_config_digest="model-digest",
+        load_config_digest="load-digest",
+        serving_build_digest="build-digest",
+        binding_layout_id="layout-id",
+        target_layout_hash="layout-hash",
+        tensor_schema_hash="tensor-schema",
+        spec_digest="spec-digest",
+        topology=identity.topology_ref,
+        member=identity.member_ref,
+    )
+
+    plan = identity.with_resolved_spec_cache_entry(entry)
+
+    assert plan.resolved_spec_cache_entry is entry
+    assert plan.source_schema_hash == "source-schema"
+    assert plan.source_reuse_decision == {"mode": "serving_transform"}
+    assert plan.model_config_digest == "model-digest"
+    assert plan.load_config_digest == "load-digest"
+    assert plan.serving_build_digest == "build-digest"
+    assert plan.binding_layout_id == "layout-id"
+    assert plan.target_layout_hash == "layout-hash"
+    assert plan.tensor_schema_hash == "tensor-schema"
+    assert plan.resolved_spec_digest == "spec-digest"
+    assert plan.topology_ref == identity.topology_ref
+    assert plan.member_ref == identity.member_ref
+    assert plan.base_payload()["resolved_spec_digest"] == "spec-digest"
+
+
 def test_recipe_build_session_owns_cache_io(monkeypatch):
     session = RecipeBuildSession(_identity())
     calls = []
@@ -89,17 +136,25 @@ def test_recipe_build_session_owns_cache_io(monkeypatch):
     import tensorcast.serving.builder.trace_cache as trace_cache
 
     monkeypatch.setattr(
-        trace_cache, "load_trace_plan_cache", lambda path: calls.append(
-            ("load_trace", path)) or "trace")
+        trace_cache,
+        "load_trace_plan_cache",
+        lambda path: calls.append(("load_trace", path)) or "trace",
+    )
     monkeypatch.setattr(
-        trace_cache, "write_trace_plan_cache",
-        lambda path, trace: calls.append(("write_trace", path, trace)))
+        trace_cache,
+        "write_trace_plan_cache",
+        lambda path, trace: calls.append(("write_trace", path, trace)),
+    )
     monkeypatch.setattr(
-        recipe_cache, "load_compiled_recipe_cache", lambda path: calls.append(
-            ("load_recipe", path)) or "recipe")
+        recipe_cache,
+        "load_compiled_recipe_cache",
+        lambda path: calls.append(("load_recipe", path)) or "recipe",
+    )
     monkeypatch.setattr(
-        recipe_cache, "write_compiled_recipe_cache",
-        lambda path, recipe: calls.append(("write_recipe", path, recipe)))
+        recipe_cache,
+        "write_compiled_recipe_cache",
+        lambda path, recipe: calls.append(("write_recipe", path, recipe)),
+    )
 
     assert session.load_trace_plan_cache("/tmp/trace.json") == "trace"
     session.write_trace_plan_cache("/tmp/trace.json", "trace-plan")
@@ -136,29 +191,31 @@ def test_recipe_build_session_owns_cache_lookup_and_memory(monkeypatch):
     monkeypatch.setattr(
         RecipeBuildSession,
         "load_trace_plan_cache",
-        staticmethod(lambda path: calls.append(
-            ("load_trace", path)) or "trace-plan"),
+        staticmethod(lambda path: calls.append(("load_trace", path)) or "trace-plan"),
     )
     trace_memory = {}
     trace_result = session.lookup_trace_plan_cache(
         source_catalog=source_catalog,
-        cache_dirs=("/tmp/tensorcast", ),
+        cache_dirs=("/tmp/tensorcast",),
         memory_cache=trace_memory,
     )
 
     assert trace_result.value == "trace-plan"
     assert trace_result.disk_hit
-    assert trace_result.cache_path == session.trace_cache_write_paths(
-        source_catalog=source_catalog,
-        cache_dirs=("/tmp/tensorcast", ),
-    )[0]
+    assert (
+        trace_result.cache_path
+        == session.trace_cache_write_paths(
+            source_catalog=source_catalog,
+            cache_dirs=("/tmp/tensorcast",),
+        )[0]
+    )
     assert trace_memory[trace_result.cache_key] == "trace-plan"
     assert calls == [("load_trace", trace_result.cache_path)]
 
     calls.clear()
     memory_result = session.lookup_trace_plan_cache(
         source_catalog=source_catalog,
-        cache_dirs=("/tmp/tensorcast", ),
+        cache_dirs=("/tmp/tensorcast",),
         memory_cache=trace_memory,
     )
 
@@ -169,18 +226,18 @@ def test_recipe_build_session_owns_cache_lookup_and_memory(monkeypatch):
 
     recipe = SimpleNamespace(
         source_metadata_fingerprint="meta-a",
-        logical_topology=None,
+        topology_ref=None,
+        member_ref=None,
     )
     monkeypatch.setattr(
         RecipeBuildSession,
         "load_compiled_recipe_cache",
-        staticmethod(lambda path: calls.append(
-            ("load_recipe", path)) or recipe),
+        staticmethod(lambda path: calls.append(("load_recipe", path)) or recipe),
     )
     recipe_memory = {}
     recipe_result = session.lookup_compiled_recipe_cache(
         source_catalog=source_catalog,
-        cache_dirs=("/tmp/tensorcast", ),
+        cache_dirs=("/tmp/tensorcast",),
         memory_cache=recipe_memory,
     )
 
@@ -195,6 +252,34 @@ def test_recipe_build_session_owns_cache_lookup_and_memory(monkeypatch):
         memory_cache=recipe_memory,
     )
     assert recipe_memory[remembered_key] is recipe
+
+
+def test_recipe_build_memory_cache_is_bounded_lru():
+    cache = RecipeBuildMemoryCache(max_entries=2)
+    cache["a"] = 1
+    cache["b"] = 2
+
+    assert cache.get("a") == 1
+
+    cache["c"] = 3
+
+    assert len(cache) == 2
+    assert "a" in cache
+    assert "b" not in cache
+    assert "c" in cache
+    assert cache.max_entries == 2
+    assert cache.size == 2
+
+
+def test_default_recipe_build_memory_caches_are_bounded():
+    assert isinstance(TRACE_PLAN_MEMORY_CACHE, RecipeBuildMemoryCache)
+    assert isinstance(COMPILED_RECIPE_MEMORY_CACHE, RecipeBuildMemoryCache)
+    assert TRACE_PLAN_MEMORY_CACHE.max_entries == (
+        DEFAULT_RECIPE_BUILD_MEMORY_CACHE_ENTRIES
+    )
+    assert COMPILED_RECIPE_MEMORY_CACHE.max_entries == (
+        DEFAULT_RECIPE_BUILD_MEMORY_CACHE_ENTRIES
+    )
 
 
 def test_recipe_build_session_owns_compile_identity_and_cached_rebind():
@@ -214,9 +299,11 @@ def test_recipe_build_session_owns_compile_identity_and_cached_rebind():
     identity = session.compile_identity(serving_facts=serving_facts)
 
     assert identity.model_id == "model"
-    assert identity.logical_topology.tensor_parallel_rank == 2
-    assert identity.logical_topology.tensor_parallel_world_size == 4
-    assert identity.extra == {"placement": {"tp_rank": 0}}
+    assert identity.tp_rank == 2
+    assert identity.tp_world_size == 4
+    assert identity.topology_ref == session.identity.topology_ref
+    assert identity.member_ref == session.identity.member_ref
+    assert identity.placement == {"tp_rank": 0}
 
     from dataclasses import dataclass
 
@@ -224,6 +311,7 @@ def test_recipe_build_session_owns_compile_identity_and_cached_rebind():
     class _Catalog:
         source_artifact_ref: str
         metadata_fingerprint: str
+        canonical_index_hash: str
 
     # Use a dataclass recipe so rebind_cached_recipe_template can preserve type
     # through dataclasses.replace, matching the real CompiledServingRecipe.
@@ -232,6 +320,9 @@ def test_recipe_build_session_owns_compile_identity_and_cached_rebind():
         CompiledServingRecipe,
         TensorcastSemanticValidationSpec,
         TensorcastServingFacts,
+        TensorSchemaEntry,
+        realization_plan_digest,
+        target_tensor_schema_hash,
     )
     from tensorcast.serving.builder.trace_ir import TracePlan
 
@@ -260,22 +351,107 @@ def test_recipe_build_session_owns_compile_identity_and_cached_rebind():
         source_hull=(),
         realization_plan=(),
         realization_fallback_plan=(),
-        logical_topology=None,
+        topology_ref=None,
+        member_ref=None,
         semantic_validation_spec=TensorcastSemanticValidationSpec.empty(),
     )
+    compile_payload = identity.compile_payload(
+        source_artifact_ref="mi2:test:source",
+        source_metadata_fingerprint="meta-b",
+        serving_facts=real_recipe.serving_facts,
+        tensor_schema=(
+            TensorSchemaEntry(
+                name="w",
+                dtype="torch.float32",
+                shape=(1,),
+                stride=(1,),
+            ),
+        ),
+        semantic_validation_spec=TensorcastSemanticValidationSpec.empty(),
+    )
+
+    assert compile_payload["source_artifact_ref"] == "mi2:test:source"
+    assert compile_payload["metadata_fingerprint"] == "meta-b"
+    assert compile_payload["topology_ref"] == session.identity.topology_ref.model_dump(
+        mode="python"
+    )
+    assert compile_payload["member_ref"] == session.identity.member_ref.model_dump(
+        mode="python"
+    )
+    assert compile_payload["tensor_schema"] == [
+        {
+            "name": "w",
+            "dtype": "torch.float32",
+            "shape": [1],
+            "stride": [1],
+        }
+    ]
 
     rebound = session.rebind_cached_recipe_template(
         real_recipe,
         source_catalog=_Catalog(
             source_artifact_ref="mi2:test:source",
             metadata_fingerprint="meta-b",
+            canonical_index_hash="source-schema-b",
         ),
     )
 
     assert rebound.compile_key != "old"
     assert rebound.source_artifact_ref == "mi2:test:source"
     assert rebound.source_metadata_fingerprint == "meta-b"
-    assert rebound.logical_topology.tensor_parallel_rank == 2
+    assert rebound.topology_ref == session.identity.topology_ref
+    assert rebound.member_ref == session.identity.member_ref
+    assert rebound.binding_plan is not None
+    assert rebound.binding_plan.source_artifact_ref == "mi2:test:source"
+    assert rebound.binding_plan.source_metadata_fingerprint == "meta-b"
+    assert rebound.binding_plan.source_schema_hash == "source-schema-b"
+    assert rebound.binding_plan.tensor_schema_hash == target_tensor_schema_hash(
+        rebound.tensor_schema
+    )
+    assert rebound.binding_plan.realization_plan_digest == realization_plan_digest(
+        rebound.realization_plan_proto
+    )
+    assert rebound.binding_plan.serving_facts is rebound.serving_facts
+    assert rebound.binding_plan.trace_plan is rebound.trace_plan
+    assert rebound.binding_plan.tensor_schema == rebound.tensor_schema
+    assert rebound.binding_plan.source_hull == rebound.source_hull
+    assert rebound.binding_plan.realization_plan == rebound.realization_plan
+    assert rebound.binding_plan.realization_fallback_plan == (
+        rebound.realization_fallback_plan
+    )
+    assert rebound.binding_plan.realization_plan_proto == (
+        rebound.realization_plan_proto
+    )
+    assert rebound.binding_plan.realization_plan_count == (
+        rebound.realization_plan_count
+    )
+    assert rebound.binding_plan.semantic_validation_spec is (
+        rebound.semantic_validation_spec
+    )
+    assert rebound.binding_plan.topology_ref == session.identity.topology_ref
+    assert rebound.binding_plan.member_ref == session.identity.member_ref
+    resolved_compile_payload = rebound.binding_plan.compile_payload(
+        source_artifact_ref=rebound.source_artifact_ref,
+        source_metadata_fingerprint=rebound.source_metadata_fingerprint,
+        serving_facts=rebound.serving_facts,
+        tensor_schema=rebound.tensor_schema,
+        semantic_validation_spec=rebound.semantic_validation_spec,
+    )
+    identity_compile_payload = identity.compile_payload(
+        source_artifact_ref=rebound.source_artifact_ref,
+        source_metadata_fingerprint=rebound.source_metadata_fingerprint,
+        serving_facts=rebound.serving_facts,
+        tensor_schema=rebound.tensor_schema,
+        semantic_validation_spec=rebound.semantic_validation_spec,
+    )
+    assert resolved_compile_payload["source_schema_hash"] == "source-schema-b"
+    assert resolved_compile_payload["tensor_schema_hash"] == (
+        rebound.binding_plan.tensor_schema_hash
+    )
+    assert resolved_compile_payload["realization_plan_digest"] == (
+        rebound.binding_plan.realization_plan_digest
+    )
+    assert resolved_compile_payload != identity_compile_payload
 
 
 def test_recipe_build_session_owns_recipe_metadata_collection():
@@ -285,15 +461,12 @@ def test_recipe_build_session_owns_recipe_metadata_collection():
     )
 
     class _Model(nn.Module):
-
         def __init__(self) -> None:
             super().__init__()
-            self.w = nn.Parameter(torch.empty((2, ), dtype=torch.float32))
-            self.runtime_only = nn.Parameter(
-                torch.empty((1, ), dtype=torch.float32))
+            self.w = nn.Parameter(torch.empty((2,), dtype=torch.float32))
+            self.runtime_only = nn.Parameter(torch.empty((1,), dtype=torch.float32))
 
     class _Adapter:
-
         def framework_name(self):
             return "fakefw"
 
@@ -312,7 +485,7 @@ def test_recipe_build_session_owns_recipe_metadata_collection():
             return tc.ServingSupportLevel.BUILDER_PUBLICATION_READY
 
         def runtime_only_tensor_names(self, model):
-            return ("runtime_only", )
+            return ("runtime_only",)
 
         def process_after_load_class(self, model, model_config):
             return tc.FinalizeClass.RUNTIME_ONLY
@@ -329,25 +502,28 @@ def test_recipe_build_session_owns_recipe_metadata_collection():
 
     facts = session.collect_serving_facts(model, "model-config", adapter)
     assert facts.framework_name == "fakefw"
-    assert facts.runtime_only_tensor_names == ("runtime_only", )
+    assert facts.runtime_only_tensor_names == ("runtime_only",)
 
     schema = session.collect_tensor_schema(
         model,
         runtime_only_tensor_names=facts.runtime_only_tensor_names,
         is_reserved_serving_tensor_name=lambda name: name.startswith(
-            "__tensorcast_meta__."),
+            "__tensorcast_meta__."
+        ),
     )
     assert [entry.name for entry in schema] == ["w"]
     assert schema[0].dtype == "torch.float32"
 
-    explicit = TensorcastSemanticValidationSpec(kind="explicit",
-                                                payload={"ok": True})
-    assert session.resolve_semantic_validation_spec(
-        model,
-        "model-config",
-        adapter,
-        explicit,
-    ) is explicit
+    explicit = TensorcastSemanticValidationSpec(kind="explicit", payload={"ok": True})
+    assert (
+        session.resolve_semantic_validation_spec(
+            model,
+            "model-config",
+            adapter,
+            explicit,
+        )
+        is explicit
+    )
     resolved = session.resolve_semantic_validation_spec(
         model,
         "model-config",
@@ -368,16 +544,14 @@ def test_recipe_build_session_build_recipe_runs_core_orchestration():
     )
 
     class _Model(nn.Module):
-
         def __init__(self) -> None:
             super().__init__()
-            self.w = nn.Parameter(torch.empty((4, ), device="meta"))
-            self.runtime_only = nn.Parameter(torch.empty((1, ), device="meta"))
+            self.w = nn.Parameter(torch.empty((4,), device="meta"))
+            self.runtime_only = nn.Parameter(torch.empty((1,), device="meta"))
 
     cleanup_calls = []
 
     class _Adapter:
-
         def framework_name(self):
             return "fakefw"
 
@@ -396,7 +570,7 @@ def test_recipe_build_session_build_recipe_runs_core_orchestration():
             return tc.ServingSupportLevel.BUILDER_PUBLICATION_READY
 
         def runtime_only_tensor_names(self, model):
-            return ("runtime_only", )
+            return ("runtime_only",)
 
         def process_after_load_class(self, model, model_config):
             return tc.FinalizeClass.RUNTIME_ONLY
@@ -407,24 +581,22 @@ def test_recipe_build_session_build_recipe_runs_core_orchestration():
         def semantic_probes(self, model, model_config):
             return None
 
-        def cleanup_after_recipe_build(self,
-                                       model,
-                                       model_config,
-                                       *,
-                                       framework_config=None):
+        def cleanup_after_recipe_build(
+            self, model, model_config, *, framework_config=None
+        ):
             cleanup_calls.append(
-                (type(model).__name__, model_config.model, framework_config))
+                (type(model).__name__, model_config.model, framework_config)
+            )
 
     meta_by_name = {
-        "x":
-        SourceTensorMeta(
+        "x": SourceTensorMeta(
             dtype=torch.float16,
-            shape=(4, ),
-            stride=(1, ),
+            shape=(4,),
+            stride=(1,),
             storage_offset=0,
         )
     }
-    ordered_names = ("x", )
+    ordered_names = ("x",)
     source_catalog = SourceCatalog(
         ordered_names=ordered_names,
         meta_by_name=meta_by_name,
@@ -439,11 +611,9 @@ def test_recipe_build_session_build_recipe_runs_core_orchestration():
     )
     trace_plan = TracePlan(
         copy_plan=[
-            CopyPlanEntry(op="copy",
-                          ckpt_name="x",
-                          ckpt_range=None,
-                          dst_name="w",
-                          dst_range=None)
+            CopyPlanEntry(
+                op="copy", ckpt_name="x", ckpt_range=None, dst_name="w", dst_range=None
+            )
         ],
         expected_src_names={"x"},
         expected_dst_names={"w"},
@@ -472,7 +642,8 @@ def test_recipe_build_session_build_recipe_runs_core_orchestration():
             trace_cache_schema_version=7,
         ),
         is_reserved_serving_tensor_name=lambda name: name.startswith(
-            "__tensorcast_meta__."),
+            "__tensorcast_meta__."
+        ),
         trace_capture_fn=lambda *_args: trace_plan,
         profile_sink=events.append,
     )
@@ -499,25 +670,24 @@ def test_recipe_build_session_owns_cached_recipe_context_match():
         "Recipe",
         (),
         {
-            "source_metadata_fingerprint":
-            "meta-a",
-            "logical_topology":
-            type(
-                "Topology",
-                (),
-                {
-                    "tensor_parallel_rank": 1,
-                    "tensor_parallel_world_size": 2,
-                },
-            )(),
+            "source_metadata_fingerprint": "meta-a",
+            "topology_ref": None,
+            "member_ref": ServingBindingMemberRef(
+                member_id="member-1",
+                member_index=1,
+                member_count=2,
+            ),
         },
     )()
     placement = type(
         "Placement",
         (),
         {
-            "tp_rank": 1,
-            "tp_world_size": 2,
+            "member": ServingBindingMemberRef(
+                member_id="member-1",
+                member_index=1,
+                member_count=2,
+            ),
         },
     )()
 
@@ -544,21 +714,27 @@ def test_recipe_build_session_owns_cached_recipe_context_match():
             "Placement",
             (),
             {
-                "tp_rank": 0,
-                "tp_world_size": 2,
+                "member": ServingBindingMemberRef(
+                    member_id="member-0",
+                    member_index=0,
+                    member_count=2,
+                ),
             },
         )(),
     )
 
 
-def test_recipe_cache_match_accepts_serving_placement_identity_payload():
+def test_recipe_cache_match_uses_serving_member_identity():
     session = RecipeBuildSession(_identity())
     source_catalog = SimpleNamespace(metadata_fingerprint="meta-a")
     recipe = SimpleNamespace(
         source_metadata_fingerprint="meta-a",
-        logical_topology=SimpleNamespace(
-            tensor_parallel_rank=1,
-            tensor_parallel_world_size=4,
+        topology_ref=None,
+        member_ref=ServingBindingMemberRef(
+            member_id="dp0:pp0:tp1",
+            member_index=9,
+            member_count=16,
+            group_id="group-1",
         ),
     )
     placement = ServingPlacement(
@@ -592,10 +768,15 @@ def test_recipe_cache_match_accepts_serving_placement_identity_payload():
         source_catalog=source_catalog,
         placement=ServingPlacement(
             topology=placement.topology,
-            member=placement.member,
+            member=ServingBindingMemberRef(
+                member_id="dp0:pp0:tp2",
+                member_index=10,
+                member_count=16,
+                group_id="group-1",
+            ),
             framework_payload=placement.framework_payload,
             identity_payload={
-                "tensor_parallel_rank": 2,
+                "tensor_parallel_rank": 1,
                 "tensor_parallel_size": 4,
             },
         ),
@@ -610,9 +791,7 @@ def test_recipe_build_session_owns_recipe_summary_fields():
             "copy_plan": (1, 2),
             "expected_src_names": {"a", "b"},
             "expected_dst_names": {"x"},
-            "tensorcast_slices": {
-                "x": object()
-            },
+            "tensorcast_slices": {"x": object()},
         },
     )()
     recipe = type(
@@ -623,7 +802,7 @@ def test_recipe_build_session_owns_recipe_summary_fields():
             "tensor_schema": ("w", "x"),
             "realization_plan_count": 3,
             "realization_plan": (),
-            "realization_fallback_plan": (1, ),
+            "realization_fallback_plan": (1,),
         },
     )()
 

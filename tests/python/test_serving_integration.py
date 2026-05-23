@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import subprocess
-import sys
 from contextlib import contextmanager
 from dataclasses import fields
 from types import SimpleNamespace
@@ -13,9 +10,9 @@ import pytest
 import torch
 from torch import nn
 
-import tensorcast.serving.integration as integration_mod
+import tensorcast.serving._runtime_impl.lifecycle as integration_mod
 from tensorcast.pytorch.module_binding import TorchModuleAdapterMixin
-from tensorcast.serving.integration import (
+from tensorcast.serving._runtime_impl.lifecycle import (
     PLACEMENT_ADMISSION_FACTS_SCHEMA_VERSION,
     PLACEMENT_IDENTITY_FACTS_SCHEMA_VERSION,
     RECIPE_CACHE_POLICY_SCHEMA_VERSION,
@@ -26,6 +23,7 @@ from tensorcast.serving.integration import (
     AdmissionDecision,
     AdmissionRejectedError,
     AdmissionRequest,
+    ArtifactLocatorResolutionError,
     AttachFinalizeError,
     AuthorityValidationError,
     BootstrapPolicy,
@@ -47,23 +45,22 @@ from tensorcast.serving.integration import (
     PlacementAdmissionFacts,
     PlacementIdentityFacts,
     PlacementMemberFacts,
-    RecipeBuildIdentity,
     RecipeBuildSessionRequest,
     RecipeCachePolicy,
     RequestContext,
     RestoreBindingError,
     RetainedBindingAcquire,
-    RetainedBindingAuthority,
     RuntimeAttachment,
     RuntimeBindingMaterialization,
+    RuntimeBindingResult,
     RuntimeBindingState,
     RuntimeBindingView,
     RuntimeProfile,
     RuntimeStateSeed,
     RuntimeWorkerView,
     SchemaMismatchError,
-    SelectorResolutionError,
-    ServingArtifactSelector,
+    ServingArtifactLocator,
+    ServingBindingPlan,
     ServingConfig,
     ServingIntegration,
     ServingIntegrationError,
@@ -87,9 +84,6 @@ from tensorcast.serving.integration import (
     _RetainedBindingAcquire,
     _ServingReload,
     bind_serving_artifact,
-    binding_layout_debug_payload,
-    binding_layout_profile_fields,
-    binding_layout_tensor_count,
     build_local_ready_prepared_artifact,
     is_runtime_binding_swap_capable,
     local_ready_current_value_summary_fields,
@@ -103,15 +97,26 @@ from tensorcast.serving.integration import (
     source_subject_from_broadcast_payload,
     swap_serving_artifact,
 )
-from tensorcast.serving.integration import (
+from tensorcast.serving._runtime_impl.lifecycle import (
     BindingValueRef as IntegrationBindingValueRef,
 )
-from tensorcast.serving.integration import (
+from tensorcast.serving._runtime_impl.lifecycle import (
     ServingBindingMemberRef as IntegrationServingBindingMemberRef,
 )
-from tensorcast.serving.preload import (
-    ExternalPreloadExpectedDigests,
-    ParsedExternalPreloadAuthority,
+from tensorcast.serving.admin import AdminLocalSourceBootstrap
+from tensorcast.serving.contract import logical_topology_json
+from tensorcast.serving.diagnostics import (
+    binding_layout_debug_payload,
+    binding_layout_profile_fields,
+    binding_layout_tensor_count,
+)
+from tensorcast.serving.local_ready import (
+    canonical_index_entries_from_tensor_schema,
+    logical_topology_json_from_recipe,
+)
+from tensorcast.serving.retained_binding import (
+    ParsedRetainedServingBindingAuthority,
+    RetainedServingBindingExpectedDigests,
 )
 from tensorcast.types import (
     BindingReservationCapability,
@@ -122,21 +127,19 @@ from tensorcast.types import (
 
 
 class _Bound:
-
     def __init__(self) -> None:
-        self.tensors = {"w": torch.ones((1, ), dtype=torch.float32)}
+        self.tensors = {"w": torch.ones((1,), dtype=torch.float32)}
         self.binding_layout_id = "layout-1"
         self.last_execution_diagnostics = {"executor": "fake"}
         self.swapped = None
 
     def swap(self, artifact, **kwargs):
         self.swapped = (artifact, kwargs)
-        self.tensors = {"w": torch.full((1, ), 2.0, dtype=torch.float32)}
+        self.tensors = {"w": torch.full((1,), 2.0, dtype=torch.float32)}
         return self
 
 
 class _Subset:
-
     def __init__(self, names):
         self.names = tuple(names)
 
@@ -145,13 +148,72 @@ class _Subset:
 
 
 class _Artifact:
-
     def subset(self, names):
         return _Subset(names)
 
 
-class _ContractFrameworkHost:
+def _matrix_placement(
+    *,
+    tp_size: int = 2,
+    pp_size: int = 1,
+    dp_size: int = 1,
+    eplb_digest: str | None = None,
+) -> ServingPlacement:
+    framework_payload = {
+        "family": "vllm_parallelism",
+        "version": "v1",
+        "dimensions": [
+            {
+                "name": "data_parallel",
+                "rank": 0,
+                "size": dp_size,
+            },
+            {
+                "name": "pipeline_parallel",
+                "rank": 0,
+                "size": pp_size,
+            },
+            {
+                "name": "tensor_parallel",
+                "rank": 0,
+                "size": tp_size,
+            },
+        ],
+        "expert_parallel_enabled": False,
+        "eplb_enabled": eplb_digest is not None,
+        "eplb_physical_to_logical_digest": eplb_digest,
+        "semantic_placement_digests": (
+            {} if eplb_digest is None else {"eplb_physical_to_logical": eplb_digest}
+        ),
+    }
+    admission = PlacementAdmissionFacts(
+        eplb_enabled=eplb_digest is not None,
+        eplb_physical_to_logical_digest=eplb_digest,
+        semantic_placement_digests=framework_payload["semantic_placement_digests"],
+    )
+    return serving_placement_from_framework_facts(
+        identity_facts=PlacementIdentityFacts(
+            tensor_parallel_rank=0,
+            tensor_parallel_size=tp_size,
+            pipeline_parallel_rank=0,
+            pipeline_parallel_size=pp_size,
+            data_parallel_rank=0,
+            data_parallel_size=dp_size,
+        ),
+        admission_facts=admission,
+        member_facts=PlacementMemberFacts(
+            runtime_rank=0,
+            runtime_world_size=tp_size * pp_size * dp_size,
+            member_id="dp0:pp0:tp0",
+            member_index=0,
+            member_count=tp_size * pp_size * dp_size,
+        ),
+        framework_payload=framework_payload,
+        identity_payload=framework_payload,
+    )
 
+
+class _ContractFrameworkHost:
     def identity(self, model_config):
         del model_config
         return FrameworkIdentity(
@@ -168,8 +230,7 @@ class _ContractFrameworkHost:
         del framework_config, model_config
         return nn.Linear(1, 1)
 
-    def build_runtime_model(self, framework_config, model_config,
-                            target_device):
+    def build_runtime_model(self, framework_config, model_config, target_device):
         del framework_config, model_config
         return nn.Linear(1, 1).to(target_device)
 
@@ -182,7 +243,6 @@ class _ContractFrameworkHost:
 
 
 class _ContractPlacementHost:
-
     def identity_facts(self, framework_config):
         del framework_config
         return PlacementIdentityFacts(
@@ -218,7 +278,8 @@ def test_integration_host_contract_skeleton_and_default_admission():
     decision = DefaultAdmissionPolicy().admit(
         AdmissionRequest(
             intent=ExistingServingArtifact(
-                ServingArtifactSelector.artifact_ref("artifact:1")),
+                ServingArtifactLocator.artifact_ref("artifact:1")
+            ),
             framework_identity=FrameworkIdentity(
                 framework_name="fake",
                 framework_version="1",
@@ -233,15 +294,51 @@ def test_integration_host_contract_skeleton_and_default_admission():
                 data_parallel_rank=0,
                 data_parallel_size=1,
             ),
-            placement_admission=PlacementAdmissionFacts(
-                expert_parallel_enabled=True),
+            placement_admission=PlacementAdmissionFacts(expert_parallel_enabled=True),
             model_config=object(),
             runtime_profile=RuntimeProfile(),
-        ))
+        )
+    )
     assert decision.family == "generic"
     assert not decision.startup_allowed
     assert not decision.reload_allowed
     assert not decision.local_bootstrap_allowed
+
+
+def test_framework_context_preserves_optional_host_placement_payloads():
+    class _PayloadPlacementHost(_ContractPlacementHost):
+        def framework_payload(self, framework_config):
+            assert framework_config == "framework-config"
+            return {
+                "family": "vllm_parallelism",
+                "version": "v1",
+            }
+
+        def identity_payload(self, framework_config):
+            assert framework_config == "framework-config"
+            return {
+                "tp_rank": 0,
+                "tp_world_size": 1,
+            }
+
+    integration = ServingIntegration(
+        host=IntegrationHost(
+            framework=_ContractFrameworkHost(),
+            placement=_PayloadPlacementHost(),
+        )
+    )
+
+    context = integration._framework_context("framework-config", object())
+
+    assert context.placement is not None
+    assert context.placement.framework_payload == {
+        "family": "vllm_parallelism",
+        "version": "v1",
+    }
+    assert context.placement.identity_payload == {
+        "tp_rank": 0,
+        "tp_world_size": 1,
+    }
 
 
 def test_placement_admission_reports_missing_semantic_proofs():
@@ -252,8 +349,7 @@ def test_placement_admission_reports_missing_semantic_proofs():
     )
 
     assert facts.requires_framework_semantic_proof()
-    assert facts.missing_framework_semantic_proofs() == (
-        "eplb_physical_to_logical", )
+    assert facts.missing_framework_semantic_proofs() == ("eplb_physical_to_logical",)
 
     complete = PlacementAdmissionFacts(
         expert_parallel_enabled=True,
@@ -290,16 +386,18 @@ def test_placement_identity_payload_includes_schema_versions():
 
     payload = placement.stable_identity_payload()["identity_payload"]
     assert identity.placement_identity_schema_version == (
-        PLACEMENT_IDENTITY_FACTS_SCHEMA_VERSION)
+        PLACEMENT_IDENTITY_FACTS_SCHEMA_VERSION
+    )
     assert admission.placement_admission_schema_version == (
-        PLACEMENT_ADMISSION_FACTS_SCHEMA_VERSION)
+        PLACEMENT_ADMISSION_FACTS_SCHEMA_VERSION
+    )
     assert payload["placement_identity_schema_version"] == (
-        PLACEMENT_IDENTITY_FACTS_SCHEMA_VERSION)
+        PLACEMENT_IDENTITY_FACTS_SCHEMA_VERSION
+    )
     assert payload["placement_admission_schema_version"] == (
-        PLACEMENT_ADMISSION_FACTS_SCHEMA_VERSION)
-    assert payload["semantic_placement_digests"] == {
-        "expert_mapping": "expert-digest"
-    }
+        PLACEMENT_ADMISSION_FACTS_SCHEMA_VERSION
+    )
+    assert payload["semantic_placement_digests"] == {"expert_mapping": "expert-digest"}
 
 
 def test_existing_serving_artifact_rejects_local_source_selector():
@@ -311,28 +409,25 @@ def test_existing_serving_artifact_rejects_local_source_selector():
         )
     with pytest.raises(ServingIntegrationError, match="local_path"):
         service.start(
-            ExistingServingArtifact({
-                "kind": "local_path",
-                "value": "/tmp/model",
-            }),
+            ExistingServingArtifact(
+                {
+                    "kind": "local_path",
+                    "value": "/tmp/model",
+                }
+            ),
             RequestContext(),
         )
 
 
 def test_retained_binding_acquire_rejects_arbitrary_authority_object():
-    with pytest.raises(ServingIntegrationError,
-                       match="RetainedBindingAuthority"):
-        RetainedBindingAcquire(
-            SimpleNamespace(readiness="serving_local_ready"))
+    with pytest.raises(
+        ServingIntegrationError,
+        match="ParsedRetainedServingBindingAuthority",
+    ):
+        RetainedBindingAcquire(SimpleNamespace(readiness="serving_local_ready"))
 
-    authority = RetainedBindingAuthority.from_preload_authority(_authority())
+    authority = _authority()
     assert RetainedBindingAcquire(authority).authority is authority
-    with pytest.raises(AuthorityValidationError, match="binding_value_ref"):
-        RetainedBindingAuthority(
-            **{
-                **authority.__dict__,
-                "binding_value_ref": SimpleNamespace(),
-            })
 
 
 def test_public_local_source_bootstrap_excludes_admin_override_fields():
@@ -353,10 +448,12 @@ def test_public_local_source_bootstrap_excludes_admin_override_fields():
 
 def test_serving_runtime_session_plans_direct_start_from_config(monkeypatch):
     captured = {}
-    state = RuntimeBindingState(runtime_view=RuntimeBindingView(
-        serving_artifact_ref="mi2:serving",
-        readiness="serving",
-    ))
+    state = RuntimeBindingState(
+        runtime_view=RuntimeBindingView(
+            serving_artifact_ref="mi2:serving",
+            readiness="serving",
+        )
+    )
     attachment = RuntimeAttachment(
         model=object(),
         state=state,
@@ -370,24 +467,26 @@ def test_serving_runtime_session_plans_direct_start_from_config(monkeypatch):
         return attachment
 
     monkeypatch.setattr(
-        integration_mod.tc_runtime.RuntimeSettings,
+        integration_mod.tc_runtime_config.RuntimeSettings,
         "ensure_initialized",
         lambda self: captured.setdefault("runtime_initialized", self),
     )
     monkeypatch.setattr(ServingIntegration, "start", fake_start)
 
     session = ServingRuntimeSession.from_config(
-        ServingConfig.from_mapping({
-            "bootstrap": {
-                "mode": "disabled",
-            },
-            "serving": {
-                "selector": {
-                    "kind": "artifact_ref",
-                    "value": "mi2:serving",
+        ServingConfig.from_mapping(
+            {
+                "bootstrap": {
+                    "mode": "disabled",
                 },
-            },
-        }),
+                "serving": {
+                    "artifact_locator": {
+                        "kind": "artifact_ref",
+                        "value": "mi2:serving",
+                    },
+                },
+            }
+        ),
         host=IntegrationHost(
             framework=_ContractFrameworkHost(),
             placement=_ContractPlacementHost(),
@@ -398,16 +497,17 @@ def test_serving_runtime_session_plans_direct_start_from_config(monkeypatch):
     assert result is attachment
     assert captured["runtime_initialized"] is session.serving_config.runtime
     assert isinstance(captured["intent"], ExistingServingArtifact)
-    assert captured["intent"].selector.kind == "artifact_ref"
+    assert captured["intent"].artifact_locator.kind == "artifact_ref"
 
 
-def test_serving_runtime_session_private_intent_initializes_runtime(
-        monkeypatch):
+def test_serving_runtime_session_private_intent_initializes_runtime(monkeypatch):
     captured = {}
-    state = RuntimeBindingState(runtime_view=RuntimeBindingView(
-        serving_artifact_ref="mi2:serving",
-        readiness="serving",
-    ))
+    state = RuntimeBindingState(
+        runtime_view=RuntimeBindingView(
+            serving_artifact_ref="mi2:serving",
+            readiness="serving",
+        )
+    )
     attachment = RuntimeAttachment(
         model=object(),
         state=state,
@@ -415,7 +515,7 @@ def test_serving_runtime_session_private_intent_initializes_runtime(
     )
 
     monkeypatch.setattr(
-        integration_mod.tc_runtime.RuntimeSettings,
+        integration_mod.tc_runtime_config.RuntimeSettings,
         "ensure_initialized",
         lambda self: captured.setdefault("runtime_initialized", self),
     )
@@ -433,7 +533,7 @@ def test_serving_runtime_session_private_intent_initializes_runtime(
                 "mode": "disabled",
             },
             "serving": {
-                "selector": {
+                "artifact_locator": {
                     "kind": "artifact_ref",
                     "value": "mi2:serving",
                 },
@@ -444,13 +544,12 @@ def test_serving_runtime_session_private_intent_initializes_runtime(
             placement=_ContractPlacementHost(),
         ),
     )
-    intent = integration_mod._AdminLocalSourceBootstrap(
+    intent = AdminLocalSourceBootstrap(
         source_selector=SourceSelector.local_path("/tmp/model"),
         bootstrap_policy=BootstrapPolicy(),
     )
 
-    result = session._start_intent(intent,
-                                   RequestContext(model_config=object()))
+    result = session._start_intent(intent, RequestContext(model_config=object()))
 
     assert result is attachment
     assert captured["runtime_initialized"] is session.serving_config.runtime
@@ -465,20 +564,25 @@ def test_serving_runtime_session_rejects_conflicting_start_config(monkeypatch):
         nonlocal initialized
         initialized = True
 
-    monkeypatch.setattr(integration_mod.tc_runtime.RuntimeSettings,
-                        "ensure_initialized", fail_if_initialized)
+    monkeypatch.setattr(
+        integration_mod.tc_runtime_config.RuntimeSettings,
+        "ensure_initialized",
+        fail_if_initialized,
+    )
     session = ServingRuntimeSession.from_config(
-        ServingConfig.from_mapping({
-            "bootstrap": {
-                "mode": "required",
-            },
-            "serving": {
-                "selector": {
-                    "kind": "artifact_ref",
-                    "value": "mi2:serving",
+        ServingConfig.from_mapping(
+            {
+                "bootstrap": {
+                    "mode": "required",
                 },
-            },
-        }),
+                "serving": {
+                    "artifact_locator": {
+                        "kind": "artifact_ref",
+                        "value": "mi2:serving",
+                    },
+                },
+            }
+        ),
         host=IntegrationHost(
             framework=_ContractFrameworkHost(),
             placement=_ContractPlacementHost(),
@@ -490,8 +594,7 @@ def test_serving_runtime_session_rejects_conflicting_start_config(monkeypatch):
     assert not initialized
 
 
-def test_serving_runtime_session_uses_source_host_for_local_bootstrap(
-        monkeypatch):
+def test_serving_runtime_session_uses_source_host_for_local_bootstrap(monkeypatch):
     captured = {}
     attachment = RuntimeAttachment(
         model=object(),
@@ -500,10 +603,8 @@ def test_serving_runtime_session_uses_source_host_for_local_bootstrap(
     )
 
     class _Source:
-
         def source_selector(self, framework_config, model_config):
-            captured["source_selector_args"] = (framework_config,
-                                                model_config)
+            captured["source_selector_args"] = (framework_config, model_config)
             return SourceSelector.local_path("/tmp/fakefw-model")
 
         def source_catalog_config(self, framework_config, model_config):
@@ -520,18 +621,20 @@ def test_serving_runtime_session_uses_source_host_for_local_bootstrap(
         return attachment
 
     monkeypatch.setattr(
-        integration_mod.tc_runtime.RuntimeSettings,
+        integration_mod.tc_runtime_config.RuntimeSettings,
         "ensure_initialized",
         lambda self: captured.setdefault("runtime_initialized", self),
     )
     monkeypatch.setattr(ServingIntegration, "start", fake_start)
 
     session = ServingRuntimeSession.from_config(
-        ServingConfig.from_mapping({
-            "bootstrap": {
-                "mode": "required",
-            },
-        }),
+        ServingConfig.from_mapping(
+            {
+                "bootstrap": {
+                    "mode": "required",
+                },
+            }
+        ),
         host=IntegrationHost(
             framework=_ContractFrameworkHost(),
             placement=_ContractPlacementHost(),
@@ -539,33 +642,41 @@ def test_serving_runtime_session_uses_source_host_for_local_bootstrap(
         ),
     )
     result = session.start(
-        RequestContext(framework_config="framework-config",
-                       model_config=SimpleNamespace(name="model-config")))
+        RequestContext(
+            framework_config="framework-config",
+            model_config=SimpleNamespace(name="model-config"),
+        )
+    )
 
     assert result is attachment
     assert captured["runtime_initialized"] is session.serving_config.runtime
     assert captured["source_selector_args"][0] == "framework-config"
     assert isinstance(captured["intent"], LocalSourceBootstrap)
     assert captured["intent"].source_selector == SourceSelector.local_path(
-        "/tmp/fakefw-model")
+        "/tmp/fakefw-model"
+    )
 
 
-def test_serving_runtime_session_rejects_local_reload_selector(monkeypatch):
+def test_serving_runtime_session_rejects_local_reload_artifact_locator(monkeypatch):
     monkeypatch.setattr(
-        integration_mod.tc_runtime.RuntimeSettings, "ensure_initialized",
-        lambda self: pytest.fail("local selector rejection must precede init"))
+        integration_mod.tc_runtime_config.RuntimeSettings,
+        "ensure_initialized",
+        lambda self: pytest.fail("local artifact locator rejection must precede init"),
+    )
     session = ServingRuntimeSession.from_config(
-        ServingConfig.from_mapping({
-            "bootstrap": {
-                "mode": "disabled",
-            },
-            "serving": {
-                "selector": {
-                    "kind": "artifact_ref",
-                    "value": "mi2:serving",
+        ServingConfig.from_mapping(
+            {
+                "bootstrap": {
+                    "mode": "disabled",
                 },
-            },
-        }),
+                "serving": {
+                    "artifact_locator": {
+                        "kind": "artifact_ref",
+                        "value": "mi2:serving",
+                    },
+                },
+            }
+        ),
         host=IntegrationHost(
             framework=_ContractFrameworkHost(),
             placement=_ContractPlacementHost(),
@@ -580,24 +691,24 @@ def test_serving_runtime_session_rejects_local_reload_selector(monkeypatch):
     with pytest.raises(ConfigConflictError, match="durable"):
         session.reload(
             current_attachment=attachment,
-            selector=SourceSelector.local_path("/tmp/model"),
+            artifact_locator=SourceSelector.local_path("/tmp/model"),
             policy=None,
             context=RequestContext(),
         )
     with pytest.raises(ConfigConflictError, match="durable"):
         session.reload(
             current_attachment=attachment,
-            selector={
+            artifact_locator={
                 "kind": "local_path",
                 "value": "/tmp/model",
             },
             policy=None,
             context=RequestContext(),
         )
-    with pytest.raises(ConfigConflictError, match="ServingArtifactSelector"):
+    with pytest.raises(ConfigConflictError, match="ServingArtifactLocator"):
         session.reload(
             current_attachment=attachment,
-            selector={
+            artifact_locator={
                 "kind": "artifact_ref",
                 "value": "mi2:serving-next",
             },
@@ -607,16 +718,14 @@ def test_serving_runtime_session_rejects_local_reload_selector(monkeypatch):
     with pytest.raises(ConfigConflictError, match="ServingPolicy"):
         session.reload(
             current_attachment=attachment,
-            selector=ServingArtifactSelector.artifact_ref("mi2:serving-next"),
+            artifact_locator=ServingArtifactLocator.artifact_ref("mi2:serving-next"),
             policy={"mode": "from_manifest"},
             context=RequestContext(),
         )
 
 
 def test_admission_endpoint_uses_tensor_parallel_facts_not_member_index():
-
     class _MultiDimPlacementHost(_ContractPlacementHost):
-
         def identity_facts(self, framework_config):
             del framework_config
             return PlacementIdentityFacts(
@@ -639,25 +748,25 @@ def test_admission_endpoint_uses_tensor_parallel_facts_not_member_index():
             )
 
     class _Admission:
-
         def admit(self, request):
             del request
             return AdmissionDecision(
                 family="fake-family",
-                support_level="serving_bind_swap_ready",
+                support_level="runtime_bind_swap_ready",
                 startup_allowed=True,
                 reload_allowed=True,
                 local_bootstrap_allowed=True,
                 endpoint_fields={},
             )
 
-    decision = ServingIntegration(host=IntegrationHost(
-        framework=_ContractFrameworkHost(),
-        placement=_MultiDimPlacementHost(),
-        admission=_Admission(),
-    ))._admit_intent(
-        ExistingServingArtifact(ServingArtifactSelector.artifact_ref(
-            "mi2:serving")),
+    decision = ServingIntegration(
+        host=IntegrationHost(
+            framework=_ContractFrameworkHost(),
+            placement=_MultiDimPlacementHost(),
+            admission=_Admission(),
+        )
+    )._admit_intent(
+        ExistingServingArtifact(ServingArtifactLocator.artifact_ref("mi2:serving")),
         RequestContext(framework_config=object(), model_config=object()),
     )
 
@@ -736,8 +845,7 @@ def test_runtime_worker_view_accepts_typed_source_selection_projection():
         tensor_schema_hash="schema",
         readiness="serving",
         diagnostics={
-            "source_selection":
-            SourceSelectionProjection(
+            "source_selection": SourceSelectionProjection(
                 selected_source_kind="canonical_fallback",
                 fallback_bytes=2048,
                 fallback_reason_bucket="transport_unavailable",
@@ -853,18 +961,81 @@ def test_execution_diagnostics_seed_runtime_source_selection_projection():
     }
 
 
+def test_materialization_diagnostics_seed_runtime_source_selection_projection():
+    resolved = SimpleNamespace(
+        artifact_ref="mi2:serving",
+        manifest=SimpleNamespace(
+            representation_contract_hash="repr",
+            source_artifact_ref="mi2:source",
+            serving_build_digest="build",
+        ),
+    )
+
+    seed = ServingIntegration._state_seed(
+        resolved,
+        tensor_schema_hash="schema",
+        materialization_diagnostics={
+            "source": "p2p",
+            "total_bytes": 4096,
+            "replica_id": "source-replica",
+            "retry_attempts": 1,
+            "retry_reason_buckets": {},
+        },
+        execution_diagnostics=SimpleNamespace(
+            actual_collective_committed_bytes=0,
+            collective_peer_transfer_bytes=0,
+            fallback_bytes=4096,
+        ),
+        binding_handle=SimpleNamespace(current_value=None),
+    )
+    worker_view = RuntimeWorkerView.from_runtime_view(seed.runtime_view())
+    payload = worker_view.endpoint.to_weight_version_payload()
+
+    assert payload["source_selection"] == {
+        "schema_version": 1,
+        "selected_source_kind": "published_memory_replica",
+        "selected_replica_id": "source-replica",
+        "p2p_bytes": 4096,
+        "fallback_bytes": 0,
+        "disk_bytes": 0,
+        "reselection_attempts": 0,
+    }
+
+
+def test_runtime_binding_result_captures_materialization_diagnostics():
+    binding = SimpleNamespace(
+        tensors={"weight": object()},
+        binding_layout_id="layout-1",
+        last_execution_diagnostics=None,
+        last_materialization_diagnostics={
+            "source": "disk",
+            "total_bytes": 2048,
+        },
+    )
+
+    result = RuntimeBindingResult.from_binding(binding)
+
+    assert result.materialization_diagnostics == {
+        "source": "disk",
+        "total_bytes": 2048,
+    }
+
+
 def test_local_bootstrap_requires_host_source_catalog_provider():
-    service = ServingIntegration(host=IntegrationHost(
-        framework=_ContractFrameworkHost(),
-        placement=_ContractPlacementHost(),
-    ))
+    service = ServingIntegration(
+        host=IntegrationHost(
+            framework=_ContractFrameworkHost(),
+            placement=_ContractPlacementHost(),
+        )
+    )
     source_subject = SourceSubject(
         artifact_ref="mi2:source",
         subject=object(),
     )
 
-    with pytest.raises(CapabilityMissingError,
-                       match="IntegrationHost.source_catalog") as exc_info:
+    with pytest.raises(
+        CapabilityMissingError, match="IntegrationHost.source_catalog"
+    ) as exc_info:
         service._local_ready_source_catalog(
             _LocalReadyBootstrap(
                 source_selector=SourceSelector.local_path("/tmp/model"),
@@ -876,22 +1047,18 @@ def test_local_bootstrap_requires_host_source_catalog_provider():
         )
     assert exc_info.value.details["level"] == "level2-local-bootstrap"
     assert exc_info.value.details["capability"] == "source_catalog"
-    assert exc_info.value.details["operation"] == \
-        "local_bootstrap.source_catalog"
-    assert exc_info.value.details["required_methods"] == ("build_catalog", )
+    assert exc_info.value.details["operation"] == "local_bootstrap.source_catalog"
+    assert exc_info.value.details["required_methods"] == ("build_catalog",)
 
 
 def test_source_catalog_provider_uses_integration_host():
-
     class _Provider:
-
         def __init__(self):
             self.request = None
 
         def build_catalog(self, request):
             self.request = request
-            return SimpleNamespace(
-                source_artifact_ref=request.source_artifact_ref)
+            return SimpleNamespace(source_artifact_ref=request.source_artifact_ref)
 
     provider = _Provider()
     host = IntegrationHost(
@@ -921,9 +1088,67 @@ def test_source_catalog_provider_uses_integration_host():
     assert provider.request.schema_version == SOURCE_CATALOG_REQUEST_SCHEMA_VERSION
 
 
+@pytest.mark.parametrize(
+    "provider_ref, expected",
+    (
+        (None, "without a real source_artifact_ref"),
+        ("disk:/tmp/model", "without a real source_artifact_ref"),
+        ("mi2:other:source", "expected 'mi2:source'"),
+    ),
+)
+def test_source_catalog_provider_must_return_matching_source_artifact_ref(
+    provider_ref, expected
+):
+    class _Provider:
+        @staticmethod
+        def build_catalog(request):
+            del request
+            if provider_ref is None:
+                return SimpleNamespace()
+            return SimpleNamespace(source_artifact_ref=provider_ref)
+
+    service = ServingIntegration(
+        host=IntegrationHost(
+            framework=_ContractFrameworkHost(),
+            placement=_ContractPlacementHost(),
+            source_catalog=_Provider(),
+        )
+    )
+    source_subject = SourceSubject(
+        artifact_ref="mi2:source",
+        subject=object(),
+    )
+
+    with pytest.raises(ServingIntegrationError, match=expected):
+        service._local_ready_source_catalog(
+            _LocalReadyBootstrap(
+                source_selector=SourceSelector.local_path("/tmp/model"),
+                source_subject=source_subject,
+                model_config=object(),
+            ),
+            source_subject=source_subject,
+            source_artifact_ref="mi2:source",
+        )
+
+
+def test_local_ready_build_recipe_requires_real_source_subject_artifact_ref():
+    service = ServingIntegration()
+
+    with pytest.raises(ServingIntegrationError, match="real source artifact identity"):
+        service._local_ready_prepare_with_built_recipe(
+            _LocalReadyBootstrap(
+                source_selector=SourceSelector.local_path("/tmp/model"),
+                source_subject=SourceSubject(
+                    artifact_ref="disk:/tmp/model",
+                    subject=object(),
+                ),
+                model_config=object(),
+            )
+        )
+
+
 def test_source_catalog_request_and_policy_schema_versions():
-    download_policy = SourceDownloadPolicy(
-        fields={"download_dir": "/tmp/download"})
+    download_policy = SourceDownloadPolicy(fields={"download_dir": "/tmp/download"})
     cache_policy = RecipeCachePolicy(fields={"cache_root": "/tmp/cache"})
     request = SourceCatalogRequest(
         source_subject=SourceSubject(
@@ -956,8 +1181,9 @@ def test_recipe_cache_policy_builds_model_adjacent_cache_config(tmp_path):
     model_dir.mkdir()
     weight_file = model_dir / "rank0.safetensors"
     weight_file.write_bytes(b"")
-    source_catalog = SimpleNamespace(selected_files=(SimpleNamespace(
-        path=str(weight_file)), ))
+    source_catalog = SimpleNamespace(
+        selected_files=(SimpleNamespace(path=str(weight_file)),)
+    )
     policy = RecipeCachePolicy(
         fields={
             "cache_root": str(tmp_path / "default-cache"),
@@ -965,7 +1191,8 @@ def test_recipe_cache_policy_builds_model_adjacent_cache_config(tmp_path):
             "debug_output_dir": str(tmp_path / "debug"),
             "debug_dump_trace": True,
             "synchronous_cache_write": False,
-        })
+        }
+    )
 
     config = ServingIntegration._local_ready_recipe_cache_config(
         _LocalReadyBootstrap(cache_config=policy),
@@ -973,10 +1200,10 @@ def test_recipe_cache_policy_builds_model_adjacent_cache_config(tmp_path):
     )
 
     root = model_dir / ".tensorcast" / "bootstrap_cache"
-    assert config.cache_dirs == (str(root / "trace_plans"), )
-    assert config.recipe_cache_dirs == (str(root / "compiled_recipes"), )
-    assert config.trace_write_dirs == (str(root / "trace_plans"), )
-    assert config.recipe_cache_write_dirs == (str(root / "compiled_recipes"), )
+    assert config.cache_dirs == (str(root / "trace_plans"),)
+    assert config.recipe_cache_dirs == (str(root / "compiled_recipes"),)
+    assert config.trace_write_dirs == (str(root / "trace_plans"),)
+    assert config.recipe_cache_write_dirs == (str(root / "compiled_recipes"),)
     assert config.debug_output_dir == tmp_path / "debug"
     assert config.debug_dump_trace
     assert not config.synchronous_cache_write
@@ -990,6 +1217,7 @@ def test_public_intent_attachment_type_exists():
         view=RuntimeWorkerView.from_runtime_view(RuntimeBindingView()),
     )
     assert attachment.state is state
+    assert attachment.recipe is None
     intent = LocalSourceBootstrap(
         source_selector=SourceSelector.local_path("/tmp/model"),
         bootstrap_policy=BootstrapPolicy(),
@@ -1001,6 +1229,7 @@ def test_local_source_bootstrap_start_derives_request_from_host(monkeypatch):
     captured = {}
     coordinator = object()
     model = nn.Linear(1, 1)
+    recipe = object()
     runtime_view = RuntimeBindingView(
         source_artifact_ref="mi2:source",
         representation_contract_hash="repr",
@@ -1014,19 +1243,17 @@ def test_local_source_bootstrap_start_derives_request_from_host(monkeypatch):
     )
 
     class _Admission:
-
         def admit(self, request):
             captured["admission"] = request
             return AdmissionDecision(
                 family="fake-family",
-                support_level="serving_bind_swap_ready",
+                support_level="runtime_bind_swap_ready",
                 startup_allowed=True,
                 reload_allowed=True,
                 local_bootstrap_allowed=True,
             )
 
     class _Collective:
-
         def source_subject_coordinator(self, framework_config):
             captured["coordinator_framework_config"] = framework_config
             return coordinator
@@ -1035,7 +1262,6 @@ def test_local_source_bootstrap_start_derives_request_from_host(monkeypatch):
             captured["barrier"] = (framework_config, target_device)
 
     class _Source:
-
         def source_catalog_config(self, framework_config, model_config):
             captured["source_catalog_config_args"] = (
                 framework_config,
@@ -1065,19 +1291,23 @@ def test_local_source_bootstrap_start_derives_request_from_host(monkeypatch):
                 family="fake-family",
                 tensor_schema_hash="schema",
             ),
+            recipe=recipe,
         )
 
-    monkeypatch.setattr(ServingIntegration, "_prepare_local_source_bootstrap",
-                        fake_prepare)
+    monkeypatch.setattr(
+        ServingIntegration, "_prepare_local_source_bootstrap", fake_prepare
+    )
 
-    attachment = ServingIntegration(host=IntegrationHost(
-        framework=_ContractFrameworkHost(),
-        placement=_ContractPlacementHost(),
-        tensor_surface=integration_mod.TorchTensorHost(),
-        collective=_Collective(),
-        source=_Source(),
-        admission=_Admission(),
-    )).start(
+    attachment = ServingIntegration(
+        host=IntegrationHost(
+            framework=_ContractFrameworkHost(),
+            placement=_ContractPlacementHost(),
+            tensor_surface=integration_mod.TorchTensorHost(),
+            collective=_Collective(),
+            source=_Source(),
+            admission=_Admission(),
+        )
+    ).start(
         LocalSourceBootstrap(
             source_selector=SourceSelector.local_path("/tmp/model"),
             bootstrap_policy=BootstrapPolicy(),
@@ -1092,6 +1322,7 @@ def test_local_source_bootstrap_start_derives_request_from_host(monkeypatch):
     request = captured["request"]
     assert attachment.model is model
     assert attachment.prepared is not None
+    assert attachment.recipe is recipe
     assert request.source_selector == SourceSelector.local_path("/tmp/model")
     assert request.source_subject_coordinator is coordinator
     assert captured["coordinator_framework_config"] == "framework-config"
@@ -1121,14 +1352,13 @@ def test_local_source_bootstrap_start_derives_request_from_host(monkeypatch):
     assert request.validate_representation_contract_hash
     assert request.require_materialization_options
     assert request.source_bound_contract_path == (
-        integration_mod.SOURCE_BOUND_CONTRACT_PATH_COLLECTIVE_FIRST_V4)
+        integration_mod.SOURCE_BOUND_CONTRACT_PATH_COLLECTIVE_FIRST_V4
+    )
     assert request.placement.member.member_index == 0
 
 
 def test_host_start_fails_clearly_without_tensor_surface():
-
     class _Resolver:
-
         def resolve(self, artifact_ref):
             return SimpleNamespace(
                 artifact=_Artifact(),
@@ -1144,11 +1374,9 @@ def test_host_start_fails_clearly_without_tensor_surface():
         ),
     )
 
-    with pytest.raises(ServingIntegrationError,
-                       match="TensorSurfaceHost") as exc_info:
+    with pytest.raises(ServingIntegrationError, match="TensorSurfaceHost") as exc_info:
         service.start(
-            ExistingServingArtifact(
-                ServingArtifactSelector.artifact_ref("mi2:serving")),
+            ExistingServingArtifact(ServingArtifactLocator.artifact_ref("mi2:serving")),
             RequestContext(
                 framework_config=object(),
                 model_config=SimpleNamespace(model="fake"),
@@ -1162,29 +1390,28 @@ def test_host_start_fails_clearly_without_tensor_surface():
 
 
 def test_integration_host_delegates_recipe_trace_capabilities():
-
     class _TraceFrameworkHost(_ContractFrameworkHost):
-
         def __init__(self):
             self.events = []
 
-        def trace_model_load(self,
-                             model,
-                             ordered_names,
-                             meta_by_name,
-                             *,
-                             debug_dump_trace=False):
-            self.events.append(("trace", model, tuple(ordered_names),
-                                dict(meta_by_name), debug_dump_trace))
+        def trace_model_load(
+            self, model, ordered_names, meta_by_name, *, debug_dump_trace=False
+        ):
+            self.events.append(
+                (
+                    "trace",
+                    model,
+                    tuple(ordered_names),
+                    dict(meta_by_name),
+                    debug_dump_trace,
+                )
+            )
             return SimpleNamespace(trace=True)
 
-        def cleanup_after_recipe_build(self,
-                                       model,
-                                       model_config,
-                                       *,
-                                       framework_config=None):
-            self.events.append(
-                ("cleanup", model, model_config, framework_config))
+        def cleanup_after_recipe_build(
+            self, model, model_config, *, framework_config=None
+        ):
+            self.events.append(("cleanup", model, model_config, framework_config))
 
         def support_level(self, model, model_config):
             self.events.append(("support", model, model_config))
@@ -1199,18 +1426,18 @@ def test_integration_host_delegates_recipe_trace_capabilities():
             return FinalizeClass.RUNTIME_ONLY
 
     framework = _TraceFrameworkHost()
-    integration = ServingIntegration(host=IntegrationHost(
-        framework=framework,
-        placement=_ContractPlacementHost(),
-        tensor_surface=integration_mod.TorchTensorHost(),
-    ))
+    integration = ServingIntegration(
+        host=IntegrationHost(
+            framework=framework,
+            placement=_ContractPlacementHost(),
+            tensor_surface=integration_mod.TorchTensorHost(),
+        )
+    )
 
     assert integration.trace_model_load(
         "model",
-        ("w", ),
-        {
-            "w": object()
-        },
+        ("w",),
+        {"w": object()},
         debug_dump_trace=True,
     ).trace
     integration.cleanup_after_recipe_build(
@@ -1218,23 +1445,35 @@ def test_integration_host_delegates_recipe_trace_capabilities():
         "model-config",
         framework_config="framework-config",
     )
-    assert integration.support_level(
-        "model", "model-config") is ServingSupportLevel.RUNTIME_BIND_SWAP_READY
-    assert integration.process_after_load_class(
-        "model", "model-config") is FinalizeClass.RUNTIME_ONLY
-    assert integration.post_bind_finalize_class(
-        "model", "model-config") is FinalizeClass.RUNTIME_ONLY
+    assert (
+        integration.support_level("model", "model-config")
+        is ServingSupportLevel.RUNTIME_BIND_SWAP_READY
+    )
+    assert (
+        integration.process_after_load_class("model", "model-config")
+        is FinalizeClass.RUNTIME_ONLY
+    )
+    assert (
+        integration.post_bind_finalize_class("model", "model-config")
+        is FinalizeClass.RUNTIME_ONLY
+    )
     assert framework.events[0][0] == "trace"
-    assert framework.events[1] == ("cleanup", "model", "model-config",
-                                   "framework-config")
+    assert framework.events[1] == (
+        "cleanup",
+        "model",
+        "model-config",
+        "framework-config",
+    )
 
 
 def test_integration_host_fails_recipe_trace_miss_clearly():
-    integration = ServingIntegration(host=IntegrationHost(
-        framework=_ContractFrameworkHost(),
-        placement=_ContractPlacementHost(),
-        tensor_surface=integration_mod.TorchTensorHost(),
-    ))
+    integration = ServingIntegration(
+        host=IntegrationHost(
+            framework=_ContractFrameworkHost(),
+            placement=_ContractPlacementHost(),
+            tensor_surface=integration_mod.TorchTensorHost(),
+        )
+    )
 
     with pytest.raises(ServingIntegrationError, match="RecipeTraceHost"):
         integration.trace_model_load(object(), (), {})
@@ -1298,8 +1537,7 @@ def test_binding_layout_diagnostics_are_core_owned():
 
 
 def test_runtime_binding_swap_capability_is_core_owned():
-    assert is_runtime_binding_swap_capable(
-        SimpleNamespace(swap=lambda _: None))
+    assert is_runtime_binding_swap_capable(SimpleNamespace(swap=lambda _: None))
     assert is_runtime_binding_swap_capable(SimpleNamespace(swap_capable=True))
     assert not is_runtime_binding_swap_capable(SimpleNamespace())
 
@@ -1311,15 +1549,17 @@ def test_local_ready_current_value_summary_is_core_owned():
         binding_value_id="value-1",
         local_serving_ref="binding-local:binding-1:value-1",
         verification_state=(
-            store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY),
+            store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY
+        ),
     )
 
     assert local_ready_current_value_summary_fields(
-        current_value, require_local_serving_ref=True) == {
-            "binding_value_id": "value-1",
-            "verification_state": "local_only",
-            "local_serving_ref": "binding-local:binding-1:value-1",
-        }
+        current_value, require_local_serving_ref=True
+    ) == {
+        "binding_value_id": "value-1",
+        "verification_state": "local_only",
+        "local_serving_ref": "binding-local:binding-1:value-1",
+    }
     with pytest.raises(integration_mod.ServingIntegrationError):
         local_ready_current_value_summary_fields(
             SimpleNamespace(binding_value_id="value-1"),
@@ -1358,7 +1598,8 @@ def test_build_local_ready_prepared_artifact_returns_runtime_state_and_view():
         seal_generation=3,
         local_serving_ref="binding-local:binding-1:value-1",
         verification_state=(
-            store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY),
+            store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY
+        ),
         verification_job_id="verify-1",
     )
     result = build_local_ready_prepared_artifact(
@@ -1374,7 +1615,7 @@ def test_build_local_ready_prepared_artifact_returns_runtime_state_and_view():
         tp_world_size=2,
         source_bound_contract_state=SimpleNamespace(
             source_bound_contract_version=4,
-            source_bound_capability_names=("a", ),
+            source_bound_capability_names=("a",),
             source_bound_contract_ready=True,
         ),
         source_bound_contract_path="/tmp/contract.json",
@@ -1385,21 +1626,20 @@ def test_build_local_ready_prepared_artifact_returns_runtime_state_and_view():
     assert result.runtime_view.source_artifact_ref == "mi2:test:source"
     assert result.runtime_view.serving_artifact_ref is None
     assert result.runtime_view.readiness == "serving_local_ready"
-    assert result.runtime_view.local_serving_ref == (
-        "binding-local:binding-1:value-1")
+    assert result.runtime_view.local_serving_ref == ("binding-local:binding-1:value-1")
     assert result.runtime_view.tensor_schema_hash == "schema"
-    assert result.runtime_view.diagnostics[
-        "verification_state"] == "local_only"
-    assert result.prepared.bootstrap_summary is result.bootstrap_summary
-    worker_view = RuntimeWorkerView.from_runtime_view(
-        result.runtime_view,
-        bootstrap_summary=result.bootstrap_summary,
-    )
+    report = result.runtime_view.diagnostics["serving_realization_report"]
+    assert report["realization"]["binding_value"]["verification_state"] == "local_only"
+    assert "verification_state" not in result.runtime_view.diagnostics
+    assert result.binding_value is not None
+    assert result.binding_value.readiness == "serving_local_ready"
+    assert result.binding_value.local_serving_ref == "binding-local:binding-1:value-1"
+    worker_view = RuntimeWorkerView.from_runtime_view(result.runtime_view)
     payload = worker_view.endpoint.to_weight_version_payload()
     assert payload["serving_manifest_ref"] == "manifest"
     assert payload["serving_build_digest"] == "build"
     assert payload["binding_layout_id"] == "layout-1"
-    assert payload["bootstrap_summary"] == result.bootstrap_summary.to_dict()
+    assert "bootstrap_summary" not in payload
     assert payload["source_bound_contract"] == {
         "version": 4,
         "capability_flags": ["a"],
@@ -1409,40 +1649,41 @@ def test_build_local_ready_prepared_artifact_returns_runtime_state_and_view():
     assert payload["realize_diagnostics"]["collective_requested"] is False
 
 
-def test_serving_integration_builds_local_ready_manifest_contract_in_core(
-        monkeypatch):
+def test_serving_integration_builds_local_ready_manifest_contract_in_core(monkeypatch):
     calls = []
     integration = ServingIntegration()
-    recipe = SimpleNamespace(logical_topology=object())
+    recipe = SimpleNamespace(topology_ref=object(), member_ref=object())
 
     monkeypatch.setattr(
-        integration_mod, "canonical_index_from_recipe",
-        lambda seen_recipe: calls.append(
-            ("canonical", seen_recipe)) or "canonical")
+        integration_mod,
+        "canonical_index_from_recipe",
+        lambda seen_recipe: calls.append(("canonical", seen_recipe)) or "canonical",
+    )
     monkeypatch.setattr(
         integration_mod,
         "compute_serving_tensor_schema_hash",
-        lambda canonical, **kwargs: calls.append(
-            ("schema", canonical, kwargs)) or "schema-hash",
+        lambda canonical, **kwargs: calls.append(("schema", canonical, kwargs))
+        or "schema-hash",
     )
     monkeypatch.setattr(
         integration_mod,
         "logical_topology_json_from_recipe",
-        lambda seen_recipe, **kwargs: calls.append(
-            ("topology", seen_recipe, kwargs)) or "{\"topology\": true}",
+        lambda seen_recipe, **kwargs: calls.append(("topology", seen_recipe, kwargs))
+        or '{"topology": true}',
     )
     monkeypatch.setattr(
         integration_mod,
         "prepare_same_binding_manifest_carrier",
-        lambda seen_recipe, **kwargs: calls.append(
-            ("carrier", seen_recipe, kwargs)) or ("manifest-ref", b"manifest"),
+        lambda seen_recipe, **kwargs: calls.append(("carrier", seen_recipe, kwargs))
+        or ("manifest-ref", b"manifest"),
     )
 
     result = integration.build_local_ready_manifest_carrier_from_contract(
         recipe=recipe,
         manifest_tensor_name="__tensorcast_meta__.manifest",
-        representation_contract_hash_factory=lambda tensor_schema_hash:
-        (f"repr:{tensor_schema_hash}"),
+        representation_contract_hash_factory=lambda tensor_schema_hash: (
+            f"repr:{tensor_schema_hash}"
+        ),
         topology="topology-ref",
         framework_payload={"rank": 0},
     )
@@ -1450,25 +1691,54 @@ def test_serving_integration_builds_local_ready_manifest_contract_in_core(
     assert result == ("manifest-ref", b"manifest")
     assert calls == [
         ("canonical", recipe),
-        ("schema", "canonical", {
-            "manifest_tensor_name": "__tensorcast_meta__.manifest",
-        }),
-        ("topology", recipe, {
-            "topology": "topology-ref",
-            "framework_payload": {
-                "rank": 0,
+        (
+            "schema",
+            "canonical",
+            {
+                "manifest_tensor_name": "__tensorcast_meta__.manifest",
             },
-        }),
-        ("carrier", recipe, {
-            "manifest_tensor_name": "__tensorcast_meta__.manifest",
-            "representation_contract_hash": "repr:schema-hash",
-            "logical_topology_json_payload": "{\"topology\": true}",
-        }),
+        ),
+        (
+            "topology",
+            recipe,
+            {
+                "topology": "topology-ref",
+                "framework_payload": {
+                    "rank": 0,
+                },
+            },
+        ),
+        (
+            "carrier",
+            recipe,
+            {
+                "manifest_tensor_name": "__tensorcast_meta__.manifest",
+                "representation_contract_hash": "repr:schema-hash",
+                "logical_topology_json_payload": '{"topology": true}',
+                "topology_admission_digest": None,
+            },
+        ),
     ]
 
 
+def test_local_ready_logical_topology_requires_topology_ref():
+    recipe = SimpleNamespace(
+        topology_ref=ServingTopologyRef(schema_topology_digest="a")
+    )
+
+    with pytest.raises(ValueError, match="requires ServingTopologyRef"):
+        logical_topology_json_from_recipe(recipe)
+
+
+def test_local_ready_logical_topology_allows_topology_insensitive_recipe():
+    recipe = SimpleNamespace(topology_ref=None, member_ref=None)
+
+    assert logical_topology_json_from_recipe(recipe) is None
+
+
 def test_serving_integration_builds_local_ready_manifest_from_framework_context(
-        monkeypatch):
+    monkeypatch,
+):
     calls = []
     adapter = SimpleNamespace(
         framework_name=lambda: "fakefw",
@@ -1477,7 +1747,7 @@ def test_serving_integration_builds_local_ready_manifest_from_framework_context(
         serving_abi_version=lambda _model_config: "abi-v1",
     )
     integration = ServingIntegration(host=_host_for_adapter(adapter))
-    recipe = SimpleNamespace(logical_topology=object())
+    recipe = SimpleNamespace(topology_ref=object(), member_ref=object())
     placement = ServingPlacement(
         topology=ServingTopologyRef(
             schema_topology_digest="digest",
@@ -1493,14 +1763,15 @@ def test_serving_integration_builds_local_ready_manifest_from_framework_context(
     )
 
     monkeypatch.setattr(
-        integration_mod, "canonical_index_from_recipe",
-        lambda seen_recipe: calls.append(
-            ("canonical", seen_recipe)) or "canonical")
+        integration_mod,
+        "canonical_index_from_recipe",
+        lambda seen_recipe: calls.append(("canonical", seen_recipe)) or "canonical",
+    )
     monkeypatch.setattr(
         integration_mod,
         "compute_serving_tensor_schema_hash",
-        lambda canonical, **kwargs: calls.append(
-            ("schema", canonical, kwargs)) or "schema-hash",
+        lambda canonical, **kwargs: calls.append(("schema", canonical, kwargs))
+        or "schema-hash",
     )
     monkeypatch.setattr(
         integration_mod,
@@ -1510,51 +1781,55 @@ def test_serving_integration_builds_local_ready_manifest_from_framework_context(
     monkeypatch.setattr(
         integration_mod,
         "logical_topology_json_from_recipe",
-        lambda seen_recipe, **kwargs: calls.append(
-            ("topology", seen_recipe, kwargs)) or "{\"topology\": true}",
+        lambda seen_recipe, **kwargs: calls.append(("topology", seen_recipe, kwargs))
+        or '{"topology": true}',
     )
     monkeypatch.setattr(
         integration_mod,
         "prepare_same_binding_manifest_carrier",
-        lambda seen_recipe, **kwargs: calls.append(
-            ("carrier", seen_recipe, kwargs)) or ("manifest-ref", b"manifest"),
+        lambda seen_recipe, **kwargs: calls.append(("carrier", seen_recipe, kwargs))
+        or ("manifest-ref", b"manifest"),
     )
 
-    result = (
-        integration.build_local_ready_manifest_carrier_from_framework_context(
-            recipe=recipe,
-            manifest_tensor_name="__tensorcast_meta__.manifest",
-            model_config=model_config,
-            placement=placement,
-            runtime_binding_schema_version=3,
-            serving_artifact_schema_version=4,
-        ))
+    result = integration.build_local_ready_manifest_carrier_from_framework_context(
+        recipe=recipe,
+        manifest_tensor_name="__tensorcast_meta__.manifest",
+        model_config=model_config,
+        placement=placement,
+        runtime_binding_schema_version=3,
+        serving_artifact_schema_version=4,
+    )
 
     assert result == ("manifest-ref", b"manifest")
-    assert calls[2] == ("repr", {
-        "tensor_schema_hash": "schema-hash",
-        "topology_ref": placement.topology,
-        "member_ref": placement.member,
-        "framework_name": "fakefw",
-        "framework_version": "fakefw-v1",
-        "adapter_version": "adapter-v1",
-        "serving_abi_version": "abi-v1",
-        "source_identity": {
-            "model_hash": "model-hash",
-            "model_name": "fake-model",
-            "runtime_binding_schema_version": 3,
-            "serving_artifact_schema_version": 4,
-            "placement": placement.identity_payload,
+    assert calls[2] == (
+        "repr",
+        {
+            "tensor_schema_hash": "schema-hash",
+            "topology_ref": placement.topology,
+            "member_ref": placement.member,
+            "framework_name": "fakefw",
+            "framework_version": "fakefw-v1",
+            "adapter_version": "adapter-v1",
+            "serving_abi_version": "abi-v1",
+            "source_identity": {
+                "model_hash": "model-hash",
+                "model_name": "fake-model",
+                "runtime_binding_schema_version": 3,
+                "serving_artifact_schema_version": 4,
+                "placement": placement.identity_payload,
+            },
         },
-    })
-    assert calls[-1] == ("carrier", recipe, {
-        "manifest_tensor_name":
-        "__tensorcast_meta__.manifest",
-        "representation_contract_hash":
-        "repr-hash",
-        "logical_topology_json_payload":
-        "{\"topology\": true}",
-    })
+    )
+    assert calls[-1] == (
+        "carrier",
+        recipe,
+        {
+            "manifest_tensor_name": "__tensorcast_meta__.manifest",
+            "representation_contract_hash": "repr-hash",
+            "logical_topology_json_payload": '{"topology": true}',
+            "topology_admission_digest": "digest",
+        },
+    )
 
 
 def test_serving_integration_prepares_manifest_carrier_result(monkeypatch):
@@ -1590,15 +1865,14 @@ def test_serving_integration_prepares_manifest_carrier_result(monkeypatch):
         ),
     )
 
-    result = (integration.
-              prepare_local_ready_manifest_carrier_from_framework_context(
-                  recipe=SimpleNamespace(),
-                  manifest_tensor_name="__tensorcast_meta__.manifest",
-                  model_config=SimpleNamespace(model="fake"),
-                  placement=placement,
-                  runtime_binding_schema_version=1,
-                  serving_artifact_schema_version=2,
-              ))
+    result = integration.prepare_local_ready_manifest_carrier_from_framework_context(
+        recipe=SimpleNamespace(),
+        manifest_tensor_name="__tensorcast_meta__.manifest",
+        model_config=SimpleNamespace(model="fake"),
+        placement=placement,
+        runtime_binding_schema_version=1,
+        serving_artifact_schema_version=2,
+    )
 
     assert isinstance(result, LocalReadyManifestCarrierResult)
     assert result.representation_contract_hash == "repr-hash"
@@ -1615,12 +1889,14 @@ def test_serving_integration_builds_local_ready_binding_contract(monkeypatch):
         lambda *_args, **_kwargs: "schema-hash",
     )
     recipe = SimpleNamespace(
-        tensor_schema=(TensorSchemaEntry(
-            name="w",
-            dtype="torch.float32",
-            shape=(2, ),
-            stride=(1, ),
-        ), ),
+        tensor_schema=(
+            TensorSchemaEntry(
+                name="w",
+                dtype="torch.float32",
+                shape=(2,),
+                stride=(1,),
+            ),
+        ),
         realization_plan_proto=b"plan",
         realization_plan_count=1,
         realization_plan=(),
@@ -1629,16 +1905,17 @@ def test_serving_integration_builds_local_ready_binding_contract(monkeypatch):
 
     contract = integration.build_local_ready_binding_contract(
         recipe=recipe,
-        canonical_tensors={"w": torch.ones((2, ), dtype=torch.float32)},
-        runtime_only_tensor_names=("runtime_only", ),
+        canonical_tensors={"w": torch.ones((2,), dtype=torch.float32)},
+        runtime_only_tensor_names=("runtime_only",),
         manifest_tensor_name="__tensorcast_meta__.manifest",
-        representation_contract_hash_factory=lambda tensor_schema_hash:
-        (f"repr:{tensor_schema_hash}"),
+        representation_contract_hash_factory=lambda tensor_schema_hash: (
+            f"repr:{tensor_schema_hash}"
+        ),
     )
 
     assert isinstance(contract, LocalReadyBindingContract)
-    assert contract.excluded_names == ("runtime_only", )
-    assert contract.canonical_tensor_names == ("w", )
+    assert contract.excluded_names == ("runtime_only",)
+    assert contract.canonical_tensor_names == ("w",)
     assert contract.tensor_schema_hash == "schema-hash"
     assert contract.representation_contract_hash == "repr:schema-hash"
     assert contract.realization_plan_proto == b"plan"
@@ -1655,14 +1932,15 @@ def test_serving_integration_owns_local_ready_recipe_fields():
             expected_dst_names={"dst"},
             tensorcast_slices=(),
         ),
-        tensor_schema=("w", ),
+        tensor_schema=("w",),
         realization_plan_count=4,
         realization_plan=(),
-        realization_fallback_plan=(1, ),
+        realization_fallback_plan=(1,),
         source_artifact_ref="mi2:test:source",
         source_metadata_fingerprint="meta-fingerprint",
         serving_facts=SimpleNamespace(
-            process_after_load_class=FinalizeClass.REPRESENTATION_CHANGING),
+            process_after_load_class=FinalizeClass.REPRESENTATION_CHANGING
+        ),
     )
 
     assert integration.local_ready_recipe_summary_fields(recipe) == {
@@ -1681,23 +1959,50 @@ def test_serving_integration_owns_local_ready_recipe_fields():
     assert integration.local_ready_requires_binding_finalize(recipe)
 
 
-class _MaterializedModel(nn.Module):
+def test_local_ready_canonical_index_uses_cumulative_segment_offsets():
+    entries = canonical_index_entries_from_tensor_schema(
+        (
+            TensorSchemaEntry(
+                name="a",
+                dtype="torch.float32",
+                shape=(2,),
+                stride=(1,),
+            ),
+            TensorSchemaEntry(
+                name="b",
+                dtype="torch.float16",
+                shape=(3,),
+                stride=(1,),
+            ),
+            TensorSchemaEntry(
+                name="c",
+                dtype="torch.uint8",
+                shape=(5,),
+                stride=(1,),
+            ),
+        )
+    )
 
+    assert [entry.name for entry in entries] == ["a", "b", "c"]
+    assert [entry.segment_offset for entry in entries] == [0, 8, 14]
+    assert [entry.size_bytes for entry in entries] == [8, 6, 5]
+
+
+class _MaterializedModel(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.w = nn.Parameter(torch.empty((1, ), device="meta"))
-        self.runtime_only = nn.Parameter(torch.empty((1, ), device="meta"))
+        self.w = nn.Parameter(torch.empty((1,), device="meta"))
+        self.runtime_only = nn.Parameter(torch.empty((1,), device="meta"))
 
 
 class _MaterializationAdapter(TorchModuleAdapterMixin):
-
     def __init__(self, *, fail_finalize: bool = False) -> None:
         self.fail_finalize = fail_finalize
         self.events: list[tuple[str, object | None, str]] = []
 
     def runtime_only_tensor_names(self, model: nn.Module) -> tuple[str, ...]:
         del model
-        return ("runtime_only", )
+        return ("runtime_only",)
 
     def build_meta_model(self, framework_config, model_config):
         del framework_config, model_config
@@ -1732,7 +2037,6 @@ class _MaterializationAdapter(TorchModuleAdapterMixin):
 
 
 class _AdapterFrameworkHost:
-
     def __init__(self, adapter) -> None:
         self.adapter = adapter
 
@@ -1741,8 +2045,7 @@ class _AdapterFrameworkHost:
             framework_name=str(self.adapter.framework_name()),
             framework_version=str(self.adapter.framework_version()),
             adapter_version=str(self.adapter.adapter_version()),
-            serving_abi_version=str(
-                self.adapter.serving_abi_version(model_config)),
+            serving_abi_version=str(self.adapter.serving_abi_version(model_config)),
         )
 
     def prepare_model_construction(self, framework_config, model_config):
@@ -1756,8 +2059,7 @@ class _AdapterFrameworkHost:
             return build(framework_config, model_config)
         return _MaterializedModel()
 
-    def build_runtime_model(self, framework_config, model_config,
-                            target_device):
+    def build_runtime_model(self, framework_config, model_config, target_device):
         build = getattr(self.adapter, "build_runtime_model", None)
         if callable(build):
             return build(framework_config, model_config, target_device)
@@ -1765,15 +2067,15 @@ class _AdapterFrameworkHost:
         return model.to(target_device) if hasattr(model, "to") else model
 
     def assert_model_ready_for_runtime_binding(self, model, *, context):
-        check = getattr(self.adapter, "assert_model_ready_for_runtime_binding",
-                        None)
+        check = getattr(self.adapter, "assert_model_ready_for_runtime_binding", None)
         if callable(check):
             check(model, context=context)
 
     def semantic_probes(self, model, model_config):
         semantic_probes = getattr(self.adapter, "semantic_probes", None)
-        return semantic_probes(
-            model, model_config) if callable(semantic_probes) else None
+        return (
+            semantic_probes(model, model_config) if callable(semantic_probes) else None
+        )
 
     def run_process_after_load(self, model, model_config, target_device):
         hook = getattr(self.adapter, "run_process_after_load", None)
@@ -1792,38 +2094,28 @@ class _AdapterFrameworkHost:
         return ServingSupportLevel.RUNTIME_BIND_SWAP_READY
 
     def process_after_load_class(self, model, model_config):
-        process_after_load = getattr(self.adapter, "process_after_load_class",
-                                     None)
+        process_after_load = getattr(self.adapter, "process_after_load_class", None)
         if callable(process_after_load):
             return process_after_load(model, model_config)
         return FinalizeClass.RUNTIME_ONLY
 
     def post_bind_finalize_class(self, model, model_config):
-        post_bind_finalize = getattr(self.adapter, "post_bind_finalize_class",
-                                     None)
+        post_bind_finalize = getattr(self.adapter, "post_bind_finalize_class", None)
         if callable(post_bind_finalize):
             return post_bind_finalize(model, model_config)
         return FinalizeClass.RUNTIME_ONLY
 
-    def trace_model_load(self,
-                         model,
-                         ordered_names,
-                         meta_by_name,
-                         *,
-                         debug_dump_trace=False):
+    def trace_model_load(
+        self, model, ordered_names, meta_by_name, *, debug_dump_trace=False
+    ):
         trace = getattr(self.adapter, "trace_model_load", None)
         if callable(trace):
-            return trace(model,
-                         ordered_names,
-                         meta_by_name,
-                         debug_dump_trace=debug_dump_trace)
+            return trace(
+                model, ordered_names, meta_by_name, debug_dump_trace=debug_dump_trace
+            )
         raise CapabilityMissingError("trace_model_load unavailable")
 
-    def cleanup_after_recipe_build(self,
-                                   model,
-                                   model_config,
-                                   *,
-                                   framework_config=None):
+    def cleanup_after_recipe_build(self, model, model_config, *, framework_config=None):
         cleanup = getattr(self.adapter, "cleanup_after_recipe_build", None)
         if callable(cleanup):
             cleanup(model, model_config, framework_config=framework_config)
@@ -1836,7 +2128,6 @@ class _AdapterFrameworkHost:
 
 
 class _AdapterTensorSurface:
-
     def __init__(self, adapter) -> None:
         self.adapter = adapter
 
@@ -1848,26 +2139,26 @@ class _AdapterTensorSurface:
         if callable(align):
             return align(model, expected_names)
         return integration_mod.TorchTensorHost().align_runtime_tensor_names(
-            model, expected_names)
+            model, expected_names
+        )
 
     def collect_runtime_tensors(self, model, *, remove_duplicate=False):
         return self.adapter.collect_runtime_binding_tensors(
-            model, remove_duplicate=remove_duplicate)
+            model, remove_duplicate=remove_duplicate
+        )
 
     def collect_runtime_tensor_view(self, tensors):
-        return integration_mod.TorchTensorHost().collect_runtime_tensor_view(
-            tensors)
+        return integration_mod.TorchTensorHost().collect_runtime_tensor_view(tensors)
 
-    def compute_runtime_tensor_schema_hash(self,
-                                           tensors,
-                                           *,
-                                           remove_duplicate=False):
+    def compute_runtime_tensor_schema_hash(self, tensors, *, remove_duplicate=False):
         return self.adapter.compute_runtime_tensor_schema_hash(
-            tensors, remove_duplicate=remove_duplicate)
+            tensors, remove_duplicate=remove_duplicate
+        )
 
     def attach_bound_tensors(self, model, tensors, *, replace_meta_params):
         return self.adapter.attach_bound_tensors(
-            model, tensors, replace_meta_params=replace_meta_params)
+            model, tensors, replace_meta_params=replace_meta_params
+        )
 
     def allocate_runtime_only_tensors(self, model, target_device):
         return self.adapter.allocate_runtime_only_tensors(model, target_device)
@@ -1883,20 +2174,17 @@ def _host_for_adapter(adapter, **kwargs) -> IntegrationHost:
     return IntegrationHost(
         framework=kwargs.pop("framework", _AdapterFrameworkHost(adapter)),
         placement=kwargs.pop("placement", _ContractPlacementHost()),
-        tensor_surface=kwargs.pop("tensor_surface",
-                                  _AdapterTensorSurface(adapter)),
+        tensor_surface=kwargs.pop("tensor_surface", _AdapterTensorSurface(adapter)),
         **kwargs,
     )
 
 
 class _TransferableBinding:
-
     def __init__(self) -> None:
         self.closed = False
         self.transferred = False
         self.runtime_handle = SimpleNamespace(closed=False)
-        self.runtime_handle.close = lambda: setattr(self.runtime_handle,
-                                                    "closed", True)
+        self.runtime_handle.close = lambda: setattr(self.runtime_handle, "closed", True)
 
     def transfer_to_runtime(self):
         self.transferred = True
@@ -1924,7 +2212,7 @@ def _binding_ref() -> BindingValueRef:
     )
 
 
-def _authority() -> ParsedExternalPreloadAuthority:
+def _authority() -> ParsedRetainedServingBindingAuthority:
     member = _member()
     binding_ref = _binding_ref()
     capability = BindingReservationCapability(
@@ -1937,7 +2225,7 @@ def _authority() -> ParsedExternalPreloadAuthority:
         reservation_bytes=4096,
         scope_digest="scope-1",
     )
-    return ParsedExternalPreloadAuthority(
+    return ParsedRetainedServingBindingAuthority(
         group_id="group-1",
         local_serving_ref="binding-local:binding-1:value-1",
         binding_value_ref=binding_ref,
@@ -1947,7 +2235,7 @@ def _authority() -> ParsedExternalPreloadAuthority:
         device_uuid="gpu-0",
         member=member,
         reservation_bytes=4096,
-        expected=ExternalPreloadExpectedDigests(
+        expected=RetainedServingBindingExpectedDigests(
             target_layout_hash="layout-hash",
             tensor_schema_hash="schema-hash",
             serving_build_digest="build-digest",
@@ -1966,32 +2254,21 @@ def test_framework_boundary_reexports_serving_identity_types():
     assert ServingSupportLevel.RUNTIME_BIND_SWAP_READY.value
 
 
-def test_retained_binding_authority_is_strong_versioned_dto():
+def test_retained_binding_authority_uses_parsed_retained_authority():
     parsed = _authority()
-    authority = RetainedBindingAuthority.from_preload_authority(parsed)
 
-    assert authority.schema_version == 1
-    assert authority.binding_value_ref == parsed.binding_value_ref
-    assert authority.reservation_capability == parsed.reservation_capability
-    assert authority.daemon_id == "daemon-1"
-    assert authority.daemon_session_id == "session-1"
-    assert authority.device_uuid == "gpu-0"
-    assert authority.member == parsed.member
-    assert authority.group_id == "group-1"
-    assert authority.expected_target_layout_hash == "layout-hash"
-    assert authority.expected_tensor_schema_hash == "schema-hash"
-    assert authority.expected_serving_build_digest == "build-digest"
-    assert authority.expected_resolved_spec_digest == "spec-digest"
-    assert authority.readiness == "serving_local_ready"
-    assert authority.local_serving_ref == "binding-local:binding-1:value-1"
-    assert authority.to_preload_authority() == parsed
-
-    with pytest.raises(AuthorityValidationError, match="schema_version"):
-        RetainedBindingAuthority(
-            **{
-                **authority.__dict__,
-                "schema_version": 999,
-            })
+    assert parsed.binding_value_ref.binding_id == "binding-1"
+    assert parsed.reservation_capability.capability_id == "capability-1"
+    assert parsed.daemon_id == "daemon-1"
+    assert parsed.daemon_session_id == "session-1"
+    assert parsed.device_uuid == "gpu-0"
+    assert parsed.member.group_id == "group-1"
+    assert parsed.expected.target_layout_hash == "layout-hash"
+    assert parsed.expected.tensor_schema_hash == "schema-hash"
+    assert parsed.expected.serving_build_digest == "build-digest"
+    assert parsed.expected.resolved_spec_digest == "spec-digest"
+    assert parsed.readiness == "serving_local_ready"
+    assert parsed.local_serving_ref == "binding-local:binding-1:value-1"
 
 
 def test_serving_integration_p15_request_contract_smoke():
@@ -2024,7 +2301,7 @@ def test_serving_integration_p15_request_contract_smoke():
     )
     assert integration.host.framework.identity(None).framework_name == "fakefw"
 
-    identity = RecipeBuildIdentity(
+    identity = ServingBindingPlan(
         model_hash="hash",
         model_id="fake-model",
         model_revision=None,
@@ -2040,14 +2317,18 @@ def test_serving_integration_p15_request_contract_smoke():
         placement=placement.stable_identity_payload(),
     )
     session = integration.build_recipe_session(
-        RecipeBuildSessionRequest(identity=identity))
+        RecipeBuildSessionRequest(identity=identity)
+    )
     assert session.recipe_cache_key(metadata_fingerprint="meta")
 
-    request_and_method = ((
-        _LocalReadyBootstrap(
-            source_selector=SourceSelector.local_path("/tmp/model")),
-        integration._prepare_local_source_bootstrap,
-    ), )
+    request_and_method = (
+        (
+            _LocalReadyBootstrap(
+                source_selector=SourceSelector.local_path("/tmp/model")
+            ),
+            integration._prepare_local_source_bootstrap,
+        ),
+    )
     for request, method in request_and_method:
         with pytest.raises(ServingIntegrationNotImplementedError):
             method(request)
@@ -2082,7 +2363,8 @@ def test_serving_integration_builds_recipe_session_identity_from_request():
             model_config=model_config,
             placement=placement,
             trace_cache_schema_version=9,
-        ))
+        )
+    )
 
     assert session.identity.model_hash == "model-hash"
     assert session.identity.model_id == "fake-model"
@@ -2115,7 +2397,8 @@ def test_serving_integration_load_and_reload_use_materialization():
             framework_config=SimpleNamespace(name="framework"),
             model_config=SimpleNamespace(name="model"),
             target_device=torch.device("cpu"),
-        ))
+        )
+    )
 
     assert isinstance(load_result, ServingLoadResult)
     assert isinstance(load_result.runtime_state, RuntimeBindingState)
@@ -2123,8 +2406,9 @@ def test_serving_integration_load_and_reload_use_materialization():
     assert load_result.runtime_view.source_artifact_ref == "mi2:test:source"
     assert load_result.runtime_view.representation_contract_hash == "repr-a"
     assert load_result.runtime_view.readiness == "serving"
-    assert torch.equal(load_result.model.w.detach(),
-                       torch.ones((1, ), dtype=torch.float32))
+    assert torch.equal(
+        load_result.model.w.detach(), torch.ones((1,), dtype=torch.float32)
+    )
     assert adapter.events == [
         ("process", SimpleNamespace(name="model"), "cpu"),
         ("finalize", SimpleNamespace(name="model"), "cpu"),
@@ -2146,27 +2430,32 @@ def test_serving_integration_load_and_reload_use_materialization():
             model=load_result.model,
             framework_config=SimpleNamespace(name="framework"),
             model_config=SimpleNamespace(name="model"),
-        ))
+        )
+    )
 
     assert isinstance(reload_result, ServingReloadResult)
     assert reload_result.runtime_view.serving_artifact_ref == "mi2:test:serving-b"
     assert reload_result.runtime_view.representation_contract_hash == "repr-b"
-    assert load_result.runtime_state.binding.swapped[
-        0] is next_resolved.artifact
-    assert torch.equal(load_result.model.w.detach(),
-                       torch.full((1, ), 2.0, dtype=torch.float32))
+    swapped_artifact = load_result.runtime_state.binding.swapped[0]
+    assert isinstance(swapped_artifact, _Subset)
+    assert swapped_artifact.names == ("w",)
+    assert torch.equal(
+        load_result.model.w.detach(), torch.full((1,), 2.0, dtype=torch.float32)
+    )
 
 
 def test_serving_integration_load_resolves_aligns_and_builds_materialization(
-        monkeypatch):
+    monkeypatch,
+):
     adapter = _MaterializationAdapter()
     align_calls = []
-    adapter.align_runtime_tensor_names = lambda model, names: align_calls.append(
-        tuple(names)) or 0
+    adapter.align_runtime_tensor_names = (
+        lambda model, names: align_calls.append(tuple(names)) or 0
+    )
     resolved = SimpleNamespace(
         artifact=_Artifact(),
         artifact_ref="mi2:test:serving",
-        tensor_names=("w", ),
+        tensor_names=("w",),
         tensor_schema_hash="schema-hash",
         manifest=SimpleNamespace(
             representation_contract_hash="repr-a",
@@ -2178,7 +2467,6 @@ def test_serving_integration_load_resolves_aligns_and_builds_materialization(
     calls = []
 
     class _Resolver:
-
         def resolve(self, artifact_ref):
             calls.append(("resolve", artifact_ref))
             return resolved
@@ -2191,8 +2479,9 @@ def test_serving_integration_load_resolves_aligns_and_builds_materialization(
         calls.append(("options", kwargs))
         return "bind-options", {"profile": True}
 
-    monkeypatch.setattr(ServingIntegration, "build_materialization_options",
-                        fake_build_options)
+    monkeypatch.setattr(
+        ServingIntegration, "build_materialization_options", fake_build_options
+    )
 
     result = ServingIntegration(
         resolver=_Resolver(),
@@ -2203,42 +2492,43 @@ def test_serving_integration_load_resolves_aligns_and_builds_materialization(
             target_device=torch.device("cpu"),
             configured_collective_policy="collective-policy",
             source_bound_contract_state=SimpleNamespace(
-                source_bound_contract_ready=True),
+                source_bound_contract_ready=True
+            ),
             source_bound_contract_path="/tmp/contract.json",
-            execution_facts={
-                "tp_rank": 0,
-                "tp_world_size": 1
-            },
+            execution_facts={"tp_rank": 0, "tp_world_size": 1},
             require_materialization_options=True,
-        ))
+        )
+    )
 
     assert result.runtime_view.serving_artifact_ref == "mi2:test:serving"
-    assert align_calls == [("w", )]
+    assert align_calls == [("w",)]
     assert calls == [
         ("resolve", "mi2:test:serving"),
-        ("cross_check", resolved, {
-            "expected_tensor_schema_hash":
-            result.runtime_view.tensor_schema_hash,
-            "serving_runtime_policy": "manifest-policy",
-        }),
-        ("options", {
-            "artifact_ref":
-            "mi2:test:serving",
-            "operation_scope":
-            "startup.direct_serving_artifact.bind",
-            "configured_policy":
-            "collective-policy",
-            "source_bound_contract_state":
-            SimpleNamespace(source_bound_contract_ready=True),
-            "source_bound_contract_path":
-            "/tmp/contract.json",
-            "execution_facts": {
-                "tp_rank": 0,
-                "tp_world_size": 1,
+        (
+            "cross_check",
+            resolved,
+            {
+                "expected_tensor_schema_hash": result.runtime_view.tensor_schema_hash,
+                "serving_runtime_policy": "manifest-policy",
             },
-            "contract_identity":
-            "repr-a",
-        }),
+        ),
+        (
+            "options",
+            {
+                "artifact_ref": "mi2:test:serving",
+                "operation_scope": "startup.direct_serving_artifact.bind",
+                "configured_policy": "collective-policy",
+                "source_bound_contract_state": SimpleNamespace(
+                    source_bound_contract_ready=True
+                ),
+                "source_bound_contract_path": "/tmp/contract.json",
+                "execution_facts": {
+                    "tp_rank": 0,
+                    "tp_world_size": 1,
+                },
+                "contract_identity": "repr-a",
+            },
+        ),
     ]
 
 
@@ -2250,12 +2540,12 @@ def test_serving_integration_reload_resolves_and_cross_checks_artifact_ref():
             representation_contract_hash="repr-next",
             source_artifact_ref="mi2:test:source",
             serving_build_digest="build-next",
+            to_runtime_policy=lambda: "manifest-policy",
         ),
     )
     calls = []
 
     class _Resolver:
-
         def resolve(self, artifact_ref):
             calls.append(("resolve", artifact_ref))
             return resolved
@@ -2277,22 +2567,201 @@ def test_serving_integration_reload_resolves_and_cross_checks_artifact_ref():
             current_state=current_state,
             artifact_ref="mi2:test:serving-next",
             target_device=torch.device("cpu"),
-        ))
+        )
+    )
 
     assert result.resolved_artifact is resolved
     assert result.runtime_view.serving_artifact_ref == "mi2:test:serving-next"
-    assert binding.swapped[0] is resolved.artifact
+    assert isinstance(binding.swapped[0], _Subset)
+    assert binding.swapped[0].names == ("w",)
     assert calls == [
         ("resolve", "mi2:test:serving-next"),
-        ("cross_check", resolved, {
-            "expected_tensor_schema_hash": "schema-hash",
-            "serving_runtime_policy": None,
-        }),
+        (
+            "cross_check",
+            resolved,
+            {
+                "expected_tensor_schema_hash": "schema-hash",
+                "serving_runtime_policy": "manifest-policy",
+            },
+        ),
     ]
 
 
-def test_serving_integration_reload_builds_materialization_options(
-        monkeypatch):
+def test_serving_integration_resolves_ranked_locator_with_placement_member(
+    monkeypatch,
+):
+    resolved = SimpleNamespace(
+        artifact=_Artifact(),
+        artifact_ref="mi2:test:serving-rank-1",
+        manifest=SimpleNamespace(
+            representation_contract_hash="repr-next",
+            source_artifact_ref="mi2:test:source",
+            serving_build_digest="build-next",
+        ),
+    )
+    calls = []
+
+    class _Resolver:
+        def resolve(self, artifact_ref):
+            calls.append(("resolve", artifact_ref))
+            return resolved
+
+    member = ServingBindingMemberRef(
+        member_id="dp0:pp0:tp1",
+        member_index=1,
+        member_count=2,
+        group_id="group-1",
+    )
+    placement = ServingPlacement(
+        topology=ServingTopologyRef(
+            group_id="group-1",
+            schema_topology_digest="topology-digest",
+            logical_topology_ref="fake://topology",
+        ),
+        member=member,
+        framework_payload={"family": "fake"},
+        identity_payload={"rank": 1},
+    )
+
+    class _RuntimeContext:
+        def resolve_key_mapping_cached(self, *, key):
+            calls.append(("key", key))
+            return "mi2:test:serving-rank-1", None
+
+    monkeypatch.setattr(
+        "tensorcast.api.store.get_runtime_context", lambda: _RuntimeContext()
+    )
+
+    result = ServingIntegration(resolver=_Resolver())._resolved_artifact(
+        resolved_artifact=None,
+        artifact_ref=None,
+        artifact_locator=ServingArtifactLocator.ranked_version_key(
+            "models/demo/serving/v1"
+        ),
+        expected_tensor_schema_hash=None,
+        serving_runtime_policy=None,
+        placement=placement,
+    )
+
+    assert result is resolved
+    assert calls == [
+        ("key", "models/demo/serving/v1/members/dp0:pp0:tp1"),
+        ("resolve", "mi2:test:serving-rank-1"),
+    ]
+
+
+def test_serving_integration_rejects_resolved_artifact_ref_mismatch():
+    resolved = SimpleNamespace(
+        artifact=_Artifact(),
+        artifact_ref="mi2:test:serving-rank-0",
+        manifest=SimpleNamespace(),
+    )
+
+    with pytest.raises(ManifestMismatchError, match="artifact ref mismatch"):
+        ServingIntegration()._resolved_artifact(
+            resolved_artifact=resolved,
+            artifact_ref="mi2:test:serving-rank-1",
+            artifact_locator=None,
+            expected_tensor_schema_hash=None,
+            serving_runtime_policy=None,
+        )
+
+
+def test_serving_integration_accepts_matching_topology_digest_and_logical_topology():
+    placement = _matrix_placement(tp_size=2, eplb_digest="eplb-a")
+    resolved = SimpleNamespace(
+        artifact=_Artifact(),
+        artifact_ref="mi2:test:serving-rank-0",
+        manifest=SimpleNamespace(
+            topology_admission_digest=placement.topology.schema_topology_digest,
+            logical_topology_json=logical_topology_json(
+                placement.topology,
+                framework_payload=placement.framework_payload,
+            ),
+        ),
+    )
+
+    assert (
+        ServingIntegration()._resolved_artifact(
+            resolved_artifact=resolved,
+            artifact_ref="mi2:test:serving-rank-0",
+            artifact_locator=None,
+            expected_tensor_schema_hash=None,
+            serving_runtime_policy=None,
+            placement=placement,
+        )
+        is resolved
+    )
+
+
+@pytest.mark.parametrize(
+    ("current_placement", "match"),
+    [
+        (_matrix_placement(tp_size=4), "topology admission digest mismatch"),
+        (_matrix_placement(pp_size=2), "topology admission digest mismatch"),
+        (_matrix_placement(dp_size=2), "topology admission digest mismatch"),
+        (
+            _matrix_placement(tp_size=2, eplb_digest="eplb-b"),
+            "topology admission digest mismatch",
+        ),
+    ],
+)
+def test_serving_integration_rejects_topology_mismatch_matrix(
+    current_placement,
+    match,
+):
+    published_placement = _matrix_placement(tp_size=2, eplb_digest="eplb-a")
+    resolved = SimpleNamespace(
+        artifact=_Artifact(),
+        artifact_ref="mi2:test:serving-rank-0",
+        manifest=SimpleNamespace(
+            topology_admission_digest=(
+                published_placement.topology.schema_topology_digest
+            ),
+            logical_topology_json=logical_topology_json(
+                published_placement.topology,
+                framework_payload=published_placement.framework_payload,
+            ),
+        ),
+    )
+
+    with pytest.raises(ManifestMismatchError, match=match):
+        ServingIntegration()._resolved_artifact(
+            resolved_artifact=resolved,
+            artifact_ref="mi2:test:serving-rank-0",
+            artifact_locator=None,
+            expected_tensor_schema_hash=None,
+            serving_runtime_policy=None,
+            placement=current_placement,
+        )
+
+
+def test_serving_integration_rejects_logical_topology_mismatch_without_digest():
+    published_placement = _matrix_placement(tp_size=2)
+    current_placement = _matrix_placement(tp_size=4)
+    resolved = SimpleNamespace(
+        artifact=_Artifact(),
+        artifact_ref="mi2:test:serving-rank-0",
+        manifest=SimpleNamespace(
+            logical_topology_json=logical_topology_json(
+                published_placement.topology,
+                framework_payload=published_placement.framework_payload,
+            ),
+        ),
+    )
+
+    with pytest.raises(ManifestMismatchError, match="logical topology mismatch"):
+        ServingIntegration()._resolved_artifact(
+            resolved_artifact=resolved,
+            artifact_ref="mi2:test:serving-rank-0",
+            artifact_locator=None,
+            expected_tensor_schema_hash=None,
+            serving_runtime_policy=None,
+            placement=current_placement,
+        )
+
+
+def test_serving_integration_reload_builds_materialization_options(monkeypatch):
     resolved = SimpleNamespace(
         artifact=_Artifact(),
         artifact_ref="mi2:test:serving-next",
@@ -2305,7 +2774,6 @@ def test_serving_integration_reload_builds_materialization_options(
     calls = []
 
     class _Resolver:
-
         def resolve(self, artifact_ref):
             return resolved
 
@@ -2316,8 +2784,9 @@ def test_serving_integration_reload_builds_materialization_options(
         calls.append(kwargs)
         return "swap-options", {"profile": True}
 
-    monkeypatch.setattr(ServingIntegration, "build_materialization_options",
-                        fake_build_options)
+    monkeypatch.setattr(
+        ServingIntegration, "build_materialization_options", fake_build_options
+    )
     binding = _Bound()
     current_state = RuntimeBindingState(
         binding=binding,
@@ -2332,35 +2801,32 @@ def test_serving_integration_reload_builds_materialization_options(
             target_device=torch.device("cpu"),
             configured_collective_policy="collective-policy",
             source_bound_contract_state=SimpleNamespace(
-                source_bound_contract_ready=True),
+                source_bound_contract_ready=True
+            ),
             source_bound_contract_path="/tmp/contract.json",
-            execution_facts={
-                "tp_rank": 0,
-                "tp_world_size": 1
-            },
+            execution_facts={"tp_rank": 0, "tp_world_size": 1},
             contract_identity="contract-id",
             require_materialization_options=True,
-        ))
+        )
+    )
 
     assert binding.swapped[1]["options"] == "swap-options"
-    assert calls == [{
-        "artifact_ref":
-        "mi2:test:serving-next",
-        "operation_scope":
-        "runtime_binding.swap",
-        "configured_policy":
-        "collective-policy",
-        "source_bound_contract_state":
-        SimpleNamespace(source_bound_contract_ready=True),
-        "source_bound_contract_path":
-        "/tmp/contract.json",
-        "execution_facts": {
-            "tp_rank": 0,
-            "tp_world_size": 1,
-        },
-        "contract_identity":
-        "contract-id",
-    }]
+    assert calls == [
+        {
+            "artifact_ref": "mi2:test:serving-next",
+            "operation_scope": "runtime_binding.swap",
+            "configured_policy": "collective-policy",
+            "source_bound_contract_state": SimpleNamespace(
+                source_bound_contract_ready=True
+            ),
+            "source_bound_contract_path": "/tmp/contract.json",
+            "execution_facts": {
+                "tp_rank": 0,
+                "tp_world_size": 1,
+            },
+            "contract_identity": "contract-id",
+        }
+    ]
 
 
 def test_serving_integration_reload_rejects_non_swap_capable_binding():
@@ -2377,17 +2843,15 @@ def test_serving_integration_reload_rejects_non_swap_capable_binding():
                 current_state=current_state,
                 artifact_ref="mi2:test:serving-next",
                 target_device=torch.device("cpu"),
-            ))
+            )
+        )
 
 
-def test_serving_integration_reload_host_infers_target_device_from_model(
-        monkeypatch):
-
+def test_serving_integration_reload_host_infers_target_device_from_model(monkeypatch):
     class _Model(nn.Module):
-
         def __init__(self):
             super().__init__()
-            self.w = nn.Parameter(torch.zeros((1, ), dtype=torch.float32))
+            self.w = nn.Parameter(torch.zeros((1,), dtype=torch.float32))
 
     resolved = SimpleNamespace(
         artifact=_Artifact(),
@@ -2401,7 +2865,6 @@ def test_serving_integration_reload_host_infers_target_device_from_model(
     )
 
     class _Resolver:
-
         def resolve(self, artifact_ref):
             assert artifact_ref == "mi2:test:serving-next"
             return resolved
@@ -2436,24 +2899,23 @@ def test_serving_integration_reload_host_infers_target_device_from_model(
     ).reload(
         current_state,
         ExistingServingArtifact(
-            ServingArtifactSelector.artifact_ref("mi2:test:serving-next")),
+            ServingArtifactLocator.artifact_ref("mi2:test:serving-next")
+        ),
         RequestContext(model_config=SimpleNamespace(model="fake")),
         model=_Model(),
     )
 
-    assert attachment.state.runtime_view.serving_artifact_ref == \
-        "mi2:test:serving-next"
+    assert attachment.state.runtime_view.serving_artifact_ref == "mi2:test:serving-next"
     assert binding.swapped[1]["options"] == "swap-options"
 
 
-def test_serving_integration_load_prepared_local_ready_uses_restore(
-        monkeypatch):
+def test_serving_integration_load_prepared_local_ready_uses_restore(monkeypatch):
     adapter = _MaterializationAdapter()
     integration = ServingIntegration(host=_host_for_adapter(adapter))
     binding_ref = _binding_ref()
 
     class _PreparedRestored:
-        tensors = {"w": torch.full((1, ), 3.0, dtype=torch.float32)}
+        tensors = {"w": torch.full((1,), 3.0, dtype=torch.float32)}
         binding_layout_id = "layout-1"
         binding_value_ref = binding_ref
         reservation_bytes = 2048
@@ -2477,9 +2939,9 @@ def test_serving_integration_load_prepared_local_ready_uses_restore(
         assert kwargs["expected_member"] == _member()
         yield restored
 
-    monkeypatch.setattr(integration_mod,
-                        "restore_prepared_local_ready_binding",
-                        fake_restore_prepared)
+    monkeypatch.setattr(
+        integration_mod, "restore_prepared_local_ready_binding", fake_restore_prepared
+    )
     resolved = SimpleNamespace(
         artifact=_Artifact(),
         artifact_ref="mi2:test:serving-local",
@@ -2497,11 +2959,12 @@ def test_serving_integration_load_prepared_local_ready_uses_restore(
             model_config=SimpleNamespace(name="model"),
             target_device=torch.device("cpu"),
             expected_member=_member(),
-        ))
+        )
+    )
 
     assert result.runtime_view.readiness == "serving_local_ready"
     assert result.runtime_view.binding_value_ref == binding_ref
-    assert torch.equal(result.model.w.detach(), torch.full((1, ), 3.0))
+    assert torch.equal(result.model.w.detach(), torch.full((1,), 3.0))
     assert restored.transferred
     assert not restored.closed
 
@@ -2513,18 +2976,18 @@ def test_serving_integration_error_taxonomy_is_structured():
     assert issubclass(AuthorityValidationError, ServingIntegrationError)
     assert issubclass(CapabilityMissingError, ServingIntegrationError)
     assert issubclass(PlacementAdmissionError, ServingIntegrationError)
-    assert issubclass(SelectorResolutionError, ServingIntegrationError)
+    assert issubclass(ArtifactLocatorResolutionError, ServingIntegrationError)
     assert issubclass(SourceProviderError, ServingIntegrationError)
     error = SchemaMismatchError(
         "bad schema",
         operation="reload",
-        details={"selector": "mi2:serving"},
+        details={"artifact_locator": "mi2:serving"},
     )
     assert error.code == "schema_mismatch"
     assert error.operation == "reload"
     assert not error.retryable
     assert error.worker_suspect
-    assert error.details == {"selector": "mi2:serving"}
+    assert error.details == {"artifact_locator": "mi2:serving"}
 
 
 def test_public_runtime_package_boundary_hides_admin_helpers():
@@ -2540,13 +3003,13 @@ def test_public_runtime_package_boundary_hides_admin_helpers():
 
     assert serving_runtime.ServingRuntimeSession is ServingRuntimeSession
     assert serving_runtime.ServingConfig is ServingConfig
-    assert serving_runtime.ServingArtifactSelector is ServingArtifactSelector
-    assert ServingArtifactSelector is serving_policy.ServingSelector
+    assert serving_runtime.ServingArtifactLocator is ServingArtifactLocator
+    assert ServingArtifactLocator is serving_policy.ServingArtifactLocator
     assert serving_runtime.ServingPolicy is serving_policy.ServingPolicy
     assert integration_mod.ServingPolicy is serving_policy.ServingPolicy
     assert "ServingRuntimeSession" in serving_runtime.__all__
     assert "FrameworkAdapter" not in serving.__all__
-    assert "FrameworkAdapter" not in integration_mod.__all__
+    assert not hasattr(integration_mod, "FrameworkAdapter")
     assert not hasattr(ServingIntegration, "framework_adapter")
     assert "AdminLocalSourceBootstrap" not in serving_runtime.__all__
     assert "_AdminLocalSourceBootstrap" not in serving_runtime.__all__
@@ -2555,27 +3018,31 @@ def test_public_runtime_package_boundary_hides_admin_helpers():
     assert not hasattr(ServingIntegration, "swap")
     assert not hasattr(ServingIntegration, "restore_retained")
     assert not hasattr(ServingIntegration, "restore_prepared_local_ready")
-    assert serving_admin.AdminLocalSourceBootstrap is (
-        integration_mod._AdminLocalSourceBootstrap)
+    assert serving_admin.AdminLocalSourceBootstrap is AdminLocalSourceBootstrap
     assert serving_hosts.IntegrationHost is IntegrationHost
     assert serving_hosts.SourceHost is integration_mod.SourceHost
     assert serving_hosts.RecipeCachePolicy is RecipeCachePolicy
     assert serving.PLACEMENT_IDENTITY_FACTS_SCHEMA_VERSION == (
-        PLACEMENT_IDENTITY_FACTS_SCHEMA_VERSION)
+        PLACEMENT_IDENTITY_FACTS_SCHEMA_VERSION
+    )
     assert serving_hosts.PLACEMENT_ADMISSION_FACTS_SCHEMA_VERSION == (
-        PLACEMENT_ADMISSION_FACTS_SCHEMA_VERSION)
+        PLACEMENT_ADMISSION_FACTS_SCHEMA_VERSION
+    )
     assert serving_hosts.SOURCE_CATALOG_REQUEST_SCHEMA_VERSION == (
-        SOURCE_CATALOG_REQUEST_SCHEMA_VERSION)
+        SOURCE_CATALOG_REQUEST_SCHEMA_VERSION
+    )
     assert serving.SOURCE_CATALOG_SCHEMA_VERSION == SOURCE_CATALOG_SCHEMA_VERSION
     assert serving_hosts.SOURCE_CATALOG_SCHEMA_VERSION == (
-        SOURCE_CATALOG_SCHEMA_VERSION)
+        SOURCE_CATALOG_SCHEMA_VERSION
+    )
 
     assert_public_runtime_boundary(serving_runtime)
     assert_framework_isolation(
-        ("tensorcast.serving.runtime", "tensorcast.serving.hosts"))
+        ("tensorcast.serving.runtime", "tensorcast.serving.hosts")
+    )
 
 
-def test_serving_root_facade_is_lazy_and_curated():
+def test_serving_root_facade_is_explicit_and_curated():
     import tensorcast.serving as serving
 
     hidden_names = {
@@ -2593,51 +3060,25 @@ def test_serving_root_facade_is_lazy_and_curated():
         "RecipeBuildSession",
         "RecipePublicationContext",
         "CompiledServingRecipe",
+        "PublishedReplicaProjection",
+        "ReloadResponseProjection",
+        "RuntimeEndpointProjection",
+        "SourceSelectionProjection",
+        "WeightVersionProjection",
+        "RuntimeAttachmentStore",
+        "RuntimeAttachmentRecord",
+        "ModelAttributeRuntimeState",
+        "ReadinessInventoryAdmissionPolicy",
+        "aggregate_runtime_view_outputs",
+        "publication_aggregate",
     }
     assert hidden_names.isdisjoint(serving.__all__)
-    assert "ServingRuntimeSession" in serving.__all__
+    assert "ServingRuntimeSession" not in serving.__all__
     assert "IntegrationHost" in serving.__all__
-    assert "ConformanceResult" in serving.__all__
-
-    script = """
-import json
-import sys
-import tensorcast.serving as serving
-payload = {
-    "has_session": "ServingRuntimeSession" in serving.__all__,
-    "has_low_level": bool({
-        "bind_serving_artifact",
-        "swap_serving_artifact",
-        "build_materialization_execution_context",
-        "RecipeBuildSession",
-    } & set(serving.__all__)),
-    "builder_loaded": any(
-        name.startswith("tensorcast.serving.builder")
-        for name in sys.modules
-    ),
-    "binding_runtime_loaded": (
-        "tensorcast.serving.binding_runtime" in sys.modules
-    ),
-    "admin_loaded": "tensorcast.serving.admin" in sys.modules,
-    "preload_loaded": "tensorcast.serving.preload" in sys.modules,
-}
-print(json.dumps(payload, sort_keys=True))
-"""
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    payload = json.loads(completed.stdout.strip().splitlines()[-1])
-    assert payload == {
-        "admin_loaded": False,
-        "binding_runtime_loaded": False,
-        "builder_loaded": False,
-        "has_low_level": False,
-        "has_session": True,
-        "preload_loaded": False,
-    }
+    assert "ConformanceResult" not in serving.__all__
+    assert "ServingConfig" in serving.__all__
+    assert "RuntimeSettings" in serving.__all__
+    assert not hasattr(serving, "__getattr__")
 
     hidden_name = "CompiledServingRecipe"
     with pytest.raises(AttributeError):
@@ -2673,12 +3114,10 @@ def test_source_subject_broadcast_round_trips_non_public_subjects():
 
     integration = ServingIntegration()
     payload = integration.source_subject_broadcast_payload(subject)
-    assert integration.source_subject_from_broadcast_payload(
-        payload) == restored
+    assert integration.source_subject_from_broadcast_payload(payload) == restored
 
 
-def test_serving_integration_resolve_source_subject_uses_coordinator(
-        monkeypatch):
+def test_serving_integration_resolve_source_subject_uses_coordinator(monkeypatch):
     subject = SourceSubject(
         artifact_ref="mi2:test:source",
         subject={"kind": "fake-source"},
@@ -2716,10 +3155,12 @@ def test_serving_integration_resolve_source_subject_uses_coordinator(
     )
 
     assert resolved == subject
-    assert calls == [(
-        source_subject_broadcast_payload(subject),
-        0,
-    )]
+    assert calls == [
+        (
+            source_subject_broadcast_payload(subject),
+            0,
+        )
+    ]
 
 
 def test_runtime_binding_materialization_attaches_and_transfers_ownership():
@@ -2742,7 +3183,7 @@ def test_runtime_binding_materialization_attaches_and_transfers_ownership():
         profile_sink=profile_events.append,
     ).attach_and_finalize(
         model=model,
-        tensors={"w": torch.ones((2, ), dtype=torch.float32)},
+        tensors={"w": torch.ones((2,), dtype=torch.float32)},
         binding_handle=binding,
         context=SimpleNamespace(placement=context),
         state_seed=RuntimeStateSeed(
@@ -2760,7 +3201,7 @@ def test_runtime_binding_materialization_attaches_and_transfers_ownership():
     assert state.binding is binding
     assert state.ownership_handle is binding.runtime_handle
     assert state.runtime_view.serving_artifact_ref == "mi2:test:serving"
-    assert torch.equal(model.w.detach(), torch.ones((2, )))
+    assert torch.equal(model.w.detach(), torch.ones((2,)))
     assert not model.runtime_only.is_meta
     assert binding.transferred
     assert not binding.closed
@@ -2781,22 +3222,22 @@ def test_runtime_binding_materialization_closes_binding_on_finalize_failure():
     with pytest.raises(AttachFinalizeError, match="attach/finalize failed"):
         adapter = _MaterializationAdapter(fail_finalize=True)
         RuntimeBindingMaterialization(
-            host=_host_for_adapter(adapter), ).attach_and_finalize(
-                model=model,
-                tensors={"w": torch.ones((2, ), dtype=torch.float32)},
-                binding_handle=binding,
-                context=SimpleNamespace(),
-                state_seed=RuntimeStateSeed(artifact_ref="mi2:test:serving"),
-                replace_meta_params=True,
-                target_device=torch.device("cpu"),
-            )
+            host=_host_for_adapter(adapter),
+        ).attach_and_finalize(
+            model=model,
+            tensors={"w": torch.ones((2,), dtype=torch.float32)},
+            binding_handle=binding,
+            context=SimpleNamespace(),
+            state_seed=RuntimeStateSeed(artifact_ref="mi2:test:serving"),
+            replace_meta_params=True,
+            target_device=torch.device("cpu"),
+        )
 
     assert binding.closed
     assert not binding.transferred
 
 
-def test_runtime_binding_materialization_closes_runtime_handle_on_state_failure(
-):
+def test_runtime_binding_materialization_closes_runtime_handle_on_state_failure():
     model = _MaterializedModel()
     binding = _TransferableBinding()
 
@@ -2810,7 +3251,7 @@ def test_runtime_binding_materialization_closes_runtime_handle_on_state_failure(
             state_factory=failing_state_factory,
         ).attach_and_finalize(
             model=model,
-            tensors={"w": torch.ones((2, ), dtype=torch.float32)},
+            tensors={"w": torch.ones((2,), dtype=torch.float32)},
             binding_handle=binding,
             context=SimpleNamespace(),
             state_seed=RuntimeStateSeed(artifact_ref="mi2:test:serving"),
@@ -2824,9 +3265,8 @@ def test_runtime_binding_materialization_closes_runtime_handle_on_state_failure(
 
 
 class _LocalReadyBinding:
-
     def __init__(self, tensors=None) -> None:
-        self.tensors = tensors or {"w": torch.ones((1, ), dtype=torch.float32)}
+        self.tensors = tensors or {"w": torch.ones((1,), dtype=torch.float32)}
         self.binding_layout_id = "layout-1"
         self.closed = False
         self.freeze_calls = []
@@ -2842,7 +3282,8 @@ class _LocalReadyBinding:
             seal_generation=1,
             local_serving_ref="binding-local:binding-1:value-1",
             verification_state=(
-                store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY),
+                store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY
+            ),
             verification_job_id="verify-1",
         )
 
@@ -2855,17 +3296,55 @@ def _local_ready_recipe() -> SimpleNamespace:
         trace_plan=SimpleNamespace(expected_dst_names={"w"}),
         source_artifact_ref="mi2:test:source",
         source_metadata_fingerprint="meta-fingerprint",
-        tensor_schema=(TensorSchemaEntry(
-            name="w",
-            dtype="torch.float32",
-            shape=(1, ),
-            stride=(1, ),
-        ), ),
+        tensor_schema=(
+            TensorSchemaEntry(
+                name="w",
+                dtype="torch.float32",
+                shape=(1,),
+                stride=(1,),
+            ),
+        ),
         realization_plan_proto=b"plan",
         realization_plan_count=1,
         realization_plan=(),
         realization_fallback_plan=(),
     )
+
+
+def _representation_changing_local_ready_recipe() -> SimpleNamespace:
+    recipe = _local_ready_recipe()
+    recipe.serving_facts = SimpleNamespace(
+        process_after_load_class=FinalizeClass.REPRESENTATION_CHANGING
+    )
+    recipe.semantic_validation_spec = TensorcastSemanticValidationSpec(
+        kind="explicit",
+        payload={"model_name": "model-config"},
+    )
+    return recipe
+
+
+def _local_ready_finalize_request(**overrides) -> _LocalReadyFinalize:
+    request = {
+        "model": _MaterializedModel(),
+        "recipe": _local_ready_recipe(),
+        "binding": _LocalReadyBinding(),
+        "update_epoch": "epoch-1",
+        "source_artifact_ref": "mi2:test:source",
+        "serving_manifest_ref": "manifest-ref",
+        "representation_contract_hash": "repr",
+        "serving_build_digest": "build",
+        "manifest_tensor_name": "__tensorcast_meta__.manifest",
+        "source_bound_contract_state": SimpleNamespace(
+            source_bound_contract_version=4,
+            source_bound_capability_names=("collective",),
+            source_bound_contract_ready=True,
+        ),
+        "source_bound_contract_path": "/tmp/contract.json",
+        "target_device": torch.device("cpu"),
+        "model_config": SimpleNamespace(name="model-config"),
+    }
+    request.update(overrides)
+    return _LocalReadyFinalize(**request)
 
 
 def test_serving_integration_finalizes_local_ready_runtime_in_core():
@@ -2874,16 +3353,17 @@ def test_serving_integration_finalizes_local_ready_runtime_in_core():
     model = _MaterializedModel()
     model_config = SimpleNamespace(name="model-config")
     binding = _LocalReadyBinding()
+    recipe = _local_ready_recipe()
     source_bound_contract_state = SimpleNamespace(
         source_bound_contract_version=4,
-        source_bound_capability_names=("collective", ),
+        source_bound_capability_names=("collective",),
         source_bound_contract_ready=True,
     )
 
     result = integration._finalize_local_ready_runtime(
         _LocalReadyFinalize(
             model=model,
-            recipe=_local_ready_recipe(),
+            recipe=recipe,
             binding=binding,
             update_epoch="epoch-1",
             source_artifact_ref="mi2:test:source",
@@ -2898,27 +3378,28 @@ def test_serving_integration_finalizes_local_ready_runtime_in_core():
             family="dummy",
             tp_rank=0,
             tp_world_size=1,
-        ))
+        )
+    )
 
     assert result.model is model
+    assert result.recipe is recipe
     assert result.binding is binding
-    assert result.current_value.local_serving_ref == (
-        "binding-local:binding-1:value-1")
+    assert result.current_value.local_serving_ref == ("binding-local:binding-1:value-1")
     assert result.runtime_view.readiness == "serving_local_ready"
     assert result.runtime_view.source_artifact_ref == "mi2:test:source"
-    assert result.prepared.bootstrap_summary is result.bootstrap_summary
-    assert torch.equal(model.w.detach(), torch.ones((1, )))
+    assert torch.equal(model.w.detach(), torch.ones((1,)))
     assert not model.runtime_only.is_meta
     assert not binding.closed
-    assert binding.freeze_calls == [{
-        "update_epoch": "epoch-1",
-        "source_artifact_ref": "mi2:test:source",
-    }]
+    assert binding.freeze_calls == [
+        {
+            "update_epoch": "epoch-1",
+            "source_artifact_ref": "mi2:test:source",
+        }
+    ]
     assert adapter.events == [("finalize", model_config, "cpu")]
 
 
-def test_serving_integration_validates_local_ready_representation_contract(
-        monkeypatch):
+def test_serving_integration_validates_local_ready_representation_contract(monkeypatch):
     calls = []
     adapter = _MaterializationAdapter()
     integration = ServingIntegration(host=_host_for_adapter(adapter))
@@ -2956,7 +3437,7 @@ def test_serving_integration_validates_local_ready_representation_contract(
             manifest_tensor_name="__tensorcast_meta__.manifest",
             source_bound_contract_state=SimpleNamespace(
                 source_bound_contract_version=4,
-                source_bound_capability_names=("collective", ),
+                source_bound_capability_names=("collective",),
                 source_bound_contract_ready=True,
             ),
             source_bound_contract_path="/tmp/contract.json",
@@ -2966,7 +3447,8 @@ def test_serving_integration_validates_local_ready_representation_contract(
             validate_representation_contract_hash=True,
             runtime_binding_schema_version=3,
             serving_artifact_schema_version=4,
-        ))
+        )
+    )
 
     assert result.current_value is not None
     assert len(calls) == 1
@@ -2986,7 +3468,8 @@ def test_serving_integration_validates_local_ready_representation_contract(
 
 
 def test_serving_integration_closes_local_ready_binding_on_representation_drift(
-        monkeypatch):
+    monkeypatch,
+):
     binding = _LocalReadyBinding()
     model_config = SimpleNamespace(model="fake-model")
     placement = ServingPlacement(
@@ -2998,53 +3481,142 @@ def test_serving_integration_closes_local_ready_binding_on_representation_drift(
         framework_payload={"framework": "fakefw"},
         identity_payload={"rank": 0},
     )
-    monkeypatch.setattr(integration_mod,
-                        "compute_runtime_representation_contract_hash",
-                        lambda **_kwargs: "actual")
+    monkeypatch.setattr(
+        integration_mod,
+        "compute_runtime_representation_contract_hash",
+        lambda **_kwargs: "actual",
+    )
 
     with pytest.raises(ManifestMismatchError, match="contract hash drifted"):
         adapter = _MaterializationAdapter()
         ServingIntegration(
-            host=_host_for_adapter(adapter), )._finalize_local_ready_runtime(
-                _LocalReadyFinalize(
-                    model=_MaterializedModel(),
-                    recipe=_local_ready_recipe(),
-                    binding=binding,
-                    update_epoch="epoch-1",
-                    source_artifact_ref="mi2:test:source",
-                    serving_manifest_ref="manifest-ref",
-                    representation_contract_hash="expected",
-                    serving_build_digest="build",
-                    manifest_tensor_name="__tensorcast_meta__.manifest",
-                    source_bound_contract_state=SimpleNamespace(
-                        source_bound_contract_version=4,
-                        source_bound_capability_names=("collective", ),
-                        source_bound_contract_ready=True,
-                    ),
-                    source_bound_contract_path="/tmp/contract.json",
-                    target_device=torch.device("cpu"),
-                    model_config=model_config,
-                    placement=placement,
-                    validate_representation_contract_hash=True,
-                    runtime_binding_schema_version=3,
-                    serving_artifact_schema_version=4,
-                ))
+            host=_host_for_adapter(adapter),
+        )._finalize_local_ready_runtime(
+            _LocalReadyFinalize(
+                model=_MaterializedModel(),
+                recipe=_local_ready_recipe(),
+                binding=binding,
+                update_epoch="epoch-1",
+                source_artifact_ref="mi2:test:source",
+                serving_manifest_ref="manifest-ref",
+                representation_contract_hash="expected",
+                serving_build_digest="build",
+                manifest_tensor_name="__tensorcast_meta__.manifest",
+                source_bound_contract_state=SimpleNamespace(
+                    source_bound_contract_version=4,
+                    source_bound_capability_names=("collective",),
+                    source_bound_contract_ready=True,
+                ),
+                source_bound_contract_path="/tmp/contract.json",
+                target_device=torch.device("cpu"),
+                model_config=model_config,
+                placement=placement,
+                validate_representation_contract_hash=True,
+                runtime_binding_schema_version=3,
+                serving_artifact_schema_version=4,
+            )
+        )
 
     assert binding.closed
 
 
-def test_serving_integration_prepare_local_ready_owns_contract_and_options(
-        monkeypatch):
+def test_serving_integration_rejects_representation_changing_finalize_without_semantic_validation():
+    binding = _LocalReadyBinding()
+
+    with pytest.raises(ServingIntegrationError, match="explicit semantic validation"):
+        ServingIntegration(
+            host=_host_for_adapter(_MaterializationAdapter())
+        )._finalize_local_ready_runtime(
+            _local_ready_finalize_request(
+                recipe=_representation_changing_local_ready_recipe(),
+                binding=binding,
+                run_process_after_load=True,
+                run_semantic_validation=False,
+            )
+        )
+
+    assert binding.closed
+
+
+def test_serving_integration_rejects_representation_changing_finalize_without_contract_validation():
+    binding = _LocalReadyBinding()
+
+    with pytest.raises(
+        ServingIntegrationError,
+        match="requires representation contract validation",
+    ):
+        ServingIntegration(
+            host=_host_for_adapter(_MaterializationAdapter())
+        )._finalize_local_ready_runtime(
+            _local_ready_finalize_request(
+                recipe=_representation_changing_local_ready_recipe(),
+                binding=binding,
+                run_process_after_load=True,
+                run_semantic_validation=True,
+            )
+        )
+
+    assert binding.closed
+
+
+def test_serving_integration_rejects_representation_changing_finalize_without_ready_contract(
+    monkeypatch,
+):
+    binding = _LocalReadyBinding()
+    placement = ServingPlacement(
+        topology=ServingTopologyRef(
+            schema_topology_digest="digest",
+            logical_topology_ref="fake://topology",
+        ),
+        member=_member(),
+        framework_payload={"framework": "fakefw"},
+        identity_payload={"rank": 0},
+    )
+    monkeypatch.setattr(
+        ServingIntegration,
+        "local_ready_representation_contract_hash",
+        lambda _self, **_kwargs: "repr",
+    )
+
+    with pytest.raises(
+        ServingIntegrationError,
+        match="ready same-binding contract proof",
+    ):
+        ServingIntegration(
+            host=_host_for_adapter(_MaterializationAdapter())
+        )._finalize_local_ready_runtime(
+            _local_ready_finalize_request(
+                recipe=_representation_changing_local_ready_recipe(),
+                binding=binding,
+                run_process_after_load=True,
+                run_semantic_validation=True,
+                validate_representation_contract_hash=True,
+                placement=placement,
+                runtime_binding_schema_version=3,
+                serving_artifact_schema_version=4,
+                source_bound_contract_state=SimpleNamespace(
+                    source_bound_contract_version=4,
+                    source_bound_capability_names=("collective",),
+                    source_bound_contract_ready=False,
+                ),
+            )
+        )
+
+    assert binding.closed
+
+
+def test_serving_integration_prepare_local_ready_owns_contract_and_options(monkeypatch):
     adapter = _MaterializationAdapter()
     align_calls = []
-    adapter.align_runtime_tensor_names = lambda model, names: align_calls.append(
-        tuple(names)) or 0
+    adapter.align_runtime_tensor_names = (
+        lambda model, names: align_calls.append(tuple(names)) or 0
+    )
     integration = ServingIntegration(host=_host_for_adapter(adapter))
     calls = []
     source_bound_contract_state = SimpleNamespace(
         source_bound_contract_ready=True,
         source_bound_contract_version=4,
-        source_bound_capability_names=("collective", ),
+        source_bound_capability_names=("collective",),
     )
 
     def fake_build_options(self, **kwargs):
@@ -3060,10 +3632,10 @@ def test_serving_integration_prepare_local_ready_owns_contract_and_options(
             realization_entry_count=1,
         )
 
-    monkeypatch.setattr(ServingIntegration, "build_materialization_options",
-                        fake_build_options)
-    monkeypatch.setattr(integration_mod, "prepare_local_ready_serving",
-                        fake_prepare)
+    monkeypatch.setattr(
+        ServingIntegration, "build_materialization_options", fake_build_options
+    )
+    monkeypatch.setattr(integration_mod, "prepare_local_ready_serving", fake_prepare)
 
     result = integration._prepare_local_source_bootstrap(
         _LocalReadyBootstrap(
@@ -3080,67 +3652,66 @@ def test_serving_integration_prepare_local_ready_owns_contract_and_options(
             configured_collective_policy="collective-policy",
             source_bound_contract_state=source_bound_contract_state,
             source_bound_contract_path="/tmp/contract.json",
-            execution_facts={
-                "tp_rank": 0,
-                "tp_world_size": 1
-            },
+            execution_facts={"tp_rank": 0, "tp_world_size": 1},
             contract_identity="contract-id",
             require_materialization_options=True,
-        ))
+        )
+    )
 
     assert result.binding is not None
     assert result.runtime_view is not None
     assert result.current_value is not None
     assert result.realization_entry_count == 1
-    assert align_calls == [("w", )]
-    assert calls[0] == ("options", {
-        "artifact_ref": "mi2:test:source",
-        "operation_scope":
-        "bootstrap.same_binding_fast_path.tensorcast_realize",
-        "configured_policy": "collective-policy",
-        "source_bound_contract_state": source_bound_contract_state,
-        "source_bound_contract_path": "/tmp/contract.json",
-        "execution_facts": {
-            "tp_rank": 0,
-            "tp_world_size": 1,
+    assert align_calls == [("w",)]
+    assert calls[0] == (
+        "options",
+        {
+            "artifact_ref": "mi2:test:source",
+            "operation_scope": "bootstrap.same_binding_fast_path.tensorcast_realize",
+            "configured_policy": "collective-policy",
+            "source_bound_contract_state": source_bound_contract_state,
+            "source_bound_contract_path": "/tmp/contract.json",
+            "execution_facts": {
+                "tp_rank": 0,
+                "tp_world_size": 1,
+            },
+            "contract_identity": "contract-id",
         },
-        "contract_identity": "contract-id",
-    })
+    )
     assert calls[1][0] == "prepare"
     assert calls[1][1]["options"] == "realize-options"
 
 
-def test_serving_integration_local_ready_gets_execution_facts_from_host(
-        monkeypatch):
+def test_serving_integration_local_ready_gets_execution_facts_from_host(monkeypatch):
     adapter = _MaterializationAdapter()
 
     class _PlacementWithExecutionFacts(_ContractPlacementHost):
-
         def execution_facts(self, framework_config):
             del framework_config
             return MaterializationExecutionFacts(
                 collective_rank=0,
                 collective_world_size=1,
                 same_node_tensor_parallel=True,
-                tensor_parallel_ranks=(0, ),
+                tensor_parallel_ranks=(0,),
             )
 
     class _Surface(integration_mod.TorchTensorHost):
-
         def runtime_only_tensor_names(self, model):
             del model
-            return ("runtime_only", )
+            return ("runtime_only",)
 
-    integration = ServingIntegration(host=_host_for_adapter(
-        adapter,
-        placement=_PlacementWithExecutionFacts(),
-        tensor_surface=_Surface(),
-    ))
+    integration = ServingIntegration(
+        host=_host_for_adapter(
+            adapter,
+            placement=_PlacementWithExecutionFacts(),
+            tensor_surface=_Surface(),
+        )
+    )
     calls = []
     source_bound_contract_state = SimpleNamespace(
         source_bound_contract_ready=True,
         source_bound_contract_version=4,
-        source_bound_capability_names=("collective", ),
+        source_bound_capability_names=("collective",),
     )
 
     monkeypatch.setattr(
@@ -3176,7 +3747,8 @@ def test_serving_integration_local_ready_gets_execution_facts_from_host(
             source_bound_contract_state=source_bound_contract_state,
             source_bound_contract_path="/tmp/contract.json",
             require_materialization_options=True,
-        ))
+        )
+    )
 
     assert calls[0]["execution_facts"] == {
         "collective_context_unavailable": False,
@@ -3184,13 +3756,12 @@ def test_serving_integration_local_ready_gets_execution_facts_from_host(
         "collective_world_size": 1,
         "same_node_tp": True,
         "tp_rank": 0,
-        "tp_ranks": (0, ),
+        "tp_ranks": (0,),
         "tp_world_size": 1,
     }
 
 
-def test_serving_integration_prepare_local_ready_builds_recipe_from_source(
-        monkeypatch):
+def test_serving_integration_prepare_local_ready_builds_recipe_from_source(monkeypatch):
     calls = []
     source_handle = SimpleNamespace()
     source_subject = SourceSubject(
@@ -3200,36 +3771,36 @@ def test_serving_integration_prepare_local_ready_builds_recipe_from_source(
         metadata_fingerprint="meta-fingerprint",
     )
     source_catalog = SimpleNamespace(
-        ordered_names=("w", ),
+        ordered_names=("w",),
         meta_by_name={},
         selected_files=(),
+        source_artifact_ref="mi2:test:source",
         metadata_fingerprint="meta-fingerprint",
     )
     cache_config = SimpleNamespace(trace_cache_schema_version=9)
-    class _Provider:
 
+    class _Provider:
         def build_catalog(self, request):
             calls.append(("source_catalog", request))
             return source_catalog
 
     class _Surface(integration_mod.TorchTensorHost):
-
         def runtime_only_tensor_names(self, model):
             del model
-            return ("runtime_only", )
+            return ("runtime_only",)
 
     class _Session:
-
         def build_recipe(self, **kwargs):
             calls.append(("build_recipe", kwargs))
-            return SimpleNamespace(recipe=_local_ready_recipe(),
-                                   diagnostics={"compile_key": "recipe-key"})
+            return SimpleNamespace(
+                recipe=_local_ready_recipe(), diagnostics={"compile_key": "recipe-key"}
+            )
 
     monkeypatch.setattr(
         ServingIntegration,
         "resolve_source_subject",
-        lambda self, selector, **kwargs: calls.append(
-            ("resolve", selector, kwargs)) or source_subject,
+        lambda self, selector, **kwargs: calls.append(("resolve", selector, kwargs))
+        or source_subject,
     )
     monkeypatch.setattr(
         ServingIntegration,
@@ -3239,13 +3810,14 @@ def test_serving_integration_prepare_local_ready_builds_recipe_from_source(
     monkeypatch.setattr(
         ServingIntegration,
         "build_materialization_options",
-        lambda self, **kwargs: calls.append(
-            ("options", kwargs)) or ("realize-options", {}),
+        lambda self, **kwargs: calls.append(("options", kwargs))
+        or ("realize-options", {}),
     )
     monkeypatch.setattr(
         integration_mod,
         "prepare_local_ready_serving",
-        lambda **kwargs: calls.append(("prepare", kwargs)) or SimpleNamespace(
+        lambda **kwargs: calls.append(("prepare", kwargs))
+        or SimpleNamespace(
             binding=_LocalReadyBinding(),
             update_epoch="epoch-1",
             layout=SimpleNamespace(binding_layout_id="layout-1"),
@@ -3253,12 +3825,14 @@ def test_serving_integration_prepare_local_ready_builds_recipe_from_source(
         ),
     )
 
-    result = ServingIntegration(host=IntegrationHost(
-        framework=_ContractFrameworkHost(),
-        placement=_ContractPlacementHost(),
-        source_catalog=_Provider(),
-        tensor_surface=_Surface(),
-    ), )._prepare_local_source_bootstrap(
+    result = ServingIntegration(
+        host=IntegrationHost(
+            framework=_ContractFrameworkHost(),
+            placement=_ContractPlacementHost(),
+            source_catalog=_Provider(),
+            tensor_surface=_Surface(),
+        ),
+    )._prepare_local_source_bootstrap(
         _LocalReadyBootstrap(
             source_selector=SourceSelector.local_path("/tmp/model"),
             bootstrap=SimpleNamespace(verify_source_checksums=True),
@@ -3277,19 +3851,24 @@ def test_serving_integration_prepare_local_ready_builds_recipe_from_source(
             source_bound_contract_state=SimpleNamespace(
                 source_bound_contract_ready=True,
                 source_bound_contract_version=4,
-                source_bound_capability_names=("collective", ),
+                source_bound_capability_names=("collective",),
             ),
             source_bound_contract_path="/tmp/contract.json",
             execution_facts={"tp_rank": 0},
             require_materialization_options=True,
             build_recipe_from_framework_context=True,
-        ))
+        )
+    )
 
     assert result.runtime_view is not None
-    assert calls[0] == ("resolve", SourceSelector.local_path("/tmp/model"), {
-        "verify_checksums": True,
-        "coordinator": "coordinator",
-    })
+    assert calls[0] == (
+        "resolve",
+        SourceSelector.local_path("/tmp/model"),
+        {
+            "verify_checksums": True,
+            "coordinator": "coordinator",
+        },
+    )
     assert calls[1][0] == "source_catalog"
     assert calls[1][1].source_artifact_ref == "mi2:test:source"
     assert calls[1][1].source_catalog_config == "source-config"
@@ -3305,19 +3884,16 @@ def test_serving_integration_prepare_local_ready_builds_recipe_from_source(
     assert calls[5][1]["source_subject"] is source_handle
 
 
-def test_serving_integration_prepare_local_ready_builds_framework_context(
-        monkeypatch):
+def test_serving_integration_prepare_local_ready_builds_framework_context(monkeypatch):
     adapter = _MaterializationAdapter()
     integration = ServingIntegration(host=_host_for_adapter(adapter))
     calls = []
     source_bound_contract_state = SimpleNamespace(
         source_bound_contract_ready=True,
         source_bound_contract_version=4,
-        source_bound_capability_names=("collective", ),
+        source_bound_capability_names=("collective",),
     )
-    recipe = _local_ready_recipe()
-    recipe.serving_facts = SimpleNamespace(
-        process_after_load_class=FinalizeClass.REPRESENTATION_CHANGING)
+    recipe = _representation_changing_local_ready_recipe()
     model_config = SimpleNamespace(name="model-config")
     placement = ServingPlacement(
         topology=ServingTopologyRef(
@@ -3341,17 +3917,25 @@ def test_serving_integration_prepare_local_ready_builds_framework_context(
     monkeypatch.setattr(
         ServingIntegration,
         "prepare_local_ready_manifest_carrier_from_framework_context",
-        lambda self, **kwargs: calls.append(
-            ("carrier", kwargs)) or LocalReadyManifestCarrierResult(
-                representation_contract_hash="repr",
-                manifest_bytes=b"manifest",
-                serving_manifest_ref="manifest-ref",
-                serving_build_digest="build",
-            ))
-    monkeypatch.setattr(ServingIntegration, "build_materialization_options",
-                        lambda self, **kwargs: ("realize-options", {}))
-    monkeypatch.setattr(integration_mod, "prepare_local_ready_serving",
-                        fake_prepare)
+        lambda self, **kwargs: calls.append(("carrier", kwargs))
+        or LocalReadyManifestCarrierResult(
+            representation_contract_hash="repr",
+            manifest_bytes=b"manifest",
+            serving_manifest_ref="manifest-ref",
+            serving_build_digest="build",
+        ),
+    )
+    monkeypatch.setattr(
+        ServingIntegration,
+        "build_materialization_options",
+        lambda self, **kwargs: ("realize-options", {}),
+    )
+    monkeypatch.setattr(
+        ServingIntegration,
+        "local_ready_representation_contract_hash",
+        lambda self, **kwargs: "repr",
+    )
+    monkeypatch.setattr(integration_mod, "prepare_local_ready_serving", fake_prepare)
 
     result = integration._prepare_local_source_bootstrap(
         _LocalReadyBootstrap(
@@ -3372,9 +3956,11 @@ def test_serving_integration_prepare_local_ready_builds_framework_context(
             build_model_from_framework_context=True,
             build_manifest_carrier_from_framework_context=True,
             run_binding_finalize_hooks_when_required=True,
+            validate_representation_contract_hash=True,
             runtime_binding_schema_version=3,
             serving_artifact_schema_version=4,
-        ))
+        )
+    )
 
     assert result.model is not None
     assert result.runtime_view is not None
@@ -3389,8 +3975,7 @@ def test_serving_integration_prepare_local_ready_builds_framework_context(
     ]
 
 
-def test_serving_integration_finalizes_local_ready_runtime_runs_semantic_validation(
-):
+def test_serving_integration_finalizes_local_ready_runtime_runs_semantic_validation():
     adapter = _MaterializationAdapter()
     integration = ServingIntegration(host=_host_for_adapter(adapter))
     model_config = SimpleNamespace(name="model-config")
@@ -3419,7 +4004,8 @@ def test_serving_integration_finalizes_local_ready_runtime_runs_semantic_validat
                 kind="explicit",
                 payload={"model_name": "model-config"},
             ),
-        ))
+        )
+    )
 
     assert result.current_value is not None
     assert adapter.events == [
@@ -3429,30 +4015,32 @@ def test_serving_integration_finalizes_local_ready_runtime_runs_semantic_validat
 
 
 def test_serving_integration_finalizes_local_ready_runtime_closes_on_error():
-    binding = _LocalReadyBinding(tensors={"unexpected": torch.ones((1, ))})
+    binding = _LocalReadyBinding(tensors={"unexpected": torch.ones((1,))})
 
     with pytest.raises(SchemaMismatchError, match="tensor set"):
         adapter = _MaterializationAdapter()
         ServingIntegration(
-            host=_host_for_adapter(adapter), )._finalize_local_ready_runtime(
-                _LocalReadyFinalize(
-                    model=_MaterializedModel(),
-                    recipe=_local_ready_recipe(),
-                    binding=binding,
-                    update_epoch="epoch-1",
-                    source_artifact_ref="mi2:test:source",
-                    serving_manifest_ref="manifest-ref",
-                    representation_contract_hash="repr",
-                    serving_build_digest="build",
-                    manifest_tensor_name="__tensorcast_meta__.manifest",
-                    source_bound_contract_state=SimpleNamespace(
-                        source_bound_contract_version=4,
-                        source_bound_capability_names=(),
-                        source_bound_contract_ready=True,
-                    ),
-                    source_bound_contract_path="/tmp/contract.json",
-                    target_device=torch.device("cpu"),
-                ))
+            host=_host_for_adapter(adapter),
+        )._finalize_local_ready_runtime(
+            _LocalReadyFinalize(
+                model=_MaterializedModel(),
+                recipe=_local_ready_recipe(),
+                binding=binding,
+                update_epoch="epoch-1",
+                source_artifact_ref="mi2:test:source",
+                serving_manifest_ref="manifest-ref",
+                representation_contract_hash="repr",
+                serving_build_digest="build",
+                manifest_tensor_name="__tensorcast_meta__.manifest",
+                source_bound_contract_state=SimpleNamespace(
+                    source_bound_contract_version=4,
+                    source_bound_capability_names=(),
+                    source_bound_contract_ready=True,
+                ),
+                source_bound_contract_path="/tmp/contract.json",
+                target_device=torch.device("cpu"),
+            )
+        )
 
     assert binding.closed
 
@@ -3461,9 +4049,11 @@ def test_serving_integration_acquire_retained_binding_uses_materialization():
     client = _Client()
     adapter = _MaterializationAdapter()
     adapter.compute_runtime_tensor_schema_hash = (
-        lambda _tensors, **_kwargs: "schema-hash")
+        lambda _tensors, **_kwargs: "schema-hash"
+    )
     adapter.allocate_runtime_only_tensors = (
-        lambda model, _target_device: _allocate_cpu_runtime_only(model))
+        lambda model, _target_device: _allocate_cpu_runtime_only(model)
+    )
     integration = ServingIntegration(host=_host_for_adapter(adapter))
     model_config = SimpleNamespace(name="model-config")
 
@@ -3475,12 +4065,13 @@ def test_serving_integration_acquire_retained_binding_uses_materialization():
             expected_member=_member(),
             runtime=_Runtime(client),
             restore_fn=lambda **_kwargs: {
-                "w": torch.ones((1, ), dtype=torch.float32),
+                "w": torch.ones((1,), dtype=torch.float32),
             },
-        ))
+        )
+    )
 
     assert result.model is not None
-    assert torch.equal(result.model.w.detach(), torch.ones((1, )))
+    assert torch.equal(result.model.w.detach(), torch.ones((1,)))
     assert not result.model.runtime_only.is_meta
     assert result.runtime_view.readiness == "serving_local_ready"
     assert result.runtime_view.tensor_schema_hash == "schema-hash"
@@ -3492,14 +4083,14 @@ def test_serving_integration_acquire_retained_binding_uses_materialization():
     assert client.released_tokens == [b"lease"]
 
 
-def test_serving_integration_acquire_retained_binding_rejects_published_ready(
-):
+def test_serving_integration_acquire_retained_binding_rejects_published_ready():
     authority = _authority()
-    authority = ParsedExternalPreloadAuthority(
+    authority = ParsedRetainedServingBindingAuthority(
         **{
             **authority.__dict__,
             "readiness": "serving_published_ready",
-        })
+        }
+    )
     adapter = _MaterializationAdapter()
     integration = ServingIntegration(host=_host_for_adapter(adapter))
 
@@ -3508,18 +4099,17 @@ def test_serving_integration_acquire_retained_binding_rejects_published_ready(
             _RetainedBindingAcquire(
                 authority=authority,
                 target_device=torch.device("cuda:0"),
-            ))
+            )
+        )
 
 
 def _allocate_cpu_runtime_only(model):
-    tensor = nn.Parameter(torch.empty((1, ), dtype=torch.float32),
-                          requires_grad=False)
+    tensor = nn.Parameter(torch.empty((1,), dtype=torch.float32), requires_grad=False)
     model.runtime_only = tensor
     return {"runtime_only": tensor}
 
 
 class _Client:
-
     def __init__(self) -> None:
         self.released_tokens: list[bytes] = []
 
@@ -3540,7 +4130,6 @@ class _Client:
 
 
 class _Runtime:
-
     def __init__(self, client: _Client) -> None:
         self.client = client
 
@@ -3549,10 +4138,10 @@ class _Runtime:
 
 
 def test_bind_and_swap_return_attach_ready_results():
-    resolved = SimpleNamespace(artifact=_Artifact())
+    resolved = SimpleNamespace(artifact=_Artifact(), tensor_names=("w",))
     result = bind_serving_artifact(
         resolved_artifact=resolved,
-        tensor_names=("w", ),
+        tensor_names=("w",),
         device=torch.device("cuda:0"),
         serving_runtime_policy=None,
         options=None,
@@ -3563,11 +4152,11 @@ def test_bind_and_swap_return_attach_ready_results():
     assert result.execution_diagnostics == {"executor": "fake"}
 
     class _SwapBinding(_Bound):
-
         def swap(self, artifact, **kwargs):
             self.swapped = (artifact, kwargs)
 
     binding = _SwapBinding()
+    binding.tensors[SERVING_MANIFEST_TENSOR_NAME] = torch.ones((1,), dtype=torch.uint8)
     swap_result = swap_serving_artifact(
         binding=binding,
         resolved_artifact=resolved,
@@ -3576,7 +4165,8 @@ def test_bind_and_swap_return_attach_ready_results():
     )
 
     assert swap_result.binding is binding
-    assert binding.swapped[0] is resolved.artifact
+    assert isinstance(binding.swapped[0], _Subset)
+    assert binding.swapped[0].names == ("w", SERVING_MANIFEST_TENSOR_NAME)
     assert binding.swapped[1] == {
         "serving_runtime_policy": "policy",
         "options": "options",
@@ -3587,10 +4177,10 @@ def test_restore_retained_binding_releases_untransferred_attachment():
     client = _Client()
 
     with restore_retained_binding(
-            authority=_authority(),
-            target_device=torch.device("cuda:0"),
-            runtime=_Runtime(client),
-            restore_fn=lambda **_kwargs: {"w": torch.empty((1, ))},
+        authority=_authority(),
+        target_device=torch.device("cuda:0"),
+        runtime=_Runtime(client),
+        restore_fn=lambda **_kwargs: {"w": torch.empty((1,))},
     ) as restored:
         assert restored.binding_layout_id == "layout-1"
         assert restored.binding_value_ref == _binding_ref()
@@ -3602,10 +4192,10 @@ def test_restore_retained_binding_keeps_runtime_owned_attachment():
     client = _Client()
 
     with restore_retained_binding(
-            authority=_authority(),
-            target_device=torch.device("cuda:0"),
-            runtime=_Runtime(client),
-            restore_fn=lambda **_kwargs: {"w": torch.empty((1, ))},
+        authority=_authority(),
+        target_device=torch.device("cuda:0"),
+        runtime=_Runtime(client),
+        restore_fn=lambda **_kwargs: {"w": torch.empty((1,))},
     ) as restored:
         runtime_handle = restored.transfer_to_runtime()
 
@@ -3623,14 +4213,16 @@ def test_restore_retained_binding_rejects_member_mismatch():
         group_id="group-1",
     )
 
-    with pytest.raises(RuntimeError, match="expected runtime placement"), \
-            restore_retained_binding(
-                authority=_authority(),
-                target_device=torch.device("cuda:0"),
-                expected_member=expected_member,
-                runtime=_Runtime(_Client()),
-                restore_fn=lambda **_kwargs: {"w": torch.empty((1, ))},
-            ):
+    with (
+        pytest.raises(RuntimeError, match="expected runtime placement"),
+        restore_retained_binding(
+            authority=_authority(),
+            target_device=torch.device("cuda:0"),
+            expected_member=expected_member,
+            runtime=_Runtime(_Client()),
+            restore_fn=lambda **_kwargs: {"w": torch.empty((1,))},
+        ),
+    ):
         pass
 
 
@@ -3640,11 +4232,13 @@ def test_restore_prepared_local_ready_requires_manifest_ref():
         artifact_ref="mi2:test:serving",
     )
 
-    with pytest.raises(RuntimeError, match="local_serving_ref"), \
-            restore_prepared_local_ready_binding(
-                resolved_artifact=resolved,
-                target_device=torch.device("cuda:0"),
-                expected_member=_member(),
-                expected_tensor_schema_hash="schema-hash",
-            ):
+    with (
+        pytest.raises(RuntimeError, match="local_serving_ref"),
+        restore_prepared_local_ready_binding(
+            resolved_artifact=resolved,
+            target_device=torch.device("cuda:0"),
+            expected_member=_member(),
+            expected_tensor_schema_hash="schema-hash",
+        ),
+    ):
         pass

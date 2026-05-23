@@ -41,14 +41,14 @@ def test_trace_plan_cache_round_trips_versioned_payload(tmp_path) -> None:
     assert json.loads(path.read_text(encoding="utf-8"))["version"] == 1
 
 
-def test_trace_plan_cache_loads_legacy_raw_payload(tmp_path) -> None:
+def test_trace_plan_cache_rejects_unversioned_raw_payload(tmp_path) -> None:
     from tensorcast.serving.builder.trace_ir import trace_plan_to_dict
 
-    path = tmp_path / "legacy.json"
+    path = tmp_path / "unversioned.json"
     trace_plan = _trace_plan()
     path.write_text(json.dumps(trace_plan_to_dict(trace_plan)), encoding="utf-8")
 
-    assert load_trace_plan_cache(path) == trace_plan
+    assert load_trace_plan_cache(path) is None
 
 
 def test_trace_plan_debug_dump_includes_extra_fields(tmp_path) -> None:

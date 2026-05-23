@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Mapping, cast
@@ -105,6 +106,67 @@ def _pad_manifest_carrier_bytes(payload: bytes) -> bytes:
     return payload + (b" " * (align - remainder))
 
 
+def _manifest_byte_mismatch_message(
+    *,
+    existing_bytes: bytes,
+    expected_bytes: bytes,
+    expected_manifest: ServingArtifactManifest,
+) -> str:
+    def _sha(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    def _first_diff_offset(left: bytes, right: bytes) -> int | None:
+        for index, (left_byte, right_byte) in enumerate(zip(left, right, strict=False)):
+            if left_byte != right_byte:
+                return index
+        if len(left) != len(right):
+            return min(len(left), len(right))
+        return None
+
+    def _summarize_value(value: object) -> object:
+        if isinstance(value, str) and len(value) > 160:
+            return {
+                "len": len(value),
+                "sha256": _sha(value.encode("utf-8")),
+                "prefix": value[:160],
+            }
+        return value
+
+    details: dict[str, object] = {
+        "existing_len": len(existing_bytes),
+        "expected_len": len(expected_bytes),
+        "existing_sha256": _sha(existing_bytes),
+        "expected_sha256": _sha(expected_bytes),
+        "first_diff_offset": _first_diff_offset(existing_bytes, expected_bytes),
+    }
+    try:
+        existing_manifest = ServingArtifactManifest.from_bytes(existing_bytes)
+    except Exception as exc:  # pragma: no cover - diagnostic path
+        details["existing_manifest_error"] = type(exc).__name__
+        details["existing_manifest_error_message"] = str(exc)
+    else:
+        existing_dump = existing_manifest.model_dump(mode="json")
+        expected_dump = expected_manifest.model_dump(mode="json")
+        differing_fields = []
+        for field in sorted(set(existing_dump) | set(expected_dump)):
+            existing_value = existing_dump.get(field)
+            expected_value = expected_dump.get(field)
+            if existing_value != expected_value:
+                differing_fields.append(
+                    {
+                        "field": field,
+                        "existing": _summarize_value(existing_value),
+                        "expected": _summarize_value(expected_value),
+                    }
+                )
+        details["differing_fields"] = differing_fields[:8]
+        details["differing_field_count"] = len(differing_fields)
+    return (
+        "manifest tensor bytes do not match the expected serving manifest "
+        f"carrier: {json.dumps(details, sort_keys=True, separators=(',', ':'))}"
+    )
+
+
 def prepare_serving_manifest_carrier(
     *,
     build_intent: ServingBuildIntent,
@@ -112,6 +174,7 @@ def prepare_serving_manifest_carrier(
     representation_contract_hash: str | None = None,
     logical_topology_json: str | None = None,
     serving_manifest_ref: str | None = None,
+    topology_admission_digest: str | None = None,
 ) -> ServingManifestCarrier:
     normalized_logical_topology = _normalize_logical_topology_payload(
         logical_topology_json
@@ -146,6 +209,7 @@ def prepare_serving_manifest_carrier(
             if normalized_logical_topology is not None
             else None
         ),
+        topology_admission_digest=topology_admission_digest,
     )
     return ServingManifestCarrier(
         serving_manifest_ref=resolved_manifest_ref,
@@ -722,6 +786,7 @@ def prepare_pure_transform_serving_registration(
     tensors: Mapping[str, torch.Tensor],
     logical_topology_json: str | None = None,
     serving_manifest_ref: str | None = None,
+    topology_admission_digest: str | None = None,
 ) -> PreparedServingRegistration:
     if build_intent.builder_mode is not BuilderMode.PURE_TRANSFORM:
         raise ArtifactError(
@@ -751,6 +816,7 @@ def prepare_pure_transform_serving_registration(
         representation_contract_hash=resolved_representation_contract_hash,
         logical_topology_json=logical_topology_json,
         serving_manifest_ref=resolved_manifest_ref,
+        topology_admission_digest=topology_admission_digest,
     )
     manifest_device = (
         next(iter(prepared_tensors.values())).device
@@ -769,7 +835,11 @@ def prepare_pure_transform_serving_registration(
         )
         if existing_bytes != carrier.serving_manifest_bytes:
             raise ArtifactError(
-                "manifest tensor bytes do not match the expected serving manifest carrier",
+                _manifest_byte_mismatch_message(
+                    existing_bytes=existing_bytes,
+                    expected_bytes=carrier.serving_manifest_bytes,
+                    expected_manifest=carrier.serving_manifest,
+                ),
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
@@ -793,6 +863,7 @@ def prepare_serving_registration(
     representation_contract_hash: str | None = None,
     logical_topology_json: str | None = None,
     serving_manifest_ref: str | None = None,
+    topology_admission_digest: str | None = None,
 ) -> PreparedServingRegistration:
     prepared_tensors = {str(name): tensor for name, tensor in dict(tensors).items()}
     resolved_manifest_ref, manifest_tensor_name = _resolve_manifest_tensor_name(
@@ -807,6 +878,7 @@ def prepare_serving_registration(
         representation_contract_hash=representation_contract_hash,
         logical_topology_json=logical_topology_json,
         serving_manifest_ref=resolved_manifest_ref,
+        topology_admission_digest=topology_admission_digest,
     )
     resolved_representation_contract_hash = (
         _resolve_explicit_representation_contract_hash(
@@ -832,7 +904,11 @@ def prepare_serving_registration(
         )
         if existing_bytes != carrier.serving_manifest_bytes:
             raise ArtifactError(
-                "manifest tensor bytes do not match the expected serving manifest carrier",
+                _manifest_byte_mismatch_message(
+                    existing_bytes=existing_bytes,
+                    expected_bytes=carrier.serving_manifest_bytes,
+                    expected_manifest=carrier.serving_manifest,
+                ),
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
@@ -856,6 +932,7 @@ def prepare_binding_finalize_serving_registration(
     representation_contract_hash: str | None = None,
     logical_topology_json: str | None = None,
     serving_manifest_ref: str | None = None,
+    topology_admission_digest: str | None = None,
 ) -> PreparedServingRegistration:
     if build_intent.builder_mode is not BuilderMode.BINDING_FINALIZE:
         raise ArtifactError(
@@ -870,6 +947,7 @@ def prepare_binding_finalize_serving_registration(
         representation_contract_hash=representation_contract_hash,
         logical_topology_json=logical_topology_json,
         serving_manifest_ref=serving_manifest_ref,
+        topology_admission_digest=topology_admission_digest,
     )
 
 
@@ -1079,6 +1157,11 @@ def build_pure_transform_publication_bundle(
             if normalized_logical_topology is not None
             else None
         ),
+        topology_admission_digest=(
+            None
+            if admission_facts is None
+            else admission_facts.topology_admission_digest
+        ),
     )
     serving_manifest_bytes = _pad_manifest_carrier_bytes(manifest.to_bytes())
 
@@ -1179,6 +1262,11 @@ def build_serving_publication_bundle(
             )
             if normalized_logical_topology is not None
             else None
+        ),
+        topology_admission_digest=(
+            None
+            if admission_facts is None
+            else admission_facts.topology_admission_digest
         ),
     )
     serving_manifest_bytes = _pad_manifest_carrier_bytes(manifest.to_bytes())

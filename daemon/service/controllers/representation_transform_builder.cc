@@ -588,8 +588,8 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
   BuildRepresentationTransformResult result;
   result.generic_fallback_map.total_bytes = 0;
   result.generic_fallback_map.num_sources = 1;
-  result.compatibility_lowered_map.total_bytes = 0;
-  result.compatibility_lowered_map.num_sources = 1;
+  result.collective_lowered_map.total_bytes = 0;
+  result.collective_lowered_map.num_sources = 1;
 
   std::vector<tensorcast::store::loader::ByteRangeSegment> mapped_segments;
   mapped_segments.reserve(copy_plan.entries_size());
@@ -711,12 +711,12 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
   result.transform_contract.source_byte_space = source_byte_space;
   result.transform_contract.target_representation.family = std::string(representation_family);
   result.transform_contract.target_representation.realization_kind = RealizationKind::kEphemeralIntoTarget;
-  result.compatibility_stats.total_dst_tensors = candidate_entries_by_dst.size();
+  result.lowering_stats.total_dst_tensors = candidate_entries_by_dst.size();
   result.transform_contract.tensor_bindings.reserve(candidate_entries_by_dst.size());
 
   const auto build_bindings_begin = ProfileClock::now();
-  absl::flat_hash_set<std::string> compatibility_dst_names;
-  compatibility_dst_names.reserve(candidate_entries_by_dst.size());
+  absl::flat_hash_set<std::string> collective_dst_names;
+  collective_dst_names.reserve(candidate_entries_by_dst.size());
   for (const auto& [dst_name, entries] : candidate_entries_by_dst) {
     if (entries.empty()) {
       continue;
@@ -777,39 +777,39 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
 
     auto partition_dim = infer_partition_dim(binding);
     if (binding.op_kind == BindingOpKind::kConcat) {
-      bool concat_compatible = true;
+      bool concat_collective_eligible = true;
       for (const auto& fragment : binding.sources) {
         if (fragment.source_range.axes.size() != 1 || fragment.destination_range.axes.size() != 1 ||
             fragment.source_range.axes.front().dim != 0 || fragment.destination_range.axes.front().dim != 0) {
-          concat_compatible = false;
+          concat_collective_eligible = false;
           break;
         }
       }
-      if (concat_compatible) {
-        result.compatibility_stats.concat_candidates += 1;
-        result.compatibility_stats.concat_bytes += binding.dst_spec.logical_length;
-        compatibility_dst_names.insert(dst_name);
+      if (concat_collective_eligible) {
+        result.lowering_stats.concat_candidates += 1;
+        result.lowering_stats.concat_bytes += binding.dst_spec.logical_length;
+        collective_dst_names.insert(dst_name);
       } else {
-        result.compatibility_stats.rejected_mixed_src_or_dim += 1;
-        result.compatibility_stats.rejected_mixed_src_or_dim_bytes += binding.dst_spec.logical_length;
+        result.lowering_stats.rejected_mixed_src_or_dim += 1;
+        result.lowering_stats.rejected_mixed_src_or_dim_bytes += binding.dst_spec.logical_length;
       }
     } else if (!partition_dim.has_value()) {
-      result.compatibility_stats.rejected_non_contiguous += 1;
-      result.compatibility_stats.rejected_non_contiguous_bytes += binding.dst_spec.logical_length;
+      result.lowering_stats.rejected_non_contiguous += 1;
+      result.lowering_stats.rejected_non_contiguous_bytes += binding.dst_spec.logical_length;
     } else if (*partition_dim < -1 || *partition_dim > 1) {
-      result.compatibility_stats.rejected_unsupported_distribution += 1;
-      result.compatibility_stats.rejected_unsupported_distribution_bytes += binding.dst_spec.logical_length;
+      result.lowering_stats.rejected_unsupported_distribution += 1;
+      result.lowering_stats.rejected_unsupported_distribution_bytes += binding.dst_spec.logical_length;
     } else {
-      result.compatibility_stats.compatible_candidates += 1;
-      result.compatibility_stats.compatible_bytes += binding.dst_spec.logical_length;
-      compatibility_dst_names.insert(dst_name);
+      result.lowering_stats.collective_candidates += 1;
+      result.lowering_stats.collective_bytes += binding.dst_spec.logical_length;
+      collective_dst_names.insert(dst_name);
     }
 
     result.transform_contract.tensor_bindings.push_back(std::move(binding));
   }
   result.generic_fallback_map.segments = flatten_segments_by_dst_order(mapped_segments_by_dst, dst_base_offsets);
-  result.compatibility_lowered_map.segments =
-      flatten_segments_by_dst_order(mapped_segments_by_dst, dst_base_offsets, &compatibility_dst_names);
+  result.collective_lowered_map.segments =
+      flatten_segments_by_dst_order(mapped_segments_by_dst, dst_base_offsets, &collective_dst_names);
   const auto build_bindings_end = ProfileClock::now();
 
   const auto normalize_begin = ProfileClock::now();
@@ -833,7 +833,7 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
             << " compute_identity_hashes=" << (compute_identity_hashes ? 1 : 0)
             << " entries=" << copy_plan.entries_size() << " dst_interval_groups=" << dst_intervals.size()
             << " candidate_dst_count=" << candidate_entries_by_dst.size() << " mapped_segments=" << mapped_segment_count
-            << " compatibility_segments=" << result.compatibility_lowered_map.segments.size()
+            << " collective_segments=" << result.collective_lowered_map.segments.size()
             << " fallback_segments=" << result.generic_fallback_map.segments.size()
             << " tensor_bindings=" << result.transform_contract.tensor_bindings.size()
             << " total_bytes_copied=" << result.total_bytes_copied;
@@ -1232,8 +1232,8 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
   BuildRepresentationTransformResult result;
   result.generic_fallback_map.total_bytes = 0;
   result.generic_fallback_map.num_sources = 1;
-  result.compatibility_lowered_map.total_bytes = 0;
-  result.compatibility_lowered_map.num_sources = 1;
+  result.collective_lowered_map.total_bytes = 0;
+  result.collective_lowered_map.num_sources = 1;
   result.transform_contract.source_byte_space = source_byte_space;
   result.transform_contract.target_representation.family = std::string(representation_family);
   result.transform_contract.target_representation.realization_kind = RealizationKind::kEphemeralIntoTarget;
@@ -1502,8 +1502,8 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
           dst_segments.push_back(segment);
         }
         result.total_bytes_copied += copied_bytes;
-        result.compatibility_stats.compatible_candidates += 1;
-        result.compatibility_stats.compatible_bytes += copied_bytes;
+        result.lowering_stats.collective_candidates += 1;
+        result.lowering_stats.collective_bytes += copied_bytes;
       }
     }
   }
@@ -1511,8 +1511,8 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
   manual_data_map.total_bytes = result.generic_fallback_map.total_bytes;
   manual_data_map.num_sources = 1;
   manual_data_map.segments = flatten_segments_by_dst_order(manual_segments_by_dst, dst_base_offsets);
-  result.compatibility_lowered_map =
-      merge_ordered_byte_range_maps(std::move(result.compatibility_lowered_map), manual_data_map);
+  result.collective_lowered_map =
+      merge_ordered_byte_range_maps(std::move(result.collective_lowered_map), manual_data_map);
   result.generic_fallback_map =
       merge_ordered_byte_range_maps(std::move(result.generic_fallback_map), std::move(manual_data_map));
   const auto manual_bindings_end = ProfileClock::now();
@@ -1540,7 +1540,7 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
             << " entries=" << realization_plan.entries_size() << " copy_plan_entries=" << copy_plan.entries_size()
             << " manual_dst_count=" << manual_entries_by_dst.size() << " manual_entry_count=" << manual_entry_count
             << " tensor_bindings=" << result.transform_contract.tensor_bindings.size()
-            << " compatibility_segments=" << result.compatibility_lowered_map.segments.size()
+            << " collective_segments=" << result.collective_lowered_map.segments.size()
             << " fallback_segments=" << result.generic_fallback_map.segments.size()
             << " total_bytes_copied=" << result.total_bytes_copied;
   return result;

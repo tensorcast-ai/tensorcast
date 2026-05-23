@@ -396,7 +396,7 @@ class SourceBoundPlanDiagnostics(BaseModel):
     planned_local_typed_bytes: int = 0
     planned_non_admitted_typed_bytes: int = 0
     planned_generic_residual_bytes: int = 0
-    compatibility_lowered_bytes: int = 0
+    collective_lowered_bytes: int = 0
     planner_reject_reason_buckets: dict[str, int] = Field(default_factory=dict)
     planner_version: str | None = None
     plan_hash: str | None = None
@@ -427,9 +427,7 @@ class SourceBoundPlanDiagnostics(BaseModel):
             planned_generic_residual_bytes=int(
                 getattr(proto, "planned_generic_residual_bytes", 0)
             ),
-            compatibility_lowered_bytes=int(
-                getattr(proto, "compatibility_lowered_bytes", 0)
-            ),
+            collective_lowered_bytes=int(getattr(proto, "collective_lowered_bytes", 0)),
             planner_reject_reason_buckets={
                 str(key): int(value)
                 for key, value in dict(
@@ -594,7 +592,6 @@ class SealAssemblyResult(BaseModel):
 
 ContributionKind = Literal["piece_partial", "canonical_full"]
 
-
 _CONTRIBUTION_KIND_TO_PROTO: dict[ContributionKind, int] = {
     "piece_partial": int(store_daemon_pb2.BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL),
     "canonical_full": int(store_daemon_pb2.BINDING_CONTRIBUTION_KIND_CANONICAL_FULL),
@@ -604,7 +601,6 @@ _CONTRIBUTION_KIND_FROM_PROTO: dict[int, ContributionKind] = {
     int(store_daemon_pb2.BINDING_CONTRIBUTION_KIND_PIECE_PARTIAL): "piece_partial",
     int(store_daemon_pb2.BINDING_CONTRIBUTION_KIND_CANONICAL_FULL): "canonical_full",
 }
-
 
 AssemblyTargetKind = Literal["structural_view", "canonical_layout"]
 AssemblyContractFamily = Literal["pp", "ep", "canonical_full"]
@@ -1436,6 +1432,7 @@ class ServingArtifactManifest(BaseModel):
     builder_mode: BuilderMode
     build_pipeline_version: str
     logical_topology_json: str | None = None
+    topology_admission_digest: str | None = None
 
     @model_validator(mode="after")
     def _validate_manifest(self) -> "ServingArtifactManifest":
@@ -1474,6 +1471,7 @@ class ServingArtifactManifest(BaseModel):
         canonical_tensor_count: int,
         serving_manifest_ref: str | None = None,
         logical_topology_json: str | None = None,
+        topology_admission_digest: str | None = None,
     ) -> "ServingArtifactManifest":
         resolved_representation_contract_hash = (
             representation_contract_hash or intent.representation_contract_hash
@@ -1500,6 +1498,7 @@ class ServingArtifactManifest(BaseModel):
             builder_mode=intent.builder_mode,
             build_pipeline_version=intent.build_pipeline_version,
             logical_topology_json=logical_topology_json,
+            topology_admission_digest=topology_admission_digest,
         )
 
     def to_bytes(self) -> bytes:
@@ -1526,6 +1525,11 @@ class ServingArtifactManifest(BaseModel):
                 self.representation_contract_hash
             ),
             expected_serving_build_digest=str(self.serving_build_digest),
+            expected_topology_admission_digest=(
+                str(self.topology_admission_digest)
+                if self.topology_admission_digest
+                else None
+            ),
         )
 
 
@@ -1536,6 +1540,7 @@ class ServingRuntimePolicy(BaseModel):
     serving_manifest_ref: str | None = None
     expected_representation_contract_hash: str | None = None
     expected_serving_build_digest: str | None = None
+    expected_topology_admission_digest: str | None = None
 
     @model_validator(mode="after")
     def _validate_policy(self) -> "ServingRuntimePolicy":
@@ -1550,6 +1555,7 @@ class ServingRuntimePolicy(BaseModel):
                 or self.serving_manifest_ref is not None
                 or self.expected_representation_contract_hash is not None
                 or self.expected_serving_build_digest is not None
+                or self.expected_topology_admission_digest is not None
             )
         )
         if self.serving_manifest_ref is not None:
@@ -1561,6 +1567,10 @@ class ServingRuntimePolicy(BaseModel):
         if self.expected_serving_build_digest is not None:
             proto.expected_serving_build_digest = str(
                 self.expected_serving_build_digest
+            )
+        if self.expected_topology_admission_digest is not None:
+            proto.expected_topology_admission_digest = str(
+                self.expected_topology_admission_digest
             )
         return proto
 
@@ -1577,6 +1587,9 @@ class ServingRuntimePolicy(BaseModel):
             ),
             expected_serving_build_digest=(
                 str(proto.expected_serving_build_digest or "") or None
+            ),
+            expected_topology_admission_digest=(
+                str(proto.expected_topology_admission_digest or "") or None
             ),
         )
 
@@ -3758,7 +3771,6 @@ class StableDramPlan(PlanBase):
 
 
 Plan = Union[CoalescedPlan, LeasePlan, StableDramPlan]
-
 
 # ---------------------------- Segment feed model ---------------------------
 

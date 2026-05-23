@@ -2896,6 +2896,7 @@ absl::Status GlobalStoreClient::fill_memory_info(
 
 RemoteReplicaInfo GlobalStoreClient::convert_from_proto_memory_info(const tensorcast::common::v1::MemoryInfo& info) {
   RemoteReplicaInfo replica;
+  replica.replica_id = info.replica_id();
   replica.node_id = info.node_id();
   replica.node_address = info.node_address();
   replica.node_port = info.node_port();

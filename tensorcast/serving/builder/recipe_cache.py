@@ -13,7 +13,6 @@ from typing import Any
 from tensorcast.serving.builder.compiler import (
     CompiledServingRecipe,
     SourceHullEntry,
-    TensorcastLogicalTopology,
     TensorcastSemanticValidationSpec,
     TensorcastServingFacts,
     TensorSchemaEntry,
@@ -27,9 +26,14 @@ from tensorcast.serving.builder.trace_ir import (
     range_to_dict,
     single_range_from_dict,
 )
-from tensorcast.types import FinalizeClass, ServingSupportLevel
+from tensorcast.types import (
+    FinalizeClass,
+    ServingBindingMemberRef,
+    ServingSupportLevel,
+    ServingTopologyRef,
+)
 
-RECIPE_CACHE_PAYLOAD_VERSION = 4
+RECIPE_CACHE_PAYLOAD_VERSION = 5
 
 
 def _serving_facts_to_dict(facts: TensorcastServingFacts) -> dict[str, Any]:
@@ -145,26 +149,30 @@ def _bytes_from_base64_payload(value: Any, *, field: str) -> bytes:
     return base64.b64decode(str(value["data"]).encode("ascii"))
 
 
-def _logical_topology_to_dict(
-    topology: TensorcastLogicalTopology | None,
-) -> dict[str, Any] | None:
-    if topology is None:
+def _pydantic_model_to_dict(value: Any | None) -> dict[str, Any] | None:
+    if value is None:
         return None
-    return {
-        "tensor_parallel_rank": topology.tensor_parallel_rank,
-        "tensor_parallel_world_size": topology.tensor_parallel_world_size,
-    }
+    if hasattr(value, "model_dump") and callable(value.model_dump):
+        return dict(value.model_dump(mode="python"))
+    if isinstance(value, Mapping):
+        return dict(value)
+    raise ValueError(f"unsupported recipe cache identity payload: {type(value)!r}")
 
 
-def _logical_topology_from_dict(
+def _topology_ref_from_dict(
     data: Mapping[str, Any] | None,
-) -> TensorcastLogicalTopology | None:
+) -> ServingTopologyRef | None:
     if data is None:
         return None
-    return TensorcastLogicalTopology(
-        tensor_parallel_rank=int(data["tensor_parallel_rank"]),
-        tensor_parallel_world_size=int(data["tensor_parallel_world_size"]),
-    )
+    return ServingTopologyRef.model_validate(dict(data))
+
+
+def _member_ref_from_dict(
+    data: Mapping[str, Any] | None,
+) -> ServingBindingMemberRef | None:
+    if data is None:
+        return None
+    return ServingBindingMemberRef.model_validate(dict(data))
 
 
 def _semantic_validation_spec_to_dict(
@@ -207,7 +215,8 @@ def compiled_recipe_to_dict(recipe: CompiledServingRecipe) -> dict[str, Any]:
         "realization_fallback_plan": [
             copy_plan_to_dict(entry) for entry in recipe.realization_fallback_plan
         ],
-        "logical_topology": _logical_topology_to_dict(recipe.logical_topology),
+        "topology_ref": _pydantic_model_to_dict(recipe.topology_ref),
+        "member_ref": _pydantic_model_to_dict(recipe.member_ref),
         "semantic_validation_spec": _semantic_validation_spec_to_dict(
             recipe.semantic_validation_spec
         ),
@@ -236,7 +245,8 @@ def compiled_recipe_from_dict(data: Mapping[str, Any]) -> CompiledServingRecipe:
             copy_plan_from_dict(dict(entry))
             for entry in data["realization_fallback_plan"]
         ),
-        logical_topology=_logical_topology_from_dict(data["logical_topology"]),
+        topology_ref=_topology_ref_from_dict(data.get("topology_ref")),
+        member_ref=_member_ref_from_dict(data.get("member_ref")),
         semantic_validation_spec=_semantic_validation_spec_from_dict(
             data["semantic_validation_spec"]
         ),

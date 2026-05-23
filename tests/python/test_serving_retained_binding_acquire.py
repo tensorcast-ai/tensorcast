@@ -3,23 +3,25 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 import tensorcast as tc
-from tensorcast.serving.preload import (
-    ExternalPreloadExpectedDigests,
-    ParsedExternalPreloadAuthority,
-    acquire_preload_lease,
+from tensorcast.serving.retained_binding import (
+    ParsedRetainedServingBindingAuthority,
+    RetainedServingBindingAuthority,
+    RetainedServingBindingExpectedDigests,
     acquire_retained_serving_binding,
-    external_preload_extra_from_prefetched_binding,
-    external_preload_extra_json,
-    external_preload_mode,
-    external_preload_trusted_reservation_bytes,
-    parse_external_preload_authority,
+    acquire_retained_serving_binding_lease,
+    parse_retained_serving_binding_authority,
     promote_current_value_and_wait,
+    retained_binding_acquire_mode,
+    retained_serving_binding_extra_from_prefetched_binding,
+    retained_serving_binding_extra_json,
+    retained_serving_binding_trusted_reservation_bytes,
 )
 from tensorcast.types import (
     BindingReservationCapability,
@@ -40,7 +42,7 @@ def _authority(
     reservation_bytes: int = 4096,
     member_index: int = 0,
     member_count: int = 1,
-) -> ParsedExternalPreloadAuthority:
+) -> ParsedRetainedServingBindingAuthority:
     suffix = member_index + 1
     member = ServingBindingMemberRef(
         member_id=f"member-{member_index}",
@@ -64,7 +66,7 @@ def _authority(
         reservation_bytes=reservation_bytes,
         scope_digest="scope-1",
     )
-    return ParsedExternalPreloadAuthority(
+    return ParsedRetainedServingBindingAuthority(
         group_id="group-1",
         local_serving_ref=f"binding-local:binding-{suffix}:value-{suffix}",
         binding_value_ref=binding_ref,
@@ -74,7 +76,7 @@ def _authority(
         device_uuid=f"gpu-{member_index}",
         member=member,
         reservation_bytes=reservation_bytes,
-        expected=ExternalPreloadExpectedDigests(
+        expected=RetainedServingBindingExpectedDigests(
             target_layout_hash="layout-hash",
             tensor_schema_hash="schema-hash",
             serving_build_digest="build-digest",
@@ -85,7 +87,9 @@ def _authority(
     )
 
 
-def _authority_payload(authority: ParsedExternalPreloadAuthority) -> dict[str, object]:
+def _authority_payload(
+    authority: ParsedRetainedServingBindingAuthority,
+) -> dict[str, object]:
     return {
         "group_id": authority.group_id,
         "member_ref": authority.member.model_dump(mode="python"),
@@ -106,6 +110,15 @@ def _authority_payload(authority: ParsedExternalPreloadAuthority) -> dict[str, o
         "trusted_reservation_bytes": authority.reservation_bytes,
         "expected": authority.expected.model_dump(mode="python"),
     }
+
+
+def _set_nested(
+    payload: dict[str, object], path: tuple[str, ...], value: object
+) -> None:
+    current = payload
+    for key in path[:-1]:
+        current = current[key]  # type: ignore[assignment,index]
+    current[path[-1]] = value
 
 
 def _response(*, reservation_bytes: int = 4096, lease_token: bytes = b"lease"):
@@ -235,11 +248,11 @@ class _Runtime:
         return self.client
 
 
-def test_acquire_preload_lease_releases_unrestored_lease_on_context_exit():
+def test_acquire_retained_serving_binding_lease_releases_unrestored_lease_on_context_exit():
     authority = _authority()
     client = _Client(_response())
 
-    with acquire_preload_lease(
+    with acquire_retained_serving_binding_lease(
         authority,
         runtime=_Runtime(client),
         caller_pid=123,
@@ -253,7 +266,7 @@ def test_acquire_preload_lease_releases_unrestored_lease_on_context_exit():
     assert client.released_tokens == [b"lease"]
 
 
-def test_acquire_retained_serving_binding_uses_external_authority():
+def test_acquire_retained_serving_binding_uses_authority():
     authority = _authority()
     client = _Client(_response())
 
@@ -265,8 +278,7 @@ def test_acquire_retained_serving_binding_uses_external_authority():
         assert lease.binding_value_ref == authority.binding_value_ref
 
     assert client.acquire_calls[0]["caller_pid"] == 456
-    assert client.acquire_calls[0]["binding_value_ref"] == \
-        authority.binding_value_ref
+    assert client.acquire_calls[0]["binding_value_ref"] == authority.binding_value_ref
     assert client.released_tokens == [b"lease"]
 
 
@@ -280,8 +292,9 @@ def test_acquire_retained_serving_binding_acquires_local_ready(monkeypatch):
     client = _Client(_response())
     import tensorcast.api.store as store_api
 
-    monkeypatch.setattr(store_api, "device_uuid_for",
-                        lambda device_index: f"gpu-{device_index}")
+    monkeypatch.setattr(
+        store_api, "device_uuid_for", lambda device_index: f"gpu-{device_index}"
+    )
 
     with acquire_retained_serving_binding(
         local_serving_ref="binding-local:binding-1:value-1",
@@ -294,8 +307,10 @@ def test_acquire_retained_serving_binding_acquires_local_ready(monkeypatch):
     ) as lease:
         assert lease.authority.readiness == "serving_local_ready"
 
-    assert client.acquire_calls[0]["local_serving_ref"] == \
-        "binding-local:binding-1:value-1"
+    assert (
+        client.acquire_calls[0]["local_serving_ref"]
+        == "binding-local:binding-1:value-1"
+    )
     assert client.acquire_calls[0]["expected_device_uuid"] == "gpu-3"
     assert client.acquire_calls[0]["caller_pid"] == 789
     assert client.released_tokens == [b"lease"]
@@ -310,7 +325,9 @@ def test_restore_failure_releases_acquired_lease():
 
     with (
         pytest.raises(RuntimeError, match="restore failed"),
-        acquire_preload_lease(authority, runtime=_Runtime(client)) as lease,
+        acquire_retained_serving_binding_lease(
+            authority, runtime=_Runtime(client)
+        ) as lease,
     ):
         lease.restore(
             target_device=torch.device("cuda:0"),
@@ -324,7 +341,9 @@ def test_attached_close_releases_once_after_successful_restore():
     authority = _authority()
     client = _Client(_response())
 
-    with acquire_preload_lease(authority, runtime=_Runtime(client)) as lease:
+    with acquire_retained_serving_binding_lease(
+        authority, runtime=_Runtime(client)
+    ) as lease:
         attached = lease.restore(
             target_device=torch.device("cuda:0"),
             restore_fn=lambda **_kwargs: {"w": torch.empty((1,), dtype=torch.float32)},
@@ -339,7 +358,9 @@ def test_transfer_to_runtime_moves_close_ownership():
     authority = _authority()
     client = _Client(_response())
 
-    with acquire_preload_lease(authority, runtime=_Runtime(client)) as lease:
+    with acquire_retained_serving_binding_lease(
+        authority, runtime=_Runtime(client)
+    ) as lease:
         attached = lease.restore(
             target_device=torch.device("cuda:0"),
             restore_fn=lambda **_kwargs: {"w": torch.empty((1,), dtype=torch.float32)},
@@ -359,7 +380,9 @@ def test_restored_lease_releases_on_context_exit_when_not_transferred():
 
     with (
         pytest.raises(RuntimeError, match="attach failed"),
-        acquire_preload_lease(authority, runtime=_Runtime(client)) as lease,
+        acquire_retained_serving_binding_lease(
+            authority, runtime=_Runtime(client)
+        ) as lease,
     ):
         lease.restore(
             target_device=torch.device("cuda:0"),
@@ -370,11 +393,13 @@ def test_restored_lease_releases_on_context_exit_when_not_transferred():
     assert client.released_tokens == [b"lease"]
 
 
-def test_preload_lifecycle_rejects_invalid_transitions():
+def test_retained_binding_lifecycle_rejects_invalid_transitions():
     authority = _authority()
     client = _Client(_response())
 
-    with acquire_preload_lease(authority, runtime=_Runtime(client)) as lease:
+    with acquire_retained_serving_binding_lease(
+        authority, runtime=_Runtime(client)
+    ) as lease:
         lease.close()
         with pytest.raises(RuntimeError, match="requires an acquired lease"):
             lease.restore(
@@ -383,7 +408,9 @@ def test_preload_lifecycle_rejects_invalid_transitions():
             )
 
     client = _Client(_response())
-    with acquire_preload_lease(authority, runtime=_Runtime(client)) as lease:
+    with acquire_retained_serving_binding_lease(
+        authority, runtime=_Runtime(client)
+    ) as lease:
         attached = lease.restore(
             target_device=torch.device("cuda:0"),
             restore_fn=lambda **_kwargs: {"w": torch.empty((1,), dtype=torch.float32)},
@@ -398,7 +425,7 @@ def test_preload_lifecycle_rejects_invalid_transitions():
             attached.transfer_to_runtime()
 
 
-def test_acquire_preload_lease_rejects_mismatched_acquire_response():
+def test_acquire_retained_serving_binding_lease_rejects_mismatched_acquire_response():
     authority = _authority()
     response = _response()
     response.current_value.binding_value_id = "other-value"
@@ -406,60 +433,217 @@ def test_acquire_preload_lease_rejects_mismatched_acquire_response():
 
     with (
         pytest.raises(RuntimeError, match="different binding value"),
-        acquire_preload_lease(authority, runtime=_Runtime(client)),
+        acquire_retained_serving_binding_lease(authority, runtime=_Runtime(client)),
     ):
         pass
 
     assert client.released_tokens == [b"lease"]
 
 
-def test_acquire_preload_lease_releases_mismatched_reservation_response():
+def test_acquire_retained_serving_binding_lease_releases_mismatched_reservation_response():
     authority = _authority(reservation_bytes=4096)
     client = _Client(_response(reservation_bytes=8192))
 
     with (
         pytest.raises(RuntimeError, match="reservation byte mismatch"),
-        acquire_preload_lease(authority, runtime=_Runtime(client)),
+        acquire_retained_serving_binding_lease(authority, runtime=_Runtime(client)),
     ):
         pass
 
     assert client.released_tokens == [b"lease"]
 
 
-def test_external_preload_public_helpers_build_extra_from_prefetched_binding():
+@pytest.mark.parametrize(
+    ("path", "value", "match"),
+    [
+        (
+            ("reservation_capability", "binding_value_ref", "binding_value_id"),
+            "other-value",
+            "binding_value_ref",
+        ),
+        (
+            ("reservation_capability", "daemon_id"),
+            "other-daemon",
+            "daemon_id mismatch",
+        ),
+        (
+            ("reservation_capability", "daemon_session_id"),
+            "other-session",
+            "daemon_session_id mismatch",
+        ),
+        (
+            ("reservation_capability", "device_uuid"),
+            "other-gpu",
+            "device_uuid mismatch",
+        ),
+        (
+            ("reservation_capability", "member", "member_id"),
+            "other-member",
+            "member mismatch",
+        ),
+        (
+            ("reservation_capability", "reservation_bytes"),
+            8192,
+            "reservation_bytes",
+        ),
+        (("expected", "tensor_schema_hash"), "", "expected digest fields"),
+    ],
+)
+def test_parse_retained_binding_authority_rejects_inconsistent_authority(
+    path,
+    value,
+    match,
+):
+    payload = _authority_payload(_authority())
+    _set_nested(payload, path, value)
+    extra = {
+        "retained_binding_acquire": {
+            "mode": "external",
+            "authority": payload,
+        },
+    }
+
+    with pytest.raises(ValueError, match=match):
+        parse_retained_serving_binding_authority(extra)
+
+
+def test_parse_retained_binding_authority_rejects_member_group_mismatch():
+    payload = _authority_payload(_authority())
+    _set_nested(payload, ("member_ref", "group_id"), "other-group")
+    _set_nested(
+        payload, ("reservation_capability", "member", "group_id"), "other-group"
+    )
+    extra = {
+        "retained_binding_acquire": {
+            "mode": "external",
+            "authority": payload,
+        },
+    }
+
+    with pytest.raises(ValueError, match="member_ref.group_id"):
+        parse_retained_serving_binding_authority(extra)
+
+
+def test_parse_retained_binding_authority_requires_published_artifact_scope():
+    authority = replace(
+        _authority(),
+        readiness="serving_published_ready",
+        serving_artifact_id=None,
+    )
+    extra = {
+        "retained_binding_acquire": {
+            "mode": "external",
+            "authority": _authority_payload(authority),
+        },
+    }
+
+    with pytest.raises(ValueError, match="serving_artifact_id"):
+        parse_retained_serving_binding_authority(extra)
+
+
+def test_acquire_retained_binding_rejects_reserved_authority_before_daemon_call():
+    authority = replace(_authority(), readiness="serving_reserved")
+    client = _Client(_response())
+
+    with (
+        pytest.raises(ValueError, match="serving_reserved"),
+        acquire_retained_serving_binding_lease(authority, runtime=_Runtime(client)),
+    ):
+        pass
+
+    assert client.acquire_calls == []
+    assert client.released_tokens == []
+
+
+def test_acquire_retained_binding_requires_group_publish_wait_before_attach():
+    authority = replace(
+        _authority(),
+        group_realization_acquire=GroupRealizationAcquireRef(
+            transaction_id="txn-1",
+            version_set_id="version-set-1",
+            part_id="part-0",
+            staging_token="token-1",
+            wait_for_publish=False,
+        ),
+    )
+    client = _Client(_response())
+
+    with (
+        pytest.raises(ValueError, match="wait for group publish"),
+        acquire_retained_serving_binding_lease(authority, runtime=_Runtime(client)),
+    ):
+        pass
+
+    assert client.acquire_calls == []
+    assert client.released_tokens == []
+
+
+def test_acquire_retained_binding_passes_group_publish_wait_authority():
+    group_acquire = GroupRealizationAcquireRef(
+        transaction_id="txn-1",
+        version_set_id="version-set-1",
+        part_id="part-0",
+        staging_token="token-1",
+        wait_for_publish=True,
+        wait_timeout_ms=1234,
+    )
+    authority = replace(_authority(), group_realization_acquire=group_acquire)
+    client = _Client(_response())
+
+    with acquire_retained_serving_binding_lease(authority, runtime=_Runtime(client)):
+        pass
+
+    assert client.acquire_calls[0]["group_realization_acquire"] == group_acquire
+    assert client.released_tokens == [b"lease"]
+
+
+def test_retained_binding_public_helpers_build_extra_from_prefetched_binding():
     member = _authority().member
     prefetched = _prefetched(member, reservation_bytes=8192)
     target = _target(member)
 
-    extra = external_preload_extra_from_prefetched_binding(
+    extra = retained_serving_binding_extra_from_prefetched_binding(
         prefetched=prefetched,
         target=target,
         expected_member=member,
     )
-    authority = parse_external_preload_authority(extra)
+    authority = parse_retained_serving_binding_authority(extra)
 
-    assert external_preload_mode(extra) == "external"
+    assert "retained_binding_acquire" in extra
+    assert retained_binding_acquire_mode(extra) == "external"
+    assert isinstance(extra["retained_binding_acquire"]["authority"], dict)
+    assert (
+        RetainedServingBindingAuthority.model_validate(
+            extra["retained_binding_acquire"]["authority"]
+        ).trusted_reservation_bytes
+        == 8192
+    )
     assert authority.member == member
     assert authority.reservation_bytes == 8192
     assert authority.expected.target_layout_hash == "target-layout-hash"
     assert authority.expected.tensor_schema_hash == "tensor-schema"
     assert authority.expected.serving_build_digest == "serving-build"
     assert authority.expected.resolved_spec_digest == "spec-digest"
-    assert external_preload_trusted_reservation_bytes(extra) == 8192
+    assert retained_serving_binding_trusted_reservation_bytes(extra) == 8192
     assert (
-        external_preload_trusted_reservation_bytes(
+        retained_serving_binding_trusted_reservation_bytes(
             SimpleNamespace(model_loader_extra_config=extra)
         )
         == 8192
     )
-    assert '"mode":"external"' in external_preload_extra_json(
+    assert '"mode":"external"' in retained_serving_binding_extra_json(
+        prefetched=prefetched,
+        target=target,
+        expected_member=member,
+    )
+    assert '"retained_binding_acquire"' in retained_serving_binding_extra_json(
         prefetched=prefetched,
         target=target,
         expected_member=member,
     )
 
 
-def test_external_preload_authority_set_selects_expected_member():
+def test_retained_binding_authority_set_selects_expected_member():
     authority0 = _authority(
         reservation_bytes=4096,
         member_index=0,
@@ -471,7 +655,7 @@ def test_external_preload_authority_set_selects_expected_member():
         member_count=2,
     )
     extra = {
-        "preload": {
+        "retained_binding_acquire": {
             "mode": "external",
             "authorities": [
                 _authority_payload(authority0),
@@ -480,7 +664,7 @@ def test_external_preload_authority_set_selects_expected_member():
         },
     }
 
-    selected = parse_external_preload_authority(
+    selected = parse_retained_serving_binding_authority(
         extra,
         expected_member=authority1.member,
     )
@@ -488,7 +672,7 @@ def test_external_preload_authority_set_selects_expected_member():
     assert selected.member == authority1.member
     assert selected.reservation_bytes == 8192
     assert (
-        external_preload_trusted_reservation_bytes(
+        retained_serving_binding_trusted_reservation_bytes(
             extra,
             expected_member=authority1.member,
         )
@@ -496,11 +680,11 @@ def test_external_preload_authority_set_selects_expected_member():
     )
 
 
-def test_external_preload_authority_set_requires_expected_member():
+def test_retained_binding_authority_set_requires_expected_member():
     authority0 = _authority(member_index=0, member_count=2)
     authority1 = _authority(member_index=1, member_count=2)
     extra = {
-        "preload": {
+        "retained_binding_acquire": {
             "mode": "external",
             "authorities": [
                 _authority_payload(authority0),
@@ -510,10 +694,10 @@ def test_external_preload_authority_set_requires_expected_member():
     }
 
     with pytest.raises(ValueError, match="expected serving member"):
-        parse_external_preload_authority(extra)
+        parse_retained_serving_binding_authority(extra)
 
 
-def test_external_preload_extra_preserves_group_realization_acquire():
+def test_retained_binding_extra_preserves_group_realization_acquire():
     member = _authority().member
     target = _target(member)
     prefetched = _prefetched(member).model_copy(
@@ -530,24 +714,24 @@ def test_external_preload_extra_preserves_group_realization_acquire():
         }
     )
 
-    extra = external_preload_extra_from_prefetched_binding(
+    extra = retained_serving_binding_extra_from_prefetched_binding(
         prefetched=prefetched,
         target=target,
         expected_member=member,
     )
-    authority = parse_external_preload_authority(extra)
+    authority = parse_retained_serving_binding_authority(extra)
 
     assert authority.group_realization_acquire is not None
     assert authority.group_realization_acquire.transaction_id == "txn-1"
     assert authority.group_realization_acquire.wait_for_publish is True
 
 
-def test_external_preload_extra_rejects_unexpected_member():
+def test_retained_binding_extra_rejects_unexpected_member():
     member = _authority().member
     unexpected = member.model_copy(update={"member_id": "other"})
 
     with pytest.raises(ValueError, match="does not match expected placement"):
-        external_preload_extra_from_prefetched_binding(
+        retained_serving_binding_extra_from_prefetched_binding(
             prefetched=_prefetched(member),
             target=_target(member),
             expected_member=unexpected,

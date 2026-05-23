@@ -16,13 +16,6 @@ _SUPPORT_LEVEL_ORDER: dict[ServingSupportLevel, int] = {
     ServingSupportLevel.RUNTIME_BIND_SWAP_READY: 2,
 }
 
-_SUPPORT_LEVEL_DISPLAY_NAMES: dict[ServingSupportLevel, str] = {
-    ServingSupportLevel.BLOCKED: "blocked",
-    ServingSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY: "publication_not_ready",
-    ServingSupportLevel.BUILDER_PUBLICATION_READY: "serving_artifact_publication_ready",
-    ServingSupportLevel.RUNTIME_BIND_SWAP_READY: "serving_bind_swap_ready",
-}
-
 
 def coerce_finalize_class(
     value: Any,
@@ -46,14 +39,6 @@ def coerce_serving_support_level(
     if isinstance(value, ServingSupportLevel):
         return value
     normalized = str(value).strip().lower()
-    aliases = {
-        "blocked": ServingSupportLevel.BLOCKED,
-        "publication_not_ready": ServingSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY,
-        "serving_artifact_publication_ready": ServingSupportLevel.BUILDER_PUBLICATION_READY,
-        "serving_bind_swap_ready": ServingSupportLevel.RUNTIME_BIND_SWAP_READY,
-    }
-    if normalized in aliases:
-        return aliases[normalized]
     return ServingSupportLevel(normalized)
 
 
@@ -69,7 +54,7 @@ def serving_support_level_at_least(
 
 
 def serving_support_level_display_name(value: ServingSupportLevel | str) -> str:
-    return _SUPPORT_LEVEL_DISPLAY_NAMES[coerce_serving_support_level(value)]
+    return coerce_serving_support_level(value).value
 
 
 def readiness_family(row: Any) -> str:
@@ -163,7 +148,7 @@ class ReadinessInventoryAdmissionPolicy:
         self._endpoint_fields = endpoint_fields
 
     def admit(self, request: Any) -> Any:
-        from tensorcast.serving.integration import AdmissionDecision
+        from tensorcast.serving.hosts import AdmissionDecision
 
         row = self._resolve_readiness(request.model_config)
         missing_semantic_proofs = (

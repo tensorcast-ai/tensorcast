@@ -271,6 +271,7 @@ message ServingArtifactRuntimePolicy {
   string serving_manifest_ref = 2;
   string expected_representation_contract_hash = 3;
   string expected_serving_build_digest = 4;
+  string expected_topology_admission_digest = 5;
 }
 
 // Actual source used to serve a materialization request.
@@ -646,7 +647,7 @@ message SourceBoundPlanDiagnostics {
   uint64 planned_local_typed_bytes = 4;
   uint64 planned_non_admitted_typed_bytes = 5;
   uint64 planned_generic_residual_bytes = 6;
-  uint64 compatibility_lowered_bytes = 7;
+  uint64 collective_lowered_bytes = 7;
   map<string, uint64> planner_reject_reason_buckets = 8;
   string planner_version = 9;
   string plan_hash = 10;
@@ -901,6 +902,8 @@ message MaterializeIntoTargetResponse {
   bytes view_index_bytes = 6;
   uint64 generation = 7;
   tensorcast.common.v1.ArtifactSelection resolved_selection = 9;
+  string selected_source_replica_id = 10;
+  string selected_source_transport_id = 11;
   reserved 8;
   reserved "target_publication_token";
 }
@@ -1441,6 +1444,7 @@ message CreateBindingResponse {
   repeated TensorPayloadDescriptor payloads = 4;
   BindingState state = 5;
   BindingValue current_value = 6;
+  bytes binding_current_value_publication_token = 7;
 }
 
 message CreateOwnedBindingRequest {
@@ -1475,6 +1479,8 @@ message CreateOwnedBindingResponse {
   BindingValue staged_value = 11;
   GroupRealizationAcquireRef group_realization_acquire = 12;
   bool created_staged_value = 13;
+  string selected_source_replica_id = 14;
+  string selected_source_transport_id = 15;
 }
 
 message PrefetchServingBindingRequest {
@@ -1648,6 +1654,8 @@ message RefillOwnedBindingResponse {
   ExecutionDiagnostics execution_diagnostics = 7;
   SourceBoundPlanDiagnostics source_bound_plan_diagnostics = 8;
   string update_epoch = 9;
+  string selected_source_replica_id = 10;
+  string selected_source_transport_id = 11;
 }
 
 message CloseOwnedBindingRequest {

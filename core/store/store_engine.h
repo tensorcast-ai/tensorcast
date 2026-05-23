@@ -55,6 +55,12 @@ class StoreEngine {
   using ReplicaInventoryEntry = runtime::ReplicaInventoryEntry;
   using ReplicaPublishState = runtime::ReplicaPublishState;
 
+  struct ReplicaBasePointer {
+    void* ptr{nullptr};
+    common::memory::MemoryLocation location{common::memory::MemoryLocation::CPU};
+    int device_id{-1};
+  };
+
   // ═══════════════════════════════════════════════════════════════════════════
   // Construction and Initialization
   // ═══════════════════════════════════════════════════════════════════════════
@@ -104,11 +110,10 @@ class StoreEngine {
       const DeviceKey& target_device,
       const runtime::ingestion::strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
       const loading::MaterializeHints& hints = {});
-
-  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_loader_into_target(
+  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_sources_into_target(
       const DeviceKey& target_device,
       const loading::IntoTargetLayout& target_layout,
-      std::unique_ptr<IArtifactLoader> loader,
+      std::vector<std::shared_ptr<loader::SeekableSource>> sources,
       const loader::ByteRangeMap& mapping,
       const loading::MaterializeHints& hints,
       loading::MaterializationSource source_kind = loading::MaterializationSource::kLocalReplica);
@@ -446,6 +451,11 @@ class StoreEngine {
 
   // Returns base pointer for the CPU replica if loaded.
   [[nodiscard]] absl::StatusOr<void*> get_replica_cpu_base_ptr(std::string_view artifact_id) const;
+
+  // Returns a loaded CPU or GPU base pointer for a replica of this artifact.
+  // CPU is preferred so disk persistence can stay on the host fast path when
+  // a stable DRAM copy is already resident.
+  [[nodiscard]] absl::StatusOr<ReplicaBasePointer> get_loaded_replica_base_ptr(std::string_view artifact_id) const;
 
   // VS chunk locking APIs have been removed in UMA V3 final state.
 

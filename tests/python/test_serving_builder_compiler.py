@@ -8,17 +8,23 @@ import pytest
 import torch
 
 from tensorcast.serving.builder.compiler import (
-    RecipeCompileIdentity,
     RecipeCompileInputs,
-    TensorcastLogicalTopology,
+    ServingBindingPlan,
     TensorcastSemanticValidationSpec,
     TensorcastServingFacts,
     TensorSchemaEntry,
     compile_serving_recipe,
+    realization_plan_digest,
+    target_tensor_schema_hash,
 )
 from tensorcast.serving.builder.trace_ir import CopyPlanEntry, Range, TracePlan
 from tensorcast.serving.source_catalog import SourceCatalog, SourceTensorMeta
-from tensorcast.types import FinalizeClass, ServingSupportLevel
+from tensorcast.types import (
+    FinalizeClass,
+    ServingBindingMemberRef,
+    ServingSupportLevel,
+    ServingTopologyRef,
+)
 
 
 def _source_catalog(source_artifact_ref: str = "mi2:test:source") -> SourceCatalog:
@@ -71,8 +77,24 @@ def _serving_facts(adapter_version: str = "adapter-v1") -> TensorcastServingFact
     )
 
 
-def _identity() -> RecipeCompileIdentity:
-    return RecipeCompileIdentity(
+def _topology_ref(digest: str = "topology-digest") -> ServingTopologyRef:
+    return ServingTopologyRef(
+        schema_topology_digest=digest,
+        logical_topology_ref=f"tensorcast://topology/{digest}",
+    )
+
+
+def _member_ref(index: int = 0, count: int = 1) -> ServingBindingMemberRef:
+    return ServingBindingMemberRef(
+        member_id=f"dp0:pp0:tp{index}",
+        member_index=index,
+        member_count=count,
+        group_id="group-1",
+    )
+
+
+def _identity() -> ServingBindingPlan:
+    return ServingBindingPlan(
         model_id="fake-model",
         model_revision=None,
         dtype="torch.float16",
@@ -82,10 +104,8 @@ def _identity() -> RecipeCompileIdentity:
         serving_abi_version="abi-v1",
         framework_version="vllm-test",
         trace_cache_schema_version=7,
-        logical_topology=TensorcastLogicalTopology(
-            tensor_parallel_rank=0,
-            tensor_parallel_world_size=1,
-        ),
+        topology_ref=_topology_ref(),
+        member_ref=_member_ref(),
     )
 
 
@@ -138,9 +158,38 @@ def test_compile_serving_recipe_assembles_recipe_from_pure_inputs() -> None:
     assert recipe.trace_plan.expected_src_names == {"x"}
     assert [entry.name for entry in recipe.tensor_schema] == ["w"]
     assert [entry.name for entry in recipe.source_hull] == ["x"]
-    assert recipe.logical_topology == TensorcastLogicalTopology(
-        tensor_parallel_rank=0,
-        tensor_parallel_world_size=1,
+    assert recipe.topology_ref == _topology_ref()
+    assert recipe.member_ref == _member_ref()
+    assert recipe.binding_plan is not None
+    assert recipe.binding_plan.source_artifact_ref == recipe.source_artifact_ref
+    assert (
+        recipe.binding_plan.source_metadata_fingerprint
+        == recipe.source_metadata_fingerprint
+    )
+    assert recipe.binding_plan.source_schema_hash == "index-hash"
+    assert recipe.binding_plan.tensor_schema_hash == target_tensor_schema_hash(
+        recipe.tensor_schema
+    )
+    assert recipe.binding_plan.realization_plan_digest == realization_plan_digest(
+        recipe.realization_plan_proto
+    )
+    assert recipe.binding_plan.serving_facts is recipe.serving_facts
+    assert recipe.binding_plan.trace_plan is recipe.trace_plan
+    assert recipe.binding_plan.tensor_schema == recipe.tensor_schema
+    assert recipe.binding_plan.source_hull == recipe.source_hull
+    assert recipe.binding_plan.realization_plan == recipe.realization_plan
+    assert recipe.binding_plan.realization_fallback_plan == (
+        recipe.realization_fallback_plan
+    )
+    assert recipe.binding_plan.realization_plan_proto == recipe.realization_plan_proto
+    assert recipe.binding_plan.realization_plan_count == recipe.realization_plan_count
+    assert recipe.binding_plan.semantic_validation_spec is (
+        recipe.semantic_validation_spec
+    )
+    assert recipe.binding_plan.topology_ref == _topology_ref()
+    assert recipe.binding_plan.member_ref == _member_ref()
+    assert (
+        recipe.binding_plan.compiled_artifact_payload()["realization_plan_count"] == 1
     )
     assert observer.events == [
         (
@@ -170,10 +219,8 @@ def test_compile_serving_recipe_compile_key_invalidates_on_pure_inputs() -> None
     recipe_c = compile_serving_recipe(
         identity=replace(
             _identity(),
-            logical_topology=TensorcastLogicalTopology(
-                tensor_parallel_rank=1,
-                tensor_parallel_world_size=2,
-            ),
+            topology_ref=_topology_ref("topology-digest-b"),
+            member_ref=_member_ref(index=1, count=2),
         ),
         inputs=_inputs(),
     )
@@ -183,7 +230,7 @@ def test_compile_serving_recipe_compile_key_invalidates_on_pure_inputs() -> None
 
 
 def test_compile_serving_recipe_rejects_identity_fact_mismatch() -> None:
-    with pytest.raises(ValueError, match="RecipeCompileIdentity must match"):
+    with pytest.raises(ValueError, match="ServingBindingPlan must match"):
         compile_serving_recipe(
             identity=replace(_identity(), adapter_version="adapter-v2"),
             inputs=_inputs(),

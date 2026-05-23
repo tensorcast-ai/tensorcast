@@ -72,6 +72,8 @@ class FakeSlotClient:
         self.last_wait_operation_ref: operation_pb2.OperationRef | None = None
         self.publish_failures = 0
         self.materialize_failures = 0
+        self.materialize_returns_publication_token = True
+        self.create_binding_returns_publication_token = False
         self.omit_commit_current_value = False
         self._token_counter = 0
         self._region_counter = 0
@@ -148,11 +150,13 @@ class FakeSlotClient:
         token = f"token-{self._token_counter}".encode("utf-8")
         selection = common_pb2.ArtifactSelection()
         selection.CopyFrom(kwargs["selection"])
-        return types.SimpleNamespace(
+        response = types.SimpleNamespace(
             status=store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED,
-            binding_current_value_publication_token=token,
             resolved_selection=selection,
         )
+        if self.materialize_returns_publication_token:
+            response.binding_current_value_publication_token = token
+        return response
 
     def create_binding(self, **kwargs: Any) -> Any:
         self.create_binding_calls.append(kwargs)
@@ -168,11 +172,16 @@ class FakeSlotClient:
                 binding_id=binding_id,
                 selection=selection,
             )
-        return types.SimpleNamespace(
+        response = types.SimpleNamespace(
             binding_id=binding_id,
             target_index_bytes=bytes(kwargs["target_index_bytes"]),
             current_value=current_value,
         )
+        if self.create_binding_returns_publication_token:
+            self._token_counter += 1
+            response.binding_current_value_publication_token = (
+                f"create-token-{self._token_counter}".encode("utf-8"))
+        return response
 
     def publish_target_replica(self, **kwargs: Any) -> Any:
         self.publish_calls.append(kwargs)
@@ -510,6 +519,43 @@ def test_binding_publish_operation_uses_operation_ref_metadata(
     assert op.wait() is None
     assert binding._slot.published_lease_id == "lease-1"
     assert binding._slot.published_replica_id == "replica-1"
+
+
+def test_bind_into_uses_create_binding_publication_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _skip_if_no_cuda()
+    index_bytes = _make_index_bytes()
+    client = FakeSlotClient(index_bytes)
+    client.materialize_returns_publication_token = False
+    client.create_binding_returns_publication_token = True
+    runtime = FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+    _cache_index(runtime, "artifact-1", index_bytes)
+    monkeypatch.setattr(
+        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
+    )
+    monkeypatch.setattr(
+        store_mod,
+        "get_cuda_memory_handle_with_offset",
+        lambda *args, **kwargs: (b"fake-handle", 0),
+    )
+    _patch_owned_binding(monkeypatch)
+
+    artifact = store.artifact(artifact_id="artifact-1")
+    target_tensors = {
+        "alpha": torch.empty((4,), dtype=torch.float32, device="cuda:0"),
+        "beta": torch.empty((4,), dtype=torch.float32, device="cuda:0"),
+    }
+    binding = artifact.bind_into(target_tensors, packing="byte_space")
+
+    binding.publish_replica()
+
+    assert len(client.publish_calls) == 1
+    assert (
+        client.publish_calls[0]["binding_current_value_publication_token"]
+        == b"create-token-2"
+    )
 
 
 def test_binding_begin_update_rejects_published_replica(

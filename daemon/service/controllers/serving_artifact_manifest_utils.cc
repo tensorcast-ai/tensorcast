@@ -4,6 +4,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -11,9 +14,11 @@
 #include <vector>
 
 #include "absl/status/status.h"
+#include "absl/strings/escaping.h"
 #include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
+#include "core/common/selection_identity.h"
 #include "nlohmann/json.hpp"
 
 namespace tensorcast::daemon::serving_artifact_manifest {
@@ -25,8 +30,9 @@ constexpr std::string_view kTensorSchemaHashVersion = "tensorcast.representation
 
 struct CanonicalTensorEntry {
   std::string name;
-  uint64_t logical_offset{0};
-  uint64_t logical_length{0};
+  uint64_t segment_offset{0};
+  uint64_t segment_size{0};
+  uint64_t tensor_nbytes{0};
   std::vector<int64_t> shape;
   std::vector<int64_t> stride;
   std::string dtype;
@@ -63,6 +69,24 @@ absl::StatusOr<uint64_t> infer_dtype_element_size(std::string_view dtype) {
   return absl::InvalidArgumentError(absl::StrCat("unsupported dtype in canonical index: ", dtype));
 }
 
+absl::StatusOr<uint64_t> infer_tensor_nbytes(const std::vector<int64_t>& shape, uint64_t element_size) {
+  uint64_t elements = 1;
+  for (const int64_t dim : shape) {
+    if (dim < 0) {
+      return absl::InvalidArgumentError("canonical index shape dimensions must be non-negative");
+    }
+    const uint64_t u_dim = static_cast<uint64_t>(dim);
+    if (u_dim != 0 && elements > std::numeric_limits<uint64_t>::max() / u_dim) {
+      return absl::InvalidArgumentError("canonical index tensor element count overflows uint64");
+    }
+    elements *= u_dim;
+  }
+  if (element_size != 0 && elements > std::numeric_limits<uint64_t>::max() / element_size) {
+    return absl::InvalidArgumentError("canonical index tensor byte size overflows uint64");
+  }
+  return elements * element_size;
+}
+
 std::string hash_serialized_payload(std::string_view version, const std::string& serialized) {
   std::string payload;
   payload.reserve(version.size() + 1 + serialized.size());
@@ -94,8 +118,8 @@ absl::StatusOr<ParsedCanonicalIndex> parse_canonical_index_json(std::string_view
       }
       CanonicalTensorEntry entry;
       entry.name = it.key();
-      entry.logical_offset = it.value().at(0).get<uint64_t>();
-      entry.logical_length = it.value().at(1).get<uint64_t>();
+      entry.segment_offset = it.value().at(0).get<uint64_t>();
+      entry.segment_size = it.value().at(1).get<uint64_t>();
       for (const auto& dim : it.value().at(2)) {
         entry.shape.push_back(dim.get<int64_t>());
       }
@@ -106,7 +130,16 @@ absl::StatusOr<ParsedCanonicalIndex> parse_canonical_index_json(std::string_view
       if (it.value().size() >= 6 && !it.value().at(5).is_null()) {
         entry.storage_offset = it.value().at(5).get<uint64_t>();
       }
-      parsed.total_size = std::max(parsed.total_size, entry.logical_offset + entry.logical_length);
+      auto element_size_or = infer_dtype_element_size(entry.dtype);
+      if (!element_size_or.ok()) {
+        return element_size_or.status();
+      }
+      auto tensor_nbytes_or = infer_tensor_nbytes(entry.shape, *element_size_or);
+      if (!tensor_nbytes_or.ok()) {
+        return tensor_nbytes_or.status();
+      }
+      entry.tensor_nbytes = *tensor_nbytes_or;
+      parsed.total_size = std::max(parsed.total_size, entry.segment_offset + entry.segment_size);
       parsed.tensors.push_back(std::move(entry));
     }
   } catch (const std::exception& e) {
@@ -155,13 +188,13 @@ absl::StatusOr<const CanonicalTensorEntry*> find_manifest_tensor(
     std::string_view manifest_tensor_name) {
   for (const auto& tensor : tensors) {
     if (tensor.name == manifest_tensor_name) {
-      if (tensor.logical_length == 0) {
+      if (tensor.tensor_nbytes == 0) {
         return absl::DataLossError("serving manifest tensor must not be empty");
       }
       if (tensor.dtype != "torch.uint8") {
         return absl::FailedPreconditionError("serving manifest tensor must use dtype torch.uint8");
       }
-      if (tensor.shape.size() != 1 || static_cast<uint64_t>(tensor.shape.front()) != tensor.logical_length) {
+      if (tensor.shape.size() != 1 || static_cast<uint64_t>(tensor.shape.front()) != tensor.tensor_nbytes) {
         return absl::FailedPreconditionError("serving manifest tensor must be a 1-D uint8 tensor sized to its payload");
       }
       if (tensor.stride.size() != 1 || tensor.stride.front() != 1) {
@@ -173,30 +206,151 @@ absl::StatusOr<const CanonicalTensorEntry*> find_manifest_tensor(
   return absl::NotFoundError("serving manifest tensor not found");
 }
 
+absl::StatusOr<std::string> read_disk_range(
+    const std::filesystem::path& artifact_dir,
+    uint64_t offset,
+    uint64_t length) {
+  if (length > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+    return absl::InvalidArgumentError("serving manifest tensor payload is too large to read into memory");
+  }
+  std::string payload(static_cast<size_t>(length), '\0');
+  uint64_t remaining = length;
+  uint64_t logical_offset = offset;
+  uint64_t copied = 0;
+
+  auto read_from_file = [&](const std::filesystem::path& path, uint64_t file_offset, uint64_t bytes) -> absl::Status {
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) {
+      return absl::NotFoundError(absl::StrCat("serving manifest disk carrier not readable: ", path.string()));
+    }
+    if (file_offset > static_cast<uint64_t>(std::numeric_limits<std::streamoff>::max())) {
+      return absl::InvalidArgumentError("serving manifest disk carrier offset exceeds stream range");
+    }
+    in.seekg(static_cast<std::streamoff>(file_offset), std::ios::beg);
+    if (!in.good()) {
+      return absl::DataLossError("failed to seek serving manifest disk carrier");
+    }
+    in.read(payload.data() + copied, static_cast<std::streamsize>(bytes));
+    if (in.gcount() != static_cast<std::streamsize>(bytes)) {
+      return absl::DataLossError("serving manifest disk carrier is truncated");
+    }
+    return absl::OkStatus();
+  };
+
+  const auto single_part = artifact_dir / "tensor.data";
+  std::error_code ec;
+  if (std::filesystem::exists(single_part, ec) && !ec) {
+    const uint64_t file_size = std::filesystem::file_size(single_part, ec);
+    if (ec || offset > file_size || length > file_size - offset) {
+      return absl::DataLossError("serving manifest disk carrier exceeds tensor.data");
+    }
+    auto st = read_from_file(single_part, offset, length);
+    if (!st.ok()) {
+      return st;
+    }
+    return payload;
+  }
+
+  for (uint64_t shard_idx = 0; remaining > 0; ++shard_idx) {
+    const auto part_path = artifact_dir / absl::StrCat("tensor.data_", shard_idx);
+    if (!std::filesystem::exists(part_path, ec) || ec) {
+      return absl::NotFoundError("serving manifest disk carrier shard not found");
+    }
+    const uint64_t file_size = std::filesystem::file_size(part_path, ec);
+    if (ec) {
+      return absl::ErrnoToStatus(ec.value(), "failed to stat serving manifest disk carrier shard");
+    }
+    if (logical_offset >= file_size) {
+      logical_offset -= file_size;
+      continue;
+    }
+    const uint64_t bytes = std::min<uint64_t>(remaining, file_size - logical_offset);
+    auto st = read_from_file(part_path, logical_offset, bytes);
+    if (!st.ok()) {
+      return st;
+    }
+    copied += bytes;
+    remaining -= bytes;
+    logical_offset = 0;
+  }
+  return payload;
+}
+
 absl::StatusOr<std::string> read_manifest_tensor_payload(
     store::StoreEngine* engine,
     std::string_view artifact_id,
+    std::string_view canonical_index_json,
     const CanonicalTensorEntry& manifest_tensor,
     uint64_t total_size,
-    const std::optional<store::loading::DiskSource>& disk_source) {
-  if (manifest_tensor.logical_offset + manifest_tensor.logical_length > total_size) {
+    const std::optional<store::loading::DiskSource>& disk_source,
+    const std::optional<store::loading::DiskMetadata>& disk_metadata) {
+  if (manifest_tensor.storage_offset > std::numeric_limits<uint64_t>::max() - manifest_tensor.segment_offset) {
+    return absl::DataLossError("serving manifest tensor offset overflows");
+  }
+  const uint64_t payload_offset = manifest_tensor.segment_offset + manifest_tensor.storage_offset;
+  if (manifest_tensor.tensor_nbytes > std::numeric_limits<uint64_t>::max() - payload_offset) {
+    return absl::DataLossError("serving manifest tensor range overflows");
+  }
+  if (payload_offset + manifest_tensor.tensor_nbytes > total_size) {
     return absl::DataLossError("serving manifest tensor exceeds the serving artifact size");
+  }
+  const bool known_partitioned_disk_source = disk_source.has_value() && disk_metadata.has_value() &&
+      disk_metadata->is_safetensors.has_value() && !*disk_metadata->is_safetensors;
+  if (known_partitioned_disk_source) {
+    return read_disk_range(disk_source->path, payload_offset, manifest_tensor.tensor_nbytes);
   }
 
   store::loading::MaterializeHints hints;
   hints.artifact_id = std::string(artifact_id);
+  std::vector<std::string> tensor_names{manifest_tensor.name};
+  auto view_plan_or =
+      store::StoreEngine::compute_view_plan(canonical_index_json, store::loader::ViewSpec{}, tensor_names);
+  if (!view_plan_or.ok()) {
+    return view_plan_or.status();
+  }
+  store::loading::VariantIdentity variant;
+  variant.canonical_artifact_id = std::string(artifact_id);
+  variant.canonical_index_json = std::string(canonical_index_json);
+  variant.cached_plan = *view_plan_or;
+  const std::string subset_hash = tensorcast::common::compute_view_subset_hash_bytes(absl::MakeSpan(tensor_names));
+  if (!subset_hash.empty()) {
+    variant.view_id = absl::StrCat("subset:", absl::BytesToHexString(subset_hash));
+  }
+  hints.variant = std::move(variant);
+  if (disk_metadata.has_value()) {
+    hints.disk_metadata = *disk_metadata;
+  }
+  if (disk_source.has_value()) {
+    hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
+  }
   const store::DeviceKey cpu_device{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
   auto handle_or =
       engine->materialize_replica(cpu_device, store::StoreEngine::MaterializeMode::AUTO, hints, disk_source);
   if (!handle_or.ok()) {
     return handle_or.status();
   }
-  auto base_ptr_or = engine->get_replica_cpu_base_ptr(artifact_id);
-  if (!base_ptr_or.ok()) {
-    return base_ptr_or.status();
+  auto loader_or =
+      engine->open_local_replica_loader(handle_or->replica_key, tensorcast::common::memory::MemoryLocation::CPU);
+  if (!loader_or.ok()) {
+    return loader_or.status();
   }
-  auto* base_ptr = static_cast<const char*>(*base_ptr_or);
-  return std::string(base_ptr + manifest_tensor.logical_offset, manifest_tensor.logical_length);
+  auto init_status = (*loader_or)->initialize();
+  if (!init_status.ok()) {
+    return init_status;
+  }
+  auto source_or = (*loader_or)->open_source();
+  if (!source_or.ok()) {
+    return source_or.status();
+  }
+  std::string payload(static_cast<size_t>(manifest_tensor.tensor_nbytes), '\0');
+  auto read_or = (*source_or)->read_at(0, payload.data(), payload.size());
+  if (!read_or.ok()) {
+    return read_or.status();
+  }
+  if (*read_or != payload.size()) {
+    return absl::DataLossError("serving manifest compact view returned a short read");
+  }
+  return payload;
 }
 
 absl::Status validate_manifest_record(
@@ -207,7 +361,8 @@ absl::Status validate_manifest_record(
     std::string_view computed_tensor_schema_hash,
     const std::optional<std::string>& expected_representation_contract_hash,
     const std::optional<std::string>& expected_serving_build_digest,
-    const std::optional<std::string>& expected_serving_build_digest_version);
+    const std::optional<std::string>& expected_serving_build_digest_version,
+    const std::optional<std::string>& expected_topology_admission_digest);
 
 absl::StatusOr<ServingArtifactPreflightResult> preflight_manifest_payload_common(
     std::string_view canonical_index_json,
@@ -216,6 +371,7 @@ absl::StatusOr<ServingArtifactPreflightResult> preflight_manifest_payload_common
     const std::optional<std::string>& expected_representation_contract_hash,
     const std::optional<std::string>& expected_serving_build_digest,
     const std::optional<std::string>& expected_serving_build_digest_version,
+    const std::optional<std::string>& expected_topology_admission_digest,
     bool require_manifest) {
   auto parsed_index_or = parse_canonical_index_json(canonical_index_json);
   if (!parsed_index_or.ok()) {
@@ -268,7 +424,8 @@ absl::StatusOr<ServingArtifactPreflightResult> preflight_manifest_payload_common
       *tensor_schema_hash_or,
       expected_representation_contract_hash,
       expected_serving_build_digest,
-      expected_serving_build_digest_version);
+      expected_serving_build_digest_version,
+      expected_topology_admission_digest);
   if (!validate_status.ok()) {
     return validate_status;
   }
@@ -292,7 +449,8 @@ absl::Status validate_manifest_record(
     std::string_view computed_tensor_schema_hash,
     const std::optional<std::string>& expected_representation_contract_hash,
     const std::optional<std::string>& expected_serving_build_digest,
-    const std::optional<std::string>& expected_serving_build_digest_version) {
+    const std::optional<std::string>& expected_serving_build_digest_version,
+    const std::optional<std::string>& expected_topology_admission_digest) {
   if (manifest.schema_version != 1) {
     return absl::FailedPreconditionError("serving artifact manifest schema_version must be 1 in phase 1");
   }
@@ -372,6 +530,11 @@ absl::Status validate_manifest_record(
     return absl::FailedPreconditionError(
         "serving artifact manifest serving_build_digest_version does not match the expected lineage");
   }
+  if (expected_topology_admission_digest.has_value() &&
+      manifest.topology_admission_digest.value_or("") != *expected_topology_admission_digest) {
+    return absl::FailedPreconditionError(
+        "serving artifact manifest topology_admission_digest does not match the expected topology");
+  }
   return absl::OkStatus();
 }
 
@@ -413,6 +576,9 @@ absl::StatusOr<ServingArtifactManifestRecord> parse_serving_manifest_payload(std
     if (root.contains("logical_topology_json") && !root.at("logical_topology_json").is_null()) {
       manifest.logical_topology_json = root.at("logical_topology_json").get<std::string>();
     }
+    if (root.contains("topology_admission_digest") && !root.at("topology_admission_digest").is_null()) {
+      manifest.topology_admission_digest = root.at("topology_admission_digest").get<std::string>();
+    }
   } catch (const std::exception& e) {
     return absl::InvalidArgumentError(
         absl::StrCat("serving artifact manifest missing or malformed fields: ", e.what()));
@@ -436,11 +602,13 @@ ServingArtifactPreflightRequest build_preflight_request(
     std::string artifact_id,
     std::string canonical_index_json,
     std::optional<store::loading::DiskSource> disk_source,
+    std::optional<store::loading::DiskMetadata> disk_metadata,
     const v2::ServingArtifactRuntimePolicy* runtime_policy) {
   ServingArtifactPreflightRequest request{
       .artifact_id = std::move(artifact_id),
       .canonical_index_json = std::move(canonical_index_json),
       .disk_source = std::move(disk_source),
+      .disk_metadata = std::move(disk_metadata),
   };
   if (runtime_policy == nullptr) {
     return request;
@@ -454,9 +622,13 @@ ServingArtifactPreflightRequest build_preflight_request(
   if (!runtime_policy->expected_serving_build_digest().empty()) {
     request.expected_serving_build_digest = runtime_policy->expected_serving_build_digest();
   }
+  if (!runtime_policy->expected_topology_admission_digest().empty()) {
+    request.expected_topology_admission_digest = runtime_policy->expected_topology_admission_digest();
+  }
   request.require_manifest = runtime_policy->require_manifest() || request.serving_manifest_ref.has_value() ||
       request.expected_representation_contract_hash.has_value() || request.expected_serving_build_digest.has_value() ||
-      request.expected_serving_build_digest_version.has_value();
+      request.expected_serving_build_digest_version.has_value() ||
+      request.expected_topology_admission_digest.has_value();
   return request;
 }
 
@@ -496,7 +668,13 @@ absl::StatusOr<ServingArtifactPreflightResult> preflight_serving_artifact(
     return manifest_tensor_or.status();
   }
   auto payload_or = read_manifest_tensor_payload(
-      engine, request.artifact_id, **manifest_tensor_or, parsed_index_or->total_size, request.disk_source);
+      engine,
+      request.artifact_id,
+      request.canonical_index_json,
+      **manifest_tensor_or,
+      parsed_index_or->total_size,
+      request.disk_source,
+      request.disk_metadata);
   if (!payload_or.ok()) {
     return payload_or.status();
   }
@@ -507,6 +685,7 @@ absl::StatusOr<ServingArtifactPreflightResult> preflight_serving_artifact(
       request.expected_representation_contract_hash,
       request.expected_serving_build_digest,
       request.expected_serving_build_digest_version,
+      request.expected_topology_admission_digest,
       request.require_manifest);
 }
 
@@ -525,6 +704,7 @@ absl::StatusOr<ServingArtifactPreflightResult> preflight_serving_manifest_payloa
       request.expected_representation_contract_hash,
       request.expected_serving_build_digest,
       request.expected_serving_build_digest_version,
+      request.expected_topology_admission_digest,
       request.require_manifest);
 }
 

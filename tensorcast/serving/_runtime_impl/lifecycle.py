@@ -12,10 +12,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -26,15 +25,21 @@ import tensorcast as tc
 from tensorcast.serving import binding_runtime as tc_binding_runtime
 from tensorcast.serving import config as tc_config
 from tensorcast.serving import contract as tc_contract
+from tensorcast.serving import diagnostics as tc_diagnostics
 from tensorcast.serving import dto as tc_dto
+from tensorcast.serving import errors as tc_errors
 from tensorcast.serving import hosts as tc_hosts
 from tensorcast.serving import local_ready as tc_local_ready
 from tensorcast.serving import policy as tc_policy
-from tensorcast.serving import preload as tc_preload
 from tensorcast.serving import readiness as tc_readiness
 from tensorcast.serving import recipe_build as tc_recipe_build
-from tensorcast.serving import runtime as tc_runtime
+from tensorcast.serving import replica_publication as tc_replica_publication
+from tensorcast.serving import retained_binding as tc_retained_binding
+from tensorcast.serving import runtime_attachment as tc_runtime_attachment
+from tensorcast.serving import runtime_config as tc_runtime_config
 from tensorcast.serving import runtime_contract as tc_runtime_contract
+from tensorcast.serving import runtime_intent as tc_runtime_intent
+from tensorcast.serving import runtime_view as tc_runtime_view
 from tensorcast.serving import session as tc_session
 from tensorcast.serving import source_catalog as tc_source_catalog
 from tensorcast.serving.builder import compiler as tc_compiler
@@ -55,11 +60,9 @@ from tensorcast.types import (
     CollectivePolicy,
     FinalizeClass,
     ServingSupportLevel,
-    ServingTopologyRef,
 )
 
 ArtifactError = tc.ArtifactError
-BootstrapSummary = tc_dto.BootstrapSummary
 BindingUpdateEpoch = tc.BindingUpdateEpoch
 BindingReservationCapability = tc.BindingReservationCapability
 BindingValueRef = tc.BindingValueRef
@@ -68,12 +71,16 @@ CompiledServingRecipe = tc_compiler.CompiledServingRecipe
 BindingFinalizeMaterializationResult = (
     tc_materialization.BindingFinalizeMaterializationResult
 )
-DEFAULT_RUNTIME_PROFILE = tc_runtime.DEFAULT_RUNTIME_PROFILE
+DEFAULT_RUNTIME_PROFILE = tc_runtime_config.DEFAULT_RUNTIME_PROFILE
+LOCAL_READY_BOOTSTRAP_BUILD_PIPELINE_VERSION = (
+    tc_local_ready.LOCAL_READY_BOOTSTRAP_BUILD_PIPELINE_VERSION
+)
 FamilyReadiness = tc_dto.FamilyReadiness
 FrameworkIntegrationContext = tc_dto.FrameworkIntegrationContext
 PreparedServingArtifact = tc_dto.PreparedServingArtifact
+ServingBindingValue = tc_dto.ServingBindingValue
 PublishedModelVersion = tc.PublishedModelVersion
-RecipeBuildIdentity = tc_recipe_build.RecipeBuildIdentity
+ServingBindingPlan = tc_recipe_build.ServingBindingPlan
 RecipeBuildCacheConfig = tc_recipe_build.RecipeBuildCacheConfig
 RecipeBuildRunResult = tc_recipe_build.RecipeBuildRunResult
 RecipeCacheLookupResult = tc_recipe_build.RecipeCacheLookupResult
@@ -81,10 +88,11 @@ RecipeCacheWriteResult = tc_recipe_build.RecipeCacheWriteResult
 RecipeBuildSession = tc_recipe_build.RecipeBuildSession
 COMPILED_RECIPE_MEMORY_CACHE = tc_recipe_build.COMPILED_RECIPE_MEMORY_CACHE
 TRACE_PLAN_MEMORY_CACHE = tc_recipe_build.TRACE_PLAN_MEMORY_CACHE
-RecipeCompileIdentity = tc_compiler.RecipeCompileIdentity
 RecipeCompileInputs = tc_compiler.RecipeCompileInputs
 RecipePublicationContext = tc_publication.RecipePublicationContext
-ParsedExternalPreloadAuthority = tc_preload.ParsedExternalPreloadAuthority
+ParsedRetainedServingBindingAuthority = (
+    tc_retained_binding.ParsedRetainedServingBindingAuthority
+)
 GroupRealizationAcquireRef = tc.GroupRealizationAcquireRef
 RuntimeTensorView = tc_dto.RuntimeTensorView
 SOURCE_BOUND_CONTRACT_PATH_COLLECTIVE_FIRST_V4 = (
@@ -105,8 +113,54 @@ source_bound_contract_profile_fields = (
 SourceCatalog = tc_source_catalog.SourceCatalog
 SOURCE_CATALOG_SCHEMA_VERSION = tc_source_catalog.SOURCE_CATALOG_SCHEMA_VERSION
 
-# Host capability contracts live in hosts.py.  Integration imports aliases so
-# lifecycle code and historical module exports use one canonical contract.
+AdmissionRejectedError = tc_errors.AdmissionRejectedError
+ArtifactLocatorResolutionError = tc_errors.ArtifactLocatorResolutionError
+AttachFinalizeError = tc_errors.AttachFinalizeError
+AuthorityValidationError = tc_errors.AuthorityValidationError
+CapabilityMissingError = tc_errors.CapabilityMissingError
+ConfigConflictError = tc_errors.ConfigConflictError
+ManifestMismatchError = tc_errors.ManifestMismatchError
+OwnershipTransferError = tc_errors.OwnershipTransferError
+PlacementAdmissionError = tc_errors.PlacementAdmissionError
+PolicyMismatchError = tc_errors.PolicyMismatchError
+PublicationRequiredError = tc_errors.PublicationRequiredError
+ReplicaPublicationError = tc_errors.ReplicaPublicationError
+RestoreBindingError = tc_errors.RestoreBindingError
+RuntimeSwapError = tc_errors.RuntimeSwapError
+SchemaMismatchError = tc_errors.SchemaMismatchError
+ServingIntegrationError = tc_errors.ServingIntegrationError
+ServingIntegrationNotImplementedError = tc_errors.ServingIntegrationNotImplementedError
+SourceProviderError = tc_errors.SourceProviderError
+SourceSubjectError = tc_errors.SourceSubjectError
+TensorCastServingRuntimeError = tc_errors.TensorCastServingRuntimeError
+_capability_missing = tc_errors.capability_missing
+
+RuntimeAttachment = tc_runtime_attachment.RuntimeAttachment
+RuntimeBindingState = tc_runtime_attachment.RuntimeBindingState
+RuntimeBindingView = tc_runtime_attachment.RuntimeBindingView
+RuntimeStateSeed = tc_runtime_attachment.RuntimeStateSeed
+
+BindingValueRefProjection = tc_runtime_view.BindingValueRefProjection
+MaterializationDiagnosticsProjection = (
+    tc_runtime_view.MaterializationDiagnosticsProjection
+)
+PublishedReplicaProjection = tc_runtime_view.PublishedReplicaProjection
+ReloadRequestProjection = tc_runtime_view.ReloadRequestProjection
+ReloadResponseProjection = tc_runtime_view.ReloadResponseProjection
+RuntimeEndpointProjection = tc_runtime_view.RuntimeEndpointProjection
+RuntimeWorkerView = tc_runtime_view.RuntimeWorkerView
+SourceBoundContractProjection = tc_runtime_view.SourceBoundContractProjection
+SourceSelectionProjection = tc_runtime_view.SourceSelectionProjection
+WeightVersionProjection = tc_runtime_view.WeightVersionProjection
+source_selection_projection_from_execution_diagnostics = (
+    tc_runtime_view.source_selection_projection_from_execution_diagnostics
+)
+source_selection_projection_from_materialization_diagnostics = (
+    tc_runtime_view.source_selection_projection_from_materialization_diagnostics
+)
+
+# Host capability contracts live in hosts.py. Lifecycle uses module-local
+# aliases only to keep the orchestration code readable.
 AdmissionDecision = tc_hosts.AdmissionDecision
 AdmissionPolicy = tc_hosts.AdmissionPolicy
 AdmissionRequest = tc_hosts.AdmissionRequest
@@ -144,27 +198,35 @@ TensorSurfaceHost = tc_hosts.TensorSurfaceHost
 TorchTensorHost = tc_hosts.TorchTensorHost
 semantic_placement_digest = tc_hosts.semantic_placement_digest
 serving_placement_from_framework_facts = tc_hosts.serving_placement_from_framework_facts
-TensorcastLogicalTopology = tc_compiler.TensorcastLogicalTopology
 TensorcastSemanticValidationSpec = tc_compiler.TensorcastSemanticValidationSpec
 TensorcastServingFacts = tc_compiler.TensorcastServingFacts
 TensorSchemaEntry = tc_compiler.TensorSchemaEntry
 read_source_bound_contract_state = tc_runtime_contract.read_source_bound_contract_state
-resolve_runtime_config_profile = tc_runtime.resolve_runtime_config_profile
+resolve_runtime_config_profile = tc_runtime_config.resolve_runtime_config_profile
 
-RUNTIME_ENDPOINT_PROJECTION_SCHEMA_VERSION = 1
-WEIGHT_VERSION_PROJECTION_SCHEMA_VERSION = 1
-RELOAD_RESPONSE_PROJECTION_SCHEMA_VERSION = 1
-PUBLISHED_REPLICA_PROJECTION_SCHEMA_VERSION = 1
-SOURCE_SELECTION_PROJECTION_SCHEMA_VERSION = 1
-RETAINED_BINDING_AUTHORITY_SCHEMA_VERSION = 1
-RETAINED_BINDING_READINESS_STATES = {
-    "serving_reserved",
-    "serving_local_ready",
-    "serving_published_ready",
-}
-SERVING_ARTIFACT_SELECTOR_SCHEMA_VERSION = tc_policy.SERVING_SELECTOR_SCHEMA_VERSION
+RUNTIME_ENDPOINT_PROJECTION_SCHEMA_VERSION = (
+    tc_runtime_view.RUNTIME_ENDPOINT_PROJECTION_SCHEMA_VERSION
+)
+WEIGHT_VERSION_PROJECTION_SCHEMA_VERSION = (
+    tc_runtime_view.WEIGHT_VERSION_PROJECTION_SCHEMA_VERSION
+)
+RELOAD_RESPONSE_PROJECTION_SCHEMA_VERSION = (
+    tc_runtime_view.RELOAD_RESPONSE_PROJECTION_SCHEMA_VERSION
+)
+PUBLISHED_REPLICA_PROJECTION_SCHEMA_VERSION = (
+    tc_runtime_view.PUBLISHED_REPLICA_PROJECTION_SCHEMA_VERSION
+)
+SOURCE_SELECTION_PROJECTION_SCHEMA_VERSION = (
+    tc_runtime_view.SOURCE_SELECTION_PROJECTION_SCHEMA_VERSION
+)
+SERVING_ARTIFACT_LOCATOR_SCHEMA_VERSION = (
+    tc_policy.SERVING_ARTIFACT_LOCATOR_SCHEMA_VERSION
+)
+binding_layout_debug_payload = tc_diagnostics.binding_layout_debug_payload
+binding_layout_profile_fields = tc_diagnostics.binding_layout_profile_fields
+binding_layout_tensor_count = tc_diagnostics.binding_layout_tensor_count
 SERVING_POLICY_SCHEMA_VERSION = tc_policy.SERVING_POLICY_SCHEMA_VERSION
-ServingArtifactSelector = tc_policy.ServingSelector
+ServingArtifactLocator = tc_policy.ServingArtifactLocator
 ServingPolicy = tc_policy.ServingPolicy
 normalize_serving_reload_request_payload = (
     tc_policy.normalize_serving_reload_request_payload
@@ -199,1106 +261,12 @@ RECIPE_CACHE_POLICY_SCHEMA_VERSION = 1
 SOURCE_CATALOG_REQUEST_SCHEMA_VERSION = 1
 
 
-class TensorCastServingRuntimeError(RuntimeError):
-    """Base class for machine-readable serving runtime failures."""
-
-    code = "tensorcast_serving_runtime_error"
-    operation = "serving_runtime"
-    retryable = False
-    worker_suspect = False
-
-    def __init__(
-        self,
-        message: str = "",
-        *,
-        operation: str | None = None,
-        retryable: bool | None = None,
-        worker_suspect: bool | None = None,
-        details: Mapping[str, object] | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.operation = operation or self.operation
-        self.retryable = self.retryable if retryable is None else retryable
-        self.worker_suspect = (
-            self.worker_suspect if worker_suspect is None else worker_suspect
-        )
-        self.details = dict(details or {})
-
-
-class ServingIntegrationError(TensorCastServingRuntimeError):
-    """Base class for structured serving integration failures."""
-
-
-class ServingIntegrationNotImplementedError(ServingIntegrationError):
-    """Raised when a deep core-owned lifecycle method is not implemented yet."""
-
-    code = "not_implemented"
-    operation = "serving_runtime"
-
-
-class ConfigConflictError(ServingIntegrationError):
-    """Serving config requests mutually exclusive lifecycle execution modes."""
-
-    code = "config_conflict"
-    operation = "config_planning"
-
-
-class CapabilityMissingError(ServingIntegrationError):
-    """Required host capability is absent for a requested lifecycle path."""
-
-    code = "capability_missing"
-    operation = "capability_validation"
-
-
-def _capability_missing(
-    message: str,
-    *,
-    level: str,
-    capability: str,
-    operation: str,
-    required_methods: Sequence[str] = (),
-    next_action: str,
-) -> CapabilityMissingError:
-    return CapabilityMissingError(
-        message,
-        operation=operation,
-        details={
-            "level": level,
-            "capability": capability,
-            "operation": operation,
-            "required_methods": tuple(required_methods),
-            "next_action": next_action,
-        },
-    )
-
-
-class AdmissionRejectedError(ServingIntegrationError):
-    """Core admission rejected a serving lifecycle request."""
-
-    code = "admission_rejected"
-    operation = "admission"
-
-
-class PlacementAdmissionError(ServingIntegrationError):
-    """Placement identity or semantic placement proof is invalid."""
-
-    code = "placement_admission"
-    operation = "placement_admission"
-
-
-class SelectorResolutionError(ServingIntegrationError):
-    """Durable serving selector could not resolve to a serving artifact."""
-
-    code = "selector_resolution"
-    operation = "selector_resolution"
-
-
-class ManifestMismatchError(ServingIntegrationError):
-    """Serving manifest content does not match requested runtime facts."""
-
-    code = "manifest_mismatch"
-    operation = "manifest_validation"
-
-
-class PolicyMismatchError(ServingIntegrationError):
-    """Serving runtime policy does not match the artifact manifest."""
-
-    code = "policy_mismatch"
-    operation = "policy_validation"
-
-
-class AuthorityValidationError(ServingIntegrationError):
-    """Retained binding authority failed validation."""
-
-    code = "authority_validation"
-    operation = "retained_acquire"
-
-
-class SchemaMismatchError(ServingIntegrationError):
-    """Runtime tensor schema does not match the serving artifact schema."""
-
-    code = "schema_mismatch"
-    operation = "schema_validation"
-    worker_suspect = True
-
-
-class AttachFinalizeError(ServingIntegrationError):
-    """Framework attach, process-after-load, or finalize failed."""
-
-    code = "attach_finalize"
-    operation = "attach_finalize"
-    worker_suspect = True
-
-
-class RestoreBindingError(ServingIntegrationError):
-    """Retained binding restore failed before runtime ownership transfer."""
-
-    code = "restore_binding"
-    operation = "retained_acquire"
-
-
-class OwnershipTransferError(ServingIntegrationError):
-    """Binding ownership transfer to runtime state failed."""
-
-    code = "ownership_transfer"
-    operation = "ownership_transfer"
-    worker_suspect = True
-
-
-class RuntimeSwapError(ServingIntegrationError):
-    """Serving binding swap failed after execution started."""
-
-    code = "runtime_swap"
-    operation = "reload"
-    worker_suspect = True
-
-
-class SourceSubjectError(ServingIntegrationError):
-    """Source selector resolution or broadcast payload handling failed."""
-
-    code = "source_subject"
-    operation = "source_provider"
-
-
-class SourceProviderError(ServingIntegrationError):
-    """Source provider, catalog, or cache policy failed."""
-
-    code = "source_provider"
-    operation = "source_provider"
-
-
-class PublicationRequiredError(ServingIntegrationError):
-    """A local-ready identity was used where durable publication is required."""
-
-    code = "publication_required"
-    operation = "selector_validation"
-
-
-class ReplicaPublicationError(ServingIntegrationError):
-    """Runtime-owned ephemeral replica publication failed."""
-
-    code = "replica_publication"
-    operation = "replica_publication"
-    worker_suspect = True
-
-
-@dataclass(frozen=True)
-class BootstrapPolicy:
-    fields: Mapping[str, object] = field(default_factory=dict)
-
-
-class ServingIntent:
-    """Marker base class for public serving lifecycle intent DTOs."""
-
-
-@dataclass(frozen=True)
-class ExistingServingArtifact(ServingIntent):
-    selector: ServingArtifactSelector | object
-    policy: ServingPolicy | object | None = None
-
-
-@dataclass(frozen=True)
-class LocalSourceBootstrap(ServingIntent):
-    source_selector: SourceSelector
-    bootstrap_policy: Any
-    cache_policy: RecipeCachePolicy | None = None
-
-
-@dataclass(frozen=True)
-class _AdminLocalSourceBootstrap(LocalSourceBootstrap):
-    """Private/admin local bootstrap request with prebuilt lifecycle inputs."""
-
-    coordinator: SourceSubjectCoordinator | None = None
-    source_catalog_config: object | None = None
-    cache_config_factory: object | None = None
-    recipe: object | None = None
-    source_subject: object | None = None
-    source_artifact_ref: str | None = None
-    model: object | None = None
-    binding_factory: object | None = None
-
-
-@dataclass(frozen=True)
-class RetainedBindingAuthority:
-    group_id: str
-    binding_value_ref: BindingValueRef
-    reservation_capability: BindingReservationCapability
-    daemon_id: str
-    daemon_session_id: str
-    device_uuid: str
-    member: ServingBindingMemberRef
-    reservation_bytes: int
-    expected_target_layout_hash: str
-    expected_tensor_schema_hash: str
-    expected_serving_build_digest: str
-    expected_resolved_spec_digest: str
-    readiness: str
-    verification_state: str = "local_only"
-    local_serving_ref: str | None = None
-    serving_artifact_id: str | None = None
-    group_realization_acquire: GroupRealizationAcquireRef | None = None
-    schema_version: int = RETAINED_BINDING_AUTHORITY_SCHEMA_VERSION
-
-    def __post_init__(self) -> None:
-        if self.schema_version != RETAINED_BINDING_AUTHORITY_SCHEMA_VERSION:
-            raise AuthorityValidationError(
-                "RetainedBindingAuthority.schema_version is unsupported",
-                details={
-                    "expected": RETAINED_BINDING_AUTHORITY_SCHEMA_VERSION,
-                    "actual": self.schema_version,
-                },
-            )
-        self._require_non_empty("group_id", self.group_id)
-        self._require_non_empty("daemon_id", self.daemon_id)
-        self._require_non_empty("daemon_session_id", self.daemon_session_id)
-        self._require_non_empty("device_uuid", self.device_uuid)
-        self._require_non_empty(
-            "expected_target_layout_hash", self.expected_target_layout_hash
-        )
-        self._require_non_empty(
-            "expected_tensor_schema_hash", self.expected_tensor_schema_hash
-        )
-        self._require_non_empty(
-            "expected_serving_build_digest", self.expected_serving_build_digest
-        )
-        self._require_non_empty(
-            "expected_resolved_spec_digest", self.expected_resolved_spec_digest
-        )
-        self._require_non_empty("verification_state", self.verification_state)
-        if self.readiness not in RETAINED_BINDING_READINESS_STATES:
-            raise AuthorityValidationError(
-                "RetainedBindingAuthority.readiness is unsupported",
-                details={
-                    "allowed": sorted(RETAINED_BINDING_READINESS_STATES),
-                    "actual": self.readiness,
-                },
-            )
-        if not isinstance(self.binding_value_ref, BindingValueRef):
-            raise AuthorityValidationError(
-                "RetainedBindingAuthority.binding_value_ref must be BindingValueRef"
-            )
-        if not isinstance(self.reservation_capability, BindingReservationCapability):
-            raise AuthorityValidationError(
-                "RetainedBindingAuthority.reservation_capability must be "
-                "BindingReservationCapability"
-            )
-        if not isinstance(self.member, ServingBindingMemberRef):
-            raise AuthorityValidationError(
-                "RetainedBindingAuthority.member must be ServingBindingMemberRef"
-            )
-        if self.group_realization_acquire is not None and not isinstance(
-            self.group_realization_acquire, GroupRealizationAcquireRef
-        ):
-            raise AuthorityValidationError(
-                "RetainedBindingAuthority.group_realization_acquire must be "
-                "GroupRealizationAcquireRef"
-            )
-        if self.reservation_bytes < 0:
-            raise AuthorityValidationError(
-                "RetainedBindingAuthority.reservation_bytes must be non-negative"
-            )
-        capability = self.reservation_capability
-        expected_pairs = {
-            "binding_value_ref": self.binding_value_ref,
-            "daemon_id": self.daemon_id,
-            "daemon_session_id": self.daemon_session_id,
-            "device_uuid": self.device_uuid,
-            "member": self.member,
-            "reservation_bytes": self.reservation_bytes,
-        }
-        for field_name, expected in expected_pairs.items():
-            actual = getattr(capability, field_name)
-            if actual != expected:
-                raise AuthorityValidationError(
-                    "RetainedBindingAuthority.reservation_capability "
-                    f"{field_name} mismatch",
-                    details={
-                        "expected": repr(expected),
-                        "actual": repr(actual),
-                    },
-                )
-        if self.member.group_id is not None and self.member.group_id != self.group_id:
-            raise AuthorityValidationError(
-                "RetainedBindingAuthority.member.group_id must match group_id",
-                details={
-                    "group_id": self.group_id,
-                    "member_group_id": self.member.group_id,
-                },
-            )
-        if self.readiness == "serving_published_ready" and not self.serving_artifact_id:
-            raise AuthorityValidationError(
-                "RetainedBindingAuthority.serving_artifact_id is required when "
-                "readiness='serving_published_ready'"
-            )
-
-    @staticmethod
-    def _require_non_empty(field_name: str, value: str) -> None:
-        if not isinstance(value, str) or not value.strip():
-            raise AuthorityValidationError(
-                f"RetainedBindingAuthority.{field_name} must be non-empty"
-            )
-
-    @classmethod
-    def from_preload_authority(
-        cls,
-        authority: ParsedExternalPreloadAuthority,
-    ) -> "RetainedBindingAuthority":
-        if not isinstance(authority, ParsedExternalPreloadAuthority):
-            raise AuthorityValidationError(
-                "RetainedBindingAuthority.from_preload_authority requires "
-                "ParsedExternalPreloadAuthority"
-            )
-        return cls(
-            group_id=authority.group_id,
-            binding_value_ref=authority.binding_value_ref,
-            reservation_capability=authority.reservation_capability,
-            daemon_id=authority.daemon_id,
-            daemon_session_id=authority.daemon_session_id,
-            device_uuid=authority.device_uuid,
-            member=authority.member,
-            reservation_bytes=authority.reservation_bytes,
-            expected_target_layout_hash=authority.expected.target_layout_hash,
-            expected_tensor_schema_hash=authority.expected.tensor_schema_hash,
-            expected_serving_build_digest=(authority.expected.serving_build_digest),
-            expected_resolved_spec_digest=(authority.expected.resolved_spec_digest),
-            readiness=authority.readiness,
-            verification_state=authority.verification_state,
-            local_serving_ref=authority.local_serving_ref,
-            serving_artifact_id=authority.serving_artifact_id,
-            group_realization_acquire=authority.group_realization_acquire,
-        )
-
-    def to_preload_authority(self) -> ParsedExternalPreloadAuthority:
-        return ParsedExternalPreloadAuthority(
-            group_id=self.group_id,
-            local_serving_ref=self.local_serving_ref,
-            binding_value_ref=self.binding_value_ref,
-            reservation_capability=self.reservation_capability,
-            daemon_id=self.daemon_id,
-            daemon_session_id=self.daemon_session_id,
-            device_uuid=self.device_uuid,
-            member=self.member,
-            reservation_bytes=self.reservation_bytes,
-            expected=tc_preload.ExternalPreloadExpectedDigests(
-                target_layout_hash=self.expected_target_layout_hash,
-                tensor_schema_hash=self.expected_tensor_schema_hash,
-                serving_build_digest=self.expected_serving_build_digest,
-                resolved_spec_digest=self.expected_resolved_spec_digest,
-            ),
-            readiness=self.readiness,
-            verification_state=self.verification_state,
-            serving_artifact_id=self.serving_artifact_id,
-            group_realization_acquire=self.group_realization_acquire,
-        )
-
-
-@dataclass(frozen=True)
-class RetainedBindingAcquire(ServingIntent):
-    authority: RetainedBindingAuthority
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.authority, RetainedBindingAuthority):
-            raise AuthorityValidationError(
-                "RetainedBindingAcquire.authority must be RetainedBindingAuthority"
-            )
-
-
-@dataclass(frozen=True)
-class RequestContext:
-    framework_config: object | None = None
-    model_config: object | None = None
-    target_device: object | None = None
-    timeout_s: float | None = 30.0
-
-
-@dataclass(frozen=True)
-class BindingValueRefProjection:
-    binding_id: str
-    binding_layout_id: str
-    binding_value_id: str
-    seal_generation: int
-
-    @classmethod
-    def from_value(cls, value: object) -> "BindingValueRefProjection | None":
-        if value is None:
-            return None
-        if isinstance(value, Mapping):
-            return cls(
-                binding_id=str(value.get("binding_id", "") or ""),
-                binding_layout_id=str(value.get("binding_layout_id", "") or ""),
-                binding_value_id=str(value.get("binding_value_id", "") or ""),
-                seal_generation=int(value.get("seal_generation", 0) or 0),
-            )
-        return cls(
-            binding_id=str(getattr(value, "binding_id", "") or ""),
-            binding_layout_id=str(getattr(value, "binding_layout_id", "") or ""),
-            binding_value_id=str(getattr(value, "binding_value_id", "") or ""),
-            seal_generation=int(getattr(value, "seal_generation", 0) or 0),
-        )
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "binding_id": self.binding_id,
-            "binding_layout_id": self.binding_layout_id,
-            "binding_value_id": self.binding_value_id,
-            "seal_generation": self.seal_generation,
-        }
-
-
-@dataclass(frozen=True)
-class SourceBoundContractProjection:
-    fields: Mapping[str, object] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, object]:
-        return dict(self.fields)
-
-
-@dataclass(frozen=True)
-class MaterializationDiagnosticsProjection:
-    fields: Mapping[str, object] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, object]:
-        return dict(self.fields)
-
-
-@dataclass(frozen=True)
-class ReloadRequestProjection:
-    selector: Mapping[str, object] | None = None
-    policy: Mapping[str, object] | None = None
-    requested_at: str | None = None
-
-    def to_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {}
-        if self.selector is not None:
-            payload["selector"] = dict(self.selector)
-        if self.policy is not None:
-            payload["policy"] = dict(self.policy)
-        if self.requested_at is not None:
-            payload["requested_at"] = self.requested_at
-        return payload
-
-
-@dataclass(frozen=True)
-class PublishedReplicaProjection:
-    state: str
-    operation_id: str | None = None
-    replica_id: str | None = None
-    lease_id: str | None = None
-    artifact_ref: str | None = None
-    device_uuid: str | None = None
-    owner_pid: int | None = None
-    byte_space_kind: str | None = None
-    byte_space_id: str | None = None
-    binding_layout_id: str | None = None
-    binding_value_ref: BindingValueRefProjection | None = None
-    generation: str | None = None
-    reason: str | None = None
-    schema_version: int = PUBLISHED_REPLICA_PROJECTION_SCHEMA_VERSION
-
-    def to_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "schema_version": self.schema_version,
-            "state": self.state,
-        }
-        optional: dict[str, object | None] = {
-            "operation_id": self.operation_id,
-            "replica_id": self.replica_id,
-            "lease_id": self.lease_id,
-            "artifact_ref": self.artifact_ref,
-            "device_uuid": self.device_uuid,
-            "owner_pid": self.owner_pid,
-            "byte_space_kind": self.byte_space_kind,
-            "byte_space_id": self.byte_space_id,
-            "binding_layout_id": self.binding_layout_id,
-            "generation": self.generation,
-            "reason": self.reason,
-        }
-        payload.update(
-            {key: value for key, value in optional.items() if value is not None}
-        )
-        if self.binding_value_ref is not None:
-            payload["binding_value_ref"] = self.binding_value_ref.to_dict()
-        return payload
-
-
-@dataclass(frozen=True)
-class SourceSelectionProjection:
-    selected_source_kind: str
-    selected_replica_id: str | None = None
-    selected_producer_worker_id: str | None = None
-    selected_byte_space_kind: str | None = None
-    selected_byte_space_id: str | None = None
-    p2p_bytes: int = 0
-    fallback_bytes: int = 0
-    disk_bytes: int = 0
-    reselection_attempts: int = 0
-    reject_reason_bucket: str | None = None
-    fallback_reason_bucket: str | None = None
-    schema_version: int = SOURCE_SELECTION_PROJECTION_SCHEMA_VERSION
-
-    def to_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "schema_version": self.schema_version,
-            "selected_source_kind": self.selected_source_kind,
-            "p2p_bytes": self.p2p_bytes,
-            "fallback_bytes": self.fallback_bytes,
-            "disk_bytes": self.disk_bytes,
-            "reselection_attempts": self.reselection_attempts,
-        }
-        optional: dict[str, object | None] = {
-            "selected_replica_id": self.selected_replica_id,
-            "selected_producer_worker_id": self.selected_producer_worker_id,
-            "selected_byte_space_kind": self.selected_byte_space_kind,
-            "selected_byte_space_id": self.selected_byte_space_id,
-            "reject_reason_bucket": self.reject_reason_bucket,
-            "fallback_reason_bucket": self.fallback_reason_bucket,
-        }
-        payload.update(
-            {key: value for key, value in optional.items() if value is not None}
-        )
-        return payload
-
-
-@dataclass(frozen=True)
-class BootstrapEndpointProjection:
-    fields: Mapping[str, object]
-
-    def to_dict(self) -> dict[str, object]:
-        return dict(self.fields)
-
-
-def _source_bound_projection_from_bootstrap(
-    bootstrap_summary: BootstrapSummary | None,
-) -> SourceBoundContractProjection | None:
-    if bootstrap_summary is None:
-        return None
-    fields = {
-        "version": getattr(bootstrap_summary, "source_bound_contract_version", 0),
-        "capability_flags": list(
-            getattr(bootstrap_summary, "source_bound_capability_flags", ())
-        ),
-        "ready": bool(getattr(bootstrap_summary, "source_bound_contract_ready", False)),
-        "path": _optional_text(
-            getattr(bootstrap_summary, "source_bound_contract_path", None)
-        ),
-    }
-    if not any(value for value in fields.values()):
-        return None
-    return SourceBoundContractProjection(fields)
-
-
-def _materialization_projection_from_fields(
-    *,
-    prefix: str,
-    diagnostics: Mapping[str, object],
-    bootstrap_summary: BootstrapSummary | None,
-) -> MaterializationDiagnosticsProjection | None:
-    fields: dict[str, object] = {}
-    diagnostics_prefix = f"{prefix}_"
-    for key, value in diagnostics.items():
-        if key.startswith(diagnostics_prefix) and value is not None:
-            fields[key[len(diagnostics_prefix) :]] = value
-    if bootstrap_summary is not None:
-        bootstrap_prefix = f"bootstrap_{prefix}_"
-        for key, value in bootstrap_summary.to_dict().items():
-            if key.startswith(bootstrap_prefix) and value is not None:
-                fields[key[len(bootstrap_prefix) :]] = value
-    if not fields:
-        return None
-    return MaterializationDiagnosticsProjection(fields)
-
-
-def _reload_request_projection_from_diagnostics(
-    diagnostics: Mapping[str, object],
-) -> ReloadRequestProjection | None:
-    value = diagnostics.get("reload_request")
-    if value is None:
-        return None
-    if isinstance(value, ReloadRequestProjection):
-        return value
-    if not isinstance(value, Mapping):
-        return None
-    selector = value.get("selector")
-    policy = value.get("policy")
-    return ReloadRequestProjection(
-        selector=dict(selector) if isinstance(selector, Mapping) else None,
-        policy=dict(policy) if isinstance(policy, Mapping) else None,
-        requested_at=_optional_text(value.get("requested_at")),
-    )
-
-
-def _published_replica_projection_from_value(
-    value: object | None,
-) -> PublishedReplicaProjection | None:
-    if value is None:
-        return None
-    if isinstance(value, PublishedReplicaProjection):
-        return value
-    if not isinstance(value, Mapping):
-        return None
-    binding_value_ref = BindingValueRefProjection.from_value(
-        value.get("binding_value_ref")
-    )
-    owner_pid = _optional_int(value.get("owner_pid"))
-    return PublishedReplicaProjection(
-        state=str(value.get("state") or ""),
-        operation_id=_optional_text(value.get("operation_id")),
-        replica_id=_optional_text(value.get("replica_id")),
-        lease_id=_optional_text(value.get("lease_id")),
-        artifact_ref=_optional_text(value.get("artifact_ref")),
-        device_uuid=_optional_text(value.get("device_uuid")),
-        owner_pid=owner_pid,
-        byte_space_kind=_optional_text(value.get("byte_space_kind")),
-        byte_space_id=_optional_text(value.get("byte_space_id")),
-        binding_layout_id=_optional_text(value.get("binding_layout_id")),
-        binding_value_ref=binding_value_ref,
-        generation=_optional_text(value.get("generation")),
-        reason=_optional_text(value.get("reason")),
-    )
-
-
-def _source_selection_projection_from_value(
-    value: object | None,
-) -> SourceSelectionProjection | None:
-    if value is None:
-        return None
-    if isinstance(value, SourceSelectionProjection):
-        return value
-    if not isinstance(value, Mapping):
-        return None
-    return SourceSelectionProjection(
-        selected_source_kind=str(value.get("selected_source_kind") or "unselected"),
-        selected_replica_id=_optional_text(value.get("selected_replica_id")),
-        selected_producer_worker_id=_optional_text(
-            value.get("selected_producer_worker_id")
-        ),
-        selected_byte_space_kind=_optional_text(value.get("selected_byte_space_kind")),
-        selected_byte_space_id=_optional_text(value.get("selected_byte_space_id")),
-        p2p_bytes=_optional_int(value.get("p2p_bytes")) or 0,
-        fallback_bytes=_optional_int(value.get("fallback_bytes")) or 0,
-        disk_bytes=_optional_int(value.get("disk_bytes")) or 0,
-        reselection_attempts=(_optional_int(value.get("reselection_attempts")) or 0),
-        reject_reason_bucket=_optional_text(value.get("reject_reason_bucket")),
-        fallback_reason_bucket=_optional_text(value.get("fallback_reason_bucket")),
-    )
-
-
-def _diagnostic_value(
-    diagnostics: Any,
-    name: str,
-    default: object | None = None,
-) -> object | None:
-    if isinstance(diagnostics, Mapping):
-        return diagnostics.get(name, default)
-    return getattr(diagnostics, name, default)
-
-
-def _dominant_reason_bucket(value: object | None) -> str | None:
-    if not isinstance(value, Mapping):
-        return None
-    candidates: list[tuple[int, str]] = []
-    for key, count in value.items():
-        name = _optional_text(key)
-        weight = _optional_int(count) or 0
-        if name is not None and weight > 0:
-            candidates.append((weight, name))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: (-item[0], item[1]))
-    return candidates[0][1]
-
-
-def source_selection_projection_from_materialization_diagnostics(
-    diagnostics: Any | None,
-) -> SourceSelectionProjection | None:
-    """Project store materialization diagnostics into the runtime endpoint DTO."""
-
-    if diagnostics is None:
-        return None
-    source = _optional_text(_diagnostic_value(diagnostics, "source"))
-    if source is None:
-        return None
-    total_bytes = _optional_int(_diagnostic_value(diagnostics, "total_bytes")) or 0
-    reselection_attempts = max(
-        0,
-        (_optional_int(_diagnostic_value(diagnostics, "retry_attempts")) or 1) - 1,
-    )
-    reason_bucket = _dominant_reason_bucket(
-        _diagnostic_value(diagnostics, "retry_reason_buckets")
-    )
-    replica_id = _optional_text(
-        _diagnostic_value(diagnostics, "ticket_replica_uuid")
-    ) or _optional_text(_diagnostic_value(diagnostics, "replica_uuid"))
-    if source == "p2p":
-        return SourceSelectionProjection(
-            selected_source_kind="published_memory_replica",
-            selected_replica_id=replica_id,
-            p2p_bytes=total_bytes,
-            reselection_attempts=reselection_attempts,
-            reject_reason_bucket=reason_bucket,
-        )
-    if source == "local_replica":
-        return SourceSelectionProjection(
-            selected_source_kind="local_memory_replica",
-            selected_replica_id=replica_id,
-            reselection_attempts=reselection_attempts,
-            reject_reason_bucket=reason_bucket,
-        )
-    if source == "disk":
-        return SourceSelectionProjection(
-            selected_source_kind="canonical_fallback",
-            fallback_bytes=total_bytes,
-            disk_bytes=total_bytes,
-            reselection_attempts=reselection_attempts,
-            fallback_reason_bucket=reason_bucket,
-        )
-    return None
-
-
-def source_selection_projection_from_execution_diagnostics(
-    diagnostics: Any | None,
-) -> SourceSelectionProjection | None:
-    """Summarize daemon execution diagnostics as low-cardinality source choice."""
-
-    if diagnostics is None:
-        return None
-    collective_bytes = (
-        _optional_int(
-            _diagnostic_value(diagnostics, "actual_collective_committed_bytes")
-        )
-        or 0
-    )
-    peer_transfer_bytes = (
-        _optional_int(_diagnostic_value(diagnostics, "collective_peer_transfer_bytes"))
-        or 0
-    )
-    local_typed_bytes = (
-        _optional_int(_diagnostic_value(diagnostics, "actual_local_typed_bytes")) or 0
-    )
-    generic_bytes = (
-        _optional_int(_diagnostic_value(diagnostics, "actual_generic_backend_bytes"))
-        or 0
-    )
-    fallback_bytes = (
-        _optional_int(_diagnostic_value(diagnostics, "fallback_bytes")) or 0
-    )
-    residual_bytes = (
-        _optional_int(_diagnostic_value(diagnostics, "residual_bytes")) or 0
-    )
-    skip_reason = _optional_text(
-        _diagnostic_value(diagnostics, "collective_skip_reason")
-    )
-    if collective_bytes or peer_transfer_bytes:
-        return SourceSelectionProjection(
-            selected_source_kind="published_memory_replica",
-            p2p_bytes=peer_transfer_bytes or collective_bytes,
-            fallback_bytes=fallback_bytes,
-            fallback_reason_bucket=skip_reason if fallback_bytes else None,
-        )
-    if local_typed_bytes:
-        return SourceSelectionProjection(
-            selected_source_kind="local_memory_replica",
-            fallback_bytes=fallback_bytes,
-            fallback_reason_bucket=skip_reason if fallback_bytes else None,
-        )
-    if fallback_bytes or residual_bytes or generic_bytes:
-        return SourceSelectionProjection(
-            selected_source_kind="canonical_fallback",
-            fallback_bytes=fallback_bytes or residual_bytes or generic_bytes,
-            fallback_reason_bucket=skip_reason,
-        )
-    return None
-
-
-@dataclass(frozen=True)
-class WeightVersionProjection:
-    source_artifact_ref: str | None
-    serving_artifact_ref: str | None
-    serving_version_key: str | None
-    serving_manifest_ref: str | None
-    representation_contract_hash: str
-    serving_build_digest: str | None
-    tensor_schema_hash: str
-    readiness: str
-    family: str
-    tp_rank: int | None
-    tp_world_size: int | None
-    binding_layout_id: str | None
-    local_serving_ref: str | None
-    binding_value_ref: BindingValueRefProjection | None
-    verification_state: str
-    verification_job_id: str | None
-    source_bound_contract: SourceBoundContractProjection | None = None
-    realize_diagnostics: MaterializationDiagnosticsProjection | None = None
-    publish_diagnostics: MaterializationDiagnosticsProjection | None = None
-    published_replica: PublishedReplicaProjection | None = None
-    source_selection: SourceSelectionProjection | None = None
-    reload_request: ReloadRequestProjection | None = None
-    bootstrap_summary: BootstrapEndpointProjection | None = None
-    schema_version: int = WEIGHT_VERSION_PROJECTION_SCHEMA_VERSION
-
-    def to_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "schema_version": self.schema_version,
-            "source_artifact_ref": self.source_artifact_ref,
-            "serving_artifact_ref": self.serving_artifact_ref,
-            "serving_version_key": self.serving_version_key,
-            "serving_manifest_ref": self.serving_manifest_ref,
-            "representation_contract_hash": self.representation_contract_hash,
-            "serving_build_digest": self.serving_build_digest,
-            "tensor_schema_hash": self.tensor_schema_hash,
-            "readiness": self.readiness,
-            "family": self.family,
-            "tp_rank": self.tp_rank,
-            "tp_world_size": self.tp_world_size,
-            "binding_layout_id": self.binding_layout_id,
-            "local_serving_ref": self.local_serving_ref,
-            "binding_value_ref": (
-                None
-                if self.binding_value_ref is None
-                else self.binding_value_ref.to_dict()
-            ),
-            "verification_state": self.verification_state,
-            "verification_job_id": self.verification_job_id,
-        }
-        optional = {
-            "source_bound_contract": self.source_bound_contract,
-            "realize_diagnostics": self.realize_diagnostics,
-            "publish_diagnostics": self.publish_diagnostics,
-            "published_replica": self.published_replica,
-            "source_selection": self.source_selection,
-            "reload_request": self.reload_request,
-            "bootstrap_summary": self.bootstrap_summary,
-        }
-        for key, value in optional.items():
-            if value is not None:
-                payload[key] = value.to_dict()
-        return payload
-
-
-@dataclass(frozen=True)
-class ReloadResponseProjection:
-    serving_artifact_ref: str | None
-    representation_contract_hash: str
-    serving_build_digest: str | None
-    readiness: str
-    schema_version: int = RELOAD_RESPONSE_PROJECTION_SCHEMA_VERSION
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "schema_version": self.schema_version,
-            "serving_artifact_ref": self.serving_artifact_ref,
-            "representation_contract_hash": self.representation_contract_hash,
-            "serving_build_digest": self.serving_build_digest,
-            "readiness": self.readiness,
-        }
-
-
-@dataclass(frozen=True)
-class RuntimeEndpointProjection:
-    weight_version: WeightVersionProjection
-    reload_response: ReloadResponseProjection | None = None
-    schema_version: int = RUNTIME_ENDPOINT_PROJECTION_SCHEMA_VERSION
-
-    def to_weight_version_payload(self) -> dict[str, object]:
-        return self.weight_version.to_dict()
-
-    def to_reload_response_payload(self) -> dict[str, object] | None:
-        if self.reload_response is None:
-            return None
-        return self.reload_response.to_dict()
-
-
-@dataclass(frozen=True)
-class RuntimeWorkerView:
-    readiness: str
-    serving_artifact_ref: str | None
-    source_artifact_ref: str | None
-    representation_contract_hash: str
-    serving_build_digest: str | None
-    tensor_schema_hash: str
-    local_serving_ref: str | None
-    binding_value_ref: BindingValueRefProjection | None
-    verification_state: str
-    verification_job_id: str | None
-    endpoint: RuntimeEndpointProjection
-    diagnostics: Mapping[str, object]
-
-    @classmethod
-    def from_runtime_view(
-        cls,
-        view: RuntimeBindingView,
-        *,
-        bootstrap_summary: BootstrapSummary | None = None,
-        family: str = "",
-        tp_rank: int | None = None,
-        tp_world_size: int | None = None,
-        include_reload_response: bool = False,
-    ) -> "RuntimeWorkerView":
-        diagnostics = dict(view.diagnostics or {})
-        binding_value_ref = BindingValueRefProjection.from_value(view.binding_value_ref)
-        serving_build_digest = _optional_text(
-            diagnostics.get("serving_build_digest")
-        ) or _optional_text(getattr(bootstrap_summary, "serving_build_digest", None))
-        verification_state = str(
-            diagnostics.get("verification_state")
-            or getattr(bootstrap_summary, "verification_state", None)
-            or "verified"
-        )
-        verification_job_id = _optional_text(
-            diagnostics.get("verification_job_id")
-        ) or _optional_text(getattr(bootstrap_summary, "verification_job_id", None))
-        bootstrap_projection = None
-        if bootstrap_summary is not None:
-            bootstrap_projection = BootstrapEndpointProjection(
-                bootstrap_summary.to_dict()
-            )
-        source_bound_projection = _source_bound_projection_from_bootstrap(
-            bootstrap_summary
-        )
-        realize_projection = _materialization_projection_from_fields(
-            prefix="realize",
-            diagnostics=diagnostics,
-            bootstrap_summary=bootstrap_summary,
-        )
-        publish_projection = _materialization_projection_from_fields(
-            prefix="publish",
-            diagnostics=diagnostics,
-            bootstrap_summary=bootstrap_summary,
-        )
-        reload_projection = _reload_request_projection_from_diagnostics(diagnostics)
-        published_replica = _published_replica_projection_from_value(
-            diagnostics.get("published_replica")
-        )
-        source_selection = _source_selection_projection_from_value(
-            diagnostics.get("source_selection")
-        )
-        weight_version = WeightVersionProjection(
-            source_artifact_ref=view.source_artifact_ref,
-            serving_artifact_ref=view.serving_artifact_ref,
-            serving_version_key=_optional_text(diagnostics.get("serving_version_key")),
-            serving_manifest_ref=_optional_text(diagnostics.get("serving_manifest_ref"))
-            or _optional_text(getattr(bootstrap_summary, "serving_manifest_ref", None)),
-            representation_contract_hash=view.representation_contract_hash,
-            serving_build_digest=serving_build_digest,
-            tensor_schema_hash=view.tensor_schema_hash,
-            readiness=view.readiness,
-            family=family or str(diagnostics.get("family") or ""),
-            tp_rank=(
-                tp_rank
-                if tp_rank is not None
-                else _optional_int(diagnostics.get("tp_rank"))
-            ),
-            tp_world_size=(
-                tp_world_size
-                if tp_world_size is not None
-                else _optional_int(diagnostics.get("tp_world_size"))
-            ),
-            binding_layout_id=_optional_text(diagnostics.get("binding_layout_id"))
-            or _optional_text(getattr(bootstrap_summary, "binding_layout_id", None)),
-            local_serving_ref=view.local_serving_ref,
-            binding_value_ref=binding_value_ref,
-            verification_state=verification_state,
-            verification_job_id=verification_job_id,
-            source_bound_contract=source_bound_projection,
-            realize_diagnostics=realize_projection,
-            publish_diagnostics=publish_projection,
-            published_replica=published_replica,
-            source_selection=source_selection,
-            reload_request=reload_projection,
-            bootstrap_summary=bootstrap_projection,
-        )
-        reload_response = None
-        if include_reload_response:
-            reload_response = ReloadResponseProjection(
-                serving_artifact_ref=view.serving_artifact_ref,
-                representation_contract_hash=view.representation_contract_hash,
-                serving_build_digest=serving_build_digest,
-                readiness=view.readiness,
-            )
-        return cls(
-            readiness=view.readiness,
-            serving_artifact_ref=view.serving_artifact_ref,
-            source_artifact_ref=view.source_artifact_ref,
-            representation_contract_hash=view.representation_contract_hash,
-            serving_build_digest=serving_build_digest,
-            tensor_schema_hash=view.tensor_schema_hash,
-            local_serving_ref=view.local_serving_ref,
-            binding_value_ref=binding_value_ref,
-            verification_state=verification_state,
-            verification_job_id=verification_job_id,
-            endpoint=RuntimeEndpointProjection(
-                weight_version=weight_version,
-                reload_response=reload_response,
-            ),
-            diagnostics=diagnostics,
-        )
-
-
-@dataclass(frozen=True)
-class RuntimeAttachment:
-    model: object
-    state: RuntimeBindingState
-    view: RuntimeWorkerView
-    bootstrap_summary: BootstrapSummary | None = None
-    prepared: PreparedServingArtifact | None = None
-
-
-@dataclass(frozen=True)
-class RuntimeBindingView:
-    """Read-only framework-facing view of core-owned runtime binding state."""
-
-    serving_artifact_ref: str | None = None
-    source_artifact_ref: str | None = None
-    representation_contract_hash: str = ""
-    tensor_schema_hash: str = ""
-    binding_value_ref: Any | None = None
-    local_serving_ref: str | None = None
-    readiness: str = ""
-    diagnostics: Mapping[str, Any] | None = None
-
-
-@dataclass
-class RuntimeBindingState:
-    """Core-owned runtime binding lifecycle state placeholder."""
-
-    binding: Any | None = None
-    artifact_ref: str | None = None
-    runtime_view: RuntimeBindingView | None = None
-    ownership_handle: Any | None = None
-
-    def close(self) -> None:
-        handle = self.ownership_handle or self.binding
-        close = getattr(handle, "close", None)
-        if callable(close):
-            close()
-
-
-@dataclass(frozen=True)
-class RuntimeStateSeed:
-    """Core state facts known before framework tensor materialization."""
-
-    artifact_ref: str | None = None
-    serving_artifact_ref: str | None = None
-    source_artifact_ref: str | None = None
-    representation_contract_hash: str = ""
-    tensor_schema_hash: str = ""
-    binding_value_ref: Any | None = None
-    local_serving_ref: str | None = None
-    readiness: str = "loaded"
-    diagnostics: Mapping[str, Any] | None = None
-
-    def runtime_view(self) -> RuntimeBindingView:
-        return RuntimeBindingView(
-            serving_artifact_ref=self.serving_artifact_ref,
-            source_artifact_ref=self.source_artifact_ref,
-            representation_contract_hash=self.representation_contract_hash,
-            tensor_schema_hash=self.tensor_schema_hash,
-            binding_value_ref=self.binding_value_ref,
-            local_serving_ref=self.local_serving_ref,
-            readiness=self.readiness,
-            diagnostics=self.diagnostics,
-        )
+BootstrapPolicy = tc_runtime_intent.BootstrapPolicy
+ServingIntent = tc_runtime_intent.ServingIntent
+ExistingServingArtifact = tc_runtime_intent.ExistingServingArtifact
+LocalSourceBootstrap = tc_runtime_intent.LocalSourceBootstrap
+RetainedBindingAcquire = tc_runtime_intent.RetainedBindingAcquire
+RequestContext = tc_runtime_intent.RequestContext
 
 
 @dataclass(frozen=True)
@@ -1553,7 +521,7 @@ class _HostMaterializationRequest:
 
 @dataclass(frozen=True)
 class _DirectServingLoad:
-    selector: Any | None = None
+    artifact_locator: Any | None = None
     policy: Any | None = None
     materialization: Any | None = None
     configured_collective_policy: Any | None = None
@@ -1584,7 +552,7 @@ class ServingLoadResult:
 @dataclass(frozen=True)
 class _ServingReload:
     current_state: RuntimeBindingState | Any
-    selector: Any | None = None
+    artifact_locator: Any | None = None
     policy: Any | None = None
     materialization: Any | None = None
     configured_collective_policy: Any | None = None
@@ -1608,6 +576,12 @@ class ServingReloadResult:
     runtime_view: RuntimeBindingView | None = None
     resolved_artifact: ResolvedServingArtifact | None = None
     binding_result: RuntimeBindingResult | None = None
+
+
+@dataclass(frozen=True)
+class _ServingArtifactPreflight:
+    resolved_artifact: ResolvedServingArtifact
+    serving_runtime_policy: Any | None
 
 
 @dataclass(frozen=True)
@@ -1732,8 +706,9 @@ class LocalReadyServingResult:
     model: Any | None = None
     runtime_state: RuntimeBindingState | None = None
     runtime_view: RuntimeBindingView | None = None
-    bootstrap_summary: BootstrapSummary | None = None
     prepared: PreparedServingArtifact | None = None
+    binding_value: ServingBindingValue | None = None
+    recipe: Any | None = None
     current_value: Any | None = None
     binding: Any | None = None
     update_epoch: Any | None = None
@@ -1749,7 +724,7 @@ class RecipeBuildSessionRequest:
     model_config: Any | None = None
     placement: ServingPlacement | None = None
     cache_config: Any | None = None
-    identity: RecipeBuildIdentity | None = None
+    identity: ServingBindingPlan | None = None
     trace_cache_schema_version: int | None = None
     tp_rank: int | None = None
     tp_world_size: int | None = None
@@ -1811,6 +786,7 @@ class RuntimeBindingResult:
     binding_layout_id: str | None = None
     operation_result: Any | None = None
     execution_diagnostics: Any | None = None
+    materialization_diagnostics: Any | None = None
 
     @classmethod
     def from_binding(
@@ -1825,6 +801,11 @@ class RuntimeBindingResult:
             binding_layout_id=getattr(binding, "binding_layout_id", None),
             operation_result=operation_result,
             execution_diagnostics=getattr(binding, "last_execution_diagnostics", None),
+            materialization_diagnostics=getattr(
+                binding,
+                "last_materialization_diagnostics",
+                None,
+            ),
         )
 
 
@@ -1832,8 +813,10 @@ class RuntimeBindingResult:
 class RestoredRetainedBinding:
     """Restored retained binding tensors before runtime ownership transfer."""
 
-    _attached: tc_preload.AttachedPreloadBinding
-    _runtime_handle: tc_preload.RuntimePreloadAttachmentHandle | None = None
+    _attached: tc_retained_binding.AttachedRetainedBinding
+    _runtime_handle: (
+        tc_retained_binding.RuntimeRetainedBindingAttachmentHandle | None
+    ) = None
 
     @property
     def tensors(self) -> Mapping[str, torch.Tensor]:
@@ -1856,10 +839,14 @@ class RestoredRetainedBinding:
         return self._attached.reservation_bytes
 
     @property
-    def runtime_handle(self) -> tc_preload.RuntimePreloadAttachmentHandle | None:
+    def runtime_handle(
+        self,
+    ) -> tc_retained_binding.RuntimeRetainedBindingAttachmentHandle | None:
         return self._runtime_handle
 
-    def transfer_to_runtime(self) -> tc_preload.RuntimePreloadAttachmentHandle:
+    def transfer_to_runtime(
+        self,
+    ) -> tc_retained_binding.RuntimeRetainedBindingAttachmentHandle:
         if self._runtime_handle is None:
             self._runtime_handle = self._attached.transfer_to_runtime()
         return self._runtime_handle
@@ -1957,10 +944,43 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
-def _selector_kind(selector: object) -> str:
-    if isinstance(selector, Mapping):
-        return str(selector.get("kind") or "")
-    return str(getattr(selector, "kind", "") or "")
+def _serving_realization_report(
+    diagnostics: Mapping[str, object],
+) -> Mapping[str, object] | None:
+    value = diagnostics.get("serving_realization_report")
+    if isinstance(value, Mapping):
+        return value
+    return None
+
+
+def _nested_mapping(
+    value: Mapping[str, object] | None,
+    key: str,
+) -> Mapping[str, object] | None:
+    if value is None:
+        return None
+    nested = value.get(key)
+    if isinstance(nested, Mapping):
+        return nested
+    return None
+
+
+def _nested_value(
+    value: Mapping[str, object] | None,
+    *path: str,
+) -> object | None:
+    current: object | None = value
+    for key in path:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _artifact_locator_kind(artifact_locator: object) -> str:
+    if isinstance(artifact_locator, Mapping):
+        return str(artifact_locator.get("kind") or "")
+    return str(getattr(artifact_locator, "kind", "") or "")
 
 
 def _optional_bool(fields: Mapping[str, object], name: str, default: bool) -> bool:
@@ -2136,8 +1156,9 @@ def resolve_source_subject(
 def source_subject_from_broadcast_payload(payload: Mapping[str, Any]) -> SourceSubject:
     payload_dict = dict(payload)
     if "kind" not in payload_dict:
-        legacy_source = tc.PublicDiskSourceHandle(**payload_dict)
-        return _source_subject_from_handle(legacy_source)
+        raise SourceSubjectError(
+            "TensorCast source subject broadcast payload is missing kind"
+        )
     kind = str(payload_dict.get("kind") or "")
     artifact_ref = str(payload_dict.get("artifact_ref") or "")
     if not artifact_ref:
@@ -2179,7 +1200,7 @@ def source_subject_slice_count(recipe: Any, subject: Any) -> int:
 def serving_binding_state_from_runtime_view(
     *,
     runtime_view: RuntimeBindingView,
-    selector: Any,
+    artifact_locator: Any,
     policy: Any,
     readiness: str | None = None,
 ) -> ServingBindingState:
@@ -2195,14 +1216,14 @@ def serving_binding_state_from_runtime_view(
             binding_value_ref = BindingValueRef.model_validate(dict(binding_value_ref))
         else:
             raise ServingIntegrationError(
-                "RuntimeBindingView.binding_value_ref must be BindingValueRef-compatible"
+                "RuntimeBindingView.binding_value_ref must be BindingValueRef or a mapping"
             )
     typed_binding_value_ref = cast(BindingValueRef | None, binding_value_ref)
     resolved_readiness = readiness or runtime_view.readiness or "loaded"
     state = "loaded" if resolved_readiness == "serving" else resolved_readiness
     return ServingBindingState(
         state=state,
-        selector=selector,
+        artifact_locator=artifact_locator,
         serving_artifact_ref=runtime_view.serving_artifact_ref,
         manifest_ref=getattr(policy, "manifest_ref", None),
         representation_contract_hash=(
@@ -2311,8 +1332,8 @@ def source_bound_plan_diagnostics_summary_fields(
         "planned_generic_residual_bytes": int(
             getattr(diagnostics, "planned_generic_residual_bytes", 0)
         ),
-        "compatibility_lowered_bytes": int(
-            getattr(diagnostics, "compatibility_lowered_bytes", 0)
+        "collective_lowered_bytes": int(
+            getattr(diagnostics, "collective_lowered_bytes", 0)
         ),
         "planner_reject_reason_buckets": dict(
             getattr(diagnostics, "planner_reject_reason_buckets", {})
@@ -2330,77 +1351,6 @@ def source_bound_plan_diagnostics_summary_fields(
         ),
     }
     return {f"{prefix}_{key}": value for key, value in fields.items()}
-
-
-def binding_layout_tensor_count(layout: Any) -> int:
-    target_layout = getattr(layout, "target_layout", None)
-    offsets = getattr(target_layout, "offsets", None)
-    if offsets is None:
-        return -1
-    return len(offsets)
-
-
-def binding_layout_profile_fields(layout: Any) -> dict[str, Any]:
-    target_index_bytes = getattr(layout, "target_index_bytes", b"") or b""
-    return {
-        "target_index_bytes": len(target_index_bytes),
-        "binding_tensor_count": binding_layout_tensor_count(layout),
-    }
-
-
-def binding_layout_debug_payload(
-    layout: Any,
-    *,
-    target_device: Any,
-    context: str,
-    pid: int,
-) -> dict[str, Any]:
-    target_layout = layout.target_layout
-    target_index_bytes = layout.target_index_bytes
-    return {
-        "context": str(context),
-        "pid": int(pid),
-        "target_device": str(target_device),
-        "binding_layout_id": str(layout.binding_layout_id),
-        "target_index_bytes_len": len(target_index_bytes),
-        "target_index_sha256": hashlib.sha256(target_index_bytes).hexdigest(),
-        "layout": {
-            "layout_kind": int(target_layout.layout_kind),
-            "index_kind": int(target_layout.index_kind),
-            "tensor_spec_kind": int(target_layout.tensor_spec_kind),
-            "logical_layout_hash": bytes(target_layout.logical_layout_hash).hex(),
-            "view_id": str(target_layout.view_id),
-            "storages": [
-                {
-                    "storage_id": str(storage.storage_id),
-                    "device_id": int(storage.device_id),
-                    "storage_length": int(storage.storage_length),
-                    "mapping_base_offset": int(storage.mapping_base_offset),
-                }
-                for storage in target_layout.storages
-            ],
-            "offsets": [
-                {
-                    "name": str(offset.name),
-                    "storage_id": str(offset.storage_id),
-                    "storage_offset": int(offset.storage_offset),
-                    "logical_length": int(offset.logical_length),
-                }
-                for offset in target_layout.offsets
-            ],
-        },
-        "dst_specs": [
-            {
-                "name": str(spec.name),
-                "dtype": str(spec.dtype),
-                "shape": [int(v) for v in spec.shape],
-                "stride": [int(v) for v in spec.stride],
-                "storage_offset": int(spec.storage_offset),
-                "logical_length": int(spec.logical_length),
-            }
-            for spec in layout.dst_specs
-        ],
-    }
 
 
 def is_runtime_binding_swap_capable(binding: Any) -> bool:
@@ -2470,6 +1420,50 @@ def build_local_ready_prepared_artifact(
     verification_job_id = getattr(current_value, "verification_job_id", None)
     binding_value_ref = binding_value_ref_from_current_value(current_value)
     binding_layout_id = getattr(binding, "binding_layout_id", None)
+    execution_report = _strip_report_prefix(
+        execution_diagnostics_summary_fields(
+            getattr(binding, "last_execution_diagnostics", None),
+            prefix="realize",
+        ),
+        prefix="realize",
+    )
+    plan_report = _strip_report_prefix(
+        source_bound_plan_diagnostics_summary_fields(
+            getattr(binding, "last_source_bound_plan_diagnostics", None),
+            prefix="realize",
+        ),
+        prefix="realize",
+    )
+    realization_report = tc_diagnostics.ServingRealizationReport(
+        source_artifact_ref=source_artifact_ref,
+        serving_manifest_ref=serving_manifest_ref,
+        representation_contract_hash=representation_contract_hash,
+        serving_build_digest=serving_build_digest,
+        tensor_schema_hash=tensor_schema_hash,
+        family=family,
+        tp_rank=int(tp_rank),
+        tp_world_size=int(tp_world_size),
+        source_bound_contract=tc_diagnostics.SourceContractReport(
+            version=(source_bound_contract_state.source_bound_contract_version),
+            capability_flags=tuple(
+                source_bound_contract_state.source_bound_capability_names
+            ),
+            ready=source_bound_contract_state.source_bound_contract_ready,
+            path=source_bound_contract_path,
+        ),
+        realization=tc_diagnostics.RealizationReport(
+            binding_layout_id=binding_layout_id,
+            binding_value=tc_diagnostics.BindingValueReport(
+                verification_state=verification_state,
+                verification_job_id=verification_job_id,
+                local_serving_ref=local_serving_ref,
+                binding_value_id=current_value_fields["binding_value_id"],
+            ),
+            execution=execution_report,
+            plan=plan_report,
+        ),
+    )
+    diagnostics = realization_report.to_runtime_diagnostics()
     runtime_view = RuntimeBindingView(
         serving_artifact_ref=None,
         source_artifact_ref=source_artifact_ref,
@@ -2478,45 +1472,12 @@ def build_local_ready_prepared_artifact(
         binding_value_ref=binding_value_ref,
         local_serving_ref=local_serving_ref,
         readiness="serving_local_ready",
-        diagnostics={
-            "verification_state": verification_state,
-            "verification_job_id": verification_job_id,
-            "serving_manifest_ref": serving_manifest_ref,
-            "serving_build_digest": serving_build_digest,
-            "family": family,
-            "tp_rank": int(tp_rank),
-            "tp_world_size": int(tp_world_size),
-        },
+        diagnostics=diagnostics,
     )
     runtime_state = runtime_binding_state_from_runtime_view(
         binding=binding,
         runtime_view=runtime_view,
         artifact_ref=source_artifact_ref,
-    )
-    bootstrap_summary = BootstrapSummary(
-        source_artifact_ref=source_artifact_ref,
-        serving_artifact_ref=None,
-        serving_manifest_ref=serving_manifest_ref,
-        representation_contract_hash=representation_contract_hash,
-        serving_build_digest=serving_build_digest,
-        binding_value_ref=binding_value_ref,
-        readiness="serving_local_ready",
-        binding_layout_id=binding_layout_id,
-        local_serving_ref=local_serving_ref,
-        verification_state=verification_state,
-        verification_job_id=verification_job_id,
-        source_bound_contract_version=source_bound_contract_state.source_bound_contract_version,
-        source_bound_capability_flags=source_bound_contract_state.source_bound_capability_names,
-        source_bound_contract_ready=source_bound_contract_state.source_bound_contract_ready,
-        source_bound_contract_path=source_bound_contract_path,
-        **execution_diagnostics_summary_fields(
-            getattr(binding, "last_execution_diagnostics", None),
-            prefix="realize",
-        ),
-        **source_bound_plan_diagnostics_summary_fields(
-            getattr(binding, "last_source_bound_plan_diagnostics", None),
-            prefix="realize",
-        ),
     )
     prepared = PreparedServingArtifact(
         source_artifact_ref=source_artifact_ref,
@@ -2534,14 +1495,22 @@ def build_local_ready_prepared_artifact(
         verification_job_id=verification_job_id,
         tp_rank=int(tp_rank),
         tp_world_size=int(tp_world_size),
-        bootstrap_summary=bootstrap_summary,
     )
     return LocalReadyServingResult(
         runtime_state=runtime_state,
         runtime_view=runtime_view,
-        bootstrap_summary=bootstrap_summary,
         prepared=prepared,
+        binding_value=prepared.to_binding_value(),
     )
+
+
+def _strip_report_prefix(fields: Mapping[str, Any], *, prefix: str) -> dict[str, Any]:
+    prefix_text = f"{prefix}_"
+    return {
+        key.removeprefix(prefix_text): value
+        for key, value in fields.items()
+        if key.startswith(prefix_text)
+    }
 
 
 def build_collective_group_id(
@@ -2621,14 +1590,14 @@ class ServingIntegration:
 
         decision = self._admit_intent(intent, context)
         if isinstance(intent, ExistingServingArtifact):
-            self._reject_source_selector_for_existing_artifact(intent.selector)
+            self._reject_source_selector_for_existing_artifact(intent.artifact_locator)
             materialization_request = self._host_materialization_request(
                 context,
                 operation_scope="startup.direct_serving_artifact.bind",
             )
             load_result = self._load_existing_serving_artifact(
                 _DirectServingLoad(
-                    selector=intent.selector,
+                    artifact_locator=intent.artifact_locator,
                     policy=intent.policy,
                     framework_config=context.framework_config,
                     model_config=context.model_config,
@@ -2657,9 +1626,8 @@ class ServingIntegration:
                 )
             return self._attachment_from_load_result(load_result, decision)
         if isinstance(intent, RetainedBindingAcquire):
-            retained_authority = intent.authority
-            authority = retained_authority.to_preload_authority()
-            expected_member = retained_authority.member
+            authority = intent.authority
+            expected_member = authority.member
             if self.host is not None:
                 placement = self._framework_context(
                     context.framework_config,
@@ -2668,13 +1636,13 @@ class ServingIntegration:
                 if (
                     placement is not None
                     and placement.member is not None
-                    and placement.member != retained_authority.member
+                    and placement.member != authority.member
                 ):
                     raise AuthorityValidationError(
-                        "RetainedBindingAuthority.member does not match "
+                        "ParsedRetainedServingBindingAuthority.member does not match "
                         "runtime placement",
                         details={
-                            "authority_member": repr(retained_authority.member),
+                            "authority_member": repr(authority.member),
                             "placement_member": repr(placement.member),
                         },
                     )
@@ -2737,7 +1705,7 @@ class ServingIntegration:
                 "ServingIntegration.reload currently accepts "
                 "ExistingServingArtifact intent only"
             )
-        self._reject_source_selector_for_existing_artifact(intent.selector)
+        self._reject_source_selector_for_existing_artifact(intent.artifact_locator)
         decision = self._admit_intent(intent, context, reload=True)
         materialization_request = self._host_materialization_request(
             context,
@@ -2746,7 +1714,7 @@ class ServingIntegration:
         result = self._reload_existing_serving_artifact(
             _ServingReload(
                 current_state=current_state,
-                selector=intent.selector,
+                artifact_locator=intent.artifact_locator,
                 policy=intent.policy,
                 framework_config=context.framework_config,
                 model_config=context.model_config,
@@ -2849,15 +1817,17 @@ class ServingIntegration:
         return decision
 
     @staticmethod
-    def _reject_source_selector_for_existing_artifact(selector: object) -> None:
-        if isinstance(selector, SourceSelector):
+    def _reject_source_selector_for_existing_artifact(
+        artifact_locator: object,
+    ) -> None:
+        if isinstance(artifact_locator, SourceSelector):
             raise ServingIntegrationError(
                 "ExistingServingArtifact requires a durable serving artifact "
-                "selector; local source selectors must use LocalSourceBootstrap"
+                "locator; local source selectors must use LocalSourceBootstrap"
             )
-        if _selector_kind(selector) == "local_path":
+        if _artifact_locator_kind(artifact_locator) == "local_path":
             raise ServingIntegrationError(
-                "ExistingServingArtifact rejects local_path selectors; use "
+                "ExistingServingArtifact rejects local_path artifact locators; use "
                 "LocalSourceBootstrap for local source acquisition"
             )
 
@@ -2906,13 +1876,9 @@ class ServingIntegration:
         return RuntimeAttachment(
             model=result.model,
             state=state,
-            view=self._worker_view_from_state(
-                state,
-                decision=decision,
-                bootstrap_summary=result.bootstrap_summary,
-            ),
-            bootstrap_summary=result.bootstrap_summary,
+            view=self._worker_view_from_state(state, decision=decision),
             prepared=result.prepared,
+            recipe=result.recipe,
         )
 
     def _local_source_bootstrap_request(
@@ -3063,7 +2029,6 @@ class ServingIntegration:
         state: RuntimeBindingState | Any,
         *,
         decision: AdmissionDecision | None,
-        bootstrap_summary: BootstrapSummary | None = None,
         include_reload_response: bool = False,
     ) -> RuntimeWorkerView:
         runtime_view = getattr(state, "runtime_view", None)
@@ -3074,7 +2039,6 @@ class ServingIntegration:
         endpoint_fields = dict(decision.endpoint_fields) if decision else {}
         return RuntimeWorkerView.from_runtime_view(
             runtime_view,
-            bootstrap_summary=bootstrap_summary,
             family=str(
                 endpoint_fields.get(
                     "family",
@@ -3116,10 +2080,24 @@ class ServingIntegration:
             raise ServingIntegrationError(
                 "ServingIntegration host placement requires IntegrationHost"
             )
+        framework_payload = None
+        framework_payload_fn = getattr(self.host.placement, "framework_payload", None)
+        if callable(framework_payload_fn):
+            with suppress(Exception):
+                payload = framework_payload_fn(framework_config)
+                framework_payload = None if payload is None else dict(payload)
+        identity_payload = None
+        identity_payload_fn = getattr(self.host.placement, "identity_payload", None)
+        if callable(identity_payload_fn):
+            with suppress(Exception):
+                payload = identity_payload_fn(framework_config)
+                identity_payload = None if payload is None else dict(payload)
         return serving_placement_from_framework_facts(
             identity_facts=self.host.placement.identity_facts(framework_config),
             admission_facts=self.host.placement.admission_facts(framework_config),
             member_facts=self.host.placement.member_facts(framework_config),
+            framework_payload=framework_payload,
+            identity_payload=identity_payload,
         )
 
     @staticmethod
@@ -3142,14 +2120,20 @@ class ServingIntegration:
         self, request: _DirectServingLoad
     ) -> ServingLoadResult:
         target_device = self._require_target_device(request.target_device)
-        policy = self._runtime_policy(request.policy)
-        resolved = self._resolved_artifact(
+        context = self._framework_context(
+            request.framework_config,
+            request.model_config,
+        )
+        preflight = self._preflight_serving_artifact(
             resolved_artifact=request.resolved_artifact,
             artifact_ref=request.artifact_ref,
-            selector=request.selector,
+            artifact_locator=request.artifact_locator,
             expected_tensor_schema_hash=None,
-            serving_runtime_policy=policy,
+            policy=request.policy,
+            placement=context.placement,
         )
+        resolved = preflight.resolved_artifact
+        policy = preflight.serving_runtime_policy
         model = request.model
         if model is None:
             self._prepare_model_construction(
@@ -3180,18 +2164,16 @@ class ServingIntegration:
             current_tensors,
             remove_duplicate=False,
         )
-        policy = self._runtime_policy_from_manifest(policy, resolved)
-        resolved = self._resolved_artifact(
+        preflight = self._preflight_serving_artifact(
             resolved_artifact=resolved,
             artifact_ref=request.artifact_ref,
-            selector=request.selector,
+            artifact_locator=request.artifact_locator,
             expected_tensor_schema_hash=tensor_schema_hash,
-            serving_runtime_policy=policy,
+            policy=policy,
+            placement=context.placement,
         )
-        context = self._framework_context(
-            request.framework_config,
-            request.model_config,
-        )
+        resolved = preflight.resolved_artifact
+        policy = preflight.serving_runtime_policy
         manifest = getattr(resolved, "manifest", None)
         local_serving_ref = getattr(manifest, "local_serving_ref", None)
         if local_serving_ref:
@@ -3219,6 +2201,9 @@ class ServingIntegration:
                     resolved,
                     tensor_schema_hash=tensor_schema_hash,
                     execution_diagnostics=binding_result.execution_diagnostics,
+                    materialization_diagnostics=(
+                        binding_result.materialization_diagnostics
+                    ),
                     binding_handle=restored,
                     readiness="serving_local_ready",
                 )
@@ -3248,6 +2233,7 @@ class ServingIntegration:
                 resolved,
                 tensor_schema_hash=tensor_schema_hash,
                 execution_diagnostics=binding_result.execution_diagnostics,
+                materialization_diagnostics=binding_result.materialization_diagnostics,
                 binding_handle=binding_result.binding,
             )
             runtime_state = self._materializer().attach_and_finalize(
@@ -3303,14 +2289,26 @@ class ServingIntegration:
                     target_device = torch.device(tensor.device)
                     break
         target_device = self._require_target_device(target_device)
-        policy = self._runtime_policy(request.policy)
-        resolved = self._resolved_artifact(
+        context = None
+        if (
+            request.model is not None
+            or _artifact_locator_kind(request.artifact_locator) == "ranked_version_key"
+        ):
+            context = self._framework_context(
+                request.framework_config,
+                request.model_config,
+            )
+        placement = None if context is None else context.placement
+        preflight = self._preflight_serving_artifact(
             resolved_artifact=request.resolved_artifact,
             artifact_ref=request.artifact_ref,
-            selector=request.selector,
+            artifact_locator=request.artifact_locator,
             expected_tensor_schema_hash=expected_tensor_schema_hash,
-            serving_runtime_policy=policy,
+            policy=request.policy,
+            placement=placement,
         )
+        resolved = preflight.resolved_artifact
+        policy = preflight.serving_runtime_policy
         materialization = self._reload_materialization_options(
             request,
             resolved,
@@ -3318,6 +2316,9 @@ class ServingIntegration:
         binding_result = swap_serving_artifact(
             binding=binding,
             resolved_artifact=resolved,
+            tensor_names=(
+                None if runtime_tensors is None else tuple(runtime_tensors.keys())
+            ),
             serving_runtime_policy=policy,
             options=materialization,
         )
@@ -3325,17 +2326,19 @@ class ServingIntegration:
             resolved,
             tensor_schema_hash=str(expected_tensor_schema_hash or ""),
             execution_diagnostics=binding_result.execution_diagnostics,
+            materialization_diagnostics=binding_result.materialization_diagnostics,
             binding_handle=binding_result.binding,
         )
         if request.model is not None:
+            context = context or self._framework_context(
+                request.framework_config,
+                request.model_config,
+            )
             runtime_state = self._materializer().attach_and_finalize(
                 model=request.model,
                 tensors=binding_result.tensors,
                 binding_handle=binding_result.binding,
-                context=self._framework_context(
-                    request.framework_config,
-                    request.model_config,
-                ),
+                context=context,
                 state_seed=state_seed,
                 replace_meta_params=False,
                 target_device=target_device,
@@ -3573,6 +2576,7 @@ class ServingIntegration:
             binding_factory=request.binding_factory,
         )
         realized = LocalReadyServingResult(
+            recipe=request.recipe,
             binding=realization.binding,
             update_epoch=realization.update_epoch,
             layout=realization.layout,
@@ -3633,8 +2637,9 @@ class ServingIntegration:
                 model=finalized.model,
                 runtime_state=finalized.runtime_state,
                 runtime_view=finalized.runtime_view,
-                bootstrap_summary=finalized.bootstrap_summary,
                 prepared=finalized.prepared,
+                binding_value=finalized.binding_value,
+                recipe=request.recipe,
                 current_value=finalized.current_value,
                 binding=finalized.binding,
                 update_epoch=finalized.update_epoch,
@@ -3659,6 +2664,15 @@ class ServingIntegration:
                 "ServingIntegration.start(LocalSourceBootstrap) could not "
                 "derive source_artifact_ref from source subject"
             )
+        try:
+            source_artifact_ref = tc_source_catalog.resolve_source_artifact_ref(
+                source_artifact_ref
+            )
+        except ValueError as exc:
+            raise ServingIntegrationError(
+                "ServingIntegration.start(LocalSourceBootstrap) requires "
+                "a real source artifact identity"
+            ) from exc
         source_realization_subject = getattr(
             source_subject_record, "subject", source_subject_record
         )
@@ -3720,7 +2734,20 @@ class ServingIntegration:
         source_subject: Any,
         source_artifact_ref: str,
     ) -> Any:
+        try:
+            expected_source_ref = tc_source_catalog.resolve_source_artifact_ref(
+                source_artifact_ref
+            )
+        except ValueError as exc:
+            raise ServingIntegrationError(
+                "ServingIntegration.start(LocalSourceBootstrap) requires "
+                "a real source artifact identity"
+            ) from exc
         if request.source_catalog is not None:
+            self._validate_source_catalog_artifact_ref(
+                request.source_catalog,
+                expected_source_artifact_ref=expected_source_ref,
+            )
             return request.source_catalog
         if self.host is not None and self.host.source_catalog is not None:
             if not isinstance(request.source_selector, SourceSelector):
@@ -3735,7 +2762,7 @@ class ServingIntegration:
                 SourceCatalogRequest(
                     source_subject=source_subject,
                     source_selector=request.source_selector,
-                    source_artifact_ref=source_artifact_ref,
+                    source_artifact_ref=expected_source_ref,
                     framework_identity=self.host.framework.identity(
                         request.model_config
                     ),
@@ -3756,14 +2783,10 @@ class ServingIntegration:
                     source_catalog_config=request.source_catalog_config,
                 )
             )
-            catalog_artifact_ref = getattr(source_catalog, "source_artifact_ref", None)
-            if catalog_artifact_ref is not None and str(catalog_artifact_ref) != str(
-                source_artifact_ref
-            ):
-                raise ServingIntegrationError(
-                    "SourceCatalogProvider returned source_artifact_ref "
-                    f"{catalog_artifact_ref!r}, expected {source_artifact_ref!r}"
-                )
+            self._validate_source_catalog_artifact_ref(
+                source_catalog,
+                expected_source_artifact_ref=expected_source_ref,
+            )
             return source_catalog
         raise _capability_missing(
             "ServingIntegration.start(LocalSourceBootstrap) requires "
@@ -3777,6 +2800,28 @@ class ServingIntegration:
                 "recipe through the admin/offline bootstrap path."
             ),
         )
+
+    @staticmethod
+    def _validate_source_catalog_artifact_ref(
+        source_catalog: Any,
+        *,
+        expected_source_artifact_ref: str,
+    ) -> None:
+        catalog_artifact_ref = getattr(source_catalog, "source_artifact_ref", None)
+        try:
+            catalog_source_ref = tc_source_catalog.resolve_source_artifact_ref(
+                catalog_artifact_ref
+            )
+        except ValueError as exc:
+            raise ServingIntegrationError(
+                "SourceCatalogProvider returned a catalog without a real "
+                "source_artifact_ref"
+            ) from exc
+        if catalog_source_ref != expected_source_artifact_ref:
+            raise ServingIntegrationError(
+                "SourceCatalogProvider returned source_artifact_ref "
+                f"{catalog_source_ref!r}, expected {expected_source_artifact_ref!r}"
+            )
 
     @staticmethod
     def _local_ready_recipe_cache_config(
@@ -3977,13 +3022,13 @@ class ServingIntegration:
                 request,
                 tensor_schema_hash=tensor_schema_hash,
             )
-            semantic_validation_spec = request.semantic_validation_spec
-            if semantic_validation_spec is None and request.run_semantic_validation:
-                semantic_validation_spec = getattr(
-                    request.recipe,
-                    "semantic_validation_spec",
-                    None,
-                )
+            semantic_validation_spec = self._local_ready_semantic_validation_spec(
+                request
+            )
+            self._assert_local_ready_finalize_admitted(
+                request,
+                semantic_validation_spec=semantic_validation_spec,
+            )
             self._materializer().attach_and_finalize(
                 model=request.model,
                 tensors=_binding_tensors(request.binding),
@@ -4039,8 +3084,9 @@ class ServingIntegration:
                 model=request.model,
                 runtime_state=prepared.runtime_state,
                 runtime_view=prepared.runtime_view,
-                bootstrap_summary=prepared.bootstrap_summary,
                 prepared=prepared.prepared,
+                binding_value=prepared.binding_value,
+                recipe=request.recipe,
                 current_value=current_value,
                 binding=request.binding,
                 update_epoch=request.update_epoch,
@@ -4048,6 +3094,65 @@ class ServingIntegration:
         except Exception:
             _close_quietly(request.binding)
             raise
+
+    def _assert_local_ready_finalize_admitted(
+        self,
+        request: _LocalReadyFinalize,
+        *,
+        semantic_validation_spec: Any | None,
+    ) -> None:
+        if not self.local_ready_requires_binding_finalize(request.recipe):
+            return
+        if not request.run_process_after_load:
+            raise ServingIntegrationError(
+                "TensorCast representation-changing local-ready finalize "
+                "requires process_after_load execution"
+            )
+        if not request.run_semantic_validation:
+            raise ServingIntegrationError(
+                "TensorCast representation-changing local-ready finalize "
+                "requires explicit semantic validation"
+            )
+        if (
+            semantic_validation_spec is None
+            or getattr(semantic_validation_spec, "kind", "none") == "none"
+        ):
+            raise ServingIntegrationError(
+                "TensorCast representation-changing local-ready finalize "
+                "requires an explicit semantic validation spec"
+            )
+        if not request.validate_representation_contract_hash:
+            raise ServingIntegrationError(
+                "TensorCast representation-changing local-ready finalize "
+                "requires representation contract validation"
+            )
+        if (
+            request.source_bound_contract_state is None
+            or not request.source_bound_contract_path
+        ):
+            raise ServingIntegrationError(
+                "TensorCast representation-changing local-ready finalize "
+                "requires same-binding contract proof"
+            )
+        if not getattr(
+            request.source_bound_contract_state,
+            "source_bound_contract_ready",
+            False,
+        ):
+            raise ServingIntegrationError(
+                "TensorCast representation-changing local-ready finalize "
+                "requires ready same-binding contract proof"
+            )
+
+    @staticmethod
+    def _local_ready_semantic_validation_spec(
+        request: _LocalReadyFinalize,
+    ) -> Any | None:
+        if request.semantic_validation_spec is not None:
+            return request.semantic_validation_spec
+        if not request.run_semantic_validation:
+            return None
+        return getattr(request.recipe, "semantic_validation_spec", None)
 
     def _validate_local_ready_representation_contract_hash(
         self,
@@ -4105,12 +3210,14 @@ class ServingIntegration:
         manifest_tensor_name: str,
         representation_contract_hash: str,
         logical_topology_json_payload: str | None = None,
+        topology_admission_digest: str | None = None,
     ) -> tuple[str, bytes]:
         return prepare_same_binding_manifest_carrier(
             recipe,
             manifest_tensor_name=manifest_tensor_name,
             representation_contract_hash=representation_contract_hash,
             logical_topology_json_payload=logical_topology_json_payload,
+            topology_admission_digest=topology_admission_digest,
         )
 
     def build_local_ready_manifest_carrier_from_contract(
@@ -4135,11 +3242,15 @@ class ServingIntegration:
             topology=topology,
             framework_payload=dict(framework_payload or {}),
         )
+        topology_admission_digest = _optional_text(
+            getattr(topology, "schema_topology_digest", None)
+        )
         return self.build_local_ready_manifest_carrier(
             recipe=recipe,
             manifest_tensor_name=manifest_tensor_name,
             representation_contract_hash=representation_contract_hash,
             logical_topology_json_payload=logical_topology_json_payload,
+            topology_admission_digest=topology_admission_digest,
         )
 
     def local_ready_representation_contract_hash(
@@ -4368,10 +3479,12 @@ class ServingIntegration:
         )
 
     def local_ready_requires_binding_finalize(self, recipe: Any) -> bool:
-        return (
-            recipe.serving_facts.process_after_load_class
-            == FinalizeClass.REPRESENTATION_CHANGING
+        serving_facts = getattr(recipe, "serving_facts", None)
+        process_after_load_class = tc_readiness.coerce_finalize_class(
+            getattr(serving_facts, "process_after_load_class", None),
+            default=FinalizeClass.RUNTIME_ONLY,
         )
+        return process_after_load_class == FinalizeClass.REPRESENTATION_CHANGING
 
     def validate_local_ready_tensor_schema(
         self,
@@ -4442,7 +3555,7 @@ class ServingIntegration:
     def _recipe_build_identity(
         self,
         request: RecipeBuildSessionRequest,
-    ) -> RecipeBuildIdentity:
+    ) -> ServingBindingPlan:
         model_config = request.model_config
         if model_config is None:
             self._lifecycle_not_implemented("build_recipe_session", "P2")
@@ -4484,7 +3597,7 @@ class ServingIntegration:
         compute_hash = getattr(model_config, "compute_hash", None)
         model_id = str(getattr(model_config, "model", "unknown"))
         framework_version = self._adapter_text(adapter, "framework_version")
-        return RecipeBuildIdentity(
+        return ServingBindingPlan(
             model_hash=str(
                 compute_hash()
                 if callable(compute_hash)
@@ -4672,14 +3785,117 @@ class ServingIntegration:
         return policy
 
     @staticmethod
-    def _runtime_policy_from_manifest(policy: Any | None, resolved: Any) -> Any | None:
-        if policy is not None:
+    def _runtime_policy_with_placement(
+        policy: Any | None, placement: Any | None
+    ) -> Any | None:
+        digest = _optional_text(
+            getattr(
+                getattr(placement, "topology", None), "schema_topology_digest", None
+            )
+        )
+        if digest is None:
             return policy
+        if policy is None:
+            return ServingRuntimePolicy(
+                require_manifest=True,
+                expected_topology_admission_digest=digest,
+            )
+        model_copy = getattr(policy, "model_copy", None)
+        if callable(model_copy):
+            return model_copy(
+                update={
+                    "require_manifest": True,
+                    "expected_topology_admission_digest": digest,
+                }
+            )
+        return policy
+
+    @classmethod
+    def _runtime_policy_from_manifest(
+        cls, policy: Any | None, resolved: Any, placement: Any | None = None
+    ) -> Any | None:
+        if policy is not None:
+            return cls._runtime_policy_with_placement(policy, placement)
         manifest = getattr(resolved, "manifest", None)
         to_runtime_policy = getattr(manifest, "to_runtime_policy", None)
         if callable(to_runtime_policy):
-            return to_runtime_policy()
-        return None
+            return cls._runtime_policy_with_placement(to_runtime_policy(), placement)
+        return cls._runtime_policy_with_placement(None, placement)
+
+    @staticmethod
+    def _json_object_payload(value: Any, *, field_name: str) -> Any:
+        try:
+            payload = json.loads(str(value))
+        except Exception as exc:
+            raise ManifestMismatchError(
+                f"TensorCast serving artifact {field_name} is invalid JSON"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise ManifestMismatchError(
+                f"TensorCast serving artifact {field_name} must be a JSON object"
+            )
+        return payload
+
+    @classmethod
+    def _validate_resolved_artifact_placement(
+        cls,
+        resolved_artifact: Any,
+        *,
+        placement: Any | None,
+    ) -> None:
+        manifest = getattr(resolved_artifact, "manifest", None)
+        if manifest is None:
+            return
+        manifest_topology_digest = _optional_text(
+            getattr(manifest, "topology_admission_digest", None)
+        )
+        placement_topology_digest = _optional_text(
+            getattr(
+                getattr(placement, "topology", None), "schema_topology_digest", None
+            )
+        )
+        if manifest_topology_digest is not None:
+            if placement_topology_digest is None:
+                raise ManifestMismatchError(
+                    "TensorCast serving artifact topology admission digest "
+                    "requires current framework placement"
+                )
+            if manifest_topology_digest != placement_topology_digest:
+                raise ManifestMismatchError(
+                    "TensorCast serving artifact topology admission digest "
+                    "mismatch: "
+                    f"manifest={manifest_topology_digest}, "
+                    f"current={placement_topology_digest}"
+                )
+
+        manifest_logical_topology = _optional_text(
+            getattr(manifest, "logical_topology_json", None)
+        )
+        if manifest_logical_topology is None:
+            return
+        if placement is None:
+            raise ManifestMismatchError(
+                "TensorCast serving artifact logical topology requires current "
+                "framework placement"
+            )
+        try:
+            current_logical_topology = tc_contract.logical_topology_json(
+                placement.topology,
+                framework_payload=dict(getattr(placement, "framework_payload", {})),
+            )
+        except Exception as exc:
+            raise ManifestMismatchError(
+                "TensorCast serving artifact logical topology could not be "
+                "computed from current framework placement"
+            ) from exc
+        if cls._json_object_payload(
+            manifest_logical_topology, field_name="logical_topology_json"
+        ) != cls._json_object_payload(
+            current_logical_topology, field_name="current logical topology"
+        ):
+            raise ManifestMismatchError(
+                "TensorCast serving artifact logical topology mismatch"
+            )
 
     def _prepare_model_construction(
         self,
@@ -4991,9 +4207,10 @@ class ServingIntegration:
         *,
         resolved_artifact: ResolvedServingArtifact | None,
         artifact_ref: str | None,
-        selector: Any | None,
+        artifact_locator: Any | None,
         expected_tensor_schema_hash: str | None,
         serving_runtime_policy: Any | None,
+        placement: ServingPlacement | None = None,
     ) -> ResolvedServingArtifact:
         if resolved_artifact is not None:
             if artifact_ref is not None and str(resolved_artifact.artifact_ref) != str(
@@ -5004,6 +4221,10 @@ class ServingIntegration:
                     f"resolved={resolved_artifact.artifact_ref}, "
                     f"requested={artifact_ref}"
                 )
+            self._validate_resolved_artifact_placement(
+                resolved_artifact,
+                placement=placement,
+            )
             if self.resolver is not None and expected_tensor_schema_hash:
                 return cross_check_serving_artifact(
                     resolved_artifact,
@@ -5013,20 +4234,69 @@ class ServingIntegration:
                 )
             return resolved_artifact
         resolved_ref = artifact_ref
-        if resolved_ref is None and selector is not None:
-            resolve_artifact_ref = getattr(selector, "resolve_artifact_ref", None)
+        if resolved_ref is None and artifact_locator is not None:
+            resolve_artifact_ref = getattr(
+                artifact_locator, "resolve_artifact_ref", None
+            )
             if callable(resolve_artifact_ref):
-                resolved_ref = resolve_artifact_ref()
+                if _artifact_locator_kind(artifact_locator) == "ranked_version_key":
+                    resolved_ref = resolve_artifact_ref(placement=placement)
+                else:
+                    resolved_ref = resolve_artifact_ref()
             else:
-                resolved_ref = str(selector)
+                resolved_ref = str(artifact_locator)
         if not resolved_ref:
             raise ServingIntegrationError(
-                "ServingIntegration request requires resolved_artifact, artifact_ref, or selector"
+                "ServingIntegration request requires resolved_artifact, "
+                "artifact_ref, or artifact_locator"
             )
-        return resolve_serving_artifact(
+        resolved = resolve_serving_artifact(
             str(resolved_ref),
             resolver=self.resolver,
             expected_tensor_schema_hash=expected_tensor_schema_hash,
+            serving_runtime_policy=serving_runtime_policy,
+        )
+        self._validate_resolved_artifact_placement(
+            resolved,
+            placement=placement,
+        )
+        return resolved
+
+    def _preflight_serving_artifact(
+        self,
+        *,
+        resolved_artifact: ResolvedServingArtifact | None,
+        artifact_ref: str | None,
+        artifact_locator: Any | None,
+        expected_tensor_schema_hash: str | None,
+        policy: Any | None,
+        placement: ServingPlacement | None = None,
+    ) -> _ServingArtifactPreflight:
+        base_policy = self._runtime_policy(policy)
+        resolved = self._resolved_artifact(
+            resolved_artifact=resolved_artifact,
+            artifact_ref=artifact_ref,
+            artifact_locator=artifact_locator,
+            expected_tensor_schema_hash=None,
+            serving_runtime_policy=None,
+            placement=placement,
+        )
+        serving_runtime_policy = self._runtime_policy_from_manifest(
+            base_policy,
+            resolved,
+            placement=placement,
+        )
+        if expected_tensor_schema_hash is not None:
+            resolved = self._resolved_artifact(
+                resolved_artifact=resolved,
+                artifact_ref=artifact_ref,
+                artifact_locator=artifact_locator,
+                expected_tensor_schema_hash=expected_tensor_schema_hash,
+                serving_runtime_policy=serving_runtime_policy,
+                placement=placement,
+            )
+        return _ServingArtifactPreflight(
+            resolved_artifact=resolved,
             serving_runtime_policy=serving_runtime_policy,
         )
 
@@ -5074,6 +4344,7 @@ class ServingIntegration:
         *,
         tensor_schema_hash: str,
         execution_diagnostics: Any | None,
+        materialization_diagnostics: Any | None = None,
         binding_handle: Any | None = None,
         readiness: str = "serving",
     ) -> RuntimeStateSeed:
@@ -5085,13 +4356,25 @@ class ServingIntegration:
         source_artifact_ref = getattr(manifest, "source_artifact_ref", None)
         serving_build_digest = getattr(manifest, "serving_build_digest", None)
         diagnostics = {}
-        if execution_diagnostics is not None:
-            diagnostics["execution"] = execution_diagnostics
-            source_selection = source_selection_projection_from_execution_diagnostics(
-                execution_diagnostics
+        if materialization_diagnostics is not None:
+            diagnostics["materialization"] = materialization_diagnostics
+            source_selection = (
+                source_selection_projection_from_materialization_diagnostics(
+                    materialization_diagnostics
+                )
             )
             if source_selection is not None:
                 diagnostics["source_selection"] = source_selection
+        if execution_diagnostics is not None:
+            diagnostics["execution"] = execution_diagnostics
+            if "source_selection" not in diagnostics:
+                source_selection = (
+                    source_selection_projection_from_execution_diagnostics(
+                        execution_diagnostics
+                    )
+                )
+                if source_selection is not None:
+                    diagnostics["source_selection"] = source_selection
         if serving_build_digest:
             diagnostics["serving_build_digest"] = str(serving_build_digest)
         binding_value_ref = getattr(binding_handle, "current_value", None)
@@ -5168,206 +4451,6 @@ def cross_check_serving_artifact(
     )
 
 
-_ACTIVE_PUBLICATION_STATES = {"publishing", "published", "retiring"}
-
-
-def _nonempty_binding_value_ref(
-    value: object | None,
-) -> BindingValueRefProjection | None:
-    projection = BindingValueRefProjection.from_value(value)
-    if projection is None:
-        return None
-    if not (
-        projection.binding_id
-        and projection.binding_layout_id
-        and projection.binding_value_id
-    ):
-        return None
-    return projection
-
-
-def _binding_value_refs_match(
-    expected: BindingValueRefProjection | None,
-    actual: BindingValueRefProjection | None,
-) -> bool:
-    if expected is None or actual is None:
-        return True
-    return expected.to_dict() == actual.to_dict()
-
-
-def _publication_generation(attachment: RuntimeAttachment) -> str:
-    weight_version = attachment.view.endpoint.weight_version
-    binding_value_ref = weight_version.binding_value_ref
-    if binding_value_ref is not None:
-        payload: object = binding_value_ref.to_dict()
-    else:
-        payload = {
-            "serving_artifact_ref": weight_version.serving_artifact_ref,
-            "local_serving_ref": weight_version.local_serving_ref,
-            "representation_contract_hash": weight_version.representation_contract_hash,
-            "tensor_schema_hash": weight_version.tensor_schema_hash,
-            "attachment_id": id(attachment),
-        }
-    encoded = json.dumps(payload, sort_keys=True, default=str)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
-
-
-def _state_publication_binding(state: RuntimeBindingState) -> object | None:
-    return state.binding or state.ownership_handle
-
-
-def _nested_attr(value: object | None, *names: str) -> object | None:
-    current = value
-    for name in names:
-        if current is None:
-            return None
-        current = getattr(current, name, None)
-    return current
-
-
-def _first_attr(value: object | None, *names: str) -> object | None:
-    if value is None:
-        return None
-    for name in names:
-        candidate = getattr(value, name, None)
-        if candidate is not None:
-            return candidate
-    return None
-
-
-def _binding_published_lease_id(binding: object | None) -> str | None:
-    return _optional_text(_first_attr(binding, "published_lease_id")) or _optional_text(
-        _nested_attr(binding, "_slot", "published_lease_id")
-    )
-
-
-def _binding_published_replica_id(binding: object | None) -> str | None:
-    return _optional_text(
-        _first_attr(binding, "published_replica_id")
-    ) or _optional_text(_nested_attr(binding, "_slot", "published_replica_id"))
-
-
-def _published_projection_matches_binding(
-    *,
-    projection: PublishedReplicaProjection,
-    attachment: RuntimeAttachment,
-    binding: object,
-) -> bool:
-    lease_id = _binding_published_lease_id(binding)
-    if projection.lease_id is not None and projection.lease_id != lease_id:
-        return False
-    replica_id = _binding_published_replica_id(binding)
-    if (
-        projection.replica_id is not None
-        and replica_id is not None
-        and projection.replica_id != replica_id
-    ):
-        return False
-    artifact_ref = _optional_text(getattr(binding, "artifact_id", None))
-    if artifact_ref is not None and projection.artifact_ref != artifact_ref:
-        return False
-    actual_ref = _nonempty_binding_value_ref(getattr(binding, "current_value", None))
-    expected_ref = projection.binding_value_ref or (
-        attachment.view.endpoint.weight_version.binding_value_ref
-    )
-    if actual_ref is not None and not _binding_value_refs_match(
-        expected_ref, actual_ref
-    ):
-        return False
-    return lease_id is not None or replica_id is not None
-
-
-def _binding_byte_space_fields(binding: object | None) -> dict[str, str | None]:
-    byte_space = getattr(binding, "byte_space", None)
-    return {
-        "byte_space_kind": (
-            _optional_text(getattr(byte_space, "kind", None))
-            or _optional_text(getattr(byte_space, "type", None))
-        ),
-        "byte_space_id": (
-            _optional_text(getattr(byte_space, "id", None))
-            or _optional_text(getattr(byte_space, "device_id", None))
-            or _optional_text(getattr(byte_space, "name", None))
-        ),
-    }
-
-
-def _call_operation_wait(
-    operation: object,
-    *,
-    timeout_s: float,
-) -> object | None:
-    wait = getattr(operation, "wait", None)
-    if callable(wait):
-        return wait(timeout_s=timeout_s)
-    result = getattr(operation, "result", None)
-    if callable(result):
-        return result(timeout_s=timeout_s)
-    return operation
-
-
-def _published_replica_projection_from_result(
-    *,
-    attachment: RuntimeAttachment,
-    binding: object,
-    operation: object | None,
-    result: object | None,
-    state: str,
-    reason: str | None = None,
-) -> PublishedReplicaProjection:
-    current_value = getattr(binding, "current_value", None)
-    binding_value_ref = (
-        _nonempty_binding_value_ref(result)
-        or _nonempty_binding_value_ref(current_value)
-        or attachment.view.endpoint.weight_version.binding_value_ref
-    )
-    byte_space_fields = _binding_byte_space_fields(binding)
-    return PublishedReplicaProjection(
-        state=state,
-        operation_id=_optional_text(getattr(operation, "operation_id", None)),
-        replica_id=(
-            _optional_text(_first_attr(result, "replica_id", "published_replica_id"))
-            or _binding_published_replica_id(binding)
-        ),
-        lease_id=(
-            _optional_text(_first_attr(result, "lease_id", "published_lease_id"))
-            or _binding_published_lease_id(binding)
-        ),
-        artifact_ref=(
-            _optional_text(_first_attr(result, "serving_artifact_id", "artifact_id"))
-            or attachment.view.endpoint.weight_version.serving_artifact_ref
-        ),
-        device_uuid=(
-            _optional_text(_first_attr(result, "device_uuid", "device_id"))
-            or _optional_text(getattr(binding, "device_uuid", None))
-        ),
-        owner_pid=_optional_int(_first_attr(result, "owner_pid")) or os.getpid(),
-        binding_layout_id=(
-            _optional_text(_first_attr(result, "binding_layout_id"))
-            or _optional_text(getattr(binding, "binding_layout_id", None))
-            or attachment.view.endpoint.weight_version.binding_layout_id
-        ),
-        binding_value_ref=binding_value_ref,
-        generation=_publication_generation(attachment),
-        reason=reason,
-        byte_space_kind=byte_space_fields["byte_space_kind"],
-        byte_space_id=byte_space_fields["byte_space_id"],
-    )
-
-
-def _attachment_with_published_replica(
-    attachment: RuntimeAttachment,
-    projection: PublishedReplicaProjection,
-) -> RuntimeAttachment:
-    weight_version = replace(
-        attachment.view.endpoint.weight_version,
-        published_replica=projection,
-    )
-    endpoint = replace(attachment.view.endpoint, weight_version=weight_version)
-    view = replace(attachment.view, endpoint=endpoint)
-    return replace(attachment, view=view)
-
-
 @dataclass(frozen=True)
 class ServingRuntimeSession:
     """Config-planned serving runtime lifecycle entrypoint."""
@@ -5416,129 +4499,34 @@ class ServingRuntimeSession:
         """Publish the current artifact-backed runtime attachment as a replica."""
 
         del context
-        if not isinstance(current_attachment, RuntimeAttachment):
-            raise ReplicaPublicationError(
-                "publish_current_replica requires a RuntimeAttachment"
-            )
-        publication_policy = self._replica_publication_policy(policy)
-        if publication_policy.mode == "disabled":
-            return current_attachment
-        profile_start = time.perf_counter()
-        self._ensure_runtime_initialized()
-        weight_version = current_attachment.view.endpoint.weight_version
-        if not weight_version.serving_artifact_ref:
-            raise ReplicaPublicationError(
-                "Replica publication requires an artifact-backed serving attachment"
-            )
-        binding = _state_publication_binding(current_attachment.state)
-        if binding is None:
-            raise ReplicaPublicationError(
-                "Runtime attachment has no publication-capable binding"
-            )
-        actual_artifact_ref = _optional_text(getattr(binding, "artifact_id", None))
-        if (
-            actual_artifact_ref is not None
-            and actual_artifact_ref != weight_version.serving_artifact_ref
-        ):
-            raise ReplicaPublicationError(
-                "Runtime attachment publication artifact does not match "
-                "the current weight version",
-                details={
-                    "expected_artifact_ref": weight_version.serving_artifact_ref,
-                    "actual_artifact_ref": actual_artifact_ref,
-                },
-            )
-        published = weight_version.published_replica
-        if published is not None and published.state in _ACTIVE_PUBLICATION_STATES:
-            if published.state == "published" and (
-                _published_projection_matches_binding(
-                    projection=published,
-                    attachment=current_attachment,
-                    binding=binding,
-                )
-            ):
-                self._emit_publication_profile(
-                    "runtime_publication.publish.replay",
-                    attachment=current_attachment,
-                    duration_s=time.perf_counter() - profile_start,
-                    published_replica=published,
-                )
-                return current_attachment
-            raise ReplicaPublicationError(
-                "Runtime attachment active published replica does not match "
-                "the current publication binding",
-                details={
-                    "published_replica_state": published.state,
-                    "replica_id": published.replica_id,
-                    "lease_id": published.lease_id,
-                },
-            )
-        operation = None
-        result = None
-        try:
-            publish_operation = getattr(binding, "publish_replica_operation", None)
-            if callable(publish_operation):
-                operation = publish_operation()
-                result = _call_operation_wait(
-                    operation,
-                    timeout_s=publication_policy.timeout_s,
-                )
-            else:
-                publish = getattr(binding, "publish_replica", None)
-                if not callable(publish):
-                    raise ReplicaPublicationError(
-                        "Runtime binding does not expose publish_replica_operation"
-                    )
-                result = publish()
-        except ReplicaPublicationError:
-            self._emit_publication_profile(
-                "runtime_publication.publish.failed",
-                attachment=current_attachment,
-                duration_s=time.perf_counter() - profile_start,
-                error="replica_publication",
-            )
-            raise
-        except Exception as exc:
-            wrapped = ReplicaPublicationError(
-                "Runtime replica publication failed",
-                details={"reason": str(exc)},
-            )
-            self._emit_publication_profile(
-                "runtime_publication.publish.failed",
-                attachment=current_attachment,
-                duration_s=time.perf_counter() - profile_start,
-                error=str(exc),
-            )
-            raise wrapped from exc
-        actual_ref = _nonempty_binding_value_ref(result) or _nonempty_binding_value_ref(
-            getattr(binding, "current_value", None)
+        return tc_replica_publication.publish_current_replica(
+            current_attachment=current_attachment,
+            policy=self._replica_publication_policy(policy),
+            ensure_runtime_initialized=self._ensure_runtime_initialized,
+            profile_sink=self.profile_sink,
         )
-        if not _binding_value_refs_match(weight_version.binding_value_ref, actual_ref):
-            raise ReplicaPublicationError(
-                "Runtime attachment publication result is stale",
-                details={
-                    "expected_binding_value_ref": None
-                    if weight_version.binding_value_ref is None
-                    else weight_version.binding_value_ref.to_dict(),
-                    "actual_binding_value_ref": None
-                    if actual_ref is None
-                    else actual_ref.to_dict(),
-                },
-            )
-        projection = _published_replica_projection_from_result(
-            attachment=current_attachment,
-            binding=binding,
-            operation=operation,
-            result=result,
-            state="published",
+
+    def project_current_replica_publication_state(
+        self,
+        *,
+        current_attachment: RuntimeAttachment,
+        state: str,
+        reason: str | None = None,
+        operation_id: str | None = None,
+    ) -> RuntimeAttachment:
+        """Return an attachment with a non-authoritative publication projection.
+
+        This helper is intentionally limited to observational states.  The
+        authoritative ``published`` and ``retired`` states still come only from
+        publish/retire lifecycle operations that touch the daemon-owned binding.
+        """
+
+        return tc_replica_publication.project_current_replica_publication_state(
+            current_attachment=current_attachment,
+            state=state,
+            reason=reason,
+            operation_id=operation_id,
         )
-        self._emit_publication_profile(
-            "runtime_publication.publish.done",
-            attachment=current_attachment,
-            duration_s=time.perf_counter() - profile_start,
-            published_replica=projection,
-        )
-        return _attachment_with_published_replica(current_attachment, projection)
 
     def retire_current_replica(
         self,
@@ -5551,101 +4539,16 @@ class ServingRuntimeSession:
         """Retire the published replica tied to a runtime attachment."""
 
         del context
-        if not isinstance(current_attachment, RuntimeAttachment):
-            raise ReplicaPublicationError(
-                "retire_current_replica requires a RuntimeAttachment"
-            )
-        weight_version = current_attachment.view.endpoint.weight_version
-        published = weight_version.published_replica
-        binding = _state_publication_binding(current_attachment.state)
-        lease_id = _binding_published_lease_id(binding)
-        active_projection = (
-            published is not None and published.state in _ACTIVE_PUBLICATION_STATES
-        )
-        if not active_projection and lease_id is None:
-            return current_attachment
-        profile_start = time.perf_counter()
-        self._ensure_runtime_initialized()
-        if binding is None:
-            raise ReplicaPublicationError(
-                "Runtime attachment has no publication-capable binding"
-            )
-        retire = getattr(binding, "retire", None)
-        if not callable(retire):
-            raise ReplicaPublicationError("Runtime binding does not expose retire")
-        drain_timeout = (
-            drain_timeout_s
-            if drain_timeout_s is not None
-            else self.serving_config.replica_publication.drain_timeout_s
-        )
-        try:
-            retire(drain_timeout_s=drain_timeout)
-        except Exception as exc:
-            wrapped = ReplicaPublicationError(
-                "Runtime replica retirement failed",
-                details={"reason": str(exc)},
-            )
-            self._emit_publication_profile(
-                "runtime_publication.retire.failed",
-                attachment=current_attachment,
-                duration_s=time.perf_counter() - profile_start,
-                published_replica=published,
-                reason=reason,
-                error=str(exc),
-            )
-            raise wrapped from exc
-        projection = (
-            published
-            if published is not None
-            else _published_replica_projection_from_result(
-                attachment=current_attachment,
-                binding=binding,
-                operation=None,
-                result=getattr(binding, "current_value", None),
-                state="retired",
-                reason=reason,
-            )
-        )
-        projection = replace(projection, state="retired", reason=reason)
-        self._emit_publication_profile(
-            "runtime_publication.retire.done",
-            attachment=current_attachment,
-            duration_s=time.perf_counter() - profile_start,
-            published_replica=projection,
+        return tc_replica_publication.retire_current_replica(
+            current_attachment=current_attachment,
             reason=reason,
+            drain_timeout_s=drain_timeout_s,
+            default_drain_timeout_s=(
+                self.serving_config.replica_publication.drain_timeout_s
+            ),
+            ensure_runtime_initialized=self._ensure_runtime_initialized,
+            profile_sink=self.profile_sink,
         )
-        return _attachment_with_published_replica(current_attachment, projection)
-
-    def _emit_publication_profile(
-        self,
-        event: str,
-        *,
-        attachment: RuntimeAttachment,
-        duration_s: float,
-        published_replica: PublishedReplicaProjection | None = None,
-        reason: str | None = None,
-        error: str | None = None,
-    ) -> None:
-        sink = self.profile_sink
-        if not callable(sink):
-            return
-        payload: dict[str, object] = {
-            "event": event,
-            "duration_s": duration_s,
-            "serving_artifact_ref": attachment.view.endpoint.weight_version.serving_artifact_ref,
-            "generation": _publication_generation(attachment),
-        }
-        if published_replica is not None:
-            payload["published_replica_state"] = published_replica.state
-            if published_replica.replica_id is not None:
-                payload["replica_id"] = published_replica.replica_id
-            if published_replica.lease_id is not None:
-                payload["lease_id"] = published_replica.lease_id
-        if reason is not None:
-            payload["reason"] = reason
-        if error is not None:
-            payload["error"] = error
-        sink(payload)
 
     def _start_intent(
         self,
@@ -5661,16 +4564,16 @@ class ServingRuntimeSession:
         self,
         *,
         current_attachment: RuntimeAttachment | RuntimeBindingState | Any,
-        selector: ServingArtifactSelector,
+        artifact_locator: ServingArtifactLocator,
         policy: ServingPolicy | None,
         context: RequestContext,
         model: object | None = None,
         contract_identity: str | None = None,
     ) -> RuntimeAttachment:
-        self._reject_local_reload_selector(selector)
-        if not isinstance(selector, ServingArtifactSelector):
+        self._reject_local_reload_artifact_locator(artifact_locator)
+        if not isinstance(artifact_locator, ServingArtifactLocator):
             raise ConfigConflictError(
-                "TensorCast serving reload requires a ServingArtifactSelector"
+                "TensorCast serving reload requires a ServingArtifactLocator"
             )
         if policy is not None and not isinstance(policy, ServingPolicy):
             raise ConfigConflictError(
@@ -5689,7 +4592,7 @@ class ServingRuntimeSession:
         )
         return self.integration.reload(
             current_state,
-            ExistingServingArtifact(selector=selector, policy=policy),
+            ExistingServingArtifact(artifact_locator=artifact_locator, policy=policy),
             context,
             model=runtime_model,
             contract_identity=contract_identity,
@@ -5720,73 +4623,44 @@ class ServingRuntimeSession:
     def _reject_reload_with_active_publication(
         current_attachment: RuntimeAttachment,
     ) -> None:
-        published = current_attachment.view.endpoint.weight_version.published_replica
-        if published is None or published.state not in _ACTIVE_PUBLICATION_STATES:
-            return
-        raise ReplicaPublicationError(
-            "TensorCast serving reload requires retiring the active published "
-            "replica before swap",
-            operation="reload",
-            details={
-                "published_replica_state": published.state,
-                "replica_id": published.replica_id,
-                "lease_id": published.lease_id,
-            },
-        )
+        tc_replica_publication.reject_reload_with_active_publication(current_attachment)
 
     def _plan_start_intent(self, context: RequestContext) -> ServingIntent:
-        config = self.serving_config
-        external = config.preload.mode == "external"
-        selector = config.serving.selector
-        has_selector = selector is not None
-        bootstrap_mode = config.bootstrap.mode
         source_selector = self._source_selector_from_context(context)
-        has_local_source = source_selector is not None
-
-        if external and has_selector:
-            raise ConfigConflictError(
-                "TensorCast serving config cannot request both external "
-                "preload and durable serving selector execution"
-            )
-        if bootstrap_mode == "required" and (external or has_selector):
-            raise ConfigConflictError(
-                "TensorCast bootstrap.mode='required' is mutually exclusive "
-                "with external preload and durable serving selector execution"
-            )
-        if bootstrap_mode == "disabled" and not (external or has_selector):
-            raise ConfigConflictError(
-                "TensorCast bootstrap.mode='disabled' requires external "
-                "preload authority or durable serving selector"
-            )
-        if external:
-            expected_member = None
-            if self.host is not None:
-                placement = self._framework_context(
-                    context.framework_config,
-                    context.model_config,
-                ).placement
-                if placement is not None:
-                    expected_member = placement.member
-            authority = parse_external_preload_authority(
-                config,
+        expected_member = None
+        if (
+            self.serving_config.retained_binding_acquire.mode == "external"
+            and self.host is not None
+        ):
+            placement = self.integration._framework_context(
+                context.framework_config,
+                context.model_config,
+            ).placement
+            if placement is not None:
+                expected_member = placement.member
+        try:
+            plan = tc_config.plan_serving_start(
+                config=self.serving_config,
+                source_selector=source_selector,
                 expected_member=expected_member,
             )
-            return RetainedBindingAcquire(
-                RetainedBindingAuthority.from_preload_authority(authority)
-            )
-        if has_selector:
+        except tc_config.ServingStartPlanError as exc:
+            raise ConfigConflictError(str(exc)) from exc
+
+        if isinstance(plan, tc_config.RetainedBindingAcquireStartPlan):
+            return RetainedBindingAcquire(plan.authority)
+        if isinstance(plan, tc_config.ArtifactBindStartPlan):
             return ExistingServingArtifact(
-                selector=selector,
-                policy=config.serving.policy,
+                artifact_locator=plan.artifact_locator,
+                policy=plan.policy,
             )
-        if bootstrap_mode in {"auto", "required"} and has_local_source:
+        if isinstance(plan, tc_config.SourceBootstrapToBindingStartPlan):
             return LocalSourceBootstrap(
-                source_selector=source_selector,
-                bootstrap_policy=config.bootstrap,
+                source_selector=plan.source_selector,
+                bootstrap_policy=plan.bootstrap_policy,
             )
         raise ConfigConflictError(
-            "TensorCast serving config did not resolve to external preload, "
-            "durable serving selector, or local source bootstrap"
+            f"TensorCast serving planner returned unsupported plan: {plan!r}"
         )
 
     def _source_selector_from_context(
@@ -5808,14 +4682,14 @@ class ServingRuntimeSession:
         return selector
 
     @staticmethod
-    def _reject_local_reload_selector(selector: object) -> None:
+    def _reject_local_reload_artifact_locator(artifact_locator: object) -> None:
         if (
-            isinstance(selector, SourceSelector)
-            or _selector_kind(selector) == "local_path"
+            isinstance(artifact_locator, SourceSelector)
+            or _artifact_locator_kind(artifact_locator) == "local_path"
         ):
             raise ConfigConflictError(
                 "TensorCast serving reload requires a durable serving "
-                "selector, not a local source selector"
+                "artifact locator, not a local source selector"
             )
 
 
@@ -5843,6 +4717,7 @@ def swap_serving_artifact(
     *,
     binding: Any,
     resolved_artifact: ResolvedServingArtifact,
+    tensor_names: Sequence[str] | None = None,
     serving_runtime_policy: Any | None,
     options: Any | None,
 ) -> RuntimeBindingResult:
@@ -5851,6 +4726,7 @@ def swap_serving_artifact(
     operation_result = tc_binding_runtime.swap_serving_artifact(
         binding=binding,
         resolved_artifact=resolved_artifact,
+        tensor_names=tensor_names,
         serving_runtime_policy=serving_runtime_policy,
         options=options,
     )
@@ -5866,7 +4742,7 @@ def swap_serving_artifact(
 @contextmanager
 def restore_retained_binding(
     *,
-    authority: tc_preload.ParsedExternalPreloadAuthority | None = None,
+    authority: tc_retained_binding.ParsedRetainedServingBindingAuthority | None = None,
     local_serving_ref: str | None = None,
     target_device: torch.device | str,
     expected_member: tc.ServingBindingMemberRef | None = None,
@@ -5889,7 +4765,7 @@ def restore_retained_binding(
     ownership belongs to the returned runtime handle.
     """
 
-    with tc_preload.acquire_retained_serving_binding(
+    with tc_retained_binding.acquire_retained_serving_binding(
         authority=authority,
         local_serving_ref=local_serving_ref,
         target_device=target_device,
@@ -6140,253 +5016,25 @@ def build_materialization_execution_context(*args: Any, **kwargs: Any) -> Any:
     return tc_binding_runtime.build_materialization_execution_context(*args, **kwargs)
 
 
-def external_preload_mode(*args: Any, **kwargs: Any) -> str:
-    return tc_preload.external_preload_mode(*args, **kwargs)
+def retained_binding_acquire_mode(*args: Any, **kwargs: Any) -> str:
+    return tc_retained_binding.retained_binding_acquire_mode(*args, **kwargs)
 
 
-def external_preload_trusted_reservation_bytes(*args: Any, **kwargs: Any) -> int:
-    return tc_preload.external_preload_trusted_reservation_bytes(*args, **kwargs)
+def retained_serving_binding_trusted_reservation_bytes(
+    *args: Any, **kwargs: Any
+) -> int:
+    return tc_retained_binding.retained_serving_binding_trusted_reservation_bytes(
+        *args, **kwargs
+    )
 
 
-def external_preload_extra_from_prefetched_binding(*args: Any, **kwargs: Any) -> Any:
-    return tc_preload.external_preload_extra_from_prefetched_binding(*args, **kwargs)
+def retained_serving_binding_extra_from_prefetched_binding(
+    *args: Any, **kwargs: Any
+) -> Any:
+    return tc_retained_binding.retained_serving_binding_extra_from_prefetched_binding(
+        *args, **kwargs
+    )
 
 
-def parse_external_preload_authority(*args: Any, **kwargs: Any) -> Any:
-    return tc_preload.parse_external_preload_authority(*args, **kwargs)
-
-
-__all__ = [
-    "ArtifactError",
-    "BindingUpdateEpoch",
-    "BindingValueRef",
-    "BindingFinalizeMaterializationResult",
-    "BootstrapSummary",
-    "BuilderMode",
-    "CapabilityMissingError",
-    "CollectiveHost",
-    "CollectivePolicy",
-    "ConfigConflictError",
-    "DEFAULT_RUNTIME_PROFILE",
-    "AdmissionDecision",
-    "AdmissionPolicy",
-    "AdmissionRejectedError",
-    "AdmissionRequest",
-    "AuthorityValidationError",
-    "BootstrapEndpointProjection",
-    "BootstrapPolicy",
-    "FamilyReadiness",
-    "FrameworkHost",
-    "FrameworkIdentity",
-    "FrameworkIntegrationContext",
-    "FinalizeClass",
-    "FinalizeHookHost",
-    "FinalizePhase",
-    "FinalizePolicy",
-    "AttachFinalizeError",
-    "BindingValueRefProjection",
-    "DefaultAdmissionPolicy",
-    "ExistingServingArtifact",
-    "IntegrationHost",
-    "LocalSourceBootstrap",
-    "ManifestPolicy",
-    "MaterializationDiagnosticsProjection",
-    "MaterializationExecutionFacts",
-    "MaterializationPolicy",
-    "NativeLoadHost",
-    "ObservabilitySink",
-    "PreparedServingArtifact",
-    "PublishedModelVersion",
-    "LocalReadyManifestCarrierResult",
-    "LocalReadyBindingContract",
-    "LocalReadyMaterializationIdentity",
-    "LocalReadyServingResult",
-    "ManifestMismatchError",
-    "OwnershipTransferError",
-    "PlacementAdmissionFacts",
-    "PlacementHost",
-    "PlacementIdentityFacts",
-    "PlacementMemberFacts",
-    "PolicyMismatchError",
-    "PlacementAdmissionError",
-    "PublishedReplicaProjection",
-    "PublicationRequiredError",
-    "ReplicaPublicationError",
-    "ReplicaPublicationPolicy",
-    "RecipeCachePolicy",
-    "RecipeTraceHost",
-    "ReloadRequestProjection",
-    "ReloadResponseProjection",
-    "ResolvedServingArtifact",
-    "RequestContext",
-    "RetainedBindingAcquire",
-    "RetainedBindingAuthority",
-    "RecipeBuildIdentity",
-    "RecipeBuildCacheConfig",
-    "RecipeBuildRunResult",
-    "RecipeCacheLookupResult",
-    "RecipeCacheWriteResult",
-    "RecipeBuildResult",
-    "RecipeBuildSessionRequest",
-    "RecipeBuildSession",
-    "COMPILED_RECIPE_MEMORY_CACHE",
-    "TRACE_PLAN_MEMORY_CACHE",
-    "RecipeCompileIdentity",
-    "RecipeCompileInputs",
-    "RecipePublicationContext",
-    "ParsedExternalPreloadAuthority",
-    "RestoreBindingError",
-    "RestoredRetainedBinding",
-    "RetainedBindingResult",
-    "RuntimeBindingResult",
-    "RuntimeBindingMaterialization",
-    "RuntimeBindingState",
-    "RuntimeStateSeed",
-    "RuntimeBindingView",
-    "RuntimeAttachment",
-    "RuntimeConfig",
-    "RuntimeEndpointProjection",
-    "RuntimeProfile",
-    "RuntimeSwapError",
-    "RuntimeTensorView",
-    "RuntimeWorkerView",
-    "SERVING_MANIFEST_TENSOR_NAME",
-    "SOURCE_BOUND_CONTRACT_PATH_COLLECTIVE_FIRST_V4",
-    "SchemaMismatchError",
-    "SelectorResolutionError",
-    "ServingArtifactSelector",
-    "ServingIntegrationError",
-    "ServingIntegrationNotImplementedError",
-    "ServingArtifactResolver",
-    "ServingArtifactManifest",
-    "ServingBindingState",
-    "ServingBindingMemberRef",
-    "ServingConfig",
-    "ServingIntegration",
-    "ServingIntent",
-    "ServingLoadResult",
-    "ServingPlacement",
-    "ServingPolicy",
-    "ServingReloadResult",
-    "ServingRuntimeSession",
-    "SourceSelectionProjection",
-    "ServingRuntimePolicy",
-    "ServingSupportLevel",
-    "ServingTopologyRef",
-    "SourceBoundContractProjection",
-    "SourceSelector",
-    "SourceSubject",
-    "SourceSubjectCoordinator",
-    "SourceSubjectError",
-    "SourceProviderError",
-    "SourceBoundContractState",
-    "SourceCatalog",
-    "SourceCatalogPolicy",
-    "SourceCatalogProvider",
-    "SourceCatalogRequest",
-    "SourceDownloadPolicy",
-    "SourceHost",
-    "TensorCastEvent",
-    "TensorCastServingRuntimeError",
-    "TensorSchemaEntry",
-    "TensorSurfaceHost",
-    "TensorcastLogicalTopology",
-    "TensorcastSemanticValidationSpec",
-    "TensorcastServingFacts",
-    "TorchTensorHost",
-    "TracePlan",
-    "WeightVersionProjection",
-    "RUNTIME_ENDPOINT_PROJECTION_SCHEMA_VERSION",
-    "PUBLISHED_REPLICA_PROJECTION_SCHEMA_VERSION",
-    "RELOAD_RESPONSE_PROJECTION_SCHEMA_VERSION",
-    "RETAINED_BINDING_AUTHORITY_SCHEMA_VERSION",
-    "SERVING_ARTIFACT_SELECTOR_SCHEMA_VERSION",
-    "SERVING_POLICY_SCHEMA_VERSION",
-    "WEIGHT_VERSION_PROJECTION_SCHEMA_VERSION",
-    "PLACEMENT_IDENTITY_FACTS_SCHEMA_VERSION",
-    "PLACEMENT_ADMISSION_FACTS_SCHEMA_VERSION",
-    "SOURCE_DOWNLOAD_POLICY_SCHEMA_VERSION",
-    "RECIPE_CACHE_POLICY_SCHEMA_VERSION",
-    "SOURCE_CATALOG_REQUEST_SCHEMA_VERSION",
-    "SOURCE_CATALOG_SCHEMA_VERSION",
-    "SOURCE_SELECTION_PROJECTION_SCHEMA_VERSION",
-    "allocate_tensors_from_schema",
-    "apply_copy_plan",
-    "bind_serving_artifact",
-    "binding_value_verification_state_name",
-    "binding_value_ref_from_current_value",
-    "build_local_ready_prepared_artifact",
-    "build_pure_transform_build_intent",
-    "build_collective_group_id",
-    "build_materialization_execution_context",
-    "canonical_index_from_recipe",
-    "collect_runtime_tensor_schema",
-    "collect_serving_tensors_from_model",
-    "compile_recipe_from_inputs",
-    "complete_pure_transform_publication",
-    "complete_pure_transform_recipe_publication_from_recipe",
-    "compiled_recipe_realization_plan_count",
-    "compute_recipe_build_cache_key",
-    "compute_recipe_compile_key",
-    "compute_recipe_compile_key_from_inputs",
-    "compute_runtime_representation_contract_hash",
-    "compute_runtime_tensor_schema_hash",
-    "compute_serving_binding_tensor_schema_hash",
-    "compute_serving_tensor_schema_hash",
-    "compute_trace_build_cache_key",
-    "cross_check_serving_artifact",
-    "dump_trace_plan_debug",
-    "evaluate_semantic_validation_spec",
-    "external_preload_extra_from_prefetched_binding",
-    "external_preload_mode",
-    "external_preload_trusted_reservation_bytes",
-    "freeze_local_ready_binding",
-    "is_public_disk_source_subject",
-    "is_reserved_serving_tensor_name",
-    "load_compiled_recipe_cache",
-    "load_source_tensors_for_recipe",
-    "load_trace_plan_cache",
-    "logical_topology_json_from_recipe",
-    "materialized_tensor_schema",
-    "materialize_binding_finalize_serving_tensors",
-    "materialize_pure_transform_serving_tensors",
-    "materialize_recipe_copy_plan_tensors",
-    "merge_serving_reload_extra_config",
-    "normalize_serving_reload_request_payload",
-    "prepare_local_ready_serving",
-    "prepare_same_binding_manifest_carrier",
-    "parse_external_preload_authority",
-    "publication_context_from_recipe",
-    "read_serving_artifact_manifest",
-    "read_source_bound_contract_state",
-    "recipe_build_cache_path",
-    "resolve_serving_artifact",
-    "resolve_runtime_config_profile",
-    "resolve_source_subject",
-    "resolve_source_artifact_ref",
-    "restore_prepared_local_ready_binding",
-    "restore_retained_binding",
-    "source_selection_projection_from_execution_diagnostics",
-    "source_selection_projection_from_materialization_diagnostics",
-    "source_subject_broadcast_payload",
-    "source_subject_from_broadcast_payload",
-    "source_subject_slice_count",
-    "source_bound_contract_profile_fields",
-    "serving_binding_state_from_runtime_view",
-    "serving_placement_from_framework_facts",
-    "semantic_placement_digest",
-    "run_binding_finalize_semantic_validation",
-    "source_catalog_from_selected_safetensors",
-    "stable_recipe_build_hash",
-    "swap_serving_artifact",
-    "tensorcast_view_slice_count",
-    "tensorcast_view_slices_from_trace_plan",
-    "trace_build_cache_path",
-    "validate_dst_coverage",
-    "validate_binding_finalize_tensor_schema",
-    "validate_recipe_for_builder_mode",
-    "validate_source_tensor_names",
-    "validate_tensor_schema_against_tensors",
-    "write_compiled_recipe_cache",
-    "write_trace_plan_cache",
-]
+def parse_retained_serving_binding_authority(*args: Any, **kwargs: Any) -> Any:
+    return tc_retained_binding.parse_retained_serving_binding_authority(*args, **kwargs)

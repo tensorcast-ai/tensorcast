@@ -99,6 +99,7 @@ from tensorcast.api.store.realization_plan import (
 )
 from tensorcast.api.store.region_utils import collect_storage_bases
 from tensorcast.api.store.registration import RegistrationPipeline
+from tensorcast.api.store.retry import raise_mapped_registration_error
 from tensorcast.api.store.runtime import (
     StoreRuntimeContext,
     shutdown_context,
@@ -1658,6 +1659,40 @@ class Store:
         )
         return self._persistence_status_from_proto(resp)
 
+    def persist_artifact(
+        self,
+        *,
+        artifact_id: str,
+        key_hint: str | None = None,
+        policy: StorePolicy | str | None = "durable",
+        timeout_s: float = 10.0,
+        ctx: CallContext | None = None,
+    ) -> Operation[PersistenceStatusResult]:
+        """Start managed persistence for an already registered artifact."""
+        if not artifact_id:
+            raise ArtifactError(
+                "artifact_id must be provided",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        try:
+            resp = self._runtime.ensure_client().start_persistence(
+                artifact_id=str(artifact_id),
+                key_hint=key_hint,
+                policy=policy,
+                timeout_s=timeout_s,
+            )
+        except ArtifactError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise_mapped_registration_error(exc)
+        task_id = getattr(resp, "task_id", "") or None
+        return self.persistence_operation(
+            task_id=str(task_id) if task_id else None,
+            artifact_id=str(artifact_id) if not task_id else None,
+            ctx=ctx,
+        )
+
     def seal_assembly(
         self,
         assembly_id: str,
@@ -2196,6 +2231,9 @@ class Store:
             representation_contract_hash=representation_contract_hash,
             logical_topology_json=logical_topology_json,
             serving_manifest_ref=serving_manifest_ref,
+            topology_admission_digest=getattr(
+                admission_facts, "topology_admission_digest", None
+            ),
         )
         publication = build_binding_finalize_publication_bundle(
             build_intent=build_intent,
@@ -4093,6 +4131,23 @@ def persistence_operation(
     )
 
 
+def persist_artifact(
+    *,
+    artifact_id: str,
+    key_hint: str | None = None,
+    policy: StorePolicy | str | None = "durable",
+    timeout_s: float = 10.0,
+    ctx: CallContext | None = None,
+) -> Operation[PersistenceStatusResult]:
+    return _coerce_store().persist_artifact(
+        artifact_id=artifact_id,
+        key_hint=key_hint,
+        policy=policy,
+        timeout_s=timeout_s,
+        ctx=ctx,
+    )
+
+
 def start_assembly_attempt(
     *,
     layout_id: str | None = None,
@@ -4670,6 +4725,7 @@ __all__ = [
     "put_async",
     "query_persistence_status",
     "persistence_operation",
+    "persist_artifact",
     "register_pure_transform_publication",
     "start_canonical_representation_publish_attempt",
     "start_assembly_attempt",

@@ -7,7 +7,11 @@ import hashlib
 from dataclasses import dataclass
 from typing import Sequence
 
-from tensorcast.api.store.common import canonical_index_to_bytes
+from tensorcast.api.store.common import (
+    canonical_entry_storage_span_bytes,
+    canonical_index_storage_extent,
+    canonical_index_to_bytes,
+)
 from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry
 from tensorcast.common.selection_identity import compute_logical_layout_hash
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
@@ -79,7 +83,7 @@ def build_owned_layout(
     packed_entries = _pack_entries(entries, ordered_names=ordered_names)
     packed_index = CanonicalIndex(
         entries=tuple(packed_entries),
-        total_size_bytes=sum(int(entry.size_bytes) for entry in packed_entries),
+        total_size_bytes=canonical_index_storage_extent(packed_entries),
         avbs_hash="",
     )
     target_index_bytes = canonical_index_to_bytes(packed_index)
@@ -170,6 +174,7 @@ def _pack_entries(
     packed: list[CanonicalIndexEntry] = []
     cursor = 0
     for entry in source_entries:
+        size_bytes = canonical_entry_storage_span_bytes(entry)
         packed.append(
             CanonicalIndexEntry(
                 name=str(entry.name),
@@ -178,10 +183,10 @@ def _pack_entries(
                 stride=tuple(int(v) for v in entry.stride),
                 storage_offset=0,
                 segment_offset=int(cursor),
-                size_bytes=int(entry.size_bytes),
+                size_bytes=int(size_bytes),
             )
         )
-        cursor += int(entry.size_bytes)
+        cursor += int(size_bytes)
     return tuple(packed)
 
 

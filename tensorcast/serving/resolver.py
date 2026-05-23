@@ -16,7 +16,6 @@ from tensorcast.api.store import artifact as open_artifact
 from tensorcast.api.store.types import CanonicalIndexEntry
 
 ServingArtifactManifest = tc.ServingArtifactManifest
-ServingArtifactManifestHint = tc_artifact_manifest.ServingArtifactManifestHint
 
 
 @dataclass(frozen=True)
@@ -99,6 +98,36 @@ def compute_descriptor_tensor_schema_hash(
     )
 
 
+def _prepared_summary_value(summary: Any, field_name: str) -> str | None:
+    value = getattr(summary, field_name, None)
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _cross_check_prepared_manifest_summary(
+    *,
+    summary: Any,
+    manifest: tc.ServingArtifactManifest,
+) -> None:
+    fields = (
+        "serving_manifest_ref",
+        "representation_contract_hash",
+        "serving_build_digest",
+        "tensor_schema_hash",
+    )
+    for field_name in fields:
+        expected = _prepared_summary_value(summary, field_name)
+        actual = _prepared_summary_value(manifest, field_name)
+        if expected is not None and actual != expected:
+            raise RuntimeError(
+                "TensorCast prepared serving artifact manifest does not match "
+                f"summary field {field_name}: manifest={actual!r}, "
+                f"summary={expected!r}"
+            )
+
+
 class ServingArtifactResolver:
     """Resolve serving artifacts and enforce manifest/schema/policy checks."""
 
@@ -176,13 +205,18 @@ class ServingArtifactResolver:
                 f"TensorCast artifact '{artifact_ref}' is missing serving "
                 "manifest tensor"
             )
-        manifest = ServingArtifactManifestHint(
-            serving_manifest_ref=summary.serving_manifest_ref,
-            representation_contract_hash=summary.representation_contract_hash,
-            serving_build_digest=summary.serving_build_digest,
-            tensor_schema_hash=summary.tensor_schema_hash,
-            canonical_tensor_count=len(tensor_names),
-            local_serving_ref=getattr(summary, "local_serving_ref", None),
+        manifest = tc_artifact_manifest.read_serving_artifact_manifest_tensor(
+            artifact,
+            artifact_ref=artifact_ref,
+            manifest_tensor_name=self._manifest_tensor_name,
+        )
+        _cross_check_prepared_manifest_summary(summary=summary, manifest=manifest)
+        tc_artifact_manifest.cross_check_serving_artifact_manifest(
+            manifest=manifest,
+            descriptor_tensor_schema_hash=tensor_schema_hash,
+            tensor_names=tensor_names,
+            expected_tensor_schema_hash=str(summary.tensor_schema_hash),
+            expected_schema_version=self._schema_version,
         )
         return ResolvedServingArtifact(
             artifact=artifact,
@@ -240,7 +274,6 @@ def resolve_serving_artifact(
 __all__ = [
     "ResolvedServingArtifact",
     "ServingArtifactManifest",
-    "ServingArtifactManifestHint",
     "ServingArtifactResolver",
     "canonical_index_from_descriptor",
     "compute_descriptor_tensor_schema_hash",

@@ -9,7 +9,9 @@ from safetensors.torch import save_file
 from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry
 from tensorcast.serving.source_catalog import (
     SOURCE_CATALOG_SCHEMA_VERSION,
+    SourceCatalog,
     SourceManifest,
+    SourceTensorMeta,
     resolve_source_artifact_ref,
     source_catalog_from_all_safetensors_dir,
     source_catalog_from_canonical_index,
@@ -141,6 +143,38 @@ def test_source_catalog_from_canonical_index_preserves_stride_storage_offset() -
     assert catalog.ordered_names == ("view",)
     assert catalog.meta_by_name["view"].stride == (4, 1)
     assert catalog.meta_by_name["view"].storage_offset == 3
+
+
+def test_source_catalog_direct_construction_requires_real_source_identity() -> None:
+    catalog = SourceCatalog(
+        ordered_names=("w",),
+        meta_by_name={
+            "w": SourceTensorMeta(
+                dtype=torch.float32,
+                shape=(1,),
+                stride=(1,),
+                storage_offset=0,
+            )
+        },
+        selected_files=(),
+        source_artifact_ref=" msa1:test:source ",
+        canonical_index_hash="hash",
+        metadata_fingerprint="fingerprint",
+        canonical_index_bytes=b"index",
+    )
+
+    assert catalog.source_artifact_ref == "msa1:test:source"
+
+    with pytest.raises(ValueError, match="real source artifact identity"):
+        SourceCatalog(
+            ordered_names=(),
+            meta_by_name={},
+            selected_files=(),
+            source_artifact_ref="disk:/tmp/model",
+            canonical_index_hash="hash",
+            metadata_fingerprint="fingerprint",
+            canonical_index_bytes=b"index",
+        )
 
 
 def test_source_catalog_all_safetensors_dir_is_offline_helper(tmp_path: Path) -> None:

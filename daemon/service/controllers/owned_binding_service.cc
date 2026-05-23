@@ -119,6 +119,58 @@ void append_cache_uint64(std::string* payload, uint64_t value) {
   absl::StrAppend(payload, value, "|");
 }
 
+std::optional<std::string_view> mi2_index_multihash(std::string_view artifact_id) {
+  constexpr std::string_view kPrefix = "mi2:";
+  if (!artifact_id.starts_with(kPrefix)) {
+    return std::nullopt;
+  }
+  const std::string_view tail = artifact_id.substr(kPrefix.size());
+  const size_t sep = tail.find(':');
+  if (sep == std::string_view::npos || sep == 0 || sep + 1 >= tail.size()) {
+    return std::nullopt;
+  }
+  return tail.substr(0, sep);
+}
+
+bool source_artifact_matches_target_index(std::string_view artifact_id, std::string_view target_index_json) {
+  if (target_index_json.empty()) {
+    return false;
+  }
+  const std::optional<std::string_view> source_index_multihash = mi2_index_multihash(artifact_id);
+  if (!source_index_multihash.has_value()) {
+    return false;
+  }
+  auto target_index_multihash_or =
+      common::compute_index_multihash(std::optional<std::string>(std::string(target_index_json)), "");
+  if (!target_index_multihash_or.ok()) {
+    LOG(WARNING) << "Failed to compute binding target index multihash for direct refill: "
+                 << target_index_multihash_or.status();
+    return false;
+  }
+  return *source_index_multihash == *target_index_multihash_or;
+}
+
+bool selection_declares_view_or_subset(const tensorcast::common::v1::ArtifactSelection& selection) {
+  return !selection.view_id().empty() || selection.has_view_spec() || !selection.view_subset_hash().empty() ||
+      selection.tensor_names_size() > 0;
+}
+
+v2::TargetLayout build_direct_refill_target_plan_layout(
+    const v2::TargetLayout& target_layout,
+    const tensorcast::common::v1::ArtifactSelection& selection,
+    bool source_artifact_index_matches_target) {
+  v2::TargetLayout layout = target_layout;
+  if (!source_artifact_index_matches_target || selection_declares_view_or_subset(selection)) {
+    layout.set_index_kind(v2::TargetLayout::INDEX_KIND_VIEW);
+    if (!selection.view_id().empty()) {
+      layout.set_view_id(selection.view_id());
+    } else {
+      layout.clear_view_id();
+    }
+  }
+  return layout;
+}
+
 std::string serialize_proto_for_cache_key(const google::protobuf::MessageLite& proto) {
   std::string out;
   proto.SerializeToString(&out);
@@ -616,6 +668,71 @@ absl::StatusOr<OwnedStorageLayout> build_owned_storage_layout(
     seg.length = storage.storage_length();
     result.publish_segments.push_back(std::move(seg));
 
+    cursor += storage.storage_length();
+  }
+  result.into_target.total_size = cursor;
+  result.total_size = cursor;
+  if (cursor == 0) {
+    return absl::InvalidArgumentError("target_layout storages must be non-empty");
+  }
+  return result;
+}
+
+absl::StatusOr<OwnedStorageLayout> build_client_binding_publication_storage_layout(
+    const v2::TargetLayout& layout,
+    int expected_device_id) {
+  OwnedStorageLayout result;
+  uint64_t cursor = 0;
+  result.publish_segments.reserve(layout.storages_size());
+  result.publish_storages.reserve(layout.storages_size());
+  for (const auto& storage : layout.storages()) {
+    if (storage.storage_id().empty()) {
+      return absl::InvalidArgumentError("storage_id is required");
+    }
+    if (storage.storage_length() == 0) {
+      return absl::InvalidArgumentError("storage_length must be non-zero");
+    }
+    if (storage.device_id() != expected_device_id) {
+      return absl::InvalidArgumentError("storage.device_id does not match device_uuid");
+    }
+
+    RegisterStorageMeta meta;
+    meta.storage_id = storage.storage_id();
+    meta.device_id = storage.device_id();
+    meta.storage_length = storage.storage_length();
+    meta.mapping_base_offset = storage.mapping_base_offset();
+    switch (storage.storage_source_case()) {
+      case v2::StorageEntry::kVramRegionId:
+        meta.region_id = storage.vram_region_id();
+        break;
+      case v2::StorageEntry::kRegionRef:
+        if (storage.region_ref().memory_kind() != v2::REGION_MEMORY_KIND_VRAM) {
+          return absl::InvalidArgumentError("client binding publication only supports VRAM target regions");
+        }
+        meta.region_id = storage.region_ref().region_id();
+        break;
+      case v2::StorageEntry::kCudaIpcHandle:
+        meta.handle_bytes = storage.cuda_ipc_handle();
+        break;
+      case v2::StorageEntry::STORAGE_SOURCE_NOT_SET:
+      default:
+        return absl::InvalidArgumentError("client binding target storage must reference a publishable source");
+    }
+    if (meta.handle_bytes.empty() == meta.region_id.empty()) {
+      return absl::InvalidArgumentError("client binding storage must specify exactly one publishable source");
+    }
+    result.publish_storages.push_back(std::move(meta));
+
+    LeaseSegMeta seg;
+    seg.storage_id = storage.storage_id();
+    seg.storage_offset = 0;
+    seg.artifact_offset = cursor;
+    seg.length = storage.storage_length();
+    result.publish_segments.push_back(std::move(seg));
+
+    if (storage.storage_length() > std::numeric_limits<uint64_t>::max() - cursor) {
+      return absl::InvalidArgumentError("storage_length sum overflow");
+    }
     cursor += storage.storage_length();
   }
   result.into_target.total_size = cursor;
@@ -1124,6 +1241,31 @@ tensorcast::common::v1::ByteSpaceRef byte_space_from_selection(
   return byte_space;
 }
 
+tensorcast::common::v1::ByteSpaceRef canonical_byte_space_ref() {
+  tensorcast::common::v1::ByteSpaceRef byte_space;
+  byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  byte_space.set_id("");
+  return byte_space;
+}
+
+bool selection_declares_tensor_subset(const tensorcast::common::v1::ArtifactSelection& selection) {
+  return selection.tensor_names_size() > 0 || !selection.view_subset_hash().empty();
+}
+
+tensorcast::common::v1::ArtifactSelection build_canonical_current_value_publication_selection(
+    std::string_view artifact_id,
+    std::string_view canonical_index_json) {
+  tensorcast::common::v1::ArtifactSelection selection;
+  selection.set_artifact_id(std::string(artifact_id));
+  selection.set_logical_layout_hash(
+      common::compute_logical_layout_hash_bytes(
+          absl::Span<const uint8_t>(
+              reinterpret_cast<const uint8_t*>(canonical_index_json.data()), canonical_index_json.size()),
+          /*needs_view_index=*/false));
+  selection.set_selection_hash(common::compute_selection_hash_bytes("", std::nullopt));
+  return selection;
+}
+
 tensorcast::common::v1::ArtifactSelection build_mapped_bound_selection(
     std::string_view artifact_id,
     const v2::TargetLayout& layout,
@@ -1285,15 +1427,21 @@ absl::StatusOr<std::string> maybe_mint_binding_current_value_publication_token(
     return absl::FailedPreconditionError("binding current value canonical index is unavailable");
   }
 
-  const std::string publication_id = mint_publication_id();
-  const auto byte_space = byte_space_from_selection(current_selection);
-  const absl::Time expires_at = absl::Now() + TargetPublishService::binding_current_value_publication_token_ttl();
-
   auto stable_index_or = store::loader::rebuild_stable_canonical_index(canonical_index_json, device_id);
   if (!stable_index_or.ok()) {
     return stable_index_or.status();
   }
   std::string stable_index_json = std::move(*stable_index_or);
+
+  tensorcast::common::v1::ArtifactSelection publication_selection = current_selection;
+  auto byte_space = byte_space_from_selection(current_selection);
+  if (!selection_declares_tensor_subset(current_selection)) {
+    publication_selection = build_canonical_current_value_publication_selection(artifact_id, stable_index_json);
+    byte_space = canonical_byte_space_ref();
+  }
+
+  const std::string publication_id = mint_publication_id();
+  const absl::Time expires_at = absl::Now() + TargetPublishService::binding_current_value_publication_token_ttl();
   const auto digest = common::sha256_digest_bytes(
       absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(stable_index_json.data()), stable_index_json.size()));
   std::string index_key_hex =
@@ -1301,7 +1449,7 @@ absl::StatusOr<std::string> maybe_mint_binding_current_value_publication_token(
 
   tensorcast::common::v1::BindingCurrentValuePublicationScope scope;
   scope.set_publication_id(publication_id);
-  scope.mutable_selection()->CopyFrom(current_selection);
+  scope.mutable_selection()->CopyFrom(publication_selection);
   scope.mutable_byte_space()->CopyFrom(byte_space);
   scope.set_device_uuid(device_uuid);
   scope.set_owner_pid(owner_pid);
@@ -1333,9 +1481,9 @@ absl::StatusOr<std::string> maybe_mint_binding_current_value_publication_token(
   TargetPublicationRegistry::Record publication_record;
   publication_record.publication_id = PublicationInstanceId{.value = publication_id};
   publication_record.publication_subject_key =
-      build_publication_subject_key(current_selection, byte_space, layout_hash, device_uuid);
+      build_publication_subject_key(publication_selection, byte_space, layout_hash, device_uuid);
   publication_record.target_layout_hash = layout_hash;
-  publication_record.selection = current_selection;
+  publication_record.selection = publication_selection;
   publication_record.byte_space = byte_space;
   publication_record.canonical_index_json = std::move(stable_index_json);
   publication_record.index_key_hex = std::move(index_key_hex);
@@ -1636,7 +1784,7 @@ v2::SourceBoundPlanDiagnostics build_source_bound_plan_diagnostics(
   diagnostics.set_planned_local_typed_bytes(summary->planned_local_typed_bytes);
   diagnostics.set_planned_non_admitted_typed_bytes(summary->planned_non_admitted_typed_bytes);
   diagnostics.set_planned_generic_residual_bytes(summary->planned_generic_residual_bytes);
-  diagnostics.set_compatibility_lowered_bytes(summary->compatibility_lowered_bytes);
+  diagnostics.set_collective_lowered_bytes(summary->collective_lowered_bytes);
   diagnostics.set_planner_version(summary->planner_version);
   diagnostics.set_plan_hash(summary->plan_hash);
   diagnostics.set_estimated_collective_peak_temporary_bytes(summary->estimated_collective_peak_temporary_bytes);
@@ -2233,6 +2381,47 @@ grpc::Status prepare_source_bound_plan(
   target_offsets_sec = elapsed_sec(target_offsets_start, target_offsets_done);
 
   const auto target_plan_start = std::chrono::steady_clock::now();
+  const bool mapped_without_realization = request.mapped && request.realization_plan == nullptr;
+  const bool source_artifact_is_mi2 = mi2_index_multihash(out.resolved_artifact_id).has_value();
+  const bool source_artifact_index_matches_target = mapped_without_realization &&
+      source_artifact_matches_target_index(out.resolved_artifact_id, request.target_index_json);
+  bool mapped_direct_byte_space = false;
+  bool mapped_direct_plan_attempted = false;
+  if (mapped_without_realization && source_artifact_is_mi2) {
+    mapped_direct_plan_attempted = true;
+    const v2::TargetLayout direct_target_layout = build_direct_refill_target_plan_layout(
+        *request.target_layout, effective_source_selection, source_artifact_index_matches_target);
+    v2::MaterializeIntoTargetRequest unmapped_request = build_unmapped_request(
+        effective_source_selection,
+        out.resolved_artifact_id,
+        direct_target_layout,
+        request.owner_pid,
+        request.device_uuid,
+        request.source_policy,
+        request.operation_id,
+        request.placement);
+    TargetMaterializationPlan unmapped_plan;
+    auto plan_status = build_target_materialization_plan(
+        d.engine,
+        out.resolved_artifact_id,
+        unmapped_request,
+        direct_target_layout,
+        *offsets_or,
+        std::string(canonical_index_json),
+        /*record_result=*/nullptr,
+        unmapped_plan);
+    if (plan_status.ok()) {
+      mapped_direct_byte_space = true;
+      out.logical_total_size = unmapped_plan.logical_total_size;
+      out.current_selection = unmapped_plan.resolved_selection;
+      out.canonical_index_json = unmapped_plan.canonical_index_json;
+      out.unmapped_plan = std::move(unmapped_plan);
+    } else {
+      LOG(INFO) << "tc_profile prepare_source_bound_plan direct_target_plan_rejected"
+                << " artifact_id=" << out.resolved_artifact_id << " target_device=" << device.ordinal
+                << " status_code=" << plan_status.error_code() << " message=" << plan_status.error_message();
+    }
+  }
   if (request.realization_plan != nullptr) {
     MappedTargetMaterializationPlan mapped_plan;
     const std::string cache_key = binding_realization_plan_cache_key(
@@ -2280,7 +2469,7 @@ grpc::Status prepare_source_bound_plan(
     out.mapped_plan_cache_key = cache_key;
     out.mapped_plan_cache_hit = plan_cache_hit;
     out.execution_only_mutable = true;
-  } else if (request.mapped) {
+  } else if (request.mapped && !mapped_direct_byte_space) {
     BindingRegistry::Record replay_record;
     replay_record.owner_pid = request.owner_pid;
     replay_record.device_uuid = std::string(request.device_uuid);
@@ -2307,7 +2496,7 @@ grpc::Status prepare_source_bound_plan(
         build_mapped_bound_selection(out.resolved_artifact_id, *request.target_layout, request.target_index_json);
     out.canonical_index_json = mapped_plan.canonical_index_json;
     out.mapped_plan = std::move(mapped_plan);
-  } else {
+  } else if (!mapped_direct_byte_space) {
     v2::MaterializeIntoTargetRequest unmapped_request = build_unmapped_request(
         effective_source_selection,
         out.resolved_artifact_id,
@@ -2340,6 +2529,10 @@ grpc::Status prepare_source_bound_plan(
   LOG(INFO) << "tc_profile prepare_source_bound_plan timings"
             << " artifact_id=" << out.resolved_artifact_id << " target_device=" << device.ordinal
             << " mapped=" << request.mapped << " realization_plan=" << (request.realization_plan != nullptr)
+            << " mapped_direct_byte_space=" << mapped_direct_byte_space
+            << " mapped_direct_plan_attempted=" << mapped_direct_plan_attempted
+            << " source_artifact_mi2=" << source_artifact_is_mi2
+            << " source_artifact_index_matches_target=" << source_artifact_index_matches_target
             << " public_disk_source=" << (request.public_disk_source != nullptr) << " metadata_fast_public="
             << (request.public_disk_source != nullptr && !request.public_disk_source->canonical_index_bytes().empty() &&
                 resolution.local_import.has_value())
@@ -2511,7 +2704,7 @@ grpc::Status prepare_source_bound_execution(
     return {StatusCode::FAILED_PRECONDITION, "source-bound materialization plan is missing execution state"};
   }
   const auto& unmapped_plan = *prepared_plan.unmapped_plan;
-  if (unmapped_plan.view_plan.has_value() && target_layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
+  if (unmapped_plan.view_plan.has_value()) {
     store::loading::VariantIdentity variant;
     variant.canonical_artifact_id = prepared_plan.resolved_artifact_id;
     if (unmapped_plan.resolved_view_id.has_value()) {
@@ -2727,16 +2920,54 @@ grpc::Status OwnedBindingService::create_binding(
   }
   if (req.has_initial_selection()) {
     record->source_selection = req.initial_selection();
+    std::string_view canonical_index_json;
+    if (req.target_layout().index_kind() == v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED &&
+        !selection_declares_view_or_subset(req.initial_selection())) {
+      canonical_index_json = std::string_view(req.target_index_bytes().data(), req.target_index_bytes().size());
+    }
     mark_ready_artifact(
         record.get(),
         req.has_source_artifact_id() ? req.source_artifact_id() : req.initial_selection().artifact_id(),
-        req.initial_selection());
+        req.initial_selection(),
+        canonical_index_json);
   } else {
     mark_allocated(record.get());
   }
 
   if (auto insert_status = d_.bindings.insert(record); !insert_status.ok()) {
     return to_grpc_status(insert_status);
+  }
+
+  if (req.ownership() == v2::BINDING_OWNERSHIP_CLIENT && req.has_initial_selection() &&
+      !record->current_artifact_canonical_index_json.empty()) {
+    auto storage_layout_or = build_client_binding_publication_storage_layout(req.target_layout(), device.ordinal);
+    if (!storage_layout_or.ok()) {
+      const bool closed = d_.bindings.close_control(record->binding_id);
+      if (!closed) {
+        LOG(WARNING) << "binding cleanup could not find binding_id=" << record->binding_id;
+      }
+      return to_grpc_status(storage_layout_or.status());
+    }
+    auto token_or = maybe_mint_binding_current_value_publication_token(
+        d_.capability_tokens,
+        d_.identity,
+        d_.target_materialization_service,
+        record,
+        d_.daemon_id,
+        d_.daemon_session_id,
+        std::string_view(),
+        std::move(storage_layout_or->publish_segments),
+        std::move(storage_layout_or->publish_storages));
+    if (!token_or.ok()) {
+      const bool closed = d_.bindings.close_control(record->binding_id);
+      if (!closed) {
+        LOG(WARNING) << "binding cleanup could not find binding_id=" << record->binding_id;
+      }
+      return to_grpc_status(token_or.status());
+    }
+    if (!token_or->empty()) {
+      resp.set_binding_current_value_publication_token(*token_or);
+    }
   }
 
   if (req.ownership() == v2::BINDING_OWNERSHIP_DAEMON) {
@@ -2885,6 +3116,7 @@ grpc::Status OwnedBindingService::create_owned_binding(
           prepared_plan.resolved_artifact_id,
           prepared_plan.canonical_index_json,
           prepared_plan.disk_source,
+          prepared_plan.disk_metadata,
           req.has_serving_artifact_policy() ? &req.serving_artifact_policy() : nullptr));
   if (!preflight_or.ok()) {
     return to_grpc_status(preflight_or.status());
@@ -3091,6 +3323,12 @@ grpc::Status OwnedBindingService::create_owned_binding(
   }
   resp.mutable_resolved_selection()->CopyFrom(prepared_plan.current_selection);
   resp.set_source(to_proto_source(result_or->source));
+  if (!result_or->selected_source_replica_id.empty()) {
+    resp.set_selected_source_replica_id(result_or->selected_source_replica_id);
+  }
+  if (!result_or->selected_source_transport_id.empty()) {
+    resp.set_selected_source_transport_id(result_or->selected_source_transport_id);
+  }
   resp.set_state(create_staged_value ? v2::BINDING_STATE_READY_LOCAL : v2::BINDING_STATE_READY_ARTIFACT);
   if (create_staged_value) {
     resp.set_created_staged_value(true);
@@ -4312,9 +4550,10 @@ grpc::Status OwnedBindingService::refill_owned_binding(
   }
   const auto strict_preflight_done = std::chrono::steady_clock::now();
   strict_preflight_sec = elapsed_sec(strict_preflight_start, strict_preflight_done);
+  const bool effective_mapped_materialization = prepared_plan.mapped_plan.has_value();
 
   const auto materialize_start = std::chrono::steady_clock::now();
-  absl::StatusOr<store::loading::MaterializeIntoTargetResult> result_or = use_mapped_materialization
+  absl::StatusOr<store::loading::MaterializeIntoTargetResult> result_or = effective_mapped_materialization
       ? d_.engine.materialize_mapped_into_target(
             device, *prepared_execution.prepared_execution_plan, prepared_execution.hints, prepared_plan.disk_source)
       : d_.engine.materialize_into_target(
@@ -4390,6 +4629,12 @@ grpc::Status OwnedBindingService::refill_owned_binding(
     }
     resp.set_artifact_id(prepared_plan.resolved_artifact_id);
     resp.set_source(to_proto_source(result_or->source));
+    if (!result_or->selected_source_replica_id.empty()) {
+      resp.set_selected_source_replica_id(result_or->selected_source_replica_id);
+    }
+    if (!result_or->selected_source_transport_id.empty()) {
+      resp.set_selected_source_transport_id(result_or->selected_source_transport_id);
+    }
     resp.set_state(v2::BINDING_STATE_MUTABLE);
     resp.set_update_epoch(update_epoch);
     resp.mutable_execution_diagnostics()->CopyFrom(execution_diagnostics);
@@ -4398,6 +4643,7 @@ grpc::Status OwnedBindingService::refill_owned_binding(
     LOG(INFO) << "tc_profile refill_owned_binding timings"
               << " binding_id=" << req.binding_id() << " artifact_id=" << prepared_plan.resolved_artifact_id
               << " target_device=" << device.ordinal << " mapped=" << mapped
+              << " effective_mapped=" << effective_mapped_materialization
               << " realization_plan=" << use_realization_plan << " execution_only_mutable=1"
               << " prepare_plan_sec=" << prepare_plan_sec << " storage_layout_sec=" << storage_layout_sec
               << " prepare_execution_sec=" << prepare_execution_sec << " strict_preflight_sec=" << strict_preflight_sec
@@ -4413,6 +4659,7 @@ grpc::Status OwnedBindingService::refill_owned_binding(
           prepared_plan.resolved_artifact_id,
           prepared_plan.canonical_index_json,
           prepared_plan.disk_source,
+          prepared_plan.disk_metadata,
           req.has_serving_artifact_policy() ? &req.serving_artifact_policy() : nullptr));
   if (!preflight_or.ok()) {
     {
@@ -4453,6 +4700,12 @@ grpc::Status OwnedBindingService::refill_owned_binding(
 
   resp.set_artifact_id(prepared_plan.resolved_artifact_id);
   resp.set_source(to_proto_source(result_or->source));
+  if (!result_or->selected_source_replica_id.empty()) {
+    resp.set_selected_source_replica_id(result_or->selected_source_replica_id);
+  }
+  if (!result_or->selected_source_transport_id.empty()) {
+    resp.set_selected_source_transport_id(result_or->selected_source_transport_id);
+  }
   if (!binding_current_value_publication_token_or->empty()) {
     resp.set_binding_current_value_publication_token(*binding_current_value_publication_token_or);
   }
@@ -4465,7 +4718,8 @@ grpc::Status OwnedBindingService::refill_owned_binding(
   LOG(INFO) << "tc_profile refill_owned_binding timings"
             << " binding_id=" << req.binding_id() << " artifact_id=" << prepared_plan.resolved_artifact_id
             << " target_device=" << device.ordinal << " mapped=" << mapped
-            << " realization_plan=" << use_realization_plan << " execution_only_mutable=0"
+            << " effective_mapped=" << effective_mapped_materialization << " realization_plan=" << use_realization_plan
+            << " execution_only_mutable=0"
             << " prepare_plan_sec=" << prepare_plan_sec << " storage_layout_sec=" << storage_layout_sec
             << " prepare_execution_sec=" << prepare_execution_sec << " strict_preflight_sec=" << strict_preflight_sec
             << " materialize_sec=" << materialize_sec << " post_materialize_sec=" << elapsed_sec(materialize_done, done)

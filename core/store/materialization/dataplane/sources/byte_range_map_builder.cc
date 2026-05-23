@@ -3,6 +3,8 @@
 #include "core/store/materialization/dataplane/sources/byte_range_map_builder.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -20,6 +22,12 @@ using nlohmann::json;
 struct IndexEntry {
   uint64_t offset{0};
   uint64_t size{0};
+};
+
+struct Range {
+  uint64_t dst_offset{0};
+  uint64_t length{0};
+  uint64_t src_offset{0};
 };
 
 absl::StatusOr<std::unordered_map<std::string, IndexEntry>> parse_index_entries(std::string_view index_json) {
@@ -58,6 +66,76 @@ uint64_t compute_total_size_from_entries(const std::unordered_map<std::string, I
   return total;
 }
 
+absl::Status append_normalized_ranges(ByteRangeMap* map, std::vector<Range> ranges) {
+  if (map == nullptr) {
+    return absl::InvalidArgumentError("byte range map output must not be null");
+  }
+  std::sort(ranges.begin(), ranges.end(), [](const Range& a, const Range& b) {
+    if (a.dst_offset != b.dst_offset) {
+      return a.dst_offset < b.dst_offset;
+    }
+    return a.src_offset < b.src_offset;
+  });
+
+  uint64_t cur = 0;
+  std::optional<int64_t> active_delta;
+  for (Range range : ranges) {
+    if (range.length == 0) {
+      continue;
+    }
+    if (range.dst_offset >= map->total_bytes || range.length > map->total_bytes - range.dst_offset) {
+      return absl::InvalidArgumentError("byte range map range out of bounds");
+    }
+    const uint64_t range_end = range.dst_offset + range.length;
+    const int64_t range_delta = static_cast<int64_t>(range.src_offset) - static_cast<int64_t>(range.dst_offset);
+    if (range.dst_offset < cur) {
+      if (active_delta.has_value() && *active_delta != range_delta) {
+        return absl::InvalidArgumentError("overlapping byte ranges map to different source offsets");
+      }
+      if (range_end <= cur) {
+        continue;
+      }
+      const uint64_t trim = cur - range.dst_offset;
+      range.dst_offset = cur;
+      range.src_offset += trim;
+      range.length = range_end - cur;
+    }
+    if (range.dst_offset > cur) {
+      map->segments.push_back(
+          ByteRangeSegment{
+              .kind = ByteRangeSegment::Kind::kPad,
+              .dst_offset = cur,
+              .length = range.dst_offset - cur,
+              .src_offset = 0,
+              .source_index = 0,
+          });
+      active_delta.reset();
+      cur = range.dst_offset;
+    }
+    map->segments.push_back(
+        ByteRangeSegment{
+            .kind = ByteRangeSegment::Kind::kData,
+            .dst_offset = range.dst_offset,
+            .length = range.length,
+            .src_offset = range.src_offset,
+            .source_index = 0,
+        });
+    active_delta = range_delta;
+    cur = range.dst_offset + range.length;
+  }
+  if (cur < map->total_bytes) {
+    map->segments.push_back(
+        ByteRangeSegment{
+            .kind = ByteRangeSegment::Kind::kPad,
+            .dst_offset = cur,
+            .length = map->total_bytes - cur,
+            .src_offset = 0,
+            .source_index = 0,
+        });
+  }
+  return absl::OkStatus();
+}
+
 absl::StatusOr<ByteRangeMap> build_byte_range_map_from_canonical_index_json(
     std::string_view index_json,
     uint64_t total_size,
@@ -78,7 +156,7 @@ absl::StatusOr<ByteRangeMap> build_byte_range_map_from_canonical_index_json(
     return absl::InvalidArgumentError("canonical index JSON must be an object");
   }
 
-  std::vector<std::pair<uint64_t, uint64_t>> ranges;
+  std::vector<Range> ranges;
   ranges.reserve(j.size());
   for (auto it = j.begin(); it != j.end(); ++it) {
     const auto& arr = it.value();
@@ -87,49 +165,16 @@ absl::StatusOr<ByteRangeMap> build_byte_range_map_from_canonical_index_json(
     }
     uint64_t off = arr[0].get<uint64_t>();
     uint64_t sz = arr[1].get<uint64_t>();
-    ranges.emplace_back(off, sz);
+    ranges.push_back(Range{.dst_offset = off, .length = sz, .src_offset = off});
   }
-  std::sort(ranges.begin(), ranges.end(), [](auto& a, auto& b) { return a.first < b.first; });
 
   ByteRangeMap map;
   map.total_bytes = total_size;
   map.num_sources = 1;
   map.segments.reserve(ranges.size() * 2 + 1);
-
-  uint64_t cur = 0;
-  for (const auto& [off, sz] : ranges) {
-    if (off > cur) {
-      map.segments.push_back(
-          ByteRangeSegment{
-              .kind = ByteRangeSegment::Kind::kPad,
-              .dst_offset = cur,
-              .length = off - cur,
-              .src_offset = 0,
-              .source_index = 0,
-          });
-      cur = off;
-    }
-    if (sz > 0) {
-      map.segments.push_back(
-          ByteRangeSegment{
-              .kind = ByteRangeSegment::Kind::kData,
-              .dst_offset = off,
-              .length = sz,
-              .src_offset = off,
-              .source_index = 0,
-          });
-      cur = off + sz;
-    }
-  }
-  if (cur < total_size) {
-    map.segments.push_back(
-        ByteRangeSegment{
-            .kind = ByteRangeSegment::Kind::kPad,
-            .dst_offset = cur,
-            .length = total_size - cur,
-            .src_offset = 0,
-            .source_index = 0,
-        });
+  auto append_status = append_normalized_ranges(&map, std::move(ranges));
+  if (!append_status.ok()) {
+    return append_status;
   }
 
   return normalize_byte_range_map(std::move(map));
@@ -173,62 +218,28 @@ absl::StatusOr<ByteRangeMap> build_byte_range_map_from_canonical_and_source_inde
     return absl::InvalidArgumentError("source index total_size is zero");
   }
 
-  struct NamedRange {
-    std::string name;
-    uint64_t offset{0};
-    uint64_t size{0};
-  };
-
-  std::vector<NamedRange> ranges;
+  std::vector<Range> ranges;
   ranges.reserve(canonical.size());
   for (const auto& [name, entry] : canonical) {
-    ranges.push_back(NamedRange{name, entry.offset, entry.size});
+    const auto& src_entry = source.at(name);
+    if (src_entry.offset > source_total_size || src_entry.size > source_total_size - src_entry.offset) {
+      return absl::InvalidArgumentError("source index offsets out of bounds");
+    }
+    ranges.push_back(
+        Range{
+            .dst_offset = entry.offset,
+            .length = entry.size,
+            .src_offset = src_entry.offset,
+        });
   }
-  std::sort(ranges.begin(), ranges.end(), [](const NamedRange& a, const NamedRange& b) { return a.offset < b.offset; });
 
   ByteRangeMap map;
   map.total_bytes = total_size;
   map.num_sources = 1;
   map.segments.reserve(ranges.size() * 2 + 1);
-
-  uint64_t cur = 0;
-  for (const auto& range : ranges) {
-    if (range.offset > cur) {
-      map.segments.push_back(
-          ByteRangeSegment{
-              .kind = ByteRangeSegment::Kind::kPad,
-              .dst_offset = cur,
-              .length = range.offset - cur,
-              .src_offset = 0,
-              .source_index = 0,
-          });
-      cur = range.offset;
-    }
-    if (range.size > 0) {
-      const auto& src_entry = source.at(range.name);
-      if (src_entry.offset > source_total_size || src_entry.size > source_total_size - src_entry.offset) {
-        return absl::InvalidArgumentError("source index offsets out of bounds");
-      }
-      map.segments.push_back(
-          ByteRangeSegment{
-              .kind = ByteRangeSegment::Kind::kData,
-              .dst_offset = range.offset,
-              .length = range.size,
-              .src_offset = src_entry.offset,
-              .source_index = 0,
-          });
-      cur = range.offset + range.size;
-    }
-  }
-  if (cur < total_size) {
-    map.segments.push_back(
-        ByteRangeSegment{
-            .kind = ByteRangeSegment::Kind::kPad,
-            .dst_offset = cur,
-            .length = total_size - cur,
-            .src_offset = 0,
-            .source_index = 0,
-        });
+  auto append_status = append_normalized_ranges(&map, std::move(ranges));
+  if (!append_status.ok()) {
+    return append_status;
   }
 
   return normalize_byte_range_map(std::move(map));

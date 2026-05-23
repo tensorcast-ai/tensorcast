@@ -170,6 +170,7 @@ def replica_to_memory_info(
         memory_size=replica.memory_size,
         memory_type=memory_type_to_proto(replica.memory_type),
         device_id=replica.device_id,
+        replica_id=str(replica.replica_id),
     )
     transport = memory_info.transport
     transport.export_state = export_state_to_proto(replica.export_state)

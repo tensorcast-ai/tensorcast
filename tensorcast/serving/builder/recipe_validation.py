@@ -41,7 +41,7 @@ def validate_recipe_for_builder_mode(recipe: Any, mode: BuilderMode | str) -> An
         failures.append(
             "support_level="
             f"{serving_support_level_display_name(facts.support_level)} "
-            "is below serving_artifact_publication_ready"
+            "is below builder_publication_ready"
         )
     if builder_mode == BuilderMode.PURE_TRANSFORM:
         if facts.process_after_load_class != FinalizeClass.RUNTIME_ONLY:

@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -71,13 +71,44 @@ def canonical_index_from_bytes(
             size_bytes=int(size_bytes),
         )
         entries.append(entry)
-        total += entry.size_bytes
+        total = max(total, int(entry.segment_offset) + int(entry.size_bytes))
 
     return CanonicalIndex(
         entries=tuple(entries),
         total_size_bytes=total,
         avbs_hash=avbs_hash,
     )
+
+
+def canonical_entry_storage_span_bytes(entry: CanonicalIndexEntry) -> int:
+    element_size = int(torch.empty((), dtype=entry.dtype).element_size())
+    if not entry.shape:
+        return element_size
+    if len(entry.shape) != len(entry.stride):
+        raise ArtifactError(
+            f"Invalid canonical index entry for '{entry.name}': shape/stride rank mismatch",
+            status_code="DATA_LOSS",
+            retryable=False,
+        )
+    max_offset = 0
+    for dim, stride in zip(entry.shape, entry.stride, strict=True):
+        if int(dim) < 0:
+            raise ArtifactError(
+                f"Invalid canonical index entry for '{entry.name}': negative shape dimension",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        if int(dim) == 0:
+            return 0
+        max_offset += (int(dim) - 1) * abs(int(stride))
+    return (max_offset + 1) * element_size
+
+
+def canonical_index_storage_extent(entries: Sequence[CanonicalIndexEntry]) -> int:
+    total = 0
+    for entry in entries:
+        total = max(total, int(entry.segment_offset) + int(entry.size_bytes))
+    return total
 
 
 def canonical_index_to_bytes(
@@ -254,8 +285,10 @@ def validate_targets(
 
 
 __all__ = [
+    "canonical_entry_storage_span_bytes",
     "canonical_index_from_bytes",
     "canonical_index_to_bytes",
+    "canonical_index_storage_extent",
     "canonical_index_from_result",
     "dtype_from_string",
     "lease_handle_from_result",

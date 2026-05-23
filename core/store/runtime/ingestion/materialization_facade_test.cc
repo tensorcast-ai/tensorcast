@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -63,6 +64,7 @@ using tensorcast::store::runtime::RuntimeContext;
 using tensorcast::store::runtime::RuntimeContextEvents;
 using tensorcast::store::runtime::ingestion::ArtifactLoweringPlan;
 using tensorcast::store::runtime::ingestion::MaterializationFacade;
+using tensorcast::store::runtime::ingestion::open_single_loader_sources;
 using tensorcast::store::testing::RecordingGlobalStoreClient;
 namespace ingestion_testing = tensorcast::store::runtime::ingestion::testing;
 namespace pipeline_runtime = tensorcast::store::materialization::runtime::pipeline;
@@ -95,6 +97,19 @@ using PreparedSourceBoundExecutionPlan =
     tensorcast::store::runtime::ingestion::strategy::PreparedSourceBoundExecutionPlan;
 using ResolvedMaterializationPlan = tensorcast::store::runtime::ingestion::strategy::ResolvedMaterializationPlan;
 using SourceBoundLoweringArtifacts = tensorcast::store::runtime::ingestion::strategy::SourceBoundLoweringArtifacts;
+
+template <typename PayloadT>
+absl::StatusOr<std::vector<std::shared_ptr<tensorcast::store::loader::SeekableSource>>> open_inline_sources(
+    std::shared_ptr<PayloadT> payload,
+    std::uint64_t size_bytes,
+    const tensorcast::store::loader::ByteRangeMap& mapping,
+    std::string_view context) {
+  return tensorcast::store::runtime::ingestion::open_single_loader_sources(
+      std::make_unique<tensorcast::store::InlineBufferLoader>(
+          loading::InlineBufferSource{.data = std::move(payload), .size_bytes = size_bytes}),
+      mapping,
+      context);
+}
 
 PreparedSourceBoundExecutionPlan make_prepared_source_bound_execution_plan(
     ResolvedMaterializationPlan resolved_plan,
@@ -626,10 +641,8 @@ TEST_CASE(
   std::filesystem::remove_all(temp_root, cleanup_ec);
 }
 
-TEST_CASE(
-    "MaterializationFacade mapped loader wrapper routes through shared mapped sources helper",
-    "[materialization_facade]") {
-  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_mapped_loader_wrapper";
+TEST_CASE("MaterializationFacade mapped sources route through shared target executor", "[materialization_facade]") {
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_mapped_sources_executor";
   std::filesystem::create_directories(temp_root);
 
   FacadeHarness harness(MakeOptions(temp_root));
@@ -660,13 +673,18 @@ TEST_CASE(
   target_layout.total_size = target.size();
 
   loading::MaterializeHints hints;
-  hints.artifact_id = "cgid:mapped-loader-wrapper";
+  hints.artifact_id = "cgid:mapped-sources-executor";
 
-  auto result_or = harness.facade->materialize_mapped_loader_into_target(
-      DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
-      target_layout,
+  auto sources_or = open_single_loader_sources(
       std::make_unique<tensorcast::store::InlineBufferLoader>(
           loading::InlineBufferSource{.data = payload, .size_bytes = payload->size()}),
+      mapping,
+      "mapped-sources-executor-test");
+  REQUIRE(sources_or.ok());
+  auto result_or = harness.facade->materialize_mapped_sources_into_target(
+      DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+      target_layout,
+      std::move(*sources_or),
       mapping,
       hints,
       loading::MaterializationSource::kDisk);
@@ -686,8 +704,8 @@ TEST_CASE(
   std::filesystem::remove_all(temp_root, cleanup_ec);
 }
 
-TEST_CASE("MaterializationFacade mapped loader wrapper integrates batched direct writes", "[materialization_facade]") {
-  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_mapped_loader_direct_batch";
+TEST_CASE("MaterializationFacade mapped sources integrate batched direct writes", "[materialization_facade]") {
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_mapped_sources_direct_batch";
   std::filesystem::create_directories(temp_root);
 
   FacadeHarness harness(MakeOptions(temp_root));
@@ -736,12 +754,15 @@ TEST_CASE("MaterializationFacade mapped loader wrapper integrates batched direct
   target_layout.total_size = target.size();
 
   loading::MaterializeHints hints;
-  hints.artifact_id = "cgid:mapped-loader-direct-batch";
+  hints.artifact_id = "cgid:mapped-sources-direct-batch";
 
-  auto result_or = harness.facade->materialize_mapped_loader_into_target(
+  auto sources_or = open_single_loader_sources(
+      std::make_unique<RecordingDirectLoader>(source_bytes, stats), mapping, "mapped-sources-direct-batch-test");
+  REQUIRE(sources_or.ok());
+  auto result_or = harness.facade->materialize_mapped_sources_into_target(
       DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
       target_layout,
-      std::make_unique<RecordingDirectLoader>(source_bytes, stats),
+      std::move(*sources_or),
       mapping,
       hints,
       loading::MaterializationSource::kLocalReplica);
@@ -822,10 +843,13 @@ TEST_CASE(
   hints.artifact_id = "cgid:direct-write-without-pinned-pool";
   hints.pinned_timeout = std::chrono::milliseconds(1);
 
-  auto result_or = harness.facade->materialize_mapped_loader_into_target(
+  auto sources_or = open_single_loader_sources(
+      std::make_unique<RecordingDirectLoader>(source_bytes, stats), mapping, "direct-write-without-pinned-pool-test");
+  REQUIRE(sources_or.ok());
+  auto result_or = harness.facade->materialize_mapped_sources_into_target(
       DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
       target_layout,
-      std::make_unique<RecordingDirectLoader>(source_bytes, stats),
+      std::move(*sources_or),
       mapping,
       hints,
       loading::MaterializationSource::kLocalReplica);
@@ -904,10 +928,15 @@ TEST_CASE(
   loading::MaterializeHints hints;
   hints.artifact_id = "cgid:single-source-direct-write-composite-target";
 
-  auto result_or = harness.facade->materialize_mapped_loader_into_target(
+  auto sources_or = open_single_loader_sources(
+      std::make_unique<RecordingDirectLoader>(source_bytes, stats),
+      mapping,
+      "single-source-direct-write-composite-target-test");
+  REQUIRE(sources_or.ok());
+  auto result_or = harness.facade->materialize_mapped_sources_into_target(
       DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
       target_layout,
-      std::make_unique<RecordingDirectLoader>(source_bytes, stats),
+      std::move(*sources_or),
       mapping,
       hints,
       loading::MaterializationSource::kLocalReplica);
@@ -932,10 +961,8 @@ TEST_CASE(
   std::filesystem::remove_all(temp_root, cleanup_ec);
 }
 
-TEST_CASE(
-    "MaterializationFacade mapped loader wrapper preserves pre-issue direct-write fallback",
-    "[materialization_facade]") {
-  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_mapped_loader_direct_fallback";
+TEST_CASE("MaterializationFacade mapped sources preserve pre-issue direct-write fallback", "[materialization_facade]") {
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_mapped_sources_direct_fallback";
   std::filesystem::create_directories(temp_root);
 
   FacadeHarness harness(MakeOptions(temp_root));
@@ -975,12 +1002,14 @@ TEST_CASE(
   target_layout.total_size = target.size();
 
   loading::MaterializeHints hints;
-  hints.artifact_id = "cgid:mapped-loader-direct-fallback";
+  hints.artifact_id = "cgid:mapped-sources-direct-fallback";
 
-  auto result_or = harness.facade->materialize_mapped_loader_into_target(
+  auto sources_or = open_single_loader_sources(std::move(loader), mapping, "mapped-sources-direct-fallback-test");
+  REQUIRE(sources_or.ok());
+  auto result_or = harness.facade->materialize_mapped_sources_into_target(
       DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
       target_layout,
-      std::move(loader),
+      std::move(*sources_or),
       mapping,
       hints,
       loading::MaterializationSource::kLocalReplica);
@@ -1000,10 +1029,8 @@ TEST_CASE(
   std::filesystem::remove_all(temp_root, cleanup_ec);
 }
 
-TEST_CASE(
-    "MaterializationFacade mapped loader wrapper keeps single-source public contract",
-    "[materialization_facade]") {
-  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_mapped_loader_single_source";
+TEST_CASE("MaterializationFacade mapped sources reject missing source handles", "[materialization_facade]") {
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_mapped_sources_missing_source";
   std::filesystem::create_directories(temp_root);
 
   FacadeHarness harness(MakeOptions(temp_root));
@@ -1039,40 +1066,42 @@ TEST_CASE(
   target_layout.total_size = target.size();
 
   loading::MaterializeHints hints;
-  hints.artifact_id = "cgid:mapped-loader-single-source";
+  hints.artifact_id = "cgid:mapped-sources-missing-source";
 
   const auto payload = std::make_shared<std::array<uint8_t, 8>>(std::array<uint8_t, 8>{1, 2, 3, 4, 5, 6, 7, 8});
-  auto result_or = harness.facade->materialize_mapped_loader_into_target(
+  auto single_source_or = open_inline_sources(
+      payload,
+      payload->size(),
+      loading::build_identity_byte_range_map(payload->size()),
+      "mapped-sources-single-source-test");
+  REQUIRE(single_source_or.ok());
+  auto result_or = harness.facade->materialize_mapped_sources_into_target(
       DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
       target_layout,
-      std::make_unique<tensorcast::store::InlineBufferLoader>(
-          loading::InlineBufferSource{.data = payload, .size_bytes = payload->size()}),
+      std::move(*single_source_or),
       mapping,
       hints,
       loading::MaterializationSource::kDisk);
   REQUIRE_FALSE(result_or.ok());
   CHECK(absl::IsInvalidArgument(result_or.status()));
-  CHECK(result_or.status().message().find("mapping.num_sources == 1") != std::string::npos);
+  CHECK(result_or.status().message().find("sources do not satisfy map.num_sources") != std::string::npos);
 
   harness.shutdown();
   std::error_code cleanup_ec;
   std::filesystem::remove_all(temp_root, cleanup_ec);
 }
 
-TEST_CASE(
-    "MaterializationFacade ingest mapped loader wrapper preserves public id and event semantics",
-    "[materialization_facade]") {
-  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_ingest_mapped_loader_ids";
+TEST_CASE("MaterializationFacade ingest mapped sources preserves target id semantics", "[materialization_facade]") {
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_ingest_mapped_sources_ids";
   std::filesystem::create_directories(temp_root);
 
   FacadeHarness harness(MakeOptions(temp_root));
   harness.initialize();
-  IngestionEventRecorder recorder(harness.runtime_context());
 
   const auto payload =
       std::make_shared<std::array<uint8_t, 6>>(std::array<uint8_t, 6>{0x41, 0x42, 0x43, 0x44, 0x45, 0x46});
-  const std::string logical_artifact_id = "cgid:logical_ingest_mapped_loader";
-  const std::string physical_artifact_id = "__tc_body__:ingest_mapped_loader";
+  const std::string logical_artifact_id = "cgid:logical_ingest_mapped_sources";
+  const std::string physical_artifact_id = "__tc_body__:ingest_mapped_sources";
 
   loading::ReplicaTarget target;
   target.location.type = MemoryLocation::CPU;
@@ -1092,26 +1121,37 @@ TEST_CASE(
   };
 
   loading::MaterializeHints hints;
+  hints.artifact_id = logical_artifact_id;
 
-  static_cast<void>(recorder.drain_started());
-  static_cast<void>(recorder.drain_completed());
-  auto handle_or = harness.facade->ingest_mapped_loader_into_replica(
-      logical_artifact_id,
-      physical_artifact_id,
-      DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
-      target,
+  auto sources_or = open_single_loader_sources(
       std::make_unique<tensorcast::store::InlineBufferLoader>(
           loading::InlineBufferSource{.data = payload, .size_bytes = payload->size()}),
       mapping,
+      "ingest-mapped-sources-ids-test");
+  REQUIRE(sources_or.ok());
+  auto result_or = harness.facade->ingest_mapped_sources_into_replicas(
+      {
+          MaterializationFacade::MappedReplicaTarget{
+              .logical_artifact_id = logical_artifact_id,
+              .physical_artifact_id = physical_artifact_id,
+              .target_device = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+              .target = target,
+              .size_bytes = mapping.total_bytes,
+          },
+      },
+      std::move(*sources_or),
+      mapping,
       hints,
       loading::MaterializationSource::kDisk);
-  REQUIRE(handle_or.ok());
-  CHECK(handle_or->key().artifact_id == physical_artifact_id);
-  CHECK(handle_or->source == loading::MaterializationSource::kDisk);
-  CHECK(handle_or->cpu_state == tensorcast::store::replica::MemoryState::LOADED);
-  CHECK(handle_or->wait_ready(std::chrono::milliseconds(100)).ok());
+  REQUIRE(result_or.ok());
+  REQUIRE(result_or->replica_handles.size() == 1);
+  loading::ReplicaHandle handle = std::move(result_or->replica_handles.front());
+  CHECK(handle.key().artifact_id == physical_artifact_id);
+  CHECK(handle.source == loading::MaterializationSource::kDisk);
+  CHECK(handle.cpu_state == tensorcast::store::replica::MemoryState::LOADED);
+  CHECK(handle.wait_ready(std::chrono::milliseconds(100)).ok());
 
-  auto replica_or = harness.replica_runtime().registry().find(handle_or->key());
+  auto replica_or = harness.replica_runtime().registry().find(handle.key());
   REQUIRE(replica_or.ok());
   CHECK(replica_or.value()->get_memory_state(MemoryLocation::CPU) == tensorcast::store::replica::MemoryState::LOADED);
   auto cpu_ptrs = replica_or.value()->get_data_pointer(MemoryLocation::CPU);
@@ -1122,36 +1162,20 @@ TEST_CASE(
     CHECK(cpu_ptr[index] == (*payload)[index]);
   }
 
-  harness.runtime_context().drain_events();
-  auto started_events = recorder.drain_started();
-  auto completed_events = recorder.drain_completed();
-  REQUIRE(started_events.size() == 1);
-  REQUIRE(completed_events.size() == 1);
-  CHECK(started_events.front().artifact_id == logical_artifact_id);
-  CHECK(completed_events.front().artifact_id == logical_artifact_id);
-  CHECK(completed_events.front().status.ok());
-  REQUIRE(completed_events.front().replica_key.has_value());
-  CHECK(completed_events.front().replica_key->artifact_id == physical_artifact_id);
-
   harness.shutdown();
   std::error_code cleanup_ec;
   std::filesystem::remove_all(temp_root, cleanup_ec);
 }
 
-TEST_CASE(
-    "MaterializationFacade ingest mapped loader wrapper keeps single-source public contract",
-    "[materialization_facade]") {
-  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_ingest_mapped_loader_single_source";
+TEST_CASE("MaterializationFacade ingest mapped sources rejects missing source handles", "[materialization_facade]") {
+  auto temp_root =
+      std::filesystem::temp_directory_path() / "materialization_facade_ingest_mapped_sources_missing_source";
   std::filesystem::create_directories(temp_root);
 
   FacadeHarness harness(MakeOptions(temp_root));
   harness.initialize();
 
   const auto payload = std::make_shared<std::array<uint8_t, 8>>(std::array<uint8_t, 8>{1, 2, 3, 4, 5, 6, 7, 8});
-
-  loading::ReplicaTarget target;
-  target.location.type = MemoryLocation::CPU;
-  target.location.device_id = -1;
 
   tensorcast::store::loader::ByteRangeMap mapping;
   mapping.total_bytes = payload->size();
@@ -1173,21 +1197,36 @@ TEST_CASE(
       },
   };
 
-  loading::MaterializeHints hints;
+  loading::ReplicaTarget target;
+  target.location.type = MemoryLocation::CPU;
+  target.location.device_id = -1;
 
-  auto handle_or = harness.facade->ingest_mapped_loader_into_replica(
-      "cgid:logical_ingest_mapped_loader_single_source",
-      "__tc_body__:ingest_mapped_loader_single_source",
-      DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
-      target,
-      std::make_unique<tensorcast::store::InlineBufferLoader>(
-          loading::InlineBufferSource{.data = payload, .size_bytes = payload->size()}),
+  loading::MaterializeHints hints;
+  hints.artifact_id = "cgid:ingest-mapped-sources-missing-source";
+
+  auto sources_or = open_inline_sources(
+      payload,
+      payload->size(),
+      loading::build_identity_byte_range_map(payload->size()),
+      "ingest-mapped-sources-single-source-test");
+  REQUIRE(sources_or.ok());
+  auto result_or = harness.facade->ingest_mapped_sources_into_replicas(
+      {
+          MaterializationFacade::MappedReplicaTarget{
+              .logical_artifact_id = "cgid:logical_ingest_mapped_sources_missing_source",
+              .physical_artifact_id = "__tc_body__:ingest_mapped_sources_missing_source",
+              .target_device = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+              .target = target,
+              .size_bytes = mapping.total_bytes,
+          },
+      },
+      std::move(*sources_or),
       mapping,
       hints,
       loading::MaterializationSource::kDisk);
-  REQUIRE_FALSE(handle_or.ok());
-  CHECK(absl::IsInvalidArgument(handle_or.status()));
-  CHECK(handle_or.status().message().find("mapping.num_sources == 1") != std::string::npos);
+  REQUIRE_FALSE(result_or.ok());
+  CHECK(absl::IsInvalidArgument(result_or.status()));
+  CHECK(result_or.status().message().find("sources do not satisfy map.num_sources") != std::string::npos);
 
   harness.shutdown();
   std::error_code cleanup_ec;

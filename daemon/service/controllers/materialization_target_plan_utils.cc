@@ -61,11 +61,11 @@ using representation_transform_builder::build_representation_transform_contract;
 using store::loader::ViewSpec;
 
 store::runtime::ingestion::strategy::SourceBoundLoweringStats to_source_bound_lowering_stats(
-    const representation_transform_builder::TransformWorkCompatibilityStats& stats) {
+    const representation_transform_builder::TransformWorkLoweringStats& stats) {
   return store::runtime::ingestion::strategy::SourceBoundLoweringStats{
       .total_dst_tensors = stats.total_dst_tensors,
-      .compatible_candidates = stats.compatible_candidates,
-      .compatible_bytes = stats.compatible_bytes,
+      .collective_candidates = stats.collective_candidates,
+      .collective_bytes = stats.collective_bytes,
       .concat_candidates = stats.concat_candidates,
       .concat_bytes = stats.concat_bytes,
       .rejected_mixed_src_or_dim = stats.rejected_mixed_src_or_dim,
@@ -149,7 +149,7 @@ void patch_transform_contract_source_specs(
 absl::StatusOr<store::materialization::contracts::RepresentationWorkPlan> build_execution_representation_work_plan(
     const store::materialization::contracts::RepresentationTransformContract& transform_contract,
     const std::optional<CanonicalIndexTable>& physical_source_table,
-    std::optional<store::loader::ByteRangeMap> compatibility_lowered_map = std::nullopt) {
+    std::optional<store::loader::ByteRangeMap> collective_lowered_map = std::nullopt) {
   auto execution_contract = transform_contract;
   if (physical_source_table.has_value()) {
     patch_transform_contract_source_specs(*physical_source_table, &execution_contract);
@@ -158,11 +158,11 @@ absl::StatusOr<store::materialization::contracts::RepresentationWorkPlan> build_
   if (!work_plan_or.ok()) {
     return work_plan_or.status();
   }
-  if (compatibility_lowered_map.has_value()) {
+  if (collective_lowered_map.has_value()) {
     store::loader::ByteRangeMap pad_map;
-    pad_map.total_bytes = compatibility_lowered_map->total_bytes;
-    pad_map.num_sources = compatibility_lowered_map->num_sources;
-    for (const auto& segment : compatibility_lowered_map->segments) {
+    pad_map.total_bytes = collective_lowered_map->total_bytes;
+    pad_map.num_sources = collective_lowered_map->num_sources;
+    for (const auto& segment : collective_lowered_map->segments) {
       if (segment.kind == store::loader::ByteRangeSegment::Kind::kPad) {
         pad_map.segments.push_back(segment);
       }
@@ -1203,22 +1203,20 @@ Status build_mapped_target_materialization_plan(
   }
   plan.representation = std::move(*representation_or);
   plan.representation.generic_fallback_map.total_bytes = plan.logical_total_size;
-  LOG(INFO) << "MaterializeIntoMappedTarget representation-work compatibility"
+  LOG(INFO) << "MaterializeIntoMappedTarget representation-work lowering"
             << " copy_entries=" << req.copy_plan().entries_size() << " dst_tensors=" << mapped_layout.dst_specs.size()
-            << " compatible_candidates=" << plan.representation.compatibility_stats.compatible_candidates
-            << " compatible_bytes=" << plan.representation.compatibility_stats.compatible_bytes
-            << " concat_candidates=" << plan.representation.compatibility_stats.concat_candidates
-            << " concat_bytes=" << plan.representation.compatibility_stats.concat_bytes
-            << " rejected_mixed_src_or_dim=" << plan.representation.compatibility_stats.rejected_mixed_src_or_dim
-            << " rejected_mixed_src_or_dim_bytes="
-            << plan.representation.compatibility_stats.rejected_mixed_src_or_dim_bytes
-            << " rejected_non_contiguous=" << plan.representation.compatibility_stats.rejected_non_contiguous
-            << " rejected_non_contiguous_bytes="
-            << plan.representation.compatibility_stats.rejected_non_contiguous_bytes
+            << " collective_candidates=" << plan.representation.lowering_stats.collective_candidates
+            << " collective_bytes=" << plan.representation.lowering_stats.collective_bytes
+            << " concat_candidates=" << plan.representation.lowering_stats.concat_candidates
+            << " concat_bytes=" << plan.representation.lowering_stats.concat_bytes
+            << " rejected_mixed_src_or_dim=" << plan.representation.lowering_stats.rejected_mixed_src_or_dim
+            << " rejected_mixed_src_or_dim_bytes=" << plan.representation.lowering_stats.rejected_mixed_src_or_dim_bytes
+            << " rejected_non_contiguous=" << plan.representation.lowering_stats.rejected_non_contiguous
+            << " rejected_non_contiguous_bytes=" << plan.representation.lowering_stats.rejected_non_contiguous_bytes
             << " rejected_unsupported_distribution="
-            << plan.representation.compatibility_stats.rejected_unsupported_distribution
+            << plan.representation.lowering_stats.rejected_unsupported_distribution
             << " rejected_unsupported_distribution_bytes="
-            << plan.representation.compatibility_stats.rejected_unsupported_distribution_bytes
+            << plan.representation.lowering_stats.rejected_unsupported_distribution_bytes
             << " representation_contract_hash="
             << plan.representation.transform_contract.target_representation.representation_contract_hash;
 
@@ -1482,7 +1480,7 @@ Status build_binding_realization_materialization_plan(
             << " parse_source_tables_sec=" << parse_source_tables_sec
             << " representation_contract_sec=" << representation_contract_sec
             << " selection_identity_sec=" << selection_identity_sec
-            << " compatibility_segments=" << plan.representation.compatibility_lowered_map.segments.size()
+            << " collective_segments=" << plan.representation.collective_lowered_map.segments.size()
             << " fallback_segments=" << plan.representation.generic_fallback_map.segments.size()
             << " tensor_bindings=" << plan.representation.transform_contract.tensor_bindings.size()
             << " total_sec=" << elapsed_sec(profile_start, done);
@@ -1502,14 +1500,14 @@ build_resolved_mapped_materialization_plan(
   double parse_source_index_sec = 0.0;
   double init_plan_sec = 0.0;
   double work_plan_sec = 0.0;
-  double filter_compat_sec = 0.0;
+  double filter_collective_candidate_sec = 0.0;
   double collective_ranges_sec = 0.0;
   double filter_collective_sec = 0.0;
   double filter_generic_sec = 0.0;
   double merge_executor_sec = 0.0;
-  bool generic_reused_compatibility_map = false;
+  bool generic_reused_collective_map = false;
   bool executor_merge_skipped = false;
-  uint64_t compatibility_data_bytes = 0;
+  uint64_t collective_candidate_data_bytes = 0;
 
   using PreparedExecutionPlan = store::runtime::ingestion::strategy::PreparedSourceBoundExecutionPlan;
   using StrategyPlan = store::runtime::ingestion::strategy::ResolvedMaterializationPlan;
@@ -1537,11 +1535,11 @@ build_resolved_mapped_materialization_plan(
   init_plan_sec = elapsed_sec(init_plan_start, std::chrono::steady_clock::now());
   if (resolved_plan.representation_transform_contract.has_value()) {
     prepared_execution.lowering_artifacts = store::runtime::ingestion::strategy::SourceBoundLoweringArtifacts{
-        .lowering_stats = to_source_bound_lowering_stats(mapped_plan.representation.compatibility_stats),
+        .lowering_stats = to_source_bound_lowering_stats(mapped_plan.representation.lowering_stats),
     };
-    const store::loader::ByteRangeMap compatibility_map = [&]() {
-      if (!mapped_plan.representation.compatibility_lowered_map.segments.empty()) {
-        auto map = mapped_plan.representation.compatibility_lowered_map;
+    const store::loader::ByteRangeMap collective_candidate_map = [&]() {
+      if (!mapped_plan.representation.collective_lowered_map.segments.empty()) {
+        auto map = mapped_plan.representation.collective_lowered_map;
         if (map.total_bytes == 0) {
           map.total_bytes = target_layout.total_size > 0 ? target_layout.total_size : mapped_plan.logical_total_size;
         }
@@ -1564,22 +1562,23 @@ build_resolved_mapped_materialization_plan(
     auto work_plan_or = build_execution_representation_work_plan(
         *resolved_plan.representation_transform_contract,
         physical_source_table,
-        compatibility_map.segments.empty() ? std::nullopt
-                                           : std::optional<store::loader::ByteRangeMap>(compatibility_map));
+        collective_candidate_map.segments.empty()
+            ? std::nullopt
+            : std::optional<store::loader::ByteRangeMap>(collective_candidate_map));
     work_plan_sec = elapsed_sec(work_plan_start, std::chrono::steady_clock::now());
     if (!work_plan_or.ok()) {
       return work_plan_or.status();
     }
     resolved_plan.representation_work_plan = std::move(*work_plan_or);
-    const auto filter_compat_start = std::chrono::steady_clock::now();
-    auto compatibility_data_map_or =
-        filter_byte_range_map(compatibility_map, store::loader::ByteRangeSegment::Kind::kData);
-    filter_compat_sec = elapsed_sec(filter_compat_start, std::chrono::steady_clock::now());
-    if (!compatibility_data_map_or.ok()) {
-      return compatibility_data_map_or.status();
+    const auto filter_collective_candidate_start = std::chrono::steady_clock::now();
+    auto collective_candidate_data_map_or =
+        filter_byte_range_map(collective_candidate_map, store::loader::ByteRangeSegment::Kind::kData);
+    filter_collective_candidate_sec = elapsed_sec(filter_collective_candidate_start, std::chrono::steady_clock::now());
+    if (!collective_candidate_data_map_or.ok()) {
+      return collective_candidate_data_map_or.status();
     }
-    if (!compatibility_data_map_or->segments.empty()) {
-      compatibility_data_bytes = byte_range_map_covered_bytes(*compatibility_data_map_or);
+    if (!collective_candidate_data_map_or->segments.empty()) {
+      collective_candidate_data_bytes = byte_range_map_covered_bytes(*collective_candidate_data_map_or);
       const auto collective_ranges_start = std::chrono::steady_clock::now();
       auto collective_dst_ranges_or = build_collective_dst_ranges(*resolved_plan.representation_work_plan);
       collective_ranges_sec = elapsed_sec(collective_ranges_start, std::chrono::steady_clock::now());
@@ -1588,7 +1587,7 @@ build_resolved_mapped_materialization_plan(
       }
       const auto filter_collective_start = std::chrono::steady_clock::now();
       auto collective_data_map_or =
-          filter_data_map_to_dst_ranges(*compatibility_data_map_or, *collective_dst_ranges_or);
+          filter_data_map_to_dst_ranges(*collective_candidate_data_map_or, *collective_dst_ranges_or);
       filter_collective_sec = elapsed_sec(filter_collective_start, std::chrono::steady_clock::now());
       if (!collective_data_map_or.ok()) {
         return collective_data_map_or.status();
@@ -1597,15 +1596,15 @@ build_resolved_mapped_materialization_plan(
         prepared_execution.lowering_artifacts->collective_data_map = *collective_data_map_or;
       }
     }
-    store::loader::ByteRangeMap compatibility_data_map;
-    if (!compatibility_data_map_or->segments.empty()) {
-      compatibility_data_map = *compatibility_data_map_or;
+    store::loader::ByteRangeMap collective_candidate_data_map;
+    if (!collective_candidate_data_map_or->segments.empty()) {
+      collective_candidate_data_map = *collective_candidate_data_map_or;
     }
     store::loader::ByteRangeMap generic_data_map;
-    if (!compatibility_data_map.segments.empty() &&
-        compatibility_data_bytes >= mapped_plan.representation.total_bytes_copied) {
-      generic_data_map = compatibility_data_map;
-      generic_reused_compatibility_map = true;
+    if (!collective_candidate_data_map.segments.empty() &&
+        collective_candidate_data_bytes >= mapped_plan.representation.total_bytes_copied) {
+      generic_data_map = collective_candidate_data_map;
+      generic_reused_collective_map = true;
     } else {
       const auto filter_generic_start = std::chrono::steady_clock::now();
       auto generic_data_map_or =
@@ -1616,8 +1615,8 @@ build_resolved_mapped_materialization_plan(
       }
       if (!generic_data_map_or->segments.empty()) {
         generic_data_map = *generic_data_map_or;
-      } else if (!compatibility_data_map.segments.empty()) {
-        generic_data_map = compatibility_data_map;
+      } else if (!collective_candidate_data_map.segments.empty()) {
+        generic_data_map = collective_candidate_data_map;
       }
     }
     if (resolved_plan.representation_work_plan->residual_fallback_map.segments.empty()) {
@@ -1651,12 +1650,13 @@ build_resolved_mapped_materialization_plan(
                     ? resolved_plan.representation_work_plan->items.size()
                     : 0)
             << " parse_source_index_sec=" << parse_source_index_sec << " init_plan_sec=" << init_plan_sec
-            << " work_plan_sec=" << work_plan_sec << " filter_compat_sec=" << filter_compat_sec
+            << " work_plan_sec=" << work_plan_sec
+            << " filter_collective_candidate_sec=" << filter_collective_candidate_sec
             << " collective_ranges_sec=" << collective_ranges_sec << " filter_collective_sec=" << filter_collective_sec
             << " filter_generic_sec=" << filter_generic_sec << " merge_executor_sec=" << merge_executor_sec
-            << " compatibility_data_bytes=" << compatibility_data_bytes
+            << " collective_candidate_data_bytes=" << collective_candidate_data_bytes
             << " total_bytes_copied=" << mapped_plan.representation.total_bytes_copied
-            << " generic_reused_compatibility_map=" << (generic_reused_compatibility_map ? 1 : 0)
+            << " generic_reused_collective_map=" << (generic_reused_collective_map ? 1 : 0)
             << " executor_merge_skipped=" << (executor_merge_skipped ? 1 : 0)
             << " total_sec=" << elapsed_sec(profile_start, done);
   return prepared_execution;

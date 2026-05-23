@@ -61,6 +61,13 @@ class SourceCatalog:
     canonical_index_bytes: bytes
     schema_version: int = SOURCE_CATALOG_SCHEMA_VERSION
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "source_artifact_ref",
+            resolve_source_artifact_ref(self.source_artifact_ref),
+        )
+
 
 def source_catalog_from_selected_safetensors(
     directory: Path | str,

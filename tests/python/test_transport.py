@@ -93,7 +93,9 @@ def test_transport_concurrency(servicer, test_context, memory_info):
         max_concurrency=max_concurrency,
         worker_id=worker_id,
     )
-    servicer.RegisterReplica(register_request, test_context)
+    register_response = servicer.RegisterReplica(register_request, test_context)
+    assert register_response.status == global_store_pb2.Status.STATUS_OK
+    assert register_response.replica_id
 
     # Request transports up to max_concurrency
     transports = []
@@ -108,6 +110,7 @@ def test_transport_concurrency(servicer, test_context, memory_info):
         )
         response = servicer.RequestReplicaTransport(transport_request, test_context)
         assert response.status == global_store_pb2.Status.STATUS_OK
+        assert response.remote_memory_info.replica_id == register_response.replica_id
         transports.append(response.transport_id)
 
     # Try to request another transport, which should fail or time out

@@ -3681,10 +3681,27 @@ grpc::Status ByteArtifactController::batch_get_into_region(
                 << " payload_bytes=" << payload_bytes;
 
       const absl::Time apply_started_at = absl::Now();
-      auto materialize_or = d_.engine.materialize_mapped_loader_into_target(
+      auto sources_or = store::runtime::ingestion::open_single_loader_sources(
+          std::make_unique<SeekableSourceLoader>(resolved_it->second.source, transport->manifest().total_size()),
+          composite_mapping,
+          "byte_artifact.batch_get_into_region_transport");
+      if (!sources_or.ok()) {
+        for (const auto& item_ref : work_unit.items) {
+          result.outcome_updates.push_back(
+              ApplyOutcomeUpdate{
+                  .outcome_index = item_ref.outcome_index,
+                  .outcome = make_outcome(
+                      item_ref.artifact_id,
+                      batch_item_status_from_absl_status(sources_or.status()),
+                      std::string(sources_or.status().message())),
+              });
+        }
+        return true;
+      }
+      auto materialize_or = d_.engine.materialize_mapped_sources_into_target(
           store::DeviceKey{.type = tensorcast::DeviceType::CPU, .ordinal = -1, .uuid = ""},
           composite_target_layout,
-          std::make_unique<SeekableSourceLoader>(resolved_it->second.source, transport->manifest().total_size()),
+          std::move(*sources_or),
           composite_mapping,
           build_lowering_hints(transport_id, operation_id_owned),
           store::loading::MaterializationSource::kP2P);
@@ -4025,11 +4042,21 @@ grpc::Status ByteArtifactController::batch_get_into_region(
             result.stats_delta.local_batch_transport_per_item_materialize_calls += 1;
           }
         }
-        auto materialize_or = d_.engine.materialize_mapped_loader_into_target(
+        auto byte_range_map = store::loading::build_identity_byte_range_map(payload_bytes);
+        auto sources_or = store::runtime::ingestion::open_single_loader_sources(
+            std::move(loader), byte_range_map, "byte_artifact.batch_get_into_region_item");
+        if (!sources_or.ok()) {
+          push_outcome(make_outcome(
+              item_ref.artifact_id,
+              batch_item_status_from_absl_status(sources_or.status()),
+              std::string(sources_or.status().message())));
+          return;
+        }
+        auto materialize_or = d_.engine.materialize_mapped_sources_into_target(
             store::DeviceKey{.type = tensorcast::DeviceType::CPU, .ordinal = -1, .uuid = ""},
             *item_target_layout_or,
-            std::move(loader),
-            store::loading::build_identity_byte_range_map(payload_bytes),
+            std::move(*sources_or),
+            byte_range_map,
             build_lowering_hints(item_ref.artifact_id, operation_id_owned),
             source_kind);
         if (!materialize_or.ok()) {

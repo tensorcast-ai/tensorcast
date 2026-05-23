@@ -9,6 +9,7 @@
 #include <string_view>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -81,6 +82,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   std::vector<std::string> upserted_artifact_metadata_indices;
 
   struct TransportReplicaInfo {
+    std::string replica_id;
     std::string artifact_id;
     std::optional<std::string> view_id;
     uint64_t memory_size{0};
@@ -99,6 +101,8 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   };
 
   std::unordered_map<std::string, TransportReplicaInfo> transport_replicas;
+  std::unordered_map<std::string, std::string> replica_transport_keys;
+  std::unordered_set<std::string> unavailable_transport_keys;
   std::vector<UnregisterReplicaByWorkerCall> unregister_replica_by_worker_calls;
   std::vector<components::TransportSession> scripted_transport_sessions;
   size_t scripted_transport_next{0};
@@ -223,12 +227,28 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
         (device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;
     info.device_id = device.ordinal;
     info.export_generation = export_generation;
-    transport_replicas[transport_key(info.artifact_id, view_id)] = std::move(info);
-    return std::string("memory_replica");
+    const std::string key = transport_key(info.artifact_id, view_id);
+    const std::string replica_id = "memory_replica";
+    info.replica_id = replica_id;
+    unavailable_transport_keys.erase(key);
+    replica_transport_keys[replica_id] = key;
+    transport_replicas[key] = std::move(info);
+    return replica_id;
   }
 
   absl::Status unregister_replica(std::string_view artifact_id, std::string_view replica_id) override {
     unregistered_replicas.emplace_back(std::string(artifact_id), std::string(replica_id));
+    if (!unregister_replica_status.ok()) {
+      return unregister_replica_status;
+    }
+    auto key_it = replica_transport_keys.find(std::string(replica_id));
+    if (key_it != replica_transport_keys.end()) {
+      unavailable_transport_keys.insert(key_it->second);
+      transport_replicas.erase(key_it->second);
+      replica_transport_keys.erase(key_it);
+      return absl::OkStatus();
+    }
+    unavailable_transport_keys.insert(transport_key(artifact_id, std::nullopt));
     return unregister_replica_status;
   }
 
@@ -243,11 +263,26 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
             .worker_id = std::string(worker_id),
             .memory_type = memory_type,
             .device_id = device_id});
+    if (!unregister_replica_by_worker_status.ok()) {
+      return unregister_replica_by_worker_status;
+    }
+    for (const auto& [key, info] : transport_replicas) {
+      if (info.artifact_id != artifact_id) {
+        continue;
+      }
+      if (memory_type.has_value() && info.memory_type != *memory_type) {
+        continue;
+      }
+      if (device_id.has_value() && info.device_id != static_cast<int>(*device_id)) {
+        continue;
+      }
+      unavailable_transport_keys.insert(key);
+    }
     return unregister_replica_by_worker_status;
   }
 
   absl::StatusOr<bool> mark_replica_unavailable(
-      std::string_view,
+      std::string_view artifact_id,
       std::string_view replica_id,
       std::optional<std::string_view>,
       std::optional<std::string_view>) override {
@@ -256,6 +291,12 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     }
     call_sequence.emplace_back(absl::StrCat("mark:", replica_id));
     marked_unavailable.emplace_back(std::string(replica_id));
+    auto key_it = replica_transport_keys.find(std::string(replica_id));
+    if (key_it != replica_transport_keys.end()) {
+      unavailable_transport_keys.insert(key_it->second);
+      return true;
+    }
+    unavailable_transport_keys.insert(transport_key(artifact_id, std::nullopt));
     return true;
   }
 
@@ -537,13 +578,17 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     if (scripted_transport_next < scripted_transport_sessions.size()) {
       return scripted_transport_sessions[scripted_transport_next++];
     }
+    const std::string key = transport_key(artifact_id, std::nullopt);
+    if (unavailable_transport_keys.contains(key)) {
+      return absl::NotFoundError("replica transport unavailable in RecordingGlobalStoreClient");
+    }
     if (replica_transport_not_found) {
       return absl::NotFoundError("replica transport not found in RecordingGlobalStoreClient");
     }
     if (!allow_replica_transport) {
       return absl::UnavailableError("replica transport disabled in RecordingGlobalStoreClient");
     }
-    auto it = transport_replicas.find(transport_key(artifact_id, std::nullopt));
+    auto it = transport_replicas.find(key);
     if (it == transport_replicas.end()) {
       return make_transport_session(artifact_id, target_device);
     }
@@ -569,7 +614,11 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     if (!allow_view_transport) {
       return absl::NotFoundError("view transport disabled in RecordingGlobalStoreClient");
     }
-    auto it = transport_replicas.find(transport_key(artifact_id, view_id));
+    const std::string key = transport_key(artifact_id, view_id);
+    if (unavailable_transport_keys.contains(key)) {
+      return absl::NotFoundError("view transport unavailable in RecordingGlobalStoreClient");
+    }
+    auto it = transport_replicas.find(key);
     if (it == transport_replicas.end()) {
       return absl::NotFoundError("view transport not found in RecordingGlobalStoreClient");
     }
@@ -920,6 +969,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     components::TransportSession session;
     (void)artifact_id;
     session.transport_id = "test-transport";
+    session.remote_replica.replica_id = "stub-replica";
     session.remote_replica.node_id = "stub-node";
     session.remote_replica.node_address = "127.0.0.1";
     session.remote_replica.node_port = 12345;
@@ -937,6 +987,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       const tensorcast::store::DeviceKey&) const {
     components::TransportSession session;
     session.transport_id = "test-transport";
+    session.remote_replica.replica_id = info.replica_id;
     session.remote_replica.node_id = remote_node_id;
     session.remote_replica.node_address = remote_node_address;
     session.remote_replica.node_port = remote_node_port;

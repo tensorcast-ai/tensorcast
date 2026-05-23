@@ -829,7 +829,7 @@ Required surfaced facts include:
   - `planned_local_typed_bytes`
   - `planned_non_admitted_typed_bytes`
   - `planned_generic_residual_bytes`
-  - `compatibility_lowered_bytes`
+  - `collective_lowered_bytes`
   - `planner_reject_reason_buckets`
   - `planner_version`
   - `plan_hash`

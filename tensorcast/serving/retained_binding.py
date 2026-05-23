@@ -1,5 +1,5 @@
 #  Copyright (c) 2026, TensorCast Team.
-"""External preloaded serving binding authority schema."""
+"""Retained serving binding authority and acquire helpers."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 import tensorcast as tc
 
-_PRELOAD_MODES = {"disabled", "external"}
+_RETAINED_BINDING_ACQUIRE_MODES = {"disabled", "external"}
 _READINESS_STATES = {
     "serving_reserved",
     "serving_local_ready",
@@ -41,7 +41,7 @@ def _normalize_enum(value: Any, *, allowed: set[str], field_name: str) -> str:
     return normalized
 
 
-class ExternalPreloadExpectedDigests(BaseModel):
+class RetainedServingBindingExpectedDigests(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     target_layout_hash: str
@@ -64,7 +64,7 @@ class ExternalPreloadExpectedDigests(BaseModel):
         return normalized
 
 
-class ExternalPreloadAuthority(BaseModel):
+class RetainedServingBindingAuthority(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     group_id: str
@@ -80,7 +80,7 @@ class ExternalPreloadAuthority(BaseModel):
     verification_state: str = "local_only"
     serving_artifact_id: str | None = None
     trusted_reservation_bytes: int = Field(ge=0)
-    expected: ExternalPreloadExpectedDigests
+    expected: RetainedServingBindingExpectedDigests
 
     @field_validator(
         "group_id",
@@ -93,7 +93,7 @@ class ExternalPreloadAuthority(BaseModel):
     def _normalize_required_text(cls, value: Any) -> str:
         normalized = _normalize_optional_text(value)
         if normalized is None:
-            raise ValueError("external preload authority text fields required")
+            raise ValueError("retained binding authority text fields required")
         return normalized
 
     @field_validator(
@@ -112,21 +112,21 @@ class ExternalPreloadAuthority(BaseModel):
         return _normalize_enum(
             value,
             allowed=_READINESS_STATES,
-            field_name="preload.authority.readiness",
+            field_name="retained_binding_acquire.authority.readiness",
         )
 
     @model_validator(mode="after")
-    def _validate_published_ready(self) -> ExternalPreloadAuthority:
+    def _validate_published_ready(self) -> RetainedServingBindingAuthority:
         if self.readiness == "serving_published_ready" and not self.serving_artifact_id:
             raise ValueError(
-                "preload.authority.serving_artifact_id is required when "
+                "retained_binding_acquire.authority.serving_artifact_id is required when "
                 "readiness='serving_published_ready'"
             )
         return self
 
 
 @dataclass(frozen=True)
-class ParsedExternalPreloadAuthority:
+class ParsedRetainedServingBindingAuthority:
     group_id: str
     local_serving_ref: str | None
     binding_value_ref: tc.BindingValueRef
@@ -136,7 +136,7 @@ class ParsedExternalPreloadAuthority:
     device_uuid: str
     member: tc.ServingBindingMemberRef
     reservation_bytes: int
-    expected: ExternalPreloadExpectedDigests
+    expected: RetainedServingBindingExpectedDigests
     readiness: str
     verification_state: str
     serving_artifact_id: str | None = None
@@ -149,7 +149,7 @@ class BindingPromotionResult:
     verification_job_id: str | None
 
 
-class _PreloadLifecycleState:
+class _RetainedBindingLifecycleState:
     def __init__(
         self,
         *,
@@ -189,25 +189,25 @@ class _PreloadLifecycleState:
 
 
 @dataclass(frozen=True)
-class RuntimePreloadAttachmentHandle:
-    """Runtime-owned close handle for a restored external preload binding."""
+class RuntimeRetainedBindingAttachmentHandle:
+    """Runtime-owned close handle for a restored retained binding."""
 
     tensors: Mapping[str, torch.Tensor]
     binding_layout_id: str
     binding_value_ref: tc.BindingValueRef
     member_ref: tc.ServingBindingMemberRef
     reservation_bytes: int
-    _state: _PreloadLifecycleState
+    _state: _RetainedBindingLifecycleState
 
     def close(self) -> None:
         if self._state.state not in {"runtime_owned", "closed"}:
             raise RuntimeError(
-                "RuntimePreloadAttachmentHandle.close() called before "
+                "RuntimeRetainedBindingAttachmentHandle.close() called before "
                 "ownership was transferred to runtime"
             )
         self._state.release()
 
-    def __enter__(self) -> RuntimePreloadAttachmentHandle:
+    def __enter__(self) -> RuntimeRetainedBindingAttachmentHandle:
         return self
 
     def __exit__(self, *_exc: object) -> None:
@@ -215,7 +215,7 @@ class RuntimePreloadAttachmentHandle:
 
 
 @dataclass(frozen=True)
-class AttachedPreloadBinding:
+class AttachedRetainedBinding:
     """Restored tensors that have not yet been transferred to runtime."""
 
     tensors: Mapping[str, torch.Tensor]
@@ -223,16 +223,16 @@ class AttachedPreloadBinding:
     binding_value_ref: tc.BindingValueRef
     member_ref: tc.ServingBindingMemberRef
     reservation_bytes: int
-    _state: _PreloadLifecycleState
+    _state: _RetainedBindingLifecycleState
 
-    def transfer_to_runtime(self) -> RuntimePreloadAttachmentHandle:
+    def transfer_to_runtime(self) -> RuntimeRetainedBindingAttachmentHandle:
         if self._state.state != "restored":
             raise RuntimeError(
-                "AttachedPreloadBinding.transfer_to_runtime() requires a "
+                "AttachedRetainedBinding.transfer_to_runtime() requires a "
                 "restored attachment owner"
             )
         self._state.state = "runtime_owned"
-        return RuntimePreloadAttachmentHandle(
+        return RuntimeRetainedBindingAttachmentHandle(
             tensors=self.tensors,
             binding_layout_id=self.binding_layout_id,
             binding_value_ref=self.binding_value_ref,
@@ -246,11 +246,11 @@ class AttachedPreloadBinding:
             return
         if self._state.state != "restored":
             raise RuntimeError(
-                "AttachedPreloadBinding.close() requires a restored attachment owner"
+                "AttachedRetainedBinding.close() requires a restored attachment owner"
             )
         self._state.release()
 
-    def __enter__(self) -> AttachedPreloadBinding:
+    def __enter__(self) -> AttachedRetainedBinding:
         return self
 
     def __exit__(self, *_exc: object) -> None:
@@ -258,29 +258,29 @@ class AttachedPreloadBinding:
 
 
 @dataclass(frozen=True)
-class BorrowedPreloadLease:
-    """Single-owner acquire lease for an external preloaded binding value."""
+class BorrowedRetainedBindingLease:
+    """Single-owner acquire lease for a retained binding value."""
 
-    authority: ParsedExternalPreloadAuthority
+    authority: ParsedRetainedServingBindingAuthority
     binding_value_ref: tc.BindingValueRef
     member_ref: tc.ServingBindingMemberRef
     reservation_bytes: int
-    _state: _PreloadLifecycleState
+    _state: _RetainedBindingLifecycleState
 
     def restore(
         self,
         *,
         target_device: torch.device,
         restore_fn: Callable[..., Mapping[str, torch.Tensor]] | None = None,
-    ) -> AttachedPreloadBinding:
+    ) -> AttachedRetainedBinding:
         if self._state.state != "acquired":
             raise RuntimeError(
-                "BorrowedPreloadLease.restore() requires an acquired lease"
+                "BorrowedRetainedBindingLease.restore() requires an acquired lease"
             )
         device_index = torch.device(target_device).index
         if device_index is None:
             raise RuntimeError(
-                "TensorCast external preload restore requires an explicit "
+                "TensorCast retained binding restore requires an explicit "
                 "CUDA device index"
             )
         if restore_fn is None:
@@ -300,7 +300,7 @@ class BorrowedPreloadLease:
             raise
         self._state.tensors = tensors
         self._state.state = "restored"
-        return AttachedPreloadBinding(
+        return AttachedRetainedBinding(
             tensors=tensors,
             binding_layout_id=self._state.binding_layout_id,
             binding_value_ref=self._state.binding_value_ref,
@@ -314,7 +314,8 @@ class BorrowedPreloadLease:
             return
         if self._state.state not in {"acquired", "restored"}:
             raise RuntimeError(
-                "BorrowedPreloadLease.close() requires an acquired or restored lease"
+                "BorrowedRetainedBindingLease.close() requires an acquired or "
+                "restored lease"
             )
         self._state.release()
 
@@ -341,50 +342,76 @@ def _model_validate(model_type: Any, value: Any, *, field_name: str) -> Any:
         return model_type.model_validate(payload)
     except Exception as exc:
         raise ValueError(
-            f"{field_name} is invalid for TensorCast external preload: {exc}"
+            f"{field_name} is invalid for TensorCast retained binding acquire: {exc}"
         ) from exc
 
 
 def _validate_authority_consistency(
-    authority: ParsedExternalPreloadAuthority,
+    authority: ParsedRetainedServingBindingAuthority,
 ) -> None:
     capability = authority.reservation_capability
     if capability.binding_value_ref != authority.binding_value_ref:
         raise ValueError(
-            "preload.authority.reservation_capability.binding_value_ref "
-            "must match preload.authority.binding_value_ref"
+            "retained_binding_acquire.authority.reservation_capability."
+            "binding_value_ref must match retained_binding_acquire.authority."
+            "binding_value_ref"
         )
     if capability.daemon_id != authority.daemon_id:
-        raise ValueError("preload.authority.reservation_capability.daemon_id mismatch")
+        raise ValueError(
+            "retained_binding_acquire.authority.reservation_capability."
+            "daemon_id mismatch"
+        )
     if capability.daemon_session_id != authority.daemon_session_id:
         raise ValueError(
-            "preload.authority.reservation_capability.daemon_session_id mismatch"
+            "retained_binding_acquire.authority.reservation_capability."
+            "daemon_session_id mismatch"
         )
     if capability.device_uuid != authority.device_uuid:
         raise ValueError(
-            "preload.authority.reservation_capability.device_uuid mismatch"
+            "retained_binding_acquire.authority.reservation_capability."
+            "device_uuid mismatch"
         )
     if capability.member != authority.member:
-        raise ValueError("preload.authority.reservation_capability.member mismatch")
+        raise ValueError(
+            "retained_binding_acquire.authority.reservation_capability.member mismatch"
+        )
     if capability.reservation_bytes != authority.reservation_bytes:
         raise ValueError(
-            "preload.authority.reservation_capability.reservation_bytes "
-            "must match preload.authority.trusted_reservation_bytes"
+            "retained_binding_acquire.authority.reservation_capability."
+            "reservation_bytes must match retained_binding_acquire.authority."
+            "trusted_reservation_bytes"
         )
     if authority.member.group_id is not None and authority.member.group_id != (
         authority.group_id
     ):
         raise ValueError(
-            "preload.authority.member_ref.group_id must match "
-            "preload.authority.group_id"
+            "retained_binding_acquire.authority.member_ref.group_id must match "
+            "retained_binding_acquire.authority.group_id"
         )
     if (
         authority.readiness == "serving_published_ready"
         and not authority.serving_artifact_id
     ):
         raise ValueError(
-            "preload.authority.serving_artifact_id is required when "
-            "preload.authority.readiness='serving_published_ready'"
+            "retained_binding_acquire.authority.serving_artifact_id is required "
+            "when retained_binding_acquire.authority.readiness="
+            "'serving_published_ready'"
+        )
+
+
+def _validate_authority_is_attachable(
+    authority: ParsedRetainedServingBindingAuthority,
+) -> None:
+    if authority.readiness == "serving_reserved":
+        raise ValueError(
+            "retained_binding_acquire.authority.readiness='serving_reserved' "
+            "is not attachable"
+        )
+    group_acquire = authority.group_realization_acquire
+    if group_acquire is not None and not group_acquire.wait_for_publish:
+        raise ValueError(
+            "retained_binding_acquire.authority.group_realization_acquire must "
+            "wait for group publish before attach"
         )
 
 
@@ -424,7 +451,7 @@ def _lease_token_from_response(response: Any) -> bytes:
 
 def _validate_acquire_response(
     response: Any,
-    authority: ParsedExternalPreloadAuthority,
+    authority: ParsedRetainedServingBindingAuthority,
 ) -> tc.BindingValueRef:
     acquired_ref = _binding_value_ref_from_response(
         response,
@@ -432,22 +459,22 @@ def _validate_acquire_response(
     )
     if acquired_ref != authority.binding_value_ref:
         raise RuntimeError(
-            "TensorCast external preload acquired a different binding value "
+            "TensorCast retained binding acquire returned a different binding value "
             "than requested"
         )
     response_reservation = int(getattr(response, "reservation_bytes", 0) or 0)
     if response_reservation and response_reservation != authority.reservation_bytes:
         raise RuntimeError(
-            "TensorCast external preload reservation byte mismatch: "
+            "TensorCast retained binding acquire reservation byte mismatch: "
             f"expected={authority.reservation_bytes}, "
             f"actual={response_reservation}"
         )
     return acquired_ref
 
 
-def _acquire_preload_response(
+def _acquire_retained_binding_response(
     client: Any,
-    authority: ParsedExternalPreloadAuthority,
+    authority: ParsedRetainedServingBindingAuthority,
     *,
     caller_pid: int,
     timeout_s: float | None,
@@ -490,7 +517,7 @@ def _release_lease_token(
 
 
 @contextmanager
-def acquire_local_ready_preload_lease(
+def acquire_local_ready_retained_binding_lease(
     *,
     local_serving_ref: str,
     expected_device_uuid: str,
@@ -505,7 +532,7 @@ def acquire_local_ready_preload_lease(
     runtime: Any | None = None,
     client: Any | None = None,
     timeout_s: float | None = None,
-) -> Iterator[BorrowedPreloadLease]:
+) -> Iterator[BorrowedRetainedBindingLease]:
     """Acquire an already-retained local-ready serving binding by local ref."""
 
     if runtime is None:
@@ -557,7 +584,7 @@ def acquire_local_ready_preload_lease(
         or getattr(runtime, "session_id", "")
         or "local-session"
     )
-    expected = ExternalPreloadExpectedDigests(
+    expected = RetainedServingBindingExpectedDigests(
         target_layout_hash=expected_target_layout_hash or "local-ready-direct",
         tensor_schema_hash=expected_tensor_schema_hash,
         serving_build_digest=expected_serving_build_digest,
@@ -580,7 +607,7 @@ def acquire_local_ready_preload_lease(
             f"{expected.serving_build_digest}"
         ),
     )
-    authority = ParsedExternalPreloadAuthority(
+    authority = ParsedRetainedServingBindingAuthority(
         group_id=expected_member.group_id or "",
         local_serving_ref=local_serving_ref,
         binding_value_ref=binding_value_ref,
@@ -595,7 +622,7 @@ def acquire_local_ready_preload_lease(
         verification_state="local_only",
         serving_artifact_id=serving_artifact_id,
     )
-    state = _PreloadLifecycleState(
+    state = _RetainedBindingLifecycleState(
         client=client,
         response=response,
         runtime=runtime,
@@ -605,7 +632,7 @@ def acquire_local_ready_preload_lease(
         reservation_bytes=reservation_bytes,
         lease_token=lease_token,
     )
-    lease = BorrowedPreloadLease(
+    lease = BorrowedRetainedBindingLease(
         authority=authority,
         binding_value_ref=binding_value_ref,
         member_ref=expected_member,
@@ -619,15 +646,15 @@ def acquire_local_ready_preload_lease(
 
 
 @contextmanager
-def acquire_preload_lease(
-    authority: ParsedExternalPreloadAuthority,
+def acquire_retained_serving_binding_lease(
+    authority: ParsedRetainedServingBindingAuthority,
     *,
     caller_pid: int | None = None,
     runtime: Any | None = None,
     client: Any | None = None,
     timeout_s: float | None = None,
-) -> Iterator[BorrowedPreloadLease]:
-    """Acquire a preloaded binding and yield the sole lease owner.
+) -> Iterator[BorrowedRetainedBindingLease]:
+    """Acquire a retained binding and yield the sole lease owner.
 
     The yielded lease owns the raw placement lease token internally. If restore
     or a later framework attach step fails, closing the current owner releases
@@ -640,7 +667,8 @@ def acquire_preload_lease(
         runtime = get_runtime_context()
     if client is None:
         client = runtime.ensure_client()
-    response = _acquire_preload_response(
+    _validate_authority_is_attachable(authority)
+    response = _acquire_retained_binding_response(
         client,
         authority,
         caller_pid=caller_pid or os.getpid(),
@@ -653,7 +681,7 @@ def acquire_preload_lease(
         with suppress(Exception):
             _release_lease_token(client, lease_token=lease_token)
         raise
-    state = _PreloadLifecycleState(
+    state = _RetainedBindingLifecycleState(
         client=client,
         response=response,
         runtime=runtime,
@@ -663,7 +691,7 @@ def acquire_preload_lease(
         reservation_bytes=authority.reservation_bytes,
         lease_token=lease_token,
     )
-    lease = BorrowedPreloadLease(
+    lease = BorrowedRetainedBindingLease(
         authority=authority,
         binding_value_ref=acquired_ref,
         member_ref=authority.member,
@@ -676,26 +704,29 @@ def acquire_preload_lease(
         lease.close()
 
 
-def _select_external_preload_authority_config(
+def _select_retained_serving_binding_authority_config(
     config: Any,
     *,
     expected_member: tc.ServingBindingMemberRef | None = None,
-) -> ExternalPreloadAuthority:
-    authority_config = config.preload.authority
+) -> RetainedServingBindingAuthority:
+    acquire_config = config.retained_binding_acquire
+    authority_config = acquire_config.authority
     if authority_config is not None:
         return authority_config
 
-    authority_configs = tuple(config.preload.authorities)
+    authority_configs = tuple(acquire_config.authorities)
     if not authority_configs:
         raise ValueError(
-            "TensorCast external preload authority requires "
-            "preload.mode='external' and preload.authority or preload.authorities"
+            "TensorCast retained binding authority requires "
+            "retained_binding_acquire.mode='external' and "
+            "retained_binding_acquire.authority or "
+            "retained_binding_acquire.authorities"
         )
     if expected_member is None:
         if len(authority_configs) == 1:
             return authority_configs[0]
         raise ValueError(
-            "TensorCast external preload authority set requires an expected "
+            "TensorCast retained binding authority set requires an expected "
             "serving member to select the worker authority"
         )
 
@@ -703,32 +734,33 @@ def _select_external_preload_authority_config(
         member = _model_validate(
             tc.ServingBindingMemberRef,
             candidate.member_ref,
-            field_name=f"preload.authorities[{index}].member_ref",
+            field_name=(f"retained_binding_acquire.authorities[{index}].member_ref"),
         )
         if member == expected_member:
             return candidate
     raise ValueError(
-        "TensorCast external preload authority set has no authority for "
+        "TensorCast retained binding authority set has no authority for "
         f"expected member {expected_member!r}"
     )
 
 
-def parse_external_preload_authority(
+def parse_retained_serving_binding_authority(
     extra: Mapping[str, Any] | Any,
     *,
     expected_member: tc.ServingBindingMemberRef | None = None,
-) -> ParsedExternalPreloadAuthority:
+) -> ParsedRetainedServingBindingAuthority:
     from tensorcast.serving.config import ServingConfig
 
     config = (
         extra if isinstance(extra, ServingConfig) else ServingConfig.from_mapping(extra)
     )
-    if config.preload.mode != "external":
+    if config.retained_binding_acquire.mode != "external":
         raise ValueError(
-            "TensorCast external preload authority requires "
-            "preload.mode='external' and preload.authority"
+            "TensorCast retained binding authority requires "
+            "retained_binding_acquire.mode='external' and "
+            "retained_binding_acquire.authority"
         )
-    authority_config = _select_external_preload_authority_config(
+    authority_config = _select_retained_serving_binding_authority_config(
         config,
         expected_member=expected_member,
     )
@@ -736,16 +768,16 @@ def parse_external_preload_authority(
     binding_value_ref = _model_validate(
         tc.BindingValueRef,
         authority_config.binding_value_ref,
-        field_name="preload.authority.binding_value_ref",
+        field_name="retained_binding_acquire.authority.binding_value_ref",
     )
     member = _model_validate(
         tc.ServingBindingMemberRef,
         authority_config.member_ref,
-        field_name="preload.authority.member_ref",
+        field_name="retained_binding_acquire.authority.member_ref",
     )
     capability_payload = _payload_to_dict(
         authority_config.reservation_capability,
-        field_name="preload.authority.reservation_capability",
+        field_name="retained_binding_acquire.authority.reservation_capability",
     )
     capability_payload.setdefault(
         "binding_value_ref", binding_value_ref.model_dump(mode="python")
@@ -754,17 +786,17 @@ def parse_external_preload_authority(
     reservation_capability = _model_validate(
         tc.BindingReservationCapability,
         capability_payload,
-        field_name="preload.authority.reservation_capability",
+        field_name="retained_binding_acquire.authority.reservation_capability",
     )
     group_realization_acquire = None
     if authority_config.group_realization_acquire is not None:
         group_realization_acquire = _model_validate(
             tc.GroupRealizationAcquireRef,
             authority_config.group_realization_acquire,
-            field_name="preload.authority.group_realization_acquire",
+            field_name="retained_binding_acquire.authority.group_realization_acquire",
         )
 
-    authority = ParsedExternalPreloadAuthority(
+    authority = ParsedRetainedServingBindingAuthority(
         group_id=authority_config.group_id,
         local_serving_ref=authority_config.local_serving_ref,
         binding_value_ref=binding_value_ref,
@@ -783,25 +815,25 @@ def parse_external_preload_authority(
     _validate_authority_consistency(authority)
     if expected_member is not None and authority.member != expected_member:
         raise ValueError(
-            "TensorCast external preload authority member does not match "
+            "TensorCast retained binding authority member does not match "
             f"expected member: authority={authority.member!r}, "
             f"expected={expected_member!r}"
         )
     return authority
 
 
-def external_preload_mode(extra: Mapping[str, Any] | None) -> str:
+def retained_binding_acquire_mode(extra: Mapping[str, Any] | None) -> str:
     if extra is None or not isinstance(extra, Mapping):
         return "disabled"
     from tensorcast.serving.config import ServingConfig
 
-    return ServingConfig.from_mapping(extra).preload.mode
+    return ServingConfig.from_mapping(extra).retained_binding_acquire.mode
 
 
 @contextmanager
 def acquire_retained_serving_binding(
     *,
-    authority: ParsedExternalPreloadAuthority | None = None,
+    authority: ParsedRetainedServingBindingAuthority | None = None,
     local_serving_ref: str | None = None,
     target_device: torch.device | str | None = None,
     expected_member: tc.ServingBindingMemberRef | None = None,
@@ -815,7 +847,7 @@ def acquire_retained_serving_binding(
     runtime: Any | None = None,
     client: Any | None = None,
     timeout_s: float | None = None,
-) -> Iterator[BorrowedPreloadLease]:
+) -> Iterator[BorrowedRetainedBindingLease]:
     if authority is not None:
         if local_serving_ref is not None:
             raise ValueError(
@@ -828,7 +860,7 @@ def acquire_retained_serving_binding(
                 "the expected runtime placement: "
                 f"authority={authority.member}, expected={expected_member}"
             )
-        with acquire_preload_lease(
+        with acquire_retained_serving_binding_lease(
             authority,
             caller_pid=caller_pid,
             runtime=runtime,
@@ -865,7 +897,7 @@ def acquire_retained_serving_binding(
         runtime = get_runtime_context()
     from tensorcast.api.store import device_uuid_for
 
-    with acquire_local_ready_preload_lease(
+    with acquire_local_ready_retained_binding_lease(
         local_serving_ref=local_serving_ref,
         expected_device_uuid=device_uuid_for(int(device_index)),
         expected_member=expected_member,
@@ -883,7 +915,7 @@ def acquire_retained_serving_binding(
         yield lease
 
 
-def external_preload_trusted_reservation_bytes(
+def retained_serving_binding_trusted_reservation_bytes(
     load_config_or_extra: Any,
     *,
     expected_member: tc.ServingBindingMemberRef | None = None,
@@ -893,15 +925,32 @@ def external_preload_trusted_reservation_bytes(
     )
     if extra is None or not isinstance(extra, Mapping):
         return 0
-    if external_preload_mode(extra) != "external":
+    if retained_binding_acquire_mode(extra) != "external":
         return 0
-    return parse_external_preload_authority(
+    return parse_retained_serving_binding_authority(
         extra,
         expected_member=expected_member,
     ).reservation_bytes
 
 
-def external_preload_extra_from_prefetched_binding(
+def retained_serving_binding_extra_from_prefetched_binding(
+    *,
+    prefetched: tc.PrefetchedServingBinding,
+    target: tc.ServingBindingTarget,
+    expected_member: tc.ServingBindingMemberRef | None = None,
+) -> dict[str, Any]:
+    authority = _retained_serving_binding_authority_from_prefetched_binding(
+        prefetched=prefetched,
+        target=target,
+        expected_member=expected_member,
+    )
+    return _retained_serving_binding_extra(
+        authority=authority,
+        config_key="retained_binding_acquire",
+    )
+
+
+def _retained_serving_binding_authority_from_prefetched_binding(
     *,
     prefetched: tc.PrefetchedServingBinding,
     target: tc.ServingBindingTarget,
@@ -943,22 +992,30 @@ def external_preload_extra_from_prefetched_binding(
         authority["group_realization_acquire"] = _model_dump(
             prefetched.group_realization_acquire
         )
+    return authority
+
+
+def _retained_serving_binding_extra(
+    *,
+    authority: dict[str, Any],
+    config_key: str,
+) -> dict[str, Any]:
     return {
-        "preload": {
+        config_key: {
             "mode": "external",
             "authority": authority,
         },
     }
 
 
-def external_preload_extra_json(
+def retained_serving_binding_extra_json(
     *,
     prefetched: tc.PrefetchedServingBinding,
     target: tc.ServingBindingTarget,
     expected_member: tc.ServingBindingMemberRef | None = None,
 ) -> str:
     return json.dumps(
-        external_preload_extra_from_prefetched_binding(
+        retained_serving_binding_extra_from_prefetched_binding(
             prefetched=prefetched,
             target=target,
             expected_member=expected_member,
@@ -1083,12 +1140,12 @@ def _model_dump(value: Any) -> dict[str, Any]:
     raise TypeError(f"Cannot serialize {type(value)!r}")
 
 
-class PreloadSettings(BaseModel):
+class RetainedBindingAcquireSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     mode: str = "disabled"
-    authority: ExternalPreloadAuthority | None = None
-    authorities: tuple[ExternalPreloadAuthority, ...] = ()
+    authority: RetainedServingBindingAuthority | None = None
+    authorities: tuple[RetainedServingBindingAuthority, ...] = ()
 
     @field_validator("mode", mode="before")
     @classmethod
@@ -1097,26 +1154,29 @@ class PreloadSettings(BaseModel):
             return "disabled"
         return _normalize_enum(
             value,
-            allowed=_PRELOAD_MODES,
-            field_name="preload.mode",
+            allowed=_RETAINED_BINDING_ACQUIRE_MODES,
+            field_name="retained_binding_acquire.mode",
         )
 
     @model_validator(mode="after")
-    def _validate_authority(self) -> PreloadSettings:
+    def _validate_authority(self) -> RetainedBindingAcquireSettings:
         has_authority = self.authority is not None
         has_authorities = bool(self.authorities)
         if self.mode == "external" and not (has_authority or has_authorities):
             raise ValueError(
-                "preload.authority or preload.authorities is required when "
-                "preload.mode='external'"
+                "retained_binding_acquire.authority or "
+                "retained_binding_acquire.authorities is required when "
+                "retained_binding_acquire.mode='external'"
             )
         if self.mode == "external" and has_authority and has_authorities:
             raise ValueError(
-                "preload.authority and preload.authorities are mutually exclusive"
+                "retained_binding_acquire.authority and "
+                "retained_binding_acquire.authorities are mutually exclusive"
             )
         if self.mode != "external" and (has_authority or has_authorities):
             raise ValueError(
-                "preload.authority and preload.authorities are only valid when "
-                "preload.mode='external'"
+                "retained_binding_acquire.authority and "
+                "retained_binding_acquire.authorities are only valid when "
+                "retained_binding_acquire.mode='external'"
             )
         return self

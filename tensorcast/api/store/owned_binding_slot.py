@@ -30,6 +30,7 @@ from tensorcast.api.store.binding_state import (
     clone_selection,
     parse_binding_value_or_raise,
 )
+from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.inplace_slot import (
     _ctx_timeout_s,
     _map_slot_error,
@@ -426,6 +427,62 @@ def _source_bound_plan_diagnostics_from_response(
     return SourceBoundPlanDiagnostics.from_proto(diagnostics_proto)
 
 
+def _materialization_source_label(source: object) -> str | None:
+    try:
+        source_code = int(source)
+    except (TypeError, ValueError):
+        return None
+    if source_code == int(store_daemon_pb2.MATERIALIZATION_SOURCE_P2P):
+        return "p2p"
+    if source_code == int(store_daemon_pb2.MATERIALIZATION_SOURCE_DISK):
+        return "disk"
+    if source_code == int(store_daemon_pb2.MATERIALIZATION_SOURCE_LOCAL_REPLICA):
+        return "local_replica"
+    return None
+
+
+def _binding_layout_total_bytes(layout: BindingLayout) -> int:
+    try:
+        return int(
+            canonical_index_from_bytes(layout.target_index_bytes).total_size_bytes
+        )
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _materialization_diagnostics_from_response(
+    response: object,
+    *,
+    layout: BindingLayout,
+) -> Mapping[str, object] | None:
+    source = getattr(
+        response,
+        "source",
+        store_daemon_pb2.MATERIALIZATION_SOURCE_UNSPECIFIED,
+    )
+    source_label = _materialization_source_label(source)
+    if source_label is None:
+        return None
+    try:
+        source_code = int(source)
+    except (TypeError, ValueError):
+        source_code = 0
+    diagnostics: dict[str, object] = {
+        "source": source_label,
+        "source_code": source_code,
+        "total_bytes": _binding_layout_total_bytes(layout),
+        "retry_attempts": 1,
+        "retry_reason_buckets": {},
+    }
+    replica_id = str(getattr(response, "selected_source_replica_id", "") or "")
+    if replica_id:
+        diagnostics["replica_id"] = replica_id
+    transport_id = str(getattr(response, "selected_source_transport_id", "") or "")
+    if transport_id:
+        diagnostics["transport_id"] = transport_id
+    return diagnostics
+
+
 class OwnedBindingSlot:
     """Stable, daemon-owned CUDA layout that can be refilled in-place."""
 
@@ -448,6 +505,7 @@ class OwnedBindingSlot:
         | store_daemon_pb2.CreateOwnedBindingResponse
         | None = None,
         start_restore: bool = False,
+        materialization_diagnostics: Mapping[str, object] | None = None,
     ) -> None:
         if not tensors and restore_response is None:
             raise ArtifactError(
@@ -504,6 +562,11 @@ class OwnedBindingSlot:
         self._last_execution_diagnostics: ExecutionDiagnostics | None = None
         self._last_source_bound_plan_diagnostics: SourceBoundPlanDiagnostics | None = (
             None
+        )
+        self._last_materialization_diagnostics: Mapping[str, object] | None = (
+            None
+            if materialization_diagnostics is None
+            else dict(materialization_diagnostics)
         )
         if start_restore:
             self.start_tensor_restore()
@@ -659,6 +722,12 @@ class OwnedBindingSlot:
     @property
     def last_source_bound_plan_diagnostics(self) -> SourceBoundPlanDiagnostics | None:
         return self._last_source_bound_plan_diagnostics
+
+    @property
+    def last_materialization_diagnostics(self) -> Mapping[str, object] | None:
+        if self._last_materialization_diagnostics is None:
+            return None
+        return dict(self._last_materialization_diagnostics)
 
     @property
     def byte_space(self) -> common_pb2.ByteSpaceRef:
@@ -1201,6 +1270,7 @@ class OwnedBindingSlot:
         )
         self._last_execution_diagnostics = None
         self._last_source_bound_plan_diagnostics = None
+        self._last_materialization_diagnostics = None
         rpc_timeout_s = _ctx_timeout_s(ctx)
         try:
             source_selection = None
@@ -1277,6 +1347,12 @@ class OwnedBindingSlot:
         self._last_source_bound_plan_diagnostics = (
             _source_bound_plan_diagnostics_from_response(response)
         )
+        self._last_materialization_diagnostics = (
+            _materialization_diagnostics_from_response(
+                response,
+                layout=self._layout,
+            )
+        )
         return BindingUpdateEpoch(
             binding_id=self._binding_id,
             update_epoch=update_epoch,
@@ -1319,6 +1395,7 @@ class OwnedBindingSlot:
         )
         self._last_execution_diagnostics = None
         self._last_source_bound_plan_diagnostics = None
+        self._last_materialization_diagnostics = None
         rpc_timeout_s = _ctx_timeout_s(ctx)
         try:
             source_selection = None
@@ -1391,6 +1468,12 @@ class OwnedBindingSlot:
         )
         self._last_source_bound_plan_diagnostics = (
             _source_bound_plan_diagnostics_from_response(response)
+        )
+        self._last_materialization_diagnostics = (
+            _materialization_diagnostics_from_response(
+                response,
+                layout=self._layout,
+            )
         )
         if publish:
             self.publish_replica(

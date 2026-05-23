@@ -32,6 +32,8 @@ from tensorcast.serving.builder.compiler import (
 from tensorcast.serving.contract import logical_topology_json
 from tensorcast.types import ServingTopologyRef
 
+LOCAL_READY_BOOTSTRAP_BUILD_PIPELINE_VERSION = "tensorcast-bootstrap-v1"
+
 
 @dataclass(frozen=True)
 class LocalReadyBindingRealizationResult:
@@ -74,11 +76,13 @@ def canonical_index_entries_from_tensor_schema(
     tensor_schema: tuple[TensorSchemaEntry, ...],
 ) -> tuple[CanonicalIndexEntry, ...]:
     entries: list[CanonicalIndexEntry] = []
+    cursor = 0
     for entry in tensor_schema:
         dtype = tc_materialization.dtype_from_string(entry.dtype)
         numel = 1
         for dim in entry.shape:
             numel *= int(dim)
+        size_bytes = int(numel * dtype.itemsize)
         entries.append(
             CanonicalIndexEntry(
                 name=str(entry.name),
@@ -86,10 +90,11 @@ def canonical_index_entries_from_tensor_schema(
                 shape=tuple(int(dim) for dim in entry.shape),
                 stride=tuple(int(dim) for dim in entry.stride),
                 storage_offset=0,
-                segment_offset=0,
-                size_bytes=int(numel * dtype.itemsize),
+                segment_offset=cursor,
+                size_bytes=size_bytes,
             )
         )
+        cursor += size_bytes
     return tuple(entries)
 
 
@@ -112,7 +117,15 @@ def logical_topology_json_from_recipe(
     framework_payload: dict[str, Any] | None = None,
 ) -> str | None:
     if topology is None:
-        return None if recipe.logical_topology is None else "{}"
+        if (
+            getattr(recipe, "topology_ref", None) is None
+            and getattr(recipe, "member_ref", None) is None
+        ):
+            return None
+        raise ValueError(
+            "TensorCast local-ready manifest requires ServingTopologyRef for "
+            "a topology-sensitive recipe"
+        )
     return logical_topology_json(
         topology,
         framework_payload=framework_payload or {},
@@ -139,9 +152,10 @@ def prepare_same_binding_manifest_carrier(
     manifest_tensor_name: str,
     representation_contract_hash: str,
     logical_topology_json_payload: str | None = None,
+    topology_admission_digest: str | None = None,
 ) -> tuple[str, bytes]:
     base_canonical_index = canonical_index_from_recipe(recipe)
-    build_pipeline_version = "tensorcast-bootstrap-v1"
+    build_pipeline_version = LOCAL_READY_BOOTSTRAP_BUILD_PIPELINE_VERSION
     publication_context = publication_context_from_recipe(
         recipe,
         logical_topology_json_payload=logical_topology_json_payload,
@@ -167,6 +181,7 @@ def prepare_same_binding_manifest_carrier(
         representation_contract_hash=representation_contract_hash,
         logical_topology_json=logical_topology_json_payload,
         serving_manifest_ref=None,
+        topology_admission_digest=topology_admission_digest,
     )
     return representation_contract_hash, carrier.serving_manifest_bytes
 
@@ -418,6 +433,7 @@ __all__ = [
     "compiled_recipe_realization_plan_count",
     "freeze_local_ready_binding",
     "logical_topology_json_from_recipe",
+    "LOCAL_READY_BOOTSTRAP_BUILD_PIPELINE_VERSION",
     "LocalReadyBindingRealizationResult",
     "materialized_tensor_schema",
     "prepare_local_ready_serving",

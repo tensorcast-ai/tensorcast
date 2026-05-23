@@ -16,10 +16,10 @@
 
 namespace tensorcast::daemon::representation_transform_builder {
 
-struct TransformWorkCompatibilityStats {
+struct TransformWorkLoweringStats {
   uint64_t total_dst_tensors{0};
-  uint64_t compatible_candidates{0};
-  uint64_t compatible_bytes{0};
+  uint64_t collective_candidates{0};
+  uint64_t collective_bytes{0};
   uint64_t concat_candidates{0};
   uint64_t concat_bytes{0};
   uint64_t rejected_mixed_src_or_dim{0};
@@ -31,11 +31,11 @@ struct TransformWorkCompatibilityStats {
 };
 
 struct BuildRepresentationTransformResult {
-  tensorcast::store::loader::ByteRangeMap compatibility_lowered_map;
+  tensorcast::store::loader::ByteRangeMap collective_lowered_map;
   tensorcast::store::loader::ByteRangeMap generic_fallback_map;
   tensorcast::store::materialization::contracts::RepresentationTransformContract transform_contract;
   uint64_t total_bytes_copied{0};
-  TransformWorkCompatibilityStats compatibility_stats;
+  TransformWorkLoweringStats lowering_stats;
 };
 
 absl::StatusOr<BuildRepresentationTransformResult> build_representation_transform_contract(

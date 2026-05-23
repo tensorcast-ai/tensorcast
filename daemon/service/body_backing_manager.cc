@@ -702,18 +702,34 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
   if (!verification_mode_requires_payload_digest(verification_mode)) {
     auto hints = build_lowering_hints(request.artifact_id, request.operation_id);
     const std::string physical_artifact_id = build_body_backing_artifact_id(request.artifact_id, request.invariant);
-    auto replica_handle_or = engine_.ingestion_runtime().ingest_mapped_loader_into_replica(
-        request.artifact_id,
-        physical_artifact_id,
-        resolve_target_device(intent),
-        build_replica_target(intent),
-        std::move(request.loader),
-        build_identity_byte_range_map(request.invariant.byte_length()),
-        hints,
-        request.source_kind);
-    if (!replica_handle_or.ok()) {
+    auto plan_or = store::runtime::ingestion::lower_to_artifact_plan(
+        store::runtime::ingestion::LowerToArtifactPlanRequest{
+            .identity =
+                store::runtime::ingestion::ArtifactLoweringIdentity{
+                    .logical_artifact_id = request.artifact_id,
+                    .physical_artifact_id = physical_artifact_id,
+                    .request_id = request.operation_id,
+                },
+            .target_device = resolve_target_device(intent),
+            .source_loader = std::move(request.loader),
+            .expected_size_bytes = request.invariant.byte_length(),
+            .generation = 1,
+            .hints = hints,
+            .source_kind = request.source_kind,
+            .replica_target = build_replica_target(intent),
+        });
+    if (!plan_or.ok()) {
       record_body_backing_metrics("stage", request.access_class, intent, "fast_ingest_error");
-      return replica_handle_or.status();
+      return plan_or.status();
+    }
+    auto result_or = engine_.execute_artifact_lowering_plan(std::move(*plan_or));
+    if (!result_or.ok()) {
+      record_body_backing_metrics("stage", request.access_class, intent, "fast_ingest_error");
+      return result_or.status();
+    }
+    if (!result_or->replica_handle.has_value()) {
+      record_body_backing_metrics("stage", request.access_class, intent, "missing_replica");
+      return absl::InternalError("body staging did not return a replica handle");
     }
     auto stage_result_or = finalize_staged_replica(
         engine_,
@@ -723,7 +739,7 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body(S
         *resolved_policy_or,
         request.invariant.layout_id(),
         verification_mode,
-        std::move(*replica_handle_or),
+        std::move(*result_or->replica_handle),
         store::runtime::ingestion::BackingIdentity{
             .physical_artifact_id = physical_artifact_id,
         },
@@ -1009,18 +1025,34 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body_f
   auto hints = build_lowering_hints(artifact_id, operation_id);
   hints.pipeline_concurrency = 1;
   const std::string physical_artifact_id = build_body_backing_artifact_id(artifact_id, invariant);
-  auto replica_handle_or = engine_.ingestion_runtime().ingest_mapped_loader_into_replica(
-      artifact_id,
-      physical_artifact_id,
-      resolve_target_device(intent),
-      build_replica_target(intent),
-      std::move(loader),
-      build_identity_byte_range_map(invariant.byte_length()),
-      hints,
-      source_kind);
-  if (!replica_handle_or.ok()) {
+  auto plan_or = store::runtime::ingestion::lower_to_artifact_plan(
+      store::runtime::ingestion::LowerToArtifactPlanRequest{
+          .identity =
+              store::runtime::ingestion::ArtifactLoweringIdentity{
+                  .logical_artifact_id = artifact_id,
+                  .physical_artifact_id = physical_artifact_id,
+                  .request_id = operation_id,
+              },
+          .target_device = resolve_target_device(intent),
+          .source_loader = std::move(loader),
+          .expected_size_bytes = invariant.byte_length(),
+          .generation = 1,
+          .hints = hints,
+          .source_kind = source_kind,
+          .replica_target = build_replica_target(intent),
+      });
+  if (!plan_or.ok()) {
     record_body_backing_metrics("stage", access_class, intent, "fast_ingest_error");
-    return replica_handle_or.status();
+    return plan_or.status();
+  }
+  auto result_or = engine_.execute_artifact_lowering_plan(std::move(*plan_or));
+  if (!result_or.ok()) {
+    record_body_backing_metrics("stage", access_class, intent, "fast_ingest_error");
+    return result_or.status();
+  }
+  if (!result_or->replica_handle.has_value()) {
+    record_body_backing_metrics("stage", access_class, intent, "missing_replica");
+    return absl::InternalError("fast CPU body staging did not return a replica handle");
   }
 
   absl::StatusOr<FinalizedStreamDigest> digest_or = absl::FailedPreconditionError("digest disabled");
@@ -1040,7 +1072,7 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body_f
     verified_content_descriptor = build_invariant_verified_content_descriptor(invariant);
     verification_record = build_stream_verification_record(invariant.layout_id(), absl::Now());
   } else {
-    (void)engine_.retire_replica_status(replica_handle_or->key());
+    (void)engine_.retire_replica_status(result_or->replica_handle->key());
     record_body_backing_metrics("stage", access_class, intent, "fast_digest_error");
     return digest_or.status();
   }
@@ -1053,7 +1085,7 @@ absl::StatusOr<BodyBackingManager::StageResult> BodyBackingManager::stage_body_f
       *resolved_policy_or,
       invariant.layout_id(),
       verification_mode,
-      std::move(*replica_handle_or),
+      std::move(*result_or->replica_handle),
       store::runtime::ingestion::BackingIdentity{
           .physical_artifact_id = physical_artifact_id,
       },

@@ -1272,7 +1272,10 @@ absl::StatusOr<v2::PublishTargetReplicaResponse> execute_publish_target_replica(
             "; routable replicas require completed worker lifecycle registration"));
   }
 
-  auto replica_id_or = d.global_store_client->register_memory_replica(
+  const std::optional<std::string_view> register_client_request_id = !effective_operation_id.empty()
+      ? std::optional<std::string_view>(effective_operation_id)
+      : std::optional<std::string_view>(record.publication_id.value);
+  auto replica_id_or = d.global_store_client->register_memory_replica_idempotent(
       publish_context.scope.selection().artifact_id(),
       worker_id,
       device,
@@ -1287,6 +1290,7 @@ absl::StatusOr<v2::PublishTargetReplicaResponse> execute_publish_target_replica(
       /*verification_json=*/std::nullopt,
       view_id.empty() ? std::nullopt : std::optional<std::string_view>(view_id),
       /*descriptor=*/std::nullopt,
+      register_client_request_id,
       kTargetPublicationExportGeneration);
   if (!replica_id_or.ok()) {
     return replica_id_or.status();
@@ -1347,7 +1351,21 @@ absl::StatusOr<v2::PublishTargetReplicaResponse> execute_publish_target_replica(
         lifecycle_kernel = &d.lifecycle_kernel,
         bindings = &d.bindings,
         lip_manager = &d.lip_manager,
+        global_store_client = d.global_store_client,
+        artifact_id = publish_context.scope.selection().artifact_id(),
+        replica_id,
+        operation_id = effective_operation_id,
         publication_id = record.publication_id.value]() -> absl::Status {
+        if (global_store_client && global_store_client->is_connected() && !replica_id.empty()) {
+          const std::optional<std::string_view> operation_id_view =
+              operation_id.empty() ? std::nullopt : std::optional<std::string_view>(operation_id);
+          auto mark_or = global_store_client->mark_replica_unavailable(
+              artifact_id, replica_id, /*reason=*/"owner_pid_exit", operation_id_view);
+          if (!mark_or.ok() && !absl::IsNotFound(mark_or.status())) {
+            LOG(WARNING) << "target publication owner cleanup: mark_replica_unavailable failed for artifact_id="
+                         << artifact_id << " replica_id=" << replica_id << ": " << mark_or.status();
+          }
+        }
         auto terminalized_or =
             terminalize_publication_record(registry, lifecycle_kernel, bindings, publication_id, "owner_pid_exit");
         if (!terminalized_or.ok() && !absl::IsNotFound(terminalized_or.status())) {

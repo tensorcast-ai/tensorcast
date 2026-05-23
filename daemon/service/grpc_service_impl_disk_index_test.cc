@@ -224,7 +224,7 @@ TEST_CASE(
        nlohmann::json::array({static_cast<uint64_t>(manifest_payload.size())}),
        nlohmann::json::array({1}),
        "torch.uint8",
-       4});
+       0});
   REQUIRE(write_custom_artifact_dir(artifact_dir, data_payload, index_json).ok());
 
   const std::string artifact_id = read_artifact_id(artifact_dir);

@@ -509,6 +509,124 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
   return token;
 }
 
+absl::Status LipManager::copy_active_lease_range_to_host(
+    std::string_view artifact_id,
+    uint64_t offset,
+    uint64_t length,
+    size_t chunk_bytes,
+    const HostChunkConsumer& consume,
+    std::optional<std::string_view> view_id) const {
+  if (!consume) {
+    return absl::InvalidArgumentError("host chunk consumer is required");
+  }
+  if (length == 0) {
+    return absl::OkStatus();
+  }
+  if (chunk_bytes == 0) {
+    return absl::InvalidArgumentError("chunk_bytes must be non-zero");
+  }
+  auto lip_opt = find_active_by_artifact_id(artifact_id, view_id);
+  if (!lip_opt.has_value()) {
+    return absl::NotFoundError("active LIP lease not found");
+  }
+  const LipLeaseEntry lip = std::move(*lip_opt);
+  if (offset > lip.total_size || length > lip.total_size || offset + length > lip.total_size) {
+    return absl::OutOfRangeError("requested LIP range exceeds artifact size");
+  }
+  if (lip.storages.empty()) {
+    return absl::FailedPreconditionError("LIP range copy requires storage metadata");
+  }
+
+  absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_id;
+  storage_by_id.reserve(lip.storages.size());
+  for (const auto& storage : lip.storages) {
+    storage_by_id.emplace(storage.storage_id, &storage);
+  }
+
+  struct OpenedSeg {
+    int device_id;
+    cuda::IpcMapping* map;
+    uint64_t base;
+    uint64_t len;
+    uint64_t dst;
+  };
+
+  RegionAcquireGuard region_guard(region_registry_);
+  absl::flat_hash_map<std::string, std::unique_ptr<cuda::IpcMapping>> mapping_cache;
+  mapping_cache.reserve(lip.storages.size());
+  std::vector<OpenedSeg> opened;
+  opened.reserve(lip.segments.size());
+  for (const auto& seg : lip.segments) {
+    auto storage_it = storage_by_id.find(seg.storage_id);
+    if (storage_it == storage_by_id.end()) {
+      return absl::InvalidArgumentError("LIP segment references unknown storage_id");
+    }
+    const RegisterStorageMeta* storage = storage_it->second;
+    if (seg.storage_offset > storage->storage_length || seg.length > storage->storage_length - seg.storage_offset) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("LIP segment exceeds storage_length for storage_id=", storage->storage_id));
+    }
+    auto map_or = GetOrOpenMappingForStorage(*storage, mapping_cache, region_guard, region_registry_, lip.owner_pid);
+    if (!map_or.ok()) {
+      return map_or.status();
+    }
+    opened.push_back(
+        OpenedSeg{
+            .device_id = storage->device_id,
+            .map = *map_or,
+            .base = storage->mapping_base_offset + seg.storage_offset,
+            .len = seg.length,
+            .dst = seg.artifact_offset,
+        });
+  }
+  std::sort(opened.begin(), opened.end(), [](const OpenedSeg& a, const OpenedSeg& b) { return a.dst < b.dst; });
+
+  auto find_covering = [&](uint64_t off) -> const OpenedSeg* {
+    for (const auto& segment : opened) {
+      if (off >= segment.dst && off < segment.dst + segment.len) {
+        return &segment;
+      }
+      if (off < segment.dst) {
+        break;
+      }
+    }
+    return nullptr;
+  };
+
+  std::vector<uint8_t> host_buffer(std::min<uint64_t>(length, static_cast<uint64_t>(chunk_bytes)));
+  uint64_t remaining = length;
+  uint64_t src_off = offset;
+  while (remaining > 0) {
+    const OpenedSeg* seg = find_covering(src_off);
+    if (seg == nullptr) {
+      return absl::FailedPreconditionError("LIP range is not covered by lease segments");
+    }
+    const uint64_t seg_end = seg->dst + seg->len;
+    const uint64_t available = seg_end - src_off;
+    const uint64_t to_copy =
+        std::min<uint64_t>(remaining, std::min<uint64_t>(available, static_cast<uint64_t>(host_buffer.size())));
+    auto set_device_status = cuda::set_device(seg->device_id);
+    if (!set_device_status.ok()) {
+      return set_device_status;
+    }
+    auto copy_status = cuda::memcpy(
+        host_buffer.data(),
+        static_cast<const uint8_t*>(seg->map->get()) + seg->base + (src_off - seg->dst),
+        static_cast<size_t>(to_copy),
+        cudaMemcpyDeviceToHost);
+    if (!copy_status.ok()) {
+      return copy_status;
+    }
+    auto consume_status = consume(host_buffer.data(), static_cast<size_t>(to_copy));
+    if (!consume_status.ok()) {
+      return consume_status;
+    }
+    src_off += to_copy;
+    remaining -= to_copy;
+  }
+  return absl::OkStatus();
+}
+
 absl::Status LipManager::release_staged_export(const std::string& token, store::StoreEngine& engine) {
   absl::MutexLock lk(&exp_mu_);
   auto it = exports_.find(token);

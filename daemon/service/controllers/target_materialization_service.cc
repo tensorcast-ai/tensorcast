@@ -33,6 +33,7 @@
 #include "core/store/materialization/dataplane/loaders/p2p_loader.h"
 #include "core/store/materialization/dataplane/metadata/canonical_index.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
+#include "core/store/runtime/ingestion/artifact_lowering_plan.h"
 #include "core/store/runtime/ingestion/materialization_strategy_types.h"
 #include "core/store/runtime/ingestion/source_bound_strategy_planner.h"
 #include "daemon/service/controllers/materialization_disk_resolve_utils.h"
@@ -543,13 +544,22 @@ absl::StatusOr<std::optional<store::loading::MaterializeIntoTargetResult>> try_p
     hints.transport_request_id = assignment.assignment_id();
     auto loader = std::make_unique<store::P2PLoader>(std::move(*p2p_source_or));
     target_may_be_dirty = true;
-    auto segment_result_or = dep.engine.materialize_mapped_loader_into_target(
-        device,
-        *sliced_or,
-        std::move(loader),
-        build_progressive_segment_map(assignment.start_byte(), segment_len),
-        hints,
-        MaterializationSource::kP2P);
+    auto segment_map = build_progressive_segment_map(assignment.start_byte(), segment_len);
+    auto sources_or = store::runtime::ingestion::open_single_loader_sources(
+        std::move(loader), segment_map, "progressive_target_materialization");
+    if (!sources_or.ok()) {
+      const std::string detail = sources_or.status().ToString();
+      complete_progressive_assignment(
+          dep.global_store_client,
+          assignment.assignment_id(),
+          global_store::PROGRESSIVE_ASSIGNMENT_STATE_FAILED,
+          detail);
+      retire_progressive_coverage_after_read_failure(dep.global_store_client, assignment, sources_or.status());
+      local_attempts += 1;
+      continue;
+    }
+    auto segment_result_or = dep.engine.materialize_mapped_sources_into_target(
+        device, *sliced_or, std::move(*sources_or), segment_map, hints, MaterializationSource::kP2P);
     if (!segment_result_or.ok()) {
       const std::string detail = segment_result_or.status().ToString();
       complete_progressive_assignment(
@@ -1352,6 +1362,7 @@ grpc::Status TargetMaterializationService::materialize_into_target(
           resolved_artifact_id,
           canonical_index_json,
           disk_source,
+          disk_metadata,
           req.has_serving_artifact_policy() ? &req.serving_artifact_policy() : nullptr));
   if (!preflight_or.ok()) {
     for (const auto& region_id : storage_lease.acquired_region_ids()) {
@@ -1388,6 +1399,12 @@ grpc::Status TargetMaterializationService::materialize_into_target(
   resp.set_artifact_id(resolved_artifact_id);
   resp.set_status(v2::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   resp.set_source(to_proto_source(result_or->source));
+  if (!result_or->selected_source_replica_id.empty()) {
+    resp.set_selected_source_replica_id(result_or->selected_source_replica_id);
+  }
+  if (!result_or->selected_source_transport_id.empty()) {
+    resp.set_selected_source_transport_id(result_or->selected_source_transport_id);
+  }
   resp.set_canonical_index_bytes(canonical_index_json);
   if (view_plan.has_value() && layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
     resp.set_view_index_bytes(view_plan->view_index_json);
@@ -1682,6 +1699,12 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   resp.set_artifact_id(resolved_artifact_id);
   resp.set_status(v2::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   resp.set_source(to_proto_source(result_or->source));
+  if (!result_or->selected_source_replica_id.empty()) {
+    resp.set_selected_source_replica_id(result_or->selected_source_replica_id);
+  }
+  if (!result_or->selected_source_transport_id.empty()) {
+    resp.set_selected_source_transport_id(result_or->selected_source_transport_id);
+  }
   resp.set_canonical_index_bytes(canonical_index_json);
   if (view_plan.has_value() && !view_plan->is_identity) {
     resp.set_view_index_bytes(view_plan->view_index_json);

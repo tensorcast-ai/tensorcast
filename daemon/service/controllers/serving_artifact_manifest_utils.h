@@ -35,16 +35,19 @@ struct ServingArtifactManifestRecord {
   std::string builder_mode;
   std::string build_pipeline_version;
   std::optional<std::string> logical_topology_json;
+  std::optional<std::string> topology_admission_digest;
 };
 
 struct ServingArtifactPreflightRequest {
   std::string artifact_id;
   std::string canonical_index_json;
   std::optional<store::loading::DiskSource> disk_source;
+  std::optional<store::loading::DiskMetadata> disk_metadata;
   std::optional<std::string> serving_manifest_ref;
   std::optional<std::string> expected_representation_contract_hash;
   std::optional<std::string> expected_serving_build_digest;
   std::optional<std::string> expected_serving_build_digest_version;
+  std::optional<std::string> expected_topology_admission_digest;
   bool require_manifest{false};
 };
 
@@ -65,6 +68,7 @@ struct ServingManifestPayloadPreflightRequest {
   std::optional<std::string> expected_representation_contract_hash;
   std::optional<std::string> expected_serving_build_digest;
   std::optional<std::string> expected_serving_build_digest_version;
+  std::optional<std::string> expected_topology_admission_digest;
   bool require_manifest{false};
 };
 
@@ -76,6 +80,7 @@ ServingArtifactPreflightRequest build_preflight_request(
     std::string artifact_id,
     std::string canonical_index_json,
     std::optional<store::loading::DiskSource> disk_source = std::nullopt,
+    std::optional<store::loading::DiskMetadata> disk_metadata = std::nullopt,
     const v2::ServingArtifactRuntimePolicy* runtime_policy = nullptr);
 
 absl::StatusOr<ServingArtifactPreflightResult> preflight_serving_artifact(
