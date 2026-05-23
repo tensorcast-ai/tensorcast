@@ -4,8 +4,10 @@ title: Selection-First Artifact Retrieval And Materialization Hard Cut
 areas: ["sdk", "daemon", "core", "proto"]
 status: draft
 created: 2026-02-14
-last_updated: 2026-03-04
+last_updated: 2026-05-23
 related_code:
+  - docs/designs/0120-artifact-centered-model-runtime-realization.md
+  - docs/designs/0121-unified-artifact-realization-kernel.md
   - tensorcast/api/store/artifact.py
   - tensorcast/api/store/view_composer.py
   - tensorcast/api/store/materialization.py
@@ -37,6 +39,9 @@ related_code:
   - docs/architecture/artifact-views-and-retrieval.md
   - docs/architecture/api/materialization-flow.md
 links:
+  related:
+    - ./0120-artifact-centered-model-runtime-realization.md
+    - ./0121-unified-artifact-realization-kernel.md
   predecessors:
     - ./0039-artifact-first-sdk.md
     - ./0055-programmable-framework.md
@@ -54,6 +59,21 @@ Hard-cut retrieval and materialization to one selection model with one identity 
 - Responses and target publication scopes carry resolved selection identity explicitly to eliminate ambiguity.
 
 This is a deliberate pre-launch breaking change. No dual stack and no compatibility shims are retained.
+
+# Target-State Alignment With `0121`
+
+`0078` remains the canonical selection invariant. `0121` moves the implementation
+of that invariant into a single realization-kernel selection resolver:
+`ResolvedArtifactSelection`.
+
+The target state is stricter than this document's original retrieval scope:
+
+- TensorDict, binding, retained prefetch, runtime attach, and TP target-set paths
+  must all build the same `ArtifactSelection` for the same artifact/view/subset;
+- path-specific selection builders are transitional implementation details and
+  should be removed or narrowed during `0121`;
+- target layout, source strategy, lifecycle, and diagnostics may vary by
+  realization target, but they must not reinterpret source selection identity.
 
 # Problem Statement
 

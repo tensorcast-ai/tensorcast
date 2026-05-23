@@ -4,8 +4,10 @@ title: Artifact Representation Semantic Core and Materialization Transform Unifi
 status: accepted
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests"]
 created: 2026-03-24
-last_updated: 2026-03-31
+last_updated: 2026-05-23
 related_code:
+  - docs/designs/0120-artifact-centered-model-runtime-realization.md
+  - docs/designs/0121-unified-artifact-realization-kernel.md
   - docs/designs/0055-programmable-framework.md
   - docs/designs/0078-selection-first-artifact-retrieval.md
   - docs/designs/0084-binding-unified-model-and-contract.md
@@ -30,6 +32,8 @@ related_code:
   - daemon/service/controllers/materialization_target_plan_utils.cc
 links:
   related:
+    - ./0120-artifact-centered-model-runtime-realization.md
+    - ./0121-unified-artifact-realization-kernel.md
     - ./0108-tensor-aware-materialization-strategy-plane.md
     - ./0112-binding-native-serving-realization-and-publication.md
   dependencies:
@@ -89,6 +93,21 @@ The semantic-core hard cut defined here is already landed in repo-local runtime.
   and Step3p5 closure dependencies now live in the `0113` design/plan pair;
 - no future work should reintroduce executor-local semantic truth or a second
   integration-private semantic stack under the banner of "finishing 0110".
+
+# Target-State Alignment With `0121`
+
+`0110` remains the representation semantic core. `0121` consumes it through
+`RepresentationAdmissionPlan`.
+
+The target interpretation is:
+
+- representation compatibility is admitted before execution lowering, not
+  rediscovered inside TensorDict, binding, runtime, or TP paths;
+- P2P and collective transport move compatible bytes only and must not hide
+  representation conversion;
+- any required transform, reshaping, runtime-only tensor handling, or
+  topology-sensitive representation work must appear in the realization plan
+  before bytes move.
 
 ```mermaid
 flowchart LR

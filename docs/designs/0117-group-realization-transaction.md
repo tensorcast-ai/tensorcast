@@ -4,8 +4,10 @@ title: Group Version-Set Realization Transaction And Staged Publish Barrier
 status: implemented
 areas: ["global_store", "daemon", "core", "sdk", "proto", "docs", "tests", "serving"]
 created: 2026-05-11
-last_updated: 2026-05-14
+last_updated: 2026-05-23
 related_code:
+  - docs/designs/0120-artifact-centered-model-runtime-realization.md
+  - docs/designs/0121-unified-artifact-realization-kernel.md
   - docs/designs/0078-selection-first-artifact-retrieval.md
   - docs/designs/0083-group-aware-transport-scheduling.md
   - docs/designs/0084-binding-unified-model-and-contract.md
@@ -48,8 +50,10 @@ links:
     - ./0116-prefetch-serving-binding-target.md
   follow_ups:
     - ./0118-progressive-replica-dissemination.md
-    - ./0119-group-realization-control-plane-scalability.md
+    - ./0121-unified-artifact-realization-kernel.md
   related:
+    - ./0120-artifact-centered-model-runtime-realization.md
+    - ./0121-unified-artifact-realization-kernel.md
     - ../architecture/p2p-transfer-strategies.md
     - ../benchmarks/20260227-multi-host-p2p-put-get-scaleout-rerun-report.md
     - ../benchmarks/20260302-0083-group-aware-transport-unified-experiment-playbook.md
@@ -74,6 +78,12 @@ The companion execution plan was completed and removed after the final outcome
 was folded back into this design. Cutover evidence is retained in
 `docs/benchmarks/20260514-0117-group-realization-cutover-evidence.md`.
 
+The former group-realization scalability follow-up is no longer a separate
+numbered design. Target-set realization, group admission, staged values,
+publish barriers, and group reports are now owned by `0121` so TP and
+model-parallel startup extend the same realization kernel rather than a second
+group-specific path.
+
 A tensor-parallel or model-parallel serving version is often a set of
 per-rank artifacts, views, or byte spaces that must be realized together. The
 long-term control-plane identity is therefore:
@@ -92,6 +102,12 @@ transport behavior.
 
 This design is intentionally limited to semantic consistency and staged
 visibility. Progressive partial-source replication stays in `0118`.
+
+Target-state note: `0121` uses this design as the group lifecycle and staged
+visibility layer for target-set realization. `GroupVersionSet`,
+`GroupRealizationTransaction`, staged publish barriers, and acquire claims are
+not a separate TP materialization system; they are group admission and lifecycle
+state around member-local realization targets.
 
 ```mermaid
 flowchart LR

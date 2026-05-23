@@ -4,8 +4,10 @@ title: Binding-Native Serving Realization and Publication
 status: implemented
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests", "proto"]
 created: 2026-03-27
-last_updated: 2026-04-30
+last_updated: 2026-05-23
 related_code:
+  - docs/designs/0120-artifact-centered-model-runtime-realization.md
+  - docs/designs/0121-unified-artifact-realization-kernel.md
   - docs/designs/0084-binding-unified-model-and-contract.md
   - docs/designs/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
   - docs/designs/0111-source-to-serving-builder-and-representation-publication.md
@@ -32,6 +34,8 @@ related_code:
   - tests/python/test_assembly_attempt.py
 links:
   related:
+    - ./0120-artifact-centered-model-runtime-realization.md
+    - ./0121-unified-artifact-realization-kernel.md
     - ./0108-tensor-aware-materialization-strategy-plane.md
     - ../benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md
   dependencies:
@@ -173,6 +177,23 @@ In particular:
 - and the remaining mounted operator evidence is now captured directly in the
   surviving design and benchmark record rather than in a standalone companion
   plan.
+
+# Target-State Alignment With `0120` / `0121`
+
+`0112` remains the binding-native realization and publication correctness
+record. Under `0120` and `0121`, the same behavior becomes one binding-backed
+target kind inside artifact realization.
+
+The target interpretation is:
+
+- same-binding startup is a binding target realization with representation
+  admission, not a separate serving loader;
+- `BindingRealizationPlan` remains valid as an execution/representation plan,
+  but the public entry should converge to `ArtifactRealizationSpec` and
+  `ArtifactRealizationHandle`;
+- local-ready values stay non-durable until explicit representation publication;
+- runtime replica publication remains an action on an artifact-backed binding
+  value and must not become a second publication truth.
 
 ## Additional mounted closure evidence
 

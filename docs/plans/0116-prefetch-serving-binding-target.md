@@ -1,10 +1,13 @@
 ---
 slug: prefetch-serving-binding-target
 title: Prefetch Serving Binding Target Follow-up Plan
-status: draft
+status: retired
 areas: ["daemon", "sdk", "proto", "serving", "tests"]
 related_code:
   - docs/designs/0116-prefetch-serving-binding-target.md
+  - docs/designs/0120-artifact-centered-model-runtime-realization.md
+  - docs/designs/0121-unified-artifact-realization-kernel.md
+  - docs/plans/0121-unified-artifact-realization-kernel.md
   - proto/tensorcast/daemon/v2/store_daemon.proto
   - proto/tensorcast/operation/v1/operation.proto
   - proto/tensorcast/plan/v1/plan.proto
@@ -20,18 +23,26 @@ related_code:
   - daemon/state/handle_lease_registry.*
 links:
   design: ../designs/0116-prefetch-serving-binding-target.md
+  superseded_by:
+    - ../designs/0120-artifact-centered-model-runtime-realization.md
+    - ../designs/0121-unified-artifact-realization-kernel.md
+    - ../plans/0121-unified-artifact-realization-kernel.md
 ---
 
 # Objective
 
-Track the remaining work after the initial `ServingBindingTarget` implementation
-has landed. The shipped baseline already supports daemon-retained
-`serving_local_ready` bindings, process-external `AcquireBindingValue`, resolved
-spec cache validation, TensorCast reference consumer coverage, internal-vLLM
-basic consumption, and real CUDA E2E validation.
+This plan is retired as an active execution plan. The initial
+`ServingBindingTarget` implementation has landed, and the remaining work is now
+owned by `0121` as retained artifact realization target/lifecycle/report work.
 
-This plan now focuses on making the feature easier to operate, harder to
-regress, and ready for published-ready / transform follow-up work.
+The content below is retained as historical grounding and a checklist source.
+Do not execute it as a standalone serving-preload plan. Move any still-relevant
+item into `0121` before implementation.
+
+The shipped baseline already supports daemon-retained `serving_local_ready`
+bindings, process-external `AcquireBindingValue`, resolved spec cache
+validation, TensorCast reference consumer coverage, internal-vLLM basic
+consumption, and real CUDA E2E validation.
 
 # Current Baseline
 
@@ -56,7 +67,7 @@ Updated 2026-05-11.
 - internal-vLLM has the basic integration path for consuming prefetched binding
   metadata and acquiring during model load.
 
-# Follow-up TODO
+# Retired Follow-up TODO Source
 
 ## P0: Stabilize The Public Example
 

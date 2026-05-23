@@ -4,8 +4,10 @@ title: Collective-First Binding Realization for TP Serving Startup
 status: implemented
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests", "benchmarks", "serving"]
 created: 2026-03-31
-last_updated: 2026-04-15
+last_updated: 2026-05-23
 related_code:
+  - docs/designs/0120-artifact-centered-model-runtime-realization.md
+  - docs/designs/0121-unified-artifact-realization-kernel.md
   - docs/designs/0084-binding-unified-model-and-contract.md
   - docs/designs/0107-retrieval-policy-plane-cleanup.md
   - docs/designs/0108-tensor-aware-materialization-strategy-plane.md
@@ -38,6 +40,8 @@ links:
     - ./0110-artifact-representation-contract-and-transform-unification.md
     - ./0112-binding-native-serving-realization-and-publication.md
   related:
+    - ./0120-artifact-centered-model-runtime-realization.md
+    - ./0121-unified-artifact-realization-kernel.md
     - ./0113-step3p5-closure-and-sot-convergence.md
     - ../benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md
 ---
@@ -100,6 +104,20 @@ shared abstractions it touches:
   work,
 - and the closure evidence for this path now lives directly in this design plus
   `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`.
+
+# Target-State Alignment With `0121`
+
+`0114` remains the evidence and design record for collective-first binding
+startup. Its long-term owner is the `0121` target-set realization model.
+
+The target interpretation is:
+
+- TP startup is not a separate TP loader;
+- collective-first behavior is a realization strategy over a target set;
+- each TP member has a member-local target plan, layout, device facts, and
+  runtime profile;
+- group barriers, staged values, and per-member diagnostics are lifecycle and
+  report facts of the shared realization plan.
 
 ## Implementation Status
 

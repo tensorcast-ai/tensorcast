@@ -1,11 +1,13 @@
 ---
 slug: prefetch-serving-binding-target
 title: Prefetch Serving Binding Target And Retained GPU Residency
-status: draft
+status: superseded
 areas: ["daemon", "sdk", "proto", "serving", "docs", "tests"]
 created: 2026-05-09
-last_updated: 2026-05-09
+last_updated: 2026-05-23
 related_code:
+  - docs/designs/0120-artifact-centered-model-runtime-realization.md
+  - docs/designs/0121-unified-artifact-realization-kernel.md
   - docs/designs/0001-docs-system-design.md
   - docs/designs/0055-programmable-framework.md
   - docs/designs/0056-programmable-framework-adv.md
@@ -29,7 +31,12 @@ related_code:
   - daemon/state/handle_lease_registry.*
 links:
   plan: ../plans/0116-prefetch-serving-binding-target.md
+  superseded_by:
+    - ./0120-artifact-centered-model-runtime-realization.md
+    - ./0121-unified-artifact-realization-kernel.md
   related:
+    - ./0120-artifact-centered-model-runtime-realization.md
+    - ./0121-unified-artifact-realization-kernel.md
     - ./0055-programmable-framework.md
     - ./0056-programmable-framework-adv.md
     - ./0084-binding-unified-model-and-contract.md
@@ -40,8 +47,15 @@ links:
 
 # Summary
 
-TensorCast should expose serving preloading as an explicit `prefetch` target,
-not as a parallel "preload" API family.
+This design is superseded as a standalone public serving-target design by
+`0120` and `0121`. It remains the retained GPU residency and acquire-validation
+record that the unified artifact realization kernel must preserve.
+
+The lasting decision from this document is not the public name
+`ServingBindingTarget`. The lasting decision is that retained runtime loading is
+an explicit artifact prefetch/realization target with daemon-owned residency,
+fresh worker acquire leases, reservation capabilities, binding-value identity,
+and fail-closed validation. It must not become a parallel "preload" API family.
 
 The user-level contract is:
 
@@ -59,6 +73,13 @@ checkpoint artifact, the SDK may expose the same daemon operation through a
 store/plan-level helper. In both forms, the operation payload carries an
 explicit `ServingBindingSourceRef`; the daemon must not infer source semantics
 from the receiver object used to start the operation.
+
+Target-state note: `0120` and `0121` absorb this design. The current names
+`ServingBindingTarget`, `PrefetchedServingBinding`, and retained serving
+authority are implementation-era carriers for retained realization target and
+handoff semantics. The long-term public concept should be retained artifact
+realization or prefetch handoff; the retained GPU residency, acquire validation,
+and readiness semantics defined here remain required.
 
 The daemon-level contract remains stricter:
 
@@ -969,6 +990,10 @@ cover:
   identity.
 
 # Compatibility & Acceptance Criteria
+
+Standalone public serving-target compatibility is no longer required. These
+acceptance criteria remain valid as retained-realization behavior that must be
+represented by `0121`.
 
 - Ordinary `Artifact.prefetch(device=...)` behavior and return type remain
   unchanged.

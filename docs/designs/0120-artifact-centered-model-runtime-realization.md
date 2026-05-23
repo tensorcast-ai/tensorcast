@@ -15,8 +15,9 @@ related_code:
   - docs/designs/0112-binding-native-serving-realization-and-publication.md
   - docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md
   - docs/designs/0116-prefetch-serving-binding-target.md
-  - docs/designs/0119-serving-runtime-concept-deepening-and-vllm-migration.md
+  - docs/designs/0121-unified-artifact-realization-kernel.md
   - docs/plans/0120-artifact-centered-model-runtime-realization.md
+  - docs/plans/0121-unified-artifact-realization-kernel.md
   - docs/architecture/p2p-transfer-strategies.md
   - core/store/docs/device-manager.md
   - core/store/docs/device-registry.md
@@ -44,22 +45,27 @@ links:
     - ./0112-binding-native-serving-realization-and-publication.md
     - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
     - ./0116-prefetch-serving-binding-target.md
-    - ./0119-serving-runtime-concept-deepening-and-vllm-migration.md
+    - ./0121-unified-artifact-realization-kernel.md
   related:
     - ../architecture/p2p-transfer-strategies.md
 ---
 
 # Summary
 
-`0119` completed the immediate serving-runtime cleanup: it split lifecycle
-implementation from framework-facing runtime modules, made retained binding
-acquire explicit, preserved runtime attachment as the vLLM boundary, and kept
-runtime replica publication separate from durable representation publication.
+The current serving-runtime baseline split lifecycle implementation from
+framework-facing runtime modules, made retained binding acquire explicit,
+preserved runtime attachment as the vLLM boundary, and kept runtime replica
+publication separate from durable representation publication.
 
-This design should not be folded into `0119`. The next question is broader than
-the `tensorcast/serving` module shape: it asks whether "Serving" should remain a
-primary TensorCast concept or become a model-runtime profile on top of the
-artifact realization system.
+This design is the canonical successor for that baseline. It asks whether
+"Serving" should remain a primary TensorCast concept or become a model-runtime
+profile on top of the artifact realization system.
+
+`0121` is the companion kernel design for the realization model described here.
+This document owns the artifact-centered target state; `0121` owns the shared
+selection, target, strategy, representation, lifecycle, execution, and report
+spine that prevents TensorDict, binding, retained prefetch, runtime attach, and
+TP from becoming separate materialization systems.
 
 The decision is:
 
@@ -74,6 +80,12 @@ The decision is:
   artifact realization model;
 - preserve the current vLLM scenario semantics and performance-sensitive timing
   even when TensorCast and internal-vLLM APIs are changed incompatibly.
+
+The feasibility conclusion is positive for the current internal-vLLM scenario,
+provided `0121` lands first: vLLM can move to the artifact-centered model without
+a vLLM-owned TensorDict/source/control path, but only if retained pre-admission,
+source bootstrap, runtime attachment, reload, publication, and TensorDict
+projection all lower through the same realization kernel.
 
 ```mermaid
 flowchart LR
@@ -92,8 +104,8 @@ flowchart LR
 
 ## Goals
 
-- Decide the next design unit after `0119`: a new artifact-centered design,
-  with `0119` as the executed implementation baseline.
+- Define the canonical artifact-centered target state for the current serving
+  runtime baseline.
 - Reduce user-facing concepts by making artifact realization the shared path for
   TensorDict retrieval, durable load, binding, local source bootstrap, retained
   prefetch acquire, TP realization, P2P reuse, reload, and runtime replica
@@ -112,8 +124,8 @@ flowchart LR
 ## Non-Goals
 
 - Do not treat `tensorcast.serving` as a compatibility boundary. It is the
-  current implementation namespace after `0119` and may be reshaped directly
-  when the final artifact-centered model is clearer.
+  current implementation namespace and may be reshaped directly when the final
+  artifact-centered model is clearer.
 - Do not collapse every runtime concern into `Artifact`. Artifact is the root,
   not a god object.
 - Do not make local-ready binding values durable or globally routable without an
@@ -125,40 +137,28 @@ flowchart LR
   depth, and performance-sensitive semantics are the requirements.
 - Do not put direct Global Store access in the Python SDK.
 
-# Relationship To `0119`
+# Relationship To Current Serving Runtime Baseline
 
-`0119` should be considered the completed semantic baseline for current serving
-runtime behavior. It should not become the umbrella document for this design,
-and it should not force API compatibility during the next refactor.
+The previous serving-runtime cleanup is now folded into this document as
+baseline context. The standalone serving-centered design has been removed to
+avoid two active conceptual centers.
 
-Reasons:
+The baseline remains useful as code behavior, not as design vocabulary:
 
-- `0119` is about reshaping the Python serving runtime after `0111`, `0112`, and
-  `0116`. Its vocabulary is still serving-centered.
-- This design changes the conceptual owner from "serving runtime" to "artifact
-  realization for model runtimes." Mixing both decisions in `0119` would make
-  the document carry two different theses.
-- vLLM now depends on the behavior implemented by `0119`. A new design can
-  explicitly classify which vLLM-facing fields are semantic and which are only
-  temporary naming before changing interfaces directly.
-- The next migration should be able to break APIs cleanly. That is easier when
-  the new target model is documented as a successor, not as an edit to the old
-  execution plan.
-
-`0119` remains useful as:
-
-- the source of current module boundaries;
-- the vLLM behavior baseline;
-- the list of runtime attachment, retained acquire, reload, and publication
-  behavior that must not regress;
-- a reference for what should be renamed, absorbed, or kept internal later.
+- current module boundaries identify migration ownership;
+- vLLM behavior is a regression baseline;
+- runtime attachment, retained acquire, reload, runtime view, publication, and
+  retirement behavior must not regress;
+- serving-centered names may be renamed, absorbed, or kept internal when the
+  artifact-centered replacement preserves behavior.
 
 # Prior Constraints Reviewed
 
-## Artifact-first SDK (`0039`)
+## Unified Artifact SDK Entrypoint (`0039`)
 
-Kept and completed. Retrieval, prefetch, and binding should hang off an artifact
-handle. This design extends that principle by treating TensorDict retrieval,
+Kept and upgraded. `0039` now owns the public SDK entrance: users obtain or
+create an `Artifact`, then realize, bind, prefetch, attach, or publish through
+that root. This design extends that rule by treating TensorDict retrieval,
 binding, and model-runtime attach as projections over one realization model. A
 model runtime is a profiled realization of an artifact or source artifact, not a
 separate serving object graph.
@@ -211,11 +211,14 @@ pipeline as P2P and disk load, not only through serving-local code.
 
 ## Prefetch serving binding target (`0116`)
 
-Kept but reframed. Prefetch prepares retained daemon-owned realization. The
-serialized handoff should be treated as a retained binding claim/capability for
-a realization target. It is not user-facing preload vocabulary.
+Superseded as a standalone public serving-target design and absorbed into this
+artifact-realization direction. Its retained residency and acquire-validation
+semantics are kept: prefetch prepares retained daemon-owned realization, and the
+serialized handoff is a retained binding claim/capability for a realization
+target. It is not user-facing preload vocabulary and should not remain a
+separate serving materialization family.
 
-## Serving runtime cleanup (`0119`)
+## Serving runtime cleanup baseline
 
 Kept as current behavior baseline, not as an API compatibility boundary. Its
 `ServingRuntimeSession`, `RuntimeAttachment`, retained acquire, runtime view,
@@ -223,7 +226,7 @@ and runtime replica publication behavior become inputs to this successor design,
 and their interfaces may be changed when the replacement preserves or improves
 the scenario semantics.
 
-# Current State After `0119`
+# Current Serving Runtime State
 
 The current TensorCast serving code has a clear runtime baseline:
 
@@ -284,6 +287,43 @@ The current internal-vLLM integration exercises these semantics:
   response projection, shutdown publication retirement, and EP/EPLB reload
   safety.
 
+# vLLM Reference Case Feasibility
+
+The current internal-vLLM integration is a good reference case because it needs
+simple concepts at the boundary and deep behavior behind them. The desired
+boundary is still small:
+
+1. select an artifact or source artifact;
+2. realize it for a model-runtime target;
+3. attach a framework adapter;
+4. project runtime view, reload, publication, or TensorDict results from the
+   same handle.
+
+The current vLLM code does not depend on TensorCast `Artifact.tensor_dict(...)`
+as the steady model-loading path. The only TensorDict requirement vLLM imposes
+on this refactor is stronger: TensorDict must prove the same realization
+semantics that runtime attach relies on. If TensorDict remains a separate
+`MaterializeReplica` convenience path with independent selection, strategy,
+diagnostics, lifetime, or P2P behavior, the vLLM integration may still work
+today, but TensorCast would keep two incompatible materialization models.
+
+| vLLM requirement | Feasibility judgement | Required TensorCast contract |
+| --- | --- | --- |
+| Conceptual integration surface | Feasible | vLLM should see artifact selection, realization spec/handle, runtime adapter, and attachment/view. It should not need serving-specific source or TensorDict control objects. |
+| TensorDict after refactor | Feasible and necessary | `Artifact.tensor_dict(...)` and `tensor_dict_into(...)` lower to the same selection resolver, target planner, strategy planner, report, and lifetime model as binding/runtime attach. |
+| Retained pre-admission memory credit | Feasible but blocking | A retained realization claim must expose trusted reservation bytes before vLLM model construction and validate expected member/device/layout both at credit time and acquire time. |
+| Local HF/safetensors cold start | Feasible | vLLM source catalog output becomes a daemon-attested mounted-source artifact subject such as `msa1:...`; no source-handle-only path bypasses artifact selection or admission. |
+| Runtime model attach | Feasible | vLLM owns only adapter capabilities: meta/runtime model construction, trace capture, runtime-only tensors, finalize hooks, and semantic probes. TensorCast owns realization lifecycle. |
+| Reload and publication | Feasible with generation discipline | Runtime attachment reload and async replica publication must compare the active attachment or binding-value generation before replacing state or retiring stale published results. |
+| EP/EPLB safety | Feasible as admission, not identity | Static semantic digests are representation/admission facts; live EP world size and EPLB maps must be re-read by the framework admission hook before reload. |
+| Main plus drafter models | Feasible with explicit semantics | Either model them as a target set with one reload transaction, or document the current sequential behavior where a draft failure after main reload marks the worker unhealthy. |
+
+This means the TensorDict refactor is sufficient for vLLM only when it is not
+just an API cleanup. It must remove semantic split-brain: the same selection
+digest, source selection digest, target layout digest, strategy decision,
+lifecycle capability, and realization report must be observable whether the
+projection is TensorDict, binding, retained handoff, or runtime attachment.
+
 # Concept Ownership
 
 The next model should reduce public concepts without hiding necessary internal
@@ -297,12 +337,14 @@ state.
 | `RealizationTargetSet` | Multi-member realization intent for TP/PP/DP groups | group realization planner | mutable key resolution |
 | `ArtifactRealizationSpec` | Target, profile, representation contract, and strategy intent | SDK/runtime planner | execution attempt state |
 | `ArtifactRealizationHandle` | User/professional handle for one realized value lifecycle | SDK/runtime facade | framework model internals |
+| `RetainedRealizationClaim` | Serialized prefetch handoff and trusted pre-admission credit | retained lifecycle/admission | durable artifact identity |
 | `TensorDictProjection` | Ordinary tensor-dict view of a realized selection | Store SDK | daemon-owned binding lifecycle |
 | `RepresentationTransformContract` | Semantic tensor/layout contract | representation plane | transport source choice |
 | `MaterializationStrategy` | Disk/P2P/collective/local execution choice | shared strategy plane | user-facing API naming |
 | `BindingValue` | Daemon-owned local realization value | binding lifecycle | durable artifact replica until published |
 | `RuntimeAttachment` | Process-local framework model attachment | runtime adapter | Global Store metadata |
 | `RuntimeAdapter` | vLLM/SGLang-specific construction and finalize hooks | integration layer | Artifact core |
+| `RuntimeAdmissionFacts` | Live framework/device/rank facts checked before attach or reload | integration host/admission | artifact key or durable replica identity |
 | `ArtifactReplica` | Published data source for future loads/P2P | artifact lifecycle | local-ready binding values |
 
 `Serving` should remain only as one model-runtime profile where useful:
@@ -385,9 +427,9 @@ prefetch, and model-runtime attach from becoming parallel top-level concepts.
 
 ## Startup paths under one model
 
-The three `0119` startup plans map cleanly to artifact realization:
+The three current startup plans map cleanly to artifact realization:
 
-| Current `0119` plan | Artifact-centered meaning |
+| Current startup plan | Artifact-centered meaning |
 | --- | --- |
 | `tensor_dict` / `tensor_dict_into` | Realize an artifact selection into a TensorDict projection |
 | `bind` / `bind_into` | Realize an artifact selection into a daemon-owned binding projection |
@@ -428,6 +470,7 @@ The retained acquire payload should be treated as a serialized retained
 realization claim:
 
 - reservation capability;
+- trusted reservation bytes visible before framework memory admission;
 - daemon/session/device/member facts;
 - binding value ref;
 - expected layout/schema/build/spec digests;
@@ -456,6 +499,29 @@ Do not move framework model state into `Artifact`.
 This is the correct separation: artifact is durable identity; attachment is
 process-local runtime state.
 
+## Framework reference flow
+
+A vLLM implementation should be able to follow this flow without constructing a
+parallel TensorDict or source subsystem:
+
+1. Normalize `model_loader_extra_config` into artifact selection, source
+   bootstrap policy, retained claim, strategy, diagnostics, and publication
+   policy.
+2. Before vLLM memory admission, parse any retained claim and credit only the
+   trusted reservation bytes for the expected placement member.
+3. Build an `ArtifactRealizationSpec.model_runtime(...)` with vLLM placement,
+   target device, runtime ABI, representation policy, and adapter identity.
+4. Resolve source identity through artifact selection: durable artifact for
+   normal startup, or daemon-attested `msa1:` mounted-source artifact for local
+   HF/safetensors bootstrap.
+5. Realize and attach through `RuntimeAdapter`; vLLM supplies construction,
+   trace, runtime-only tensor, finalize, and semantic probe hooks.
+6. After vLLM readiness, publish an artifact-backed runtime replica only if the
+   attachment is still the active generation.
+7. On reload, re-run runtime admission, reject live EP/EPLB drift, retire or mark
+   current publication state, swap the active binding value, and project the
+   reload response from the new attachment.
+
 # vLLM Scenario Contract
 
 The following vLLM facts are semantic requirements, not legacy compatibility
@@ -463,19 +529,19 @@ fields.
 
 | vLLM scenario | Must remain true after this design |
 | --- | --- |
-| TensorDict retrieval and TensorDict-dependent internals | TensorDict loads are projections of artifact realization and share selection, strategy, diagnostics, and P2P semantics with binding/runtime realization |
-| Local HF/safetensors cold start | Local path is normalized into a source artifact before planning; recipe/trace caches are keyed by source, model, topology, member, schema, and realization identity |
+| TensorDict projection equivalence | Current vLLM does not use TensorCast TensorDict as the steady loader path, but TensorDict loads must still be projections of artifact realization and share selection, strategy, diagnostics, lifetime, and P2P semantics with binding/runtime realization |
+| Local HF/safetensors cold start | Local path is normalized into a mounted-source artifact before planning; recipe/trace caches are keyed by source, model, topology, member, schema, and realization identity |
 | Durable artifact startup | A locator resolves to a durable artifact; manifest and policy preflight validate schema, representation contract, serving build, topology, and readiness before attach |
 | Retained prefetch attach | vLLM can credit trusted reservation bytes before model construction and later acquire a fresh lease for the exact member/device/layout/value |
 | vLLM memory admission | Retained reservation bytes stay visible before vLLM memory admission; this timing is a behavior requirement |
 | TP multi-rank load | Same-node source coordination, collective execution facts, TP ranks, rank-local target layouts, and local-ready barrier remain explicit |
-| EP/EPLB reload safety | Expert placement and EPLB digests remain part of topology admission and reload validation |
+| EP/EPLB reload safety | Expert placement and EPLB digests remain part of topology admission, and live EP world size/EPLB maps are checked before reload |
 | Runtime-only tensors | Runtime-only tensor names, allocation, post-bind finalize, and invariant validation remain adapter-owned |
 | In-place reload | Reload swaps the active binding value without reconstructing the vLLM model, and returns stable reload response projection |
 | Runtime view | Weight-version and endpoint projections expose artifact ref, local ref, binding value ref, schema, contract, readiness, publication state, and failure state |
-| Runtime replica publication | After-ready publication stays async, artifact-backed, and explicitly retired on reload/shutdown |
+| Runtime replica publication | After-ready publication stays async, artifact-backed, active-generation checked, and explicitly retired on reload/shutdown |
 | Local-ready durable promotion | Promotion from local-ready binding to durable artifact remains an explicit representation publication workflow |
-| Drafter models | Main and draft model TensorCast attachments can reload coherently through the same artifact locator path |
+| Drafter models | Main and draft model TensorCast attachments can reload through the same artifact locator path with either target-set transaction semantics or explicit sequential failure/unhealthy semantics |
 
 The existing vLLM `model_loader_extra_config` fields should be reclassified:
 
@@ -519,8 +585,12 @@ explicit than the public API:
   identity, ABI, source catalog policy, and admission policy;
 - `ArtifactRealizationHandle` for projection, acquire, attach, reload, and
   publication actions;
+- `RetainedRealizationClaim` for pre-admission trusted reservation credit and
+  acquire validation;
 - `RuntimeAttachment` for process-local state and close/reload/publication
   projection;
+- framework admission hooks for live runtime facts that cannot be durable
+  artifact identity, such as EP/EPLB reload checks;
 - `RuntimeView` for operator and framework response payloads.
 
 This layer should be stable enough for vLLM/SGLang maintainers but should not
@@ -544,7 +614,8 @@ These objects should not become the everyday user API.
 
 The following names are the preferred long-term conceptual direction. They do
 not require compatibility aliases; the implementation may rename or reshape the
-current `0119` interfaces directly once the vLLM scenario matrix is covered.
+current serving-runtime interfaces directly once the vLLM scenario matrix is
+covered.
 
 | Current name | Future direction | Rationale |
 | --- | --- | --- |
@@ -554,7 +625,7 @@ current `0119` interfaces directly once the vLLM scenario matrix is covered.
 | `ServingBindingPlan` | `ArtifactRealizationPlan` for public docs; internal name may remain | plan identity covers source, target, transform, cache, and layout |
 | `PrefetchedServingBinding` | `PrefetchHandoff` or `RetainedRealizationClaim` | serialized acquire capability, not a tensor handle |
 | `RetainedServingBindingAuthority` | `RetainedRealizationClaim` internally, `PrefetchHandoff` publicly | serialized acquire capability, not authority of truth |
-| `ServingRuntimeAttachment` | `RuntimeAttachment` | already generalized in `0119` code |
+| `ServingRuntimeAttachment` | `RuntimeAttachment` | already generalized in current code |
 | `ServingRealizationReport` | `ArtifactRealizationReport` | report is not serving-only |
 | `ServingArtifactManifest` | `RuntimeRepresentationManifest` unless the payload is truly serving ABI-specific | durable representation metadata should not be serving-rooted |
 | `serving_build_digest` | `runtime_build_digest` or `representation_build_digest` unless tied to serving ABI | build identity belongs to representation/runtime profile |
@@ -587,10 +658,15 @@ Any new Python API proposed here must follow repository style:
 - Startup planning must resolve exactly one plan. Ambiguous retained acquire,
   durable artifact bind, and source bootstrap combinations fail before GPU
   allocation.
+- Retained realization claims must expose trusted reservation bytes before
+  framework memory admission and must validate member/device/layout before both
+  credit and acquire.
 - TensorDict retrieval, binding, retained prefetch, and model-runtime attach must
   build the same resolved `ArtifactSelection` for the same artifact/view/subset.
 - Artifact locator resolution must happen through the daemon-backed SDK path,
   not direct Global Store calls.
+- Source bootstrap must resolve to a daemon-attested mounted-source artifact or a
+  durable artifact subject before realization planning.
 - A local-ready binding value is not a durable artifact and is not eligible for
   cross-daemon P2P until explicit publication.
 - A runtime-published replica must be artifact-backed and tied to the active
@@ -601,7 +677,10 @@ Any new Python API proposed here must follow repository style:
   compatibility before data movement.
 - Device ordinal, CUDA UUID, daemon session, lease token, and process id are
   runtime facts. They must not become durable artifact identity.
-- EP/EPLB semantic placement digests must participate in reload admission.
+- EP/EPLB semantic placement digests and live EP/EPLB framework facts must
+  participate in reload admission.
+- Main/draft TensorCast reload must declare either target-set transaction
+  semantics or explicit sequential failure/unhealthy semantics.
 - Unexpected runtime state should fail clearly rather than falling back to a
   slower or less precise path.
 
@@ -668,8 +747,8 @@ No source compatibility guarantee is required. The implementation should be
 phased only to protect behavior and reviewability, not to preserve old imports
 or parameter names:
 
-1. Use `0119` behavior as the baseline and refactor the implementation toward
-   artifact-centered concepts directly.
+1. Use current serving-runtime behavior as the baseline and refactor the
+   implementation toward artifact-centered concepts directly.
 2. Collapse TensorDict, binding, prefetch, and model-runtime attach onto the
    same realization spec/handle model before broad public renaming.
 3. Port internal-vLLM in the same execution window as TensorCast API changes,
@@ -681,9 +760,12 @@ or parameter names:
 # Acceptance Criteria
 
 - A new design and plan exist for the artifact-centered model-runtime direction;
-  `0119` remains the current baseline rather than being expanded indefinitely.
+  current serving-runtime behavior is captured here as baseline rather than in
+  a separate serving-centered design.
 - The vLLM scenario matrix in this design is treated as a required migration
   checklist.
+- The vLLM reference case is feasible without a vLLM-owned parallel TensorDict,
+  source, or control path.
 - Durable artifact bind, local source bootstrap, retained prefetch acquire, TP
   local-ready realization, TensorDict retrieval, P2P reuse, in-place reload,
   runtime replica publication, shutdown retirement, and local-ready durable
@@ -691,6 +773,9 @@ or parameter names:
 - TensorDict, Binding, RuntimeAttachment, retained prefetch handoff, and artifact
   replica publication are projections or actions of one realization model, not
   parallel user-facing source authorities.
+- Retained pre-admission credit, mounted-source bootstrap, active-generation
+  publication, live EP/EPLB reload checks, and main/draft reload semantics are
+  covered as vLLM migration constraints.
 - No design path requires direct Python SDK Global Store access.
 - Device and framework facts remain realization/admission/runtime facts, not
   durable artifact identity.
@@ -718,7 +803,6 @@ a second durable metadata authority.
 - `docs/designs/0112-binding-native-serving-realization-and-publication.md`
 - `docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md`
 - `docs/designs/0116-prefetch-serving-binding-target.md`
-- `docs/designs/0119-serving-runtime-concept-deepening-and-vllm-migration.md`
 - `docs/architecture/p2p-transfer-strategies.md`
 - `/data/workspace/internal-vllm/vllm/tensorcast/loader.py`
 - `/data/workspace/internal-vllm/vllm/tensorcast/placement.py`
