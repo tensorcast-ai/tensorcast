@@ -4,8 +4,10 @@ title: Source-to-Serving Builder and Representation Publication Lineage
 status: accepted
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests"]
 created: 2026-03-24
-last_updated: 2026-05-09
+last_updated: 2026-05-23
 related_code:
+  - docs/designs/0120-artifact-centered-model-runtime-realization.md
+  - docs/designs/0121-unified-artifact-realization-kernel.md
   - docs/designs/0110-artifact-representation-contract-and-transform-unification.md
   - docs/designs/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
   - docs/designs/0084-binding-unified-model-and-contract.md
@@ -21,6 +23,8 @@ related_code:
   - daemon/service/controllers/serving_artifact_manifest_utils.{h,cc}
 links:
   related:
+    - ./0120-artifact-centered-model-runtime-realization.md
+    - ./0121-unified-artifact-realization-kernel.md
     - ./0108-tensor-aware-materialization-strategy-plane.md
     - ./0112-binding-native-serving-realization-and-publication.md
     - ./0116-prefetch-serving-binding-target.md
@@ -88,6 +92,24 @@ The repo-owned `0111` bridge contract is now landed at its intended base scope:
 - the remaining work is no longer "finish the base `0111` implementation", but
   residual hardening, external integration convergence, and Step3p5 closeout
   cleanup now tracked by `0113`.
+
+# Target-State Alignment With `0120` / `0121`
+
+`0111` remains the representation-publication bridge from source representation
+to serving/runtime representation. It does not own the long-term runtime loading
+surface.
+
+The target interpretation is:
+
+- durable representation publication remains an explicit publication workflow;
+- local-ready or runtime-attached values remain artifact realization results
+  until promoted through representation publication;
+- serving-specific builder and manifest names may remain internal carriers, but
+  user-facing runtime load should converge to model-runtime realization
+  profiles under `0120`;
+- source-to-serving builder work must enter the `0121` kernel through
+  representation admission and target planning, not through a separate serving
+  materialization stack.
 
 # Why This Revision
 

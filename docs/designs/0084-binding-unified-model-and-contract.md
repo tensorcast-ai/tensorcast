@@ -3,9 +3,11 @@ slug: binding-unified-model-and-contract
 title: Binding Unified Model and Contract
 status: accepted
 created: 2026-03-12
-last_updated: 2026-04-30
+last_updated: 2026-05-23
 areas: ["sdk", "daemon", "core", "proto"]
 related_code:
+  - docs/designs/0120-artifact-centered-model-runtime-realization.md
+  - docs/designs/0121-unified-artifact-realization-kernel.md
   - tensorcast/api/store/artifact.py
   - tensorcast/api/store/binding.py
   - tensorcast/api/store/inplace_slot.py
@@ -27,6 +29,8 @@ related_code:
 links:
   plan: ../plans/0084-binding-doc-consolidation.md
   related:
+    - ./0120-artifact-centered-model-runtime-realization.md
+    - ./0121-unified-artifact-realization-kernel.md
     - ./0085-distributed-binding-assembly-and-coordinator.md
     - ./0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md
   predecessors:
@@ -91,6 +95,25 @@ After the assembly-side hard cut from `0085` and `0105`, this boundary is
 final: local-only sealed values leave the binding plane only through the
 assembly attempt domain, never by implicitly minting artifact identity inside
 `0084`.
+
+# Target-State Alignment With `0120` / `0121`
+
+`0084` remains the binding-plane contract. Under the `0120` target model and the
+`0121` realization kernel, a `Binding` is a local realization projection with
+lifecycle capabilities. It is not the universal implementation of retrieval,
+and it is not durable identity.
+
+The aligned interpretation is:
+
+- `Artifact.bind(...)` and `Artifact.bind_into(...)` lower through artifact
+  realization with binding target kinds;
+- TensorDict and caller-tensor targets do not inherit binding lifecycle unless
+  the requested realization target is binding-backed;
+- publication eligibility is a lifecycle capability of an artifact-backed
+  binding current value, not a property of every realized tensor view;
+- swap, reload, staged group values, and publication remain binding operations
+  but are exposed through the common realization-handle capability model where
+  appropriate.
 
 # Goals / Non-Goals
 

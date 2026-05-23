@@ -4,8 +4,10 @@ title: Tensor-Aware Materialization Strategy Plane
 status: accepted
 areas: ["core", "daemon", "sdk", "integrations", "proto", "docs"]
 created: 2026-03-23
-last_updated: 2026-04-19
+last_updated: 2026-05-23
 related_code:
+  - docs/designs/0120-artifact-centered-model-runtime-realization.md
+  - docs/designs/0121-unified-artifact-realization-kernel.md
   - core/store/runtime/ingestion/materialization_facade.cc
   - core/store/runtime/ingestion/materialization_service.cc
   - core/store/materialization/contracts/loading_spec.h
@@ -40,6 +42,8 @@ related_code:
   - ../architecture/api/region-backed.md
 links:
   related:
+    - ./0120-artifact-centered-model-runtime-realization.md
+    - ./0121-unified-artifact-realization-kernel.md
     - ./0107-retrieval-policy-plane-cleanup.md
     - ./0109-batched-owner-file-collective-executor.md
     - ./0112-binding-native-serving-realization-and-publication.md
@@ -161,6 +165,22 @@ plane, but execution is now intentionally split:
   above;
 - `0117` remains the normative owner for group version-set realization and the
   staged publish barrier. It must not be folded back into the strategy plane.
+
+# Target-State Alignment With `0121`
+
+`0108` remains the strategy-plane owner below semantic truth. `0121` lifts that
+role into the unified artifact realization kernel as `RealizationStrategyPlan`.
+
+The target interpretation is:
+
+- source policy, P2P/disk choice, collective admission, retry, verification,
+  deadline, lease/export, and fallback policy are strategy-plane facts for every
+  target kind;
+- TensorDict, binding, caller-owned target writes, retained prefetch, runtime
+  attach, and TP target sets must not carry separate source/fallback logic;
+- `ExecutionStrategyPlan` remains a lower-level core/daemon execution artifact,
+  while `RealizationStrategyPlan` is the SDK/daemon-controller admission layer
+  that owns consistent behavior before lowering.
 
 # Implementation Status
 

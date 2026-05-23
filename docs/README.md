@@ -15,6 +15,7 @@ Understand how TensorCast works:
 
 - **[Component Interactions](architecture/README.md)** - How components work together
 - **[API Design](architecture/api/README.md)** - SDK surface and internal API flows
+- **[Unified Artifact SDK Entrypoint](designs/0039-artifact-first-sdk.md)** - Canonical public SDK entrance: all user-facing data movement starts from `Artifact` and lowers through artifact realization
 - **[Binding Unified Model](designs/0084-binding-unified-model-and-contract.md)** - Canonical binding semantics, lifecycle, mapped binding, and publishability
 - **[Retrieval Policy Plane Cleanup](designs/0107-retrieval-policy-plane-cleanup.md)** - Separates retrieval policy from execution topology context and defines the normalized daemon request boundary
 - **[Tensor-Aware Materialization Strategy Plane](designs/0108-tensor-aware-materialization-strategy-plane.md)** - Sole long-term strategy-plane owner for ordinary and source-bound execution planning, explicit lane allocation, and no-implicit-fallback runtime semantics
@@ -24,8 +25,9 @@ Understand how TensorCast works:
 - **[Binding-Native Serving Realization and Publication](designs/0112-binding-native-serving-realization-and-publication.md)** - Canonical owner for binding-native same-binding serving ingress, audited Step3p5 closure, and the shipped publication and closeout model
 - **[Collective-First Binding Realization for TP Serving Startup](designs/0114-collective-first-binding-realization-for-tp-serving-startup.md)** - Path-specific convergence design for `collective_first_v4` source-bound TP startup and downstream typed-diagnostics surfacing
 - **[Trusted Disk Source Format-Aware Source Handle And Metadata-First Resolve](designs/0115-trusted-disk-source-format-aware-source-handle-and-metadata-first-resolve.md)** - Format-aware public disk source handle contract for partitioned and safetensors mounts, typed trust policy, and metadata-first resolve without artifact-plane overload
-- **[Prefetch Serving Binding Target And Retained GPU Residency](designs/0116-prefetch-serving-binding-target.md)** - Serving prefetch target, retained binding residency, and worker acquire semantics
-- **[Serving Runtime Concept Deepening And vLLM Migration](designs/0119-serving-runtime-concept-deepening-and-vllm-migration.md)** - Breaking serving-runtime refactor design for canonical artifact, binding, attachment, and internal-vLLM migration semantics
+- **[Prefetch Serving Binding Target And Retained GPU Residency](designs/0116-prefetch-serving-binding-target.md)** - Superseded serving-target design retained as the residency, reservation, and worker acquire semantics record
+- **[Artifact-Centered Model Runtime Realization](designs/0120-artifact-centered-model-runtime-realization.md)** - Target model that unifies TensorDict, binding, prefetch, runtime attachment, publication, and TP under artifact realization
+- **[Unified Artifact Realization Kernel](designs/0121-unified-artifact-realization-kernel.md)** - Shared realization kernel for selection, target, strategy, representation, lifecycle, execution, and reports
 - **[Assembly Attempt Seal Remediation Handoff Plan](plans/0105-01-assembly-attempt-cut-driven-seal-remediation-handoff.md)** - Ordered execution handoff for finishing cut-driven seal, contract-family enforcement, and validation closure
 - **[Daemon-Served Directory and Target Resolution](designs/0106-daemon-served-directory-and-target-resolution.md)** - Stable worker or instance identity, bounded-staleness directory reads, and NodeAgentDirectory contract
 - **[High Availability Design](architecture/high-availability-design.md)** - HA architecture deep-dive
