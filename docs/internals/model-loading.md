@@ -228,17 +228,19 @@ compiled serving recipes:
   builder accepts `mi2` content identities and daemon-attested `msa1` mounted
   sources; synthetic `disk:`, `key:`, path, and cache-local references are
   rejected before compile.
-- `RecipeCompileIdentity` must agree with `TensorcastServingFacts` for
-  `framework_name`, `adapter_version`, and `serving_abi_version`. The compile key
-  includes both the identity and facts fields, and destination tensor schema must
-  cover every trace-plan destination.
+- `ServingBindingPlan` is the single recipe, compile, resolved-spec, and
+  realization identity. It must agree with `TensorcastServingFacts` for
+  `framework_name`, `adapter_version`, and `serving_abi_version`; its compile
+  payload also carries source/schema/realization digests and destination tensor
+  schema coverage for every trace-plan destination.
 - Mapped binding lowering accepts only single-axis source and destination ranges.
   Destination `MultiRange` slices stay on the binding-realization path until the
   mapped-binding protocol has an explicit flattened-layout contract; coverage
   validation fails closed for unsupported `MultiRange` writes.
-- External preload authority may carry a `group_realization_acquire` reference.
-  Acquire passes it through to the Store Daemon, and preload attachment handles
-  own lease release unless ownership has been explicitly transferred to runtime.
+- Retained serving binding authority may carry a `group_realization_acquire`
+  reference. Acquire passes it through to the Store Daemon, and retained
+  attachment handles own lease release unless ownership has been explicitly
+  transferred to runtime.
 
 ### Lease-In-Place Fast Path & Use Leases
 

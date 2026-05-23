@@ -105,15 +105,49 @@ def bind_serving_artifact(
     )
 
 
+def _binding_layout_tensor_names(binding: Any) -> tuple[str, ...]:
+    layout = getattr(binding, "layout", None)
+    target_layout = getattr(layout, "target_layout", None)
+    offsets = getattr(target_layout, "offsets", None)
+    if offsets is None:
+        return ()
+    return tuple(
+        str(offset.name) for offset in offsets if str(getattr(offset, "name", ""))
+    )
+
+
+def _binding_tensor_names(binding: Any) -> tuple[str, ...]:
+    binding_tensors = getattr(binding, "tensors", None)
+    if not isinstance(binding_tensors, Mapping):
+        return ()
+    return tuple(str(name) for name in binding_tensors)
+
+
 def swap_serving_artifact(
     *,
     binding: Any,
     resolved_artifact: Any,
+    tensor_names: Sequence[str] | None = None,
     serving_runtime_policy: Any | None,
     options: Any | None,
 ) -> Any:
+    binding_layout_tensor_names = _binding_layout_tensor_names(binding)
+    binding_tensor_names = _binding_tensor_names(binding)
+    if binding_layout_tensor_names:
+        tensor_names = binding_layout_tensor_names
+    elif binding_tensor_names:
+        tensor_names = binding_tensor_names
+    elif tensor_names is None:
+        tensor_names = tuple(getattr(resolved_artifact, "tensor_names", ()) or ())
+    else:
+        tensor_names = tuple(str(name) for name in tensor_names)
+    artifact = (
+        resolved_artifact.artifact.subset(list(tensor_names))
+        if tensor_names
+        else resolved_artifact.artifact
+    )
     return binding.swap(
-        resolved_artifact.artifact,
+        artifact,
         serving_runtime_policy=serving_runtime_policy,
         options=options,
     )

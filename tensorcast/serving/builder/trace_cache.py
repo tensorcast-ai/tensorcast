@@ -30,11 +30,14 @@ def load_trace_plan_cache(
     try:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        if isinstance(data, Mapping) and "trace_plan" in data:
-            version = int(data.get("version", 0) or 0)
-            if version != TRACE_PLAN_CACHE_PAYLOAD_VERSION:
-                return None
-            data = data["trace_plan"]
+        if not isinstance(data, Mapping):
+            return None
+        if "trace_plan" not in data:
+            return None
+        version = int(data.get("version", 0) or 0)
+        if version != TRACE_PLAN_CACHE_PAYLOAD_VERSION:
+            return None
+        data = data["trace_plan"]
         return trace_plan_from_dict(dict(data))
     except Exception:
         return None

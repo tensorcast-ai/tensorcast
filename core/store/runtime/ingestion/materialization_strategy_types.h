@@ -80,7 +80,7 @@ struct SourceBoundExecutionPlanSummary {
   uint64_t planned_local_typed_bytes{0};
   uint64_t planned_non_admitted_typed_bytes{0};
   uint64_t planned_generic_residual_bytes{0};
-  uint64_t compatibility_lowered_bytes{0};
+  uint64_t collective_lowered_bytes{0};
   absl::flat_hash_map<std::string, uint64_t> planner_reject_reason_buckets;
   std::string planner_version;
   std::string plan_hash;
@@ -93,8 +93,8 @@ struct SourceBoundExecutionPlanSummary {
 
 struct SourceBoundLoweringStats {
   uint64_t total_dst_tensors{0};
-  uint64_t compatible_candidates{0};
-  uint64_t compatible_bytes{0};
+  uint64_t collective_candidates{0};
+  uint64_t collective_bytes{0};
   uint64_t concat_candidates{0};
   uint64_t concat_bytes{0};
   uint64_t rejected_mixed_src_or_dim{0};

@@ -95,6 +95,10 @@ message MemoryInfo {
   // Presence is critical: when present, the payload is authoritative even if
   // keys/sizes are empty (intentional withdraw/clear).
   optional ReplicaTransportMetadata transport = 17;
+  // Stable Global Store identity for this replica when MemoryInfo is used as a
+  // selected or listed replica descriptor. Registration RPCs still assign
+  // identity server-side and must not trust caller-provided values.
+  string replica_id = 18;
 }
 
 message ReplicaRef {

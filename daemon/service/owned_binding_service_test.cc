@@ -63,6 +63,10 @@ std::string make_target_index_json() {
   return R"({"alpha":[0,4,[1],[1],"torch.float32",0]})";
 }
 
+std::string make_source_index_with_extra_tensor_json() {
+  return R"({"alpha":[0,4,[1],[1],"torch.float32",0],"beta":[4,4,[1],[1],"torch.float32",0]})";
+}
+
 v2::TargetLayout make_target_layout() {
   v2::TargetLayout layout;
   layout.set_layout_kind(v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -127,6 +131,8 @@ class BindingContributionGuardClient final : public tensorcast::store::testing::
  public:
   std::vector<tensorcast::store::components::AssemblySlotOccupancyInfo> accepted_rows;
   std::vector<std::string> active_identities;
+  std::string cluster_id{"cluster-test"};
+  std::vector<tensorcast::store::components::ArtifactDiskLocation> disk_locations;
 
   absl::StatusOr<std::vector<std::string>> list_active_worker_identities(bool) override {
     return active_identities;
@@ -159,6 +165,32 @@ class BindingContributionGuardClient final : public tensorcast::store::testing::
         }
       }
       out.push_back(row);
+    }
+    return out;
+  }
+
+  absl::StatusOr<std::string> get_cluster_id() override {
+    if (cluster_id.empty()) {
+      return absl::NotFoundError("cluster_id unavailable");
+    }
+    return cluster_id;
+  }
+
+  absl::StatusOr<std::vector<tensorcast::store::components::ArtifactDiskLocation>> list_artifact_disk_locations(
+      std::string_view artifact_id,
+      bool include_deleted = false) override {
+    std::vector<tensorcast::store::components::ArtifactDiskLocation> out;
+    for (const auto& entry : disk_locations) {
+      if (entry.artifact_id != artifact_id) {
+        continue;
+      }
+      if (entry.is_deleted && !include_deleted) {
+        continue;
+      }
+      out.push_back(entry);
+    }
+    if (out.empty()) {
+      return absl::NotFoundError("disk_locations_not_found");
     }
     return out;
   }
@@ -329,6 +361,17 @@ void seed_expired_contribution(Fixture& fix) {
   row.lease_expires_at = absl::Now() - absl::Seconds(30);
   fix.global_store_client->accepted_rows = {row};
   fix.global_store_client->active_identities = {"daemon-1"};
+}
+
+void register_managed_disk_location(Fixture& fix, std::string_view artifact_id, const std::filesystem::path& path) {
+  tensorcast::store::components::ArtifactDiskLocation loc;
+  loc.artifact_id = std::string(artifact_id);
+  loc.cluster_id = fix.global_store_client->cluster_id;
+  loc.relative_path = path.lexically_relative(fix.storage_root).string();
+  loc.kind = tensorcast::global_store::v1::DISK_LOCATION_KIND_MANAGED;
+  loc.created_at = absl::Now();
+  loc.updated_at = absl::Now();
+  fix.global_store_client->disk_locations.push_back(std::move(loc));
 }
 
 } // namespace
@@ -555,6 +598,67 @@ TEST_CASE("RefillOwnedBinding strict preflight rejection preserves ready artifac
   REQUIRE(record->state == v2::BINDING_STATE_READY_ARTIFACT);
   REQUIRE(record->current_artifact_id == "artifact-old");
   REQUIRE(record->current_binding_value_id == "value-1");
+}
+
+TEST_CASE(
+    "RefillOwnedBinding directly refills mapped binding from selected serving artifact view",
+    "[daemon][binding][mapped]") {
+  Fixture fix;
+  const auto record = fix.insert_ready_artifact_record();
+
+  const auto artifact_dir = fix.storage_root / "binding_selected_serving_artifact";
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  REQUIRE(write_file(artifact_dir / "tensor.data", "ABCDEFGH"));
+  REQUIRE(write_file(artifact_dir / "tensor_index.json", make_source_index_with_extra_tensor_json()));
+
+  auto imported_or = tensorcast::daemon::materialization_disk_resolve::import_artifact_from_path(
+      artifact_dir.string(),
+      fix.storage_root,
+      /*verify_checksums=*/false);
+  REQUIRE(imported_or.ok());
+  register_managed_disk_location(fix, imported_or->artifact_id, imported_or->normalized_path);
+
+  {
+    absl::MutexLock lock(&record->mu);
+    record->allocation = std::make_unique<tensorcast::common::memory::GpuDeviceMemory>();
+    REQUIRE(record->allocation->allocate(4, record->device_id).ok());
+    record->mapped = true;
+    record->copy_plan.set_version(1);
+    record->dst_tensors.clear();
+    auto& spec = record->dst_tensors.emplace_back();
+    spec.set_name("alpha");
+    spec.add_shape(1);
+    spec.add_stride(1);
+    spec.set_dtype("torch.float32");
+    spec.set_storage_offset(0);
+    spec.set_logical_length(4);
+  }
+
+  v2::RefillOwnedBindingRequest req;
+  req.set_binding_id(record->binding_id);
+  req.set_artifact_id(imported_or->artifact_id);
+  req.mutable_source_selection()->set_artifact_id(imported_or->artifact_id);
+  req.mutable_source_selection()->add_tensor_names("alpha");
+  req.mutable_source_policy()->set_preference(v2::SOURCE_PREFERENCE_PREFER_DISK);
+  req.mutable_source_policy()->set_allow_p2p(false);
+  req.mutable_source_policy()->set_allow_disk(true);
+  v2::RefillOwnedBindingResponse resp;
+
+  const auto status = run_refill_owned_binding(fix.service, req, resp);
+
+  INFO("RefillOwnedBinding status: " << status.error_code() << " " << status.error_message());
+  REQUIRE(status.ok());
+  REQUIRE(resp.artifact_id() == imported_or->artifact_id);
+  REQUIRE(resp.state() == v2::BINDING_STATE_READY_ARTIFACT);
+  REQUIRE(resp.source() == v2::MATERIALIZATION_SOURCE_DISK);
+  REQUIRE(resp.resolved_selection().artifact_id() == imported_or->artifact_id);
+  REQUIRE(resp.resolved_selection().tensor_names_size() == 1);
+  REQUIRE(resp.resolved_selection().tensor_names(0) == "alpha");
+
+  absl::MutexLock lock(&record->mu);
+  REQUIRE(record->current_artifact_id == imported_or->artifact_id);
+  REQUIRE(record->state == v2::BINDING_STATE_READY_ARTIFACT);
 }
 
 TEST_CASE(

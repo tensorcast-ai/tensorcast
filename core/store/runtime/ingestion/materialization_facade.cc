@@ -4018,6 +4018,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         LOG(WARNING) << "complete_replica_transport returned error: " << complete_status;
       }
       if (p2p_or.ok()) {
+        p2p_or->selected_source_replica_id = remote.replica_id;
+        p2p_or->selected_source_transport_id = session.transport_id;
         return p2p_or;
       }
       if (!allow_disk || !has_disk_source || prefer_p2p) {
@@ -5229,6 +5231,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         LOG(WARNING) << "complete_replica_transport returned error: " << complete_status;
       }
       if (p2p_or.ok()) {
+        p2p_or->selected_source_replica_id = remote.replica_id;
+        p2p_or->selected_source_transport_id = session.transport_id;
         return p2p_or;
       }
       if (!allow_disk || !has_disk_source || prefer_p2p) {
@@ -5523,80 +5527,6 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   };
 }
 
-absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::materialize_mapped_loader_into_target(
-    const DeviceKey& target_device,
-    const loading::IntoTargetLayout& target_layout,
-    std::unique_ptr<IArtifactLoader> loader,
-    const loader::ByteRangeMap& mapping,
-    const loading::MaterializeHints& hints,
-    loading::MaterializationSource source_kind) {
-  // Public compatibility wrapper: callers still provide one loader even
-  // though internal execution can now target multiple resolved sources.
-  if (target_device.type != DeviceType::GPU && target_device.type != DeviceType::CPU) {
-    return absl::InvalidArgumentError("materialize_mapped_loader_into_target requires GPU or CPU target device");
-  }
-  if (loader == nullptr) {
-    return absl::InvalidArgumentError("materialize_mapped_loader_into_target requires a source loader");
-  }
-  if (hints.artifact_id.empty()) {
-    return absl::InvalidArgumentError("materialize_mapped_loader_into_target requires hints.artifact_id");
-  }
-  if (target_layout.storages.empty()) {
-    return absl::InvalidArgumentError("materialize_mapped_loader_into_target requires at least one target storage");
-  }
-  if (mapping.num_sources != 1) {
-    return absl::InvalidArgumentError("materialize_mapped_loader_into_target requires mapping.num_sources == 1");
-  }
-  if (hints.variant && hints.variant->cached_plan.has_value() && !hints.variant->cached_plan->is_identity) {
-    return absl::InvalidArgumentError("materialize_mapped_loader_into_target does not support view transforms");
-  }
-
-  uint64_t total_size = target_layout.total_size;
-  uint64_t computed_total = 0;
-  for (const auto& storage : target_layout.storages) {
-    if (storage.length == 0) {
-      return absl::InvalidArgumentError("materialize_mapped_loader_into_target requires non-empty storage length");
-    }
-    if (storage.length > std::numeric_limits<uint64_t>::max() - computed_total) {
-      return absl::OutOfRangeError("materialize_mapped_loader_into_target storage length overflow");
-    }
-    computed_total += storage.length;
-  }
-  if (total_size == 0) {
-    total_size = computed_total;
-  } else if (total_size != computed_total) {
-    return absl::InvalidArgumentError(
-        "materialize_mapped_loader_into_target total_size does not match storage lengths");
-  }
-  if (total_size == 0) {
-    return absl::InvalidArgumentError("materialize_mapped_loader_into_target requires total_size > 0");
-  }
-  if (mapping.total_bytes != total_size) {
-    return absl::InvalidArgumentError("materialize_mapped_loader_into_target mapping total_bytes mismatch");
-  }
-
-  auto init_status = loader->initialize();
-  if (!init_status.ok()) {
-    return init_status;
-  }
-  auto source_size_or = loader->get_artifact_size();
-  if (!source_size_or.ok()) {
-    return source_size_or.status();
-  }
-  if (*source_size_or < total_size) {
-    return absl::FailedPreconditionError("materialize_mapped_loader_into_target source is smaller than target mapping");
-  }
-  auto source_or = loader->open_source();
-  if (!source_or.ok()) {
-    return source_or.status();
-  }
-
-  std::vector<std::shared_ptr<loader::SeekableSource>> sources;
-  sources.emplace_back(std::move(*source_or));
-  return materialize_mapped_sources_into_target(
-      target_device, target_layout, std::move(sources), mapping, hints, source_kind);
-}
-
 absl::StatusOr<MaterializationFacade::IngestMappedSourcesIntoReplicasResult> MaterializationFacade::
     ingest_mapped_sources_into_replicas(
         std::vector<MappedReplicaTarget> targets,
@@ -5803,13 +5733,24 @@ absl::StatusOr<ArtifactLoweringResult> MaterializationFacade::execute_artifact_l
     return descriptor;
   };
 
+  auto sources_or =
+      open_single_loader_sources(std::move(plan.source_loader), plan.byte_range_map, "ArtifactLoweringPlan");
+  if (!sources_or.ok()) {
+    return sources_or.status();
+  }
+  std::vector<std::shared_ptr<loader::SeekableSource>> sources = std::move(*sources_or);
+  loading::MaterializeHints materialize_hints = plan.hints;
+  if (materialize_hints.artifact_id.empty()) {
+    materialize_hints.artifact_id = plan.identity.logical_artifact_id;
+  }
+
   if (plan.into_target.has_value()) {
-    auto result_or = materialize_mapped_loader_into_target(
+    auto result_or = materialize_mapped_sources_into_target(
         plan.target_device,
         *plan.into_target,
-        std::move(plan.source_loader),
+        std::move(sources),
         plan.byte_range_map,
-        plan.hints,
+        materialize_hints,
         plan.source_kind);
     if (!result_or.ok()) {
       return result_or.status();
@@ -5821,20 +5762,29 @@ absl::StatusOr<ArtifactLoweringResult> MaterializationFacade::execute_artifact_l
     return result;
   }
 
-  auto replica_handle_or = ingest_mapped_loader_into_replica(
-      plan.identity.logical_artifact_id,
-      plan.identity.physical_artifact_id,
-      plan.target_device,
-      *plan.replica_target,
-      std::move(plan.source_loader),
+  auto replica_handles_or = ingest_mapped_sources_into_replicas(
+      {
+          MappedReplicaTarget{
+              .logical_artifact_id = plan.identity.logical_artifact_id,
+              .physical_artifact_id = plan.identity.physical_artifact_id,
+              .target_device = plan.target_device,
+              .target = *plan.replica_target,
+              .size_bytes = plan.byte_range_map.total_bytes,
+          },
+      },
+      std::move(sources),
       plan.byte_range_map,
-      plan.hints,
+      materialize_hints,
       plan.source_kind);
-  if (!replica_handle_or.ok()) {
-    return replica_handle_or.status();
+  if (!replica_handles_or.ok()) {
+    return replica_handles_or.status();
   }
+  if (replica_handles_or->replica_handles.size() != 1) {
+    return absl::InternalError("ArtifactLoweringPlan replica execution returned unexpected handle count");
+  }
+  loading::ReplicaHandle replica_handle = std::move(replica_handles_or->replica_handles.front());
 
-  auto replica_or = config_.replica_runtime->registry().find(replica_handle_or->key());
+  auto replica_or = config_.replica_runtime->registry().find(replica_handle.key());
   if (!replica_or.ok()) {
     return replica_or.status();
   }
@@ -5845,7 +5795,7 @@ absl::StatusOr<ArtifactLoweringResult> MaterializationFacade::execute_artifact_l
   }
 
   ArtifactLoweringResult result;
-  result.replica_handle = std::move(*replica_handle_or);
+  result.replica_handle = std::move(replica_handle);
   result.selection_identity = plan.selection_identity;
   result.resolved_source_descriptor = build_resolved_source_descriptor(plan);
   result.verified_content_descriptor = verified_projection_or->descriptor;
@@ -7405,181 +7355,6 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly_f
   }
 
   return result;
-}
-
-absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::ingest_mapped_loader_into_replica(
-    std::string_view logical_artifact_id,
-    std::string_view physical_artifact_id,
-    const DeviceKey& target_device,
-    const loading::ReplicaTarget& target,
-    std::unique_ptr<IArtifactLoader> loader,
-    const loader::ByteRangeMap& mapping,
-    const loading::MaterializeHints& hints,
-    loading::MaterializationSource source_kind) {
-  // Public compatibility wrapper: logical/physical ids plus the single-loader
-  // contract remain part of the facade shape until composite sources become a
-  // first-class request concept.
-  if (logical_artifact_id.empty()) {
-    return absl::InvalidArgumentError("ingest_mapped_loader_into_replica requires logical_artifact_id");
-  }
-  if (physical_artifact_id.empty()) {
-    return absl::InvalidArgumentError("ingest_mapped_loader_into_replica requires physical_artifact_id");
-  }
-  if (loader == nullptr) {
-    return absl::InvalidArgumentError("ingest_mapped_loader_into_replica requires source loader");
-  }
-  if (mapping.num_sources != 1) {
-    return absl::InvalidArgumentError("ingest_mapped_loader_into_replica requires mapping.num_sources == 1");
-  }
-
-  const common::memory::MemoryLocation target_location = target.location.type;
-  if (target_location != common::memory::MemoryLocation::CPU &&
-      target_location != common::memory::MemoryLocation::GPU) {
-    return absl::InvalidArgumentError("ingest_mapped_loader_into_replica requires a CPU or GPU target");
-  }
-
-  auto runner = [&](const std::string& request_id,
-                    const std::string& publish_context_id,
-                    IngestionResultEvent* event_out) -> absl::StatusOr<loading::ReplicaHandle> {
-    const absl::Time started_at = absl::Now();
-
-    auto init_status = loader->initialize();
-    if (!init_status.ok()) {
-      return init_status;
-    }
-    auto source_size_or = loader->get_artifact_size();
-    if (!source_size_or.ok()) {
-      return source_size_or.status();
-    }
-    auto required_bytes_or = compute_required_source_bytes_for_map(mapping);
-    if (!required_bytes_or.ok()) {
-      return required_bytes_or.status();
-    }
-    if (*source_size_or < *required_bytes_or) {
-      return absl::FailedPreconditionError(
-          "ingest_mapped_loader_into_replica source is smaller than required byte-range map");
-    }
-    auto source_or = loader->open_source();
-    if (!source_or.ok()) {
-      return source_or.status();
-    }
-
-    std::vector<std::shared_ptr<loader::SeekableSource>> sources;
-    sources.emplace_back(std::move(*source_or));
-
-    loader::ByteRangeCompiler compiler(config_.options->byte_mapping, "ingest_mapped_loader_into_replica");
-    auto program_or = compiler.Compile(mapping);
-    if (!program_or.ok()) {
-      return program_or.status();
-    }
-    loader::ByteRangeMappedSource::Options map_opts{
-        .path = "ingest_mapped_loader_into_replica",
-        .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
-    };
-    auto mapped_or =
-        loader::ByteRangeMappedSource::Create(mapping, *program_or, std::move(sources), std::move(map_opts));
-    if (!mapped_or.ok()) {
-      return mapped_or.status();
-    }
-
-    auto registry = &config_.replica_runtime->registry();
-    loading::ReplicaKey key{
-        .artifact_id = std::string(physical_artifact_id),
-        .view_id = std::nullopt,
-        .device = target_device,
-        .replica = 0,
-    };
-
-    auto existing_or = registry->find(key);
-    if (existing_or.ok()) {
-      auto reuse_status = validate_existing_replica_for_reuse(*existing_or, target_location);
-      if (reuse_status.ok()) {
-        loading::ReplicaHandle handle = build_local_replica_handle(key, *existing_or, target_location);
-        handle.source = source_kind;
-        if (event_out != nullptr) {
-          event_out->request_id = request_id;
-          event_out->artifact_id = std::string(logical_artifact_id);
-          event_out->target_device = target_device;
-          event_out->target_location = target_location;
-          event_out->bytes_transferred = mapping.total_bytes;
-          event_out->duration_seconds = absl::ToDoubleSeconds(absl::Now() - started_at);
-          event_out->publish_context_id = publish_context_id;
-          event_out->replica_key = handle.key();
-        }
-        return handle;
-      }
-    } else if (!absl::IsNotFound(existing_or.status())) {
-      return existing_or.status();
-    }
-
-    loading::InlineBufferSource inline_source{.data = nullptr, .size_bytes = mapping.total_bytes};
-    replica::ReplicaConfig cfg{
-        .source = inline_source,
-        .artifact_identifier = key.artifact_id,
-        .device_type = target_device.type,
-        .local_device_id = target_device.type == DeviceType::GPU ? target_device.ordinal : -1,
-        .pinned_buffer_pool = config_.runtime_context->pinned_buffer_pool(),
-        .async_runtime = gsl::not_null<std::shared_ptr<common::AsyncRuntime>>{config_.runtime_context->async_runtime()},
-        .artifact_chunk_bytes = config_.artifact_chunk_bytes,
-        .expected_artifact_size = mapping.total_bytes,
-        .byte_mapping_config = config_.options->byte_mapping,
-        .materialization_strategy = config_.options->materialization_strategy,
-        .memory_tier_config = config_.options->memory_tier_config,
-    };
-    cfg.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : config_.pinned_memory_timeout;
-    cfg.streaming_buffer_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
-    cfg.cpu_shared_memory_enabled = config_.runtime_context->options().cpu_shared_memory_enabled;
-
-    auto replica_or = replica::Replica::create(cfg);
-    if (!replica_or.ok()) {
-      return replica_or.status();
-    }
-    auto replica = std::shared_ptr<replica::Replica>(std::move(replica_or.value()));
-    const int concurrency = hints.pipeline_concurrency > 0 ? static_cast<int>(hints.pipeline_concurrency)
-                                                           : std::max(1, config_.num_threads);
-    auto load_future = replica->get_memory_manager().load_async_from_source(
-        std::move(*mapped_or), target_location, concurrency, std::nullopt, std::function<absl::Status()>{});
-    absl::Status load_status = std::move(load_future).get();
-    if (!load_status.ok()) {
-      return load_status;
-    }
-    replica->set_ready_signal(target_location, absl::OkStatus());
-
-    absl::Status emplace_status = registry->emplace(key, gsl::not_null{replica});
-    if (!emplace_status.ok() && !absl::IsAlreadyExists(emplace_status)) {
-      return emplace_status;
-    }
-    if (absl::IsAlreadyExists(emplace_status)) {
-      auto registered_or = registry->find(key);
-      if (!registered_or.ok()) {
-        return registered_or.status();
-      }
-      replica = *registered_or;
-    }
-
-    loading::ReplicaHandle handle = build_local_replica_handle(key, replica, target_location);
-    handle.source = source_kind;
-    if (event_out != nullptr) {
-      event_out->request_id = request_id;
-      event_out->artifact_id = std::string(logical_artifact_id);
-      event_out->target_device = target_device;
-      event_out->target_location = target_location;
-      event_out->bytes_transferred = mapping.total_bytes;
-      event_out->duration_seconds = absl::ToDoubleSeconds(absl::Now() - started_at);
-      event_out->publish_context_id = publish_context_id;
-      event_out->replica_key = handle.key();
-    }
-    return handle;
-  };
-
-  return run_pipeline_ingestion(
-      IngestionSource::kMemory,
-      std::string(logical_artifact_id),
-      mapping,
-      target,
-      hints,
-      /*publish_to_global_store=*/false,
-      runner);
 }
 
 absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::ingest_from_disk(

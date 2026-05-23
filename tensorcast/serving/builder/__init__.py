@@ -1,6 +1,7 @@
 #  Copyright (c) 2026, TensorCast Team.
 """Serving builder primitives shared by framework integrations."""
 
+from tensorcast.serving.binding_plan import ServingBindingPlan
 from tensorcast.serving.builder.binding_plan import (
     TargetShapes,
     lower_trace_plan_for_binding,
@@ -9,13 +10,11 @@ from tensorcast.serving.builder.binding_plan import (
 )
 from tensorcast.serving.builder.compiler import (
     CompiledServingRecipe,
-    RecipeCompileIdentity,
     RecipeCompileInputs,
     SemanticValidationSpec,
     ServingBuildObserver,
     ServingFacts,
     SourceHullEntry,
-    TensorcastLogicalTopology,
     TensorcastSemanticValidationSpec,
     TensorcastServingFacts,
     TensorSchemaEntry,
@@ -127,7 +126,6 @@ __all__ = [
     "MultiRange",
     "Range",
     "RangeSpec",
-    "RecipeCompileIdentity",
     "RecipeCompileInputs",
     "RecipePublicationContext",
     "RECIPE_CACHE_PAYLOAD_VERSION",
@@ -138,6 +136,7 @@ __all__ = [
     "SourceHullEntry",
     "SourceTensorMeta",
     "ServingBuildObserver",
+    "ServingBindingPlan",
     "ServingFacts",
     "TargetShapes",
     "TRACE_PLAN_CACHE_PAYLOAD_VERSION",
@@ -146,7 +145,6 @@ __all__ = [
     "TensorParityMismatch",
     "TensorParityProbe",
     "TensorParityReport",
-    "TensorcastLogicalTopology",
     "TensorcastSemanticValidationSpec",
     "TensorcastServingFacts",
     "allocate_tensors_from_schema",

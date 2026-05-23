@@ -80,7 +80,7 @@ absl::StatusOr<std::string> compute_source_bound_plan_hash(const SourceBoundExec
       "\n",
       summary.planned_generic_residual_bytes,
       "\n",
-      summary.compatibility_lowered_bytes,
+      summary.collective_lowered_bytes,
       "\n",
       summary.estimated_collective_peak_temporary_bytes,
       "\n",
@@ -182,7 +182,7 @@ absl::StatusOr<SourceBoundStrategyPlan> build_source_bound_execution_strategy_pl
 
   if (lowering_artifacts.has_value()) {
     if (lowering_artifacts->collective_data_map.has_value()) {
-      strategy_plan.summary.compatibility_lowered_bytes =
+      strategy_plan.summary.collective_lowered_bytes =
           byte_range_map_covered_bytes(*lowering_artifacts->collective_data_map);
       strategy_plan.lane_plan.collective_lane_map = *lowering_artifacts->collective_data_map;
     }

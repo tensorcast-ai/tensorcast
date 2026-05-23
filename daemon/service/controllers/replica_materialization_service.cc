@@ -1170,12 +1170,17 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   if (disk_source_artifact_id.has_value() && *disk_source_artifact_id == handle.replica_key.artifact_id) {
     preflight_disk_source = disk_source;
   }
+  std::optional<store::loading::DiskMetadata> preflight_disk_metadata;
+  if (preflight_disk_source.has_value() && hints.disk_metadata.has_value()) {
+    preflight_disk_metadata = hints.disk_metadata;
+  }
   auto preflight_or = serving_artifact_manifest::preflight_serving_artifact(
       &d_.engine,
       serving_artifact_manifest::build_preflight_request(
           handle.replica_key.artifact_id,
           *preflight_canonical_index_or,
           preflight_disk_source,
+          preflight_disk_metadata,
           req.has_serving_artifact_policy() ? &req.serving_artifact_policy() : nullptr));
   if (!preflight_or.ok()) {
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);

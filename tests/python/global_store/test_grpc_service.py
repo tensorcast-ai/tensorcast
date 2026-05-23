@@ -1069,6 +1069,124 @@ class TestGRPCService:
             == common_pb2.BYTE_SPACE_KIND_CANONICAL
         )
 
+    def test_canonical_transport_prefers_full_identity_view_replica(
+        self, servicer, test_context, registered_worker
+    ):
+        from tensorcast.api.store.common import canonical_index_from_bytes
+        from tensorcast.api.store.view_composer import (
+            _build_subset_identity_view_spec_proto,
+            compute_index_multihash,
+            compute_view_id,
+        )
+
+        index_bytes = (
+            b'{"alpha":[0,4,[1],[1],"torch.float32",0],'
+            b'"beta":[4,4,[1],[1],"torch.float32",0]}'
+        )
+        canonical_index = canonical_index_from_bytes(index_bytes)
+        tensor_names = tuple(entry.name for entry in canonical_index.entries)
+        identity_spec = _build_subset_identity_view_spec_proto(
+            canonical_index=canonical_index,
+            tensor_names=tensor_names,
+        )
+        assert identity_spec is not None
+        identity_view_id = compute_view_id(identity_spec, index_bytes)
+        artifact_id = (
+            f"mi2:{compute_index_multihash(index_bytes)}:"
+            f"{compute_index_multihash(b'payload')}"
+        )
+
+        def _memory_info(
+            *,
+            view_id: str | None,
+            remote_key: str,
+        ) -> common_pb2.MemoryInfo:
+            byte_space = common_pb2.ByteSpaceRef(
+                kind=(
+                    common_pb2.BYTE_SPACE_KIND_VIEW
+                    if view_id
+                    else common_pb2.BYTE_SPACE_KIND_CANONICAL
+                ),
+                id=view_id or "",
+            )
+            info = common_pb2.MemoryInfo(
+                node_id=str(uuid.uuid4()),
+                node_address="192.168.8.10",
+                node_port=9001 if view_id else 9000,
+                memory_size=8,
+                memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU,
+                device_id=0,
+                byte_space=byte_space,
+            )
+            info.transport.export_state = (
+                common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE
+            )
+            info.transport.export_generation = 1
+            info.transport.remote_memory_keys.append(remote_key)
+            info.transport.buffer_sizes.append(info.memory_size)
+            return info
+
+        canonical_info = _memory_info(view_id=None, remote_key="canonical-key")
+        view_info = _memory_info(view_id=identity_view_id, remote_key="runtime-key")
+        servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id=artifact_id,
+                mem_info=canonical_info,
+                max_concurrency=1,
+                worker_id=registered_worker,
+                tensor_index_data=index_bytes,
+                encoding="json",
+                schema_version="v3",
+            ),
+            test_context,
+        )
+        servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id=artifact_id,
+                mem_info=view_info,
+                max_concurrency=1,
+                worker_id=registered_worker,
+            ),
+            test_context,
+        )
+        servicer.WorkerHeartbeat(
+            global_store_pb2.WorkerHeartbeatRequest(
+                worker_id=registered_worker,
+                mem_pool_available_size=7000000000,
+                accepting_new_requests=True,
+                state_version=1,
+            ),
+            test_context,
+        )
+
+        response = servicer.RequestReplicaTransport(
+            global_store_pb2.RequestReplicaTransportRequest(
+                artifact_id=artifact_id,
+                local_memory_info=canonical_info,
+                wait_timeout_dur=duration_pb2.Duration(seconds=1),
+                source_node_id="consumer",
+                source_address="192.168.8.20",
+                source_port=9010,
+                request_id="transport-canonical-identity-view",
+                requested_byte_space=common_pb2.ByteSpaceRef(
+                    kind=common_pb2.BYTE_SPACE_KIND_CANONICAL,
+                    id="",
+                ),
+            ),
+            test_context,
+        )
+
+        assert response.status == global_store_pb2.Status.STATUS_OK
+        assert (
+            response.remote_memory_info.byte_space.kind
+            == common_pb2.BYTE_SPACE_KIND_VIEW
+        )
+        assert response.remote_memory_info.byte_space.id == identity_view_id
+        assert (
+            list(response.remote_memory_info.transport.remote_memory_keys)
+            == ["runtime-key"]
+        )
+
     def test_get_artifact_index_by_id_with_multibase(
         self, servicer, test_context, memory_info, registered_worker
     ):

@@ -9,11 +9,14 @@ import json
 import os
 import threading
 import time
-from collections.abc import Callable, Mapping, MutableMapping, Sequence
+from collections import OrderedDict
+from collections.abc import Callable, Iterator, MutableMapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from tensorcast.serving.binding_plan import ServingBindingPlan
 
 
 def _jsonable(value: Any) -> Any:
@@ -28,58 +31,6 @@ def _jsonable(value: Any) -> Any:
     return repr(value)
 
 
-@dataclass(frozen=True)
-class RecipeBuildIdentity:
-    model_hash: str
-    model_id: str
-    model_revision: str | None
-    dtype: str
-    runtime_version: str
-    framework_name: str
-    framework_version: str
-    adapter_version: str
-    serving_abi_version: str
-    trace_cache_schema_version: int
-    tp_rank: int
-    tp_world_size: int
-    topology_ref: Any | None = None
-    member_ref: Any | None = None
-    placement: Any | None = None
-
-    def base_payload(self) -> dict[str, Any]:
-        return {
-            "model_hash": self.model_hash,
-            "model": self.model_id,
-            "revision": self.model_revision,
-            "dtype": self.dtype,
-            "version": self.runtime_version,
-            "trace_cache_schema_version": self.trace_cache_schema_version,
-            "tp_rank": self.tp_rank,
-            "tp_world_size": self.tp_world_size,
-            "topology_ref": _jsonable(self.topology_ref),
-            "member_ref": _jsonable(self.member_ref),
-            "placement": _jsonable(self.placement),
-        }
-
-    def recipe_payload(self, *, metadata_fingerprint: str) -> dict[str, Any]:
-        payload = self.base_payload()
-        payload.update(
-            {
-                "metadata_fingerprint": metadata_fingerprint,
-                "framework_name": self.framework_name,
-                "framework_version": self.framework_version,
-                "adapter_version": self.adapter_version,
-                "serving_abi_version": self.serving_abi_version,
-            }
-        )
-        return payload
-
-    def trace_payload(self, *, metadata_fingerprint: str) -> dict[str, Any]:
-        payload = self.base_payload()
-        payload["metadata_fingerprint"] = metadata_fingerprint
-        return payload
-
-
 def stable_recipe_build_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True).encode("utf-8")
@@ -87,7 +38,7 @@ def stable_recipe_build_hash(payload: dict[str, Any]) -> str:
 
 
 def compute_trace_cache_key(
-    identity: RecipeBuildIdentity,
+    identity: ServingBindingPlan,
     *,
     metadata_fingerprint: str,
 ) -> str:
@@ -97,7 +48,7 @@ def compute_trace_cache_key(
 
 
 def compute_recipe_cache_key(
-    identity: RecipeBuildIdentity,
+    identity: ServingBindingPlan,
     *,
     metadata_fingerprint: str,
 ) -> str:
@@ -112,47 +63,6 @@ def trace_cache_path(*, cache_dir: str, cache_key: str, tp_rank: int) -> str:
 
 def recipe_cache_path(*, cache_dir: str, cache_key: str, tp_rank: int) -> str:
     return os.path.join(cache_dir, f"tensorcast_recipe_{cache_key}_tp{tp_rank}.json")
-
-
-def _mapping_value(payload: Any, *names: str) -> Any | None:
-    if not isinstance(payload, Mapping):
-        return None
-    for name in names:
-        value = payload.get(name)
-        if value is not None:
-            return value
-    return None
-
-
-def _placement_tensor_parallel_context(
-    placement: Any | None,
-) -> tuple[int | None, int | None]:
-    if placement is None:
-        return None, None
-
-    rank = getattr(placement, "tp_rank", None)
-    world_size = getattr(placement, "tp_world_size", None)
-    payload = getattr(placement, "identity_payload", None)
-    if payload is None:
-        stable_identity_payload = getattr(placement, "stable_identity_payload", None)
-        if callable(stable_identity_payload):
-            payload = _mapping_value(stable_identity_payload(), "identity_payload")
-
-    if rank is None:
-        rank = _mapping_value(payload, "tp_rank", "tensor_parallel_rank")
-    if world_size is None:
-        world_size = _mapping_value(payload, "tp_world_size", "tensor_parallel_size")
-
-    member = getattr(placement, "member", None)
-    if rank is None and member is not None:
-        rank = getattr(member, "member_index", None)
-    if world_size is None and member is not None:
-        world_size = getattr(member, "member_count", None)
-
-    return (
-        None if rank is None else int(rank),
-        None if world_size is None else int(world_size),
-    )
 
 
 @dataclass(frozen=True)
@@ -172,8 +82,74 @@ class RecipeBuildCacheConfig:
     synchronous_recipe_cache_write: bool = False
 
 
-TRACE_PLAN_MEMORY_CACHE: dict[str, Any] = {}
-COMPILED_RECIPE_MEMORY_CACHE: dict[str, Any] = {}
+DEFAULT_RECIPE_BUILD_MEMORY_CACHE_ENTRIES = 128
+
+
+class RecipeBuildMemoryCache(MutableMapping[str, Any]):
+    """Thread-safe LRU memory cache for trace plans and compiled recipes."""
+
+    def __init__(
+        self,
+        *,
+        max_entries: int = DEFAULT_RECIPE_BUILD_MEMORY_CACHE_ENTRIES,
+    ) -> None:
+        self._max_entries = max(0, int(max_entries))
+        self._lock = threading.RLock()
+        self._entries: OrderedDict[str, Any] = OrderedDict()
+
+    @property
+    def max_entries(self) -> int:
+        return self._max_entries
+
+    @property
+    def size(self) -> int:
+        return len(self)
+
+    @property
+    def enabled(self) -> bool:
+        return self._max_entries > 0
+
+    def __getitem__(self, key: str) -> Any:
+        with self._lock:
+            value = self._entries[key]
+            self._entries.move_to_end(key)
+            return value
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self._entries[key] = value
+            self._entries.move_to_end(key)
+            self._evict_lru_locked()
+
+    def __delitem__(self, key: str) -> None:
+        with self._lock:
+            del self._entries[key]
+
+    def __iter__(self) -> Iterator[str]:
+        with self._lock:
+            return iter(tuple(self._entries.keys()))
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+    def __contains__(self, key: object) -> bool:
+        with self._lock:
+            return key in self._entries
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+    def _evict_lru_locked(self) -> None:
+        while len(self._entries) > self._max_entries:
+            self._entries.popitem(last=False)
+
+
+TRACE_PLAN_MEMORY_CACHE: RecipeBuildMemoryCache = RecipeBuildMemoryCache()
+COMPILED_RECIPE_MEMORY_CACHE: RecipeBuildMemoryCache = RecipeBuildMemoryCache()
 
 
 @dataclass(frozen=True)
@@ -209,7 +185,7 @@ def _cache_config_attr(cache_config: Any, name: str, default: Any) -> Any:
 class RecipeBuildSession:
     """Small core-owned shell for stable recipe build cache identity."""
 
-    def __init__(self, identity: RecipeBuildIdentity) -> None:
+    def __init__(self, identity: ServingBindingPlan) -> None:
         self.identity = identity
 
     def trace_cache_key(self, *, metadata_fingerprint: str) -> str:
@@ -248,22 +224,13 @@ class RecipeBuildSession:
             tp_rank=self.identity.tp_rank,
         )
 
-    def logical_topology(self) -> Any:
-        from tensorcast.serving.builder import compiler as tc_compiler
-
-        return tc_compiler.TensorcastLogicalTopology(
-            tensor_parallel_rank=int(self.identity.tp_rank),
-            tensor_parallel_world_size=int(self.identity.tp_world_size),
-        )
-
     def compile_identity(self, *, serving_facts: Any) -> Any:
-        from tensorcast.serving.builder import compiler as tc_compiler
-
-        return tc_compiler.RecipeCompileIdentity(
+        return ServingBindingPlan(
             model_id=self.identity.model_id,
             model_revision=self.identity.model_revision,
             dtype=self.identity.dtype,
             model_hash=self.identity.model_hash,
+            runtime_version=self.identity.runtime_version,
             framework_name=getattr(
                 serving_facts, "framework_name", self.identity.framework_name
             ),
@@ -279,10 +246,11 @@ class RecipeBuildSession:
                 serving_facts, "framework_version", self.identity.framework_version
             ),
             trace_cache_schema_version=self.identity.trace_cache_schema_version,
-            logical_topology=self.logical_topology(),
+            tp_rank=self.identity.tp_rank,
+            tp_world_size=self.identity.tp_world_size,
             topology_ref=self.identity.topology_ref,
             member_ref=self.identity.member_ref,
-            extra={"placement": _jsonable(self.identity.placement)},
+            placement=self.identity.placement,
         )
 
     def compile_recipe(self, *, inputs: Any) -> Any:
@@ -813,8 +781,34 @@ class RecipeBuildSession:
         )
         source_metadata_fingerprint = str(source_catalog.metadata_fingerprint)
         identity = self.compile_identity(serving_facts=cached_recipe.serving_facts)
+        realization_plan_proto = bytes(cached_recipe.realization_plan_proto or b"")
+        binding_plan = identity.with_compiled_artifacts(
+            source_artifact_ref=source_artifact_ref,
+            source_metadata_fingerprint=source_metadata_fingerprint,
+            serving_facts=cached_recipe.serving_facts,
+            trace_plan=cached_recipe.trace_plan,
+            tensor_schema=tuple(cached_recipe.tensor_schema),
+            source_hull=tuple(cached_recipe.source_hull),
+            source_schema_hash=str(
+                getattr(source_catalog, "canonical_index_hash", "")
+                or source_metadata_fingerprint
+            ),
+            tensor_schema_hash=tc_compiler.target_tensor_schema_hash(
+                cached_recipe.tensor_schema
+            ),
+            realization_plan=tuple(cached_recipe.realization_plan),
+            realization_fallback_plan=tuple(cached_recipe.realization_fallback_plan),
+            realization_plan_proto=realization_plan_proto,
+            realization_plan_digest=tc_compiler.realization_plan_digest(
+                realization_plan_proto
+            ),
+            realization_plan_count=tc_compiler.compiled_recipe_realization_plan_count(
+                cached_recipe
+            ),
+            semantic_validation_spec=cached_recipe.semantic_validation_spec,
+        )
         compile_key = tc_compiler.compute_recipe_compile_key(
-            identity=identity,
+            identity=binding_plan,
             source_artifact_ref=source_artifact_ref,
             source_metadata_fingerprint=source_metadata_fingerprint,
             serving_facts=cached_recipe.serving_facts,
@@ -826,7 +820,9 @@ class RecipeBuildSession:
             compile_key=compile_key,
             source_artifact_ref=source_artifact_ref,
             source_metadata_fingerprint=source_metadata_fingerprint,
-            logical_topology=identity.logical_topology,
+            topology_ref=identity.topology_ref,
+            member_ref=identity.member_ref,
+            binding_plan=binding_plan,
         )
 
     def cached_recipe_matches_context(
@@ -840,17 +836,15 @@ class RecipeBuildSession:
             source_catalog.metadata_fingerprint
         ):
             return False
-        if placement is not None and recipe.logical_topology is not None:
-            tp_rank, tp_world_size = _placement_tensor_parallel_context(placement)
-            if (
-                tp_rank is not None
-                and recipe.logical_topology.tensor_parallel_rank != tp_rank
-            ):
+        if placement is not None:
+            serving_placement = getattr(placement, "serving_placement", placement)
+            placement_topology = getattr(serving_placement, "topology", None)
+            placement_member = getattr(serving_placement, "member", None)
+            recipe_topology = getattr(recipe, "topology_ref", None)
+            recipe_member = getattr(recipe, "member_ref", None)
+            if recipe_topology is not None and recipe_topology != placement_topology:
                 return False
-            if (
-                tp_world_size is not None
-                and recipe.logical_topology.tensor_parallel_world_size != tp_world_size
-            ):
+            if recipe_member is not None and recipe_member != placement_member:
                 return False
         return True
 
@@ -1240,13 +1234,15 @@ class RecipeBuildSession:
 
 
 __all__ = [
-    "RecipeBuildIdentity",
+    "ServingBindingPlan",
+    "RecipeBuildMemoryCache",
     "RecipeBuildCacheConfig",
     "RecipeBuildRunResult",
     "RecipeCacheLookupResult",
     "RecipeCacheWriteResult",
     "RecipeBuildSession",
     "COMPILED_RECIPE_MEMORY_CACHE",
+    "DEFAULT_RECIPE_BUILD_MEMORY_CACHE_ENTRIES",
     "TRACE_PLAN_MEMORY_CACHE",
     "compute_recipe_cache_key",
     "compute_trace_cache_key",

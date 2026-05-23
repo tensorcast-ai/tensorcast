@@ -207,7 +207,7 @@ The same packet also recorded:
 | `bootstrap_realize_planned_collective_admitted_bytes` | `9,692,217,088` |
 | `bootstrap_realize_planned_non_admitted_typed_bytes` | `15,858,339,840` |
 | `bootstrap_realize_planner_reject_reason_buckets` | `tensor_copy_partition_unknown`, `typed_work_not_collective_admitted` |
-| `bootstrap_realize_compatibility_lowered_bytes` | `25,550,556,928` |
+| `bootstrap_realize_collective_lowered_bytes` | `25,550,556,928` |
 
 The closure conclusion for `0109` is:
 

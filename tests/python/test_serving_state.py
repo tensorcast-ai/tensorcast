@@ -2,10 +2,12 @@
 
 from types import SimpleNamespace
 
-from tensorcast.serving.integration import (
+from tensorcast.serving.runtime_attachment import (
     RuntimeAttachment,
     RuntimeBindingState,
     RuntimeBindingView,
+)
+from tensorcast.serving.runtime_view import (
     RuntimeWorkerView,
 )
 from tensorcast.serving.state import (
@@ -45,11 +47,14 @@ def test_model_attribute_runtime_state_compare_and_attach_fences_generation():
     state.attach_runtime_attachment(model, first)
     state.attach_runtime_attachment(model, current)
 
-    assert state.compare_and_attach_runtime_attachment(
-        model,
-        expected_attachment=first,
-        replacement_attachment=stale_replacement,
-    ) is False
+    assert (
+        state.compare_and_attach_runtime_attachment(
+            model,
+            expected_attachment=first,
+            replacement_attachment=stale_replacement,
+        )
+        is False
+    )
     assert state.get_runtime_attachment(model) is current
 
 

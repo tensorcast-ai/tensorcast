@@ -13,6 +13,10 @@ import torch
 
 import tensorcast as tc
 from tensorcast.serving._runtime_impl import lifecycle as _integration
+from tensorcast.serving.retained_binding import (
+    ParsedRetainedServingBindingAuthority,
+    RetainedServingBindingExpectedDigests,
+)
 
 
 @dataclass(frozen=True)
@@ -77,6 +81,12 @@ _PUBLIC_BOUNDARY_MESSAGES = {
         "Do not expose bind/swap/restore helpers from the runtime module; "
         "frameworks should call ServingRuntimeSession.start/reload."
     ),
+    "hides_projection_dtos": (
+        "Runtime endpoint projection DTOs live in tensorcast.serving.runtime_view."
+    ),
+    "hides_state_helpers": (
+        "Model attribute helpers live in tensorcast.serving.state."
+    ),
 }
 
 _FRAMEWORK_ISOLATION_MESSAGES = {
@@ -104,6 +114,18 @@ def assert_public_runtime_boundary(runtime_module: ModuleType) -> ConformanceRes
         "hides_low_level_bind": "bind_serving_artifact" not in public_names
         and "swap_serving_artifact" not in public_names
         and "restore_retained_binding" not in public_names,
+        "hides_projection_dtos": {
+            "PublishedReplicaProjection",
+            "ReloadResponseProjection",
+            "RuntimeEndpointProjection",
+            "SourceSelectionProjection",
+            "WeightVersionProjection",
+        }.isdisjoint(public_names),
+        "hides_state_helpers": {
+            "ModelAttributeRuntimeState",
+            "RuntimeAttachmentRecord",
+            "RuntimeAttachmentStore",
+        }.isdisjoint(public_names),
     }
     return _result(
         level="public-runtime-boundary",
@@ -210,8 +232,9 @@ def _retained_authority(runtime_module: ModuleType) -> object:
         reservation_bytes=4096,
         scope_digest="scope-1",
     )
-    return runtime_module.RetainedBindingAuthority(
+    return ParsedRetainedServingBindingAuthority(
         group_id="group-1",
+        local_serving_ref="binding-local:fake",
         binding_value_ref=binding_ref,
         reservation_capability=capability,
         daemon_id="daemon-1",
@@ -219,12 +242,14 @@ def _retained_authority(runtime_module: ModuleType) -> object:
         device_uuid="gpu-0",
         member=member,
         reservation_bytes=4096,
-        expected_target_layout_hash="layout-hash",
-        expected_tensor_schema_hash="fake-schema",
-        expected_serving_build_digest="build-digest",
-        expected_resolved_spec_digest="spec-digest",
+        expected=RetainedServingBindingExpectedDigests(
+            target_layout_hash="layout-hash",
+            tensor_schema_hash="fake-schema",
+            serving_build_digest="build-digest",
+            resolved_spec_digest="spec-digest",
+        ),
         readiness="serving_local_ready",
-        local_serving_ref="binding-local:fake",
+        verification_state="local_only",
     )
 
 
@@ -504,7 +529,7 @@ _LEVEL1_MESSAGES = {
     ),
     "reload": (
         "Durable serving artifact reload failed. Level 1 reload must use a "
-        "typed ServingArtifactSelector and ServingPolicy."
+        "typed ServingArtifactLocator and ServingPolicy."
     ),
     "reload_identity_from_runtime_view": (
         "Reload response identity must come from the runtime view, not from the "
@@ -517,13 +542,13 @@ _LEVEL1_MESSAGES = {
         "Level 1 direct serving artifact start/reload must not require "
         "SourceCatalogProvider."
     ),
-    "rejects_local_reload_selector": (
+    "rejects_local_reload_artifact_locator": (
         "Reload must reject local source selectors; local paths belong to "
         "Level 2 bootstrap, not durable serving artifact reload."
     ),
-    "rejects_untyped_reload_selector": (
-        "Reload must reject untyped selector dictionaries on the public runtime "
-        "path. Use ServingArtifactSelector."
+    "rejects_untyped_reload_artifact_locator": (
+        "Reload must reject untyped artifact locator dictionaries on the public "
+        "runtime path. Use ServingArtifactLocator."
     ),
     "rejects_untyped_reload_policy": (
         "Reload must reject untyped policy dictionaries on the public runtime "
@@ -548,15 +573,15 @@ _LEVEL2_MESSAGES = {
         "Cache-miss local bootstrap must fail with a clear missing trace/native "
         "load capability instead of AttributeError or fallback loading."
     ),
-    "local_path_is_not_reload_selector": (
+    "local_path_is_not_reload_artifact_locator": (
         "Local path selectors must stay in bootstrap; reload accepts only durable "
-        "serving artifact selectors."
+        "serving artifact locators."
     ),
 }
 
 _LEVEL3_MESSAGES = {
     "retained_acquire_public_start": (
-        "External preload must enter through ServingRuntimeSession.start and "
+        "Retained binding acquire must enter through ServingRuntimeSession.start and "
         "return a RuntimeAttachment with typed endpoint projection."
     ),
     "retained_acquire_uses_host_member": (
@@ -568,7 +593,7 @@ _LEVEL3_MESSAGES = {
         "only after attach/finalize succeeds."
     ),
     "missing_authority_fails_closed": (
-        "External preload config must include typed retained authority."
+        "Retained binding acquire config must include typed retained authority."
     ),
     "authority_mismatch_fails_closed": (
         "Daemon/session/member authority mismatches must fail closed."
@@ -577,19 +602,19 @@ _LEVEL3_MESSAGES = {
         "Attach/finalize failure must close an untransferred retained handle."
     ),
     "failure_path_used_retained_restore": (
-        "Retained preload failure coverage did not exercise restore ownership."
+        "Retained binding failure coverage did not exercise restore ownership."
     ),
     "rejects_arbitrary_retained_authority": (
-        "Retained acquire must reject arbitrary authority objects; use the typed "
-        "RetainedBindingAuthority projection."
+        "Retained acquire must reject arbitrary authority objects; use the parsed "
+        "retained serving binding authority."
     ),
 }
 
 
-def _external_preload_config(runtime_module: ModuleType) -> dict[str, Any]:
+def _retained_binding_acquire_config(runtime_module: ModuleType) -> dict[str, Any]:
     authority = _retained_authority(runtime_module)
     return {
-        "preload": {
+        "retained_binding_acquire": {
             "mode": "external",
             "authority": {
                 "group_id": authority.group_id,
@@ -609,10 +634,10 @@ def _external_preload_config(runtime_module: ModuleType) -> dict[str, Any]:
                 "serving_artifact_id": authority.serving_artifact_id,
                 "trusted_reservation_bytes": authority.reservation_bytes,
                 "expected": {
-                    "target_layout_hash": authority.expected_target_layout_hash,
-                    "tensor_schema_hash": authority.expected_tensor_schema_hash,
-                    "serving_build_digest": (authority.expected_serving_build_digest),
-                    "resolved_spec_digest": (authority.expected_resolved_spec_digest),
+                    "target_layout_hash": authority.expected.target_layout_hash,
+                    "tensor_schema_hash": authority.expected.tensor_schema_hash,
+                    "serving_build_digest": authority.expected.serving_build_digest,
+                    "resolved_spec_digest": authority.expected.resolved_spec_digest,
                 },
             },
         },
@@ -663,7 +688,7 @@ def assert_level1_runtime_conformance(
     ``tensorcast.serving.hosts`` plus this testing module's fake host fixtures.
     It covers direct artifact start, reload, describe, capability optionality,
     strict public DTO rejection and no-vLLM-import contracts. It does not
-    instantiate local bootstrap or retained preload intent DTOs.
+    instantiate local bootstrap or retained binding acquire intent DTOs.
     """
 
     checks: dict[str, bool] = {}
@@ -680,7 +705,7 @@ def assert_level1_runtime_conformance(
                     "mode": "disabled",
                 },
                 "serving": {
-                    "selector": {
+                    "artifact_locator": {
                         "kind": "artifact_ref",
                         "value": "mi2:serving",
                     },
@@ -711,7 +736,7 @@ def assert_level1_runtime_conformance(
 
         reloaded = session.reload(
             current_attachment=attachment,
-            selector=runtime_module.ServingArtifactSelector.artifact_ref(
+            artifact_locator=runtime_module.ServingArtifactLocator.artifact_ref(
                 "mi2:serving-next"
             ),
             policy=runtime_module.ServingPolicy(),
@@ -735,31 +760,34 @@ def assert_level1_runtime_conformance(
         try:
             session.reload(
                 current_attachment=reloaded,
-                selector=runtime_module.SourceSelector.local_path("/tmp/model"),
+                artifact_locator=runtime_module.SourceSelector.local_path("/tmp/model"),
                 policy=runtime_module.ServingPolicy(),
                 context=runtime_module.RequestContext(),
             )
         except _integration.ConfigConflictError:
-            checks["rejects_local_reload_selector"] = True
+            checks["rejects_local_reload_artifact_locator"] = True
         else:
-            checks["rejects_local_reload_selector"] = False
+            checks["rejects_local_reload_artifact_locator"] = False
 
         try:
             session.reload(
                 current_attachment=reloaded,
-                selector={"kind": "artifact_ref", "value": "mi2:serving-next"},
+                artifact_locator={
+                    "kind": "artifact_ref",
+                    "value": "mi2:serving-next",
+                },
                 policy=runtime_module.ServingPolicy(),
                 context=runtime_module.RequestContext(),
             )
         except _integration.ConfigConflictError:
-            checks["rejects_untyped_reload_selector"] = True
+            checks["rejects_untyped_reload_artifact_locator"] = True
         else:
-            checks["rejects_untyped_reload_selector"] = False
+            checks["rejects_untyped_reload_artifact_locator"] = False
 
         try:
             session.reload(
                 current_attachment=reloaded,
-                selector=runtime_module.ServingArtifactSelector.artifact_ref(
+                artifact_locator=runtime_module.ServingArtifactLocator.artifact_ref(
                     "mi2:serving-next"
                 ),
                 policy={"mode": "from_manifest"},
@@ -909,14 +937,16 @@ def assert_level2_local_bootstrap_conformance(
         try:
             session.reload(
                 current_attachment=attachment,
-                selector=runtime_module.SourceSelector.local_path("/tmp/fakefw-model"),
+                artifact_locator=runtime_module.SourceSelector.local_path(
+                    "/tmp/fakefw-model"
+                ),
                 policy=runtime_module.ServingPolicy(),
                 context=runtime_module.RequestContext(),
             )
         except _integration.ConfigConflictError:
-            checks["local_path_is_not_reload_selector"] = True
+            checks["local_path_is_not_reload_artifact_locator"] = True
         else:
-            checks["local_path_is_not_reload_selector"] = False
+            checks["local_path_is_not_reload_artifact_locator"] = False
 
     return _result(
         level="level2-local-bootstrap",
@@ -925,11 +955,11 @@ def assert_level2_local_bootstrap_conformance(
     )
 
 
-def assert_level3_retained_preload_conformance(
+def assert_level3_retained_binding_conformance(
     runtime_module: ModuleType,
     hosts_module: ModuleType,
 ) -> ConformanceResult:
-    """Run Level 3 retained/external preload conformance."""
+    """Run Level 3 retained binding acquire conformance."""
 
     checks: dict[str, bool] = {}
     with _patched_fake_runtime(runtime_module):
@@ -947,7 +977,7 @@ def assert_level3_retained_preload_conformance(
         integration_module.restore_retained_binding = fake_restore_retained
         try:
             session = runtime_module.ServingRuntimeSession.from_config(
-                _external_preload_config(runtime_module),
+                _retained_binding_acquire_config(runtime_module),
                 host=host,
             )
             retained = session.start(
@@ -975,7 +1005,7 @@ def assert_level3_retained_preload_conformance(
         try:
             runtime_module.ServingConfig.from_mapping(
                 {
-                    "preload": {
+                    "retained_binding_acquire": {
                         "mode": "external",
                     },
                 }
@@ -985,14 +1015,14 @@ def assert_level3_retained_preload_conformance(
         else:
             checks["missing_authority_fails_closed"] = False
 
-        mismatch_config = dict(_external_preload_config(runtime_module))
-        preload = dict(mismatch_config["preload"])
-        authority = dict(preload["authority"])
+        mismatch_config = dict(_retained_binding_acquire_config(runtime_module))
+        acquire = dict(mismatch_config["retained_binding_acquire"])
+        authority = dict(acquire["authority"])
         capability = dict(authority["reservation_capability"])
         capability["daemon_session_id"] = "wrong-session"
         authority["reservation_capability"] = capability
-        preload["authority"] = authority
-        mismatch_config["preload"] = preload
+        acquire["authority"] = authority
+        mismatch_config["retained_binding_acquire"] = acquire
         try:
             mismatch_session = runtime_module.ServingRuntimeSession.from_config(
                 mismatch_config,
@@ -1026,7 +1056,7 @@ def assert_level3_retained_preload_conformance(
         integration_module.restore_retained_binding = fake_restore_for_failure
         try:
             failing_session = runtime_module.ServingRuntimeSession.from_config(
-                _external_preload_config(runtime_module),
+                _retained_binding_acquire_config(runtime_module),
                 host=failing_host,
             )
             try:
@@ -1056,19 +1086,10 @@ def assert_level3_retained_preload_conformance(
             checks["rejects_arbitrary_retained_authority"] = False
 
     return _result(
-        level="level3-retained-preload",
+        level="level3-retained-binding",
         checks=checks,
         messages=_LEVEL3_MESSAGES,
     )
-
-
-def assert_minimal_runtime_conformance(
-    runtime_module: ModuleType,
-    hosts_module: ModuleType,
-) -> ConformanceResult:
-    """Compatibility alias for Level 1 runtime conformance."""
-
-    return assert_level1_runtime_conformance(runtime_module, hosts_module)
 
 
 __all__ = [
@@ -1088,8 +1109,7 @@ __all__ = [
     "assert_framework_isolation",
     "assert_level1_runtime_conformance",
     "assert_level2_local_bootstrap_conformance",
-    "assert_level3_retained_preload_conformance",
-    "assert_minimal_runtime_conformance",
+    "assert_level3_retained_binding_conformance",
     "assert_public_runtime_boundary",
     "build_fake_runtime_host",
 ]

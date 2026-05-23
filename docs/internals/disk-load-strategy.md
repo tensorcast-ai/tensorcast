@@ -462,8 +462,8 @@ Current rule:
 
 - runtime initialization settings do not by themselves turn ordinary
   `disk:<model_path>` startup into the preferred mapped startup path,
-- startup binding is attempted only through an explicit serving selector,
-  external preload authority, or local-directory bootstrap,
+- startup binding is attempted only through an explicit serving artifact locator,
+  retained serving binding authority, or local source bootstrap,
 - otherwise ordinary disk startup stays on the `tensor_dict` strategy described
   above.
 

@@ -20,6 +20,7 @@ from tensorcast.global_store.exceptions import (
     TimeoutError,
     ValidationError,
 )
+from tensorcast.global_store.grpc_helpers import multibase_sha256_to_hex
 from tensorcast.global_store.metrics import (
     dec_active_transports,
     inc_active_transports,
@@ -41,6 +42,10 @@ from tensorcast.global_store.repositories import (
     ReplicaRepository,
     TransportRepository,
 )
+from tensorcast.global_store.repositories.artifact_index_repository import (
+    ArtifactIndexRepository,
+)
+from tensorcast.global_store.repositories.artifact_repository import ArtifactRepository
 from tensorcast.global_store.repositories.base import is_transient_tx_conflict
 from tensorcast.global_store.repositories.replica_repository import (
     GroupSourceSpreadPolicy,
@@ -63,14 +68,20 @@ class TransportService:
         replica_repository: ReplicaRepository,
         transport_repository: TransportRepository,
         pending_transport_request_repository: PendingTransportRequestRepository,
+        artifact_repository: ArtifactRepository | None = None,
+        artifact_index_repository: ArtifactIndexRepository | None = None,
     ):
         """Initialize service with repositories."""
         self.replica_repository = replica_repository
         self.transport_repository = transport_repository
         self.pending_transport_request_repository = pending_transport_request_repository
+        self.artifact_repository = artifact_repository
+        self.artifact_index_repository = artifact_index_repository
         self.config = get_config()
         # Serialize queue-wide dispatch to avoid multi-thread transaction storms.
         self._dispatch_loop_lock = threading.Lock()
+        self._canonical_identity_view_cache: dict[str, tuple[str, ...]] = {}
+        self._canonical_identity_view_cache_lock = threading.Lock()
 
     def _retry_transient_db_call(self, *, op_name: str, fn: Callable[[], T]) -> T:
         max_attempts = 8
@@ -111,6 +122,60 @@ class TransportService:
                 int(policy.group_source_min_candidates_for_enforce),
             ),
         )
+
+    def _canonical_equivalent_view_ids(
+        self,
+        artifact_id: str,
+        *,
+        cursor=None,
+    ) -> tuple[str, ...]:
+        if self.artifact_repository is None or self.artifact_index_repository is None:
+            return ()
+        with self._canonical_identity_view_cache_lock:
+            cached = self._canonical_identity_view_cache.get(artifact_id)
+        if cached is not None:
+            return cached
+
+        artifact_row = self.artifact_repository.get(artifact_id, cursor=cursor)
+        index_multihash = (
+            str(artifact_row.get("index_multihash") or "") if artifact_row else ""
+        )
+        index_key = multibase_sha256_to_hex(index_multihash)
+        if not index_key:
+            return ()
+        index_data = self.artifact_index_repository.get(index_key, cursor=cursor)
+        if not index_data:
+            return ()
+
+        try:
+            from tensorcast.api.store.common import canonical_index_from_bytes
+            from tensorcast.api.store.view_composer import (
+                _build_subset_identity_view_spec_proto,
+                compute_view_id,
+            )
+
+            canonical_index = canonical_index_from_bytes(bytes(index_data))
+            tensor_names = tuple(str(entry.name) for entry in canonical_index.entries)
+            view_spec = _build_subset_identity_view_spec_proto(
+                canonical_index=canonical_index,
+                tensor_names=tensor_names,
+            )
+            if view_spec is None:
+                return ()
+            view_id = str(compute_view_id(view_spec, bytes(index_data)) or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Unable to compute canonical-equivalent identity view_id for artifact_id=%s: %s",
+                artifact_id,
+                exc,
+            )
+            return ()
+
+        aliases = (view_id,) if view_id else ()
+        if aliases:
+            with self._canonical_identity_view_cache_lock:
+                self._canonical_identity_view_cache[artifact_id] = aliases
+        return aliases
 
     @staticmethod
     def _normalize_request_id(request_id: str) -> str:
@@ -373,7 +438,14 @@ class TransportService:
         start_time = time.time()
         timeout_deadline = start_time + (max(0, wait_timeout_ms) / 1000.0)
 
-        if not self.replica_repository.has_any_replica(artifact_id, view_id):
+        canonical_equivalent_view_ids = (
+            self._canonical_equivalent_view_ids(artifact_id) if view_id is None else ()
+        )
+        if not self.replica_repository.has_any_replica(
+            artifact_id,
+            view_id,
+            canonical_equivalent_view_ids=canonical_equivalent_view_ids,
+        ):
             inc_transport_request(artifact_id, "not_found")
             observe_transport_wait(artifact_id, time.time() - start_time)
             raise NotFoundError(f"No replicas registered for artifact {artifact_id}")
@@ -918,9 +990,18 @@ class TransportService:
                     cursor=tx,
                 )
 
+            canonical_equivalent_view_ids = (
+                self._canonical_equivalent_view_ids(
+                    pending_request.artifact_id,
+                    cursor=tx,
+                )
+                if pending_request.requested_view_id is None
+                else ()
+            )
             selection = self.replica_repository.find_available_for_transport(
                 artifact_id=pending_request.artifact_id,
                 view_id=pending_request.requested_view_id,
+                canonical_equivalent_view_ids=canonical_equivalent_view_ids,
                 heartbeat_timeout_seconds=self.config.heartbeat_timeout_ms / 1000,
                 scheduler_mode="GROUP_DISPATCH",
                 source_balance_weights=source_weights,

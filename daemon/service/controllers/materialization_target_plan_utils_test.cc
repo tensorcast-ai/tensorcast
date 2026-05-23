@@ -418,11 +418,11 @@ TEST_CASE("copy-plan collective map only keeps source-overlap tensors", "[materi
       canonical_byte_space(),
       "local_seal_then_promote");
   REQUIRE(transform_or.ok());
-  CHECK(transform_or->compatibility_stats.compatible_candidates == 1);
-  CHECK(transform_or->compatibility_stats.concat_candidates == 1);
+  CHECK(transform_or->lowering_stats.collective_candidates == 1);
+  CHECK(transform_or->lowering_stats.concat_candidates == 1);
   CHECK(covered_bytes(transform_or->generic_fallback_map) == 16);
-  CHECK(covered_bytes(transform_or->compatibility_lowered_map) == 16);
-  REQUIRE(transform_or->compatibility_lowered_map.segments.size() == 3);
+  CHECK(covered_bytes(transform_or->collective_lowered_map) == 16);
+  REQUIRE(transform_or->collective_lowered_map.segments.size() == 3);
 
   MappedTargetMaterializationPlan mapped_plan;
   mapped_plan.representation = *transform_or;
@@ -480,7 +480,7 @@ TEST_CASE("copy-plan collective map only keeps source-overlap tensors", "[materi
   CHECK_FALSE(strategy_plan_or->summary.planner_reject_reason_buckets.contains("generic_backend_coverage_unproven"));
 }
 
-TEST_CASE("copy-plan compatibility map admits source-only dim1 shard copies", "[materialization_target_plan]") {
+TEST_CASE("copy-plan collective lowering map admits source-only dim1 shard copies", "[materialization_target_plan]") {
   const std::string source_index_json = R"({
     "down":[0,32,[2,8],[8,1],"torch.float16",0]
   })";
@@ -515,9 +515,9 @@ TEST_CASE("copy-plan compatibility map admits source-only dim1 shard copies", "[
       canonical_byte_space(),
       "local_seal_then_promote");
   REQUIRE(transform_or.ok());
-  CHECK(transform_or->compatibility_stats.compatible_candidates == 1);
-  CHECK(transform_or->compatibility_stats.compatible_bytes == 16);
-  CHECK(covered_bytes(transform_or->compatibility_lowered_map) == 16);
+  CHECK(transform_or->lowering_stats.collective_candidates == 1);
+  CHECK(transform_or->lowering_stats.collective_bytes == 16);
+  CHECK(covered_bytes(transform_or->collective_lowered_map) == 16);
 }
 
 } // namespace tensorcast::daemon::materialization_target_plan

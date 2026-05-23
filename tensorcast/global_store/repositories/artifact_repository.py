@@ -66,9 +66,10 @@ class ArtifactRepository(BaseRepository):
             if owns_cursor:
                 cursor.close()
 
-    def get(self, artifact_id: str) -> Optional[dict[str, Any]]:
+    def get(self, artifact_id: str, cursor=None) -> Optional[dict[str, Any]]:
         """Fetch a artifact descriptor by id; returns None if not found."""
-        cursor = self.get_cursor()
+        owns_cursor = cursor is None
+        cursor = cursor if cursor is not None else self.get_cursor()
         try:
             row = cursor.execute(
                 """
@@ -90,4 +91,5 @@ class ArtifactRepository(BaseRepository):
                 "id_kind": row[6],
             }
         finally:
-            cursor.close()
+            if owns_cursor:
+                cursor.close()

@@ -65,28 +65,15 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> IngestionRuntime::materiali
   return materialization_facade_->materialize_mapped_into_target(target_device, prepared_execution, hints);
 }
 
-absl::StatusOr<loading::MaterializeIntoTargetResult> IngestionRuntime::materialize_mapped_loader_into_target(
+absl::StatusOr<loading::MaterializeIntoTargetResult> IngestionRuntime::materialize_mapped_sources_into_target(
     const DeviceKey& target_device,
     const loading::IntoTargetLayout& target_layout,
-    std::unique_ptr<IArtifactLoader> loader,
+    std::vector<std::shared_ptr<loader::SeekableSource>> sources,
     const loader::ByteRangeMap& mapping,
     const loading::MaterializeHints& hints,
     loading::MaterializationSource source_kind) {
-  return materialization_facade_->materialize_mapped_loader_into_target(
-      target_device, target_layout, std::move(loader), mapping, hints, source_kind);
-}
-
-absl::StatusOr<loading::ReplicaHandle> IngestionRuntime::ingest_mapped_loader_into_replica(
-    std::string_view logical_artifact_id,
-    std::string_view physical_artifact_id,
-    const DeviceKey& target_device,
-    const loading::ReplicaTarget& target,
-    std::unique_ptr<IArtifactLoader> loader,
-    const loader::ByteRangeMap& mapping,
-    const loading::MaterializeHints& hints,
-    loading::MaterializationSource source_kind) {
-  return materialization_facade_->ingest_mapped_loader_into_replica(
-      logical_artifact_id, physical_artifact_id, target_device, target, std::move(loader), mapping, hints, source_kind);
+  return materialization_facade_->materialize_mapped_sources_into_target(
+      target_device, target_layout, std::move(sources), mapping, hints, source_kind);
 }
 
 absl::StatusOr<ingestion::MaterializationFacade::IngestMappedSourcesIntoReplicasResult> IngestionRuntime::

@@ -29,6 +29,7 @@ def test_bind_and_swap_serving_artifact_delegate_to_artifact_handles() -> None:
             return _Subset()
 
     class _Binding:
+        tensors = {"a": object(), "b": object()}
 
         def swap(self, artifact, **kwargs):
             calls.append(("swap", (artifact, kwargs)))
@@ -50,6 +51,8 @@ def test_bind_and_swap_serving_artifact_delegate_to_artifact_handles() -> None:
         options="options",
     ) == "swapped"
 
+    swapped_artifact = calls[3][1][0]
+    assert isinstance(swapped_artifact, _Subset)
     assert calls == [
         ("subset", ("a", "b")),
         (
@@ -60,10 +63,11 @@ def test_bind_and_swap_serving_artifact_delegate_to_artifact_handles() -> None:
                 "options": "options",
             },
         ),
+        ("subset", ("a", "b")),
         (
             "swap",
             (
-                resolved.artifact,
+                swapped_artifact,
                 {
                     "serving_runtime_policy": "policy",
                     "options": "options",
@@ -71,6 +75,91 @@ def test_bind_and_swap_serving_artifact_delegate_to_artifact_handles() -> None:
             ),
         ),
     ]
+
+
+def test_swap_serving_artifact_prefers_binding_target_tensor_names() -> None:
+    calls: list[tuple[str, object]] = []
+
+    class _Subset:
+        pass
+
+    class _Artifact:
+
+        def subset(self, names):
+            calls.append(("subset", tuple(names)))
+            return _Subset()
+
+    class _Binding:
+        tensors = {"a": object(), "__tensorcast_meta__.manifest_json": object()}
+
+        def swap(self, artifact, **kwargs):
+            calls.append(("swap", artifact))
+            return "swapped"
+
+    resolved = SimpleNamespace(artifact=_Artifact(), tensor_names=("a", ))
+
+    assert swap_serving_artifact(
+        binding=_Binding(),
+        resolved_artifact=resolved,
+        tensor_names=("a", ),
+        serving_runtime_policy=None,
+        options=None,
+    ) == "swapped"
+
+    assert calls[0] == (
+        "subset",
+        ("a", "__tensorcast_meta__.manifest_json"),
+    )
+    assert isinstance(calls[1][1], _Subset)
+
+
+def test_swap_serving_artifact_prefers_binding_layout_tensor_order() -> None:
+    calls: list[tuple[str, object]] = []
+
+    class _Subset:
+        pass
+
+    class _Artifact:
+
+        def subset(self, names):
+            calls.append(("subset", tuple(names)))
+            return _Subset()
+
+    class _Binding:
+        layout = SimpleNamespace(
+            target_layout=SimpleNamespace(
+                offsets=(
+                    SimpleNamespace(name="a"),
+                    SimpleNamespace(name=tc.SERVING_MANIFEST_TENSOR_NAME),
+                    SimpleNamespace(name="b"),
+                )
+            )
+        )
+        tensors = {
+            "b": object(),
+            "a": object(),
+            tc.SERVING_MANIFEST_TENSOR_NAME: object(),
+        }
+
+        def swap(self, artifact, **kwargs):
+            calls.append(("swap", artifact))
+            return "swapped"
+
+    resolved = SimpleNamespace(artifact=_Artifact(), tensor_names=("a", "b"))
+
+    assert swap_serving_artifact(
+        binding=_Binding(),
+        resolved_artifact=resolved,
+        tensor_names=("b", ),
+        serving_runtime_policy=None,
+        options=None,
+    ) == "swapped"
+
+    assert calls[0] == (
+        "subset",
+        ("a", tc.SERVING_MANIFEST_TENSOR_NAME, "b"),
+    )
+    assert isinstance(calls[1][1], _Subset)
 
 
 def test_materialization_execution_context_builds_collective_options() -> None:

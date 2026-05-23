@@ -8,9 +8,11 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -25,6 +27,7 @@
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
 #include "core/common/artifact_identity.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/metadata/disk_dir_hash.h"
 #include "core/store/replica/memory_state.h"
@@ -1317,11 +1320,15 @@ absl::Status PersistenceManager::start_disk_write(
   const absl::string_view source_artifact_id = task.source_artifact_id.empty()
       ? absl::string_view(task.artifact_id)
       : absl::string_view(task.source_artifact_id);
-  auto base_ptr_or = store_engine_->get_replica_cpu_base_ptr(source_artifact_id);
+  const std::string source_artifact_id_copy(source_artifact_id);
+  auto base_ptr_or = store_engine_->get_loaded_replica_base_ptr(source_artifact_id_copy);
   if (!base_ptr_or.ok()) {
-    return base_ptr_or.status();
+    if (lip_mgr_ == nullptr || !lip_mgr_->find_active_by_artifact_id(source_artifact_id_copy).has_value()) {
+      LOG(WARNING) << "persistence.shared_disk_source_unavailable artifact_id=" << task.artifact_id
+                   << " source_artifact_id=" << source_artifact_id_copy << " status=" << base_ptr_or.status();
+      return base_ptr_or.status();
+    }
   }
-  const auto base_ptr = static_cast<const uint8_t*>(*base_ptr_or);
   const uint64_t offset = shard.byte_range_start;
   const uint64_t length = shard.size_bytes;
 
@@ -1332,34 +1339,97 @@ absl::Status PersistenceManager::start_disk_write(
   target.target_state = gs::PLACEMENT_TARGET_STATE_COPYING;
 
   auto executor = async_runtime_->blocking_executor();
-  executor->add([state, base_ptr, offset, length, part_path]() {
-    absl::Status st = absl::OkStatus();
-    std::ofstream out(part_path, std::ios::binary | std::ios::trunc);
-    if (!out.is_open()) {
-      st = absl::FailedPreconditionError("shared_disk_write_failed");
-    } else {
-      constexpr uint64_t kChunk = 4ULL * 1024 * 1024;
-      uint64_t remaining = length;
-      const uint8_t* src = base_ptr + offset;
-      while (st.ok() && remaining > 0) {
-        const uint64_t to_write = std::min<uint64_t>(remaining, kChunk);
-        out.write(reinterpret_cast<const char*>(src), static_cast<std::streamsize>(to_write));
-        if (!out.good()) {
-          st = absl::FailedPreconditionError("shared_disk_write_failed");
-          break;
-        }
-        state->bytes_written.fetch_add(to_write);
-        remaining -= to_write;
-        src += to_write;
-      }
-      out.flush();
-      if (st.ok() && !out.good()) {
+  if (base_ptr_or.ok()) {
+    const auto source_ptr = static_cast<const uint8_t*>(base_ptr_or->ptr);
+    const auto source_location = base_ptr_or->location;
+    const int source_device_id = base_ptr_or->device_id;
+    executor->add([state, source_ptr, source_location, source_device_id, offset, length, part_path]() {
+      absl::Status st = absl::OkStatus();
+      std::ofstream out(part_path, std::ios::binary | std::ios::trunc);
+      if (!out.is_open()) {
         st = absl::FailedPreconditionError("shared_disk_write_failed");
+      } else {
+        constexpr uint64_t kChunk = 4ULL * 1024 * 1024;
+        uint64_t remaining = length;
+        const uint8_t* src = source_ptr + offset;
+        std::vector<uint8_t> gpu_host_buffer;
+        if (source_location == common::memory::MemoryLocation::GPU) {
+          st = cuda::set_device(source_device_id);
+          if (!st.ok()) {
+            state->set_status(st);
+            state->done.store(true);
+            return;
+          }
+          gpu_host_buffer.resize(static_cast<size_t>(std::min<uint64_t>(remaining, kChunk)));
+        }
+        while (st.ok() && remaining > 0) {
+          const uint64_t to_write = std::min<uint64_t>(remaining, kChunk);
+          const char* write_ptr = reinterpret_cast<const char*>(src);
+          if (source_location == common::memory::MemoryLocation::GPU) {
+            if (gpu_host_buffer.size() < to_write) {
+              gpu_host_buffer.resize(static_cast<size_t>(to_write));
+            }
+            st = cuda::memcpy(gpu_host_buffer.data(), src, static_cast<size_t>(to_write), cudaMemcpyDeviceToHost);
+            if (!st.ok()) {
+              break;
+            }
+            write_ptr = reinterpret_cast<const char*>(gpu_host_buffer.data());
+          }
+          out.write(write_ptr, static_cast<std::streamsize>(to_write));
+          if (!out.good()) {
+            st = absl::FailedPreconditionError("shared_disk_write_failed");
+            break;
+          }
+          state->bytes_written.fetch_add(to_write);
+          remaining -= to_write;
+          src += to_write;
+        }
+        out.flush();
+        if (st.ok() && !out.good()) {
+          st = absl::FailedPreconditionError("shared_disk_write_failed");
+        }
       }
-    }
-    state->set_status(std::move(st));
-    state->done.store(true);
-  });
+      if (!st.ok()) {
+        LOG(WARNING) << "persistence.shared_disk_write_failed path=" << part_path.string()
+                     << " source_location=" << static_cast<int>(source_location)
+                     << " source_device_id=" << source_device_id << " offset=" << offset << " length=" << length
+                     << " status=" << st;
+      }
+      state->set_status(std::move(st));
+      state->done.store(true);
+    });
+  } else {
+    LipManager* lip_mgr = lip_mgr_;
+    executor->add([state, lip_mgr, source_artifact_id_copy, offset, length, part_path]() {
+      absl::Status st = absl::OkStatus();
+      std::ofstream out(part_path, std::ios::binary | std::ios::trunc);
+      if (!out.is_open()) {
+        st = absl::FailedPreconditionError("shared_disk_write_failed");
+      } else {
+        constexpr size_t kChunk = 4ULL * 1024 * 1024;
+        st = lip_mgr->copy_active_lease_range_to_host(
+            source_artifact_id_copy, offset, length, kChunk, [&](const uint8_t* data, size_t size) -> absl::Status {
+              out.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+              if (!out.good()) {
+                return absl::FailedPreconditionError("shared_disk_write_failed");
+              }
+              state->bytes_written.fetch_add(static_cast<uint64_t>(size));
+              return absl::OkStatus();
+            });
+        out.flush();
+        if (st.ok() && !out.good()) {
+          st = absl::FailedPreconditionError("shared_disk_write_failed");
+        }
+      }
+      if (!st.ok()) {
+        LOG(WARNING) << "persistence.shared_disk_lip_write_failed path=" << part_path.string()
+                     << " source_artifact_id=" << source_artifact_id_copy << " offset=" << offset
+                     << " length=" << length << " status=" << st;
+      }
+      state->set_status(std::move(st));
+      state->done.store(true);
+    });
+  }
 
   return absl::OkStatus();
 }

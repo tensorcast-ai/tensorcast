@@ -5,9 +5,13 @@
 
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
@@ -44,6 +48,8 @@ class LipManager {
     std::vector<uint64_t> buffer_sizes;
   };
 
+  using HostChunkConsumer = std::function<absl::Status(const uint8_t* data, size_t size)>;
+
   LipManager(std::shared_ptr<store::StoreEngine> engine, IpcRegionRegistry* regions)
       : engine_(std::move(engine)), region_registry_(regions) {}
 
@@ -69,6 +75,14 @@ class LipManager {
       const LipLeaseEntry& lip,
       absl::Span<const uint32_t> chunk_indices,
       store::StoreEngine& engine);
+
+  [[nodiscard]] absl::Status copy_active_lease_range_to_host(
+      std::string_view artifact_id,
+      uint64_t offset,
+      uint64_t length,
+      size_t chunk_bytes,
+      const HostChunkConsumer& consume,
+      std::optional<std::string_view> view_id = std::nullopt) const;
 
   // Release a staged export by lock token: unregister tensor keys and close
   // CUDA IPC mappings.

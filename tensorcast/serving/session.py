@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from tensorcast.serving.policy import ServingSelector
+from tensorcast.serving.policy import ServingArtifactLocator
 from tensorcast.types import BindingValueRef
 
 
@@ -16,7 +16,7 @@ class ServingBindingState(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     state: str
-    selector: ServingSelector | None = None
+    artifact_locator: ServingArtifactLocator | None = None
     serving_artifact_ref: str | None = None
     manifest_ref: str | None = None
     representation_contract_hash: str | None = None

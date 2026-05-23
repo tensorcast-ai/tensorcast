@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <unistd.h>
@@ -370,6 +371,50 @@ TEST_CASE("PublishTargetReplica reports terminal progressive coverage when enabl
   CHECK(report.identity().selection_hash() == scope.selection().selection_hash());
   CHECK(report.identity().logical_layout_hash() == scope.selection().logical_layout_hash());
   CHECK(report.identity().coverage_order_hash().size() == 32);
+
+  gs->allow_replica_transport = true;
+  const tensorcast::store::DeviceKey target_device{
+      .type = tensorcast::DeviceType::GPU, .ordinal = kDeviceId, .uuid = device_key.uuid};
+  auto before_cleanup = gs->request_replica_transport(
+      scope.selection().artifact_id(),
+      "consumer-node",
+      "127.0.0.1",
+      12345,
+      target_device,
+      /*wait_timeout_ms=*/1,
+      std::nullopt,
+      "consumer-worker",
+      "request-before-owner-cleanup");
+  REQUIRE(before_cleanup.ok());
+
+  harness->kernel().lifecycle_manager().handle_pid_exit(owner_pid);
+
+  auto context_after_cleanup =
+      harness->materialization_controller().inspect_target_publication_context_for_testing(req, absl::Now());
+  REQUIRE_FALSE(context_after_cleanup.ok());
+  CHECK(context_after_cleanup.status().code() == absl::StatusCode::kNotFound);
+  auto capability_after_cleanup = harness->kernel().lifecycle_kernel().inspect_capability(inserted_or->capability_id);
+  REQUIRE_FALSE(capability_after_cleanup.ok());
+  CHECK(capability_after_cleanup.status().code() == absl::StatusCode::kNotFound);
+  REQUIRE(gs->marked_unavailable == std::vector<std::string>{resp.replica_id()});
+  REQUIRE(
+      gs->unregistered_replicas ==
+      std::vector<std::pair<std::string, std::string>>{
+          {scope.selection().artifact_id(), resp.replica_id()},
+      });
+
+  auto after_cleanup = gs->request_replica_transport(
+      scope.selection().artifact_id(),
+      "consumer-node",
+      "127.0.0.1",
+      12345,
+      target_device,
+      /*wait_timeout_ms=*/1,
+      std::nullopt,
+      "consumer-worker",
+      "request-after-owner-cleanup");
+  REQUIRE(!after_cleanup.ok());
+  REQUIRE(absl::IsNotFound(after_cleanup.status()));
 }
 
 TEST_CASE(

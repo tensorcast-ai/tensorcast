@@ -52,10 +52,10 @@ consumer model we want to preserve:
 - `tensorcast_loader.py` can:
   - load directly from a serving artifact with `artifact.bind(...)`
   - or bootstrap a local/source input into a serving artifact and then bind it
-  - or attach an externally preloaded serving binding through explicit authority
+  - or acquire a retained serving binding through explicit retained authority
   - and later reload through `binding.swap(...)`
 - `gpu_model_runner.py` consumes the dedicated TensorCast serving reload path
-  using `selector.kind` / `selector.value` and runtime policy
+  using `ServingArtifactLocator` and manifest runtime policy
 - `api_server.py` gates `/reload_serving_artifact` with drain + serialized
   reload, while `/set_model_weight` is rejected for `load_format="tensorcast"`
 
@@ -64,8 +64,8 @@ Concrete current anchors:
 - direct serving-artifact startup path in
   `internal-vllm/vllm/model_executor/model_loader/tensorcast_loader.py`
   (`TensorcastModelLoader.load_model(...)`)
-- external preload attach path in
-  `internal-vllm/vllm/model_executor/model_loader/tensorcast_builder/preloaded_binding.py`
+- retained binding acquire path in
+  `internal-vllm/vllm/tensorcast/retained_binding.py`
 - local bootstrap path in
   `internal-vllm/vllm/model_executor/model_loader/tensorcast_builder/local_dir_prepare.py`
 - reload-by-swap path in

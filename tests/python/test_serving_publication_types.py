@@ -68,7 +68,8 @@ def _canonical_index(
     )
 
 
-def test_serving_build_digest_ignores_source_and_semantic_hash_inputs() -> None:
+def test_serving_build_digest_ignores_source_and_semantic_hash_inputs(
+) -> None:
     intent_a = ServingBuildIntent(
         representation_contract_hash="bafksemantic-a",
         builder_mode=BuilderMode.BINDING_FINALIZE,
@@ -88,22 +89,16 @@ def test_serving_build_digest_ignores_source_and_semantic_hash_inputs() -> None:
         source_artifact_ref="mi2:source-b",
     )
 
-    assert (
-        intent_a.compute_serving_build_digest()
-        == intent_b.compute_serving_build_digest()
-    )
+    assert (intent_a.compute_serving_build_digest() ==
+            intent_b.compute_serving_build_digest())
 
 
 def test_tensorcast_top_level_exports_cover_vllm_serving_contract() -> None:
     assert tc.prepare_serving_registration is prepare_serving_registration
-    assert (
-        tc.prepare_binding_finalize_serving_registration
-        is prepare_binding_finalize_serving_registration
-    )
-    assert (
-        tc.build_serving_publication_bundle_from_registered_artifact
-        is build_serving_publication_bundle_from_registered_artifact
-    )
+    assert (tc.prepare_binding_finalize_serving_registration
+            is prepare_binding_finalize_serving_registration)
+    assert (tc.build_serving_publication_bundle_from_registered_artifact
+            is build_serving_publication_bundle_from_registered_artifact)
     assert tc.PublishedModelVersion is PublishedModelVersion
     assert tc.RepresentationPublishContract is RepresentationPublishContract
     assert tc.ServingAdmissionFacts is ServingAdmissionFacts
@@ -132,7 +127,8 @@ def test_serving_artifact_manifest_round_trips_via_json_payload() -> None:
 
     assert restored == manifest
     assert restored.serving_manifest_ref == build_serving_manifest_ref()
-    assert restored.serving_build_digest == intent.compute_serving_build_digest()
+    assert restored.serving_build_digest == intent.compute_serving_build_digest(
+    )
     assert restored.serving_build_digest_version == SERVING_BUILD_DIGEST_VERSION
 
 
@@ -152,29 +148,25 @@ def test_representation_publish_contract_matches_serving_manifest() -> None:
     )
     contract = RepresentationPublishContract(
         subject=ServingPublicationSubject(
-            serving_artifact_id="mi2:test:serving",
-        ),
+            serving_artifact_id="mi2:test:serving", ),
         serving_manifest_ref=build_serving_manifest_ref(),
         representation_contract_hash=manifest.representation_contract_hash,
         serving_build_digest=manifest.serving_build_digest,
     )
 
     contract.validate_against_manifest(manifest)
-    assert (
-        parse_serving_manifest_ref(contract.serving_manifest_ref)
-        == "__tensorcast_meta__.manifest_json"
-    )
+    assert (parse_serving_manifest_ref(
+        contract.serving_manifest_ref) == "__tensorcast_meta__.manifest_json")
     runtime_policy = contract.to_runtime_policy()
     assert runtime_policy.require_manifest is True
     assert runtime_policy.serving_manifest_ref == build_serving_manifest_ref()
-    assert (
-        runtime_policy.expected_representation_contract_hash
-        == manifest.representation_contract_hash
-    )
+    assert (runtime_policy.expected_representation_contract_hash ==
+            manifest.representation_contract_hash)
 
 
 def test_serving_admission_facts_require_fast_path_validation() -> None:
-    with pytest.raises(ValueError, match="same_binding_fast_path_validated=True"):
+    with pytest.raises(ValueError,
+                       match="same_binding_fast_path_validated=True"):
         ServingAdmissionFacts(
             finalize_class=FinalizeClass.REPRESENTATION_CHANGING,
             support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY,
@@ -182,16 +174,15 @@ def test_serving_admission_facts_require_fast_path_validation() -> None:
         )
 
 
-def test_representation_publish_contract_accepts_binding_value_subject() -> None:
+def test_representation_publish_contract_accepts_binding_value_subject(
+) -> None:
     contract = RepresentationPublishContract(
-        subject=ServingPublicationSubject(
-            binding_value_ref=BindingValueRef(
-                binding_id="binding-1",
-                binding_layout_id="layout-1",
-                binding_value_id="value-1",
-                seal_generation=7,
-            )
-        ),
+        subject=ServingPublicationSubject(binding_value_ref=BindingValueRef(
+            binding_id="binding-1",
+            binding_layout_id="layout-1",
+            binding_value_id="value-1",
+            seal_generation=7,
+        )),
         serving_manifest_ref=build_serving_manifest_ref(),
         representation_contract_hash="bafkrepresentation",
         serving_build_digest="bafkbuilddigest",
@@ -200,22 +191,20 @@ def test_representation_publish_contract_accepts_binding_value_subject() -> None
     assert contract.serving_artifact_id is None
     assert contract.binding_value_ref is not None
     restored = RepresentationPublishContract.from_publication_proto(
-        contract.to_publication_proto()
-    )
+        contract.to_publication_proto())
     assert restored.binding_value_ref is not None
     assert restored.binding_value_ref.binding_id == "binding-1"
 
 
-def test_binding_subject_contract_rejects_runtime_policy_until_promoted() -> None:
+def test_binding_subject_contract_rejects_runtime_policy_until_promoted(
+) -> None:
     contract = RepresentationPublishContract(
-        subject=ServingPublicationSubject(
-            binding_value_ref=BindingValueRef(
-                binding_id="binding-2",
-                binding_layout_id="layout-2",
-                binding_value_id="value-2",
-                seal_generation=3,
-            )
-        ),
+        subject=ServingPublicationSubject(binding_value_ref=BindingValueRef(
+            binding_id="binding-2",
+            binding_layout_id="layout-2",
+            binding_value_id="value-2",
+            seal_generation=3,
+        )),
         serving_manifest_ref=build_serving_manifest_ref(),
         representation_contract_hash="bafkrepresentation",
         serving_build_digest="bafkbuilddigest",
@@ -225,7 +214,8 @@ def test_binding_subject_contract_rejects_runtime_policy_until_promoted() -> Non
         contract.to_runtime_policy()
 
 
-def test_build_binding_finalize_admission_facts_requires_same_binding_proof() -> None:
+def test_build_binding_finalize_admission_facts_requires_same_binding_proof(
+) -> None:
     facts = build_binding_finalize_admission_facts(
         support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY,
         same_binding_fast_path_validated=True,
@@ -236,25 +226,21 @@ def test_build_binding_finalize_admission_facts_requires_same_binding_proof() ->
     assert facts.support_level == ServingSupportLevel.BUILDER_PUBLICATION_READY
 
 
-def test_build_binding_finalize_publication_bundle_has_no_artifact_subject_parameter() -> (
-    None
-):
-    assert (
-        "serving_artifact"
-        not in inspect.signature(build_binding_finalize_publication_bundle).parameters
-    )
+def test_build_binding_finalize_publication_bundle_has_no_artifact_subject_parameter(
+) -> (None):
+    assert ("serving_artifact" not in inspect.signature(
+        build_binding_finalize_publication_bundle).parameters)
 
     canonical_index = _canonical_index(
         CanonicalIndexEntry(
             name="weights",
             dtype=torch.float16,
-            shape=(8,),
-            stride=(1,),
+            shape=(8, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=0,
             size_bytes=16,
-        ),
-    )
+        ), )
     intent = ServingBuildIntent(
         representation_contract_hash="bafkbindingrepr",
         framework_name="torch",
@@ -276,20 +262,18 @@ def test_build_binding_finalize_publication_bundle_has_no_artifact_subject_param
         )
 
 
-def test_build_binding_finalize_publication_bundle_accepts_binding_value_subject() -> (
-    None
-):
+def test_build_binding_finalize_publication_bundle_accepts_binding_value_subject(
+) -> (None):
     canonical_index = _canonical_index(
         CanonicalIndexEntry(
             name="weights",
             dtype=torch.float16,
-            shape=(8,),
-            stride=(1,),
+            shape=(8, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=0,
             size_bytes=16,
-        ),
-    )
+        ), )
     intent = ServingBuildIntent(
         representation_contract_hash="bafkbindingrepr",
         builder_mode=BuilderMode.BINDING_FINALIZE,
@@ -321,62 +305,58 @@ def test_build_binding_finalize_publication_bundle_accepts_binding_value_subject
     assert bundle.representation_publish_contract.binding_value_ref is not None
 
 
-def test_compute_serving_tensor_schema_hash_excludes_reserved_manifest_tensor() -> None:
+def test_compute_serving_tensor_schema_hash_excludes_reserved_manifest_tensor(
+) -> None:
     canonical_without_manifest = CanonicalIndex(
-        entries=(
-            CanonicalIndexEntry(
-                name="weights",
-                dtype=torch.float16,
-                shape=(8,),
-                stride=(1,),
-                storage_offset=0,
-                segment_offset=0,
-                size_bytes=16,
-            ),
-        ),
+        entries=(CanonicalIndexEntry(
+            name="weights",
+            dtype=torch.float16,
+            shape=(8, ),
+            stride=(1, ),
+            storage_offset=0,
+            segment_offset=0,
+            size_bytes=16,
+        ), ),
         total_size_bytes=16,
         avbs_hash="bafkavbs",
     )
     canonical_with_manifest = CanonicalIndex(
-        entries=canonical_without_manifest.entries
-        + (
-            CanonicalIndexEntry(
-                name="__tensorcast_meta__.manifest_json",
-                dtype=torch.uint8,
-                shape=(32,),
-                stride=(1,),
-                storage_offset=0,
-                segment_offset=16,
-                size_bytes=32,
-            ),
-        ),
+        entries=canonical_without_manifest.entries + (CanonicalIndexEntry(
+            name="__tensorcast_meta__.manifest_json",
+            dtype=torch.uint8,
+            shape=(32, ),
+            stride=(1, ),
+            storage_offset=0,
+            segment_offset=16,
+            size_bytes=32,
+        ), ),
         total_size_bytes=48,
         avbs_hash="bafkavbs",
     )
 
     assert compute_serving_tensor_schema_hash(
-        canonical_with_manifest
-    ) == compute_serving_tensor_schema_hash(canonical_without_manifest)
+        canonical_with_manifest) == compute_serving_tensor_schema_hash(
+            canonical_without_manifest)
     assert count_canonical_serving_tensors(canonical_with_manifest) == 1
 
 
-def test_compute_pure_transform_representation_contract_hash_accepts_tensor_mapping() -> (
-    None
-):
+def test_compute_pure_transform_representation_contract_hash_accepts_tensor_mapping(
+) -> (None):
     source_canonical_index = _canonical_index(
         CanonicalIndexEntry(
             name="weights",
             dtype=torch.float16,
-            shape=(8,),
-            stride=(1,),
+            shape=(8, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=0,
             size_bytes=16,
-        ),
-    )
+        ), )
     serving_tensors = {
-        "weights": torch.empty((8,), dtype=torch.float16),
-        SERVING_MANIFEST_TENSOR_NAME: torch.tensor(
+        "weights":
+        torch.empty((8, ), dtype=torch.float16),
+        SERVING_MANIFEST_TENSOR_NAME:
+        torch.tensor(
             list(b'{"schema_version":1}'),
             dtype=torch.uint8,
         ),
@@ -392,25 +372,25 @@ def test_compute_pure_transform_representation_contract_hash_accepts_tensor_mapp
             CanonicalIndexEntry(
                 name="weights",
                 dtype=torch.float16,
-                shape=(8,),
-                stride=(1,),
+                shape=(8, ),
+                stride=(1, ),
                 storage_offset=0,
                 segment_offset=0,
                 size_bytes=16,
-            ),
-        ),
+            ), ),
     )
 
     assert hash_from_tensors == hash_from_index
 
 
-def test_build_pure_transform_publication_bundle_from_registered_artifact() -> None:
+def test_build_pure_transform_publication_bundle_from_registered_artifact(
+) -> None:
     canonical_index = _canonical_index(
         CanonicalIndexEntry(
             name="weights",
             dtype=torch.float16,
-            shape=(8,),
-            stride=(1,),
+            shape=(8, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=0,
             size_bytes=16,
@@ -418,8 +398,8 @@ def test_build_pure_transform_publication_bundle_from_registered_artifact() -> N
         CanonicalIndexEntry(
             name="__tensorcast_meta__.manifest_json",
             dtype=torch.uint8,
-            shape=(64,),
-            stride=(1,),
+            shape=(64, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=16,
             size_bytes=64,
@@ -460,37 +440,27 @@ def test_build_pure_transform_publication_bundle_from_registered_artifact() -> N
     assert bundle.manifest_tensor_name == "__tensorcast_meta__.manifest_json"
     assert bundle.serving_manifest_ref == build_serving_manifest_ref()
     assert bundle.serving_manifest.canonical_tensor_count == 1
-    assert (
-        bundle.serving_manifest.tensor_schema_hash
-        == compute_serving_tensor_schema_hash(canonical_index)
-    )
-    assert (
-        bundle.representation_publish_contract.serving_artifact_id == "mi2:test:serving"
-    )
-    assert (
-        bundle.closeout_contract.representation_publish_contract
-        == bundle.representation_publish_contract
-    )
+    assert (bundle.serving_manifest.tensor_schema_hash ==
+            compute_serving_tensor_schema_hash(canonical_index))
+    assert (bundle.representation_publish_contract.serving_artifact_id ==
+            "mi2:test:serving")
+    assert (bundle.closeout_contract.representation_publish_contract ==
+            bundle.representation_publish_contract)
     assert bundle.closeout_contract.kind == "representation_publish"
-    assert (
-        ServingArtifactManifest.from_bytes(bundle.serving_manifest_bytes)
-        == bundle.serving_manifest
-    )
-    assert (
-        bundle.representation_publish_contract.serving_build_digest_version
-        == SERVING_BUILD_DIGEST_VERSION
-    )
+    assert (ServingArtifactManifest.from_bytes(
+        bundle.serving_manifest_bytes) == bundle.serving_manifest)
+    assert (bundle.representation_publish_contract.serving_build_digest_version
+            == SERVING_BUILD_DIGEST_VERSION)
 
 
-def test_compute_pure_transform_representation_contract_hash_normalizes_logical_topology() -> (
-    None
-):
+def test_compute_pure_transform_representation_contract_hash_normalizes_logical_topology(
+) -> (None):
     source_index = _canonical_index(
         CanonicalIndexEntry(
             name="weights",
             dtype=torch.float16,
-            shape=(8,),
-            stride=(1,),
+            shape=(8, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=0,
             size_bytes=16,
@@ -498,8 +468,8 @@ def test_compute_pure_transform_representation_contract_hash_normalizes_logical_
         CanonicalIndexEntry(
             name="bias",
             dtype=torch.float16,
-            shape=(8,),
-            stride=(1,),
+            shape=(8, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=16,
             size_bytes=16,
@@ -509,8 +479,8 @@ def test_compute_pure_transform_representation_contract_hash_normalizes_logical_
         CanonicalIndexEntry(
             name="bias",
             dtype=torch.float16,
-            shape=(8,),
-            stride=(1,),
+            shape=(8, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=16,
             size_bytes=16,
@@ -518,8 +488,8 @@ def test_compute_pure_transform_representation_contract_hash_normalizes_logical_
         CanonicalIndexEntry(
             name="weights",
             dtype=torch.float16,
-            shape=(8,),
-            stride=(1,),
+            shape=(8, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=0,
             size_bytes=16,
@@ -529,43 +499,44 @@ def test_compute_pure_transform_representation_contract_hash_normalizes_logical_
     hash_a = compute_pure_transform_representation_contract_hash(
         source_artifact=source_index,
         serving_artifact=serving_index,
-        logical_topology_json='{"family":"tp","version":"v1","dimensions":[{"name":"tp","size":2},{"name":"pp","size":1}]}',
+        logical_topology_json=
+        '{"family":"tp","version":"v1","dimensions":[{"name":"tp","size":2},{"name":"pp","size":1}]}',
     )
     hash_b = compute_pure_transform_representation_contract_hash(
         source_artifact=source_index,
         serving_artifact=serving_index,
-        logical_topology_json='{"dimensions":[{"name":"pp","size":1},{"name":"tp","size":2}],"version":"v1","family":"tp"}',
+        logical_topology_json=
+        '{"dimensions":[{"name":"pp","size":1},{"name":"tp","size":2}],"version":"v1","family":"tp"}',
     )
     hash_c = compute_pure_transform_representation_contract_hash(
         source_artifact=source_index,
         serving_artifact=serving_index,
-        logical_topology_json='{"family":"tp","version":"v1","dimensions":[{"name":"tp","size":4},{"name":"pp","size":1}]}',
+        logical_topology_json=
+        '{"family":"tp","version":"v1","dimensions":[{"name":"tp","size":4},{"name":"pp","size":1}]}',
     )
 
     assert hash_a == hash_b
     assert hash_a != hash_c
 
 
-def test_build_pure_transform_publication_bundle_auto_derives_representation_hash() -> (
-    None
-):
+def test_build_pure_transform_publication_bundle_auto_derives_representation_hash(
+) -> (None):
     source_index = _canonical_index(
         CanonicalIndexEntry(
             name="weights",
             dtype=torch.float16,
-            shape=(8,),
-            stride=(1,),
+            shape=(8, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=0,
             size_bytes=16,
-        ),
-    )
+        ), )
     serving_index = _canonical_index(
         CanonicalIndexEntry(
             name="weights",
             dtype=torch.float16,
-            shape=(8,),
-            stride=(1,),
+            shape=(8, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=0,
             size_bytes=16,
@@ -573,8 +544,8 @@ def test_build_pure_transform_publication_bundle_auto_derives_representation_has
         CanonicalIndexEntry(
             name="__tensorcast_meta__.manifest_json",
             dtype=torch.uint8,
-            shape=(64,),
-            stride=(1,),
+            shape=(64, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=16,
             size_bytes=64,
@@ -609,33 +580,34 @@ def test_build_pure_transform_publication_bundle_auto_derives_representation_has
         serving_artifact=registered_artifact,
         source_version_key="models/demo/source/auto",
         serving_version_key="models/demo/serving/auto",
-        logical_topology_json='{"family":"tp","version":"v1","dimensions":[{"name":"tp","size":2}]}',
+        logical_topology_json=
+        '{"family":"tp","version":"v1","dimensions":[{"name":"tp","size":2}]}',
     )
 
     expected_hash = compute_pure_transform_representation_contract_hash(
         source_artifact=source_index,
         serving_artifact=registered_artifact,
-        logical_topology_json='{"family":"tp","version":"v1","dimensions":[{"name":"tp","size":2}]}',
+        logical_topology_json=
+        '{"family":"tp","version":"v1","dimensions":[{"name":"tp","size":2}]}',
     )
     assert bundle.representation_publish_contract.representation_contract_hash == (
-        expected_hash
-    )
+        expected_hash)
     assert bundle.contract_family == "pp"
     assert bundle.serving_manifest.representation_contract_hash == expected_hash
 
 
-def test_prepare_pure_transform_serving_registration_embeds_manifest_tensor() -> None:
+def test_prepare_pure_transform_serving_registration_embeds_manifest_tensor(
+) -> None:
     source_index = _canonical_index(
         CanonicalIndexEntry(
             name="weights",
             dtype=torch.float16,
-            shape=(8,),
-            stride=(1,),
+            shape=(8, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=0,
             size_bytes=16,
-        ),
-    )
+        ), )
     intent = ServingBuildIntent(
         builder_mode=BuilderMode.PURE_TRANSFORM,
         framework_name="torch",
@@ -655,24 +627,17 @@ def test_prepare_pure_transform_serving_registration_embeds_manifest_tensor() ->
     assert "__tensorcast_meta__.manifest_json" in prepared.tensors
     assert len(prepared.serving_manifest_bytes) % 8 == 0
     assert prepared.canonical_index.total_size_bytes == sum(
-        int(entry.size_bytes) for entry in prepared.canonical_index.entries
-    )
-    assert (
-        ServingArtifactManifest.from_bytes(prepared.serving_manifest_bytes)
-        == prepared.serving_manifest
-    )
-    assert (
-        ServingArtifactManifest.from_bytes(
-            bytes(prepared.tensors["__tensorcast_meta__.manifest_json"].tolist())
-        )
-        == prepared.serving_manifest
-    )
+        int(entry.size_bytes) for entry in prepared.canonical_index.entries)
+    assert (ServingArtifactManifest.from_bytes(
+        prepared.serving_manifest_bytes) == prepared.serving_manifest)
+    assert (ServingArtifactManifest.from_bytes(
+        bytes(prepared.tensors["__tensorcast_meta__.manifest_json"].tolist()))
+            == prepared.serving_manifest)
     assert prepared.representation_contract_hash == (
         compute_pure_transform_representation_contract_hash(
             source_artifact=source_index,
             serving_artifact=prepared.canonical_index,
-        )
-    )
+        ))
 
 
 def test_prepare_serving_registration_supports_binding_finalize() -> None:
@@ -689,18 +654,19 @@ def test_prepare_serving_registration_supports_binding_finalize() -> None:
         build_intent=intent,
         tensors={"weights": torch.ones(8, dtype=torch.float16)},
         representation_contract_hash="bafkbindingrepr",
+        topology_admission_digest="bafktopology",
     )
 
     assert prepared.manifest_tensor_name == "__tensorcast_meta__.manifest_json"
     assert "__tensorcast_meta__.manifest_json" in prepared.tensors
     assert prepared.serving_manifest.builder_mode == BuilderMode.BINDING_FINALIZE
     assert prepared.serving_manifest.framework_name == "torch"
+    assert prepared.serving_manifest.topology_admission_digest == "bafktopology"
     assert prepared.representation_contract_hash == "bafkbindingrepr"
 
 
-def test_prepare_binding_finalize_serving_registration_requires_binding_finalize() -> (
-    None
-):
+def test_prepare_binding_finalize_serving_registration_requires_binding_finalize(
+) -> (None):
     intent = ServingBuildIntent(
         builder_mode=BuilderMode.PURE_TRANSFORM,
         framework_name="torch",
@@ -718,9 +684,8 @@ def test_prepare_binding_finalize_serving_registration_requires_binding_finalize
         )
 
 
-def test_prepare_binding_finalize_serving_registration_supports_binding_finalize() -> (
-    None
-):
+def test_prepare_binding_finalize_serving_registration_supports_binding_finalize(
+) -> (None):
     intent = ServingBuildIntent(
         builder_mode=BuilderMode.BINDING_FINALIZE,
         framework_name="torch",
@@ -734,15 +699,45 @@ def test_prepare_binding_finalize_serving_registration_supports_binding_finalize
         build_intent=intent,
         tensors={"weights": torch.ones(8, dtype=torch.float16)},
         representation_contract_hash="bafkbindingrepr",
+        topology_admission_digest="bafktopology",
     )
 
     assert prepared.serving_manifest.builder_mode == BuilderMode.BINDING_FINALIZE
+    assert prepared.serving_manifest.topology_admission_digest == "bafktopology"
+    manifest_from_tensor = ServingArtifactManifest.from_bytes(
+        bytes(prepared.tensors[prepared.manifest_tensor_name].tolist()))
+    assert manifest_from_tensor.topology_admission_digest == "bafktopology"
 
 
-def test_prepare_serving_registration_keeps_manifest_on_tensor_device() -> None:
-    device = (
-        torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+def test_prepare_binding_finalize_serving_registration_rejects_stale_manifest_topology(
+) -> None:
+    intent = ServingBuildIntent(
+        builder_mode=BuilderMode.BINDING_FINALIZE,
+        framework_name="torch",
+        adapter_version="adapter-v4-binding-helper",
+        serving_abi_version="abi-v4-binding-helper",
+        build_pipeline_version="pipeline-v4-binding-helper",
+        source_artifact_ref="mi2:test:binding-source",
     )
+    prepared = prepare_binding_finalize_serving_registration(
+        build_intent=intent,
+        tensors={"weights": torch.ones(8, dtype=torch.float16)},
+        representation_contract_hash="bafkbindingrepr",
+    )
+
+    with pytest.raises(ArtifactError, match="topology_admission_digest"):
+        prepare_binding_finalize_serving_registration(
+            build_intent=intent,
+            tensors=dict(prepared.tensors),
+            representation_contract_hash="bafkbindingrepr",
+            topology_admission_digest="bafktopology",
+        )
+
+
+def test_prepare_serving_registration_keeps_manifest_on_tensor_device(
+) -> None:
+    device = (torch.device("cuda:0")
+              if torch.cuda.is_available() else torch.device("cpu"))
     intent = ServingBuildIntent(
         builder_mode=BuilderMode.BINDING_FINALIZE,
         framework_name="torch",
@@ -759,18 +754,18 @@ def test_prepare_serving_registration_keeps_manifest_on_tensor_device() -> None:
     )
 
     assert prepared.tensors["weights"].device == device
-    assert prepared.tensors["__tensorcast_meta__.manifest_json"].device == device
+    assert prepared.tensors[
+        "__tensorcast_meta__.manifest_json"].device == device
 
 
-def test_build_serving_publication_bundle_from_registered_artifact_rejects_binding_finalize() -> (
-    None
-):
+def test_build_serving_publication_bundle_from_registered_artifact_rejects_binding_finalize(
+) -> (None):
     canonical_index = _canonical_index(
         CanonicalIndexEntry(
             name="weights",
             dtype=torch.float16,
-            shape=(8,),
-            stride=(1,),
+            shape=(8, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=0,
             size_bytes=16,
@@ -778,8 +773,8 @@ def test_build_serving_publication_bundle_from_registered_artifact_rejects_bindi
         CanonicalIndexEntry(
             name="__tensorcast_meta__.manifest_json",
             dtype=torch.uint8,
-            shape=(64,),
-            stride=(1,),
+            shape=(64, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=16,
             size_bytes=64,
@@ -817,13 +812,14 @@ def test_build_serving_publication_bundle_from_registered_artifact_rejects_bindi
         )
 
 
-def test_build_binding_finalize_publication_bundle_uses_admission_facts() -> None:
+def test_build_binding_finalize_publication_bundle_uses_admission_facts(
+) -> None:
     canonical_index = _canonical_index(
         CanonicalIndexEntry(
             name="weights",
             dtype=torch.float16,
-            shape=(8,),
-            stride=(1,),
+            shape=(8, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=0,
             size_bytes=16,
@@ -831,8 +827,8 @@ def test_build_binding_finalize_publication_bundle_uses_admission_facts() -> Non
         CanonicalIndexEntry(
             name="__tensorcast_meta__.manifest_json",
             dtype=torch.uint8,
-            shape=(64,),
-            stride=(1,),
+            shape=(64, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=16,
             size_bytes=64,
@@ -872,15 +868,14 @@ def test_build_binding_finalize_publication_bundle_uses_admission_facts() -> Non
     assert bundle.admission_facts == admission_facts
 
 
-def test_build_binding_finalize_publication_bundle_rejects_serving_key_without_runtime_ready() -> (
-    None
-):
+def test_build_binding_finalize_publication_bundle_rejects_serving_key_without_runtime_ready(
+) -> (None):
     canonical_index = _canonical_index(
         CanonicalIndexEntry(
             name="weights",
             dtype=torch.float16,
-            shape=(8,),
-            stride=(1,),
+            shape=(8, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=0,
             size_bytes=16,
@@ -888,8 +883,8 @@ def test_build_binding_finalize_publication_bundle_rejects_serving_key_without_r
         CanonicalIndexEntry(
             name="__tensorcast_meta__.manifest_json",
             dtype=torch.uint8,
-            shape=(64,),
-            stride=(1,),
+            shape=(64, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=16,
             size_bytes=64,
@@ -944,7 +939,8 @@ def test_build_pure_transform_serving_args_encodes_repo_owned_keys() -> None:
     )
 
     assert args["tc_serving_enable"] == 1
-    assert args["tc_serving_representation_contract_hash"] == "bafkrepresentation"
+    assert args[
+        "tc_serving_representation_contract_hash"] == "bafkrepresentation"
     assert args["tc_serving_framework_name"] == "torch"
     assert args["tc_serving_adapter_version"] == "adapter-v5"
     assert args["tc_serving_abi_version"] == "abi-v5"
@@ -955,9 +951,8 @@ def test_build_pure_transform_serving_args_encodes_repo_owned_keys() -> None:
     assert args["quant"] == 4
 
 
-def test_build_pure_transform_serving_args_omits_unresolved_representation_hash() -> (
-    None
-):
+def test_build_pure_transform_serving_args_omits_unresolved_representation_hash(
+) -> (None):
     intent = ServingBuildIntent(
         builder_mode=BuilderMode.PURE_TRANSFORM,
         framework_name="torch",
@@ -973,7 +968,8 @@ def test_build_pure_transform_serving_args_omits_unresolved_representation_hash(
 
     assert args["tc_serving_enable"] == 1
     assert "tc_serving_representation_contract_hash" not in args
-    assert args["tc_serving_serving_version_key"] == "models/demo/serving/v5-auto"
+    assert args[
+        "tc_serving_serving_version_key"] == "models/demo/serving/v5-auto"
 
 
 def test_published_model_version_builds_serving_runtime_policy() -> None:
@@ -991,7 +987,8 @@ def test_published_model_version_builds_serving_runtime_policy() -> None:
         ),
         representation_contract_hash="bafkrepresentation",
         serving_build_digest="bafkbuilddigest",
-        serving_manifest_ref=build_serving_manifest_ref("__serving_manifest__.json"),
+        serving_manifest_ref=build_serving_manifest_ref(
+            "__serving_manifest__.json"),
     )
 
     policy = version.require_serving_runtime_policy()
@@ -1003,7 +1000,8 @@ def test_published_model_version_builds_serving_runtime_policy() -> None:
     assert policy.expected_serving_build_digest == "bafkbuilddigest"
 
 
-def test_coerce_serving_runtime_policy_accepts_manifest_lineage_models() -> None:
+def test_coerce_serving_runtime_policy_accepts_manifest_lineage_models(
+) -> None:
     manifest = ServingArtifactManifest(
         framework_name="torch",
         adapter_version="adapter-v6",
@@ -1012,7 +1010,8 @@ def test_coerce_serving_runtime_policy_accepts_manifest_lineage_models() -> None
         serving_build_digest="bafkbuilddigest",
         tensor_schema_hash="bafktensorschema",
         canonical_tensor_count=1,
-        serving_manifest_ref=build_serving_manifest_ref("__alt_manifest__.json"),
+        serving_manifest_ref=build_serving_manifest_ref(
+            "__alt_manifest__.json"),
         builder_mode=BuilderMode.PURE_TRANSFORM,
         build_pipeline_version="pipeline-v6",
     )
@@ -1028,9 +1027,9 @@ def test_coerce_serving_runtime_policy_accepts_manifest_lineage_models() -> None
 def test_coerce_serving_runtime_policy_accepts_contract_and_version() -> None:
     contract = RepresentationPublishContract(
         subject=ServingPublicationSubject(
-            serving_artifact_id="mi2:test:serving",
-        ),
-        serving_manifest_ref=build_serving_manifest_ref("__alt_manifest__.json"),
+            serving_artifact_id="mi2:test:serving", ),
+        serving_manifest_ref=build_serving_manifest_ref(
+            "__alt_manifest__.json"),
         representation_contract_hash="bafkrepresentation",
         serving_build_digest="bafkbuilddigest",
     )
@@ -1048,7 +1047,8 @@ def test_coerce_serving_runtime_policy_accepts_contract_and_version() -> None:
         ),
         representation_contract_hash="bafkrepresentation",
         serving_build_digest="bafkbuilddigest",
-        serving_manifest_ref=build_serving_manifest_ref("__alt_manifest__.json"),
+        serving_manifest_ref=build_serving_manifest_ref(
+            "__alt_manifest__.json"),
     )
 
     contract_policy = coerce_serving_runtime_policy(contract)
@@ -1063,9 +1063,8 @@ def test_coerce_serving_runtime_policy_accepts_contract_and_version() -> None:
     assert version_policy == contract_policy
 
 
-def test_coerce_serving_runtime_policy_accepts_runtime_ready_representation_publish_spec() -> (
-    None
-):
+def test_coerce_serving_runtime_policy_accepts_runtime_ready_representation_publish_spec(
+) -> (None):
     manifest = ServingArtifactManifest(
         framework_name="torch",
         adapter_version="adapter-v6-runtime",
@@ -1079,8 +1078,7 @@ def test_coerce_serving_runtime_policy_accepts_runtime_ready_representation_publ
     )
     contract = RepresentationPublishContract(
         subject=ServingPublicationSubject(
-            serving_artifact_id="mi2:test:serving",
-        ),
+            serving_artifact_id="mi2:test:serving", ),
         serving_manifest_ref=build_serving_manifest_ref(),
         representation_contract_hash="bafkrepresentation",
         serving_build_digest="bafkbuilddigest",
@@ -1112,9 +1110,8 @@ def test_coerce_serving_runtime_policy_accepts_runtime_ready_representation_publ
     )
 
 
-def test_coerce_serving_runtime_policy_rejects_builder_only_representation_publish_spec() -> (
-    None
-):
+def test_coerce_serving_runtime_policy_rejects_builder_only_representation_publish_spec(
+) -> (None):
     manifest = ServingArtifactManifest(
         framework_name="torch",
         adapter_version="adapter-v6-runtime-blocked",
@@ -1128,8 +1125,7 @@ def test_coerce_serving_runtime_policy_rejects_builder_only_representation_publi
     )
     contract = RepresentationPublishContract(
         subject=ServingPublicationSubject(
-            serving_artifact_id="mi2:test:serving",
-        ),
+            serving_artifact_id="mi2:test:serving", ),
         serving_manifest_ref=build_serving_manifest_ref(),
         representation_contract_hash="bafkrepresentation",
         serving_build_digest="bafkbuilddigest",
@@ -1182,7 +1178,8 @@ def test_build_pure_transform_transform_spec_wraps_transform_args() -> None:
     assert spec.publication_spec.serving_version_key == "models/demo/serving/v6"
 
 
-def test_build_pure_transform_transform_spec_can_omit_representation_hash() -> None:
+def test_build_pure_transform_transform_spec_can_omit_representation_hash(
+) -> None:
     intent = ServingBuildIntent(
         builder_mode=BuilderMode.PURE_TRANSFORM,
         framework_name="torch",
@@ -1219,8 +1216,9 @@ def test_build_pure_transform_publication_spec_wraps_typed_inputs() -> None:
         contract_family="canonical_full",
         source_version_key="models/demo/source/v7",
         serving_version_key="models/demo/serving/v7",
-        serving_manifest_ref=build_serving_manifest_ref("__alt_manifest__.json"),
-        structural_view_ids=("view-a",),
+        serving_manifest_ref=build_serving_manifest_ref(
+            "__alt_manifest__.json"),
+        structural_view_ids=("view-a", ),
         admission_facts=admission_facts,
     )
 
@@ -1229,19 +1227,18 @@ def test_build_pure_transform_publication_spec_wraps_typed_inputs() -> None:
     assert publication_spec.source_version_key == "models/demo/source/v7"
     assert publication_spec.serving_version_key == "models/demo/serving/v7"
     assert publication_spec.serving_manifest_ref == "tensor:__alt_manifest__.json"
-    assert publication_spec.structural_view_ids == ("view-a",)
+    assert publication_spec.structural_view_ids == ("view-a", )
     assert publication_spec.admission_facts == admission_facts
 
 
-def test_representation_publish_spec_round_trips_admission_facts_and_digest_version() -> (
-    None
-):
+def test_representation_publish_spec_round_trips_admission_facts_and_digest_version(
+) -> (None):
     canonical_index = _canonical_index(
         CanonicalIndexEntry(
             name="weights",
             dtype=torch.float16,
-            shape=(8,),
-            stride=(1,),
+            shape=(8, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=0,
             size_bytes=16,
@@ -1249,8 +1246,8 @@ def test_representation_publish_spec_round_trips_admission_facts_and_digest_vers
         CanonicalIndexEntry(
             name="__tensorcast_meta__.manifest_json",
             dtype=torch.uint8,
-            shape=(64,),
-            stride=(1,),
+            shape=(64, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=16,
             size_bytes=64,
@@ -1292,21 +1289,18 @@ def test_representation_publish_spec_round_trips_admission_facts_and_digest_vers
     restored = RepresentationPublishSpec.from_proto(bundle.to_proto())
 
     assert restored.admission_facts == admission_facts
-    assert (
-        restored.representation_publish_contract.serving_build_digest_version
-        == SERVING_BUILD_DIGEST_VERSION
-    )
+    assert (restored.representation_publish_contract.
+            serving_build_digest_version == SERVING_BUILD_DIGEST_VERSION)
 
 
-def test_topology_admission_digest_does_not_change_representation_or_build_identity() -> (
-    None
-):
+def test_topology_admission_digest_does_not_change_representation_or_build_identity(
+) -> (None):
     canonical_index = _canonical_index(
         CanonicalIndexEntry(
             name="weights",
             dtype=torch.float16,
-            shape=(8,),
-            stride=(1,),
+            shape=(8, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=0,
             size_bytes=16,
@@ -1314,8 +1308,8 @@ def test_topology_admission_digest_does_not_change_representation_or_build_ident
         CanonicalIndexEntry(
             name="__tensorcast_meta__.manifest_json",
             dtype=torch.uint8,
-            shape=(64,),
-            stride=(1,),
+            shape=(64, ),
+            stride=(1, ),
             storage_offset=0,
             segment_offset=16,
             size_bytes=64,
@@ -1358,12 +1352,11 @@ def test_topology_admission_digest_does_not_change_representation_or_build_ident
         ),
     )
 
-    assert (
-        bundle_a.representation_publish_contract.representation_contract_hash
-        == bundle_b.representation_publish_contract.representation_contract_hash
-    )
-    assert (
-        bundle_a.representation_publish_contract.serving_build_digest
-        == bundle_b.representation_publish_contract.serving_build_digest
-    )
+    assert (bundle_a.representation_publish_contract.
+            representation_contract_hash == bundle_b.
+            representation_publish_contract.representation_contract_hash)
+    assert (bundle_a.representation_publish_contract.serving_build_digest ==
+            bundle_b.representation_publish_contract.serving_build_digest)
+    assert bundle_a.serving_manifest.topology_admission_digest == "bafktopology-a"
+    assert bundle_b.serving_manifest.topology_admission_digest == "bafktopology-b"
     assert bundle_a.admission_facts != bundle_b.admission_facts

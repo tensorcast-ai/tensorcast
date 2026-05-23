@@ -107,6 +107,7 @@ struct ActiveInstanceInfo {
 
 // Information about a remote replica replica
 struct RemoteReplicaInfo {
+  std::string replica_id;
   std::string node_id;
   std::string endpoint_id;
   std::string node_address;

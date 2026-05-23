@@ -9,7 +9,6 @@ from tensorcast.api.store import Range as StoreRange
 from tensorcast.serving.builder.compiler import (
     CompiledServingRecipe,
     SourceHullEntry,
-    TensorcastLogicalTopology,
     TensorcastSemanticValidationSpec,
     TensorcastServingFacts,
     TensorSchemaEntry,
@@ -20,7 +19,12 @@ from tensorcast.serving.builder.recipe_cache import (
     write_compiled_recipe_cache,
 )
 from tensorcast.serving.builder.trace_ir import CopyPlanEntry, Range, TracePlan
-from tensorcast.types import FinalizeClass, ServingSupportLevel
+from tensorcast.types import (
+    FinalizeClass,
+    ServingBindingMemberRef,
+    ServingSupportLevel,
+    ServingTopologyRef,
+)
 
 
 def _recipe() -> CompiledServingRecipe:
@@ -49,30 +53,39 @@ def _recipe() -> CompiledServingRecipe:
             adapter_version="adapter-v1",
             serving_abi_version="abi-v1",
             support_level=ServingSupportLevel.RUNTIME_BIND_SWAP_READY,
-            runtime_only_tensor_names=("runtime", ),
+            runtime_only_tensor_names=("runtime",),
             process_after_load_class=FinalizeClass.RUNTIME_ONLY,
             post_bind_finalize_class=FinalizeClass.RUNTIME_ONLY,
         ),
         trace_plan=trace_plan,
-        tensor_schema=(TensorSchemaEntry(
-            name="w",
-            dtype="torch.float16",
-            shape=(4, ),
-            stride=(1, ),
-        ), ),
-        source_hull=(SourceHullEntry(name="x",
-                                     range=Range(dim=0, start=0, end=4)), ),
-        realization_plan=(BindingRealizationEntry(
-            op="copy",
-            source_name="x",
-            source_ranges=(StoreRange(dim=0, start=0, end=4), ),
-            dst_name="w",
-            dst_ranges=(),
-        ), ),
+        tensor_schema=(
+            TensorSchemaEntry(
+                name="w",
+                dtype="torch.float16",
+                shape=(4,),
+                stride=(1,),
+            ),
+        ),
+        source_hull=(SourceHullEntry(name="x", range=Range(dim=0, start=0, end=4)),),
+        realization_plan=(
+            BindingRealizationEntry(
+                op="copy",
+                source_name="x",
+                source_ranges=(StoreRange(dim=0, start=0, end=4),),
+                dst_name="w",
+                dst_ranges=(),
+            ),
+        ),
         realization_fallback_plan=(),
-        logical_topology=TensorcastLogicalTopology(
-            tensor_parallel_rank=0,
-            tensor_parallel_world_size=2,
+        topology_ref=ServingTopologyRef(
+            schema_topology_digest="topology-digest",
+            logical_topology_ref="tensorcast://topology/topology-digest",
+        ),
+        member_ref=ServingBindingMemberRef(
+            member_id="dp0:pp0:tp0",
+            member_index=0,
+            member_count=2,
+            group_id="group-1",
         ),
         semantic_validation_spec=TensorcastSemanticValidationSpec(
             kind="explicit",
@@ -103,19 +116,25 @@ def test_compiled_recipe_cache_round_trips(tmp_path: Path) -> None:
     assert "realization_plan" not in payload["compiled_recipe"]
     assert "realization_plan_proto" in payload["compiled_recipe"]
     assert "trace_plan" not in payload["compiled_recipe"]
-    assert payload["compiled_recipe"]["trace_plan_summary"][
-        "expected_dst_names"] == ["w"]
-    assert payload["compiled_recipe"]["serving_facts"][
-        "framework_version"] == "vllm-test"
+    assert payload["compiled_recipe"]["trace_plan_summary"]["expected_dst_names"] == [
+        "w"
+    ]
+    assert payload["compiled_recipe"]["serving_facts"]["framework_version"] == (
+        "vllm-test"
+    )
+    assert payload["compiled_recipe"]["topology_ref"]["schema_topology_digest"] == (
+        "topology-digest"
+    )
+    assert payload["compiled_recipe"]["member_ref"]["member_id"] == "dp0:pp0:tp0"
 
 
 def test_compiled_recipe_cache_ignores_missing_and_unknown_version(
-    tmp_path: Path, ) -> None:
+    tmp_path: Path,
+) -> None:
     missing = tmp_path / "missing.json"
     assert load_compiled_recipe_cache(missing) is None
 
     bad_version = tmp_path / "bad_version.json"
-    bad_version.write_text('{"version": 999, "compiled_recipe": {}}',
-                           encoding="utf-8")
+    bad_version.write_text('{"version": 999, "compiled_recipe": {}}', encoding="utf-8")
 
     assert load_compiled_recipe_cache(bad_version) is None

@@ -65,6 +65,8 @@ struct MaterializeIntoTargetResult {
   bool source_ordered{false};
   std::string dominant_executor;
   std::string selection_reason;
+  std::string selected_source_replica_id;
+  std::string selected_source_transport_id;
 
   struct DebugStats {
     std::uint64_t produced_chunks{0};

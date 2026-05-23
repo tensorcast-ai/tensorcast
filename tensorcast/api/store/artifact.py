@@ -71,6 +71,7 @@ from tensorcast.api.store.owned_binding_layout import (
 )
 from tensorcast.api.store.owned_binding_slot import (
     OwnedBindingSlot,
+    _materialization_diagnostics_from_response,
     restore_owned_binding_tensors,
 )
 from tensorcast.api.store.region_utils import collect_storage_bases
@@ -507,7 +508,7 @@ def _register_client_binding(
     source_artifact_id: str | None,
     binding_current_value_publication_token: bytes | None,
     ctx: CallContext | None,
-) -> tuple[str, BindingLayout, BindingValueMetadata | None]:
+) -> tuple[str, BindingLayout, BindingValueMetadata | None, bytes | None]:
     binding_layout = build_binding_layout(
         target_layout=region_layout.layout,
         target_index_bytes=bytes(
@@ -544,10 +545,14 @@ def _register_client_binding(
             status_code="DATA_LOSS",
             retryable=False,
         )
+    response_publication_token = getattr(
+        response, "binding_current_value_publication_token", None
+    )
     return (
         str(response.binding_id),
         binding_layout,
         metadata,
+        response_publication_token or binding_current_value_publication_token,
     )
 
 
@@ -1327,7 +1332,12 @@ class Artifact:
             )
             raise
 
-        binding_id, binding_layout, current_value_metadata = _register_client_binding(
+        (
+            binding_id,
+            binding_layout,
+            current_value_metadata,
+            binding_current_value_publication_token,
+        ) = _register_client_binding(
             runtime=runtime,
             device_id=device_id,
             region_layout=region_layout,
@@ -1339,7 +1349,9 @@ class Artifact:
             ),
             source_artifact_id=self._ensure_identified(),
             binding_current_value_publication_token=getattr(
-                response, "binding_current_value_publication_token", None
+                response,
+                "binding_current_value_publication_token",
+                None,
             ),
             ctx=ctx,
         )
@@ -1359,8 +1371,8 @@ class Artifact:
             view_subset_hash=region_layout.view_subset_hash,
             view_spec=view_spec_proto,
             current_value_metadata=current_value_metadata,
-            binding_current_value_publication_token=getattr(
-                response, "binding_current_value_publication_token", None
+            binding_current_value_publication_token=(
+                binding_current_value_publication_token
             ),
         )
         return Binding(slot, publish=publish, ctx=ctx)
@@ -1618,7 +1630,12 @@ class Artifact:
             raise
 
         stage_start = time.perf_counter()
-        binding_id, binding_layout, current_value_metadata = _register_client_binding(
+        (
+            binding_id,
+            binding_layout,
+            current_value_metadata,
+            binding_current_value_publication_token,
+        ) = _register_client_binding(
             runtime=runtime,
             device_id=device_id,
             region_layout=region_layout,
@@ -1630,7 +1647,9 @@ class Artifact:
             ),
             source_artifact_id=self._ensure_identified(),
             binding_current_value_publication_token=getattr(
-                response, "binding_current_value_publication_token", None
+                response,
+                "binding_current_value_publication_token",
+                None,
             ),
             ctx=ctx,
         )
@@ -1651,8 +1670,8 @@ class Artifact:
             view_subset_hash=region_layout.view_subset_hash,
             view_spec=view_spec_proto,
             current_value_metadata=current_value_metadata,
-            binding_current_value_publication_token=getattr(
-                response, "binding_current_value_publication_token", None
+            binding_current_value_publication_token=(
+                binding_current_value_publication_token
             ),
             copy_plan=copy_plan,
         )
@@ -1984,6 +2003,10 @@ class Artifact:
             staged_value_metadata=staged_value_metadata,
             group_realization_acquire=group_realization_acquire,
             binding_current_value_publication_operation_id=operation_id,
+            materialization_diagnostics=_materialization_diagnostics_from_response(
+                response,
+                layout=owner_layout,
+            ),
         )
         if slot.current_value_metadata is None and slot.staged_value_metadata is None:
             with contextlib.suppress(Exception):

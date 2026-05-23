@@ -25,6 +25,19 @@ from tensorcast.logger import init_logger
 logger = init_logger(__name__)
 
 
+def _transport_view_ids(
+    view_id: str | None,
+    canonical_equivalent_view_ids: Sequence[str] | None,
+) -> tuple[str, ...]:
+    ids = [view_id or ""]
+    if view_id is None:
+        for alias in canonical_equivalent_view_ids or ():
+            normalized = str(alias or "").strip()
+            if normalized and normalized not in ids:
+                ids.append(normalized)
+    return tuple(ids)
+
+
 def _to_uuid(value: str | UUID) -> UUID:
     """Convert str or UUID to UUID.
 
@@ -271,14 +284,23 @@ class ReplicaRepository(BaseRepository):
             last_assigned_at=last_assigned_at,
         )
 
-    def has_any_replica(self, artifact_id: str, view_id: str | None = None) -> bool:
+    def has_any_replica(
+        self,
+        artifact_id: str,
+        view_id: str | None = None,
+        *,
+        canonical_equivalent_view_ids: Sequence[str] | None = None,
+    ) -> bool:
         """Return True when at least one replica exists for *artifact_id*."""
 
+        view_ids = _transport_view_ids(view_id, canonical_equivalent_view_ids)
+        placeholders = ", ".join("?" for _ in view_ids)
         cursor = self.get_cursor()
         try:
             row = cursor.execute(
-                "SELECT 1 FROM artifact_replicas WHERE artifact_id = ? AND COALESCE(view_id, '') = COALESCE(?, '') LIMIT 1",
-                [artifact_id, view_id or ""],
+                "SELECT 1 FROM artifact_replicas "
+                f"WHERE artifact_id = ? AND COALESCE(view_id, '') IN ({placeholders}) LIMIT 1",
+                [artifact_id, *view_ids],
             ).fetchone()
             return row is not None
         finally:
@@ -392,6 +414,7 @@ class ReplicaRepository(BaseRepository):
         artifact_id: str,
         heartbeat_timeout_seconds: float,
         view_id: str | None = None,
+        canonical_equivalent_view_ids: Sequence[str] | None = None,
         scheduler_mode: str = "LEGACY",
         source_balance_weights: SourceBalanceWeights | None = None,
         group_source_counts: dict[str, int] | None = None,
@@ -407,6 +430,19 @@ class ReplicaRepository(BaseRepository):
         if owns_cursor:
             cursor = self.get_cursor()
         try:
+            view_ids = _transport_view_ids(view_id, canonical_equivalent_view_ids)
+            view_placeholders = ", ".join("?" for _ in view_ids)
+            alias_ids = tuple(view_ids[1:]) if view_id is None else ()
+            alias_order_sql = ""
+            order_params: list[str] = []
+            if alias_ids:
+                alias_placeholders = ", ".join("?" for _ in alias_ids)
+                alias_order_sql = (
+                    "CASE WHEN COALESCE(mr.view_id, '') IN ("
+                    + alias_placeholders
+                    + ") THEN 0 ELSE 1 END, "
+                )
+                order_params.extend(alias_ids)
             query = (
                 "SELECT "
                 + self._REPLICA_PROJECTION
@@ -419,8 +455,9 @@ class ReplicaRepository(BaseRepository):
                 + "LEFT JOIN workers w ON mr.worker_id = w.worker_id "
                 + "LEFT JOIN worker_liveness wl ON wl.worker_id = w.worker_id "
                 + "WHERE mr.artifact_id = ? "
-                + "AND COALESCE(mr.view_id, '') = COALESCE(?, '') "
+                + f"AND COALESCE(mr.view_id, '') IN ({view_placeholders}) "
                 + "ORDER BY "
+                + alias_order_sql
                 + "CASE "
                 + "WHEN mr.memory_type = 'GPU' THEN 0 "
                 + "WHEN mr.memory_type = 'RAM' THEN 1 "
@@ -433,7 +470,7 @@ class ReplicaRepository(BaseRepository):
                 + "COALESCE(rc.last_assigned_at, TIMESTAMP '1970-01-01') ASC, "
                 + "mr.updated_at ASC"
             )
-            result = cursor.execute(query, [artifact_id, view_id or ""])
+            result = cursor.execute(query, [artifact_id, *view_ids, *order_params])
             rows = result.fetchall()
             if not rows:
                 return TransportSelectionResult(replica=None, exportable_replicas=0)

@@ -9,16 +9,19 @@ import torch
 
 from tensorcast.serving.builder.compiler import (
     CompiledServingRecipe,
-    TensorSchemaEntry,
     TensorcastSemanticValidationSpec,
     TensorcastServingFacts,
+    TensorSchemaEntry,
 )
 from tensorcast.serving.builder.recipe_validation import (
-    validate_recipe_for_builder_mode, )
+    validate_recipe_for_builder_mode,
+)
 from tensorcast.serving.builder.semantic_validation import (
-    evaluate_semantic_validation_spec, )
+    evaluate_semantic_validation_spec,
+)
 from tensorcast.serving.builder.tensor_schema import (
-    validate_tensor_schema_against_tensors, )
+    validate_tensor_schema_against_tensors,
+)
 from tensorcast.serving.builder.trace_ir import TracePlan
 from tensorcast.types import BuilderMode, FinalizeClass, ServingSupportLevel
 
@@ -33,7 +36,7 @@ def _recipe() -> CompiledServingRecipe:
             adapter_version="adapter-v1",
             serving_abi_version="abi-v1",
             support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY,
-            runtime_only_tensor_names=("runtime_only", ),
+            runtime_only_tensor_names=("runtime_only",),
             process_after_load_class=FinalizeClass.RUNTIME_ONLY,
             post_bind_finalize_class=FinalizeClass.RUNTIME_ONLY,
         ),
@@ -48,28 +51,32 @@ def _recipe() -> CompiledServingRecipe:
         source_hull=(),
         realization_plan=(),
         realization_fallback_plan=(),
-        logical_topology=None,
+        topology_ref=None,
+        member_ref=None,
         semantic_validation_spec=TensorcastSemanticValidationSpec.empty(),
     )
 
 
 def test_validate_recipe_for_builder_mode_accepts_pure_transform() -> None:
-    assert validate_recipe_for_builder_mode(
-        _recipe(),
-        BuilderMode.PURE_TRANSFORM,
-    ) == _recipe()
+    assert (
+        validate_recipe_for_builder_mode(
+            _recipe(),
+            BuilderMode.PURE_TRANSFORM,
+        )
+        == _recipe()
+    )
 
 
-def test_validate_recipe_for_builder_mode_rejects_binding_finalize_fact_mismatch(
-) -> None:
+def test_validate_recipe_for_builder_mode_rejects_binding_finalize_fact_mismatch() -> (
+    None
+):
     recipe = _recipe()
 
     with pytest.raises(ValueError, match="representation_changing"):
         validate_recipe_for_builder_mode(recipe, BuilderMode.BINDING_FINALIZE)
 
 
-def test_validate_recipe_for_builder_mode_rejects_non_publication_ready(
-) -> None:
+def test_validate_recipe_for_builder_mode_rejects_non_publication_ready() -> None:
     recipe = replace(
         _recipe(),
         serving_facts=replace(
@@ -87,8 +94,7 @@ class _ProbePayload:
     values: tuple[int, ...]
 
 
-def test_evaluate_semantic_validation_spec_normalizes_and_compares_payload(
-) -> None:
+def test_evaluate_semantic_validation_spec_normalizes_and_compares_payload() -> None:
     spec = TensorcastSemanticValidationSpec(
         kind="explicit",
         payload={"values": [1, 2, 3]},
@@ -97,9 +103,7 @@ def test_evaluate_semantic_validation_spec_normalizes_and_compares_payload(
     assert evaluate_semantic_validation_spec(
         spec,
         _ProbePayload(values=(1, 2, 3)),
-    ) == {
-        "values": [1, 2, 3]
-    }
+    ) == {"values": [1, 2, 3]}
 
 
 def test_evaluate_semantic_validation_spec_rejects_explicit_mismatch() -> None:
@@ -112,14 +116,17 @@ def test_evaluate_semantic_validation_spec_rejects_explicit_mismatch() -> None:
         evaluate_semantic_validation_spec(spec, {"values": [3, 2, 1]})
 
 
-def test_validate_tensor_schema_against_tensors_checks_names_shape_stride_dtype(
-) -> None:
-    schema = (TensorSchemaEntry(
-        name="w",
-        dtype=str(torch.float16),
-        shape=(2, 3),
-        stride=(3, 1),
-    ), )
+def test_validate_tensor_schema_against_tensors_checks_names_shape_stride_dtype() -> (
+    None
+):
+    schema = (
+        TensorSchemaEntry(
+            name="w",
+            dtype=str(torch.float16),
+            shape=(2, 3),
+            stride=(3, 1),
+        ),
+    )
 
     validate_tensor_schema_against_tensors(
         schema,

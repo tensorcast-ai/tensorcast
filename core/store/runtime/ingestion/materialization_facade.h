@@ -159,25 +159,13 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       const DeviceKey& target_device,
       const strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
       const loading::MaterializeHints& hints);
-
-  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_loader_into_target(
+  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_sources_into_target(
       const DeviceKey& target_device,
       const loading::IntoTargetLayout& target_layout,
-      std::unique_ptr<IArtifactLoader> loader,
+      std::vector<std::shared_ptr<loader::SeekableSource>> sources,
       const loader::ByteRangeMap& mapping,
       const loading::MaterializeHints& hints,
       loading::MaterializationSource source_kind);
-
-  absl::StatusOr<loading::ReplicaHandle> ingest_mapped_loader_into_replica(
-      std::string_view logical_artifact_id,
-      std::string_view physical_artifact_id,
-      const DeviceKey& target_device,
-      const loading::ReplicaTarget& target,
-      std::unique_ptr<IArtifactLoader> loader,
-      const loader::ByteRangeMap& mapping,
-      const loading::MaterializeHints& hints,
-      loading::MaterializationSource source_kind);
-
   absl::StatusOr<IngestMappedSourcesIntoReplicasResult> ingest_mapped_sources_into_replicas(
       std::vector<MappedReplicaTarget> targets,
       std::vector<std::shared_ptr<loader::SeekableSource>> sources,
@@ -250,18 +238,6 @@ class MaterializationFacade : public materialization::control::MaterializationBa
 
   absl::StatusOr<loading::ReplicaHandle> materialize_view_from_local_canonical(
       const loading::MaterializationRequest& request);
-
-  friend class MaterializationFacadeTestPeer;
-
-  // Internal-only composite helper. Public facade APIs remain single-loader
-  // until request/daemon contracts grow an explicit multi-source shape.
-  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_sources_into_target(
-      const DeviceKey& target_device,
-      const loading::IntoTargetLayout& target_layout,
-      std::vector<std::shared_ptr<loader::SeekableSource>> sources,
-      const loader::ByteRangeMap& mapping,
-      const loading::MaterializeHints& hints,
-      loading::MaterializationSource source_kind);
 
   template <typename SourceT, typename RunnerFn>
   absl::StatusOr<loading::ReplicaHandle> run_pipeline_ingestion(

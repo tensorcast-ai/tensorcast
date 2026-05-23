@@ -129,6 +129,7 @@ def prepare_pure_transform_serving_registration_from_context(
     source_artifact: object | None = None,
     representation_contract_hash: str | None = None,
     serving_manifest_ref: str | None = None,
+    topology_admission_digest: str | None = None,
 ) -> Any:
     return prepare_pure_transform_serving_registration(
         build_intent=build_pure_transform_build_intent(
@@ -140,6 +141,7 @@ def prepare_pure_transform_serving_registration_from_context(
         tensors=dict(tensors),
         logical_topology_json=context.logical_topology_json,
         serving_manifest_ref=serving_manifest_ref,
+        topology_admission_digest=topology_admission_digest,
     )
 
 
@@ -218,6 +220,7 @@ def prepare_binding_finalize_serving_registration_from_context(
     build_pipeline_version: str,
     representation_contract_hash: str,
     serving_manifest_ref: str | None = None,
+    topology_admission_digest: str | None = None,
 ) -> Any:
     return prepare_binding_finalize_serving_registration(
         build_intent=build_binding_finalize_build_intent(
@@ -229,6 +232,7 @@ def prepare_binding_finalize_serving_registration_from_context(
         representation_contract_hash=representation_contract_hash,
         logical_topology_json=context.logical_topology_json,
         serving_manifest_ref=serving_manifest_ref,
+        topology_admission_digest=topology_admission_digest,
     )
 
 

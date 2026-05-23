@@ -504,6 +504,7 @@ sc_cc_library(
         "//core/common:artifact_hash_lib",
         "//core/common:artifact_identity_lib",
         "//core/common:async_runtime_lib",
+        "//core/cuda:cuda_api_lib",
         "//core/store:global_store_client",
         "//core/store:store_engine",
         "//core/store/materialization/contracts:loading_spec",
@@ -1185,6 +1186,7 @@ sc_cc_library(
     hdrs = ["service/controllers/serving_artifact_manifest_utils.h"],
     deps = [
         "//core/common:artifact_hash_lib",
+        "//core/common:selection_identity_lib",
         "//core/store:store_engine",
         "//core/store/materialization/contracts:loading_spec",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
@@ -2787,6 +2789,21 @@ cc_test(
         "//core/store:testing_recording_global_store_client",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "serving_artifact_manifest_utils_test",
+    srcs = ["service/controllers/serving_artifact_manifest_utils_test.cc"],
+    deps = [
+        ":serving_artifact_manifest_utils_lib",
+        "//core/common:artifact_hash_lib",
+        "//core/store:store_engine",
+        "//core/store:store_engine_options",
+        "//core/store/materialization/dataplane:safetensors_util",
+        "@abseil-cpp//absl/types:span",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
     ],
 )
 

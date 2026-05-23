@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from tensorcast.serving._runtime_impl.lifecycle import (
+    from tensorcast.serving.runtime_attachment import (
         RuntimeAttachment,
         RuntimeBindingState,
         RuntimeBindingView,
@@ -50,7 +50,6 @@ class ModelAttributeNames:
     tensor_schema_hash: str
     runtime_binding_failure: str
     runtime_binding_failure_generation: str
-    bootstrap_summary: str
     after_ready_hooks: str
     runtime_binding_exclude_names: str
     lock: str
@@ -68,7 +67,6 @@ class ModelAttributeNames:
             runtime_binding_failure_generation=(
                 f"{normalized}_runtime_binding_failure_generation"
             ),
-            bootstrap_summary=f"{normalized}_bootstrap_summary",
             after_ready_hooks=f"{normalized}_after_ready_hooks",
             runtime_binding_exclude_names=(
                 f"{normalized}_runtime_binding_exclude_names"
@@ -186,8 +184,6 @@ class ModelAttributeRuntimeState:
             view.representation_contract_hash,
         )
         setattr(model, self.names.tensor_schema_hash, view.tensor_schema_hash)
-        if attachment.bootstrap_summary is not None:
-            self.set_bootstrap_summary(model, attachment.bootstrap_summary)
 
     def mark_failure(
         self,
@@ -224,19 +220,6 @@ class ModelAttributeRuntimeState:
                     return
             setattr(model, self.names.runtime_binding_failure, None)
             setattr(model, self.names.runtime_binding_failure_generation, None)
-
-    def set_bootstrap_summary(self, model: Any, summary: Any) -> None:
-        setattr(model, self.names.bootstrap_summary, summary)
-
-    def replace_bootstrap_summary(
-        self,
-        model: Any,
-        summary: Any,
-        **changes: Any,
-    ) -> Any:
-        updated = summary.model_copy(update=changes)
-        self.set_bootstrap_summary(model, updated)
-        return updated
 
     def add_after_ready_hook(
         self,
