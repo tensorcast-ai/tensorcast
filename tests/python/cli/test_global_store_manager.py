@@ -107,6 +107,75 @@ def test_start_global_store_records_state(monkeypatch, tmp_path):
     assert stopped_state.get("global_store", {}).get("cluster_token") == "cluster-token"
 
 
+def test_stop_global_store_prunes_reused_live_pid_without_signal(monkeypatch, tmp_path):
+    monkeypatch.setenv("TENSORCAST_HOME", str(tmp_path))
+
+    def _fake_popen(args, **kwargs):
+        return _FakeProc(2000)
+
+    health = GlobalStoreHealth(
+        address="127.0.0.1:50051",
+        listen_host="127.0.0.1",
+        listen_port=50051,
+        advertise_host="127.0.0.1",
+        advertise_port=50051,
+        metrics_port=8000,
+        cluster_token="cluster-token",
+        version="v1",
+        db_file=str(tmp_path / "global_store.duckdb"),
+    )
+
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.global_store_manager.subprocess.Popen", _fake_popen
+    )
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.global_store_manager.ensure_process_started",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.global_store_manager.wait_for_global_store",
+        lambda *args, **kwargs: health,
+    )
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.global_store_manager.start_log_threads",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.global_store_manager.ping_global_store",
+        lambda *args, **kwargs: health,
+    )
+
+    instance = start_global_store(to_console=False)
+
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.global_store_manager.os.getpgid",
+        lambda pid: 4242,
+    )
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.global_store_manager._process_group_contains_global_store",
+        lambda pgid, *, config_path: False,
+    )
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.global_store_manager._find_global_store_pgids",
+        lambda config_paths: set(),
+    )
+
+    def _fail_signal(*args, **kwargs):
+        raise AssertionError("stop_global_store signaled a reused pid group")
+
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.global_store_manager.kill_force", _fail_signal
+    )
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.global_store_manager.kill_gracefully", _fail_signal
+    )
+
+    stop_global_store(session_id=instance.id, quiet=True, force=True)
+
+    pids = json.loads(global_session_paths(instance.id).pids_json.read_text())
+    assert pids["processes"] == []
+
+
 def test_start_global_store_rotates_cluster_token_on_fresh_restart(
     monkeypatch, tmp_path
 ):

@@ -671,6 +671,12 @@ def stop_global_store(
                     pgid, config_path=config_path
                 ):
                     continue
+            else:
+                if not _process_group_contains_global_store(
+                    pgid, config_path=config_path
+                ):
+                    targets.append(pid)
+                    continue
             targets.append(pid)
             if force:
                 kill_force(int(pgid))
