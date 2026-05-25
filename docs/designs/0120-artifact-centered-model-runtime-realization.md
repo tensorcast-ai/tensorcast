@@ -4,7 +4,7 @@ title: Artifact-Centered Model Runtime Realization
 status: draft
 areas: ["sdk", "serving", "daemon", "core", "integrations", "docs", "tests"]
 created: 2026-05-23
-last_updated: 2026-05-23
+last_updated: 2026-05-25
 related_code:
   - docs/designs/0039-artifact-first-sdk.md
   - docs/designs/0078-selection-first-artifact-retrieval.md
@@ -67,6 +67,17 @@ selection, target, strategy, representation, lifecycle, execution, and report
 spine that prevents TensorDict, binding, retained prefetch, runtime attach, and
 TP from becoming separate materialization systems.
 
+As of the 2026-05-25 implementation snapshot, that shared kernel has landed for
+the main Store SDK and serving-runtime report paths. `ArtifactRealizationSpec`,
+`ArtifactRealizationHandle`, `ArtifactRealizationReport`, resource envelopes,
+release contracts, target-set reports, mounted-source reports, runtime-attachment
+reports, model-runtime report wrappers, and publication reports exist in
+`tensorcast.api.store.realization_kernel`. The remaining `0120` work is no longer
+"land 0121 first"; it is to finish the public/professional model-runtime API
+boundary, retire serving-centered public vocabulary where ownership is clearer,
+port internal-vLLM away from serving-named entrypoints, and prove the model with a
+second runtime.
+
 The decision is:
 
 - keep `Artifact` as the durable identity, routing, discovery, lifecycle, and
@@ -81,11 +92,13 @@ The decision is:
 - preserve the current vLLM scenario semantics and performance-sensitive timing
   even when TensorCast and internal-vLLM APIs are changed incompatibly.
 
-The feasibility conclusion is positive for the current internal-vLLM scenario,
-provided `0121` lands first: vLLM can move to the artifact-centered model without
-a vLLM-owned TensorDict/source/control path, but only if retained pre-admission,
-source bootstrap, runtime attachment, reload, publication, and TensorDict
-projection all lower through the same realization kernel.
+The feasibility conclusion remains positive for the current internal-vLLM
+scenario. The TensorCast side now has the kernel and report surface needed for
+that migration. Direct public `Artifact.realize(ArtifactRealizationSpec.model_runtime(...))`
+still fails closed until serving-runtime attachment lowering is exposed through
+that entrypoint; today, serving lifecycle code creates runtime-attachment and
+model-runtime realization handles internally while internal-vLLM still enters
+through `ServingRuntimeSession`.
 
 ```mermaid
 flowchart LR
@@ -249,22 +262,31 @@ The current TensorCast serving code has a clear runtime baseline:
   publication and retirement for artifact-backed active bindings.
 - `tensorcast.serving._runtime_impl.lifecycle` remains the orchestration module.
 
-The current Store SDK still exposes several artifact-driven entrypoints that
-should be unified conceptually before large API changes:
+The Store SDK realization kernel has now covered the main artifact-driven
+entrypoints:
 
-- `Artifact.tensor_dict(...)` and `Artifact.tensor_dict_into(...)` materialize
-  selected bytes into caller-observed tensors.
-- `Artifact.bind(...)` and `Artifact.bind_into(...)` materialize the same
-  selection into a daemon-owned local binding location.
-- `Artifact.prefetch(device=...)` prepares an ordinary replica, while
-  `Artifact.prefetch(target=ServingBindingTarget(...))` prepares retained
-  binding state.
-- Serving startup then consumes bindings and retained binding claims through
-  separate runtime objects.
+- `Artifact.tensor_dict(...)`, `Artifact.tensor_dict_with_diagnostics(...)`,
+  `Artifact.tensor_dict_into(...)`, `Artifact.tensor_into(...)`,
+  `Artifact.bind(...)`, and `Artifact.bind_into(...)` lower through
+  `Artifact.realize(...)` and return projections or completion through
+  `ArtifactRealizationHandle`.
+- `Artifact.prefetch(device=...)`,
+  `Artifact.prefetch(target=ServingBindingTarget(...))`, and
+  `Artifact.prefetch(target=ServingBindingSetTarget(...))` lower through
+  `Artifact.realize_async(...)` for retained replica, retained binding, and
+  target-set realization while preserving the public `Operation[T]` behavior.
+- `Store.promote_mounted_source(...)` lowers through
+  `ArtifactRealizationSpec.mounted_source(...)` and reports `msa1:` source
+  admission plus promoted durable `mi2:` identity.
+- Serving startup now attaches `ArtifactRealizationReport` data to runtime
+  attachment, model-runtime, retained acquire, and publication projections, but
+  the framework-facing entrance remains `ServingRuntimeSession`.
 
-These entrypoints already start from `Artifact`; the remaining problem is that
-they expose multiple conceptual result systems. The target state is one
-realization handle with different projections and lifecycle actions.
+These entrypoints already start from `Artifact` and now share the realization
+kernel for selection, target, strategy, lifecycle, resource envelope, report, and
+release-contract state. The remaining problem is vocabulary and API ownership:
+serving-named types still form the framework-facing surface, and direct public
+model-runtime realization is not exposed through `Artifact.realize(...)` yet.
 
 The current internal-vLLM integration exercises these semantics:
 
@@ -309,12 +331,12 @@ today, but TensorCast would keep two incompatible materialization models.
 
 | vLLM requirement | Feasibility judgement | Required TensorCast contract |
 | --- | --- | --- |
-| Conceptual integration surface | Feasible | vLLM should see artifact selection, realization spec/handle, runtime adapter, and attachment/view. It should not need serving-specific source or TensorDict control objects. |
-| TensorDict after refactor | Feasible and necessary | `Artifact.tensor_dict(...)` and `tensor_dict_into(...)` lower to the same selection resolver, target planner, strategy planner, report, and lifetime model as binding/runtime attach. |
+| Conceptual integration surface | Feasible, remaining migration | vLLM should see artifact selection, realization spec/handle, runtime adapter, and attachment/view. Current internal-vLLM still imports `ServingRuntimeSession`; the remaining work is API migration, not kernel feasibility. |
+| TensorDict after refactor | Implemented and necessary | `Artifact.tensor_dict(...)` and `tensor_dict_into(...)` lower to the same selection resolver, target planner, strategy planner, report, and lifetime model as binding/runtime attach. |
 | Retained pre-admission memory credit | Feasible but blocking | A retained realization claim must expose trusted reservation bytes before vLLM model construction and validate expected member/device/layout both at credit time and acquire time. |
-| Local HF/safetensors cold start | Feasible | vLLM source catalog output becomes a daemon-attested mounted-source artifact subject such as `msa1:...`; no source-handle-only path bypasses artifact selection or admission. |
-| Runtime model attach | Feasible | vLLM owns only adapter capabilities: meta/runtime model construction, trace capture, runtime-only tensors, finalize hooks, and semantic probes. TensorCast owns realization lifecycle. |
-| Reload and publication | Feasible with generation discipline | Runtime attachment reload and async replica publication must compare the active attachment or binding-value generation before replacing state or retiring stale published results. |
+| Local HF/safetensors cold start | Kernel implemented, integration migration remaining | vLLM source catalog output becomes a daemon-attested mounted-source artifact subject such as `msa1:...`; no source-handle-only path bypasses artifact selection or admission. |
+| Runtime model attach | Partially implemented | vLLM owns only adapter capabilities: meta/runtime model construction, trace capture, runtime-only tensors, finalize hooks, and semantic probes. TensorCast now creates model-runtime reports/handles inside serving lifecycle, but direct `Artifact.realize(model_runtime)` is still unimplemented. |
+| Reload and publication | Implemented in serving lifecycle, API cleanup remaining | Runtime attachment reload and async replica publication compare active attachment or binding-value generation before replacing state or retiring stale published results. |
 | EP/EPLB safety | Feasible as admission, not identity | Static semantic digests are representation/admission facts; live EP world size and EPLB maps must be re-read by the framework admission hook before reload. |
 | Main plus drafter models | Feasible with explicit semantics | Either model them as a target set with one reload transaction, or document the current sequential behavior where a draft failure after main reload marks the worker unhealthy. |
 
@@ -378,8 +400,13 @@ realization = artifact.realize(
 attachment = realization.attach(adapter=vllm_adapter)
 ```
 
-This is not a requirement to add this exact API immediately. It establishes the
-conceptual target:
+This remains the conceptual target for direct public/professional model-runtime
+realization. The current implementation has the DTO, report wrapper, handle
+projection, and serving-lifecycle internal handles, but direct
+`Artifact.realize(ArtifactRealizationSpec.model_runtime(...))` still fails closed
+until runtime attachment lowering moves behind this artifact entrypoint.
+
+The target rules are:
 
 - users start from `Artifact`;
 - one realization spec expresses target, profile, strategy, and admission
@@ -391,7 +418,7 @@ conceptual target:
 - current `tensorcast.serving.runtime` APIs may be reshaped directly toward this
   model because source compatibility is not a goal.
 
-Ordinary retrieval should use the same conceptual path:
+Ordinary retrieval already uses this path:
 
 ```python
 tensors = tc.artifact(key="model:qwen:weights").realize(
@@ -404,14 +431,14 @@ binding = tc.artifact(key="model:qwen:weights").realize(
 ```
 
 The existing `artifact.tensor_dict(...)`, `artifact.tensor_dict_into(...)`,
-`artifact.bind(...)`, and `artifact.bind_into(...)` methods may remain as
-convenience forms if they lower into this model. They should not define a second
-materialization architecture.
+`artifact.tensor_into(...)`, `artifact.bind(...)`, and `artifact.bind_into(...)`
+methods remain as convenience forms and now lower into this model. They should
+stay thin wrappers and must not regain independent materialization architecture.
 
 ## Realization handle and projections
 
-The public/professional result should be a single `ArtifactRealizationHandle`
-with explicit projections:
+The public/professional result is a single `ArtifactRealizationHandle` with
+explicit projections:
 
 | Projection/action | Meaning |
 | --- | --- |
@@ -427,15 +454,18 @@ prefetch, and model-runtime attach from becoming parallel top-level concepts.
 
 ## Startup paths under one model
 
-The three current startup plans map cleanly to artifact realization:
+The current startup and SDK paths map to artifact realization as follows:
 
-| Current startup plan | Artifact-centered meaning |
-| --- | --- |
-| `tensor_dict` / `tensor_dict_into` | Realize an artifact selection into a TensorDict projection |
-| `bind` / `bind_into` | Realize an artifact selection into a daemon-owned binding projection |
-| `artifact_bind` | Realize a durable representation artifact into a runtime binding |
-| `source_bootstrap_to_binding` | Normalize local source into source artifact, then realize into target binding |
-| `retained_binding_acquire` | Attach to a retained realization prepared by artifact prefetch |
+| Current path | Artifact-centered meaning | Current implementation status |
+| --- | --- | --- |
+| `tensor_dict` / `tensor_dict_into` / `tensor_into` | Realize an artifact selection into a TensorDict or caller-tensor projection | implemented through `Artifact.realize(...)` |
+| `bind` / `bind_into` | Realize an artifact selection into a daemon-owned or adopted binding projection | implemented through `Artifact.realize(...)` |
+| `prefetch(device=...)` | Prepare a retained replica through async realization | implemented through `Artifact.realize_async(...)` |
+| `prefetch(target=...)` | Prepare retained binding or target-set handoff | implemented through `Artifact.realize_async(...)` |
+| `artifact_bind` | Realize a durable representation artifact into a runtime binding | implemented in serving lifecycle with runtime-attachment report/handle |
+| `source_bootstrap_to_binding` | Normalize local source into source artifact, then realize into target binding | implemented in serving lifecycle with mounted-source/report state |
+| `retained_binding_acquire` | Attach to a retained realization prepared by artifact prefetch | implemented in serving lifecycle with retained acquire report/handle |
+| `model_runtime` direct artifact entrypoint | Attach a framework adapter through `Artifact.realize(...).attach(...)` | not yet lowered through public `Artifact.realize(...)`; serving lifecycle creates model-runtime handles internally |
 
 The internal plans should remain explicit. The change is that they become
 variants under artifact realization, not serving lifecycle branches or
@@ -562,15 +592,18 @@ but their semantics should not be silently removed.
 
 ## Public user API
 
-Public APIs should be artifact-first and small:
+Public APIs should stay artifact-first and small:
 
 - `tc.artifact(...)` and `tc.from_disk(...)` remain the root.
-- `Artifact.realize(spec=...)` is the target long-term model for TensorDict,
-  binding, retained prefetch, and model-runtime attach.
-- `Artifact.prefetch(...)` may remain as a convenience method when it lowers to
-  `realize(...).prefetch_handoff()` or ordinary replica preparation.
-- TensorDict helpers may remain as convenience methods when they lower to
-  `realize(...).tensor_dict()`.
+- `Artifact.realize(spec=...)` is implemented for TensorDict, caller tensors,
+  owned/adopted binding, and mounted-source realization. It remains the target
+  public model for direct model-runtime attach.
+- `Artifact.realize_async(spec=...)` is implemented for retained replica,
+  retained binding, and target-set handoff where operation semantics are required.
+- `Artifact.prefetch(...)` remains a convenience method that lowers to async
+  realization while preserving `Operation[T]` status/wait/cancel behavior.
+- TensorDict and binding helpers remain convenience methods because they now lower
+  to `Artifact.realize(...)`.
 - Publication belongs to the realization handle or binding value, not to a
   second serving-specific authority.
 
@@ -581,12 +614,13 @@ explicit than the public API:
 
 - `RuntimeAdapter` for model construction, tensor surface, finalize hooks, and
   semantic probes;
-- `ArtifactRealizationSpec` or `ModelRuntimeProfile` fields for framework
-  identity, ABI, source catalog policy, and admission policy;
-- `ArtifactRealizationHandle` for projection, acquire, attach, reload, and
-  publication actions;
-- `RetainedRealizationClaim` for pre-admission trusted reservation credit and
-  acquire validation;
+- `ArtifactRealizationSpec.model_runtime(...)` fields for framework identity,
+  ABI, topology/member facts, and adapter identity;
+- `ArtifactRealizationHandle` for projection, acquire, attach, release-contract,
+  promotion, and publication actions;
+- retained realization claim semantics for pre-admission trusted reservation
+  credit and acquire validation; current wire/config names still use retained
+  serving binding authority;
 - `RuntimeAttachment` for process-local state and close/reload/publication
   projection;
 - framework admission hooks for live runtime facts that cannot be durable
@@ -635,23 +669,34 @@ Migrate once the vLLM scenario matrix is covered by tests and docs.
 
 # Naming Compliance
 
-Any new Python API proposed here must follow repository style:
+Any new Python API proposed here must follow repository style. The 2026-05-25
+snapshot splits implemented names from future naming candidates:
 
-| Symbol | Kind | Required style | Status |
-| --- | --- | --- | --- |
-| `ModelRuntimeTarget` | Python class | `PascalCase` | compliant |
-| `ModelRuntimeProfile` | Python class | `PascalCase` | compliant |
-| `ArtifactRealizationSpec` | Python class | `PascalCase` | compliant |
-| `ArtifactRealizationHandle` | Python class | `PascalCase` | compliant |
-| `ArtifactRealizationPlan` | Python class | `PascalCase` | compliant |
-| `ArtifactRealizationReport` | Python class | `PascalCase` | compliant |
-| `RetainedRealizationClaim` | Python class | `PascalCase` | compliant |
-| `PrefetchHandoff` | Python class | `PascalCase` | compliant |
-| `RuntimeAttachment` | Python class | `PascalCase` | compliant |
-| `Artifact.realize` | Python method | `snake_case` | compliant |
-| `Artifact.prefetch` | Python method | `snake_case` | existing compliant |
-| `publish_replica` | Python function/method | `snake_case` | compliant |
-| `retire_replica` | Python function/method | `snake_case` | compliant |
+| Symbol | Status | Kind | Required style | Notes |
+| --- | --- | --- | --- | --- |
+| `ArtifactRealizationSpec` | implemented/exported | Python class | `PascalCase` | shared target intent DTO |
+| `ArtifactRealizationHandle` | implemented/exported | Python class | `PascalCase` | projection and lifecycle facade |
+| `ArtifactRealizationReport` | implemented/exported | Python class | `PascalCase` | shared report DTO |
+| `ResolvedArtifactSelection` | implemented/exported | Python class | `PascalCase` | canonical selection resolver result |
+| `RealizationTargetPlan` | implemented/exported | Python class | `PascalCase` | target-plan identity |
+| `RealizationStrategyPlan` | implemented/exported | Python class | `PascalCase` | strategy/admission facts |
+| `RepresentationAdmissionPlan` | implemented/exported | Python class | `PascalCase` | representation compatibility facts |
+| `RealizationLifecyclePlan` | implemented/exported | Python class | `PascalCase` | lifecycle capability facts |
+| `RealizationResourceEnvelope` | implemented/exported | Python class | `PascalCase` | backing/export/projection/owner/cost model |
+| `RealizationReleaseContract` | implemented/exported | Python class | `PascalCase` | idempotent release action contract |
+| `RealizationModelRuntimeReport` | implemented/exported | Python class | `PascalCase` | model-runtime report payload |
+| `RealizationMountedSourceReport` | implemented/exported | Python class | `PascalCase` | `msa1:` promotion report payload |
+| `RealizationPublicationReport` | implemented/exported | Python class | `PascalCase` | runtime publication report payload |
+| `RuntimeAttachment` | implemented/exported | Python class | `PascalCase` | process-local framework boundary |
+| `Artifact.realize` | implemented method | Python method | `snake_case` | direct model-runtime lowering still unimplemented |
+| `Artifact.realize_async` | implemented method | Python method | `snake_case` | retained operation targets |
+| `Artifact.prefetch` | implemented method | Python method | `snake_case` | convenience wrapper over async realization |
+| `publish_replica` | implemented/future method family | Python function/method | `snake_case` | binding/publication action naming |
+| `retire_replica` | implemented/future method family | Python function/method | `snake_case` | publication retirement naming |
+| `ModelRuntimeTarget` | future candidate | Python class | `PascalCase` | add only if fields do not belong in `ArtifactRealizationSpec` |
+| `ModelRuntimeProfile` | future candidate | Python class | `PascalCase` | add only if runtime profile needs a separate public object |
+| `RetainedRealizationClaim` | future candidate | Python class | `PascalCase` | rename path for retained serving authority semantics |
+| `PrefetchHandoff` | future candidate | Python class | `PascalCase` | public handoff name if retained result types are renamed |
 
 # Error Model And Invariants
 
@@ -743,25 +788,31 @@ semantic replacement exists and is wired into vLLM.
 
 # Implementation Direction
 
-No source compatibility guarantee is required. The implementation should be
-phased only to protect behavior and reviewability, not to preserve old imports
-or parameter names:
+No source compatibility guarantee is required. The implementation should now be
+phased around the remaining ownership gaps, not around landing the shared kernel:
 
-1. Use current serving-runtime behavior as the baseline and refactor the
-   implementation toward artifact-centered concepts directly.
-2. Collapse TensorDict, binding, prefetch, and model-runtime attach onto the
-   same realization spec/handle model before broad public renaming.
-3. Port internal-vLLM in the same execution window as TensorCast API changes,
-   because internal-vLLM is part of the controlled system.
+1. Treat `0121` as the landed kernel baseline for TensorDict, caller tensors,
+   binding, retained prefetch, target sets, mounted source, runtime attachment
+   reports, model-runtime report wrappers, and publication reports.
+2. Keep current serving-runtime behavior as the regression baseline while
+   exposing direct model-runtime realization through the artifact-centered API.
+3. Port internal-vLLM from `ServingRuntimeSession` naming to the successor
+   artifact/runtime API in the same execution window as any TensorCast API
+   changes, because internal-vLLM is part of the controlled system.
 4. Delete or narrow serving-centered public imports when the replacement exists.
 5. Keep internal names only where they accurately describe implementation
-   ownership.
+   ownership or serving ABI semantics.
 
 # Acceptance Criteria
 
-- A new design and plan exist for the artifact-centered model-runtime direction;
-  current serving-runtime behavior is captured here as baseline rather than in
-  a separate serving-centered design.
+- A design and plan exist for the artifact-centered model-runtime direction;
+  current serving-runtime behavior is captured here as baseline rather than in a
+  separate serving-centered design.
+- The shared realization kernel from `0121` is treated as current baseline, not
+  future prerequisite work.
+- Direct public model-runtime realization has an explicit remaining-work marker
+  until `Artifact.realize(ArtifactRealizationSpec.model_runtime(...))` no longer
+  fails closed.
 - The vLLM scenario matrix in this design is treated as a required migration
   checklist.
 - The vLLM reference case is feasible without a vLLM-owned parallel TensorDict,

@@ -433,6 +433,7 @@ class ReplicaRepository(BaseRepository):
             view_ids = _transport_view_ids(view_id, canonical_equivalent_view_ids)
             view_placeholders = ", ".join("?" for _ in view_ids)
             alias_ids = tuple(view_ids[1:]) if view_id is None else ()
+            alias_order = {alias: index for index, alias in enumerate(alias_ids)}
             alias_order_sql = ""
             order_params: list[str] = []
             if alias_ids:
@@ -543,15 +544,18 @@ class ReplicaRepository(BaseRepository):
                 )
                 ranked_candidates = sorted(
                     eligible_candidates,
-                    key=lambda candidate: self._source_balance_sort_key(
-                        candidate,
-                        worker_loads,
-                        now_ts,
-                        weights,
-                        group_source_counts=normalized_group_source_counts,
-                        group_candidate_count=group_candidate_count,
-                        group_source_spread_weight=spread_policy.spread_weight,
-                        group_source_penalty_scale=group_penalty_scale,
+                    key=lambda candidate: (
+                        self._alias_preference_rank(candidate, alias_order),
+                        *self._source_balance_sort_key(
+                            candidate,
+                            worker_loads,
+                            now_ts,
+                            weights,
+                            group_source_counts=normalized_group_source_counts,
+                            group_candidate_count=group_candidate_count,
+                            group_source_spread_weight=spread_policy.spread_weight,
+                            group_source_penalty_scale=group_penalty_scale,
+                        ),
                     ),
                 )
 
@@ -784,6 +788,16 @@ class ReplicaRepository(BaseRepository):
             cls._last_assigned_timestamp_seconds(candidate.last_assigned_at),
             str(replica.replica_id),
         )
+
+    @staticmethod
+    def _alias_preference_rank(
+        candidate: TransportCandidate,
+        alias_order: dict[str, int],
+    ) -> int:
+        if not alias_order:
+            return 0
+        view_id = candidate.replica.byte_space.id or ""
+        return alias_order.get(view_id, len(alias_order))
 
     def get_transport_eligibility_snapshot(
         self,

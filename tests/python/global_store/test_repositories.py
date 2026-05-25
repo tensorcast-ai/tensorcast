@@ -3,11 +3,13 @@
 """Tests for Global Store repository layer."""
 
 from datetime import datetime, timezone
+from uuid import UUID
 
 import pytest
 
 from tensorcast.global_store.exceptions import DatabaseError
 from tensorcast.global_store.models import (
+    ByteSpaceRef,
     ExportState,
     MemoryType,
     Replica,
@@ -413,6 +415,76 @@ class TestRepositories:
         assert selected.node_id == "node_high_cap"
         assert selected.current_requests == 2
 
+    def test_group_dispatch_preserves_canonical_alias_preference(self, repositories):
+        """Canonical requests should prefer full-identity view aliases."""
+        replica_repo = repositories["replica"]
+        worker_repo = repositories["worker"]
+
+        worker = Worker(
+            worker_id="worker_alias_preference",
+            daemon_id="daemon_alias_preference",
+            node_id="node_alias_preference",
+            node_address="192.168.30.1",
+            grpc_port=50401,
+            p2p_port=50402,
+            mem_pool_total_size=1024,
+            mem_pool_available_size=1024,
+            accepting_new_requests=True,
+        )
+        worker_repo.create(worker)
+        assert worker_repo.update_heartbeat(worker.worker_id, 1024, True) is True
+
+        artifact_id = "alias_preference_artifact"
+        identity_view_id = "identity-view"
+        replica_repo.create(
+            Replica(
+                replica_id=UUID("00000000-0000-0000-0000-000000000001"),
+                artifact_id=artifact_id,
+                byte_space=ByteSpaceRef.canonical(),
+                node_id=worker.node_id,
+                node_address=worker.node_address,
+                node_port=8080,
+                memory_size=1024,
+                memory_type=MemoryType.GPU,
+                device_id=0,
+                remote_memory_keys=["canonical-key"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
+                max_concurrency=1,
+                worker_id=worker.worker_id,
+            )
+        )
+        replica_repo.create(
+            Replica(
+                replica_id=UUID("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+                artifact_id=artifact_id,
+                byte_space=ByteSpaceRef.view(identity_view_id),
+                node_id=worker.node_id,
+                node_address=worker.node_address,
+                node_port=8081,
+                memory_size=1024,
+                memory_type=MemoryType.GPU,
+                device_id=0,
+                remote_memory_keys=["view-key"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
+                max_concurrency=1,
+                worker_id=worker.worker_id,
+            )
+        )
+
+        selection = replica_repo.find_available_for_transport(
+            artifact_id=artifact_id,
+            view_id=None,
+            canonical_equivalent_view_ids=(identity_view_id,),
+            heartbeat_timeout_seconds=60,
+            scheduler_mode="GROUP_DISPATCH",
+        )
+
+        assert selection.replica is not None
+        assert selection.replica.byte_space == ByteSpaceRef.view(identity_view_id)
+        assert selection.replica.remote_memory_keys == ["view-key"]
+
     def test_replica_re_registration_does_not_reset_inflight_counter(
         self, repositories
     ):
@@ -756,8 +828,12 @@ class TestRepositories:
             outcome=TransportCompletionOutcome.SUCCESS,
         )
 
-        start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        end = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59, microsecond=0)
+        start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        end = datetime.now(timezone.utc).replace(
+            hour=23, minute=59, second=59, microsecond=0
+        )
         rows_before_cleanup = transport_repo.list_rows_in_created_window(
             started_at=start,
             finished_at=end,
@@ -786,7 +862,9 @@ class TestRepositories:
             limit=100,
         )
         matched_after_cleanup = [
-            row for row in rows_after_cleanup if row.transport_id == str(transport.transport_id)
+            row
+            for row in rows_after_cleanup
+            if row.transport_id == str(transport.transport_id)
         ]
         assert len(matched_after_cleanup) == 1
         assert matched_after_cleanup[0].replica_memory_size_bytes == 4096
