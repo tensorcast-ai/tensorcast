@@ -3770,16 +3770,18 @@ class ServingIntegration:
         return self.build_local_ready_manifest_carrier_from_contract(
             recipe=recipe,
             manifest_tensor_name=manifest_tensor_name,
-            representation_contract_hash_factory=lambda tensor_schema_hash: self.local_ready_representation_contract_hash(
-                tensor_schema_hash=tensor_schema_hash,
-                model_config=model_config,
-                placement=placement,
-                runtime_binding_schema_version=runtime_binding_schema_version,
-                serving_artifact_schema_version=serving_artifact_schema_version,
-                framework_name=framework_name,
-                framework_version=framework_version,
-                adapter_version=adapter_version,
-                serving_abi_version=serving_abi_version,
+            representation_contract_hash_factory=lambda tensor_schema_hash: (
+                self.local_ready_representation_contract_hash(
+                    tensor_schema_hash=tensor_schema_hash,
+                    model_config=model_config,
+                    placement=placement,
+                    runtime_binding_schema_version=runtime_binding_schema_version,
+                    serving_artifact_schema_version=serving_artifact_schema_version,
+                    framework_name=framework_name,
+                    framework_version=framework_version,
+                    adapter_version=adapter_version,
+                    serving_abi_version=serving_abi_version,
+                )
             ),
             topology=getattr(placement, "topology", None),
             framework_payload=getattr(placement, "framework_payload", {}),
