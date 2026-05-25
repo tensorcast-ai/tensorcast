@@ -900,7 +900,7 @@ def emit_artifact_realization_profile_event(
 
 def _tensor_nbytes(tensor: object) -> int:
     try:
-        return int(tensor.element_size()) * int(tensor.numel())  # type: ignore[attr-defined]
+        return int(tensor.element_size()) * int(tensor.numel())
     except (AttributeError, TypeError, ValueError):
         return 0
 
