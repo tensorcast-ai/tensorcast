@@ -1,8 +1,5 @@
 // Copyright (c) 2026, TensorCast Team.
 
-/**
- *  Copyright (C) by StepAI Contributors. 2025.
- */
 #include <dlfcn.h>
 #include <errno.h>
 extern "C" {

@@ -25,7 +25,7 @@ related_code:
   - core/store/materialization/contracts/representation_contract.h
   - core/store/runtime/ingestion/materialization_facade.cc
   - core/store/replica/collective_disk_loader.cc
-  - /data/workspace/internal-vllm/docs/design/tensorcast_collective_first_binding_realization_plan.md
+  - /opt/vllm/docs/design/tensorcast_collective_first_binding_realization_plan.md
 links:
   dependencies:
     - ./0084-binding-unified-model-and-contract.md
@@ -42,7 +42,7 @@ links:
   related:
     - ./0120-artifact-centered-model-runtime-realization.md
     - ./0121-unified-artifact-realization-kernel.md
-    - ./0113-step3p5-closure-and-sot-convergence.md
+    - ./0113-example-tp-model-closure-and-sot-convergence.md
     - ../benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md
 ---
 
@@ -100,7 +100,7 @@ shared abstractions it touches:
 - `0108` remains the owner of lane planning and mixed-execution strategy,
 - `0109` remains the owner of the owner-file collective executor,
 - `0113` remains the owner of the cross-design closure constraints, capability
-  and version handoff, and delete-gate invariants for the residual Step3p5
+  and version handoff, and delete-gate invariants for the residual Example TP Model
   work,
 - and the closure evidence for this path now lives directly in this design plus
   `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`.
@@ -125,7 +125,7 @@ The target interpretation is:
 
 What this design needed from the live system is now present:
 
-- downstream `internal-vllm` `/weight_version` summary records
+- downstream `vllm` `/weight_version` summary records
   `source_bound_contract_version=4`,
   `source_bound_contract_path=collective_first_v4`,
   `execution_plan_kind=collective_first_mixed`,
@@ -200,7 +200,7 @@ executor selection begins.
   path.
 - Surface planner and lane diagnostics explicitly through daemon responses and
   SDK types.
-- Keep downstream `internal-vllm` integration on the common TensorCast runtime,
+- Keep downstream `vllm` integration on the common TensorCast runtime,
   not on a vLLM-private fast path.
 
 ## Non-Goals
@@ -897,9 +897,9 @@ This contract must hold across:
 - SDK typed diagnostics,
 - downstream integration summaries.
 
-# Step3p5 As The Motivating Example
+# Example TP Model As The Motivating Example
 
-Step3p5 is not a special one-off exception.
+Example TP Model is not a special one-off exception.
 It is simply a representative example of a TP startup request that exercises the
 current mismatch.
 
@@ -924,7 +924,7 @@ What should happen instead:
   diagnostics;
 - only truly unsupported leftovers remain in generic residual fallback.
 
-This is the intended generic solution for TP startup, not a Step3p5-only
+This is the intended generic solution for TP startup, not a Example TP Model-only
 special case.
 
 # Module Coordination
@@ -998,7 +998,7 @@ Required evidence classes are:
   - no duplicate byte coverage
   - no implicit widening after partial execution
 - mounted serving evidence
-  - representative TP startup cases such as Step3p5 / Mixtral
+  - representative TP startup cases such as Example TP Model / Mixtral
   - lane byte breakdown
   - dominant executor shift away from generic-only path
 - downstream integration evidence
@@ -1068,5 +1068,5 @@ This design is complete only when all of the following are true.
 7. `source_bound_contract_version = 4` marks the additive contract landing for
    true residual semantics, strict preflight, and split planner/execution
    diagnostics on this path.
-8. downstream `internal-vllm` integration remains on the shared TensorCast
+8. downstream `vllm` integration remains on the shared TensorCast
    runtime trunk and does not introduce a private execution fork.

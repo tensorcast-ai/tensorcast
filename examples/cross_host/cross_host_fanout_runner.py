@@ -189,7 +189,7 @@ def run_remote(
         run_as_user=_resolved_remote_run_as_user(),
     )
     cmd = (
-        f"brainctl exec process/{process_id} -n shai-core -- bash -lc "
+        f"orchestratorctl exec process/{process_id} -n tensorcast -- bash -lc "
         f"{shlex.quote(wrapped_cmd)}"
     )
     return run(cmd, timeout_sec=timeout_sec)
@@ -228,24 +228,24 @@ def collect_worker_failure_probe(
     }
     per_call_timeout = max(5.0, min(60.0, float(timeout_sec)))
 
-    get_cmd = f"brainctl get process {worker.process_id} -n shai-core --no-headers"
+    get_cmd = (
+        f"orchestratorctl get process {worker.process_id} -n tensorcast --no-headers"
+    )
     try:
-        probe["brainctl_get_process"] = _tail_text(
+        probe["orchestratorctl_get_process"] = _tail_text(
             run(get_cmd, timeout_sec=per_call_timeout)
         )
     except Exception as exc:  # noqa: BLE001
-        probe["brainctl_get_process_error"] = str(exc)
+        probe["orchestratorctl_get_process_error"] = str(exc)
 
-    describe_cmd = (
-        f"brainctl describe process/{worker.process_id} -n shai-core | sed -n '1,140p'"
-    )
+    describe_cmd = f"orchestratorctl describe process/{worker.process_id} -n tensorcast | sed -n '1,140p'"
     try:
-        probe["brainctl_describe_head"] = _tail_text(
+        probe["orchestratorctl_describe_head"] = _tail_text(
             run(describe_cmd, timeout_sec=per_call_timeout),
             max_chars=6000,
         )
     except Exception as exc:  # noqa: BLE001
-        probe["brainctl_describe_error"] = str(exc)
+        probe["orchestratorctl_describe_error"] = str(exc)
 
     remote_probe_cmd = (
         "set -euo pipefail; "
@@ -2626,7 +2626,7 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Collect on-failure worker diagnostics (brainctl get/describe + "
+            "Collect on-failure worker diagnostics (orchestratorctl get/describe + "
             "remote daemon status probe)."
         ),
     )

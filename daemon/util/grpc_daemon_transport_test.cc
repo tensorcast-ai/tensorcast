@@ -22,6 +22,8 @@ namespace {
 
 constexpr std::size_t kLargePayloadBytes = (4U << 20U) + 1024U;
 
+// Test-only self-signed mTLS fixtures. These keys are not used by any
+// production or example configuration.
 constexpr char kCaCertPem[] = R"(-----BEGIN CERTIFICATE-----
 MIIDGzCCAgOgAwIBAgIUXeqZ4PVXCLRPgyJkup3nWR2HNHowDQYJKoZIhvcNAQEL
 BQAwHTEbMBkGA1UEAwwSdGVuc29yY2FzdC10ZXN0LWNhMB4XDTI2MDMxMTE1Mjk1

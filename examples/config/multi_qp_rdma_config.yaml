@@ -8,7 +8,7 @@
 
 meta:
   description: "High-performance RDMA configuration with multi-QP support"
-  cluster_token: "multi-qp-demo"
+  cluster_token: ""
 
 server:
   listen:

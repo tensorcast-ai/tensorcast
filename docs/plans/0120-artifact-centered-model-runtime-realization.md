@@ -30,7 +30,7 @@ links:
 
 # Objective
 
-Plan the successor work from the current serving-runtime baseline: move
+Plan the successor work from the current vllm baseline: move
 TensorCast TensorDict retrieval, binding, prefetch, and model-runtime loading
 from parallel surfaces toward one artifact-centered realization model while
 preserving all vLLM behavior and performance-sensitive semantics.
@@ -44,7 +44,7 @@ allowed.
 
 # Current State & Grounding
 
-The current serving-runtime baseline is implemented and folded into `0120` as
+The current vllm baseline is implemented and folded into `0120` as
 context. It is not a separate long-term public model.
 - `tensorcast.serving.runtime` is the narrow framework-facing runtime API.
 - `tensorcast.serving.config` selects exactly one startup plan.
@@ -74,7 +74,7 @@ baseline:
   reports are implemented and exported from the Store SDK.
 - Direct `Artifact.realize(ArtifactRealizationSpec.model_runtime(...))` still
   fails closed. Serving lifecycle code creates runtime-attachment and
-  model-runtime handles internally while internal-vLLM still enters through
+  model-runtime handles internally while vllm still enters through
   `ServingRuntimeSession`.
 - Daemon materialization already has the key performance primitives the target
   API must preserve: `MaterializeReplica` tries the artifact LIP/local-replica
@@ -114,7 +114,7 @@ Current gaps against the `0120` target state:
 - Publication generation, active-generation checks, replay, reload rejection,
   and shutdown retirement already exist in serving publication code but are not
   yet formalized as the shared artifact-runtime publication/CAS contract.
-- A fake second framework already proves the serving runtime is not purely
+- A fake second framework already proves the vllm is not purely
   vLLM-shaped, but the proof still enters through `ServingRuntimeSession`; it
   must be repeated on the direct artifact-runtime API.
 - Serving-rooted public DTOs and helpers remain broadly exported. They must be
@@ -137,13 +137,13 @@ Execution order:
    the docs/examples use the real target API shape.
 3. Finish direct public/professional model-runtime realization instead of routing
    framework integrations through serving-named session APIs.
-4. Port internal-vLLM in the same execution window as TensorCast API changes.
+4. Port vllm in the same execution window as TensorCast API changes.
 5. Delete or internalize serving-centered public names, compatibility wrappers,
    redundant diagnostics, and duplicate tests once replacements are wired.
 6. Prove the boundary with SGLang or a minimal second runtime adapter through the
    direct artifact-runtime API.
 
-The internal-vLLM baseline depends on these surfaces:
+The vllm baseline depends on these surfaces:
 
 - `vllm/tensorcast/loader.py`: session start, attachment storage, in-place
   reload, replica publication, local-ready durable promotion.
@@ -161,7 +161,7 @@ The internal-vLLM baseline depends on these surfaces:
 
 Feasibility result for the current scenario:
 
-- internal-vLLM can adapt cleanly to the artifact-centered model because its
+- vllm can adapt cleanly to the artifact-centered model because its
   TensorCast loader is already concentrated behind model loader, placement,
   source, adapter, and worker reload/publication surfaces;
 - vLLM does not need a direct TensorCast TensorDict model-loading API, and
@@ -211,13 +211,13 @@ tests, then delete or internalize the old public serving surface in the same
 cleanup window. A phase is incomplete if old and new public paths both remain as
 supported peer entrypoints.
 
-# internal-vLLM Migration Slice
+# vllm Migration Slice
 
-TensorCast and internal-vLLM changes should land in one coordinated window
+TensorCast and vllm changes should land in one coordinated window
 because both sides are under our control and no source compatibility guarantee is
 required.
 
-| internal-vLLM owner | Current TensorCast dependency | Target interaction | Completion signal |
+| vllm owner | Current TensorCast dependency | Target interaction | Completion signal |
 | --- | --- | --- | --- |
 | `vllm/tensorcast/loader.py` | `ServingConfig`, `IntegrationHost`, `ServingRuntimeSession`, `RuntimeAttachment` | build artifact/runtime request, call direct `Artifact.realize(... model_runtime ..., runtime_host=...)`, store `handle.attachment()` | startup, reload, required-publication, and local-ready promotion smoke tests no longer instantiate `ServingRuntimeSession` |
 | `vllm/tensorcast/host.py` | `tensorcast.serving.hosts.IntegrationHost` | construct `RuntimeHostCapabilities` or transitional alias with deletion trigger | host construction has no public serving-session dependency |
@@ -227,7 +227,7 @@ required.
 | `vllm/tensorcast/collective.py` | serving-local collective coordination | realization strategy and target-set coordination facts | TP same-node startup uses shared target-set strategy reports |
 | `vllm/tensorcast/retained_binding.py` | retained-serving-binding helpers | retained realization claim helpers | retained startup validates claim through neutral naming |
 | `vllm/model_executor/model_loader/memory_accounting.py` | `tensorcast.serving.retained_binding` trusted bytes | retained realization claim trusted reservation bytes | memory credit still occurs before vLLM admission without public serving imports |
-| `vllm/tensorcast/runtime_view.py` and `gpu_model_runner.py` | serving runtime view, session shutdown retirement, serving policy helpers | runtime attachment/view projection and artifact-runtime retirement actions | runtime view, reload, and shutdown tests use artifact-runtime actions |
+| `vllm/tensorcast/runtime_view.py` and `gpu_model_runner.py` | vllm view, session shutdown retirement, serving policy helpers | runtime attachment/view projection and artifact-runtime retirement actions | runtime view, reload, and shutdown tests use artifact-runtime actions |
 | `vllm/tensorcast/builder/*` | serving builder/publication helpers | keep only if the payload is serving-ABI-specific; otherwise move to artifact publication actions | remaining builder imports are documented as internal/offline ABI-specific paths |
 
 # Performance Migration Gates
@@ -238,7 +238,7 @@ path.
 
 | Gate | What to prove | Concrete check |
 | --- | --- | --- |
-| No TensorDict intermediate | `Artifact.realize(... model_runtime ...)` attaches a binding/retained value directly instead of first calling TensorDict materialization. | Direct API tests and internal-vLLM startup tests fail if normal model-runtime startup calls TensorDict projection helpers, Python builder materializers, or full state-dict loaders. |
+| No TensorDict intermediate | `Artifact.realize(... model_runtime ...)` attaches a binding/retained value directly instead of first calling TensorDict materialization. | Direct API tests and vllm startup tests fail if normal model-runtime startup calls TensorDict projection helpers, Python builder materializers, or full state-dict loaders. |
 | Fast source selection preserved | Retained, local replica/LIP, P2P, disk, mounted-source/direct-write, and explicit-transform cases report the expected selected source and fallback status. | Artifact-realization reports assert source kind, fallback reason bucket, copy bytes, temporary bytes, retained bytes, and direct-write bytes for each representative path. |
 | No extra GPU weight residency | Steady-state runtime attach owns one TensorCast weight residency plus framework runtime-only tensors; direct API migration does not keep both serving and artifact-runtime owners. | vLLM smoke/profile captures CUDA allocated/reserved deltas around startup and reload, checks `_vllm_external_weight_bytes`/retained credit, and verifies old attachment/binding handles are retired. |
 | No full host-memory staging | Normal durable, retained, and mounted-source startup do not build a full Python `dict[str, torch.Tensor]`, full safetensors state dict, or full CPU copy of weights. | RSS/profile events and call-site audit keep full host materialization limited to explicit offline builder workflows. |
@@ -252,10 +252,10 @@ path for the same compatibility class.
 
 # Phases & Milestones
 
-- [x] Phase 1: Freeze The Current Serving Runtime Baseline
+- [x] Phase 1: Freeze The Current vllm Baseline
   - [x] Remove the standalone serving-centered design and fold baseline context
         into `0120`.
-  - [x] Record the current serving-runtime code/module state and mark behavior
+  - [x] Record the current vllm code/module state and mark behavior
         contracts versus temporary names.
   - [x] Capture the vLLM scenario matrix with owner files and expected behavior
         in the design.
@@ -328,7 +328,7 @@ path for the same compatibility class.
         binding arguments (`mapping` / target-plan DTOs), not stale `layout=...`
         placeholders.
 
-- [ ] Phase 5: Migrate internal-vLLM To The Successor Boundary
+- [ ] Phase 5: Migrate vllm to the successor boundary
   - [ ] Port `TensorcastModelLoader` startup from serving session naming to the
         successor artifact-runtime API.
   - [ ] Port `vllm/tensorcast/host.py` from public `IntegrationHost`
@@ -348,14 +348,14 @@ path for the same compatibility class.
   - [ ] Keep `VLLMTensorcastAdapter` as the owner for model construction,
         trace capture, runtime-only tensor rehydration, finalize hooks, and
         semantic probes.
-  - [ ] Add internal-vLLM profile/smoke coverage for CUDA allocated/reserved
+  - [ ] Add vllm profile/smoke coverage for CUDA allocated/reserved
         deltas, host RSS deltas, selected source kind, attach/finalize timing,
         reload overlap, and old-handle retirement.
   - [ ] Preserve in-place reload response projection, stale/duplicate reload
         handling, after-ready publication, required-publication failure state,
         stale publication retirement, shutdown retirement, EP/EPLB reload
         safety, and drafter sequential failure/unhealthy behavior.
-  - [ ] Remove normal internal-vLLM startup, reload, memory-accounting,
+  - [ ] Remove normal vllm startup, reload, memory-accounting,
         runtime-view, and shutdown imports of public `tensorcast.serving.*`
         APIs after replacement paths pass.
 
@@ -394,7 +394,7 @@ after its replacement is wired.
 
 | Current surface | Replacement owner | Delete/internalize after | Guardrail |
 | --- | --- | --- | --- |
-| `ServingRuntimeSession` public runtime root | `Artifact.realize(... model_runtime ..., runtime_host=...)` plus completed `ArtifactRealizationHandle.attachment()` | internal-vLLM startup/reload/shutdown and second-runtime fixture use the direct API | import/call-site search shows no normal public startup path instantiates `ServingRuntimeSession`; smoke tests show no extra binding owner or TensorDict intermediate |
+| `ServingRuntimeSession` public runtime root | `Artifact.realize(... model_runtime ..., runtime_host=...)` plus completed `ArtifactRealizationHandle.attachment()` | vllm startup/reload/shutdown and second-runtime fixture use the direct API | import/call-site search shows no normal public startup path instantiates `ServingRuntimeSession`; smoke tests show no extra binding owner or TensorDict intermediate |
 | `ServingConfig` as public runtime request | artifact/runtime request DTOs and profile policy fields | loader/source/reload paths parse the new request and preserve behavior | semantic field-map tests cover durable, source, retained, diagnostics, publication, and reload inputs |
 | `serving_runtime_policy` on generic realization specs | neutral runtime profile/preflight policy or binding-specific options object | binding/runtime preflight no longer needs serving-rooted field names | spec construction tests use neutral field names; old field rejected or private |
 | `ServingArtifactLocator` | artifact locator or artifact selection locator | durable startup and reload resolve through artifact selection | reload/startup tests assert artifact selection digest and no serving locator authority |
@@ -426,7 +426,7 @@ after its replacement is wired.
 - Move `serving_runtime_policy` out of the generic realization spec or fence it
   behind a transitional binding/runtime-profile options object with a deletion
   trigger.
-- Build a current internal-vLLM import/call-site table showing every remaining
+- Build a current vllm import/call-site table showing every remaining
   `ServingRuntimeSession`, `ServingConfig`, retained-binding, publication, and
   runtime-view dependency.
 - Create the semantic field map from current `model_loader_extra_config` to
@@ -437,11 +437,11 @@ after its replacement is wired.
   after-ready publication, reload retirement, and shutdown retirement as the
   vLLM migration acceptance rule.
 - Add direct model-runtime realization tests once the public lowering exists.
-- Add or update internal-vLLM smoke/integration tests for startup, retained
+- Add or update vllm smoke/integration tests for startup, retained
   memory credit, local source cold start, durable artifact startup, in-place
   reload, after-ready publication, shutdown retirement, EP/EPLB rejection, and
   draft partial-failure/unhealthy behavior.
-- Add internal-vLLM profile checks for CUDA allocated/reserved deltas, host RSS,
+- Add vllm profile checks for CUDA allocated/reserved deltas, host RSS,
   selected source kind, copy/temporary/direct-write bytes, attach/finalize
   timing, reload overlap, and old-handle retirement.
 - Add direct artifact-runtime second-framework tests or fixtures before retiring
@@ -452,7 +452,7 @@ after its replacement is wired.
 - Maintain the deletion ledger above as implementation work proceeds; every
   temporary serving compatibility object must have a replacement, owner,
   guardrail, and removal trigger.
-- Add an internal-vLLM call-site search check before cleanup completion so
+- Add a vllm call-site search check before cleanup completion so
   normal startup, reload, memory accounting, runtime view, and shutdown do not
   import public `tensorcast.serving.*` APIs.
 
@@ -477,7 +477,7 @@ Remaining migration checks:
   no longer fails closed;
 - completed-handle runtime attachment projection tests proving no second attach
   execution path exists;
-- internal-vLLM smoke/integration tests for startup, reload, publication, and
+- vllm smoke/integration tests for startup, reload, publication, and
   retained credit;
 - performance migration gates for no TensorDict intermediate, source selection,
   no extra GPU/host full-weight residency, pre-admission retained credit, stage
@@ -489,13 +489,13 @@ Remaining migration checks:
   deleted or internalized after replacement;
 - deletion-ledger audit showing each old public serving surface is removed,
   private, or serving-ABI-specific with an owner;
-- internal-vLLM import/call-site audit proving normal startup, reload,
+- vllm import/call-site audit proving normal startup, reload,
   memory-accounting, runtime-view, and shutdown paths use artifact-runtime
   APIs;
 - C++ daemon/core tests only when proto, materialization, binding, or P2P
   behavior changes.
 
-- Execute TensorCast and internal-vLLM changes together, because both codebases
+- Execute TensorCast and vllm changes together, because both codebases
   are under our control.
 - Recovery is behavior-based and delete-forward: if the new API shape is wrong,
   revise the refactor before landing rather than preserving a parallel

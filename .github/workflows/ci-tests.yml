@@ -308,7 +308,7 @@ jobs:
 
       - name: Setup Buf CLI
         # if: steps.restore-buf-proto-gen.outputs.cache-hit != 'true'
-        uses: bufbuild/buf-setup-action@v1
+        uses: bufbuild/buf-setup-action@v1.50.0
 
       - name: Generate protos via Buf
         # if: steps.restore-buf-proto-gen.outputs.cache-hit != 'true'

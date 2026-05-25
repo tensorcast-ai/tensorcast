@@ -2,7 +2,7 @@
 
 # import tensorcast as tc
 
-# path = "/mnt/step3-alignment/inference/Qwen2-1.5B-Instruct"
+# path = "/models/example/inference/Qwen2-1.5B-Instruct"
 # artifact = tc.from_disk(path, verify_checksums=False)
 # names = artifact.tensor_names
 
@@ -17,7 +17,7 @@
 
 import tensorcast as tc
 
-path = "/mnt/step3-alignment/inference/Qwen2-1.5B-Instruct"
+path = "/models/example/inference/Qwen2-1.5B-Instruct"
 
 # HF safetensors 目录通常没有 artifact_descriptor.json；要么先 backfill，要么先关掉校验
 artifact = tc.from_disk(path, verify_checksums=False)

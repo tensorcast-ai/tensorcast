@@ -9,7 +9,7 @@ cd "${REPO_ROOT}"
 
 source .venv/bin/activate
 
-: "${TC_WP_PUBLISHER_PROC:?set TC_WP_PUBLISHER_PROC (publisher brainctl process id)}"
+: "${TC_WP_PUBLISHER_PROC:?set TC_WP_PUBLISHER_PROC (publisher orchestratorctl process id)}"
 : "${TC_WP_RECEIVER_PROCS:?set TC_WP_RECEIVER_PROCS (comma-separated receiver process ids)}"
 : "${TC_GS_ADDR:?set TC_GS_ADDR (global store host:port)}"
 
@@ -165,7 +165,7 @@ remote_exec_as_user() {
   local inner_cmd="$2"
   local inner_b64
   inner_b64="$(printf '%s' "${inner_cmd}" | base64 | tr -d '\n')"
-  brainctl exec process/"${process_id}" -n shai-core -- bash -lc "
+  orchestratorctl exec process/"${process_id}" -n tensorcast -- bash -lc "
 set -euo pipefail
 run_as_user='${TC_RUN_AS_USER}'
 if [ \"\${run_as_user}\" = \"root\" ]; then

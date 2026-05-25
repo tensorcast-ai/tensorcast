@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #  Copyright (c) 2026, TensorCast Team.
 
-"""Convert internal-vLLM TensorCast trace-plan dumps into benchmark load plans.
+"""Convert vllm TensorCast trace-plan dumps into benchmark load plans.
 
 The benchmark at
 `//core/store/materialization/benchmarks:safetensors_load_strategy_benchmark`
@@ -26,7 +26,7 @@ expects a compact JSON shape:
   ]
 }
 
-internal-vLLM already emits trace-plan dumps under
+vllm already emits trace-plan dumps under
 `<diagnostics.debug_path>/trace_plan/tensorcast_trace_plan_tp*.json`, but those
 files include fill ops and builder-oriented copy-plan fields. This tool lowers
 the trace dump into the benchmark contract by:

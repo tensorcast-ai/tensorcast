@@ -108,7 +108,7 @@ The final model is:
   - runtime must execute the chosen plan exactly,
   - and implicit widening to a slower generic path is forbidden.
 
-This design is driven by actual loader experiments on the Step3p5 weight set
+This design is driven by actual loader experiments on the Example TP Model weight set
 and exists to close the remaining host-local gap against `fastsafetensors`
 while preserving TensorCast's selection-first, artifact-first, and
 binding-aware architecture.
@@ -238,8 +238,8 @@ Partially implemented in this repository:
 host-local `0108` scope:
 
 - source model:
-  `/mnt/step3-alignment/inference/Qwen2.5-32B-Instruct`
-- current `internal-vllm` TP4 trace output now yields:
+  `/models/example/inference/Qwen2.5-32B-Instruct`
+- current `vllm` TP4 trace output now yields:
   - `773` trace entries / rank,
   - `771` source-backed copy ops / rank,
   - and `2` fill ops / rank;
@@ -252,7 +252,7 @@ host-local `0108` scope:
     - rank0 `T(total_ready)=3.997s`
     - rank1 `T(total_ready)=3.835s`;
 - same-machine local references:
-  - `internal-vllm` TP4 `safetensors` per-rank weight-loading:
+  - `vllm` TP4 `safetensors` per-rank weight-loading:
     `15.3918 GiB` in about `6.907s`
   - stable local `fastsafetensors` no-GDS iterator reference:
     full-model `61.027 GiB` in about `14.926s`;
@@ -283,8 +283,8 @@ no-new-work decision:
 This design no longer owns:
 
 - owner-file collective executor rollout or shared-source defaulting,
-- same-binding mounted Step3p5 rollout and delete-gate cleanup,
-- or downstream `internal-vllm` rollout tracking.
+- same-binding mounted Example TP Model rollout and delete-gate cleanup,
+- or downstream `vllm` rollout tracking.
 
 Normative source-bound execution rule after the reorganization:
 
@@ -323,7 +323,7 @@ Current TensorCast runtime is too eager to lower selection-aware retrieval into
 generic byte-range execution. This loses tensor semantics early and leaves
 performance on the table for local-disk model loading.
 
-Observed behavior on the current Step3p5 workload:
+Observed behavior on the current Example TP Model workload:
 
 - Exact `879` source-tensor workload on host-local SSD, current TensorCast
   common collective path: about `47s` wall at TP=8.
@@ -1166,22 +1166,22 @@ Mitigations:
 
 # References
 
-- [`docs/designs/0001-docs-system-design.md`](/data/workspace/tensorcast-280/docs/designs/0001-docs-system-design.md)
-- [`docs/designs/0004-unified-runtime-config.md`](/data/workspace/tensorcast-280/docs/designs/0004-unified-runtime-config.md)
-- [`docs/designs/0107-retrieval-policy-plane-cleanup.md`](/data/workspace/tensorcast-280/docs/designs/0107-retrieval-policy-plane-cleanup.md)
-- [`docs/designs/0078-selection-first-artifact-retrieval.md`](/data/workspace/tensorcast-280/docs/designs/0078-selection-first-artifact-retrieval.md)
-- [`docs/designs/0084-binding-unified-model-and-contract.md`](/data/workspace/tensorcast-280/docs/designs/0084-binding-unified-model-and-contract.md)
-- [`docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md`](/data/workspace/tensorcast-280/docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md)
-- [`docs/designs/0109-batched-owner-file-collective-executor.md`](/data/workspace/tensorcast-280/docs/designs/0109-batched-owner-file-collective-executor.md)
-- [`docs/designs/0112-binding-native-serving-realization-and-publication.md`](/data/workspace/tensorcast-280/docs/designs/0112-binding-native-serving-realization-and-publication.md)
-- [`docs/benchmarks/20260415-qwen2.5-32b-host-local-trace-backed-loading-evidence.md`](/data/workspace/tensorcast-280/docs/benchmarks/20260415-qwen2.5-32b-host-local-trace-backed-loading-evidence.md)
-- [`docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`](/data/workspace/tensorcast-280/docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md)
-- [`docs/architecture/api/materialization-flow.md`](/data/workspace/tensorcast-280/docs/architecture/api/materialization-flow.md)
-- [`docs/architecture/api/region-backed.md`](/data/workspace/tensorcast-280/docs/architecture/api/region-backed.md)
-- [`docs/internals/byte-range-mapping-and-execution.md`](/data/workspace/tensorcast-280/docs/internals/byte-range-mapping-and-execution.md)
-- [`docs/internals/model-loading.md`](/data/workspace/tensorcast-280/docs/internals/model-loading.md)
-- [`core/store/runtime/ingestion/materialization_facade.cc`](/data/workspace/tensorcast-280/core/store/runtime/ingestion/materialization_facade.cc)
-- [`core/store/runtime/ingestion/materialization_service.cc`](/data/workspace/tensorcast-280/core/store/runtime/ingestion/materialization_service.cc)
-- [`daemon/service/controllers/materialization_target_plan_utils.cc`](/data/workspace/tensorcast-280/daemon/service/controllers/materialization_target_plan_utils.cc)
-- [`daemon/service/controllers/representation_transform_builder.cc`](/data/workspace/tensorcast-280/daemon/service/controllers/representation_transform_builder.cc)
-- [`tools/trace_plan_to_load_plan.py`](/data/workspace/tensorcast-280/tools/trace_plan_to_load_plan.py)
+- [`docs/designs/0001-docs-system-design.md`](./docs/designs/0001-docs-system-design.md)
+- [`docs/designs/0004-unified-runtime-config.md`](./docs/designs/0004-unified-runtime-config.md)
+- [`docs/designs/0107-retrieval-policy-plane-cleanup.md`](./docs/designs/0107-retrieval-policy-plane-cleanup.md)
+- [`docs/designs/0078-selection-first-artifact-retrieval.md`](./docs/designs/0078-selection-first-artifact-retrieval.md)
+- [`docs/designs/0084-binding-unified-model-and-contract.md`](./docs/designs/0084-binding-unified-model-and-contract.md)
+- [`docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md`](./docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md)
+- [`docs/designs/0109-batched-owner-file-collective-executor.md`](./docs/designs/0109-batched-owner-file-collective-executor.md)
+- [`docs/designs/0112-binding-native-serving-realization-and-publication.md`](./docs/designs/0112-binding-native-serving-realization-and-publication.md)
+- [`docs/benchmarks/20260415-qwen2.5-32b-host-local-trace-backed-loading-evidence.md`](./docs/benchmarks/20260415-qwen2.5-32b-host-local-trace-backed-loading-evidence.md)
+- [`docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`](./docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md)
+- [`docs/architecture/api/materialization-flow.md`](./docs/architecture/api/materialization-flow.md)
+- [`docs/architecture/api/region-backed.md`](./docs/architecture/api/region-backed.md)
+- [`docs/internals/byte-range-mapping-and-execution.md`](./docs/internals/byte-range-mapping-and-execution.md)
+- [`docs/internals/model-loading.md`](./docs/internals/model-loading.md)
+- [`core/store/runtime/ingestion/materialization_facade.cc`](./core/store/runtime/ingestion/materialization_facade.cc)
+- [`core/store/runtime/ingestion/materialization_service.cc`](./core/store/runtime/ingestion/materialization_service.cc)
+- [`daemon/service/controllers/materialization_target_plan_utils.cc`](./daemon/service/controllers/materialization_target_plan_utils.cc)
+- [`daemon/service/controllers/representation_transform_builder.cc`](./daemon/service/controllers/representation_transform_builder.cc)
+- [`tools/trace_plan_to_load_plan.py`](./tools/trace_plan_to_load_plan.py)

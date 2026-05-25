@@ -22,7 +22,7 @@ Understand how TensorCast works:
 - **[Batched Owner-File Collective Executor](designs/0109-batched-owner-file-collective-executor.md)** - Shared-FS same-host TP collective executor design for bounded owner batching and cross-rank source dedup
 - **[Representation Semantic Core](designs/0110-artifact-representation-contract-and-transform-unification.md)** - Shared tensor-semantic transform core for mapped binding, mapped-target, builder lowering, and strategy convergence
 - **[Source-to-Serving Builder and Publication](designs/0111-source-to-serving-builder-and-representation-publication.md)** - Builder modes, serving-artifact identity and manifests, `serving_build_digest`, and typed `representation_publish` handoff into `PublishedModelVersion`
-- **[Binding-Native Serving Realization and Publication](designs/0112-binding-native-serving-realization-and-publication.md)** - Canonical owner for binding-native same-binding serving ingress, audited Step3p5 closure, and the shipped publication and closeout model
+- **[Binding-Native Serving Realization and Publication](designs/0112-binding-native-serving-realization-and-publication.md)** - Canonical owner for binding-native same-binding serving ingress, audited Example TP Model closure, and the shipped publication and closeout model
 - **[Collective-First Binding Realization for TP Serving Startup](designs/0114-collective-first-binding-realization-for-tp-serving-startup.md)** - Path-specific convergence design for `collective_first_v4` source-bound TP startup and downstream typed-diagnostics surfacing
 - **[Trusted Disk Source Format-Aware Source Handle And Metadata-First Resolve](designs/0115-trusted-disk-source-format-aware-source-handle-and-metadata-first-resolve.md)** - Format-aware public disk source handle contract for partitioned and safetensors mounts, typed trust policy, and metadata-first resolve without artifact-plane overload
 - **[Prefetch Serving Binding Target And Retained GPU Residency](designs/0116-prefetch-serving-binding-target.md)** - Superseded serving-target design retained as the residency, reservation, and worker acquire semantics record
@@ -56,8 +56,6 @@ Guides for developing specific components:
 - **[Adding New Metrics](internals/adding-metrics.md)** - How to create and expose metrics
 - **[tensor_dict_into Dataflow](internals/tensor_dict_into_dataflow.md)** - Legacy vs region-backed into paths
 - **[Disk Load Strategy](internals/disk-load-strategy.md)** - TP-aware disk loading decisions for local SSD, shared filesystems, and mapped target flows
-- **[Qwen2.5 Host-Local Trace-Backed Loading Evidence](benchmarks/20260415-qwen2.5-32b-host-local-trace-backed-loading-evidence.md)** - Current local TP4 trace-backed host-local benchmark packet used for `0108` closure
-- **[Qwen2.5 Mounted Collective-First v4 Serving Evidence](benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md)** - Current mounted TP4 same-binding serving packet used for `0109`, `0112`, and `0114` closure
 - **[Preemptible Memory Internals](internals/preemptible-memory.md)** - UMA/VS preemption workflow and tuning
 - **[Byte-Range Mapping and Execution](internals/byte-range-mapping-and-execution.md)** - Unified byte-range executor semantics
 - **[Chaos Report Template](internals/chaos-report-template.md)** - Standard handoff template for multi-host chaos runs

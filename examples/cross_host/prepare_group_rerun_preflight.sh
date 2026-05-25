@@ -161,12 +161,12 @@ EOF
 )"
 
   timeout "${timeout_sec}s" \
-    brainctl exec "process/${process_id}" -n shai-core -- bash -lc "${wrapped}" >/dev/null
+    orchestratorctl exec "process/${process_id}" -n tensorcast -- bash -lc "${wrapped}" >/dev/null
 }
 
 if [[ "${TC_PREP_REMOTE_CLEANUP}" == "1" ]]; then
-  if ! command -v brainctl >/dev/null 2>&1; then
-    echo "[prep] TC_PREP_REMOTE_CLEANUP=1 but brainctl is not available" >&2
+  if ! command -v orchestratorctl >/dev/null 2>&1; then
+    echo "[prep] TC_PREP_REMOTE_CLEANUP=1 but orchestratorctl is not available" >&2
     exit 1
   fi
   declare -A seen=()

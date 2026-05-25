@@ -10,17 +10,17 @@
 - `cross_host_put_once.py`：单轮 put helper。
 - `cross_host_get_once.py`：单轮 get helper（含可见性等待与 comm bytes delta 采样）。
 - `cross_host_deregister_once.py`：单轮 deregister helper（`wait=true`，用于验证释放收敛）。
-- `run_multihost_chaos_suite.sh`：统一 chaos 执行入口（含 brainctl preflight/predict/launch/cleanup 元数据输出）。
+- `run_multihost_chaos_suite.sh`：统一 chaos 执行入口（含 orchestratorctl preflight/predict/launch/cleanup 元数据输出）。
 - `run_multihost_weight_publisher_suite.sh`：WeightPublisher 多机套件入口（single-host 功能验证 -> 2 节点 -> 3 节点）。
 
 ## 1. 前置条件
 
 1. 本机（CPU 节点）启动 Global Store（blocking）。
-2. 两台 GPU worker 已通过 `brainctl` 启动，能拿到：
+2. 两台 GPU worker 已通过 `orchestratorctl` 启动，能拿到：
 - `put_proc` / `get_proc`（process id）
 - 两侧 daemon advertise IP（推荐使用 worker `Pod IP`，通常是 `100.x`，不要用节点 `Host IP` 的 `10.x`）
 - 两侧 daemon gRPC 地址（`host:port`）
-3. 两侧 worker 都有同一份代码目录（默认 `/data/workspace/tensorcast-280`）和 `.venv`。
+3. 两侧 worker 都有同一份代码目录（默认 `./`）和 `.venv`。
 
 ## 2. 标准运行方式
 
@@ -160,7 +160,7 @@ export TC_GS_ADDR=<GS_IP>:50051
 # export TC_EARLY_GATE_BASELINE_LINK_GIBPS=<micro_baseline_gibps>
 # export TC_EARLY_GATE_MIN_BASELINE_RATIO=0.60
 # export TC_QUOTA_PREFLIGHT_ENABLE=1
-# export TC_QUOTA_CHARGED_GROUP=tensorcast_dev
+# export TC_QUOTA_CHARGED_GROUP=tensorcast-dev
 # export TC_XLARGE_STABLE_PREFLIGHT_ENABLE=1
 # export TC_XLARGE_STABLE_OVERLAP_VERSIONS=2
 # export TC_XLARGE_STABLE_PREFLIGHT_MARGIN_RATIO=1.05
@@ -261,13 +261,13 @@ export TC_CASE_SCHEMA=examples/cross_host/case_schemas/chaos_suite_example.json
 export TC_OUT_DIR=/tmp/tc_cross_20260222/results_chaos
 export TC_RUN_ID=chaos-20260222
 
-# 可选：让脚本托管 brainctl 生命周期（技能默认 charged-group=tensorcast_dev）
-# export TC_BRAINCTL_ENABLE_LAUNCH=true
-# export TC_BRAINCTL_GPU=1
-# export TC_BRAINCTL_CPU=4
-# export TC_BRAINCTL_MEMORY=106400
-# export TC_BRAINCTL_POSITIVE_TAGS=L40S,H200,H800,H100
-# export TC_BRAINCTL_MOUNT='juicefs+s3://xxx:/mnt/xxx'
+# 可选：让脚本托管 orchestratorctl 生命周期（技能默认 charged-group=tensorcast-dev）
+# export TC_ORCHESTRATOR_ENABLE_LAUNCH=true
+# export TC_ORCHESTRATOR_GPU=1
+# export TC_ORCHESTRATOR_CPU=4
+# export TC_ORCHESTRATOR_MEMORY=106400
+# export TC_ORCHESTRATOR_POSITIVE_TAGS=L40S,H200,H800,H100
+# export TC_ORCHESTRATOR_MOUNT='juicefs+s3://xxx:/mnt/xxx'
 # 可选：门禁评审阈值（默认开启 all_get_complete/source_cardinality/expected_failure/comm_errors gate）
 # export TC_GATE_MAX_RECOVER_TIME_SEC=180
 # export TC_GATE_REQUIRE_SOURCE_CARDINALITY=true
@@ -282,7 +282,7 @@ bash examples/cross_host/run_multihost_chaos_suite.sh
 - `<out_dir>/<run_id>/cases/<case_name>/result.json`
 - `<out_dir>/<run_id>/cases/<case_name>/metrics.json`
 - `<out_dir>/<run_id>/cases/<case_name>/classification.json`
-- `<out_dir>/<run_id>/meta/brainctl_steps.jsonl`
+- `<out_dir>/<run_id>/meta/orchestratorctl_steps.jsonl`
 - `<out_dir>/<run_id>/gate_review.json`
 - `<out_dir>/<run_id>/gate_review.md`
 
@@ -335,7 +335,7 @@ bash examples/cross_host/run_0081_multihost_chaos.sh \
   --gs-addr 100.97.246.95:50051 \
   --run-label 0081-manual-$(date +%Y%m%d-%H%M%S) \
   --out-root /tmp/tc_cross_20260222/results_chaos_0081_fixed \
-  --charged-group tensorcast_dev \
+  --charged-group tensorcast-dev \
   --private-machine group \
   --keep-workers
 ```
@@ -343,7 +343,7 @@ bash examples/cross_host/run_0081_multihost_chaos.sh \
 Notes:
 
 - If `--gs-addr` is not provided, the script resolves it from `tensorcast-cli global status --json`.
-- The script automatically handles: `brainctl predict`, worker launch/readiness wait, GPU + repo health checks, schema generation, phase execution, and phase-gate aggregation.
+- The script automatically handles: `orchestratorctl predict`, worker launch/readiness wait, GPU + repo health checks, schema generation, phase execution, and phase-gate aggregation.
 - Output layout:
   - `<out-root>/<run-label>/schemas/` (small/medium/large schemas)
   - `<out-root>/<run-label>/results/` (per-phase runs + gate artifacts + phase gate review)
@@ -466,7 +466,7 @@ chaos 报告模板：
 
 6. `cannot exec into ... Stopped`
 - 表示 worker 被平台自动回收。
-- 处理：重新 `brainctl launch`，并更新 process id / pod ip 后重跑 case。
+- 处理：重新 `orchestratorctl launch`，并更新 process id / pod ip 后重跑 case。
 
 7. `cudaErrorNoDevice` / `device_count=0` 导致 daemon 首启崩溃
 - 这是 worker 运行时 GPU 不可用（常见于异常节点），不是 case 参数问题。

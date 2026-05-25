@@ -9,8 +9,8 @@ from tensorcast import (
     save_dict,
 )
 
-# sudo python examples/save_vllm_model.py --artifact-name DeepSeek-R1-0528 --local-artifact-path /mnt/host0/DeepSeek-R1-0528  --storage-path /mnt/host0/tensorcast --tensor-parallel-size 8
-directory = "/mnt/host0/tensorcast/DeepSeek-R1-0528-layer-8-tp-1/rank_0"
+# sudo python examples/save_vllm_model.py --artifact-name example-model --local-artifact-path /mnt/host0/example-model  --storage-path /mnt/host0/tensorcast --tensor-parallel-size 8
+directory = "/mnt/host0/tensorcast/example-model-layer-8-tp-1/rank_0"
 ori_path = f"{directory}/original_state_dict.pth"
 
 ori_dict = torch.load(ori_path, map_location="cuda:0")
@@ -44,7 +44,7 @@ def assert_dict_equal(
             print(f"Tensor '{key}' matches.")
 
 
-tmp_dir = "/mnt/host0/tensorcast/DeepSeek-R1-0528-layer-8-tp-1/rank_test"  # ssd
+tmp_dir = "/mnt/host0/tensorcast/example-model-layer-8-tp-1/rank_test"  # ssd
 # tmp_dir = "/tmp/rank_test" # tmpfs
 descriptor = save_dict(ori_dict, tmp_dir)
 fallback = FallbackOptions(

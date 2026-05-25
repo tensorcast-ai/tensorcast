@@ -90,7 +90,7 @@ The semantic-core hard cut defined here is already landed in repo-local runtime.
 
 - the deleted `0110` companion plan is no longer an active execution note;
 - remaining producer-boundary convergence, topology-scoped follow-on extraction,
-  and Step3p5 closure dependencies now live in the `0113` design/plan pair;
+  and Example TP Model closure dependencies now live in the `0113` design/plan pair;
 - no future work should reintroduce executor-local semantic truth or a second
   integration-private semantic stack under the banner of "finishing 0110".
 
@@ -163,7 +163,7 @@ flowchart LR
 - Collapse view transforms and compute transforms into one overloaded concept.
 - Require one universal executor for all materialization requests.
 - Force every runtime to consume raw source artifacts directly.
-- Define the complete serving-publication contract for `internal-vllm`; this
+- Define the complete serving-publication contract for `vllm`; this
   design only defines the TensorCast-side semantic core that later builder and
   publication work will consume.
 
@@ -666,7 +666,7 @@ Normative rules:
 2. final externally visible publish lineage remains owned by `0105`
    `PublishedModelVersion` and typed closeout contracts,
 3. mapped binding or copy-plan lowering may remain useful builder-side
-   mechanisms, but they must not remain the long-lived serving-runtime semantic
+   mechanisms, but they must not remain the long-lived vllm semantic
    truth.
 4. builder- or framework-version identity needed for serving publication must be
    modeled as a distinct layer above `RepresentationTransformContract`; it must
@@ -781,7 +781,7 @@ Proposed interface names follow repository naming rules.
 - cleaner separation between semantic truth, publication lineage, and execution
   topology,
 - simpler long-term executor architecture under `0108`,
-- clearer integration boundary for `internal-vllm` and other framework builders,
+- clearer integration boundary for `vllm` and other framework builders,
 - preserves a forward path to future reshard execution without forcing
   communicator planning into the first hard cut.
 
@@ -852,7 +852,7 @@ This design is accepted only when all of the following are true:
 - `daemon/service/controllers/representation_layout_types.h`
 - `core/store/replica/collective_disk_loader.cc`
 - external integration grounding:
-  - `/data/workspace/internal-vllm/vllm/model_executor/model_loader/tensorcast_loader.py`
-  - `/data/workspace/internal-vllm/docs/design/tensorcast_torch_framework_integration.md`
-  - `/data/workspace/internal-vllm/docs/design/tensorcast_loader_bind_swap_upgrade_plan.md`
-  - `/data/workspace/internal-vllm/docs/design/tensorcast_serving_artifact_bind_swap_decision.md`
+  - `/opt/vllm/vllm/model_executor/model_loader/tensorcast_loader.py`
+  - `/opt/vllm/docs/design/tensorcast_torch_framework_integration.md`
+  - `/opt/vllm/docs/design/tensorcast_loader_bind_swap_upgrade_plan.md`
+  - `/opt/vllm/docs/design/tensorcast_serving_artifact_bind_swap_decision.md`

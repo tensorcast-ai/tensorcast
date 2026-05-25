@@ -13,11 +13,11 @@ weight-version workflow:
 2) Trigger an inference service to reload that `weight_version`.
 3) Optionally wait for acknowledgement and garbage-collect old versions.
 
-Current `internal-vllm` with `load_format="tensorcast"` no longer treats
+Current `vllm` with `load_format="tensorcast"` no longer treats
 `weight_version` or `/set_model_weight` as TensorCast serving identity. That
 runtime expects a published serving artifact and reloads through
 `POST /reload_serving_artifact` with a `selector + policy` request. Use
-`internal-vllm/tools/tensorcast_prepare_local_dir.py` or a serving-artifact
+`vllm/tools/tensorcast_prepare_local_dir.py` or a serving-artifact
 publisher to produce that request. The reload sections below apply to
 non-TensorCast or legacy `/set_model_weight` deployments.
 
@@ -194,7 +194,7 @@ Notes:
 - The Stepcast reload path assumes vLLM dev endpoints are enabled on each
   replica (e.g. `VLLM_SERVER_DEV_MODE=1`).
 - This path no longer pushes vLLM TensorCast loader config. Current
-  `internal-vllm` serving-artifact runtime must be configured through
+  `vllm` serving-artifact runtime must be configured through
   `tensorcast.serving.ServingConfig` and reloaded with
   `/reload_serving_artifact`.
 
@@ -348,7 +348,7 @@ Distributed checklist:
   daemons alive briefly after completion, then query GS metadata
   (`ClusterRuntimeService.BatchGetReplicaCounts`).
 
-## Multi-host Suite (brainctl)
+## Multi-host Suite (orchestratorctl)
 
 For staged scale-out (`2-node -> 3-node`) with `group_realization` staged
 binding updates and retention checks, use:
