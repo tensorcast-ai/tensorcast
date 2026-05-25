@@ -9,7 +9,7 @@ areas: ["sdk", "daemon", "core", "serving"]
 This document describes the current `load from disk` strategy for TensorCast-backed
 model loading, with emphasis on:
 
-- TP-aware rank-local slicing in the current internal-vLLM TensorCast loader,
+- TP-aware rank-local slicing in the current vllm TensorCast loader,
 - local SSD versus shared filesystem behavior,
 - daemon-side executor selection under the converged `0108` strategy plane,
 - the difference between ordinary `tensor_dict` startup and mapped `into-target` paths.
@@ -75,7 +75,7 @@ Important boundaries:
 
 The strategy entry point is daemon config, not ad-hoc environment variables.
 The example below matches the generic repository sample config rather than the
-audited `internal-vllm` packaged serving config:
+audited `vllm` packaged serving config:
 
 ```yaml
 engine:
@@ -137,9 +137,9 @@ flowchart TD
     M -- "GenericByteRangeExecutor" --> P["generic byte-range / mapped fallback"]
 ```
 
-## Step 1: TP-Aware Request Shaping In The internal-vLLM Loader
+## Step 1: TP-Aware Request Shaping In The vllm Loader
 
-The current internal-vLLM TensorCast loader does not send a full-model load
+The current vllm TensorCast loader does not send a full-model load
 request per rank. Instead, each rank first traces its own checkpoint access
 pattern and builds a rank-local plan:
 
@@ -156,7 +156,7 @@ This is the first TP-specific optimization. It reduces disk work before the
 daemon chooses any executor.
 
 This step is integration-owned, not a generic TensorCast SDK behavior. The
-current implementation lives in the internal-vLLM loader, which traces
+current implementation lives in the vllm loader, which traces
 `model.load_weights(...)`, builds `TracePlan`, derives `tensorcast_slices`, and
 caches the result per TP rank and world size.
 
@@ -173,7 +173,7 @@ For ordinary `disk:<model_path>` startup, collective remains an explicit
 TensorCast API contract. The generic SDK does not attach a collective hint on
 its own.
 
-The current internal-vLLM loader may synthesize that explicit
+The current vllm loader may synthesize that explicit
 `CollectiveLoadGroup` on behalf of the caller by constructing
 `CallContext.collective`, but this is an integration policy above the API
 boundary rather than a TensorCast-core SDK default.
@@ -198,7 +198,7 @@ Current rule:
     preferred collective route
 
 This is not a hard-coded `JuiceFS` or `JFS` special case by name. The current
-internal-vLLM loader treats them through filesystem type detection:
+vllm loader treats them through filesystem type detection:
 
 - host-local SSD paths usually resolve to one of the local filesystem types and
   therefore default to non-collective startup,
@@ -208,7 +208,7 @@ internal-vLLM loader treats them through filesystem type detection:
 - if mount type detection fails, the code currently also biases toward
   non-collective.
 
-Current internal-vLLM behavior therefore is:
+Current vllm behavior therefore is:
 
 - local filesystems default to no collective hint,
 - shared/non-local filesystems also default to no collective hint today,
@@ -364,7 +364,7 @@ Current defaults and caveats:
 
 - `enable_owner_file_collective` exists,
 - the generic sample config shown above keeps it `false`, while the audited
-  `internal-vllm` packaged serving config may enable it for the same-binding
+  `vllm` packaged serving config may enable it for the same-binding
   mounted path,
 - owner-file batch planning is now the steady-state owner collective path,
 - once the owner-file collective route is selected, planner failure no longer
@@ -405,7 +405,7 @@ This is the current best-known default path for ordinary host-local startup.
 
 Expected behavior:
 
-- current internal-vLLM loader still defaults to no collective hint,
+- current vllm loader still defaults to no collective hint,
 - daemon therefore usually stays on the non-collective local-batched or generic
   path,
 - explicit collective experiments can still attach a group and exercise
@@ -447,7 +447,7 @@ The key differences from ordinary `tensor_dict` startup are:
   now reports through typed source-bound executor names rather than the generic
   replica-path label.
 
-The Step3p5 TP8 same-host closure case
+The Example TP Model TP8 same-host closure case
 `/data/tc/0113-tp8-rect2d-final-20260428-125500` is the reference profile for
 this mixed mapped strategy: `137` local rect2d jobs absorbed the previous
 `873,562,112` byte residual tail, `actual_generic_backend_bytes=0`, and ready

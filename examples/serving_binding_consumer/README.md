@@ -1,7 +1,7 @@
 # Serving Binding Reference Consumer
 
 This example is a minimal TensorCast-side consumer for the serving binding
-prefetch/acquire flow. It is intentionally independent of internal-vLLM so the
+prefetch/acquire flow. It is intentionally independent of vllm so the
 daemon API can be exercised as a public reference path.
 
 ```bash

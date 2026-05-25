@@ -58,9 +58,9 @@ nav:
     - Store Session Release: deployment/store-session-release-checklist.md
     - Weight Publisher: deployment/weight-publisher.md
   - Development:
+    - Build from Source: development/build-from-source.md
     - Testing: development/testing.md
-  - Benchmarks:
-    - benchmarks/index.md
+    - Security Checks: development/security-checks.md
   - Designs:
     - designs/index.md
   - Internal:

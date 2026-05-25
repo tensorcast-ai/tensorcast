@@ -340,9 +340,9 @@ This runbook is mandatory for anyone executing the remaining items.
 
 - After every run, verify temporary workers are deleted.
 - Verification command:
-  - `brainctl get process -n shai-core | rg "ws-<workspace-id>-worker-|<owner-name>"`
+  - `orchestratorctl get process -n tensorcast | rg "ws-<workspace-id>-worker-|<owner-name>"`
 - If stale workers exist, delete explicitly:
-  - `brainctl delete process <worker_id> -n shai-core`
+  - `orchestratorctl delete process <worker_id> -n tensorcast`
 
 ## Failure-handling policy
 
@@ -471,7 +471,7 @@ Chaos suite:
 
 ## Re-execution snapshot (2026-02-22, private-machine group)
 
-- Re-launched 8 workers with `brainctl launch --private-machine group`.
+- Re-launched 8 workers with `orchestratorctl launch --private-machine group`.
 - Re-generated phase schemas using current worker ids/pod IPs:
   - `/tmp/tc_cross_20260222/chaos_phase_schemas_0081_exec/small.json`
   - `/tmp/tc_cross_20260222/chaos_phase_schemas_0081_exec/medium.json`

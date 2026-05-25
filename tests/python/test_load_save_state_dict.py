@@ -82,10 +82,10 @@ if __name__ == "__main__":
     # Replace with actual paths to your artifact files
     # Ensure the artifact files exist at these paths before running.
     path_to_torch_state_dict = (
-        "/data/workspace/tensorcast-store/test-models/Qwen/Qwen3-0.6B/state_dict.pth"
+        "/tmp/tensorcast-test-models/Qwen/Qwen3-0.6B/state_dict.pth"
     )
     path_to_sc_model_dir = (
-        "/data/workspace/tensorcast-store/test-models/Qwen/Qwen3-0.6B"
+        "/tmp/tensorcast-test-models/Qwen/Qwen3-0.6B"
     )
 
     try:

@@ -15,7 +15,7 @@ RUN_LABEL="${TC0081_RUN_LABEL:-$(date +%Y%m%d-%H%M%S)}"
 GS_ADDR="${TC0081_GS_ADDR:-}"
 WORKER_COUNT="${TC0081_WORKER_COUNT:-0}"
 
-CHARGED_GROUP="${TC0081_CHARGED_GROUP:-tensorcast_dev}"
+CHARGED_GROUP="${TC0081_CHARGED_GROUP:-tensorcast-dev}"
 PRIVATE_MACHINE="${TC0081_PRIVATE_MACHINE:-group}"
 GPU="${TC0081_GPU:-1}"
 CPU="${TC0081_CPU:-4}"
@@ -31,7 +31,7 @@ CHAOS_SEED="${TC0081_CHAOS_SEED:-7}"
 GATE_MAX_RECOVER_TIME_SEC="${TC0081_GATE_MAX_RECOVER_TIME_SEC:-300}"
 
 WAIT_RUNNING_TIMEOUT_SEC="${TC0081_WAIT_RUNNING_TIMEOUT_SEC:-1500}"
-RUN_WORKDIR="${TC0081_RUN_WORKDIR:-/data/workspace/tensorcast-280}"
+RUN_WORKDIR="${TC0081_RUN_WORKDIR:-./}"
 
 usage() {
   cat <<'EOF'
@@ -44,13 +44,13 @@ Options:
   --run-label <label>                   Run label (default: timestamp)
   --gs-addr <host:port>                 Global Store address (default: from tensorcast-cli global status --json)
   --workers <n>                         Worker count to launch (default: auto by phase)
-  --charged-group <name>                brainctl charged group (default: tensorcast_dev)
-  --private-machine <mode>              brainctl private-machine (default: group)
+  --charged-group <name>                orchestratorctl charged group (default: tensorcast-dev)
+  --private-machine <mode>              orchestratorctl private-machine (default: group)
   --gpu <n>                             GPU per worker (default: 1)
   --cpu <n>                             CPU per worker (default: 4)
   --memory-mib <n>                      Memory per worker MiB (default: 106400)
-  --max-wait-duration <duration>        brainctl max wait (default: 20m)
-  --positive-tags <csv>                 Optional brainctl positive-tags
+  --max-wait-duration <duration>        orchestratorctl max wait (default: 20m)
+  --positive-tags <csv>                 Optional orchestratorctl positive-tags
   --daemon-config <path>                Daemon config path
   --remote-timeout-sec <n>              Runner remote timeout seconds (default: 900)
   --chaos-seed <n>                      Chaos seed (default: 7)
@@ -214,7 +214,7 @@ cleanup_workers() {
   echo "[0081-fixed] cleaning up workers..."
   local pid
   for pid in "${WORKER_IDS[@]}"; do
-    brainctl delete process "${pid}" -n shai-core >/dev/null 2>&1 || true
+    orchestratorctl delete process "${pid}" -n tensorcast >/dev/null 2>&1 || true
   done
 }
 
@@ -225,7 +225,7 @@ wait_worker_running() {
   local deadline=$((SECONDS + WAIT_RUNNING_TIMEOUT_SEC))
   while (( SECONDS < deadline )); do
     local status_line
-    status_line="$(brainctl get process "${pid}" -n shai-core | awk 'NR==2{print $4" "$5}')"
+    status_line="$(orchestratorctl get process "${pid}" -n tensorcast | awk 'NR==2{print $4" "$5}')"
     if [[ "${status_line}" == "1/1 Running" ]]; then
       return 0
     fi
@@ -349,10 +349,10 @@ EOF
 }
 
 echo "[0081-fixed] run_label=${RUN_LABEL} phase=${PHASE} gs=${GS_ADDR}"
-echo "[0081-fixed] preflight brainctl..."
-brainctl version >/dev/null 2>&1
-brainctl options >/dev/null 2>&1
-brainctl launch \
+echo "[0081-fixed] preflight orchestratorctl..."
+orchestratorctl version >/dev/null 2>&1
+orchestratorctl options >/dev/null 2>&1
+orchestratorctl launch \
   --charged-group="${CHARGED_GROUP}" \
   --gpu "${GPU}" \
   --cpu "${CPU}" \
@@ -364,7 +364,7 @@ brainctl launch \
 echo "[0081-fixed] launching ${WORKER_COUNT} workers..."
 for idx in $(seq 1 "${WORKER_COUNT}"); do
   launch_cmd=(
-    brainctl launch -d
+    orchestratorctl launch -d
     --charged-group="${CHARGED_GROUP}"
     --gpu "${GPU}"
     --cpu "${CPU}"
@@ -391,13 +391,13 @@ echo "[0081-fixed] collecting worker inventory and health check..."
 inventory_file="${META_DIR}/worker_inventory.jsonl"
 : > "${inventory_file}"
 for pid in "${WORKER_IDS[@]}"; do
-  pod_ip="$(brainctl describe process/"${pid}" -n shai-core | awk -F': ' '/Pod IP/{gsub(/^ +/,"",$2); print $2; exit}')"
+  pod_ip="$(orchestratorctl describe process/"${pid}" -n tensorcast | awk -F': ' '/Pod IP/{gsub(/^ +/,"",$2); print $2; exit}')"
   if [[ -z "${pod_ip}" ]]; then
     echo "[0081-fixed] failed to get Pod IP for ${pid}" >&2
     exit 1
   fi
-  host_name="$(brainctl get process "${pid}" -n shai-core | awk 'NR==2{print $2}')"
-  brainctl exec process/"${pid}" -n shai-core -- bash -lc \
+  host_name="$(orchestratorctl get process "${pid}" -n tensorcast | awk 'NR==2{print $2}')"
+  orchestratorctl exec process/"${pid}" -n tensorcast -- bash -lc \
     "set -euo pipefail; nvidia-smi -L | head -n 1 >/dev/null; test -d ${RUN_WORKDIR}; test -d ${RUN_WORKDIR}/.venv"
   WORKER_IPS+=("${pod_ip}")
   WORKER_HOSTS+=("${host_name}")

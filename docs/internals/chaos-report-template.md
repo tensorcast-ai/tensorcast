@@ -9,7 +9,7 @@ Use this template for each multi-host chaos run package.
 - `chaos_profile`: `none` / `single_fault` / `combo_fault`
 - `case_schema`:
 - `global_store_profile`: `fast_failover` / `slow_cleanup`
-- `brainctl_meta`:
+- `orchestratorctl_meta`:
 
 ## 2. Summary Gate Checklist
 
@@ -83,4 +83,4 @@ For each negative case, record:
 - `cases/<case_name>/result.json`
 - `cases/<case_name>/metrics.json`
 - `cases/<case_name>/classification.json`
-- `meta/brainctl_steps.jsonl`
+- `meta/orchestratorctl_steps.jsonl`

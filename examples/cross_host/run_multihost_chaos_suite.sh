@@ -16,23 +16,23 @@ TC_RUN_ID="${TC_RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 TC_CHAOS_SEED="${TC_CHAOS_SEED:-7}"
 TC_REMOTE_TIMEOUT_SEC="${TC_REMOTE_TIMEOUT_SEC:-900}"
 
-# Optional brainctl workflow hooks (scriptized phase 5.2).
+# Optional orchestratorctl workflow hooks (scriptized phase 5.2).
 # Provide full commands when you want this script to own worker lifecycle.
-TC_BRAINCTL_PREDICT_CMD="${TC_BRAINCTL_PREDICT_CMD:-}"
-TC_BRAINCTL_LAUNCH_CMD="${TC_BRAINCTL_LAUNCH_CMD:-}"
-TC_BRAINCTL_CLEANUP_CMD="${TC_BRAINCTL_CLEANUP_CMD:-}"
-TC_BRAINCTL_ENABLE_LAUNCH="${TC_BRAINCTL_ENABLE_LAUNCH:-false}"
-TC_BRAINCTL_CHARGED_GROUP="${TC_BRAINCTL_CHARGED_GROUP:-tensorcast_dev}"
-TC_BRAINCTL_GPU="${TC_BRAINCTL_GPU:-1}"
-TC_BRAINCTL_CPU="${TC_BRAINCTL_CPU:-4}"
-TC_BRAINCTL_MEMORY="${TC_BRAINCTL_MEMORY:-106400}"
-TC_BRAINCTL_MAX_WAIT_DURATION="${TC_BRAINCTL_MAX_WAIT_DURATION:-15m}"
-TC_BRAINCTL_POSITIVE_TAGS="${TC_BRAINCTL_POSITIVE_TAGS:-}"
-TC_BRAINCTL_MOUNT="${TC_BRAINCTL_MOUNT:-}"
-TC_BRAINCTL_PRIVATE_MACHINE="${TC_BRAINCTL_PRIVATE_MACHINE:-}"
-TC_BRAINCTL_COMMENT="${TC_BRAINCTL_COMMENT:-multihost-chaos-suite}"
-TC_BRAINCTL_REMOTE_SMOKE_CMD="${TC_BRAINCTL_REMOTE_SMOKE_CMD:-echo START; hostname; nvidia-smi -L | head -n 4; echo DONE}"
-TC_BRAINCTL_CLEANUP_PROCESS_IDS="${TC_BRAINCTL_CLEANUP_PROCESS_IDS:-}"
+TC_ORCHESTRATOR_PREDICT_CMD="${TC_ORCHESTRATOR_PREDICT_CMD:-}"
+TC_ORCHESTRATOR_LAUNCH_CMD="${TC_ORCHESTRATOR_LAUNCH_CMD:-}"
+TC_ORCHESTRATOR_CLEANUP_CMD="${TC_ORCHESTRATOR_CLEANUP_CMD:-}"
+TC_ORCHESTRATOR_ENABLE_LAUNCH="${TC_ORCHESTRATOR_ENABLE_LAUNCH:-false}"
+TC_ORCHESTRATOR_CHARGED_GROUP="${TC_ORCHESTRATOR_CHARGED_GROUP:-tensorcast-dev}"
+TC_ORCHESTRATOR_GPU="${TC_ORCHESTRATOR_GPU:-1}"
+TC_ORCHESTRATOR_CPU="${TC_ORCHESTRATOR_CPU:-4}"
+TC_ORCHESTRATOR_MEMORY="${TC_ORCHESTRATOR_MEMORY:-106400}"
+TC_ORCHESTRATOR_MAX_WAIT_DURATION="${TC_ORCHESTRATOR_MAX_WAIT_DURATION:-15m}"
+TC_ORCHESTRATOR_POSITIVE_TAGS="${TC_ORCHESTRATOR_POSITIVE_TAGS:-}"
+TC_ORCHESTRATOR_MOUNT="${TC_ORCHESTRATOR_MOUNT:-}"
+TC_ORCHESTRATOR_PRIVATE_MACHINE="${TC_ORCHESTRATOR_PRIVATE_MACHINE:-}"
+TC_ORCHESTRATOR_COMMENT="${TC_ORCHESTRATOR_COMMENT:-multihost-chaos-suite}"
+TC_ORCHESTRATOR_REMOTE_SMOKE_CMD="${TC_ORCHESTRATOR_REMOTE_SMOKE_CMD:-echo START; hostname; nvidia-smi -L | head -n 4; echo DONE}"
+TC_ORCHESTRATOR_CLEANUP_PROCESS_IDS="${TC_ORCHESTRATOR_CLEANUP_PROCESS_IDS:-}"
 TC_GATE_MAX_RECOVER_TIME_SEC="${TC_GATE_MAX_RECOVER_TIME_SEC:-180}"
 TC_GATE_REQUIRE_ALL_GET_COMPLETE="${TC_GATE_REQUIRE_ALL_GET_COMPLETE:-true}"
 TC_GATE_REQUIRE_SOURCE_CARDINALITY="${TC_GATE_REQUIRE_SOURCE_CARDINALITY:-true}"
@@ -44,7 +44,7 @@ RUN_DIR="${TC_OUT_DIR}/${TC_RUN_ID}"
 META_DIR="${RUN_DIR}/meta"
 mkdir -p "${META_DIR}"
 
-META_JSONL="${META_DIR}/brainctl_steps.jsonl"
+META_JSONL="${META_DIR}/orchestratorctl_steps.jsonl"
 : > "${META_JSONL}"
 
 json_escape() {
@@ -99,62 +99,62 @@ run_optional_step() {
 }
 
 run_cleanup_if_configured() {
-  if [[ -n "${TC_BRAINCTL_CLEANUP_PROCESS_IDS}" ]]; then
+  if [[ -n "${TC_ORCHESTRATOR_CLEANUP_PROCESS_IDS}" ]]; then
     local cleanup_cmd=""
-    IFS=',' read -r -a pid_arr <<< "${TC_BRAINCTL_CLEANUP_PROCESS_IDS}"
+    IFS=',' read -r -a pid_arr <<< "${TC_ORCHESTRATOR_CLEANUP_PROCESS_IDS}"
     for pid in "${pid_arr[@]}"; do
       pid="$(echo "${pid}" | xargs)"
       if [[ -z "${pid}" ]]; then
         continue
       fi
-      cleanup_cmd+="brainctl delete process ${pid} -n shai-core || true; "
+      cleanup_cmd+="orchestratorctl delete process ${pid} -n tensorcast || true; "
     done
     if [[ -n "${cleanup_cmd}" ]]; then
       run_step "cleanup_processes" "${cleanup_cmd}" false
     fi
   fi
-  if [[ -n "${TC_BRAINCTL_CLEANUP_CMD}" ]]; then
-    run_step "cleanup" "${TC_BRAINCTL_CLEANUP_CMD}" false
+  if [[ -n "${TC_ORCHESTRATOR_CLEANUP_CMD}" ]]; then
+    run_step "cleanup" "${TC_ORCHESTRATOR_CLEANUP_CMD}" false
   fi
 }
 
 trap run_cleanup_if_configured EXIT
 
-run_step "preflight_version" "brainctl version" true
-run_step "preflight_options" "brainctl options" true
+run_step "preflight_version" "orchestratorctl version" true
+run_step "preflight_options" "orchestratorctl options" true
 
-if [[ "${TC_BRAINCTL_ENABLE_LAUNCH}" == "true" ]]; then
-  BRAINCTL_BASE_CMD="brainctl launch --charged-group=${TC_BRAINCTL_CHARGED_GROUP} --gpu ${TC_BRAINCTL_GPU} --cpu ${TC_BRAINCTL_CPU} --memory ${TC_BRAINCTL_MEMORY} --max-wait-duration=${TC_BRAINCTL_MAX_WAIT_DURATION}"
-  if [[ -n "${TC_BRAINCTL_MOUNT}" ]]; then
-    BRAINCTL_BASE_CMD+=" --mount='${TC_BRAINCTL_MOUNT}'"
+if [[ "${TC_ORCHESTRATOR_ENABLE_LAUNCH}" == "true" ]]; then
+  ORCHESTRATOR_BASE_CMD="orchestratorctl launch --charged-group=${TC_ORCHESTRATOR_CHARGED_GROUP} --gpu ${TC_ORCHESTRATOR_GPU} --cpu ${TC_ORCHESTRATOR_CPU} --memory ${TC_ORCHESTRATOR_MEMORY} --max-wait-duration=${TC_ORCHESTRATOR_MAX_WAIT_DURATION}"
+  if [[ -n "${TC_ORCHESTRATOR_MOUNT}" ]]; then
+    ORCHESTRATOR_BASE_CMD+=" --mount='${TC_ORCHESTRATOR_MOUNT}'"
   fi
-  if [[ -n "${TC_BRAINCTL_PRIVATE_MACHINE}" ]]; then
-    BRAINCTL_BASE_CMD+=" --private-machine ${TC_BRAINCTL_PRIVATE_MACHINE}"
+  if [[ -n "${TC_ORCHESTRATOR_PRIVATE_MACHINE}" ]]; then
+    ORCHESTRATOR_BASE_CMD+=" --private-machine ${TC_ORCHESTRATOR_PRIVATE_MACHINE}"
   fi
-  if [[ -n "${TC_BRAINCTL_POSITIVE_TAGS}" ]]; then
-    BRAINCTL_BASE_CMD+=" --positive-tags ${TC_BRAINCTL_POSITIVE_TAGS}"
+  if [[ -n "${TC_ORCHESTRATOR_POSITIVE_TAGS}" ]]; then
+    ORCHESTRATOR_BASE_CMD+=" --positive-tags ${TC_ORCHESTRATOR_POSITIVE_TAGS}"
   fi
-  if [[ -z "${TC_BRAINCTL_PREDICT_CMD}" ]]; then
-    TC_BRAINCTL_PREDICT_CMD="${BRAINCTL_BASE_CMD} --predict-only"
+  if [[ -z "${TC_ORCHESTRATOR_PREDICT_CMD}" ]]; then
+    TC_ORCHESTRATOR_PREDICT_CMD="${ORCHESTRATOR_BASE_CMD} --predict-only"
   fi
-  if [[ -z "${TC_BRAINCTL_LAUNCH_CMD}" ]]; then
-    TC_BRAINCTL_LAUNCH_CMD="${BRAINCTL_BASE_CMD} --comment '${TC_BRAINCTL_COMMENT}' -- bash -lc '${TC_BRAINCTL_REMOTE_SMOKE_CMD}'"
+  if [[ -z "${TC_ORCHESTRATOR_LAUNCH_CMD}" ]]; then
+    TC_ORCHESTRATOR_LAUNCH_CMD="${ORCHESTRATOR_BASE_CMD} --comment '${TC_ORCHESTRATOR_COMMENT}' -- bash -lc '${TC_ORCHESTRATOR_REMOTE_SMOKE_CMD}'"
   fi
 fi
 
-run_optional_step "predict" "${TC_BRAINCTL_PREDICT_CMD}"
-run_optional_step "launch" "${TC_BRAINCTL_LAUNCH_CMD}"
+run_optional_step "predict" "${TC_ORCHESTRATOR_PREDICT_CMD}"
+run_optional_step "launch" "${TC_ORCHESTRATOR_LAUNCH_CMD}"
 
 SUITE_META_JSON="${META_DIR}/suite_meta.json"
 cat > "${SUITE_META_JSON}" <<EOF
 {
   "run_id": "${TC_RUN_ID}",
   "case_schema": "${TC_CASE_SCHEMA}",
-  "charged_group": "${TC_BRAINCTL_CHARGED_GROUP}",
-  "predict_cmd": "$(json_escape "${TC_BRAINCTL_PREDICT_CMD}")",
-  "launch_cmd": "$(json_escape "${TC_BRAINCTL_LAUNCH_CMD}")",
-  "cleanup_cmd": "$(json_escape "${TC_BRAINCTL_CLEANUP_CMD}")",
-  "cleanup_process_ids": "${TC_BRAINCTL_CLEANUP_PROCESS_IDS}",
+  "charged_group": "${TC_ORCHESTRATOR_CHARGED_GROUP}",
+  "predict_cmd": "$(json_escape "${TC_ORCHESTRATOR_PREDICT_CMD}")",
+  "launch_cmd": "$(json_escape "${TC_ORCHESTRATOR_LAUNCH_CMD}")",
+  "cleanup_cmd": "$(json_escape "${TC_ORCHESTRATOR_CLEANUP_CMD}")",
+  "cleanup_process_ids": "${TC_ORCHESTRATOR_CLEANUP_PROCESS_IDS}",
   "gate_max_recover_time_sec": "${TC_GATE_MAX_RECOVER_TIME_SEC}",
   "gate_require_all_get_complete": "${TC_GATE_REQUIRE_ALL_GET_COMPLETE}",
   "gate_require_source_cardinality": "${TC_GATE_REQUIRE_SOURCE_CARDINALITY}",

@@ -17,7 +17,7 @@ import sys
 import time
 
 
-REPO_ROOT = Path("/data/workspace/tensorcast-280")
+REPO_ROOT = Path("./")
 BENCH_BINARY = REPO_ROOT / "bazel-bin/core/communicator/communicator_bench_binary"
 NUMA_WRAPPER = REPO_ROOT / "tools/communicator/run_with_numa_policy.py"
 

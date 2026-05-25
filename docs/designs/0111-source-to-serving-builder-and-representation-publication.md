@@ -73,7 +73,7 @@ durable serving artifacts and a typed representation-publication bridge for
 The design is intentionally Torch-first in grounding, but not Torch-layer-owned.
 
 - current real integrations are Torch ecosystem integrations,
-- the current highest-value grounding is `/data/workspace/internal-vllm`,
+- the current highest-value grounding is `/opt/vllm`,
 - and the right first cut is to keep this design narrow:
   TensorCast owns serving-artifact identity and the representation-publication
   bridge, while a separate shared Torch integration layer owns trace capture,
@@ -90,7 +90,7 @@ The repo-owned `0111` bridge contract is now landed at its intended base scope:
   and binding-native publication entrypoints are present in this repository;
 - the deleted `0111` companion plan has been folded back into this design;
 - the remaining work is no longer "finish the base `0111` implementation", but
-  residual hardening, external integration convergence, and Step3p5 closeout
+  residual hardening, external integration convergence, and Example TP Model closeout
   cleanup now tracked by `0113`.
 
 # Target-State Alignment With `0120` / `0121`
@@ -113,7 +113,7 @@ The target interpretation is:
 
 # Why This Revision
 
-Recent bootstrap-design work in `/data/workspace/internal-vllm` exposed one
+Recent bootstrap-design work in `/opt/vllm` exposed one
 important modeling gap in the original `0111` wording.
 
 The original split remains correct:
@@ -131,7 +131,7 @@ What was underspecified is different:
 - and which topology-sensitive facts belong in semantic identity versus
   builder/publication admission identity.
 
-Real families such as MoE / EP / EPLB-sensitive `mixtral` and `step3p5` make
+Real families such as MoE / EP / EPLB-sensitive `mixtral` and `example-tp-model` make
 this distinction unavoidable. They are not evidence that `BuilderMode` or
 `FinalizeClass` were wrong. They are evidence that those axes are necessary but
 not yet sufficient to describe every valid source-to-serving realization shape.
@@ -230,7 +230,7 @@ Current repository and integration facts:
 - `0084` already makes a strict distinction between:
   - artifact-backed current values,
   - local-only sealed values.
-- current `internal-vllm` integration already contains practical
+- current `vllm` integration already contains practical
   serving-artifact bind, swap, manifest, invariant-validation logic, and
   concrete bootstrap-design pressure from real families:
   - direct serving-artifact startup,
@@ -348,7 +348,7 @@ Revised:
   `TransformSpec` -> `RepresentationTransformContract` spine,
 - but this design does not require a new public request family beyond `0055`.
 
-## External integration grounding from `/data/workspace/internal-vllm`
+## External integration grounding from `/opt/vllm`
 
 Kept:
 
@@ -500,7 +500,7 @@ Repository rule:
 - and `0111` should consume the resulting facts without turning itself into a
   second integration-framework design.
 
-This matches the direction already emerging in `/data/workspace/internal-vllm`:
+This matches the direction already emerging in `/opt/vllm`:
 TensorCast core stays artifact-first, a shared Torch layer owns common
 plumbing, and per-framework adapters stay thin.
 
@@ -595,7 +595,7 @@ make explicit.
 - phase-1 `ServingArtifactManifest`, `RepresentationPublishContract`, and
   `serving_build_digest` are already repo-owned and runtime-enforced,
 - while many family rollout facts still live in integration registries such as
-  `/data/workspace/internal-vllm`.
+  `/opt/vllm`.
 
 The next step should not be to silently widen `ServingBuildIntent` or
 `serving_build_digest` with rollout-only fields. Instead, the repository should
@@ -671,7 +671,7 @@ Semantics:
   semantic core rather than by widening `representation_contract_hash`,
 - execution-quality facts remain outside `ServingBuildIntent` and
   `ServingAdmissionFacts`; they belong to runtime diagnostics surfaces such as
-  the residual Step3p5 closure tracked by `0113`,
+  the residual Example TP Model closure tracked by `0113`,
 - and rollout-only facts such as `support_level` or
   `same_binding_fast_path_validated` must not silently perturb the phase-1
   digest.
@@ -1146,7 +1146,7 @@ builder path.
 
 ### 6.3 Representation gate
 
-Before serving runtime accepts a serving artifact, TensorCast runtime preflight
+Before vllm accepts a serving artifact, TensorCast runtime preflight
 must validate:
 
 - manifest schema version,
@@ -1328,7 +1328,7 @@ Rejected.
 Rejected for phase 1.
 
 - `0110` explicitly defers broad artifact-catalog expansion.
-- serving runtime still needs a self-describing artifact and publication lineage
+- vllm still needs a self-describing artifact and publication lineage
   contract now.
 - a typed manifest carrier plus `0105` lineage is sufficient to standardize the
   bridge without pretending the catalog question is solved.
@@ -1474,8 +1474,8 @@ This design is accepted only when all of the following are true:
 - `proto/tensorcast/daemon/v2/store_daemon.proto`
 - `tensorcast/api/store/owned_binding_slot.py`
 - external integration grounding:
-  - `/data/workspace/internal-vllm/docs/design/tensorcast_loader_integration.md`
-  - `/data/workspace/internal-vllm/docs/design/tensorcast_from_disk_bootstrap_to_serving.md`
-  - `/data/workspace/internal-vllm/docs/design/tensorcast_from_disk_bootstrap_to_serving_plan.md`
-  - `/data/workspace/internal-vllm/docs/design/tensorcast_family_readiness_matrix.md`
-  - `/data/workspace/internal-vllm/vllm/model_executor/model_loader/tensorcast_loader.py`
+  - `/opt/vllm/docs/design/tensorcast_loader_integration.md`
+  - `/opt/vllm/docs/design/tensorcast_from_disk_bootstrap_to_serving.md`
+  - `/opt/vllm/docs/design/tensorcast_from_disk_bootstrap_to_serving_plan.md`
+  - `/opt/vllm/docs/design/tensorcast_family_readiness_matrix.md`
+  - `/opt/vllm/vllm/model_executor/model_loader/tensorcast_loader.py`
