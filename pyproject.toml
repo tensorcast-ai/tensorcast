@@ -69,7 +69,7 @@ dev = [
     "rich-click>=1.8.9",
     "ruff==0.15.14",
     "toml>=0.10.2",
-    "types-protobuf==5.28.3.20241203",
+    "types-protobuf==7.34.1.20260518",
     "safetensors==0.7.0"
 ]
 release = [
