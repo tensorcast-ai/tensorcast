@@ -18,10 +18,12 @@
 #include "core/checkpoint/checkpoint.h"
 #include "core/checkpoint/streaming_tensor_writer.h"
 #include "core/common/artifact_hash.h"
+#include "core/common/async_copy_manager.h"
 #include "core/common/const/granularity.h"
 #include "core/common/logging_init.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/cuda/cuda_api.h"
+#include "core/cuda/cuda_runtime.h"
 
 #include <filesystem>
 #include <fstream>
@@ -1101,4 +1103,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       &build_canonical_index_from_safetensors_wrapper,
       py::arg("artifact_dir"),
       "Build canonical RFC-0007 index JSON bytes from a directory of .safetensors files");
+
+  m.def(
+      "shutdown_native_runtime",
+      []() {
+        tensorcast::common::AsyncCopyManager::instance().shutdown();
+        tensorcast::cuda::CudaRuntime::instance().stream_pool().release_all();
+      },
+      "Best-effort cleanup for TensorCast native runtime resources");
 }
