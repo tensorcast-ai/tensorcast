@@ -570,6 +570,17 @@ Status StoreDaemonServiceImpl::ListArtifactLayouts(
   return materialization_controller_->list_artifact_layouts(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::EnsureCanonicalLayout(
+    grpc::ServerContext* ctx,
+    const v2::EnsureCanonicalLayoutRequest* req,
+    v2::EnsureCanonicalLayoutResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"EnsureCanonicalLayout", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->ensure_canonical_layout(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::BatchExists(
     grpc::ServerContext* ctx,
     const v2::BatchExistsRequest* req,
@@ -907,12 +918,12 @@ Status StoreDaemonServiceImpl::GetDetailedStatus(
   return status_controller_->get_detailed_status(rctx, *resp);
 }
 
-Status StoreDaemonServiceImpl::GetLoadedReplicasV2(
+Status StoreDaemonServiceImpl::GetLoadedReplicas(
     grpc::ServerContext* ctx,
-    const v2::GetLoadedReplicasV2Request* req,
-    v2::GetLoadedReplicasV2Response* resp) {
-  RpcContext rctx{"GetLoadedReplicasV2", *ctx, opts_.allow_high_card_attrs};
-  return status_controller_->get_loaded_replicas_v2(rctx, *req, *resp, opts_.use_cursor_pagination);
+    const v2::GetLoadedReplicasRequest* req,
+    v2::GetLoadedReplicasResponse* resp) {
+  RpcContext rctx{"GetLoadedReplicas", *ctx, opts_.allow_high_card_attrs};
+  return status_controller_->get_loaded_replicas(rctx, *req, *resp, opts_.use_cursor_pagination);
 }
 
 } // namespace tensorcast::daemon

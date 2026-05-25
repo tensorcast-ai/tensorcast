@@ -46,7 +46,7 @@ TEST_CASE("DiskArtifact creation errors", "[replica][disk][error]") {
         .source = disk_src,
         .artifact_identifier = artifact_id,
         .device_type = ::tensorcast::DeviceType::CPU,
-        .local_device_id = 0,
+        .local_device_id = -1,
         .pinned_buffer_pool = pool,
         .async_runtime = async_runtime,
         .max_buffer_bytes = pool_total};
@@ -75,7 +75,7 @@ TEST_CASE("DiskArtifact creation errors", "[replica][disk][error]") {
         .source = disk_src,
         .artifact_identifier = artifact_id,
         .device_type = ::tensorcast::DeviceType::CPU,
-        .local_device_id = 0,
+        .local_device_id = -1,
         .pinned_buffer_pool = pool,
         .async_runtime = async_runtime,
         .expected_artifact_size = 1024 // wrong expected size

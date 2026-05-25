@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable, cast
 
 import pytest
 
 import tensorcast
 from tensorcast.api.context import CallContext, GovernanceContext
-from tensorcast.api.errors import ArtifactError
 from tensorcast.api.plan import Instance, PlanFailedError, PlanResult
 from tensorcast.api.runtime import connect
 from tensorcast.engine_adapter.artifact_api import (
@@ -93,7 +92,7 @@ def test_connect_registers_active_runtime_and_plan_uses_ingress() -> None:
     client = _FakeDaemonClient("127.0.0.1:50051")
     runtime = connect(
         daemon_address="127.0.0.1:50051",
-        client_factory=lambda address: client,
+        client_factory=lambda _address: cast(Any, client),
     )
     ctx = CallContext(
         request_id="req-runtime",
@@ -122,7 +121,7 @@ def test_runtime_execute_plan_propagates_call_deadline_to_daemon_timeout() -> No
     client = _FakeDaemonClient("127.0.0.1:50051")
     runtime = connect(
         daemon_address="127.0.0.1:50051",
-        client_factory=lambda address: client,
+        client_factory=lambda _address: cast(Any, client),
     )
     plan = runtime.plan(
         CallContext(request_id="req-runtime-deadline", deadline_ms=120_000)
@@ -135,75 +134,29 @@ def test_runtime_execute_plan_propagates_call_deadline_to_daemon_timeout() -> No
     runtime.close()
 
 
-def test_runtime_compat_hydrate_rewrites_cached_publish_manifest() -> None:
+def test_runtime_hydrate_engine_request_id_goes_to_daemon_unrewritten() -> None:
     client = _FakeDaemonClient("127.0.0.1:50051")
     runtime = connect(
         daemon_address="127.0.0.1:50051",
-        client_factory=lambda address: client,
+        client_factory=lambda _address: cast(Any, client),
     )
-    runtime.remember_publish_manifest(_sample_publish_manifest(rid="rid-compat"))
 
     plan = runtime.plan(CallContext(request_id="req-runtime-hydrate"))
     plan.on_instance(
         Instance(instance_id="inst-a", worker_id="worker-a", engine="sglang")
-    ).hydrate(engine_request_id="rid-compat")
+    ).hydrate(engine_request_id="rid-unified")
 
     result = plan.run()
 
     assert result.ok is True
     assert client.last_plan is not None
     hydrate = client.last_plan.steps[0].action.hydrate
-    assert hydrate.WhichOneof("request_source") == "publish_manifest"
-    assert hydrate.publish_manifest.artifact_manifest.engine_request_id == "rid-compat"
+    assert hydrate.WhichOneof("request_source") == "engine_request_id"
+    assert hydrate.engine_request_id == "rid-unified"
     runtime.close()
 
 
-def test_runtime_compat_hydrate_fails_closed_without_cached_publish_manifest() -> None:
-    client = _FakeDaemonClient("127.0.0.1:50051")
-    runtime = connect(
-        daemon_address="127.0.0.1:50051",
-        client_factory=lambda address: client,
-    )
-    plan = runtime.plan(CallContext(request_id="req-runtime-hydrate-miss"))
-    plan.on_instance(
-        Instance(instance_id="inst-a", worker_id="worker-a", engine="sglang")
-    ).hydrate(engine_request_id="rid-missing")
-
-    with pytest.raises(ArtifactError, match="no cached PublishManifest found"):
-        plan.run()
-
-    assert client.last_plan is None
-    runtime.close()
-
-
-def test_runtime_compat_hydrate_fails_closed_on_ambiguous_cached_generations() -> None:
-    client = _FakeDaemonClient("127.0.0.1:50051")
-    runtime = connect(
-        daemon_address="127.0.0.1:50051",
-        client_factory=lambda address: client,
-    )
-    runtime.remember_publish_manifest(
-        _sample_publish_manifest(rid="rid-ambiguous", payload=b'{"generation":1}')
-    )
-    runtime.remember_publish_manifest(
-        _sample_publish_manifest(rid="rid-ambiguous", payload=b'{"generation":2}')
-    )
-
-    plan = runtime.plan(CallContext(request_id="req-runtime-hydrate-ambiguous"))
-    plan.on_instance(
-        Instance(instance_id="inst-a", worker_id="worker-a", engine="sglang")
-    ).hydrate(engine_request_id="rid-ambiguous")
-
-    with pytest.raises(
-        ArtifactError, match="multiple cached PublishManifest generations"
-    ):
-        plan.run()
-
-    assert client.last_plan is None
-    runtime.close()
-
-
-def test_runtime_caches_publish_manifest_from_publish_result() -> None:
+def test_runtime_publish_result_does_not_install_hydrate_rewrite_cache() -> None:
     publish_manifest = _sample_publish_manifest(rid="rid-publish-cache")
 
     def _response_factory(plan) -> node_agent_pb2.ExecutePlanResponse:  # noqa: ANN001
@@ -234,7 +187,7 @@ def test_runtime_caches_publish_manifest_from_publish_result() -> None:
     )
     runtime = connect(
         daemon_address="127.0.0.1:50051",
-        client_factory=lambda address: client,
+        client_factory=lambda _address: cast(Any, client),
     )
     publish_plan = runtime.plan(CallContext(request_id="req-runtime-publish"))
     publish_plan.on_instance(
@@ -244,8 +197,8 @@ def test_runtime_caches_publish_manifest_from_publish_result() -> None:
     publish_result = publish_plan.run()
 
     assert publish_result.ok is True
-    resolved = runtime.resolve_publish_manifest(engine_request_id="rid-publish-cache")
-    assert resolved == publish_manifest
+    assert not hasattr(runtime, "resolve_publish_manifest")
+    assert not hasattr(runtime, "remember_publish_manifest")
     runtime.close()
 
 
@@ -272,7 +225,7 @@ def test_runtime_publish_failure_surfaces_to_controller() -> None:
     )
     runtime = connect(
         daemon_address="127.0.0.1:50051",
-        client_factory=lambda address: client,
+        client_factory=lambda _address: cast(Any, client),
     )
     plan = runtime.plan(CallContext(request_id="req-runtime-publish-fail"))
     plan.on_instance(
@@ -315,7 +268,7 @@ def test_runtime_hydrate_failure_surfaces_to_controller() -> None:
     )
     runtime = connect(
         daemon_address="127.0.0.1:50051",
-        client_factory=lambda address: client,
+        client_factory=lambda _address: cast(Any, client),
     )
     plan = runtime.plan(CallContext(request_id="req-runtime-hydrate-fail"))
     plan.on_instance(
@@ -337,7 +290,7 @@ def test_runtime_rejects_non_terminal_ingress_class_before_rpc() -> None:
     client = _FakeDaemonClient("127.0.0.1:50051")
     runtime = connect(
         daemon_address="127.0.0.1:50051",
-        client_factory=lambda address: client,
+        client_factory=lambda _address: cast(Any, client),
     )
 
     with pytest.raises(RuntimeError, match="terminal_only"):
@@ -380,7 +333,7 @@ def test_runtime_signals_reads_connected_worker_status() -> None:
     )
     runtime = connect(
         daemon_address="127.0.0.1:50051",
-        client_factory=lambda address: client,
+        client_factory=lambda _address: cast(Any, client),
     )
 
     snapshot = runtime.signals().get_worker_status()
@@ -409,7 +362,7 @@ def test_runtime_signals_falls_back_when_daemon_omits_freshness_fields() -> None
     )
     runtime = connect(
         daemon_address="127.0.0.1:50051",
-        client_factory=lambda address: client,
+        client_factory=lambda _address: cast(Any, client),
     )
 
     snapshot = runtime.signals().get_worker_status()
@@ -478,13 +431,12 @@ def test_runtime_directory_reads_daemon_served_routes() -> None:
     )
     runtime = connect(
         daemon_address="127.0.0.1:50051",
-        client_factory=lambda address: client,
+        client_factory=lambda _address: cast(Any, client),
     )
 
     worker_snapshot = runtime.directory().list_workers()
     instance_snapshot = runtime.directory().list_instances()
     route_snapshot = runtime.directory().resolve_instance_execution("inst-a")
-    compat_worker_snapshot = runtime.signals().list_workers()
 
     assert worker_snapshot.authority_mode == "GLOBAL_STORE_BACKED"
     assert worker_snapshot.value[0].daemon_id == "daemon-a"
@@ -493,5 +445,6 @@ def test_runtime_directory_reads_daemon_served_routes() -> None:
     assert instance_snapshot.value[0].execution_endpoint == "10.0.0.1:7001"
     assert route_snapshot.value.execution_host_kind == "node_agent_grpc"
     assert route_snapshot.cache_epoch == 7
-    assert compat_worker_snapshot.value[0].daemon_id == "daemon-a"
+    assert not hasattr(runtime.signals(), "list_workers")
+    assert not hasattr(runtime.signals(), "list_instances")
     runtime.close()

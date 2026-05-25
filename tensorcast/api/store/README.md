@@ -29,6 +29,14 @@ managing clients manually.
   non-identity views the SDK resolves and sends a deterministic `view_id` in
   the `TargetLayout`. `region_backed_mode` (`auto`/`require`/`disable`) controls
   fallback behavior.
+- Convenience materialization APIs remain the ergonomic SDK surface:
+  `tensor_dict(...)`, `tensor_dict_with_diagnostics(...)`,
+  `tensor_dict_into(...)`, `tensor_into(...)`, `bind(...)`, and
+  `bind_into(...)` lower through `ArtifactRealizationSpec` and the shared
+  `Artifact.realize(...)` handle facade. Use `Artifact.realize(...)` directly
+  when callers need the `ArtifactRealizationReport`, projection owner, or
+  lifecycle handle; use the convenience methods for normal retrieval and
+  binding workflows.
 - Handles retain whichever identifiers are available (`artifact_id`, `key`).
   At least one identifier is required when instantiating or
   rehydrating a handle, but resolved handles may keep both `artifact_id` and
@@ -37,8 +45,8 @@ managing clients manually.
   metadata-first mounted-source path for same-daemon loading. Successful calls
   return a lazy `Artifact` seeded from `ResolvePublicDiskSource` metadata,
   usually with primary `artifact_id = msa1:...`, without hashing payload bytes
-  on the cold path. Use `show_progress=True` or call
-  `import_from_disk(...)` explicitly when you need the old stream/import path.
+  during metadata resolution. Use `show_progress=True` or call
+  `import_from_disk(...)` explicitly when you need streamed daemon import.
 - `tensorcast.import_from_disk(path)` / `Store.import_from_disk(path)` keep the
   explicit daemon import contract via `ImportArtifactFromPath` /
   `ImportArtifactFromPathStream`. This path returns `mi2:` and remains the
@@ -160,13 +168,12 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
     `RepresentationPublishContract.to_runtime_policy()`,
     `ServingArtifactManifest.to_runtime_policy()`, and
     `PublishedModelVersion.require_serving_runtime_policy()`.
-  - The repo-owned serving-lineage carriers now also expose an explicit
-    phase-1 compatibility hook for build identity:
+  - The repo-owned serving-lineage carriers now also expose explicit phase-1
+    build identity fields:
     `ServingArtifactManifest.serving_build_digest_version` and
     `RepresentationPublishContract.serving_build_digest_version`.
-    Runtime policy remains compatible with existing consumers and still gates on
-    `serving_manifest_ref`, `representation_contract_hash`, and
-    `serving_build_digest`.
+    Runtime policy gates on `serving_manifest_ref`,
+    `representation_contract_hash`, and `serving_build_digest`.
   - For integrations that already have a transformed serving artifact in hand,
     `build_pure_transform_publication_bundle_from_registered_artifact(...)`
     assembles a typed `RepresentationPublishSpec` containing the repo-owned
@@ -242,12 +249,11 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
   - If that publication runs through `transform_register`, prefer
     `build_pure_transform_publication_spec(...)` or
     `build_pure_transform_transform_spec(...)`. These helpers now attach typed
-    publish intent on `TransformSpec.publication_spec` rather than asking
-    callers to hand-author internal `tc_serving_*` keys. The legacy string-arg
-    path remains as a compatibility fallback. `representation_contract_hash`
-    can still be provided explicitly, but the repo-owned `PURE_TRANSFORM` path
-    can auto-derive it from source and serving canonical indexes when the
-    source artifact metadata is available. The default identity
+    publish intent on `TransformSpec.publication_spec`.
+    `representation_contract_hash` can still be provided explicitly, but the
+    repo-owned `PURE_TRANSFORM` path can auto-derive it from source and serving
+    canonical indexes when the source artifact metadata is available. The
+    default identity
     `transform_register` path now also prepares the reserved manifest tensor
     before registration, so the resulting serving artifact can already carry
     `tensor:__tensorcast_meta__.manifest_json`.
@@ -393,12 +399,20 @@ binding.swap("model:v2")
   `lease_mode=NO_LEASE` so it does not create PID-bound UseLeases and does not mint IPC handle leases. Prefetch is
   supported for both GPU VRAM (`"cuda:0"`/`0`) and daemon-owned host DRAM (`"cpu"`/`"dram"`/`-1`). Handle-exporting APIs
   remain PID/lease-bound and are separate from daemon-owned warm replicas.
-- Serving prefetch is entered explicitly with `artifact.prefetch(target=ServingBindingTarget(...))` or
-  `artifact.prefetch(target=ServingBindingSetTarget(...))`. Ordinary `device=` prefetch behavior is unchanged. Serving
-  targets require runtime-provided resolved layout/index metadata before daemon allocation; unresolved layouts fail
-  closed before GPU memory is reserved. The daemon keeps serving prefetch behind `daemon_config.serving_prefetch.enabled`
-  and returns a typed `PrefetchedServingBinding` / `PrefetchedServingBindingSet` result once the retained binding
-  materialization path is enabled.
+- Retained serving prefetch lowers through the unified realization facade:
+  `ArtifactRealizationSpec.retained_binding(...)` for one retained binding and
+  `ArtifactRealizationSpec.target_set(...)` for TP/group target sets.
+  `artifact.prefetch(target=ServingBindingTarget(...))` and
+  `artifact.prefetch(target=ServingBindingSetTarget(...))` remain ergonomic
+  wrappers, but target sets must use the target-set realization path so group
+  admission, strategy, lifecycle, resource-envelope, and report state all carry
+  `target_kind="target_set"`. Ordinary `device=` prefetch behavior is
+  unchanged. Serving targets require runtime-provided resolved layout/index
+  metadata before daemon allocation; unresolved layouts fail closed before GPU
+  memory is reserved. The daemon keeps serving prefetch behind
+  `daemon_config.serving_prefetch.enabled` and returns a typed
+  `PrefetchedServingBinding` / `PrefetchedServingBindingSet` result once the
+  retained binding materialization path is enabled.
 - Prefetch idempotency derives a stable action fingerprint from selection identity (`artifact_id`,
   `logical_layout_hash`, `selection_hash`) and target placement (daemon + device/tier). `selection_hash` is computed via
   `tensorcast.common.selection_identity` (stable `view_id` + `view_subset_hash`), matching Plan selection identity

@@ -6,7 +6,7 @@ from tensorcast.serving.builder.publication import (
     RecipePublicationContext,
     build_binding_finalize_publication_bundle_from_context,
     build_pure_transform_build_intent,
-    build_pure_transform_serving_args_from_context,
+    build_pure_transform_publication_spec_from_context,
 )
 from tensorcast.types import BindingValueRef, BuilderMode
 
@@ -37,14 +37,13 @@ def test_publication_context_builds_serving_intent() -> None:
 
 
 def test_publication_context_passes_framework_topology_json() -> None:
-    args = build_pure_transform_serving_args_from_context(
+    spec = build_pure_transform_publication_spec_from_context(
         _context(),
         build_pipeline_version="pipeline-v1",
         representation_contract_hash="repr-hash",
     )
 
-    assert args["tc_serving_logical_topology_json"] == \
-        '{"topology":"framework-owned"}'
+    assert spec.logical_topology_json == '{"topology":"framework-owned"}'
 
 
 def test_binding_finalize_publication_requires_explicit_admission_facts(

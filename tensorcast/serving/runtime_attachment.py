@@ -78,12 +78,38 @@ class RuntimeBindingState:
     artifact_ref: str | None = None
     runtime_view: RuntimeBindingView | None = None
     ownership_handle: Any | None = None
+    release_contract: Any | None = None
+    realization_handle: Any | None = None
+    model_runtime_handle: Any | None = None
+    publication_handle: Any | None = None
 
     def close(self) -> None:
+        release = getattr(self.release_contract, "release", None)
+        if callable(release):
+            release()
+            return
+        close_publication = getattr(self.publication_handle, "close", None)
+        if callable(close_publication):
+            close_publication()
+            return
+        close_realization = getattr(self.realization_handle, "close", None)
+        if callable(close_realization):
+            close_realization()
+            return
+        self.close_resources()
+
+    def close_resources(self) -> None:
+        self.retire_active_publication()
+        self.close_binding_handle()
+
+    def retire_active_publication(self) -> None:
         handle = self.ownership_handle or self.binding
         retire = getattr(handle, "retire", None)
         if callable(retire) and _binding_has_active_published_replica(handle):
             retire(drain_timeout_s=None)
+
+    def close_binding_handle(self) -> None:
+        handle = self.ownership_handle or self.binding
         close = getattr(handle, "close", None)
         if callable(close):
             close()
@@ -102,6 +128,7 @@ class RuntimeStateSeed:
     local_serving_ref: str | None = None
     readiness: str = "loaded"
     diagnostics: Mapping[str, Any] | None = None
+    realization_report: Any | None = None
 
     def runtime_view(self) -> RuntimeBindingView:
         return RuntimeBindingView(

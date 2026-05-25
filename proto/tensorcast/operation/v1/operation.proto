@@ -276,6 +276,8 @@ message PrefetchServingBindingResult {
   optional string group_realization_version_set_id = 15;
   optional string group_realization_part_id = 16;
   optional string group_realization_staging_token = 17;
+  optional bool group_realization_wait_for_publish = 18;
+  optional uint64 group_realization_wait_timeout_ms = 19;
 }
 
 message PrefetchServingBindingMemberFailure {

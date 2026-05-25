@@ -83,8 +83,6 @@ By default, the Python SDK surfaces a concise `ArtifactError` stack without gRPC
   the instance execution endpoint from that same directory contract before forwarding to the Node Agent.
 - `runtime.signals().get_worker_status()` provides a daemon-backed low-cardinality snapshot for the connected worker
   with explicit snapshot metadata (`SignalSnapshot`).
-- `runtime.signals().list_workers()` and `runtime.signals().list_instances()` remain compatibility delegation shims
-  over `runtime.directory()` during the migration away from direct Global Store directory reads.
 
 ## Materialization v2 (descriptor streaming)
 
@@ -111,7 +109,7 @@ this path.
 The `region_backed_mode` default in the unified runtime config controls the
 behavior:
 
-- `auto`: try region-backed first; fall back to the legacy replica path on
+- `auto`: try region-backed first; use daemon-owned replica materialization on
   validation failures.
 - `require`: enforce region-backed and surface errors.
 
@@ -144,8 +142,8 @@ immediately, keeping callers from running deeper into retry loops that can never
 `Artifact.view(...).tensor*` defaults to executing transforms on the daemon so
 transpose views return buffers in the expected orientation. Client-side
 execution is intentionally disabled until a local transform engine exists; the
-pipeline still accepts `placement="CLIENT"` explicitly for forward
-compatibility.
+pipeline still accepts `placement="CLIENT"` explicitly as a reserved placement
+mode.
 
 ## View Registration
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import weakref
+from typing import Any, cast
 
 import pytest
 import torch
@@ -88,11 +89,15 @@ class _StoreStub:
     _runtime = None
 
 
+def _store_ref(store: _StoreStub) -> weakref.ReferenceType[Any]:
+    return cast(weakref.ReferenceType[Any], weakref.ref(store))
+
+
 def test_plan_to_spec_is_deterministic() -> None:
     store = _StoreStub()
     canonical_bytes = _canonical_index_bytes()
     artifact = Artifact(
-        store_ref=weakref.ref(store),
+        store_ref=_store_ref(store),
         artifact_id="mi2:test",
         canonical_index_bytes=canonical_bytes,
         canonical_index=canonical_index_from_bytes(canonical_bytes),
@@ -122,7 +127,7 @@ def test_plan_view_selection_hash_populated() -> None:
     store = _StoreStub()
     canonical_bytes = _canonical_index_bytes()
     base = Artifact(
-        store_ref=weakref.ref(store),
+        store_ref=_store_ref(store),
         artifact_id="mi2:view-test",
         canonical_index_bytes=canonical_bytes,
         canonical_index=canonical_index_from_bytes(canonical_bytes),
@@ -217,7 +222,7 @@ def test_plan_transform_register_pure_transform_builds_repo_owned_spec() -> None
     store = _StoreStub()
     canonical_bytes = _canonical_index_bytes()
     artifact = Artifact(
-        store_ref=weakref.ref(store),
+        store_ref=_store_ref(store),
         artifact_id="mi2:test",
         canonical_index_bytes=canonical_bytes,
         canonical_index=canonical_index_from_bytes(canonical_bytes),
@@ -272,13 +277,13 @@ def test_prefetch_many_lowers_to_inline_artifact_set_ref() -> None:
     store = _StoreStub()
     canonical_bytes = _canonical_index_bytes()
     artifact_a = Artifact(
-        store_ref=weakref.ref(store),
+        store_ref=_store_ref(store),
         artifact_id="mi2:a",
         canonical_index_bytes=canonical_bytes,
         canonical_index=canonical_index_from_bytes(canonical_bytes),
     )
     artifact_b = Artifact(
-        store_ref=weakref.ref(store),
+        store_ref=_store_ref(store),
         artifact_id="mi2:b",
         canonical_index_bytes=canonical_bytes,
         canonical_index=canonical_index_from_bytes(canonical_bytes),
@@ -298,8 +303,8 @@ def test_prefetch_many_lowers_to_inline_artifact_set_ref() -> None:
 
     explicit_set = ArtifactSetRef.inline(
         (
-            artifact_a._build_artifact_selection(),
-            artifact_b._build_artifact_selection(),
+            artifact_a._resolve_realization_selection().proto,
+            artifact_b._resolve_realization_selection().proto,
         )
     )
     explicit_plan = Plan(ctx)
@@ -402,7 +407,7 @@ def test_local_plan_run_fails_closed_on_instance_steps_without_node_agent_bridge
     step_result = result.step(step)
     assert step_result.action == "manifest"
     assert step_result.status.state == "failed"
-    assert "Node Agent" in step_result.status.message
+    assert "Node Agent" in (step_result.status.message or "")
 
 
 def test_artifact_set_ref_resolution_fails_closed_on_mismatch() -> None:

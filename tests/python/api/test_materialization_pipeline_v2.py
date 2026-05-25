@@ -60,6 +60,7 @@ def test_materialization_proto_alignment():
     assert hasattr(resp, "canonical_index_bytes")
     assert hasattr(resp, "view_index_bytes")
     assert hasattr(resp, "generation")
+    assert not hasattr(resp, "view_index_json")
     assert not hasattr(resp, "canonical_index_json")
 
 
@@ -127,7 +128,7 @@ class _FakeClient:
         del artifact_id
         return b"{}"
 
-    def import_artifact_from_path_v2(self, *, path: str, verify_checksums: bool = True):
+    def import_artifact_from_path(self, *, path: str, verify_checksums: bool = True):
         self.resolve_calls.append((path, bool(verify_checksums)))
 
         class _Resp:
@@ -139,10 +140,10 @@ class _FakeClient:
         resp.generation = 0
         return resp
 
-    def import_artifact_from_path_stream_v2(
+    def import_artifact_from_path_stream(
         self, *, path: str, verify_checksums: bool = True
     ):
-        resp = self.import_artifact_from_path_v2(
+        resp = self.import_artifact_from_path(
             path=path,
             verify_checksums=verify_checksums,
         )

@@ -3,7 +3,6 @@
 """Service for instance registry operations."""
 
 import time
-from contextlib import suppress
 
 from tensorcast.global_store.config import get_config
 from tensorcast.global_store.exceptions import ValidationError
@@ -101,10 +100,9 @@ class InstanceService:
             instance_id, worker_id=resolved_worker_id
         )
         if ok and capability_flags is not None:
-            with suppress(Exception):
-                self.instance_repository.update_capability_flags(
-                    instance_id, int(capability_flags)
-                )
+            self.instance_repository.update_capability_flags(
+                instance_id, int(capability_flags)
+            )
         return ok
 
     def unregister_instance(self, instance_id: str) -> bool:

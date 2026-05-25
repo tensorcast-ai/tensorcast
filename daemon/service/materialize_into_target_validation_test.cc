@@ -46,6 +46,8 @@
 namespace {
 
 using tensorcast::daemon::MaterializationController;
+using tensorcast::daemon::v2::EnsureCanonicalLayoutRequest;
+using tensorcast::daemon::v2::EnsureCanonicalLayoutResponse;
 using tensorcast::daemon::v2::MaterializeIntoTargetRequest;
 using tensorcast::daemon::v2::MaterializeIntoTargetResponse;
 
@@ -283,7 +285,58 @@ grpc::Status run_request(
   return controller.materialize_into_target(rctx, req, resp);
 }
 
+grpc::Status run_ensure_canonical_layout(
+    MaterializationController& controller,
+    const EnsureCanonicalLayoutRequest& req,
+    EnsureCanonicalLayoutResponse& resp) {
+  grpc::ServerContext ctx;
+  tensorcast::daemon::RpcContext rctx{"EnsureCanonicalLayoutTest", ctx, /*allow_high_card_attrs=*/true};
+  return controller.ensure_canonical_layout(rctx, req, resp);
+}
+
 } // namespace
+
+TEST_CASE("EnsureCanonicalLayout provisions canonical layout", "[daemon][materialize][layout]") {
+  ValidationFixture fix;
+  fix.global_store_client->next_layout_id = "layout-canonical";
+
+  EnsureCanonicalLayoutRequest req;
+  req.set_index_multihash("mh-test");
+  req.set_canonical_index_data("index-bytes");
+
+  EnsureCanonicalLayoutResponse resp;
+  auto status = run_ensure_canonical_layout(fix.controller, req, resp);
+
+  REQUIRE(status.ok());
+  REQUIRE(resp.layout_id() == "layout-canonical");
+  REQUIRE(fix.global_store_client->put_layout_specs.size() == 1);
+  REQUIRE(fix.global_store_client->put_layout_specs.front().layout_schema_version() == 1);
+  REQUIRE(fix.global_store_client->put_layout_specs.front().index_multihash() == "mh-test");
+  REQUIRE(fix.global_store_client->put_layout_canonical_index_data == std::vector<std::string>{"index-bytes"});
+  REQUIRE(fix.global_store_client->artifact_layouts.empty());
+}
+
+TEST_CASE("EnsureCanonicalLayout can attach layout to artifact", "[daemon][materialize][layout]") {
+  ValidationFixture fix;
+  fix.global_store_client->next_layout_id = "layout-attached";
+
+  EnsureCanonicalLayoutRequest req;
+  req.set_artifact_id("mi2:mh-test:artifact");
+  req.set_index_multihash("mh-test");
+  req.set_attach_to_artifact(true);
+  req.mutable_layout()->set_layout_schema_version(7);
+
+  EnsureCanonicalLayoutResponse resp;
+  auto status = run_ensure_canonical_layout(fix.controller, req, resp);
+
+  REQUIRE(status.ok());
+  REQUIRE(resp.layout_id() == "layout-attached");
+  REQUIRE(fix.global_store_client->put_layout_specs.size() == 1);
+  REQUIRE(fix.global_store_client->put_layout_specs.front().layout_schema_version() == 7);
+  REQUIRE(fix.global_store_client->put_layout_specs.front().index_multihash() == "mh-test");
+  REQUIRE(
+      fix.global_store_client->artifact_layouts["mi2:mh-test:artifact"] == std::vector<std::string>{"layout-attached"});
+}
 
 TEST_CASE("MaterializeIntoTarget rejects missing artifact_id", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
@@ -380,12 +433,12 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "MaterializeIntoTarget falls back to local import disk when Global Store connected",
+    "MaterializeIntoTarget uses local import disk source when Global Store connected",
     "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   fix.global_store_client->connected = true;
 
-  const auto artifact_dir = test_tmpdir() / "artifact_target_local_import_fallback";
+  const auto artifact_dir = test_tmpdir() / "artifact_target_local_import_disk_source";
   std::filesystem::remove_all(artifact_dir);
   std::filesystem::create_directories(artifact_dir);
   REQUIRE(write_file(artifact_dir / "tensor_index.json", make_canonical_index_json()));

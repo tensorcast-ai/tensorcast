@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import importlib
 import json
 import time
 import types
@@ -170,6 +171,7 @@ class _FakeMappedClient:
         self.refill_calls: list[dict[str, Any]] = []
         self.close_calls: list[str] = []
         self.publish_calls: list[dict[str, Any]] = []
+        self.omit_create_binding_current_value = False
         self._token_counter = 0
         self._region_counter = 0
         self._lease_counter = 0
@@ -232,29 +234,21 @@ class _FakeMappedClient:
         self.unregister_calls.append(region_id)
         return True
 
-    def materialize_into_target_v2(self, **kwargs: Any) -> Any:
+    def materialize_into_target(self, **kwargs: Any) -> Any:
         self.into_target_calls.append(kwargs)
-        self._token_counter += 1
         selection = common_pb2.ArtifactSelection()
         selection.CopyFrom(kwargs["selection"])
         return types.SimpleNamespace(
             status=1,  # MATERIALIZE_REPLICA_STATUS_ALLOCATED
-            binding_current_value_publication_token=f"token-{self._token_counter}".encode(
-                "utf-8"
-            ),
             resolved_selection=selection,
         )
 
     def materialize_into_mapped_target(self, **kwargs: Any) -> Any:
         self.into_mapped_calls.append(kwargs)
-        self._token_counter += 1
         selection = common_pb2.ArtifactSelection()
         selection.CopyFrom(kwargs["selection"])
         return types.SimpleNamespace(
             status=1,  # MATERIALIZE_REPLICA_STATUS_ALLOCATED
-            binding_current_value_publication_token=f"token-{self._token_counter}".encode(
-                "utf-8"
-            ),
             resolved_selection=selection,
         )
 
@@ -269,10 +263,14 @@ class _FakeMappedClient:
     def create_binding(self, **kwargs: Any) -> Any:
         self.create_binding_calls.append(kwargs)
         self._binding_counter += 1
+        self._token_counter += 1
         binding_id = f"mapped-client-binding-{self._binding_counter}"
         self._binding_layout_ids[binding_id] = str(kwargs["binding_layout_id"])
         current_value = None
-        if kwargs.get("initial_selection") is not None:
+        if (
+            kwargs.get("initial_selection") is not None
+            and not self.omit_create_binding_current_value
+        ):
             selection = common_pb2.ArtifactSelection()
             selection.CopyFrom(kwargs["initial_selection"])
             self._binding_selections[binding_id] = selection
@@ -284,6 +282,9 @@ class _FakeMappedClient:
             binding_id=binding_id,
             target_index_bytes=bytes(kwargs["target_index_bytes"]),
             current_value=current_value,
+            binding_current_value_publication_token=f"token-{self._token_counter}".encode(
+                "utf-8"
+            ),
         )
 
     def create_owned_binding(self, **kwargs: Any) -> Any:
@@ -307,6 +308,7 @@ class _FakeMappedClient:
             binding_current_value_publication_token=f"token-{self._token_counter}".encode(
                 "utf-8"
             ),
+            created_staged_value=False,
             current_value=self._make_binding_value(
                 binding_id=binding_id,
                 selection=selection,
@@ -316,10 +318,14 @@ class _FakeMappedClient:
     def commit_binding_artifact(self, **kwargs: Any) -> Any:
         self.commit_calls.append(kwargs)
         binding_id = str(kwargs["binding_id"])
+        self._token_counter += 1
         selection = common_pb2.ArtifactSelection()
         selection.CopyFrom(kwargs["selection"])
         self._binding_selections[binding_id] = selection
         return types.SimpleNamespace(
+            binding_current_value_publication_token=f"token-{self._token_counter}".encode(
+                "utf-8"
+            ),
             current_value=self._make_binding_value(
                 binding_id=binding_id,
                 selection=selection,
@@ -464,9 +470,6 @@ def test_mapped_binding_uses_materialize_into_mapped_target(
     import tensorcast.api.store as store_mod
 
     monkeypatch.setattr(
-        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
-    )
-    monkeypatch.setattr(
         store_mod,
         "get_cuda_memory_handle_with_offset",
         lambda *args, **kwargs: (b"fake-handle", 0),
@@ -515,6 +518,60 @@ def test_mapped_binding_uses_materialize_into_mapped_target(
 
 
 @pytest.mark.requires_cuda_or_fake
+def test_mapped_bind_into_closes_binding_and_releases_regions_for_malformed_create_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA tensors unavailable; mapped binding requires torch CUDA")
+
+    index_bytes = _make_index_bytes()
+    client = _FakeMappedClient(index_bytes)
+    client.omit_create_binding_current_value = True
+    runtime = _FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+    _cache_index(runtime, "artifact-1", index_bytes)
+
+    import tensorcast.api._device as device_mod
+    import tensorcast.api.store as store_mod
+
+    artifact_mod = importlib.import_module("tensorcast.api.store.artifact")
+    monkeypatch.setattr(
+        store_mod,
+        "get_cuda_memory_handle_with_offset",
+        lambda *args, **kwargs: (b"fake-handle", 0),
+    )
+    monkeypatch.setattr(device_mod, "device_uuid_for", lambda device_id: "gpu-0")
+    monkeypatch.setattr(artifact_mod, "device_uuid_for", lambda device_id: "gpu-0")
+
+    dst_tensors = {
+        "a": torch.empty((4,), dtype=torch.uint8, device="cuda:0"),
+        "b": torch.empty((4,), dtype=torch.uint8, device="cuda:0"),
+    }
+    plan = [
+        CopyPlanEntry(
+            ckpt_name="src",
+            ckpt_range=Range(dim=0, start=0, end=4),
+            dst_name="a",
+            dst_range=Range(dim=0, start=0, end=4),
+        ),
+        CopyPlanEntry(
+            ckpt_name="src",
+            ckpt_range=Range(dim=0, start=4, end=8),
+            dst_name="b",
+            dst_range=Range(dim=0, start=0, end=4),
+        ),
+    ]
+
+    with pytest.raises(ArtifactError) as excinfo:
+        store.artifact(artifact_id="artifact-1").bind_into(dst_tensors, mapping=plan)
+
+    assert excinfo.value.status_code == "DATA_LOSS"
+    assert len(client.into_mapped_calls) == 1
+    assert client.close_calls == ["mapped-client-binding-1"]
+    assert client.unregister_calls == ["region:mapped:1", "region:mapped:2"]
+
+
+@pytest.mark.requires_cuda_or_fake
 def test_bind_into_surfaces_region_registry_capacity_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -530,9 +587,6 @@ def test_bind_into_surfaces_region_registry_capacity_errors(
     import tensorcast.api._device as device_mod
     import tensorcast.api.store as store_mod
 
-    monkeypatch.setattr(
-        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
-    )
     monkeypatch.setattr(
         store_mod,
         "get_cuda_memory_handle_with_offset",
@@ -588,9 +642,6 @@ def test_mapped_binding_swap_publish_calls_publish_target_replica(
     import tensorcast.api.store as store_mod
 
     monkeypatch.setattr(
-        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
-    )
-    monkeypatch.setattr(
         store_mod,
         "get_cuda_memory_handle_with_offset",
         lambda *args, **kwargs: (b"fake-handle", 0),
@@ -645,9 +696,6 @@ def test_mapped_binding_bind_publish_calls_publish_target_replica(
     import tensorcast.api._device as device_mod
     import tensorcast.api.store as store_mod
 
-    monkeypatch.setattr(
-        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
-    )
     monkeypatch.setattr(
         store_mod,
         "get_cuda_memory_handle_with_offset",
@@ -775,9 +823,6 @@ def test_bind_into_mapping_propagates_collective_hint_in_operation_id(
 
     monkeypatch.setattr(device_mod, "device_uuid_for", lambda device_id: "gpu-0")
     monkeypatch.setattr(artifact_mod, "device_uuid_for", lambda device_id: "gpu-0")
-    monkeypatch.setattr(
-        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
-    )
     monkeypatch.setattr(
         store_mod,
         "get_cuda_memory_handle_with_offset",

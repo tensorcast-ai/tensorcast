@@ -20,6 +20,7 @@
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
+#include "daemon/service/controllers/materialization_policy_utils.h"
 #include "daemon/state/routed_authority_protocol.h"
 #include "daemon/state/routed_authority_wire.h"
 #include "daemon/util/status_utils.h"
@@ -29,6 +30,11 @@ namespace tensorcast::daemon {
 
 using ::grpc::Status;
 using ::grpc::StatusCode;
+using materialization_policy::attach_controller_realization_plan_span_attrs;
+using materialization_policy::build_controller_realization_plan;
+using materialization_policy::ControllerRealizationPlan;
+using materialization_policy::require_controller_export_kind;
+using materialization_policy::require_controller_resource_authority;
 namespace global_store = tensorcast::global_store::v1;
 namespace operation = tensorcast::operation::v1;
 using status_utils::to_grpc_status;
@@ -1946,6 +1952,21 @@ grpc::Status TargetPublishService::publish_target_replica(
     return to_grpc_status(publish_context_or.status());
   }
   auto publish_context = std::move(*publish_context_or);
+  auto realization_plan_or =
+      build_controller_realization_plan(req, publish_context.scope, publish_context.normalized_byte_space);
+  if (!realization_plan_or.ok()) {
+    return to_grpc_status(realization_plan_or.status());
+  }
+  const ControllerRealizationPlan& realization_plan = *realization_plan_or;
+  attach_controller_realization_plan_span_attrs(rctx, realization_plan);
+  if (auto status = require_controller_export_kind(realization_plan, "publication_lease", "PublishTargetReplica");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
+  if (auto status = require_controller_resource_authority(realization_plan, "LifecycleKernel", "PublishTargetReplica");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
   auto record = std::move(publish_context.record);
   populate_publication_workflow_state(&record);
   if (record.request_operation_id.empty() && req.has_operation_id() && !req.operation_id().empty()) {
@@ -2031,6 +2052,22 @@ grpc::Status TargetPublishService::start_publish_target_replica(
     return to_grpc_status(publish_context_or.status());
   }
   auto publish_context = std::move(*publish_context_or);
+  auto realization_plan_or =
+      build_controller_realization_plan(req, publish_context.scope, publish_context.normalized_byte_space);
+  if (!realization_plan_or.ok()) {
+    return to_grpc_status(realization_plan_or.status());
+  }
+  const ControllerRealizationPlan& realization_plan = *realization_plan_or;
+  attach_controller_realization_plan_span_attrs(rctx, realization_plan);
+  if (auto status = require_controller_export_kind(realization_plan, "publication_lease", "StartPublishTargetReplica");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
+  if (auto status =
+          require_controller_resource_authority(realization_plan, "LifecycleKernel", "StartPublishTargetReplica");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
   auto record = std::move(publish_context.record);
   populate_publication_workflow_state(&record);
   if (record.request_operation_id.empty() && req.has_operation_id() && !req.operation_id().empty()) {

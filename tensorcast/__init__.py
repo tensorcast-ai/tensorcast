@@ -442,10 +442,6 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "tensorcast.api.store",
         "build_representation_publish_requirements",
     ),
-    "build_pure_transform_serving_args": (
-        "tensorcast.api.store",
-        "build_pure_transform_serving_args",
-    ),
     "build_pure_transform_transform_spec": (
         "tensorcast.api.store",
         "build_pure_transform_transform_spec",

@@ -265,7 +265,7 @@ absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
     const std::filesystem::path& storage_path,
     std::string artifact_id,
     bool allow_disk,
-    bool allow_local_import_fallback,
+    bool allow_local_import_disk_source,
     bool loopback_peer,
     std::optional<uint64_t> disk_expected_size,
     bool lightweight_msa1_validation) {
@@ -325,7 +325,7 @@ absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
     return binding_or.status();
   }
   if (binding_or->has_value()) {
-    resolution.fallback_artifact_id = resolution.resolved_artifact_id;
+    resolution.pre_binding_artifact_id = resolution.resolved_artifact_id;
     resolution.bound_artifact_id = binding_or->value();
     resolution.resolved_artifact_id = binding_or->value();
   }
@@ -344,9 +344,9 @@ absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
             .updated_at = absl::Now(),
         });
   }
-  // Managed shared-disk remains preferred. If unavailable, local imports can still provide
-  // a deterministic disk source even when Global Store is connected.
-  if (!resolution.normalized_disk_path.has_value() && allow_disk && allow_local_import_fallback &&
+  // Managed shared-disk remains preferred. If unavailable, local imports can
+  // still provide an explicit daemon-local disk source when requested.
+  if (!resolution.normalized_disk_path.has_value() && allow_disk && allow_local_import_disk_source &&
       source_registry != nullptr) {
     auto entry = source_registry->lookup_binding(resolution.resolved_artifact_id);
     if (entry.has_value()) {
@@ -355,7 +355,7 @@ absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
       }
       if (entry->source_kind != ArtifactSourceRegistry::SourceKind::kLocalImport) {
         return absl::FailedPreconditionError(
-            "SOURCE_MUTATED: unexpected source binding type for local import fallback");
+            "SOURCE_MUTATED: unexpected source binding type for local import disk source");
       }
       materialization_disk_resolve::SourceFingerprintMap expected_fingerprints;
       expected_fingerprints.reserve(entry->file_fingerprints.size());

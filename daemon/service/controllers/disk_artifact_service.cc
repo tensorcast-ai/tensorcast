@@ -162,7 +162,6 @@ materialization_disk_resolve::MountedSourceAttestationPolicy build_attestation_p
 struct ResolvedDiskPathPolicy {
   std::filesystem::path normalized_path;
   TrustedRootPolicy policy;
-  bool used_absolute_fallback{false};
 };
 
 absl::StatusOr<ResolvedDiskPathPolicy> resolve_disk_path_policy(
@@ -189,7 +188,6 @@ absl::StatusOr<ResolvedDiskPathPolicy> resolve_disk_path_policy(
     return ResolvedDiskPathPolicy{
         .normalized_path = *normalized_or,
         .policy = trusted_root,
-        .used_absolute_fallback = false,
     };
   }
 
@@ -223,21 +221,6 @@ absl::StatusOr<ResolvedDiskPathPolicy> resolve_disk_path_policy(
     return ResolvedDiskPathPolicy{
         .normalized_path = *normalized_or,
         .policy = *best_match,
-        .used_absolute_fallback = false,
-    };
-  }
-
-  if (policy.unmatched_path_mode == PublicDiskSourcePolicy::UnmatchedPathMode::kAllowAbsoluteFallback) {
-    TrustedRootPolicy fallback_policy;
-    fallback_policy.policy_id = default_public_disk_source_policy_id(std::filesystem::path());
-    auto normalized_or = normalize_disk_path(request_path, std::filesystem::path());
-    if (!normalized_or.ok()) {
-      return normalized_or.status();
-    }
-    return ResolvedDiskPathPolicy{
-        .normalized_path = *normalized_or,
-        .policy = std::move(fallback_policy),
-        .used_absolute_fallback = true,
     };
   }
 
@@ -551,9 +534,6 @@ DiskArtifactService::DiskArtifactService(Dep d)
               .policy_id = mounted_source_policy_id(),
               .root_path = storage_path_,
           });
-    } else {
-      d_.public_disk_source_policy.unmatched_path_mode =
-          PublicDiskSourcePolicy::UnmatchedPathMode::kAllowAbsoluteFallback;
     }
   }
   for (auto& trusted_root : d_.public_disk_source_policy.trusted_root_policies) {
@@ -952,7 +932,7 @@ grpc::Status DiskArtifactService::promote_mounted_source_artifact(
       storage_path_,
       req.artifact_id(),
       /*allow_disk=*/true,
-      /*allow_local_import_fallback=*/true,
+      /*allow_local_import_disk_source=*/true,
       /*loopback_peer=*/true);
   if (!resolution_or.ok()) {
     return to_import_grpc_status(resolution_or.status());

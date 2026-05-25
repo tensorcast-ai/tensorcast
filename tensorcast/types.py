@@ -2735,6 +2735,7 @@ class PrefetchedServingBinding(BaseModel):
     expires_at_ms: int | None = None
     staged_value: bool = False
     group_realization_acquire: GroupRealizationAcquireRef | None = None
+    report: object | None = Field(default=None, exclude=True, repr=False)
 
     @model_validator(mode="after")
     def _validate_result(self) -> "PrefetchedServingBinding":
@@ -2787,6 +2788,12 @@ class PrefetchedServingBinding(BaseModel):
             proto.group_realization_staging_token = (
                 self.group_realization_acquire.staging_token
             )
+            proto.group_realization_wait_for_publish = (
+                self.group_realization_acquire.wait_for_publish
+            )
+            proto.group_realization_wait_timeout_ms = (
+                self.group_realization_acquire.wait_timeout_ms
+            )
         return proto
 
     @classmethod
@@ -2803,6 +2810,16 @@ class PrefetchedServingBinding(BaseModel):
                 version_set_id=str(proto.group_realization_version_set_id),
                 part_id=str(proto.group_realization_part_id),
                 staging_token=str(proto.group_realization_staging_token),
+                wait_for_publish=(
+                    bool(proto.group_realization_wait_for_publish)
+                    if proto.HasField("group_realization_wait_for_publish")
+                    else False
+                ),
+                wait_timeout_ms=(
+                    int(proto.group_realization_wait_timeout_ms)
+                    if proto.HasField("group_realization_wait_timeout_ms")
+                    else 0
+                ),
             )
         return cls(
             local_serving_ref=(
@@ -2905,6 +2922,7 @@ class PrefetchedServingBindingSet(BaseModel):
     expires_at_ms: int | None = None
     member_failures: tuple[PrefetchedServingBindingMemberFailure, ...] = ()
     partial: bool = False
+    report: object | None = Field(default=None, exclude=True, repr=False)
 
     @model_validator(mode="after")
     def _validate_result_set(self) -> "PrefetchedServingBindingSet":

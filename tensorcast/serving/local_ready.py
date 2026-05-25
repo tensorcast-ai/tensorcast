@@ -4,8 +4,8 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -33,6 +33,7 @@ from tensorcast.serving.contract import logical_topology_json
 from tensorcast.types import ServingTopologyRef
 
 LOCAL_READY_BOOTSTRAP_BUILD_PIPELINE_VERSION = "tensorcast-bootstrap-v1"
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -285,6 +286,13 @@ def create_local_ready_binding(
     )
 
 
+def _close_binding_after_failure(binding: Any, *, phase: str) -> None:
+    try:
+        binding.close()
+    except Exception:
+        _LOGGER.exception("Failed to close local-ready binding after %s failure", phase)
+
+
 def realize_local_ready_binding_from_source(
     *,
     recipe: CompiledServingRecipe,
@@ -319,8 +327,7 @@ def realize_local_ready_binding_from_source(
             options=options,
         )
     except Exception:
-        with suppress(Exception):
-            binding.close()
+        _close_binding_after_failure(binding, phase="realize_from")
         raise
     return LocalReadyBindingRealizationResult(
         binding=binding,
@@ -364,8 +371,7 @@ def freeze_local_ready_binding(
             source_artifact_ref=source_artifact_ref,
         )
     except Exception:
-        with suppress(Exception):
-            binding.close()
+        _close_binding_after_failure(binding, phase="freeze_current")
         raise
 
 

@@ -32,7 +32,21 @@ sc_header_only_library(
         "//core/common:pinned_buffer_pool_lib",
         "//core/store:store_engine_options",
         "//core/store/materialization/contracts:loading_spec",
+        "//core/store/materialization/dataplane:view_planner",
         "//core/store/runtime/ingestion:materialization_strategy_types",
+    ],
+)
+
+sc_cc_library(
+    name = "replica_placement",
+    srcs = ["replica_placement.cc"],
+    hdrs = ["replica_placement.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":replica_config",
+        "//core/store:device_registry",
+        "//core/store:device_types",
+        "@abseil-cpp//absl/strings",
     ],
 )
 
@@ -192,6 +206,7 @@ sc_cc_library(
         ":direct_write",
         ":memory_export_registry",
         ":memory_state",
+        ":replica_placement",
         ":transfer_helpers",
         ":transfer_service",
         ":unified_memory_authority",
@@ -232,11 +247,11 @@ sc_cc_library(
         ":chunk_state",
         ":memory_state",
         ":replica_load_controller",
+        ":replica_placement",
         "//core/common:memory_location_lib",
         "//core/communicator:engine_lib",
         "//core/cuda:cuda_api_lib",
         "//core/store:communication_types",
-        "//core/store:device_registry",
         "//core/store:device_types",
         "//core/store:memory_types",
         "//core/store:store_engine_options",
@@ -263,6 +278,21 @@ sc_cc_library(
 )
 
 # Tests
+
+cc_test(
+    name = "replica_placement_test",
+    srcs = ["replica_placement_test.cc"],
+    deps = [
+        ":replica_placement",
+        "//core/common:async_runtime_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/store:device_registry",
+        "//core/store:device_types",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+        "@gsl",
+    ],
+)
 
 cc_test(
     name = "unified_memory_authority_plan_commit_test",

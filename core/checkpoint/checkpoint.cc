@@ -47,6 +47,7 @@
 #include <nlohmann/json.hpp>
 #include "absl/cleanup/cleanup.h"
 #include "absl/log/absl_check.h"
+#include "absl/strings/str_cat.h"
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmacro-redefined"
@@ -1240,24 +1241,6 @@ std::uint64_t allocate_cuda_memory(int device_id, size_t tensor_size) {
   return reinterpret_cast<std::uint64_t>(ptr);
 }
 
-std::string get_cuda_memory_handle(int device_id, std::uint64_t memory_ptr) {
-  cudaIpcMemHandle_t handle;
-  auto set_device_status = cuda::set_device(device_id);
-  if (!set_device_status.ok()) {
-    LOG(ERROR) << "Failed to set CUDA device " << device_id << ": " << set_device_status.message();
-    return "";
-  }
-
-  auto ipc_status = cuda::get_ipc_mem_handle(&handle, reinterpret_cast<void*>(memory_ptr));
-  if (!ipc_status.ok()) {
-    LOG(ERROR) << "Failed to get IPC memory handle: " << ipc_status.message();
-    return "";
-  }
-
-  const auto bytes = cuda::IpcHandleBytes::from_native(handle);
-  return std::string(bytes.as_string_view());
-}
-
 absl::StatusOr<std::pair<std::string, std::uint64_t>> get_cuda_memory_handle_with_offset(
     int device_id,
     std::uint64_t memory_ptr) {
@@ -1274,14 +1257,8 @@ absl::StatusOr<std::pair<std::string, std::uint64_t>> get_cuda_memory_handle_wit
   size_t range_bytes = 0;
   auto range_status = cuda::mem_get_address_range(&base, &range_bytes, reinterpret_cast<void*>(memory_ptr));
   if (!range_status.ok() || base == nullptr) {
-    // Fall back to the legacy behavior: export directly from memory_ptr with a
-    // zero base offset. This preserves previous semantics when address-range
-    // queries are unavailable.
-    const std::string handle = get_cuda_memory_handle(device_id, memory_ptr);
-    if (handle.empty()) {
-      return absl::FailedPreconditionError("Failed to export CUDA IPC handle");
-    }
-    return std::make_pair(handle, static_cast<std::uint64_t>(0));
+    return absl::FailedPreconditionError(
+        absl::StrCat("CUDA address range lookup failed for IPC export: ", range_status.ToString()));
   }
 
   const auto base_addr = reinterpret_cast<std::uint64_t>(base);

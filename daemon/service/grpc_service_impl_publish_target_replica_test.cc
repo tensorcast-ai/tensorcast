@@ -135,27 +135,6 @@ std::string mint_token(
   return *token_or;
 }
 
-std::string mint_legacy_target_publication_token(
-    const tensorcast::common::CapabilityTokenManager& manager,
-    std::string_view issuer,
-    const tensorcast::common::v1::BindingCurrentValuePublicationScope& scope) {
-  tensorcast::common::v1::TargetPublicationScope legacy_scope;
-  legacy_scope.set_publication_id(scope.publication_id());
-  legacy_scope.mutable_selection()->CopyFrom(scope.selection());
-  legacy_scope.mutable_byte_space()->CopyFrom(scope.byte_space());
-  legacy_scope.set_device_uuid(scope.device_uuid());
-  legacy_scope.set_owner_pid(scope.owner_pid());
-  legacy_scope.set_target_layout_hash(scope.target_layout_hash());
-  legacy_scope.set_operation_id(scope.operation_id());
-  auto scope_bytes_or = tensorcast::common::CapabilityTokenManager::serialize_scope_deterministic(legacy_scope);
-  REQUIRE(scope_bytes_or.ok());
-  const uint64_t expires_at_ms = static_cast<uint64_t>(absl::ToUnixMillis(absl::Now() + absl::Minutes(5)));
-  auto token_or = manager.mint(
-      issuer, tensorcast::common::v1::CAPABILITY_AUDIENCE_TARGET_PUBLICATION, *scope_bytes_or, expires_at_ms);
-  REQUIRE(token_or.ok());
-  return *token_or;
-}
-
 tensorcast::daemon::TargetPublicationRegistry::Record make_record_from_scope(
     const tensorcast::common::v1::BindingCurrentValuePublicationScope& scope) {
   tensorcast::daemon::TargetPublicationRegistry::Record record;
@@ -232,31 +211,6 @@ TEST_CASE("PublishTargetReplica rejects owner mismatch", "[daemon][publish]") {
 
   auto st = harness->service().PublishTargetReplica(&ctx, &req, &resp);
   REQUIRE(st.error_code() == grpc::StatusCode::PERMISSION_DENIED);
-}
-
-TEST_CASE("PublishTargetReplica rejects legacy target publication tokens", "[daemon][publish]") {
-  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts());
-  auto gs = std::make_shared<tensorcast::store::testing::RecordingGlobalStoreClient>();
-  auto harness = make_harness(engine, gs);
-
-  auto* tokens = harness->kernel().capability_tokens();
-  REQUIRE(tokens != nullptr);
-  const int owner_pid = getpid();
-  const auto scope = make_scope("write-legacy", "artifact-legacy", "gpu-0", owner_pid, true);
-  auto record = make_publishable_record_from_scope(scope);
-  auto inserted_or = harness->materialization_controller().insert_target_publication_for_testing(std::move(record));
-  REQUIRE(inserted_or.ok());
-  const std::string token = mint_legacy_target_publication_token(*tokens, "daemon-test", scope);
-
-  grpc::ServerContext ctx;
-  tensorcast::daemon::v2::PublishTargetReplicaRequest req;
-  tensorcast::daemon::v2::PublishTargetReplicaResponse resp;
-  req.set_binding_current_value_publication_token(token);
-  req.mutable_byte_space()->CopyFrom(scope.byte_space());
-  req.set_owner_pid(owner_pid);
-
-  auto st = harness->service().PublishTargetReplica(&ctx, &req, &resp);
-  REQUIRE(!st.ok());
 }
 
 TEST_CASE("PublishTargetReplica rejects packed selections", "[daemon][publish]") {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import ctypes.util
 import gc
@@ -109,13 +110,78 @@ def test_cpu_memfd_lease_release_is_raii() -> None:
             local_handle_socket_path=socket_path,
         )
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.close(fd)
-        except OSError:
-            pass
 
     t = tensors["t"]
     assert bytes(t[:26].tolist()) == b"abcdefghijklmnopqrstuvwxyz"
+
+    del t
+    del tensors
+    gc.collect()
+
+    thread.join(timeout=3.0)
+    assert received["token"] == (2, token)
+
+
+def test_cpu_memfd_restore_writes_are_private_to_tensor_mapping() -> None:
+    token = b"lease_token_private_mapping"
+    sock_dir = Path(tempfile.mkdtemp(prefix="tc_local_handle_private_"))
+    socket_path = str(sock_dir / "local_handle.sock")
+
+    received: dict[str, object] = {"token": None}
+    ready = threading.Event()
+
+    def _serve_once() -> None:
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            srv.bind(socket_path)
+            srv.listen(1)
+            ready.set()
+            conn, _addr = srv.accept()
+            with conn:
+                header = _recv_exact(conn, 1 + 4)
+                if len(header) != 5:
+                    return
+                opcode = int(header[0])
+                (tok_len,) = struct.unpack("=I", header[1:])
+                tok = _recv_exact(conn, tok_len)
+                received["token"] = (opcode, tok)
+                with contextlib.suppress(BrokenPipeError):
+                    conn.sendall(bytes([0]))
+        finally:
+            srv.close()
+
+    thread = threading.Thread(target=_serve_once, daemon=True)
+    thread.start()
+    assert ready.wait(timeout=3.0)
+
+    size_bytes = 4096
+    fd = _memfd_create("tc_cpu_memfd_private_mapping")
+    try:
+        os.ftruncate(fd, size_bytes)
+        os.write(fd, b"abcdefghijklmnopqrstuvwxyz" * (size_bytes // 26))
+        os.lseek(fd, 0, os.SEEK_SET)
+        restore_fd = os.dup(fd)
+        tensors = restore_tensors_from_cpu_fd_with_lease(
+            {"t": ([size_bytes], [1], "torch.uint8", 0)},
+            fd=restore_fd,
+            size_bytes=size_bytes,
+            offset_bytes=0,
+            tensor_device_offsets={"t": 0},
+            lease_token=token,
+            local_handle_socket_path=socket_path,
+        )
+
+        t = tensors["t"]
+        assert int(t[0]) == ord("a")
+        t[0] = ord("Z")
+        assert int(t[0]) == ord("Z")
+        os.lseek(fd, 0, os.SEEK_SET)
+        assert os.read(fd, 1) == b"a"
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
     del t
     del tensors

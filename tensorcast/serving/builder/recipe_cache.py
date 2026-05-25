@@ -152,10 +152,16 @@ def _bytes_from_base64_payload(value: Any, *, field: str) -> bytes:
 def _pydantic_model_to_dict(value: Any | None) -> dict[str, Any] | None:
     if value is None:
         return None
-    if hasattr(value, "model_dump") and callable(value.model_dump):
-        return dict(value.model_dump(mode="python"))
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump(mode="python")
+        if not isinstance(dumped, Mapping):
+            raise ValueError(
+                f"unsupported recipe cache identity payload: {type(value)!r}"
+            )
+        return {str(key): payload for key, payload in dumped.items()}
     if isinstance(value, Mapping):
-        return dict(value)
+        return {str(key): payload for key, payload in value.items()}
     raise ValueError(f"unsupported recipe cache identity payload: {type(value)!r}")
 
 

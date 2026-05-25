@@ -77,7 +77,7 @@ TEST_CASE("DiskArtifact get size and load to CPU", "[replica][disk][cpu]") {
       .source = disk_src,
       .artifact_identifier = artifact_id,
       .device_type = ::tensorcast::DeviceType::CPU,
-      .local_device_id = 0,
+      .local_device_id = -1,
       .pinned_buffer_pool = pool,
       .async_runtime = async_runtime,
       .expected_artifact_size = total_size,

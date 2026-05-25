@@ -310,8 +310,11 @@ class TorchTensorHost:
             self.runtime_only_tensor_names(model),
             target_device=device,
         )
-        allocated.update(self.rehydrate_runtime_only_tensors(model, allocated, device))
-        return allocated
+        allocated_objects: dict[str, object] = dict(allocated)
+        allocated_objects.update(
+            self.rehydrate_runtime_only_tensors(model, allocated_objects, device)
+        )
+        return allocated_objects
 
     def rehydrate_runtime_only_tensors(
         self,

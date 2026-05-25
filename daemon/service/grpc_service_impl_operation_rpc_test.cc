@@ -968,6 +968,8 @@ TEST_CASE("PrefetchServingBinding creates staged value for group realization", "
   REQUIRE(result.group_realization_version_set_id() == client->begin_version_set_id);
   REQUIRE(result.group_realization_part_id() == "member-0");
   REQUIRE_FALSE(result.group_realization_staging_token().empty());
+  REQUIRE(result.group_realization_wait_for_publish());
+  REQUIRE(result.group_realization_wait_timeout_ms() == 30000);
   REQUIRE_FALSE(result.binding_value_ref().binding_value_id().empty());
   REQUIRE(result.binding_value_ref().seal_generation() == 0);
   REQUIRE(client->begin_group_calls.load(std::memory_order_relaxed) == 1);

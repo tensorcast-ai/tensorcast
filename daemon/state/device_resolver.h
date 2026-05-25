@@ -37,7 +37,7 @@ class DeviceResolver {
     if (type == v2::DeviceType::DEVICE_TYPE_GPU && ordinal_hint.has_value() && *ordinal_hint >= 0) {
       return reg_.gpu_key(*ordinal_hint);
     }
-    // Treat DISK as ingest-to-default GPU for legacy parity; default GPU otherwise.
+    // Treat DISK as ingest-to-default GPU; default GPU otherwise.
     return DefaultGpu();
   }
 

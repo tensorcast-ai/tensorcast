@@ -6,17 +6,19 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import logging
 import os
 import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, MutableMapping, Sequence
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from tensorcast.serving.binding_plan import ServingBindingPlan
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _jsonable(value: Any) -> Any:
@@ -1038,11 +1040,13 @@ class RecipeBuildSession:
         trace_plan: Any,
     ) -> None:
         def _worker() -> None:
-            with suppress(Exception):
+            try:
                 self.store_trace_plan_cache(
                     cache_path=cache_path,
                     trace_plan=trace_plan,
                 )
+            except Exception:
+                _LOGGER.exception("Failed to write deferred trace plan cache")
 
         threading.Thread(
             target=_worker,
@@ -1057,11 +1061,13 @@ class RecipeBuildSession:
         recipe: Any,
     ) -> None:
         def _worker() -> None:
-            with suppress(Exception):
+            try:
                 self.store_compiled_recipe_cache(
                     cache_path=cache_path,
                     recipe=recipe,
                 )
+            except Exception:
+                _LOGGER.exception("Failed to write deferred compiled recipe cache")
 
         threading.Thread(
             target=_worker,

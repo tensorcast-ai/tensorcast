@@ -611,7 +611,7 @@ def _resolve_view_index_bytes(
 
 
 def _resolve_artifact_selection(artifact: Artifact) -> _ArtifactSelection:
-    selection = artifact._build_artifact_selection()
+    selection = artifact._resolve_realization_selection().proto
     view_subset_hash = (
         bytes(selection.view_subset_hash) if selection.view_subset_hash else None
     )

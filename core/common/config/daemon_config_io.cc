@@ -618,13 +618,6 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
     auto* trusted_root = public_disk_source->add_trusted_root_policies();
     trusted_root->set_root_path(cfg->server().storage_path());
   }
-  if (public_disk_source->unmatched_path_mode() ==
-      tcfg::DaemonConfig::PublicDiskSource::UNMATCHED_PATH_MODE_UNSPECIFIED) {
-    public_disk_source->set_unmatched_path_mode(
-        cfg->server().storage_path().empty()
-            ? tcfg::DaemonConfig::PublicDiskSource::UNMATCHED_PATH_MODE_ALLOW_ABSOLUTE_FALLBACK
-            : tcfg::DaemonConfig::PublicDiskSource::UNMATCHED_PATH_MODE_REJECT);
-  }
   for (int i = 0; i < public_disk_source->trusted_root_policies_size(); ++i) {
     auto* trusted_root = public_disk_source->mutable_trusted_root_policies(i);
     if (!trusted_root->root_path().empty() && trusted_root->policy_id().empty()) {

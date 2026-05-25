@@ -1989,6 +1989,13 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
   absl::flat_hash_map<std::string, std::shared_ptr<const std::string>> mirrored_remote_batch_payloads;
   absl::flat_hash_map<std::string, std::shared_ptr<std::mutex>> remote_direct_source_mutexes;
   absl::flat_hash_set<std::string> direct_remote_batch_payloads;
+  ByteArtifactAuthorityService::Context authority_context{
+      .shard_id = req.fence().shard_id(),
+      .lease_generation = home_lease_or->lease_generation,
+      .routing_epoch = options_.routing.routing_epoch,
+      .shard_count = options_.routing.shard_count,
+      .now = now,
+  };
 
   struct CompositeStageCandidate {
     std::string transport_id;
@@ -2035,6 +2042,24 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
   std::vector<int> authority_item_indices;
   authority_items.reserve(req.items_size());
   authority_item_indices.reserve(req.items_size());
+  const auto maybe_publish_preregistered_existing = [&](std::string_view artifact_id) {
+    if (!options_.publish_prereg.enabled) {
+      return;
+    }
+    auto entry = d_.body_store.get(
+        artifact_id,
+        authority_context.shard_id,
+        authority_context.lease_generation,
+        authority_context.routing_epoch,
+        authority_context.now);
+    if (!entry.has_value()) {
+      VLOG(2) << "byte_artifact.publish_prereg.skip"
+              << " artifact_id=" << artifact_id << " published_at_ms=" << absl::ToUnixMillis(now)
+              << " reason=canonical_backing_missing";
+      return;
+    }
+    publish_preregistered_export(std::string(artifact_id), entry->backing_record.retained_body_handle, now);
+  };
 
   for (int index = 0; index < req.items_size(); ++index) {
     const auto& item = req.items(index);
@@ -2055,6 +2080,35 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
           artifact_id,
           v2::BATCH_ITEM_STATUS_INVALID_ARGUMENT,
           "inline_payload, payload_ref, and batch_payload_slice are mutually exclusive");
+      continue;
+    }
+    if (source_count == 0) {
+      deferred_outcomes[index] = make_outcome(
+          artifact_id,
+          v2::BATCH_ITEM_STATUS_INVALID_ARGUMENT,
+          "inline_payload, payload_ref, or batch_payload_slice is required");
+      continue;
+    }
+
+    auto preflight_results = authority_service_.batch_preflight_put_if_absent(
+        std::vector<ByteArtifactAuthorityService::PutPreflightItem>{
+            ByteArtifactAuthorityService::PutPreflightItem{
+                .artifact_id = artifact_id,
+                .invariant = item.invariant(),
+            },
+        },
+        authority_context,
+        ttl_ms);
+    if (preflight_results.size() != 1) {
+      deferred_outcomes[index] =
+          make_outcome(artifact_id, v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, "put preflight returned no outcome");
+      continue;
+    }
+    if (!preflight_results[0].requires_backing) {
+      deferred_outcomes[index] = std::move(preflight_results[0].terminal_outcome);
+      if (deferred_outcomes[index]->status() == v2::BATCH_ITEM_STATUS_OK) {
+        maybe_publish_preregistered_existing(artifact_id);
+      }
       continue;
     }
 
@@ -2331,12 +2385,6 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
         source_kind = loader_or->source_kind;
         loader = std::move(loader_or->loader);
       }
-    } else {
-      deferred_outcomes[index] = make_outcome(
-          artifact_id,
-          v2::BATCH_ITEM_STATUS_INVALID_ARGUMENT,
-          "inline_payload, payload_ref, or batch_payload_slice is required");
-      continue;
     }
     prepared_items[static_cast<std::size_t>(index)] = PreparedHomeBatchPutItem{
         .item = &item,
@@ -2734,16 +2782,7 @@ grpc::Status ByteArtifactController::home_batch_put_if_absent(
 
   timing_stats.authority_item_count = authority_items.size();
   const absl::Time authority_apply_started_at = absl::Now();
-  const auto authority_outcomes = authority_service_.batch_put_if_absent(
-      authority_items,
-      ByteArtifactAuthorityService::Context{
-          .shard_id = req.fence().shard_id(),
-          .lease_generation = home_lease_or->lease_generation,
-          .routing_epoch = options_.routing.routing_epoch,
-          .shard_count = options_.routing.shard_count,
-          .now = now,
-      },
-      ttl_ms);
+  const auto authority_outcomes = authority_service_.batch_put_if_absent(authority_items, authority_context, ttl_ms);
   timing_stats.authority_apply_elapsed = absl::Now() - authority_apply_started_at;
   for (size_t index = 0; index < authority_outcomes.size(); ++index) {
     deferred_outcomes[authority_item_indices[index]] = authority_outcomes[index];
@@ -5217,6 +5256,112 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
       return task_has_outcome[static_cast<std::size_t>(outcome_index)];
     };
 
+    const auto maybe_publish_preregistered_existing_for_task =
+        [&](std::string_view artifact_id, const ByteArtifactAuthorityService::Context& context) {
+          if (!options_.publish_prereg.enabled) {
+            return;
+          }
+          auto entry = d_.body_store.get(
+              artifact_id, context.shard_id, context.lease_generation, context.routing_epoch, context.now);
+          if (!entry.has_value()) {
+            VLOG(2) << "byte_artifact.publish_prereg.skip"
+                    << " artifact_id=" << artifact_id << " published_at_ms=" << absl::ToUnixMillis(now)
+                    << " reason=canonical_backing_missing";
+            return;
+          }
+          publish_preregistered_export(std::string(artifact_id), entry->backing_record.retained_body_handle, now);
+        };
+
+    const auto preflight_local_home_put = [&](std::uint64_t lease_generation) -> bool {
+      v2::RouteFence fence;
+      fence.set_shard_id(task.shard_id);
+      fence.set_lease_generation(lease_generation);
+      fence.set_holder_daemon_id(local_daemon_id);
+      fence.set_routing_epoch(options_.routing.routing_epoch);
+      auto home_lease_or = d_.route_resolver.ensure_home_lease(fence, now);
+      if (!home_lease_or.ok()) {
+        for (const auto& pending : task.batch.items) {
+          if (has_outcome(pending.outcome_index)) {
+            continue;
+          }
+          record_outcome(
+              pending.outcome_index,
+              make_outcome(
+                  pending.artifact_id,
+                  batch_item_status_from_absl_status(home_lease_or.status()),
+                  std::string(home_lease_or.status().message())));
+        }
+        return false;
+      }
+      if (home_lease_or->kind != ByteArtifactRouteResolver::HomeLeaseDecision::Kind::kOwned) {
+        for (const auto& pending : task.batch.items) {
+          if (has_outcome(pending.outcome_index)) {
+            continue;
+          }
+          record_outcome(
+              pending.outcome_index,
+              make_outcome(pending.artifact_id, v2::BATCH_ITEM_STATUS_UNAVAILABLE, home_lease_or->message));
+        }
+        return false;
+      }
+
+      std::vector<ByteArtifactAuthorityService::PutPreflightItem> preflight_items;
+      std::vector<int> preflight_indices;
+      preflight_items.reserve(task.batch.items.size());
+      preflight_indices.reserve(task.batch.items.size());
+      for (const auto& pending : task.batch.items) {
+        if (has_outcome(pending.outcome_index)) {
+          continue;
+        }
+        preflight_items.push_back(
+            ByteArtifactAuthorityService::PutPreflightItem{
+                .artifact_id = pending.artifact_id,
+                .invariant = pending.invariant,
+            });
+        preflight_indices.push_back(pending.outcome_index);
+      }
+      if (preflight_items.empty()) {
+        return true;
+      }
+
+      ByteArtifactAuthorityService::Context authority_context{
+          .shard_id = task.shard_id,
+          .lease_generation = home_lease_or->lease_generation,
+          .routing_epoch = options_.routing.routing_epoch,
+          .shard_count = options_.routing.shard_count,
+          .now = now,
+      };
+      const auto preflight_results =
+          authority_service_.batch_preflight_put_if_absent(preflight_items, authority_context, ttl_ms);
+      if (preflight_results.size() != preflight_items.size()) {
+        for (const auto outcome_index : preflight_indices) {
+          if (has_outcome(outcome_index)) {
+            continue;
+          }
+          record_outcome(
+              outcome_index,
+              make_outcome(
+                  req.items(outcome_index).selection().artifact_id(),
+                  v2::BATCH_ITEM_STATUS_INTERNAL_ERROR,
+                  "put preflight returned an unexpected outcome count"));
+        }
+        return false;
+      }
+      for (std::size_t index = 0; index < preflight_results.size(); ++index) {
+        const auto& result = preflight_results[index];
+        if (result.requires_backing) {
+          continue;
+        }
+        const int outcome_index = preflight_indices[index];
+        const bool publish_existing = result.terminal_outcome.status() == v2::BATCH_ITEM_STATUS_OK;
+        record_outcome(outcome_index, result.terminal_outcome);
+        if (publish_existing) {
+          maybe_publish_preregistered_existing_for_task(result.artifact_id, authority_context);
+        }
+      }
+      return true;
+    };
+
     const auto stage_pending_body = [&](PendingPut* pending, BodyAccessClass access_class) {
       if (pending == nullptr || pending->body_handle.has_value() || has_outcome(pending->outcome_index)) {
         return;
@@ -5546,6 +5691,9 @@ grpc::Status ByteArtifactController::batch_put_if_absent_from_region(
     if (!is_remote) {
       ++task_stats.local_home_batch_count;
       task_stats.local_home_item_count += task.batch.items.size();
+      if (!preflight_local_home_put(task.route.lease_generation != 0 ? task.route.lease_generation : 1)) {
+        return finalize_task();
+      }
       for (auto& pending : task.batch.items) {
         stage_pending_body(&pending, BodyAccessClass::kHomeDefault);
       }

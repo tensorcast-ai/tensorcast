@@ -80,7 +80,7 @@ TEST_CASE("DiskArtifact load to CPU then GPU and verify content", "[replica][dis
   ReplicaConfig cfg{
       .source = disk_src,
       .artifact_identifier = artifact_id,
-      .device_type = ::tensorcast::DeviceType::CPU,
+      .device_type = ::tensorcast::DeviceType::GPU,
       .local_device_id = 0,
       .pinned_buffer_pool = pool,
       .async_runtime = async_runtime,
@@ -158,7 +158,7 @@ TEST_CASE(
   ReplicaConfig cfg{
       .source = disk_src,
       .artifact_identifier = artifact_id,
-      .device_type = ::tensorcast::DeviceType::CPU,
+      .device_type = ::tensorcast::DeviceType::GPU,
       .local_device_id = 0,
       .pinned_buffer_pool = pool,
       .async_runtime = async_runtime,

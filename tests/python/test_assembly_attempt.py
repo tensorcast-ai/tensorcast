@@ -28,7 +28,10 @@ from tensorcast.api.store import (
     prepare_pure_transform_serving_registration,
 )
 from tensorcast.api.store.artifact import Artifact
-from tensorcast.api.store.common import canonical_index_from_bytes
+from tensorcast.api.store.common import (
+    canonical_index_from_bytes,
+    canonical_index_to_bytes,
+)
 from tensorcast.api.store.handles import RegisteredArtifact
 from tensorcast.api.store.types import ReplicaInfo
 from tensorcast.proto.common.v1 import common_pb2
@@ -52,6 +55,8 @@ class FakeAttemptClient:
         self.seal_calls: list[dict[str, object]] = []
         self.wait_calls: list[dict[str, object]] = []
         self.layout_calls: list[str] = []
+        self.ensure_canonical_layout_calls: list[dict[str, object]] = []
+        self.ensure_canonical_layout_result = "layout-provisioned"
         self.layout_ids_by_artifact: dict[str, tuple[str, ...]] = {
             "mi2:test:source": ("layout-source",),
             "mi2:test:serving": (),
@@ -123,6 +128,10 @@ class FakeAttemptClient:
         del timeout_s
         self.layout_calls.append(artifact_id)
         return list(self.layout_ids_by_artifact.get(artifact_id, ()))
+
+    def ensure_canonical_layout(self, **kwargs: object) -> str:
+        self.ensure_canonical_layout_calls.append(dict(kwargs))
+        return self.ensure_canonical_layout_result
 
     def get_operation(
         self,
@@ -753,9 +762,9 @@ def test_start_representation_publish_attempt_rejects_ambiguous_inferred_layout(
     assert "ambiguous" in str(exc_info.value)
 
 
-def test_start_representation_publish_attempt_provisions_canonical_source_layout(
-    monkeypatch,
-) -> None:
+def test_start_representation_publish_attempt_provisions_canonical_source_layout() -> (
+    None
+):
     client = FakeAttemptClient()
     client.layout_ids_by_artifact["mi2:test:source"] = ()
     runtime = FakeRuntime(client)
@@ -764,34 +773,28 @@ def test_start_representation_publish_attempt_provisions_canonical_source_layout
     bundle = _representation_publish_bundle().model_copy(
         update={"contract_family": "canonical_full"}
     )
-    captured: dict[str, object] = {}
-
-    def fake_provision(store_obj: Store, *, artifact_id: str) -> str:
-        captured["store"] = store_obj
-        captured["artifact_id"] = artifact_id
-        return "layout-provisioned"
-
-    monkeypatch.setattr(
-        store_api,
-        "_ensure_canonical_layout_for_artifact",
-        fake_provision,
-    )
 
     attempt = store.start_representation_publish_attempt(
         requirements=requirements,
         publication=bundle,
     )
 
-    assert captured["store"] is store
-    assert captured["artifact_id"] == "mi2:test:source"
+    assert client.ensure_canonical_layout_calls == [
+        {
+            "artifact_id": "mi2:test:source",
+            "index_multihash": "test",
+            "attach_to_artifact": True,
+        }
+    ]
     assert attempt.layout_id == "layout-provisioned"
     assert client.start_calls[0]["layout_id"] == "layout-provisioned"
 
 
-def test_start_representation_publish_attempt_provisions_binding_subject_layout_from_canonical_index(
-    monkeypatch,
-) -> None:
+def test_start_representation_publish_attempt_provisions_binding_subject_layout_from_canonical_index() -> (
+    None
+):
     client = FakeAttemptClient()
+    client.ensure_canonical_layout_result = "layout-binding-native"
     runtime = FakeRuntime(client)
     store = Store("fake://daemon", runtime=runtime)
     requirements = AssemblyRequirementSetRef.canonical_full()
@@ -841,25 +844,18 @@ def test_start_representation_publish_attempt_provisions_binding_subject_layout_
         ),
         contract_family="canonical_full",
     )
-    captured: dict[str, object] = {}
-
-    def fake_provision(*, canonical_index: object) -> str:
-        captured["canonical_index"] = canonical_index
-        return "layout-binding-native"
-
-    monkeypatch.setattr(
-        store_api,
-        "_ensure_canonical_layout_for_index",
-        fake_provision,
-    )
-
     attempt = store.start_representation_publish_attempt(
         requirements=requirements,
         publication=publication,
         layout_artifact_id="mi2:test:source",
     )
 
-    assert captured["canonical_index"] == canonical_index
+    assert len(client.ensure_canonical_layout_calls) == 1
+    ensure_call = client.ensure_canonical_layout_calls[0]
+    assert ensure_call["canonical_index_data"] == canonical_index_to_bytes(
+        canonical_index
+    )
+    assert ensure_call["attach_to_artifact"] is False
     assert client.layout_calls == []
     assert attempt.layout_id == "layout-binding-native"
     assert client.start_calls[0]["layout_id"] == "layout-binding-native"

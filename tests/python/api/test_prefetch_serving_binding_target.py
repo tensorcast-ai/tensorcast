@@ -389,6 +389,8 @@ def test_prefetched_serving_binding_staged_result_proto_roundtrip() -> None:
             version_set_id="version-set-1",
             part_id="member-0",
             staging_token="stage-1",
+            wait_for_publish=True,
+            wait_timeout_ms=250,
         ),
     )
 

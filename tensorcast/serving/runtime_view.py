@@ -36,6 +36,16 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _optional_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if not isinstance(value, Iterable):
+        return []
+    return [str(item) for item in value]
+
+
 def _diagnostic_value(
     diagnostics: Any,
     name: str,
@@ -50,6 +60,15 @@ def _serving_realization_report(
     diagnostics: Mapping[str, object],
 ) -> Mapping[str, object] | None:
     value = diagnostics.get("serving_realization_report")
+    if isinstance(value, Mapping):
+        return value
+    return None
+
+
+def _artifact_realization_report(
+    diagnostics: Mapping[str, object],
+) -> Mapping[str, object] | None:
+    value = diagnostics.get("artifact_realization_report")
     if isinstance(value, Mapping):
         return value
     return None
@@ -235,9 +254,11 @@ def _source_bound_projection_from_diagnostics(
     if source_contract is not None:
         return SourceBoundContractProjection(dict(source_contract))
     fields = {
-        "version": int(diagnostics.get("source_bound_contract_version") or 0),
-        "capability_flags": list(
-            diagnostics.get("source_bound_capability_flags") or ()
+        "version": (
+            _optional_int(diagnostics.get("source_bound_contract_version")) or 0
+        ),
+        "capability_flags": _optional_string_list(
+            diagnostics.get("source_bound_capability_flags")
         ),
         "ready": bool(diagnostics.get("source_bound_contract_ready") or False),
         "path": _optional_text(diagnostics.get("source_bound_contract_path")),
@@ -319,32 +340,6 @@ def _published_replica_projection_from_value(
         binding_value_ref=binding_value_ref,
         generation=_optional_text(value.get("generation")),
         reason=_optional_text(value.get("reason")),
-    )
-
-
-def _source_selection_projection_from_value(
-    value: object | None,
-) -> SourceSelectionProjection | None:
-    if value is None:
-        return None
-    if isinstance(value, SourceSelectionProjection):
-        return value
-    if not isinstance(value, Mapping):
-        return None
-    return SourceSelectionProjection(
-        selected_source_kind=str(value.get("selected_source_kind") or "unselected"),
-        selected_replica_id=_optional_text(value.get("selected_replica_id")),
-        selected_producer_worker_id=_optional_text(
-            value.get("selected_producer_worker_id")
-        ),
-        selected_byte_space_kind=_optional_text(value.get("selected_byte_space_kind")),
-        selected_byte_space_id=_optional_text(value.get("selected_byte_space_id")),
-        p2p_bytes=_optional_int(value.get("p2p_bytes")) or 0,
-        fallback_bytes=_optional_int(value.get("fallback_bytes")) or 0,
-        disk_bytes=_optional_int(value.get("disk_bytes")) or 0,
-        reselection_attempts=(_optional_int(value.get("reselection_attempts")) or 0),
-        reject_reason_bucket=_optional_text(value.get("reject_reason_bucket")),
-        fallback_reason_bucket=_optional_text(value.get("fallback_reason_bucket")),
     )
 
 
@@ -465,6 +460,120 @@ def source_selection_projection_from_execution_diagnostics(
             fallback_reason_bucket=skip_reason,
         )
     return None
+
+
+def source_selection_projection_from_artifact_realization_report(
+    report: Mapping[str, object] | None,
+) -> SourceSelectionProjection | None:
+    """Project source choice from the unified artifact realization report."""
+
+    if report is None:
+        return None
+    materialization = _diagnostic_value(report, "materialization_diagnostics")
+    projection = source_selection_projection_from_materialization_diagnostics(
+        materialization
+    )
+    if projection is not None:
+        return projection
+
+    execution_commit = _nested_mapping(report, "execution_commit")
+    projection = source_selection_projection_from_execution_diagnostics(
+        execution_commit
+    )
+    if projection is not None:
+        return projection
+
+    envelope = _nested_mapping(report, "envelope")
+    strategy_plan = _nested_mapping(report, "strategy_plan")
+    if envelope is None and strategy_plan is None:
+        return None
+
+    source = _optional_text(report.get("source"))
+    fallback_policy = (
+        None
+        if strategy_plan is None
+        else _optional_text(strategy_plan.get("fallback_policy"))
+    )
+    fallback_reason_bucket = (
+        None
+        if envelope is None
+        else _dominant_reason_bucket(envelope.get("fallback_reason_buckets"))
+    )
+    copy_bytes = (
+        0 if envelope is None else (_optional_int(envelope.get("copy_bytes")) or 0)
+    )
+    temporary_bytes = (
+        0
+        if envelope is None
+        else (_optional_int(envelope.get("temporary_replica_bytes")) or 0)
+    )
+    retained_bytes = (
+        0 if envelope is None else (_optional_int(envelope.get("retained_bytes")) or 0)
+    )
+    direct_write_bytes = (
+        0
+        if envelope is None
+        else (_optional_int(envelope.get("direct_write_bytes")) or 0)
+    )
+    total_bytes = max(copy_bytes, temporary_bytes, retained_bytes, direct_write_bytes)
+
+    if source in {"p2p", "local_replica", "disk"}:
+        return source_selection_projection_from_materialization_diagnostics(
+            {
+                "source": source,
+                "total_bytes": total_bytes,
+                "retry_attempts": 1,
+                "retry_reason_buckets": (
+                    {}
+                    if fallback_reason_bucket is None
+                    else {fallback_reason_bucket: 1}
+                ),
+            }
+        )
+
+    if (
+        copy_bytes > 0
+        or temporary_bytes > 0
+        or fallback_reason_bucket is not None
+        or fallback_policy == "generic_fallback"
+    ):
+        return SourceSelectionProjection(
+            selected_source_kind="canonical_fallback",
+            fallback_bytes=max(copy_bytes, temporary_bytes),
+            fallback_reason_bucket=fallback_reason_bucket or fallback_policy,
+        )
+
+    return None
+
+
+def source_selection_projection_from_runtime_diagnostics(
+    diagnostics: Mapping[str, object] | None,
+) -> SourceSelectionProjection | None:
+    """Project runtime diagnostics into source selection from source facts."""
+
+    if diagnostics is None:
+        return None
+    materialization = source_selection_projection_from_materialization_diagnostics(
+        diagnostics.get("materialization")
+    )
+    if materialization is not None:
+        return materialization
+    execution = source_selection_projection_from_execution_diagnostics(
+        diagnostics.get("execution")
+    )
+    if execution is not None:
+        return execution
+    report = _serving_realization_report(diagnostics)
+    realization = _nested_mapping(report, "realization")
+    report_execution = _nested_mapping(realization, "execution")
+    serving_projection = source_selection_projection_from_execution_diagnostics(
+        report_execution
+    )
+    if serving_projection is not None:
+        return serving_projection
+    return source_selection_projection_from_artifact_realization_report(
+        _artifact_realization_report(diagnostics)
+    )
 
 
 @dataclass(frozen=True)
@@ -628,8 +737,8 @@ class RuntimeWorkerView:
         published_replica = _published_replica_projection_from_value(
             diagnostics.get("published_replica")
         )
-        source_selection = _source_selection_projection_from_value(
-            diagnostics.get("source_selection")
+        source_selection = source_selection_projection_from_runtime_diagnostics(
+            diagnostics
         )
         report_tp_rank = _optional_int(_nested_value(report, "tp_rank"))
         diagnostics_tp_rank = _optional_int(diagnostics.get("tp_rank"))
@@ -818,6 +927,8 @@ __all__ = [
     "WeightVersionProjection",
     "aggregate_runtime_view_outputs",
     "publication_aggregate",
+    "source_selection_projection_from_artifact_realization_report",
     "source_selection_projection_from_execution_diagnostics",
     "source_selection_projection_from_materialization_diagnostics",
+    "source_selection_projection_from_runtime_diagnostics",
 ]

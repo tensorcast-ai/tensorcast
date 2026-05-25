@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import atexit
 import concurrent.futures
-import contextlib
 import logging
 import os
 import threading
@@ -37,6 +36,20 @@ from tensorcast.types import ServerConfig
 logger = logging.getLogger(__name__)
 
 
+def _log_best_effort_cleanup_failure(context: str, **fields: object) -> None:
+    handlers = tuple(logger.handlers) + tuple(logging.getLogger().handlers)
+    if any(
+        getattr(getattr(handler, "stream", None), "closed", False)
+        for handler in handlers
+    ):
+        return
+    details = ", ".join(f"{key}={value}" for key, value in fields.items())
+    if details:
+        logger.exception("%s failed (%s)", context, details)
+        return
+    logger.exception("%s failed", context)
+
+
 class _ForkAwareHandle:
     """Track per-context resources that must be refreshed across fork."""
 
@@ -44,8 +57,10 @@ class _ForkAwareHandle:
         self._cleanup = cleanup
 
     def close(self) -> None:
-        with contextlib.suppress(Exception):
+        try:
             self._cleanup()
+        except Exception:  # noqa: BLE001
+            _log_best_effort_cleanup_failure("store_runtime.fork_handle_cleanup")
 
 
 class _KeyCacheEntry:
@@ -525,21 +540,29 @@ class StoreRuntimeContext:
         if self._closed:
             return
         self._closed = True
-        with contextlib.suppress(Exception):
+        try:
             StoreRuntimeContext._LIVE_CONTEXTS.discard(self)
+        except Exception:  # noqa: BLE001
+            _log_best_effort_cleanup_failure("store_runtime.close.live_context_discard")
         with self._client_lock:
             if self._client is not None:
-                with contextlib.suppress(Exception):
+                try:
                     self._client.close()
+                except Exception:  # noqa: BLE001
+                    _log_best_effort_cleanup_failure("store_runtime.close.client_close")
                 self._client = None
         self.release_all_leases()
         self._executor_handle.close()
-        with contextlib.suppress(Exception):
+        try:
             self._loop.call_soon_threadsafe(self._loop.stop)
+        except Exception:  # noqa: BLE001
+            _log_best_effort_cleanup_failure("store_runtime.close.loop_stop")
         if hasattr(self, "_loop_thread") and self._loop_thread.is_alive():
             self._loop_thread.join(timeout=5.0)
-        with contextlib.suppress(Exception):
+        try:
             self._loop.close()
+        except Exception:  # noqa: BLE001
+            _log_best_effort_cleanup_failure("store_runtime.close.loop_close")
         with self._key_cache_lock:
             self._key_cache.clear()
         self._artifact_cache.clear()
@@ -573,8 +596,12 @@ class StoreRuntimeContext:
             leases = list(self._active_leases)
             self._active_leases.clear()
         for lease in leases:
-            with contextlib.suppress(Exception):
+            try:
                 lease.__exit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                _log_best_effort_cleanup_failure(
+                    "store_runtime.release_all_leases.lease_exit"
+                )
         self._update_session_record(activity=False)
 
     @contextmanager
@@ -723,8 +750,10 @@ def get_context(
         _GLOBAL_CONTEXT_OPTIONS = effective_opts
 
     if prior is not None:
-        with contextlib.suppress(Exception):
+        try:
             prior.close()
+        except Exception:  # noqa: BLE001
+            _log_best_effort_cleanup_failure("store_runtime.get_context.close_prior")
 
     return new_context
 
@@ -740,14 +769,20 @@ def shutdown_context() -> None:
         _GLOBAL_CONTEXT_OPTIONS = None
 
     if current is not None:
-        with contextlib.suppress(Exception):
+        try:
             current.close()
+        except Exception:  # noqa: BLE001
+            _log_best_effort_cleanup_failure("store_runtime.shutdown_context.close")
 
 
 def _shutdown_all_contexts() -> None:
     for context in list(StoreRuntimeContext._LIVE_CONTEXTS):
-        with contextlib.suppress(Exception):
+        try:
             context.close()
+        except Exception:  # noqa: BLE001
+            _log_best_effort_cleanup_failure(
+                "store_runtime.shutdown_all_contexts.close"
+            )
 
 
 atexit.register(_shutdown_all_contexts)

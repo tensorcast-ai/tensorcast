@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import os
 import time
 from collections.abc import Mapping
-from contextlib import contextmanager, nullcontext, suppress
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, ContextManager, Iterator
 
@@ -16,7 +17,13 @@ import torch
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 import tensorcast as tc
+from tensorcast.api.store.realization_kernel import (
+    RealizationReleaseContract,
+    envelope_for_runtime_attachment,
+    release_contract_for,
+)
 
+_LOGGER = logging.getLogger(__name__)
 _RETAINED_BINDING_ACQUIRE_MODES = {"disabled", "external"}
 _READINESS_STATES = {
     "serving_reserved",
@@ -156,6 +163,7 @@ class _RetainedBindingLifecycleState:
         client: Any,
         response: Any,
         runtime: Any,
+        authority: ParsedRetainedServingBindingAuthority,
         binding_value_ref: tc.BindingValueRef,
         binding_layout_id: str,
         member_ref: tc.ServingBindingMemberRef,
@@ -165,6 +173,7 @@ class _RetainedBindingLifecycleState:
         self.client = client
         self.response = response
         self.runtime = runtime
+        self.authority = authority
         self.binding_value_ref = binding_value_ref
         self.binding_layout_id = binding_layout_id
         self.member_ref = member_ref
@@ -173,19 +182,36 @@ class _RetainedBindingLifecycleState:
         self.tensors: Mapping[str, torch.Tensor] | None = None
         self.state = "acquired"
         self._closed = False
+        self._release_timeout_s: float | None = None
+        self.release_contract = release_contract_for(
+            envelope_for_runtime_attachment(
+                {},
+                retained=True,
+                reservation_bytes=reservation_bytes,
+            ),
+            self._release_placement_lease,
+        )
+
+    def _release_placement_lease(self) -> None:
+        if not self.lease_token:
+            return
+        _release_lease_token(
+            self.client,
+            lease_token=self.lease_token,
+            timeout_s=self._release_timeout_s,
+        )
 
     def release(self, *, timeout_s: float | None = None) -> None:
         if self._closed:
             return
         self._closed = True
         self.state = "closed"
-        if not self.lease_token:
-            return
-        _release_lease_token(
-            self.client,
-            lease_token=self.lease_token,
-            timeout_s=timeout_s,
-        )
+        prior_timeout_s = self._release_timeout_s
+        self._release_timeout_s = timeout_s
+        try:
+            self.release_contract.release()
+        finally:
+            self._release_timeout_s = prior_timeout_s
 
 
 @dataclass(frozen=True)
@@ -198,6 +224,20 @@ class RuntimeRetainedBindingAttachmentHandle:
     member_ref: tc.ServingBindingMemberRef
     reservation_bytes: int
     _state: _RetainedBindingLifecycleState
+
+    @property
+    def authority(self) -> ParsedRetainedServingBindingAuthority:
+        return self._state.authority
+
+    @property
+    def release_contract(self) -> RealizationReleaseContract:
+        return self._state.release_contract
+
+    def status(self) -> str:
+        return self._state.state
+
+    def debug_status(self) -> dict[str, Any]:
+        return _retained_binding_debug_status(self._state)
 
     def close(self) -> None:
         if self._state.state not in {"runtime_owned", "closed"}:
@@ -224,6 +264,20 @@ class AttachedRetainedBinding:
     member_ref: tc.ServingBindingMemberRef
     reservation_bytes: int
     _state: _RetainedBindingLifecycleState
+
+    @property
+    def authority(self) -> ParsedRetainedServingBindingAuthority:
+        return self._state.authority
+
+    @property
+    def release_contract(self) -> RealizationReleaseContract:
+        return self._state.release_contract
+
+    def status(self) -> str:
+        return self._state.state
+
+    def debug_status(self) -> dict[str, Any]:
+        return _retained_binding_debug_status(self._state)
 
     def transfer_to_runtime(self) -> RuntimeRetainedBindingAttachmentHandle:
         if self._state.state != "restored":
@@ -266,6 +320,16 @@ class BorrowedRetainedBindingLease:
     member_ref: tc.ServingBindingMemberRef
     reservation_bytes: int
     _state: _RetainedBindingLifecycleState
+
+    @property
+    def release_contract(self) -> RealizationReleaseContract:
+        return self._state.release_contract
+
+    def status(self) -> str:
+        return self._state.state
+
+    def debug_status(self) -> dict[str, Any]:
+        return _retained_binding_debug_status(self._state)
 
     def restore(
         self,
@@ -413,6 +477,49 @@ def _validate_authority_is_attachable(
             "retained_binding_acquire.authority.group_realization_acquire must "
             "wait for group publish before attach"
         )
+    expires_at_ms = authority.reservation_capability.expires_at_ms
+    if expires_at_ms is not None and int(expires_at_ms) <= _current_epoch_ms():
+        raise ValueError(
+            "retained_binding_acquire.authority.reservation_capability has expired"
+        )
+
+
+def _current_epoch_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _retained_binding_debug_status(
+    state: _RetainedBindingLifecycleState,
+) -> dict[str, Any]:
+    authority = state.authority
+    capability = authority.reservation_capability
+    payload: dict[str, Any] = {
+        "state": state.state,
+        "binding_value_ref": state.binding_value_ref.model_dump(mode="python"),
+        "binding_layout_id": state.binding_layout_id,
+        "member": state.member_ref.model_dump(mode="python"),
+        "group_id": authority.group_id,
+        "local_serving_ref": authority.local_serving_ref,
+        "daemon_id": authority.daemon_id,
+        "daemon_session_id": authority.daemon_session_id,
+        "device_uuid": authority.device_uuid,
+        "readiness": authority.readiness,
+        "verification_state": authority.verification_state,
+        "serving_artifact_id": authority.serving_artifact_id,
+        "reservation_bytes": state.reservation_bytes,
+        "reservation_capability_id": capability.capability_id,
+        "reservation_scope_digest": capability.scope_digest,
+        "reservation_expires_at_ms": capability.expires_at_ms,
+        "lease_token_present": bool(state.lease_token),
+        "release_policy": state.release_contract.release_policy,
+        "release_strictness": state.release_contract.release_strictness,
+        "released": state.release_contract.released,
+    }
+    if authority.group_realization_acquire is not None:
+        payload["group_realization_acquire"] = (
+            authority.group_realization_acquire.model_dump(mode="python")
+        )
+    return payload
 
 
 def _binding_value_ref_from_response(
@@ -516,6 +623,19 @@ def _release_lease_token(
         release(lease_token=lease_token, timeout_s=timeout_s)
 
 
+def _release_lease_token_after_acquire_failure(
+    client: Any,
+    *,
+    lease_token: bytes,
+) -> None:
+    try:
+        _release_lease_token(client, lease_token=lease_token)
+    except Exception:
+        _LOGGER.exception(
+            "Failed to release retained serving binding lease after acquire failure",
+        )
+
+
 @contextmanager
 def acquire_local_ready_retained_binding_lease(
     *,
@@ -567,8 +687,7 @@ def acquire_local_ready_retained_binding_lease(
         default=missing_ref,
     )
     if binding_value_ref == missing_ref:
-        with suppress(Exception):
-            _release_lease_token(client, lease_token=lease_token)
+        _release_lease_token_after_acquire_failure(client, lease_token=lease_token)
         raise RuntimeError(
             "TensorCast local-ready acquire did not return a binding value"
         )
@@ -626,6 +745,7 @@ def acquire_local_ready_retained_binding_lease(
         client=client,
         response=response,
         runtime=runtime,
+        authority=authority,
         binding_value_ref=binding_value_ref,
         binding_layout_id=binding_value_ref.binding_layout_id,
         member_ref=expected_member,
@@ -678,13 +798,13 @@ def acquire_retained_serving_binding_lease(
     try:
         acquired_ref = _validate_acquire_response(response, authority)
     except Exception:
-        with suppress(Exception):
-            _release_lease_token(client, lease_token=lease_token)
+        _release_lease_token_after_acquire_failure(client, lease_token=lease_token)
         raise
     state = _RetainedBindingLifecycleState(
         client=client,
         response=response,
         runtime=runtime,
+        authority=authority,
         binding_value_ref=acquired_ref,
         binding_layout_id=authority.binding_value_ref.binding_layout_id,
         member_ref=authority.member,

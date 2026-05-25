@@ -72,19 +72,6 @@ class RegisteredServingPublication:
     publication: RepresentationPublishSpec
 
 
-PURE_TRANSFORM_SERVING_ARG_ENABLE = "tc_serving_enable"
-PURE_TRANSFORM_SERVING_ARG_REPRESENTATION_CONTRACT_HASH = (
-    "tc_serving_representation_contract_hash"
-)
-PURE_TRANSFORM_SERVING_ARG_FRAMEWORK_NAME = "tc_serving_framework_name"
-PURE_TRANSFORM_SERVING_ARG_ADAPTER_VERSION = "tc_serving_adapter_version"
-PURE_TRANSFORM_SERVING_ARG_ABI_VERSION = "tc_serving_abi_version"
-PURE_TRANSFORM_SERVING_ARG_BUILD_PIPELINE_VERSION = "tc_serving_build_pipeline_version"
-PURE_TRANSFORM_SERVING_ARG_SOURCE_VERSION_KEY = "tc_serving_source_version_key"
-PURE_TRANSFORM_SERVING_ARG_SERVING_VERSION_KEY = "tc_serving_serving_version_key"
-PURE_TRANSFORM_SERVING_ARG_LOGICAL_TOPOLOGY_JSON = "tc_serving_logical_topology_json"
-PURE_TRANSFORM_SERVING_ARG_MANIFEST_REF = "tc_serving_manifest_ref"
-PURE_TRANSFORM_SERVING_ARG_CONTRACT_FAMILY = "tc_serving_contract_family"
 PURE_TRANSFORM_TARGET_REPRESENTATION_FAMILY = "runtime_serving"
 _PURE_TRANSFORM_SOURCE_BYTE_SPACE_KIND_CANONICAL = 1
 _PURE_TRANSFORM_TARGET_REALIZATION_KIND = "artifact_publishable"
@@ -965,44 +952,6 @@ def build_binding_finalize_admission_facts(
     )
 
 
-def build_pure_transform_serving_args(
-    *,
-    build_intent: ServingBuildIntent,
-    contract_family: AssemblyContractFamily | str | None = None,
-    source_version_key: str | None = None,
-    serving_version_key: str | None = None,
-    logical_topology_json: str | None = None,
-    serving_manifest_ref: str | None = None,
-    extra_args: dict[str, str | int] | None = None,
-) -> dict[str, str | int]:
-    args: dict[str, str | int] = dict(extra_args or {})
-    args[PURE_TRANSFORM_SERVING_ARG_ENABLE] = 1
-    if build_intent.representation_contract_hash:
-        args[PURE_TRANSFORM_SERVING_ARG_REPRESENTATION_CONTRACT_HASH] = (
-            build_intent.representation_contract_hash
-        )
-    args[PURE_TRANSFORM_SERVING_ARG_FRAMEWORK_NAME] = build_intent.framework_name
-    args[PURE_TRANSFORM_SERVING_ARG_ADAPTER_VERSION] = build_intent.adapter_version
-    args[PURE_TRANSFORM_SERVING_ARG_ABI_VERSION] = build_intent.serving_abi_version
-    args[PURE_TRANSFORM_SERVING_ARG_BUILD_PIPELINE_VERSION] = (
-        build_intent.build_pipeline_version
-    )
-    normalized_contract_family = _normalize_contract_family(contract_family)
-    if normalized_contract_family is not None:
-        args[PURE_TRANSFORM_SERVING_ARG_CONTRACT_FAMILY] = normalized_contract_family
-    if source_version_key:
-        args[PURE_TRANSFORM_SERVING_ARG_SOURCE_VERSION_KEY] = str(source_version_key)
-    if serving_version_key:
-        args[PURE_TRANSFORM_SERVING_ARG_SERVING_VERSION_KEY] = str(serving_version_key)
-    if logical_topology_json:
-        args[PURE_TRANSFORM_SERVING_ARG_LOGICAL_TOPOLOGY_JSON] = str(
-            logical_topology_json
-        )
-    if serving_manifest_ref:
-        args[PURE_TRANSFORM_SERVING_ARG_MANIFEST_REF] = str(serving_manifest_ref)
-    return args
-
-
 def build_pure_transform_publication_spec(
     *,
     build_intent: ServingBuildIntent,
@@ -1451,22 +1400,10 @@ __all__ = [
     "PureTransformPublicationSpec",
     "RepresentationPublishSpec",
     "RegisteredServingPublication",
-    "PURE_TRANSFORM_SERVING_ARG_ABI_VERSION",
-    "PURE_TRANSFORM_SERVING_ARG_ADAPTER_VERSION",
-    "PURE_TRANSFORM_SERVING_ARG_BUILD_PIPELINE_VERSION",
-    "PURE_TRANSFORM_SERVING_ARG_CONTRACT_FAMILY",
-    "PURE_TRANSFORM_SERVING_ARG_ENABLE",
-    "PURE_TRANSFORM_SERVING_ARG_FRAMEWORK_NAME",
-    "PURE_TRANSFORM_SERVING_ARG_LOGICAL_TOPOLOGY_JSON",
-    "PURE_TRANSFORM_SERVING_ARG_MANIFEST_REF",
-    "PURE_TRANSFORM_SERVING_ARG_REPRESENTATION_CONTRACT_HASH",
-    "PURE_TRANSFORM_SERVING_ARG_SERVING_VERSION_KEY",
-    "PURE_TRANSFORM_SERVING_ARG_SOURCE_VERSION_KEY",
     "build_serving_publication_bundle",
     "build_serving_publication_bundle_from_registered_artifact",
     "build_binding_finalize_admission_facts",
     "build_binding_finalize_publication_bundle",
-    "build_pure_transform_serving_args",
     "build_pure_transform_publication_spec",
     "build_pure_transform_transform_spec",
     "build_pure_transform_publication_bundle",

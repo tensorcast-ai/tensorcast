@@ -220,6 +220,11 @@ class MaterializationController {
       const v2::ListArtifactLayoutsRequest& req,
       v2::ListArtifactLayoutsResponse& resp);
 
+  grpc::Status ensure_canonical_layout(
+      RpcContext& rctx,
+      const v2::EnsureCanonicalLayoutRequest& req,
+      v2::EnsureCanonicalLayoutResponse& resp);
+
   grpc::Status seal_assembly(RpcContext& rctx, const v2::SealAssemblyRequest& req, v2::SealAssemblyResponse& resp);
 
   grpc::Status start_assembly_attempt(

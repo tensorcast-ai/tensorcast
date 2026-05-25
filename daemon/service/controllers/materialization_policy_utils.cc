@@ -17,6 +17,7 @@
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
 #include "core/store/materialization/dataplane/view/view_identity.h"
+#include "daemon/service/rpc_context.h"
 
 namespace tensorcast::daemon::materialization_policy {
 
@@ -310,9 +311,894 @@ std::string derive_group_realization_child_transport_request_id(
       "grt:", absl::BytesToHexString(std::string_view(reinterpret_cast<const char*>(digest.data()), digest.size())));
 }
 
+std::string digest_payload(std::string_view label, std::string_view payload) {
+  std::string framed;
+  append_length_prefixed_field(&framed, label);
+  append_length_prefixed_field(&framed, payload);
+  const auto digest = common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(framed.data()), framed.size()));
+  return absl::BytesToHexString(std::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
+}
+
+absl::StatusOr<std::string> target_layout_digest(const v2::TargetLayout& layout) {
+  std::string serialized;
+  if (!layout.SerializeToString(&serialized)) {
+    return absl::InternalError("failed to serialize target_layout for realization plan");
+  }
+  return digest_payload("daemon-target-layout", serialized);
+}
+
+std::string source_selection_mode_for(const GroupRealizationBeginContext* begin_context) {
+  if (begin_context == nullptr) {
+    return "single_selection";
+  }
+  switch (begin_context->realization_kind) {
+    case global_store::GROUP_REALIZATION_KIND_SAME_SELECTION:
+      return "same_selection";
+    case global_store::GROUP_REALIZATION_KIND_PER_PART_SELECTION:
+      return "per_part_selection";
+    case global_store::GROUP_REALIZATION_KIND_UNSPECIFIED:
+    default:
+      return "group_selection";
+  }
+}
+
+std::string source_selection_mode_for(const v2::GroupRealizationOptions* group_realization, bool per_part_source) {
+  (void)group_realization;
+  if (per_part_source) {
+    return "per_part_selection";
+  }
+  return "same_selection";
+}
+
+std::vector<std::string> group_barriers_for(const v2::GroupRealizationOptions* group_realization) {
+  std::vector<std::string> barriers;
+  if (group_realization == nullptr || !group_realization->enabled()) {
+    return barriers;
+  }
+  if (group_realization->group().total_parts() > 1) {
+    barriers.push_back("member_readiness");
+  }
+  barriers.push_back("group_acquire");
+  if (group_realization->require_staged_publish()) {
+    barriers.push_back("staged_values");
+    barriers.push_back("publish_barrier");
+  }
+  return barriers;
+}
+
+std::vector<std::string> acquire_group_barriers_for(const v2::GroupRealizationAcquireRef& acquire) {
+  std::vector<std::string> barriers{"group_acquire"};
+  if (acquire.wait_for_publish()) {
+    barriers.push_back("publish_barrier");
+  }
+  return barriers;
+}
+
+std::optional<std::string> selection_digest_for(
+    const v2::GroupRealizationOptions* group_realization,
+    const GroupRealizationBeginContext* begin_context,
+    const tensorcast::common::v1::ArtifactSelection& selection) {
+  if (begin_context != nullptr && !begin_context->selection_hash.empty()) {
+    return absl::BytesToHexString(begin_context->selection_hash);
+  }
+  if (!selection.selection_hash().empty()) {
+    return absl::BytesToHexString(selection.selection_hash());
+  }
+  if (group_realization != nullptr && group_realization->enabled()) {
+    return std::nullopt;
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> operation_id_for(const v2::MaterializeIntoTargetRequest& request) {
+  return request.has_operation_id() && !request.operation_id().empty()
+      ? std::optional<std::string>(request.operation_id())
+      : std::nullopt;
+}
+
+std::optional<std::string> operation_id_for(const v2::MaterializeIntoMappedTargetRequest& request) {
+  return request.has_operation_id() && !request.operation_id().empty()
+      ? std::optional<std::string>(request.operation_id())
+      : std::nullopt;
+}
+
+std::string digest_fields(std::string_view label, const std::vector<std::string>& fields);
+
+std::string target_layout_digest_for_replica(
+    const tensorcast::common::v1::ArtifactSelection& resolved_selection,
+    const v2::MaterializeReplicaRequest& request,
+    std::string_view resolved_artifact_id) {
+  if (!resolved_selection.logical_layout_hash().empty()) {
+    return absl::BytesToHexString(resolved_selection.logical_layout_hash());
+  }
+  return digest_fields(
+      "daemon-replica-target-layout",
+      {
+          std::string(resolved_artifact_id),
+          resolved_selection.view_id(),
+          absl::BytesToHexString(resolved_selection.selection_hash()),
+          request.device_uuid(),
+          std::format("{}", static_cast<int>(request.target_device_type())),
+          std::format("{}", request.size_bytes()),
+      });
+}
+
+v2::CollectivePolicy replica_collective_policy_for(const NormalizedMaterializationRequestContext& request_context) {
+  return request_context.execution_topology.collective_load_group.has_value()
+      ? v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST
+      : v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE;
+}
+
+std::string replica_target_kind_for(const v2::MaterializeReplicaRequest& request) {
+  return request.wait_for_completion() ? "tensor_dict" : "retained_replica";
+}
+
+std::vector<std::string> replica_release_policy_for(const v2::MaterializeReplicaRequest& request, bool no_lease) {
+  if (no_lease) {
+    return {"retain_daemon_replica", "release_operation_ticket"};
+  }
+  if (request.wait_for_completion()) {
+    return {"release_handle_lease", "release_pid_ref", "release_replica_session"};
+  }
+  return {"release_retained_replica_handle", "release_replica_session"};
+}
+
+std::string digest_fields(std::string_view label, const std::vector<std::string>& fields) {
+  std::string payload;
+  for (const auto& field : fields) {
+    append_length_prefixed_field(&payload, field);
+  }
+  return digest_payload(label, payload);
+}
+
+std::string target_layout_digest_for_serving_target(const tensorcast::operation::v1::ServingBindingTarget& target) {
+  const auto& layout = target.resolved_layout();
+  if (!layout.target_layout_hash().empty()) {
+    return layout.target_layout_hash();
+  }
+  if (!layout.target_layout().empty()) {
+    return digest_payload("daemon-serving-target-layout", layout.target_layout());
+  }
+  return {};
+}
+
+std::string target_set_layout_digest_for(const tensorcast::operation::v1::ServingBindingSetTarget& target) {
+  std::vector<std::string> fields{
+      target.runtime(),
+      target.group_id(),
+  };
+  fields.reserve(fields.size() + static_cast<size_t>(target.members_size()) * 4);
+  for (const auto& member : target.members()) {
+    fields.push_back(member.member().member_id());
+    fields.push_back(member.device_uuid());
+    fields.push_back(target_layout_digest_for_serving_target(member));
+    fields.push_back(member.resolved_layout().spec_digest());
+  }
+  return digest_fields("daemon-serving-target-set-layout", fields);
+}
+
+std::optional<std::string> prefetch_operation_id_for(const v2::PrefetchServingBindingRequest& request) {
+  return request.has_operation_id() && !request.operation_id().empty()
+      ? std::optional<std::string>(request.operation_id())
+      : std::nullopt;
+}
+
+std::optional<std::string> publication_operation_id_for(
+    const v2::PublishTargetReplicaRequest& request,
+    const tensorcast::common::v1::BindingCurrentValuePublicationScope& scope) {
+  if (request.has_operation_id() && !request.operation_id().empty()) {
+    return request.operation_id();
+  }
+  if (!scope.operation_id().empty()) {
+    return scope.operation_id();
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> operation_id_for(const v2::CreateOwnedBindingRequest& request) {
+  return request.has_operation_id() && !request.operation_id().empty()
+      ? std::optional<std::string>(request.operation_id())
+      : std::nullopt;
+}
+
+std::optional<std::string> operation_id_for(const v2::RefillOwnedBindingRequest& request) {
+  return request.has_operation_id() && !request.operation_id().empty()
+      ? std::optional<std::string>(request.operation_id())
+      : std::nullopt;
+}
+
+std::string publication_target_layout_digest_for(
+    const tensorcast::common::v1::BindingCurrentValuePublicationScope& scope,
+    const tensorcast::common::v1::ByteSpaceRef& normalized_byte_space) {
+  if (!scope.target_layout_hash().empty()) {
+    return absl::BytesToHexString(scope.target_layout_hash());
+  }
+  return digest_fields(
+      "daemon-publication-target-layout",
+      {
+          scope.publication_id(),
+          scope.selection().artifact_id(),
+          byte_space_identity(normalized_byte_space),
+          scope.device_uuid(),
+          scope.binding_id(),
+          scope.binding_layout_id(),
+          scope.binding_value_id(),
+          std::format("{}", scope.seal_generation()),
+      });
+}
+
+v2::CollectivePolicy prefetch_collective_policy_for(
+    const v2::PrefetchServingBindingRequest& request,
+    uint32_t member_count) {
+  if (member_count > 1 &&
+      request.source().source_kind() == tensorcast::operation::v1::SERVING_BINDING_SOURCE_KIND_CHECKPOINT_ARTIFACT) {
+    return v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST;
+  }
+  return v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE;
+}
+
+std::string binding_ownership_name(v2::BindingOwnership ownership) {
+  switch (ownership) {
+    case v2::BindingOwnership::BINDING_OWNERSHIP_DAEMON:
+      return "binding_owned";
+    case v2::BindingOwnership::BINDING_OWNERSHIP_CLIENT:
+      return "binding_adopted";
+    case v2::BindingOwnership::BINDING_OWNERSHIP_UNSPECIFIED:
+    default:
+      return "binding";
+  }
+}
+
+std::vector<std::string> create_binding_release_policy_for(const v2::CreateBindingRequest& request) {
+  if (request.ownership() == v2::BindingOwnership::BINDING_OWNERSHIP_DAEMON) {
+    return {"release_handle_lease", "close_binding"};
+  }
+  if (request.has_initial_selection()) {
+    return {"close_binding", "retire_publication_token"};
+  }
+  return {"close_binding"};
+}
+
+std::vector<std::string> binding_materialization_release_policy(bool staged_publish) {
+  std::vector<std::string> release_policy{"release_handle_lease", "close_binding"};
+  if (staged_publish) {
+    release_policy.push_back("release_group_staged_acquire");
+  } else {
+    release_policy.push_back("retire_publication_token");
+  }
+  return release_policy;
+}
+
+std::vector<std::string> refill_release_policy(bool execution_only_mutable) {
+  if (execution_only_mutable) {
+    return {"preserve_binding_allocation", "mark_mutable_epoch"};
+  }
+  return {"replace_binding_current_value", "retire_publication_token"};
+}
+
+uint32_t assembly_requirement_count(const v2::AssemblyRequirementSetRef& requirements) {
+  if (requirements.requirement_count() > 0) {
+    return requirements.requirement_count();
+  }
+  return static_cast<uint32_t>(requirements.inline_requirements_size());
+}
+
+std::string assembly_attempt_layout_digest(const v2::AssemblyAttemptIntent& intent) {
+  return digest_fields(
+      "daemon-assembly-attempt-layout",
+      {
+          intent.layout_id(),
+          intent.attempt_intent_digest(),
+          std::format("{}", assembly_requirement_count(intent.requirements())),
+          intent.requirements().carrier_form(),
+      });
+}
+
+std::string assembly_seal_layout_digest(std::string_view assembly_id, std::string_view layout_id) {
+  return digest_fields(
+      "daemon-assembly-seal-layout",
+      {
+          std::string(assembly_id),
+          std::string(layout_id),
+      });
+}
+
+std::string assembly_closeout_coordination(const v2::AssemblyCloseoutContract& closeout_contract) {
+  switch (closeout_contract.kind()) {
+    case v2::ASSEMBLY_CLOSEOUT_KIND_REPRESENTATION_PUBLISH:
+      return "representation_publish_closeout";
+    case v2::ASSEMBLY_CLOSEOUT_KIND_SOURCE_PUBLISH_ONLY:
+      return "source_publish_closeout";
+    case v2::ASSEMBLY_CLOSEOUT_KIND_ROLLOUT_GATED_PUBLISH:
+      return "rollout_gated_publish_closeout";
+    case v2::ASSEMBLY_CLOSEOUT_KIND_UNSPECIFIED:
+    default:
+      return "assembly_closeout";
+  }
+}
+
+std::vector<std::string> assembly_attempt_barriers_for(const v2::AssemblyAttemptIntent& intent) {
+  std::vector<std::string> barriers{"requirement_registration"};
+  if (assembly_requirement_count(intent.requirements()) > 1) {
+    barriers.push_back("multi_requirement_readiness");
+  }
+  barriers.push_back("operation_coordinator");
+  return barriers;
+}
+
+std::vector<std::string> assembly_seal_barriers_for(const v2::AssemblyCloseoutContract& closeout_contract) {
+  std::vector<std::string> barriers{"readiness_cut", "seal_cut"};
+  if (closeout_contract.kind() == v2::ASSEMBLY_CLOSEOUT_KIND_REPRESENTATION_PUBLISH) {
+    barriers.push_back("representation_publish_closeout");
+  } else {
+    barriers.push_back("source_publish_closeout");
+  }
+  return barriers;
+}
+
+bool has_prefix(std::string_view value, std::string_view prefix) {
+  return value.size() >= prefix.size() && value.substr(0, prefix.size()) == prefix;
+}
+
+bool contains_token(std::string_view value, std::string_view token) {
+  return value.find(token) != std::string_view::npos;
+}
+
+void append_unique(std::vector<std::string>* values, std::string_view value) {
+  const bool found = std::any_of(values->begin(), values->end(), [value](const std::string& current) {
+    return std::string_view(current) == value;
+  });
+  if (found) {
+    return;
+  }
+  values->emplace_back(value);
+}
+
+bool envelope_has_resource_authority(
+    const ControllerRealizationResourceEnvelope& envelope,
+    std::string_view authority) {
+  return std::any_of(
+      envelope.resource_authorities.begin(),
+      envelope.resource_authorities.end(),
+      [authority](const std::string& current) { return std::string_view(current) == authority; });
+}
+
+bool retained_backing_kind(std::string_view backing_kind) {
+  return has_prefix(backing_kind, "daemon_retained") || backing_kind == "daemon_binding" ||
+      backing_kind == "daemon_published_replica" || backing_kind == "assembly_workspace";
+}
+
+bool process_visible_handle_export(std::string_view export_kind) {
+  return export_kind == "cuda_ipc_lease" || export_kind == "cpu_memfd_lease";
+}
+
+bool token_backed_export_lifetime(std::string_view lifetime_kind) {
+  return lifetime_kind == "handle_lease" || lifetime_kind == "runtime_attachment";
+}
+
+ControllerBodyBackingIntentPlan body_backing_intent_for(std::string_view backing_kind, std::string_view export_kind) {
+  ControllerBodyBackingIntentPlan intent;
+  intent.preferred_residency = export_kind == "cuda_ipc_lease" ? "gpu" : "cpu";
+  intent.retention_intent = retained_backing_kind(backing_kind) ? "retained" : "ephemeral";
+  intent.stable_retention_requirement =
+      backing_kind == "daemon_published_replica" || has_prefix(backing_kind, "daemon_retained") ? "prefer_stable"
+                                                                                                : "none";
+  if (export_kind == "publication_lease") {
+    intent.sharing_intent = "remote_shareable";
+  } else if (process_visible_handle_export(export_kind) || contains_token(export_kind, "binding_reservation")) {
+    intent.sharing_intent = "local_read_mostly";
+  } else {
+    intent.sharing_intent = "private_local";
+  }
+  return intent;
+}
+
+std::vector<std::string> resource_authorities_for(
+    std::string_view backing_kind,
+    std::string_view export_kind,
+    std::string_view projection_kind,
+    std::string_view owner_kind) {
+  std::vector<std::string> authorities;
+  if (backing_kind == "caller_region") {
+    append_unique(&authorities, "caller_allocation");
+  } else if (backing_kind == "assembly_workspace") {
+    append_unique(&authorities, "assembly_registry");
+  } else {
+    append_unique(&authorities, "BodyBackingManager");
+  }
+  if (contains_token(backing_kind, "binding") || contains_token(export_kind, "binding") ||
+      contains_token(projection_kind, "binding") || contains_token(owner_kind, "binding")) {
+    append_unique(&authorities, "BindingRegistry");
+  }
+  if (process_visible_handle_export(export_kind)) {
+    append_unique(&authorities, "HandleLeaseRegistry");
+    append_unique(&authorities, "SessionLifecycleManager");
+    append_unique(&authorities, "LifecycleKernel");
+  }
+  if (export_kind == "publication_lease" || owner_kind == "runtime_publication") {
+    append_unique(&authorities, "LifecycleKernel");
+  }
+  if (export_kind == "operation_lease") {
+    append_unique(&authorities, "OperationLeaseRegistry");
+  }
+  if (owner_kind == "daemon_session" || retained_backing_kind(backing_kind)) {
+    append_unique(&authorities, "SessionLifecycleManager");
+  }
+  return authorities;
+}
+
+std::string body_backing_manager_linkage_for(const ControllerRealizationPlan& plan) {
+  if (!envelope_has_resource_authority(plan.resource_envelope, "BodyBackingManager")) {
+    return "none";
+  }
+  return std::format(
+      "BodyBackingManager:{}:{}:{}",
+      plan.resource_envelope.backing_kind,
+      plan.resource_envelope.body_backing_intent.retention_intent,
+      plan.resource_envelope.body_backing_intent.sharing_intent);
+}
+
+std::string handle_lease_registry_linkage_for(const ControllerRealizationPlan& plan) {
+  if (!envelope_has_resource_authority(plan.resource_envelope, "HandleLeaseRegistry")) {
+    return "none";
+  }
+  return std::format("HandleLeaseRegistry:{}", plan.resource_envelope.export_kind);
+}
+
+std::string session_lifecycle_manager_linkage_for(const ControllerRealizationPlan& plan) {
+  if (!envelope_has_resource_authority(plan.resource_envelope, "SessionLifecycleManager")) {
+    return "none";
+  }
+  if (process_visible_handle_export(plan.resource_envelope.export_kind)) {
+    return std::format("SessionLifecycleManager:{}:pid_use_lease", plan.resource_envelope.export_kind);
+  }
+  if (plan.resource_envelope.export_kind == "operation_lease") {
+    return "SessionLifecycleManager:operation_lease";
+  }
+  if (contains_token(plan.resource_envelope.export_kind, "binding_reservation")) {
+    return "SessionLifecycleManager:retained_binding_reservation";
+  }
+  if (plan.resource_envelope.owner_kind == "daemon_session") {
+    return "SessionLifecycleManager:daemon_session_retention";
+  }
+  if (retained_backing_kind(plan.resource_envelope.backing_kind)) {
+    return "SessionLifecycleManager:retained_backing";
+  }
+  return "SessionLifecycleManager:resource_lifecycle";
+}
+
+std::string lifecycle_kernel_linkage_for(const ControllerRealizationPlan& plan) {
+  if (!envelope_has_resource_authority(plan.resource_envelope, "LifecycleKernel")) {
+    return "none";
+  }
+  if (process_visible_handle_export(plan.resource_envelope.export_kind)) {
+    return "LifecycleKernel:handle_lease_capability";
+  }
+  if (plan.resource_envelope.export_kind == "publication_lease" ||
+      plan.resource_envelope.owner_kind == "runtime_publication") {
+    return "LifecycleKernel:publication_capability";
+  }
+  return "LifecycleKernel:capability";
+}
+
+bool collective_policy_linkage_requested(v2::CollectivePolicy policy) {
+  switch (policy) {
+    case v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE:
+    case v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST:
+      return true;
+    case v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE:
+    case v2::CollectivePolicy::COLLECTIVE_POLICY_UNSPECIFIED:
+    default:
+      return false;
+  }
+}
+
+std::string execution_commit_report_linkage_for(const ControllerRealizationPlan& plan) {
+  const std::string_view target_kind = plan.target.target_kind;
+  std::string_view commit_subject;
+  if (target_kind == "caller_tensors") {
+    commit_subject = "direct_write";
+  } else if (target_kind == "binding_adopted") {
+    commit_subject = "mapped_target";
+  } else if (target_kind == "binding_owned" || target_kind == "binding_owned_refill") {
+    commit_subject = "binding_materialization";
+  } else if (target_kind == "tensor_dict" || target_kind == "retained_replica") {
+    commit_subject = "replica_materialization";
+  } else if (target_kind == "retained_binding" || target_kind == "target_set") {
+    commit_subject = "retained_binding_materialization";
+  } else {
+    return "none";
+  }
+  return std::format(
+      "ExecutionCommitReport:{}:{}",
+      commit_subject,
+      collective_policy_linkage_requested(plan.strategy.collective_policy) ? "collective_capable" : "single_executor");
+}
+
+ControllerRealizationResourceEnvelope make_resource_envelope(
+    std::string_view backing_kind,
+    std::string_view export_kind,
+    std::string_view projection_kind,
+    std::string_view owner_kind,
+    const std::vector<std::string>& release_policy) {
+  return ControllerRealizationResourceEnvelope{
+      .backing_kind = std::string(backing_kind),
+      .export_kind = std::string(export_kind),
+      .projection_kind = std::string(projection_kind),
+      .owner_kind = std::string(owner_kind),
+      .release_policy = release_policy,
+      .body_backing_intent = body_backing_intent_for(backing_kind, export_kind),
+      .resource_authorities = resource_authorities_for(backing_kind, export_kind, projection_kind, owner_kind),
+  };
+}
+
+absl::StatusOr<ControllerRealizationPlan> finalize_controller_realization_plan(ControllerRealizationPlan plan) {
+  plan.resource_envelope.manager_linkage = controller_resource_manager_linkage_for(plan);
+  auto status = validate_controller_realization_plan(plan);
+  if (!status.ok()) {
+    return status;
+  }
+  return plan;
+}
+
+template <typename RequestT>
+absl::StatusOr<ControllerRealizationPlan> build_controller_realization_plan_impl(
+    const RequestT& request,
+    const NormalizedMaterializationRequestContext& request_context,
+    const OperationTransportContext& transport_context,
+    const GroupRealizationBeginContext* group_begin_context,
+    std::string_view resolved_artifact_id,
+    std::string_view target_kind,
+    std::string_view capability,
+    std::string_view projection_kind) {
+  if (!request.has_target_layout()) {
+    return absl::InvalidArgumentError("target_layout is required for controller realization plan");
+  }
+  if (request.device_uuid().empty()) {
+    return absl::InvalidArgumentError("device_uuid is required for controller realization plan");
+  }
+  if (request.pid() <= 0) {
+    return absl::InvalidArgumentError("pid is required for controller realization plan");
+  }
+  auto layout_digest_or = target_layout_digest(request.target_layout());
+  if (!layout_digest_or.ok()) {
+    return layout_digest_or.status();
+  }
+
+  const v2::GroupRealizationOptions* group_realization =
+      request.has_group_realization() ? &request.group_realization() : nullptr;
+  ControllerRealizationPlan plan;
+  plan.target = ControllerRealizationTargetPlan{
+      .target_kind = std::string(target_kind),
+      .resolved_artifact_id = std::string(resolved_artifact_id),
+      .target_layout_digest = std::move(*layout_digest_or),
+      .device_uuid = request.device_uuid(),
+      .owner_pid = request.pid(),
+      .layout_storage_count = static_cast<uint32_t>(request.target_layout().storages_size()),
+      .layout_offset_count = static_cast<uint32_t>(request.target_layout().offsets_size()),
+      .member_count =
+          group_realization != nullptr && group_realization->enabled() ? group_realization->group().total_parts() : 1,
+      .group_id = group_realization != nullptr && group_realization->enabled()
+          ? std::optional<std::string>(group_realization->group().group_id())
+          : std::nullopt,
+      .part_id = group_begin_context != nullptr ? std::optional<std::string>(group_begin_context->part_id)
+          : group_realization != nullptr && group_realization->enabled()
+          ? std::optional<std::string>(group_realization->group().part_id())
+          : std::nullopt,
+      .operation_id = operation_id_for(request),
+  };
+  plan.strategy = ControllerRealizationStrategyPlan{
+      .source_selection_mode = source_selection_mode_for(group_begin_context),
+      .source_coordination =
+          transport_context.transport_scheduling_group.has_value() ? "group_realization_transport" : "single_request",
+      .collective_policy = default_collective_policy_for_mapped_target(request_context.execution_topology),
+      .group_barriers = group_barriers_for(group_realization),
+      .version_set_id = group_begin_context != nullptr && !group_begin_context->version_set.version_set_id().empty()
+          ? std::optional<std::string>(group_begin_context->version_set.version_set_id())
+          : std::nullopt,
+      .transaction_id = group_begin_context != nullptr && !group_begin_context->transaction_id.empty()
+          ? std::optional<std::string>(group_begin_context->transaction_id)
+          : std::nullopt,
+      .source_selection_digest = selection_digest_for(group_realization, group_begin_context, request.selection()),
+  };
+  plan.lifecycle = ControllerRealizationLifecyclePlan{
+      .capability = std::string(capability),
+      .export_lifetime_kind = "request_scoped",
+      .release_strictness = "strict",
+      .mutability_contract = "caller_mutable",
+      .release_policy = {"release_external_target_storage_lease"},
+      .staged_value_count =
+          group_realization != nullptr && group_realization->enabled() && group_realization->require_staged_publish()
+          ? 1U
+          : 0U,
+      .acquire_claim_count = group_begin_context != nullptr ? 1U : 0U,
+      .publish_barrier =
+          group_realization != nullptr && group_realization->enabled() && group_realization->require_staged_publish(),
+  };
+  plan.resource_envelope = make_resource_envelope(
+      "caller_region", "registered_region_direct_write", projection_kind, "caller_pid", plan.lifecycle.release_policy);
+  return finalize_controller_realization_plan(std::move(plan));
+}
+
+absl::StatusOr<ControllerRealizationPlan> build_prefetch_target_set_realization_plan(
+    const v2::PrefetchServingBindingRequest& request) {
+  const auto& target = request.serving_binding_set_target();
+  if (target.members_size() == 0) {
+    return absl::InvalidArgumentError("serving_binding_set_target.members is required for controller realization plan");
+  }
+  const uint32_t member_count = static_cast<uint32_t>(target.members_size());
+  const bool per_part_source =
+      request.source().source_kind() == tensorcast::operation::v1::SERVING_BINDING_SOURCE_KIND_SERVING_ARTIFACT_SET;
+  std::vector<std::string> release_policy{"release_binding_reservations"};
+  if (request.has_group_realization() && request.group_realization().require_staged_publish()) {
+    release_policy.push_back("release_group_staged_acquire");
+  }
+  ControllerRealizationPlan plan;
+  plan.target = ControllerRealizationTargetPlan{
+      .target_kind = "target_set",
+      .resolved_artifact_id = request.source_selection().artifact_id(),
+      .target_layout_digest = target_set_layout_digest_for(target),
+      .device_uuid = "target_set",
+      .owner_pid = 0,
+      .layout_storage_count = 0,
+      .layout_offset_count = 0,
+      .member_count = member_count,
+      .group_id = target.group_id().empty() ? std::nullopt : std::optional<std::string>(target.group_id()),
+      .part_id = std::nullopt,
+      .operation_id = prefetch_operation_id_for(request),
+  };
+  plan.strategy = ControllerRealizationStrategyPlan{
+      .source_selection_mode = source_selection_mode_for(
+          request.has_group_realization() ? &request.group_realization() : nullptr, per_part_source),
+      .source_coordination = request.has_group_realization() && request.group_realization().enabled()
+          ? "group_realization_transport"
+          : "same_daemon_session",
+      .collective_policy = prefetch_collective_policy_for(request, member_count),
+      .group_barriers = group_barriers_for(request.has_group_realization() ? &request.group_realization() : nullptr),
+      .version_set_id = std::nullopt,
+      .transaction_id = std::nullopt,
+      .source_selection_digest = !request.source().artifact_selection_digest().empty()
+          ? std::optional<std::string>(request.source().artifact_selection_digest())
+          : selection_digest_for(nullptr, nullptr, request.source_selection()),
+  };
+  plan.lifecycle = ControllerRealizationLifecyclePlan{
+      .capability = "target_set",
+      .export_lifetime_kind = "daemon_retained",
+      .release_strictness = "strict",
+      .mutability_contract = "binding_controlled_read_only",
+      .release_policy = release_policy,
+      .staged_value_count =
+          request.has_group_realization() && request.group_realization().require_staged_publish() ? member_count : 0,
+      .acquire_claim_count = member_count,
+      .publish_barrier = request.has_group_realization() && request.group_realization().require_staged_publish(),
+  };
+  plan.resource_envelope = make_resource_envelope(
+      "daemon_retained_binding_set",
+      "binding_reservation_set",
+      "target_set",
+      "binding_reservation_capability_set",
+      release_policy);
+  return finalize_controller_realization_plan(std::move(plan));
+}
+
+absl::StatusOr<ControllerRealizationPlan> build_prefetch_member_realization_plan(
+    const v2::PrefetchServingBindingRequest& request) {
+  const auto& target = request.serving_binding_target();
+  if (target.device_uuid().empty()) {
+    return absl::InvalidArgumentError("serving_binding_target.device_uuid is required for controller realization plan");
+  }
+  if (!target.has_member() || target.member().member_id().empty()) {
+    return absl::InvalidArgumentError("serving_binding_target.member is required for controller realization plan");
+  }
+  std::vector<std::string> release_policy{"release_binding_reservation"};
+  if (request.has_group_realization() && request.group_realization().require_staged_publish()) {
+    release_policy.push_back("release_group_staged_acquire");
+  }
+  const uint32_t member_count = target.member().member_count() == 0 ? 1 : target.member().member_count();
+  ControllerRealizationPlan plan;
+  plan.target = ControllerRealizationTargetPlan{
+      .target_kind = "retained_binding",
+      .resolved_artifact_id = request.source_selection().artifact_id(),
+      .target_layout_digest = target_layout_digest_for_serving_target(target),
+      .device_uuid = target.device_uuid(),
+      .owner_pid = 0,
+      .layout_storage_count = 0,
+      .layout_offset_count = 0,
+      .member_count = member_count,
+      .group_id =
+          target.member().group_id().empty() ? std::nullopt : std::optional<std::string>(target.member().group_id()),
+      .part_id = target.member().member_id(),
+      .operation_id = prefetch_operation_id_for(request),
+  };
+  plan.strategy = ControllerRealizationStrategyPlan{
+      .source_selection_mode = source_selection_mode_for(
+          request.has_group_realization() ? &request.group_realization() : nullptr,
+          /*per_part_source=*/false),
+      .source_coordination = request.has_group_realization() && request.group_realization().enabled()
+          ? "group_realization_transport"
+          : "same_daemon_session",
+      .collective_policy = prefetch_collective_policy_for(request, member_count),
+      .group_barriers = group_barriers_for(request.has_group_realization() ? &request.group_realization() : nullptr),
+      .version_set_id = std::nullopt,
+      .transaction_id = std::nullopt,
+      .source_selection_digest = !request.source().artifact_selection_digest().empty()
+          ? std::optional<std::string>(request.source().artifact_selection_digest())
+          : selection_digest_for(nullptr, nullptr, request.source_selection()),
+  };
+  plan.lifecycle = ControllerRealizationLifecyclePlan{
+      .capability = "retained_binding",
+      .export_lifetime_kind = "daemon_retained",
+      .release_strictness = "strict",
+      .mutability_contract = "binding_controlled_read_only",
+      .release_policy = release_policy,
+      .staged_value_count =
+          request.has_group_realization() && request.group_realization().require_staged_publish() ? 1U : 0U,
+      .acquire_claim_count = 1,
+      .publish_barrier = request.has_group_realization() && request.group_realization().require_staged_publish(),
+  };
+  plan.resource_envelope = make_resource_envelope(
+      "daemon_retained_binding",
+      "binding_reservation",
+      "prefetch_handoff",
+      "binding_reservation_capability",
+      release_policy);
+  return finalize_controller_realization_plan(std::move(plan));
+}
+
+std::string acquire_target_subject(const v2::AcquireBindingValueRequest& request) {
+  if (!request.binding_value_ref().binding_id().empty()) {
+    return absl::StrCat("binding:", request.binding_value_ref().binding_id());
+  }
+  if (!request.local_serving_ref().empty()) {
+    return absl::StrCat("local_serving_ref:", request.local_serving_ref());
+  }
+  return "binding:unknown";
+}
+
+uint32_t acquire_member_count(const v2::AcquireBindingValueRequest& request) {
+  if (request.reservation_capability().has_member() && request.reservation_capability().member().member_count() > 0) {
+    return request.reservation_capability().member().member_count();
+  }
+  if (request.has_expected_member() && request.expected_member().member_count() > 0) {
+    return request.expected_member().member_count();
+  }
+  return 1;
+}
+
+std::optional<std::string> acquire_group_id(const v2::AcquireBindingValueRequest& request) {
+  if (request.reservation_capability().has_member() && !request.reservation_capability().member().group_id().empty()) {
+    return request.reservation_capability().member().group_id();
+  }
+  if (request.has_expected_member() && !request.expected_member().group_id().empty()) {
+    return request.expected_member().group_id();
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> acquire_part_id(const v2::AcquireBindingValueRequest& request) {
+  if (request.has_group_realization_acquire() && !request.group_realization_acquire().part_id().empty()) {
+    return request.group_realization_acquire().part_id();
+  }
+  if (request.reservation_capability().has_member() && !request.reservation_capability().member().member_id().empty()) {
+    return request.reservation_capability().member().member_id();
+  }
+  if (request.has_expected_member() && !request.expected_member().member_id().empty()) {
+    return request.expected_member().member_id();
+  }
+  return std::nullopt;
+}
+
 } // namespace
 
-absl::StatusOr<RetrievalPolicy> resolve_retrieval_policy_compat(const v2::SourcePolicy* policy) {
+ControllerResourceManagerLinkagePlan controller_resource_manager_linkage_for(const ControllerRealizationPlan& plan) {
+  return ControllerResourceManagerLinkagePlan{
+      .body_backing_manager = body_backing_manager_linkage_for(plan),
+      .handle_lease_registry = handle_lease_registry_linkage_for(plan),
+      .session_lifecycle_manager = session_lifecycle_manager_linkage_for(plan),
+      .lifecycle_kernel = lifecycle_kernel_linkage_for(plan),
+      .execution_commit_report = execution_commit_report_linkage_for(plan),
+  };
+}
+
+void attach_controller_realization_plan_span_attrs(RpcContext& rctx, const ControllerRealizationPlan& plan) {
+  auto& span = rctx.span();
+  span->SetAttribute("tc.realization.target_kind", plan.target.target_kind);
+  span->SetAttribute("tc.realization.source_selection_mode", plan.strategy.source_selection_mode);
+  span->SetAttribute("tc.realization.lifecycle_capability", plan.lifecycle.capability);
+  span->SetAttribute("tc.realization.resource_backing", plan.resource_envelope.backing_kind);
+  span->SetAttribute("tc.realization.resource_export", plan.resource_envelope.export_kind);
+  span->SetAttribute("tc.realization.resource_projection", plan.resource_envelope.projection_kind);
+  span->SetAttribute("tc.realization.resource_owner", plan.resource_envelope.owner_kind);
+  span->SetAttribute(
+      "tc.realization.manager.body_backing", plan.resource_envelope.manager_linkage.body_backing_manager);
+  span->SetAttribute(
+      "tc.realization.manager.handle_lease", plan.resource_envelope.manager_linkage.handle_lease_registry);
+  span->SetAttribute(
+      "tc.realization.manager.session_lifecycle", plan.resource_envelope.manager_linkage.session_lifecycle_manager);
+  span->SetAttribute(
+      "tc.realization.manager.lifecycle_kernel", plan.resource_envelope.manager_linkage.lifecycle_kernel);
+  span->SetAttribute(
+      "tc.realization.manager.execution_commit", plan.resource_envelope.manager_linkage.execution_commit_report);
+}
+
+absl::Status validate_controller_realization_plan(const ControllerRealizationPlan& plan) {
+  if (plan.target.target_kind.empty()) {
+    return absl::InvalidArgumentError("controller realization plan requires target_kind");
+  }
+  if (plan.lifecycle.capability.empty()) {
+    return absl::InvalidArgumentError("controller realization plan requires lifecycle capability");
+  }
+  if (plan.lifecycle.export_lifetime_kind.empty()) {
+    return absl::InvalidArgumentError("controller realization plan requires export_lifetime_kind");
+  }
+  if (plan.resource_envelope.backing_kind.empty() || plan.resource_envelope.export_kind.empty() ||
+      plan.resource_envelope.projection_kind.empty() || plan.resource_envelope.owner_kind.empty()) {
+    return absl::InvalidArgumentError("controller realization plan requires resource envelope identity fields");
+  }
+  if (plan.resource_envelope.resource_authorities.empty()) {
+    return absl::InvalidArgumentError("controller realization plan requires resource authorities");
+  }
+  if (plan.resource_envelope.release_policy != plan.lifecycle.release_policy) {
+    return absl::InvalidArgumentError("resource envelope release_policy must match lifecycle release_policy");
+  }
+  if (process_visible_handle_export(plan.resource_envelope.export_kind) &&
+      !token_backed_export_lifetime(plan.lifecycle.export_lifetime_kind)) {
+    return absl::InvalidArgumentError("process-visible controller exports require token-backed lifetime");
+  }
+  const ControllerResourceManagerLinkagePlan expected_linkage = controller_resource_manager_linkage_for(plan);
+  if (plan.resource_envelope.manager_linkage != expected_linkage) {
+    return absl::InvalidArgumentError(
+        "controller realization plan resource manager linkage must match resource envelope authorities");
+  }
+  return absl::OkStatus();
+}
+
+bool controller_plan_has_resource_authority(const ControllerRealizationPlan& plan, std::string_view authority) {
+  return envelope_has_resource_authority(plan.resource_envelope, authority);
+}
+
+absl::Status require_controller_resource_authority(
+    const ControllerRealizationPlan& plan,
+    std::string_view authority,
+    std::string_view action) {
+  if (controller_plan_has_resource_authority(plan, authority)) {
+    return absl::OkStatus();
+  }
+  return absl::FailedPreconditionError(std::format("{} requires controller resource authority {}", action, authority));
+}
+
+absl::Status require_controller_export_kind(
+    const ControllerRealizationPlan& plan,
+    std::string_view export_kind,
+    std::string_view action) {
+  if (plan.resource_envelope.export_kind == export_kind) {
+    return absl::OkStatus();
+  }
+  return absl::FailedPreconditionError(
+      std::format(
+          "{} expected controller export_kind={} but admitted export_kind={}",
+          action,
+          export_kind,
+          plan.resource_envelope.export_kind));
+}
+
+absl::Status validate_controller_process_visible_export_authorities(
+    const ControllerRealizationPlan& plan,
+    std::string_view action) {
+  if (!process_visible_handle_export(plan.resource_envelope.export_kind)) {
+    return absl::OkStatus();
+  }
+  if (auto status = require_controller_resource_authority(plan, "HandleLeaseRegistry", action); !status.ok()) {
+    return status;
+  }
+  if (auto status = require_controller_resource_authority(plan, "SessionLifecycleManager", action); !status.ok()) {
+    return status;
+  }
+  return require_controller_resource_authority(plan, "LifecycleKernel", action);
+}
+
+absl::StatusOr<RetrievalPolicy> resolve_retrieval_policy(const v2::SourcePolicy* policy) {
   RetrievalPolicy resolved;
   if (policy != nullptr) {
     if (policy->preference() != v2::SourcePreference::SOURCE_PREFERENCE_UNSPECIFIED) {
@@ -394,6 +1280,710 @@ v2::CollectivePolicy default_collective_policy_for_mapped_target(const Execution
 bool collective_policy_requests_collective(v2::CollectivePolicy policy) {
   return policy == v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE ||
       policy == v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST;
+}
+
+absl::StatusOr<ControllerRealizationPlan> build_controller_realization_plan(
+    const v2::MaterializeIntoTargetRequest& request,
+    const NormalizedMaterializationRequestContext& request_context,
+    const OperationTransportContext& transport_context,
+    const GroupRealizationBeginContext* group_begin_context,
+    std::string_view resolved_artifact_id) {
+  return build_controller_realization_plan_impl(
+      request,
+      request_context,
+      transport_context,
+      group_begin_context,
+      resolved_artifact_id,
+      "caller_tensors",
+      "caller_tensors",
+      "completion");
+}
+
+absl::StatusOr<ControllerRealizationPlan> build_controller_realization_plan(
+    const v2::MaterializeIntoMappedTargetRequest& request,
+    const NormalizedMaterializationRequestContext& request_context,
+    const OperationTransportContext& transport_context,
+    const GroupRealizationBeginContext* group_begin_context,
+    std::string_view resolved_artifact_id) {
+  return build_controller_realization_plan_impl(
+      request,
+      request_context,
+      transport_context,
+      group_begin_context,
+      resolved_artifact_id,
+      "binding_adopted",
+      "binding_adopted",
+      "binding");
+}
+
+absl::StatusOr<ControllerRealizationPlan> build_controller_realization_plan(
+    const v2::MaterializeReplicaRequest& request,
+    const NormalizedMaterializationRequestContext& request_context,
+    const OperationTransportContext& transport_context,
+    const GroupRealizationBeginContext* group_begin_context,
+    std::string_view resolved_artifact_id,
+    const tensorcast::common::v1::ArtifactSelection& resolved_selection,
+    bool cpu_target,
+    bool no_lease) {
+  if (resolved_artifact_id.empty()) {
+    return absl::InvalidArgumentError("resolved_artifact_id is required for controller realization plan");
+  }
+  if (request.wait_for_completion() && no_lease) {
+    return absl::InvalidArgumentError("lease_mode=NO_LEASE cannot export a tensor_dict realization");
+  }
+  const v2::GroupRealizationOptions* group_realization =
+      request.has_group_realization() && request.group_realization().enabled() ? &request.group_realization() : nullptr;
+  std::vector<std::string> release_policy = replica_release_policy_for(request, no_lease);
+  const std::string target_kind = replica_target_kind_for(request);
+  ControllerRealizationPlan plan;
+  plan.target = ControllerRealizationTargetPlan{
+      .target_kind = target_kind,
+      .resolved_artifact_id = std::string(resolved_artifact_id),
+      .target_layout_digest = target_layout_digest_for_replica(resolved_selection, request, resolved_artifact_id),
+      .device_uuid = cpu_target           ? "CPU"
+          : request.device_uuid().empty() ? "GPU"
+                                          : request.device_uuid(),
+      .owner_pid = no_lease ? 0 : request.pid(),
+      .layout_storage_count = 0,
+      .layout_offset_count = 0,
+      .member_count = group_realization != nullptr && group_realization->group().total_parts() > 0
+          ? group_realization->group().total_parts()
+          : 1,
+      .group_id = group_realization != nullptr && !group_realization->group().group_id().empty()
+          ? std::optional<std::string>(group_realization->group().group_id())
+          : std::nullopt,
+      .part_id = group_begin_context != nullptr && !group_begin_context->part_id.empty()
+          ? std::optional<std::string>(group_begin_context->part_id)
+          : group_realization != nullptr && !group_realization->group().part_id().empty()
+          ? std::optional<std::string>(group_realization->group().part_id())
+          : std::nullopt,
+      .operation_id = std::nullopt,
+  };
+  plan.strategy = ControllerRealizationStrategyPlan{
+      .source_selection_mode = source_selection_mode_for(group_begin_context),
+      .source_coordination =
+          transport_context.transport_scheduling_group.has_value() ? "group_realization_transport" : "single_request",
+      .collective_policy = replica_collective_policy_for(request_context),
+      .group_barriers = group_barriers_for(group_realization),
+      .version_set_id = group_begin_context != nullptr && !group_begin_context->version_set.version_set_id().empty()
+          ? std::optional<std::string>(group_begin_context->version_set.version_set_id())
+          : std::nullopt,
+      .transaction_id = group_begin_context != nullptr && !group_begin_context->transaction_id.empty()
+          ? std::optional<std::string>(group_begin_context->transaction_id)
+          : std::nullopt,
+      .source_selection_digest = !resolved_selection.selection_hash().empty()
+          ? std::optional<std::string>(absl::BytesToHexString(resolved_selection.selection_hash()))
+          : std::nullopt,
+  };
+  plan.lifecycle = ControllerRealizationLifecyclePlan{
+      .capability = target_kind,
+      .export_lifetime_kind = no_lease ? "daemon_retained" : "handle_lease",
+      .release_strictness = "strict",
+      .mutability_contract =
+          cpu_target && request.wait_for_completion() ? "read_mostly_private_copy" : "borrowed_read_only",
+      .release_policy = release_policy,
+      .staged_value_count = 0,
+      .acquire_claim_count = no_lease ? 0U : 1U,
+      .publish_barrier = false,
+  };
+  plan.resource_envelope = make_resource_envelope(
+      request.wait_for_completion() ? "daemon_replica" : "daemon_retained_replica",
+      no_lease ? "none" : (cpu_target ? "cpu_memfd_lease" : "cuda_ipc_lease"),
+      request.wait_for_completion() ? "tensor_dict" : "operation_ticket",
+      no_lease ? "daemon_session" : "caller_pid",
+      release_policy);
+  return finalize_controller_realization_plan(std::move(plan));
+}
+
+absl::StatusOr<ControllerRealizationPlan> build_controller_realization_plan(const v2::CreateBindingRequest& request) {
+  if (request.ownership() == v2::BindingOwnership::BINDING_OWNERSHIP_UNSPECIFIED) {
+    return absl::InvalidArgumentError("binding ownership is required for controller realization plan");
+  }
+  if (!request.has_target_layout()) {
+    return absl::InvalidArgumentError("target_layout is required for controller realization plan");
+  }
+  if (request.device_uuid().empty()) {
+    return absl::InvalidArgumentError("device_uuid is required for controller realization plan");
+  }
+  if (request.pid() <= 0) {
+    return absl::InvalidArgumentError("pid is required for controller realization plan");
+  }
+  auto layout_digest_or = target_layout_digest(request.target_layout());
+  if (!layout_digest_or.ok()) {
+    return layout_digest_or.status();
+  }
+
+  const std::vector<std::string> release_policy = create_binding_release_policy_for(request);
+  const std::string target_kind = binding_ownership_name(request.ownership());
+  ControllerRealizationPlan plan;
+  plan.target = ControllerRealizationTargetPlan{
+      .target_kind = target_kind,
+      .resolved_artifact_id = request.has_initial_selection()
+          ? (request.has_source_artifact_id() ? request.source_artifact_id()
+                                              : request.initial_selection().artifact_id())
+          : std::string(),
+      .target_layout_digest = std::move(*layout_digest_or),
+      .device_uuid = request.device_uuid(),
+      .owner_pid = request.pid(),
+      .layout_storage_count = static_cast<uint32_t>(request.target_layout().storages_size()),
+      .layout_offset_count = static_cast<uint32_t>(request.target_layout().offsets_size()),
+      .member_count = 1,
+      .group_id = std::nullopt,
+      .part_id = std::nullopt,
+      .operation_id = std::nullopt,
+  };
+  plan.strategy = ControllerRealizationStrategyPlan{
+      .source_selection_mode = request.has_initial_selection() ? "single_selection" : "none",
+      .source_coordination = request.has_initial_selection() ? "binding_initial_value" : "binding_allocation",
+      .collective_policy = v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE,
+      .group_barriers = {},
+      .version_set_id = std::nullopt,
+      .transaction_id = std::nullopt,
+      .source_selection_digest =
+          request.has_initial_selection() && !request.initial_selection().selection_hash().empty()
+          ? std::optional<std::string>(absl::BytesToHexString(request.initial_selection().selection_hash()))
+          : std::nullopt,
+  };
+  const bool daemon_owned = request.ownership() == v2::BindingOwnership::BINDING_OWNERSHIP_DAEMON;
+  plan.lifecycle = ControllerRealizationLifecyclePlan{
+      .capability = target_kind,
+      .export_lifetime_kind = daemon_owned ? "handle_lease" : "binding_registry",
+      .release_strictness = "strict",
+      .mutability_contract = daemon_owned ? "binding_controlled_mutable" : "caller_region_borrowed",
+      .release_policy = release_policy,
+      .staged_value_count = 0,
+      .acquire_claim_count = daemon_owned ? 1U : 0U,
+      .publish_barrier = false,
+  };
+  plan.resource_envelope = make_resource_envelope(
+      daemon_owned ? "daemon_binding" : "caller_region",
+      daemon_owned ? "cuda_ipc_lease" : "publication_token_or_none",
+      "binding",
+      "caller_pid",
+      release_policy);
+  return finalize_controller_realization_plan(std::move(plan));
+}
+
+absl::StatusOr<ControllerRealizationPlan> build_controller_realization_plan(
+    const v2::CreateOwnedBindingRequest& request,
+    const NormalizedMaterializationRequestContext& request_context,
+    const OperationTransportContext& transport_context,
+    const GroupRealizationBeginContext* group_begin_context,
+    std::string_view resolved_artifact_id,
+    const tensorcast::common::v1::ArtifactSelection& resolved_selection) {
+  if (resolved_artifact_id.empty()) {
+    return absl::InvalidArgumentError("resolved_artifact_id is required for controller realization plan");
+  }
+  if (!request.has_target_layout()) {
+    return absl::InvalidArgumentError("target_layout is required for controller realization plan");
+  }
+  if (request.device_uuid().empty()) {
+    return absl::InvalidArgumentError("device_uuid is required for controller realization plan");
+  }
+  if (request.pid() <= 0) {
+    return absl::InvalidArgumentError("pid is required for controller realization plan");
+  }
+  auto layout_digest_or = target_layout_digest(request.target_layout());
+  if (!layout_digest_or.ok()) {
+    return layout_digest_or.status();
+  }
+
+  const v2::GroupRealizationOptions* group_realization =
+      request.has_group_realization() && request.group_realization().enabled() ? &request.group_realization() : nullptr;
+  const bool staged_publish = group_realization != nullptr && group_realization->require_staged_publish();
+  const std::vector<std::string> release_policy = binding_materialization_release_policy(staged_publish);
+  ControllerRealizationPlan plan;
+  plan.target = ControllerRealizationTargetPlan{
+      .target_kind = "binding_owned",
+      .resolved_artifact_id = std::string(resolved_artifact_id),
+      .target_layout_digest = std::move(*layout_digest_or),
+      .device_uuid = request.device_uuid(),
+      .owner_pid = request.pid(),
+      .layout_storage_count = static_cast<uint32_t>(request.target_layout().storages_size()),
+      .layout_offset_count = static_cast<uint32_t>(request.target_layout().offsets_size()),
+      .member_count = group_realization != nullptr ? group_realization->group().total_parts() : 1,
+      .group_id = group_realization != nullptr && !group_realization->group().group_id().empty()
+          ? std::optional<std::string>(group_realization->group().group_id())
+          : std::nullopt,
+      .part_id = group_begin_context != nullptr && !group_begin_context->part_id.empty()
+          ? std::optional<std::string>(group_begin_context->part_id)
+          : group_realization != nullptr && !group_realization->group().part_id().empty()
+          ? std::optional<std::string>(group_realization->group().part_id())
+          : std::nullopt,
+      .operation_id = operation_id_for(request),
+  };
+  plan.strategy = ControllerRealizationStrategyPlan{
+      .source_selection_mode = source_selection_mode_for(group_begin_context),
+      .source_coordination =
+          transport_context.transport_scheduling_group.has_value() ? "group_realization_transport" : "single_request",
+      .collective_policy = default_collective_policy_for_mapped_target(request_context.execution_topology),
+      .group_barriers = group_barriers_for(group_realization),
+      .version_set_id = group_begin_context != nullptr && !group_begin_context->version_set.version_set_id().empty()
+          ? std::optional<std::string>(group_begin_context->version_set.version_set_id())
+          : std::nullopt,
+      .transaction_id = group_begin_context != nullptr && !group_begin_context->transaction_id.empty()
+          ? std::optional<std::string>(group_begin_context->transaction_id)
+          : std::nullopt,
+      .source_selection_digest = selection_digest_for(group_realization, group_begin_context, resolved_selection),
+  };
+  plan.lifecycle = ControllerRealizationLifecyclePlan{
+      .capability = "binding_owned",
+      .export_lifetime_kind = "handle_lease",
+      .release_strictness = "strict",
+      .mutability_contract = "binding_controlled_read_only",
+      .release_policy = release_policy,
+      .staged_value_count = staged_publish ? 1U : 0U,
+      .acquire_claim_count = group_begin_context != nullptr ? 1U : 0U,
+      .publish_barrier = staged_publish,
+  };
+  plan.resource_envelope = make_resource_envelope(
+      "daemon_binding", "cuda_ipc_lease", staged_publish ? "staged_binding" : "binding", "caller_pid", release_policy);
+  return finalize_controller_realization_plan(std::move(plan));
+}
+
+absl::StatusOr<ControllerRealizationPlan> build_controller_realization_plan(
+    const v2::RefillOwnedBindingRequest& request,
+    const NormalizedMaterializationRequestContext& request_context,
+    const OperationTransportContext& transport_context,
+    const GroupRealizationBeginContext* group_begin_context,
+    std::string_view resolved_artifact_id,
+    const tensorcast::common::v1::ArtifactSelection& resolved_selection,
+    const v2::TargetLayout& target_layout,
+    std::string_view device_uuid,
+    int32_t owner_pid,
+    bool mapped,
+    v2::CollectivePolicy collective_policy,
+    bool execution_only_mutable) {
+  if (request.binding_id().empty()) {
+    return absl::InvalidArgumentError("binding_id is required for controller realization plan");
+  }
+  if (resolved_artifact_id.empty()) {
+    return absl::InvalidArgumentError("resolved_artifact_id is required for controller realization plan");
+  }
+  if (device_uuid.empty()) {
+    return absl::InvalidArgumentError("device_uuid is required for controller realization plan");
+  }
+  if (owner_pid <= 0) {
+    return absl::InvalidArgumentError("owner_pid is required for controller realization plan");
+  }
+  auto layout_digest_or = target_layout_digest(target_layout);
+  if (!layout_digest_or.ok()) {
+    return layout_digest_or.status();
+  }
+
+  const v2::GroupRealizationOptions* group_realization =
+      request.has_group_realization() && request.group_realization().enabled() ? &request.group_realization() : nullptr;
+  const std::vector<std::string> release_policy = refill_release_policy(execution_only_mutable);
+  ControllerRealizationPlan plan;
+  plan.target = ControllerRealizationTargetPlan{
+      .target_kind = "binding_owned_refill",
+      .resolved_artifact_id = std::string(resolved_artifact_id),
+      .target_layout_digest = std::move(*layout_digest_or),
+      .device_uuid = std::string(device_uuid),
+      .owner_pid = owner_pid,
+      .layout_storage_count = static_cast<uint32_t>(target_layout.storages_size()),
+      .layout_offset_count = static_cast<uint32_t>(target_layout.offsets_size()),
+      .member_count = group_realization != nullptr ? group_realization->group().total_parts() : 1,
+      .group_id = group_realization != nullptr && !group_realization->group().group_id().empty()
+          ? std::optional<std::string>(group_realization->group().group_id())
+          : std::nullopt,
+      .part_id = group_begin_context != nullptr && !group_begin_context->part_id.empty()
+          ? std::optional<std::string>(group_begin_context->part_id)
+          : group_realization != nullptr && !group_realization->group().part_id().empty()
+          ? std::optional<std::string>(group_realization->group().part_id())
+          : std::nullopt,
+      .operation_id = operation_id_for(request),
+  };
+  plan.strategy = ControllerRealizationStrategyPlan{
+      .source_selection_mode = source_selection_mode_for(group_begin_context),
+      .source_coordination =
+          transport_context.transport_scheduling_group.has_value() ? "group_realization_transport" : "single_request",
+      .collective_policy = request_context.execution_topology.collective_load_group.has_value()
+          ? collective_policy
+          : v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE,
+      .group_barriers = group_barriers_for(group_realization),
+      .version_set_id = group_begin_context != nullptr && !group_begin_context->version_set.version_set_id().empty()
+          ? std::optional<std::string>(group_begin_context->version_set.version_set_id())
+          : std::nullopt,
+      .transaction_id = group_begin_context != nullptr && !group_begin_context->transaction_id.empty()
+          ? std::optional<std::string>(group_begin_context->transaction_id)
+          : std::nullopt,
+      .source_selection_digest = selection_digest_for(group_realization, group_begin_context, resolved_selection),
+  };
+  plan.lifecycle = ControllerRealizationLifecyclePlan{
+      .capability = "binding_owned",
+      .export_lifetime_kind = "binding_current_value",
+      .release_strictness = "strict",
+      .mutability_contract = execution_only_mutable ? "binding_controlled_mutable" : "binding_controlled_read_only",
+      .release_policy = release_policy,
+      .staged_value_count = 0,
+      .acquire_claim_count = group_begin_context != nullptr ? 1U : 0U,
+      .publish_barrier = group_realization != nullptr && group_realization->require_staged_publish(),
+  };
+  plan.resource_envelope = make_resource_envelope(
+      "daemon_binding",
+      execution_only_mutable ? "none" : "publication_token_or_none",
+      mapped ? "binding_mapped_refill" : "binding_refill",
+      "binding_registry",
+      release_policy);
+  return finalize_controller_realization_plan(std::move(plan));
+}
+
+absl::StatusOr<ControllerRealizationPlan> build_controller_realization_plan(
+    const v2::StartAssemblyAttemptRequest& request,
+    const v2::AssemblyAttemptIntent& intent,
+    std::string_view attempt_id,
+    std::string_view workspace_assembly_id,
+    std::string_view operation_id) {
+  if (intent.layout_id().empty()) {
+    return absl::InvalidArgumentError("assembly attempt layout_id is required for controller realization plan");
+  }
+  if (attempt_id.empty()) {
+    return absl::InvalidArgumentError("assembly attempt_id is required for controller realization plan");
+  }
+  if (workspace_assembly_id.empty()) {
+    return absl::InvalidArgumentError("assembly workspace_assembly_id is required for controller realization plan");
+  }
+  if (operation_id.empty()) {
+    return absl::InvalidArgumentError("assembly operation_id is required for controller realization plan");
+  }
+  const bool representation_publish = request.has_representation_publish_spec();
+  const std::vector<std::string> release_policy{
+      "release_operation_lease",
+      "stop_coordinator_keepalive",
+      "close_assembly_attempt",
+  };
+  ControllerRealizationPlan plan;
+  plan.target = ControllerRealizationTargetPlan{
+      .target_kind = representation_publish ? "representation_publish_assembly_attempt" : "assembly_attempt",
+      .resolved_artifact_id = std::string(workspace_assembly_id),
+      .target_layout_digest = assembly_attempt_layout_digest(intent),
+      .device_uuid = "assembly",
+      .owner_pid = 0,
+      .layout_storage_count = 0,
+      .layout_offset_count = assembly_requirement_count(intent.requirements()),
+      .member_count = assembly_requirement_count(intent.requirements()),
+      .group_id = std::string(attempt_id),
+      .part_id = std::nullopt,
+      .operation_id = std::string(operation_id),
+  };
+  plan.strategy = ControllerRealizationStrategyPlan{
+      .source_selection_mode = "assembly_requirements",
+      .source_coordination = "assembly_attempt_coordinator",
+      .collective_policy = v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE,
+      .group_barriers = assembly_attempt_barriers_for(intent),
+      .version_set_id = std::nullopt,
+      .transaction_id = std::string(attempt_id),
+      .source_selection_digest = intent.attempt_intent_digest().empty()
+          ? std::nullopt
+          : std::optional<std::string>(intent.attempt_intent_digest()),
+  };
+  plan.lifecycle = ControllerRealizationLifecyclePlan{
+      .capability = "assembly_attempt",
+      .export_lifetime_kind = "operation_lease",
+      .release_strictness = "strict",
+      .mutability_contract = "workspace_mutable_until_seal",
+      .release_policy = release_policy,
+      .staged_value_count = assembly_requirement_count(intent.requirements()),
+      .acquire_claim_count = 1,
+      .publish_barrier = representation_publish,
+  };
+  plan.resource_envelope = make_resource_envelope(
+      "assembly_workspace", "operation_lease", "operation_ref", "daemon_coordinator", release_policy);
+  return finalize_controller_realization_plan(std::move(plan));
+}
+
+absl::StatusOr<ControllerRealizationPlan> build_controller_realization_plan(
+    const v2::SealAssemblyAttemptRequest& request,
+    const v2::AssemblyAttemptRecord& record,
+    std::string_view operation_id) {
+  if (request.attempt_id().empty()) {
+    return absl::InvalidArgumentError("assembly attempt_id is required for controller realization plan");
+  }
+  if (record.workspace_assembly_id().empty()) {
+    return absl::InvalidArgumentError("assembly workspace_assembly_id is required for controller realization plan");
+  }
+  if (operation_id.empty()) {
+    return absl::InvalidArgumentError("assembly operation_id is required for controller realization plan");
+  }
+  const std::vector<std::string> release_policy{
+      "release_operation_lease",
+      "finalize_slot_occupancies",
+      "publish_workspace_seal_binding",
+  };
+  ControllerRealizationPlan plan;
+  plan.target = ControllerRealizationTargetPlan{
+      .target_kind = "assembly_attempt_seal",
+      .resolved_artifact_id = record.workspace_assembly_id(),
+      .target_layout_digest = assembly_attempt_layout_digest(record.intent()),
+      .device_uuid = "assembly",
+      .owner_pid = 0,
+      .layout_storage_count = 0,
+      .layout_offset_count = assembly_requirement_count(record.intent().requirements()),
+      .member_count = assembly_requirement_count(record.intent().requirements()),
+      .group_id = request.attempt_id(),
+      .part_id = std::nullopt,
+      .operation_id = std::string(operation_id),
+  };
+  plan.strategy = ControllerRealizationStrategyPlan{
+      .source_selection_mode = "assembly_requirements",
+      .source_coordination = assembly_closeout_coordination(record.intent().closeout_contract()),
+      .collective_policy = v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE,
+      .group_barriers = assembly_seal_barriers_for(record.intent().closeout_contract()),
+      .version_set_id = std::nullopt,
+      .transaction_id = request.attempt_id(),
+      .source_selection_digest = record.intent().attempt_intent_digest().empty()
+          ? std::nullopt
+          : std::optional<std::string>(record.intent().attempt_intent_digest()),
+  };
+  plan.lifecycle = ControllerRealizationLifecyclePlan{
+      .capability = "assembly_seal",
+      .export_lifetime_kind = "operation_lease",
+      .release_strictness = "strict",
+      .mutability_contract = "sealed_artifact_immutable",
+      .release_policy = release_policy,
+      .staged_value_count = 0,
+      .acquire_claim_count = 1,
+      .publish_barrier = true,
+  };
+  plan.resource_envelope = make_resource_envelope(
+      "assembly_workspace", "operation_lease", "operation_ref", "daemon_coordinator", release_policy);
+  return finalize_controller_realization_plan(std::move(plan));
+}
+
+absl::StatusOr<ControllerRealizationPlan> build_controller_realization_plan(const v2::SealAssemblyRequest& request) {
+  if (request.assembly_id().empty()) {
+    return absl::InvalidArgumentError("assembly_id is required for controller realization plan");
+  }
+  const std::vector<std::string> release_policy{"commit_sealed_artifact"};
+  ControllerRealizationPlan plan;
+  plan.target = ControllerRealizationTargetPlan{
+      .target_kind = "assembly_seal",
+      .resolved_artifact_id = request.assembly_id(),
+      .target_layout_digest = assembly_seal_layout_digest(request.assembly_id(), std::string_view()),
+      .device_uuid = "assembly",
+      .owner_pid = 0,
+      .layout_storage_count = 0,
+      .layout_offset_count = 0,
+      .member_count = 1,
+      .group_id = std::nullopt,
+      .part_id = std::nullopt,
+      .operation_id = std::nullopt,
+  };
+  plan.strategy = ControllerRealizationStrategyPlan{
+      .source_selection_mode = "assembly_workspace",
+      .source_coordination = request.publish_canonical() ? "seal_and_publish_canonical" : "seal_only",
+      .collective_policy = v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE,
+      .group_barriers = {"seal_cut"},
+      .version_set_id = std::nullopt,
+      .transaction_id = std::nullopt,
+      .source_selection_digest = std::nullopt,
+  };
+  plan.lifecycle = ControllerRealizationLifecyclePlan{
+      .capability = "assembly_seal",
+      .export_lifetime_kind = "request_scoped",
+      .release_strictness = "strict",
+      .mutability_contract = "sealed_artifact_immutable",
+      .release_policy = release_policy,
+      .staged_value_count = 0,
+      .acquire_claim_count = 0,
+      .publish_barrier = request.publish_canonical(),
+  };
+  plan.resource_envelope =
+      make_resource_envelope("assembly_workspace", "none", "artifact_descriptor", "daemon_request", release_policy);
+  return finalize_controller_realization_plan(std::move(plan));
+}
+
+absl::StatusOr<ControllerRealizationPlan> build_controller_realization_plan(
+    const v2::StartSealAssemblyRequest& request,
+    std::string_view operation_id) {
+  if (request.assembly_id().empty()) {
+    return absl::InvalidArgumentError("assembly_id is required for controller realization plan");
+  }
+  if (operation_id.empty()) {
+    return absl::InvalidArgumentError("assembly operation_id is required for controller realization plan");
+  }
+  const std::vector<std::string> release_policy{
+      "release_operation_lease",
+      "attach_layout_to_artifact",
+      "apply_post_seal_policy",
+  };
+  ControllerRealizationPlan plan;
+  plan.target = ControllerRealizationTargetPlan{
+      .target_kind = "assembly_seal",
+      .resolved_artifact_id = request.assembly_id(),
+      .target_layout_digest = assembly_seal_layout_digest(request.assembly_id(), request.layout_id()),
+      .device_uuid = "assembly",
+      .owner_pid = 0,
+      .layout_storage_count = 0,
+      .layout_offset_count = 0,
+      .member_count = 1,
+      .group_id = std::nullopt,
+      .part_id = std::nullopt,
+      .operation_id = std::string(operation_id),
+  };
+  plan.strategy = ControllerRealizationStrategyPlan{
+      .source_selection_mode = "assembly_workspace",
+      .source_coordination = request.layout_id().empty() ? "layout_binding_lookup" : "explicit_layout",
+      .collective_policy = v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE,
+      .group_barriers = {"operation_coordinator", "seal_cut", "post_seal_policy"},
+      .version_set_id = std::nullopt,
+      .transaction_id = std::nullopt,
+      .source_selection_digest = std::nullopt,
+  };
+  plan.lifecycle = ControllerRealizationLifecyclePlan{
+      .capability = "assembly_seal",
+      .export_lifetime_kind = "operation_lease",
+      .release_strictness = "strict",
+      .mutability_contract = "sealed_artifact_immutable",
+      .release_policy = release_policy,
+      .staged_value_count = 0,
+      .acquire_claim_count = 1,
+      .publish_barrier = true,
+  };
+  plan.resource_envelope = make_resource_envelope(
+      "assembly_workspace", "operation_lease", "operation_ref", "daemon_coordinator", release_policy);
+  return finalize_controller_realization_plan(std::move(plan));
+}
+
+absl::StatusOr<ControllerRealizationPlan> build_controller_realization_plan(
+    const v2::PrefetchServingBindingRequest& request) {
+  switch (request.target_case()) {
+    case v2::PrefetchServingBindingRequest::kServingBindingSetTarget:
+      return build_prefetch_target_set_realization_plan(request);
+    case v2::PrefetchServingBindingRequest::kServingBindingTarget:
+      return build_prefetch_member_realization_plan(request);
+    case v2::PrefetchServingBindingRequest::TARGET_NOT_SET:
+    default:
+      return absl::InvalidArgumentError("prefetch serving binding target is required for controller realization plan");
+  }
+}
+
+absl::StatusOr<ControllerRealizationPlan> build_controller_realization_plan(
+    const v2::AcquireBindingValueRequest& request) {
+  if (!request.has_caller_pid() || request.caller_pid() <= 0) {
+    return absl::InvalidArgumentError("caller_pid is required for controller realization plan");
+  }
+  const bool group_acquire = request.has_group_realization_acquire();
+  const std::vector<std::string> release_policy{"release_handle_lease", "release_attachment_ref"};
+  ControllerRealizationPlan plan;
+  plan.target = ControllerRealizationTargetPlan{
+      .target_kind = "runtime_attachment",
+      .resolved_artifact_id = acquire_target_subject(request),
+      .target_layout_digest = request.expected_target_layout_hash(),
+      .device_uuid = !request.expected_device_uuid().empty() ? request.expected_device_uuid()
+                                                             : request.reservation_capability().device_uuid(),
+      .owner_pid = request.caller_pid(),
+      .layout_storage_count = 0,
+      .layout_offset_count = 0,
+      .member_count = acquire_member_count(request),
+      .group_id = acquire_group_id(request),
+      .part_id = acquire_part_id(request),
+      .operation_id = std::nullopt,
+  };
+  plan.strategy = ControllerRealizationStrategyPlan{
+      .source_selection_mode = group_acquire ? "per_part_selection" : "retained_selection",
+      .source_coordination = group_acquire ? "group_realization_acquire" : "retained_binding_acquire",
+      .collective_policy = v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE,
+      .group_barriers =
+          group_acquire ? acquire_group_barriers_for(request.group_realization_acquire()) : std::vector<std::string>{},
+      .version_set_id = group_acquire && !request.group_realization_acquire().version_set_id().empty()
+          ? std::optional<std::string>(request.group_realization_acquire().version_set_id())
+          : std::nullopt,
+      .transaction_id = group_acquire && !request.group_realization_acquire().transaction_id().empty()
+          ? std::optional<std::string>(request.group_realization_acquire().transaction_id())
+          : std::nullopt,
+      .source_selection_digest = !request.reservation_capability().scope_digest().empty()
+          ? std::optional<std::string>(request.reservation_capability().scope_digest())
+          : std::nullopt,
+  };
+  plan.lifecycle = ControllerRealizationLifecyclePlan{
+      .capability = "retained_acquire",
+      .export_lifetime_kind = "runtime_attachment",
+      .release_strictness = "strict",
+      .mutability_contract = "runtime_adapter_owned",
+      .release_policy = release_policy,
+      .staged_value_count = group_acquire ? 1U : 0U,
+      .acquire_claim_count = 1,
+      .publish_barrier = group_acquire && request.group_realization_acquire().wait_for_publish(),
+  };
+  plan.resource_envelope = make_resource_envelope(
+      "daemon_retained_binding", "cuda_ipc_lease", "runtime_attachment", "caller_pid", release_policy);
+  return finalize_controller_realization_plan(std::move(plan));
+}
+
+absl::StatusOr<ControllerRealizationPlan> build_controller_realization_plan(
+    const v2::PublishTargetReplicaRequest& request,
+    const tensorcast::common::v1::BindingCurrentValuePublicationScope& scope,
+    const tensorcast::common::v1::ByteSpaceRef& normalized_byte_space) {
+  if (request.binding_current_value_publication_token().empty()) {
+    return absl::InvalidArgumentError(
+        "binding_current_value_publication_token is required for controller realization plan");
+  }
+  if (scope.publication_id().empty()) {
+    return absl::InvalidArgumentError("publication_id is required for controller realization plan");
+  }
+  if (scope.selection().artifact_id().empty()) {
+    return absl::InvalidArgumentError("publication selection artifact_id is required for controller realization plan");
+  }
+  if (scope.device_uuid().empty()) {
+    return absl::InvalidArgumentError("publication device_uuid is required for controller realization plan");
+  }
+  const int32_t owner_pid =
+      request.has_owner_pid() && request.owner_pid() > 0 ? request.owner_pid() : scope.owner_pid();
+  if (owner_pid <= 0) {
+    return absl::InvalidArgumentError("publication owner_pid is required for controller realization plan");
+  }
+
+  const v2::GroupRealizationOptions* group_realization =
+      request.has_group_realization() && request.group_realization().enabled() ? &request.group_realization() : nullptr;
+  const std::vector<std::string> release_policy{
+      "retire_published_replica",
+      "release_publication_lease",
+      "release_lifecycle_use_guard",
+  };
+  ControllerRealizationPlan plan;
+  plan.target = ControllerRealizationTargetPlan{
+      .target_kind = "publication",
+      .resolved_artifact_id = scope.selection().artifact_id(),
+      .target_layout_digest = publication_target_layout_digest_for(scope, normalized_byte_space),
+      .device_uuid = scope.device_uuid(),
+      .owner_pid = owner_pid,
+      .layout_storage_count = 0,
+      .layout_offset_count = 0,
+      .member_count = group_realization != nullptr ? group_realization->group().total_parts() : 1,
+      .group_id = group_realization != nullptr && !group_realization->group().group_id().empty()
+          ? std::optional<std::string>(group_realization->group().group_id())
+          : std::nullopt,
+      .part_id = group_realization != nullptr && !group_realization->group().part_id().empty()
+          ? std::optional<std::string>(group_realization->group().part_id())
+          : std::nullopt,
+      .operation_id = publication_operation_id_for(request, scope),
+  };
+  plan.strategy = ControllerRealizationStrategyPlan{
+      .source_selection_mode = group_realization != nullptr ? "same_selection" : "single_selection",
+      .source_coordination = group_realization != nullptr ? "publication_group_realization" : "publication_lifecycle",
+      .collective_policy = v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE,
+      .group_barriers = group_barriers_for(group_realization),
+      .version_set_id = std::nullopt,
+      .transaction_id = std::nullopt,
+      .source_selection_digest = !scope.selection().selection_hash().empty()
+          ? std::optional<std::string>(absl::BytesToHexString(scope.selection().selection_hash()))
+          : std::nullopt,
+  };
+  plan.lifecycle = ControllerRealizationLifecyclePlan{
+      .capability = "publication",
+      .export_lifetime_kind = "publication_lease",
+      .release_strictness = "strict",
+      .mutability_contract = "published_read_only",
+      .release_policy = release_policy,
+      .staged_value_count = group_realization != nullptr && group_realization->require_staged_publish() ? 1U : 0U,
+      .acquire_claim_count = 1,
+      .publish_barrier = true,
+  };
+  plan.resource_envelope = make_resource_envelope(
+      "daemon_published_replica", "publication_lease", "published_replica", "runtime_publication", release_policy);
+  return finalize_controller_realization_plan(std::move(plan));
 }
 
 OperationTransportContext resolve_operation_transport_context(std::string_view operation_id) {
@@ -588,7 +2178,7 @@ absl::StatusOr<NormalizedMaterializationRequestContext> resolve_materialization_
     std::optional<std::string> replica_uuid,
     bool verify_checksums,
     int32_t wait_for_shared_disk_ms) {
-  auto retrieval_policy_or = resolve_retrieval_policy_compat(source_policy);
+  auto retrieval_policy_or = resolve_retrieval_policy(source_policy);
   if (!retrieval_policy_or.ok()) {
     return retrieval_policy_or.status();
   }

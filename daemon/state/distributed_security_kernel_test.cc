@@ -1,6 +1,7 @@
 // Copyright (c) 2026, TensorCast Team.
 
 #include "daemon/state/distributed_security_kernel.h"
+#include "daemon/state/routed_authority_wire.h"
 
 #include <optional>
 
@@ -58,6 +59,17 @@ TEST_CASE("loopback transport derives deployment trusted peer identity", "[daemo
   CHECK(peer_identity.auth_class == DaemonHopAuthClass::kDeploymentTrustedChannel);
   CHECK(peer_identity.peer_id == "unix:/tmp/tensorcast.sock");
   CHECK_FALSE(peer_identity.channel_binding_id.has_value());
+}
+
+TEST_CASE("routed authority wire rejects retired target publication front-door label", "[daemon][security_kernel]") {
+  auto current_or =
+      routed_authority_wire::detail::lifecycle_front_door_kind_from_label("binding_current_value_publication_token");
+  REQUIRE(current_or.ok());
+  CHECK(*current_or == LifecycleFrontDoorKind::kTargetPublicationToken);
+
+  auto retired_or = routed_authority_wire::detail::lifecycle_front_door_kind_from_label("target_publication_token");
+  REQUIRE_FALSE(retired_or.ok());
+  CHECK(retired_or.status().code() == absl::StatusCode::kInvalidArgument);
 }
 
 TEST_CASE("authority binding uses authenticated peer identity instead of locator output", "[daemon][security_kernel]") {

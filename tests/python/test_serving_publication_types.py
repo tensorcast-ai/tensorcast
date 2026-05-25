@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 
 import pytest
 import torch
 
 import tensorcast as tc
+import tensorcast.api.store as store_api
 from tensorcast.api._config import PlanType
 from tensorcast.api.plan.transforms import TransformSpec
 from tensorcast.api.store import (
@@ -15,7 +17,6 @@ from tensorcast.api.store import (
     build_binding_finalize_publication_bundle,
     build_pure_transform_publication_bundle_from_registered_artifact,
     build_pure_transform_publication_spec,
-    build_pure_transform_serving_args,
     build_pure_transform_transform_spec,
     build_serving_publication_bundle_from_registered_artifact,
     compute_pure_transform_representation_contract_hash,
@@ -919,59 +920,6 @@ def test_build_binding_finalize_publication_bundle_rejects_serving_key_without_r
         )
 
 
-def test_build_pure_transform_serving_args_encodes_repo_owned_keys() -> None:
-    intent = ServingBuildIntent(
-        representation_contract_hash="bafkrepresentation",
-        builder_mode=BuilderMode.PURE_TRANSFORM,
-        framework_name="torch",
-        adapter_version="adapter-v5",
-        serving_abi_version="abi-v5",
-        build_pipeline_version="pipeline-v5",
-        source_artifact_ref="mi2:test:source",
-    )
-
-    args = build_pure_transform_serving_args(
-        build_intent=intent,
-        contract_family="canonical_full",
-        source_version_key="models/demo/source/v5",
-        serving_version_key="models/demo/serving/v5",
-        extra_args={"quant": 4},
-    )
-
-    assert args["tc_serving_enable"] == 1
-    assert args[
-        "tc_serving_representation_contract_hash"] == "bafkrepresentation"
-    assert args["tc_serving_framework_name"] == "torch"
-    assert args["tc_serving_adapter_version"] == "adapter-v5"
-    assert args["tc_serving_abi_version"] == "abi-v5"
-    assert args["tc_serving_build_pipeline_version"] == "pipeline-v5"
-    assert args["tc_serving_contract_family"] == "canonical_full"
-    assert args["tc_serving_source_version_key"] == "models/demo/source/v5"
-    assert args["tc_serving_serving_version_key"] == "models/demo/serving/v5"
-    assert args["quant"] == 4
-
-
-def test_build_pure_transform_serving_args_omits_unresolved_representation_hash(
-) -> (None):
-    intent = ServingBuildIntent(
-        builder_mode=BuilderMode.PURE_TRANSFORM,
-        framework_name="torch",
-        adapter_version="adapter-v5-auto",
-        serving_abi_version="abi-v5-auto",
-        build_pipeline_version="pipeline-v5-auto",
-    )
-
-    args = build_pure_transform_serving_args(
-        build_intent=intent,
-        serving_version_key="models/demo/serving/v5-auto",
-    )
-
-    assert args["tc_serving_enable"] == 1
-    assert "tc_serving_representation_contract_hash" not in args
-    assert args[
-        "tc_serving_serving_version_key"] == "models/demo/serving/v5-auto"
-
-
 def test_published_model_version_builds_serving_runtime_policy() -> None:
     version = PublishedModelVersion(
         assembly_id="cgid:test-assembly",
@@ -1229,6 +1177,22 @@ def test_build_pure_transform_publication_spec_wraps_typed_inputs() -> None:
     assert publication_spec.serving_manifest_ref == "tensor:__alt_manifest__.json"
     assert publication_spec.structural_view_ids == ("view-a", )
     assert publication_spec.admission_facts == admission_facts
+
+
+def test_pure_transform_publication_no_longer_exposes_string_arg_fallback() -> None:
+    assert not hasattr(store_api, "build_pure_transform_serving_args")
+
+    removed_markers: list[str] = []
+    for path in (
+        Path("tensorcast/api/store/serving_builder.py"),
+        Path("tensorcast/engine_adapter/adapter.py"),
+        Path("tensorcast/serving/builder/publication.py"),
+    ):
+        text = path.read_text(encoding="utf-8")
+        if "tc_serving_" in text or "build_pure_transform_serving_args" in text:
+            removed_markers.append(str(path))
+
+    assert removed_markers == []
 
 
 def test_representation_publish_spec_round_trips_admission_facts_and_digest_version(

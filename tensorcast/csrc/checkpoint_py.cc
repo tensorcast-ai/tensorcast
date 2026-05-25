@@ -1044,20 +1044,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("size"),
           "Allocate CUDA memory on a single device")
       .def(
-          "get_cuda_memory_handle",
-          [](int device_id, std::uint64_t memory_ptr_int) {
-            const std::string handle = tensorcast::checkpoint::get_cuda_memory_handle(device_id, memory_ptr_int);
-            return py::bytes(handle);
-          },
-          py::arg("device_id"),
-          py::arg("memory_ptr"),
-          "Get a CUDA IPC memory handle for a single allocation")
-      .def(
           "get_cuda_memory_handle_with_offset",
           [](int device_id, std::uint64_t memory_ptr_int) {
             auto handle_or = tensorcast::checkpoint::get_cuda_memory_handle_with_offset(device_id, memory_ptr_int);
             if (!handle_or.ok()) {
-              return py::make_tuple(py::bytes(""), py::int_(0));
+              PY_THROW_WITH_LOG(PyExc_RuntimeError, handle_or.status().ToString());
             }
             const auto& [handle, base_offset] = *handle_or;
             return py::make_tuple(py::bytes(handle), py::int_(base_offset));

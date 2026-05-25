@@ -7,16 +7,24 @@ import threading
 import time
 import weakref
 from dataclasses import replace
-from typing import Sequence, cast
+from typing import Any, Sequence, cast
 
 import pytest
 import torch
 
+from tensorcast.api._config import (
+    GetArtifactOptions,
+    RegionBackedMode,
+    RetrievalPolicy,
+    RetrievalPreference,
+)
 from tensorcast.api._materialize import MaterializationPayload, TensorPayloadDescriptor
-from tensorcast.api.store import Store
+from tensorcast.api.store import ArtifactRealizationSpec, Store
 from tensorcast.api.store.artifact import Artifact
 from tensorcast.api.store.cache import ArtifactCache, ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
+from tensorcast.api.store.mapped_binding import CopyPlanEntry, Range
+from tensorcast.api.store.materialization import GetIntoResult
 from tensorcast.api.store.retry import build_retry_policies
 from tensorcast.api.store.types import ArtifactError, StoreOptions
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
@@ -94,7 +102,7 @@ class _ClientStub:
         self.get_index_calls += 1
         return self.canonical_index_bytes
 
-    def import_artifact_from_path_v2(self, *, path: str, verify_checksums: bool = True):
+    def import_artifact_from_path(self, *, path: str, verify_checksums: bool = True):
         self.import_calls.append((path, bool(verify_checksums)))
         generation = self.disk_generation if self.disk_generation is not None else 0
 
@@ -107,7 +115,7 @@ class _ClientStub:
         resp.generation = generation
         return resp
 
-    def import_artifact_from_path_stream_v2(
+    def import_artifact_from_path_stream(
         self, *, path: str, verify_checksums: bool = True
     ):
         if self.startup_in_progress_failures > 0:
@@ -116,7 +124,7 @@ class _ClientStub:
                 "Local StoreDaemon (daemon) is not available. Msg: "
                 "daemon startup still in progress: prewarming"
             )
-        resp = self.import_artifact_from_path_v2(
+        resp = self.import_artifact_from_path(
             path=path,
             verify_checksums=verify_checksums,
         )
@@ -197,6 +205,7 @@ class _RuntimeStub:
     def __init__(self, client: _ClientStub) -> None:
         self.daemon_endpoint = "daemon"
         self.session_id = "sess"
+        self.closed = False
         self.opts = StoreOptions()
         self.retry_policies = build_retry_policies()
         self._artifact_cache = ArtifactCache(
@@ -235,8 +244,14 @@ class _RuntimeStub:
 
 
 class _PipelineStub:
-    def __init__(self, payload: MaterializationPayload) -> None:
+    def __init__(
+        self,
+        payload: MaterializationPayload,
+        *,
+        get_into_result: GetIntoResult | None = None,
+    ) -> None:
         self.payload = payload
+        self.get_into_result = get_into_result
         self.calls: list[dict[str, object]] = []
         self.get_into_calls: list[dict[str, object]] = []
         self.released: list[str] = []
@@ -275,7 +290,7 @@ class _PipelineStub:
         view_index_hint=None,
         replica_uuid=None,
         ctx=None,
-    ) -> None:
+    ) -> GetIntoResult | None:
         del ctx
         self.get_into_calls.append(
             {
@@ -293,6 +308,7 @@ class _PipelineStub:
         for name, tensor in state.items():
             if name in target:
                 target[name].copy_(tensor)
+        return self.get_into_result
 
 
 class _StoreStub:
@@ -328,6 +344,40 @@ def test_tensor_subset_materialization_and_release():
     assert pipeline.calls[0]["view_index_hint"]
     assert runtime._client.unloaded == []
     assert pipeline.released == []
+
+    projection = cast(Any, result)
+    tensor_owner = cast(Any, result["bar"])._tensorcast_realization_owner
+    assert tensor_owner is projection._tensorcast_realization_owner
+
+    tensor_owner.close()
+    projection.close()
+    assert pipeline.released == ["replica-1"]
+    assert runtime._client.unloaded == [("replica-1", "")]
+
+
+def test_tensor_dict_with_diagnostics_release_is_idempotent():
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+        generation=1,
+    )
+
+    result = artifact.tensor_dict_with_diagnostics(device="cpu")
+
+    assert set(result.tensors) == {"foo"}
+    assert runtime._client.unloaded == []
+    assert pipeline.released == []
+
+    result.release()
+    result.release()
+    cast(Any, result.tensors).close()
+    assert pipeline.released == ["replica-1"]
+    assert runtime._client.unloaded == [("replica-1", "")]
 
 
 def test_subset_derives_view_metadata_eagerly():
@@ -376,7 +426,7 @@ def test_selection_reuses_eager_view_metadata():
     assert derived._view_metadata.view_index_bytes
     assert derived._view_metadata.view_id
 
-    selection = derived._build_artifact_selection()
+    selection = derived._resolve_realization_selection().proto
 
     assert selection.view_id == derived._view_metadata.view_id
     assert derived._view_metadata is not None
@@ -421,6 +471,215 @@ def test_tensor_dict_with_diagnostics_reports_source_and_bytes():
     assert diagnostics.total_sec >= diagnostics.materialize_sec
 
 
+def test_realize_emits_report_shaped_profile_event(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("TENSORCAST_PROFILE_DIR", str(tmp_path))
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+    )
+
+    _ = artifact.tensor_dict(device="cpu")
+
+    records = [
+        json.loads(line)
+        for path in tmp_path.glob("tensorcast_pid*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    stages = [str(record.get("stage") or "") for record in records]
+    assert "artifact.tensor_dict_with_diagnostics" not in stages
+    events = [record for record in records if record.get("stage") == "artifact.realize"]
+    assert len(events) == 1
+    event = events[0]
+    assert event["target_kind"] == "tensor_dict"
+    assert event["artifact_id"] == "aid"
+    assert event["operation_backend"] == "daemon_materialization"
+    assert event["envelope_backing_kind"] == "daemon_temporary_replica"
+    assert event["envelope_export_kind"] == "cpu_memfd"
+    assert event["target_plan_kind"] == "tensor_dict"
+    assert event["strategy_fallback_policy"] == "fail_closed"
+    assert event["lifecycle_capability"] == "tensor_dict"
+    assert event["publishable"] is False
+    assert event["source_selection_digest"]
+
+
+def test_caller_tensors_realization_reports_temporary_copy_costs() -> None:
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    pipeline = _PipelineStub(
+        payload,
+        get_into_result=GetIntoResult(
+            used_region_backed=False,
+            source="disk",
+            source_code=int(store_daemon_pb2.MATERIALIZATION_SOURCE_DISK),
+            replica_uuid="replica-1",
+            total_bytes=4,
+            fallback_reason_buckets={"layout_mismatch": 1},
+        ),
+    )
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+    )
+    target = {"foo": torch.zeros(1)}
+    options = GetArtifactOptions(
+        source=RetrievalPolicy(
+            preference=RetrievalPreference.PREFER_DISK,
+            allow_p2p=False,
+            allow_disk=True,
+        ),
+        wait_for_shared_disk_ms=250,
+        verify_checksums=False,
+        enable_verification=False,
+        region_backed_mode=RegionBackedMode.DISABLE,
+        export_policy="force",
+        transport_hold_ms=77,
+    )
+
+    handle = artifact.realize(
+        ArtifactRealizationSpec.caller_tensors(
+            target=target,
+            device="cpu",
+            options=options,
+        )
+    )
+
+    handle.complete()
+    assert torch.equal(target["foo"], torch.ones(1))
+    assert pipeline.get_into_calls
+    report = handle.report
+    assert report.target_kind == "caller_tensors"
+    assert report.operation_backend == "daemon_materialize_into_target"
+    assert report.source == "disk"
+    assert report.target_plan is not None
+    assert report.target_plan.target_layout_digest
+    assert report.envelope.direct_write_bytes == 0
+    assert report.envelope.copy_bytes == 4
+    assert report.envelope.copy_count == 1
+    assert report.envelope.temporary_replica_bytes == 4
+    assert report.envelope.fallback_reason_buckets == {"layout_mismatch": 1}
+    assert report.envelope.release_policy == (
+        "unregister_target_region",
+        "unload_temporary_replica_on_fallback",
+    )
+    assert report.strategy_plan is not None
+    assert report.strategy_plan.fallback_policy == "generic_fallback"
+    assert report.strategy_plan.source_policy == {
+        "preference": "prefer_disk",
+        "allow_p2p": False,
+        "allow_disk": True,
+        "wait_for_shared_disk_ms": 250,
+        "verify_checksums": False,
+        "enable_verification": False,
+        "region_backed_mode": "disable",
+        "export_policy": "force",
+        "wait_for_completion": True,
+        "transport_hold_ms": 77,
+        "lease_mode": None,
+        "topology_collective_policy": None,
+        "source_locality": "auto",
+        "source_sharing_domain": None,
+    }
+    assert report.representation_admission is not None
+    assert report.representation_admission.representation_contract == "caller_tensors"
+    assert report.lifecycle_plan is not None
+    assert report.lifecycle_plan.capability == "caller_tensors"
+    assert report.lifecycle_plan.release_policy == report.envelope.release_policy
+
+
+def test_caller_tensors_realization_reports_cuda_direct_write_costs() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA direct-write cost accounting requires CUDA")
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    pipeline = _PipelineStub(
+        payload,
+        get_into_result=GetIntoResult(used_region_backed=True),
+    )
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+    )
+    target = {"foo": torch.zeros(1, device="cuda:0")}
+
+    handle = artifact.realize(
+        ArtifactRealizationSpec.caller_tensors(
+            target=target,
+            device="cuda:0",
+        )
+    )
+
+    handle.complete()
+    assert torch.equal(target["foo"].cpu(), torch.ones(1))
+    report = handle.report
+    assert report.envelope.export_kind == "registered_vram_region_direct_write"
+    assert report.envelope.direct_write_bytes == 4
+    assert report.envelope.copy_bytes == 0
+    assert report.envelope.copy_count == 0
+    assert report.envelope.temporary_replica_bytes == 0
+    assert report.envelope.release_policy == ("unregister_target_region",)
+
+
+def test_caller_tensors_realization_reports_cuda_fallback_copy_costs() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA fallback copy cost accounting requires CUDA")
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    pipeline = _PipelineStub(
+        payload,
+        get_into_result=GetIntoResult(
+            used_region_backed=False,
+            source="disk",
+            source_code=int(store_daemon_pb2.MATERIALIZATION_SOURCE_DISK),
+            replica_uuid="replica-1",
+            total_bytes=4,
+            fallback_reason_buckets={"layout_mismatch": 1},
+        ),
+    )
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+    )
+    target = {"foo": torch.zeros(1, device="cuda:0")}
+
+    handle = artifact.realize(
+        ArtifactRealizationSpec.caller_tensors(
+            target=target,
+            device="cuda:0",
+        )
+    )
+
+    handle.complete()
+    assert torch.equal(target["foo"].cpu(), torch.ones(1))
+    report = handle.report
+    assert report.source == "disk"
+    assert report.envelope.export_kind == "temporary_copy"
+    assert report.envelope.direct_write_bytes == 0
+    assert report.envelope.copy_bytes == 4
+    assert report.envelope.copy_count == 1
+    assert report.envelope.temporary_replica_bytes == 4
+    assert report.envelope.fallback_reason_buckets == {"layout_mismatch": 1}
+    assert report.envelope.release_policy == (
+        "unregister_target_region",
+        "unload_temporary_replica_on_fallback",
+    )
+    assert report.strategy_plan is not None
+    assert report.strategy_plan.fallback_policy == "generic_fallback"
+
+
 def test_bind_coerces_serving_manifest_into_runtime_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -434,11 +693,28 @@ def test_bind_coerces_serving_manifest_into_runtime_policy(
         canonical_index_bytes=canonical_bytes,
     )
     captured: dict[str, object] = {}
+    fake_binding = type(
+        "_BindingStub",
+        (),
+        {
+            "binding_id": "binding",
+            "binding_layout_id": "bl1:test",
+            "current_value": None,
+            "staged_value": None,
+            "last_materialization_diagnostics": {
+                "source": "disk",
+                "total_bytes": 4,
+                "retry_reason_buckets": {},
+            },
+            "last_execution_diagnostics": None,
+            "last_source_bound_plan_diagnostics": None,
+        },
+    )()
 
     def _fake_bind_owned(self, **kwargs):
         del self
         captured.update(kwargs)
-        return "binding"
+        return fake_binding
 
     monkeypatch.setattr(Artifact, "_bind_owned", _fake_bind_owned)
 
@@ -460,7 +736,7 @@ def test_bind_coerces_serving_manifest_into_runtime_policy(
         serving_runtime_policy=manifest,
     )
 
-    assert result == "binding"
+    assert result is fake_binding
     assert captured["device"] == torch.device("cuda:0")
     assert captured["serving_runtime_policy"] == ServingRuntimePolicy(
         require_manifest=True,
@@ -468,6 +744,102 @@ def test_bind_coerces_serving_manifest_into_runtime_policy(
         expected_representation_contract_hash="bafkrepresentation",
         expected_serving_build_digest="bafkbuilddigest",
     )
+
+
+def test_tensor_dict_and_adopted_binding_share_source_selection_with_separate_target_digests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(2)})
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+        generation=7,
+    )
+    target = {"dst": torch.zeros(2)}
+    copy_plan = (
+        CopyPlanEntry(
+            ckpt_name="foo",
+            ckpt_range=None,
+            dst_name="dst",
+            dst_range=Range(dim=0, start=0, end=2),
+        ),
+    )
+    captured: dict[str, object] = {}
+    binding_value = type(
+        "_BindingValueStub",
+        (),
+        {
+            "binding_id": "binding",
+            "binding_layout_id": "bl1:test",
+            "binding_value_id": "value-1",
+            "seal_generation": 1,
+            "source_artifact_id": "aid",
+            "is_artifact_backed": True,
+            "verification_state": 0,
+            "is_published": False,
+        },
+    )()
+    fake_binding = type(
+        "_AdoptedBindingStub",
+        (),
+        {
+            "binding_id": "binding",
+            "binding_layout_id": "bl1:test",
+            "current_value": binding_value,
+            "staged_value": None,
+            "last_materialization_diagnostics": {
+                "source": "disk",
+                "total_bytes": 8,
+                "retry_reason_buckets": {},
+            },
+            "last_execution_diagnostics": None,
+            "last_source_bound_plan_diagnostics": None,
+        },
+    )()
+
+    def _fake_execute_bind_into(self, target_tensors, **kwargs):
+        del self
+        captured["target_tensors"] = target_tensors
+        captured.update(kwargs)
+        return fake_binding
+
+    monkeypatch.setattr(Artifact, "_execute_bind_into", _fake_execute_bind_into)
+
+    tensor_handle = artifact.realize(ArtifactRealizationSpec.tensor_dict(device="cpu"))
+    adopted_handle = artifact.realize(
+        ArtifactRealizationSpec.adopted_binding(
+            target=target,
+            mapping=copy_plan,
+            packing="byte_space",
+        )
+    )
+
+    tensor_report = tensor_handle.report
+    adopted_report = adopted_handle.report
+    assert adopted_handle.binding() is fake_binding
+    assert captured["mapping"] == copy_plan
+    assert (
+        adopted_report.source_selection_digest == tensor_report.source_selection_digest
+    )
+    assert adopted_report.target_layout_digest
+    assert adopted_report.copy_plan_digest
+    assert adopted_report.target_layout_digest != adopted_report.source_selection_digest
+    assert adopted_report.copy_plan_digest != adopted_report.target_layout_digest
+    assert str(adopted_report.copy_plan_digest).startswith("mapped:v1:")
+    assert adopted_report.target_plan is not None
+    assert adopted_report.target_plan.target_layout_digest == (
+        adopted_report.target_layout_digest
+    )
+    assert (
+        adopted_report.target_plan.copy_plan_digest == adopted_report.copy_plan_digest
+    )
+
+    tensor_handle.close()
+    adopted_handle.close()
 
 
 def test_tensor_into_materializes_subset_only():
@@ -640,7 +1012,7 @@ def test_from_dict_accepts_key_and_artifact_id():
 def test_artifact_ref_accepts_msa1_prefix():
     canonical_bytes, _payload = _build_payload({"foo": torch.ones(1)})
     runtime = _RuntimeStub(_ClientStub(canonical_bytes))
-    store = Store("daemon", runtime=runtime)
+    store = Store("daemon", runtime=cast(Any, runtime))
 
     artifact = store.artifact("msa1:test-session~policy~safetensors~deadbeef")
 
@@ -658,7 +1030,7 @@ def test_from_disk_resolves_once_and_caches_generation():
         mounted_artifact_id="msa1:test-session~policy~safetensors~deadbeef",
     )
     runtime = _RuntimeStub(client)
-    store = Store("daemon", runtime=runtime)
+    store = Store("daemon", runtime=cast(Any, runtime))
 
     artifact = store.from_disk("/tmp/artifact")
     desc = artifact.describe()
@@ -686,7 +1058,7 @@ def test_from_disk_progress_mode_uses_stream_resolution():
         disk_artifact_id="mi2:idx:data",
     )
     runtime = _RuntimeStub(client)
-    store = Store("daemon", runtime=runtime)
+    store = Store("daemon", runtime=cast(Any, runtime))
 
     artifact = store.from_disk("/tmp/artifact", show_progress=True)
 
@@ -704,7 +1076,7 @@ def test_from_disk_default_stays_fast_path_even_when_stderr_is_tty(monkeypatch):
         mounted_artifact_id="msa1:test-session~policy~safetensors~deadbeef",
     )
     runtime = _RuntimeStub(client)
-    store = Store("daemon", runtime=runtime)
+    store = Store("daemon", runtime=cast(Any, runtime))
 
     monkeypatch.setattr("sys.stderr.isatty", lambda: True)
 
@@ -725,7 +1097,7 @@ def test_from_disk_retries_daemon_startup_in_progress(monkeypatch):
         startup_in_progress_failures=2,
     )
     runtime = _RuntimeStub(client)
-    store = Store("daemon", runtime=runtime)
+    store = Store("daemon", runtime=cast(Any, runtime))
     sleeps: list[float] = []
 
     monkeypatch.setattr(time, "sleep", lambda seconds: sleeps.append(seconds))
@@ -751,7 +1123,7 @@ def test_store_promote_mounted_source_returns_mi2_artifact():
         mounted_artifact_id="msa1:test-session~policy~safetensors~source",
     )
     runtime = _RuntimeStub(client)
-    store = Store("daemon", runtime=runtime)
+    store = Store("daemon", runtime=cast(Any, runtime))
 
     artifact = store.promote_mounted_source(
         "msa1:test-session~policy~safetensors~source"
@@ -763,6 +1135,88 @@ def test_store_promote_mounted_source_returns_mi2_artifact():
     ]
 
 
+def test_mounted_source_realize_promotes_and_reports_identity():
+    canonical_bytes, _payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(
+        canonical_bytes,
+        disk_generation=17,
+        disk_artifact_id="mi2:idx:promoted",
+        mounted_artifact_id="msa1:test-session~policy~safetensors~source",
+    )
+    runtime = _RuntimeStub(client)
+    store = Store("daemon", runtime=cast(Any, runtime))
+    source = store.artifact("msa1:test-session~policy~safetensors~source")
+
+    handle = source.realize(
+        ArtifactRealizationSpec.mounted_source(
+            verify_checksums=False,
+            timeout_s=60.0,
+        )
+    )
+    promoted = handle.promote()
+
+    assert promoted.artifact_id == "mi2:idx:promoted"
+    assert client.promote_mounted_source_calls == [
+        ("msa1:test-session~policy~safetensors~source", False, 60.0)
+    ]
+    assert handle.report.target_kind == "mounted_source"
+    assert handle.report.artifact_profile == "mounted_source"
+    assert handle.report.authority_scope == "daemon_local_mounted_source"
+    assert handle.report.operation_backend == "daemon_mounted_source_promotion"
+    assert handle.report.mounted_source is not None
+    assert (
+        handle.report.mounted_source.source_artifact_id
+        == "msa1:test-session~policy~safetensors~source"
+    )
+    assert handle.report.mounted_source.promoted_artifact_id == "mi2:idx:promoted"
+    assert handle.report.mounted_source.promoted_artifact_profile == "durable_artifact"
+    assert handle.report.mounted_source.generation == 17
+    assert promoted.key is None
+
+
+def test_mounted_source_realize_rejects_non_msa1_subject():
+    canonical_bytes, _payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(
+        canonical_bytes,
+        disk_generation=17,
+        disk_artifact_id="mi2:idx:promoted",
+        mounted_artifact_id="msa1:test-session~policy~safetensors~source",
+    )
+    runtime = _RuntimeStub(client)
+    store = Store("daemon", runtime=cast(Any, runtime))
+    source = store.artifact("mi2:idx:ordinary")
+
+    with pytest.raises(ArtifactError) as excinfo:
+        source.realize(ArtifactRealizationSpec.mounted_source())
+
+    assert excinfo.value.status_code == "INVALID_ARGUMENT"
+    assert client.promote_mounted_source_calls == []
+
+
+def test_mounted_source_realize_rejects_key_mapping_activation():
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(
+        canonical_bytes,
+        disk_generation=17,
+        disk_artifact_id="mi2:idx:promoted",
+        mounted_artifact_id="msa1:test-session~policy~safetensors~source",
+    )
+    runtime = _RuntimeStub(client)
+    runtime.cache_key_mapping(
+        "mounted-source-key",
+        artifact_id="msa1:test-session~policy~safetensors~source",
+    )
+    store = _StoreStub(runtime, _PipelineStub(payload))
+    source = Artifact(store_ref=_store_ref(store), key="mounted-source-key")
+
+    with pytest.raises(ArtifactError) as excinfo:
+        source.realize(ArtifactRealizationSpec.mounted_source())
+
+    assert excinfo.value.status_code == "INVALID_ARGUMENT"
+    assert "explicit msa1 artifact id" in str(excinfo.value)
+    assert client.promote_mounted_source_calls == []
+
+
 def test_store_promote_mounted_source_accepts_artifact_handle():
     canonical_bytes, _payload = _build_payload({"foo": torch.ones(1)})
     client = _ClientStub(
@@ -772,7 +1226,7 @@ def test_store_promote_mounted_source_accepts_artifact_handle():
         mounted_artifact_id="msa1:test-session~policy~safetensors~source",
     )
     runtime = _RuntimeStub(client)
-    store = Store("daemon", runtime=runtime)
+    store = Store("daemon", runtime=cast(Any, runtime))
     source = store.from_disk("/tmp/artifact")
 
     promoted = store.promote_mounted_source(source, verify_checksums=False)
@@ -792,7 +1246,7 @@ def test_store_promote_mounted_source_passes_timeout_override():
         mounted_artifact_id="msa1:test-session~policy~safetensors~source",
     )
     runtime = _RuntimeStub(client)
-    store = Store("daemon", runtime=runtime)
+    store = Store("daemon", runtime=cast(Any, runtime))
 
     promoted = store.promote_mounted_source(
         "msa1:test-session~policy~safetensors~source",
@@ -813,7 +1267,7 @@ def test_import_from_disk_uses_import_stream_and_publishes_key():
         disk_artifact_id="mi2:idx:data",
     )
     runtime = _RuntimeStub(client)
-    store = Store("daemon", runtime=runtime)
+    store = Store("daemon", runtime=cast(Any, runtime))
 
     artifact = store.import_from_disk("/tmp/artifact", key="model:key")
 

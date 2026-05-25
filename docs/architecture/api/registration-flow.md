@@ -154,7 +154,8 @@ This is the critical “why” behind region-backed registration:
 - A **region handle** lets the daemon refer to stable CUDA IPC metadata once,
   then use cheap offsets for each storage entry.
 
-See [Region-Backed](./region-backed.md) for `RegisterVramRegion` and teardown.
+See [Region-Backed](./region-backed.md) for `RegisterRegion(memory_kind=VRAM)`
+and teardown.
 
 ## Coalesced And Stable DRAM Paths
 

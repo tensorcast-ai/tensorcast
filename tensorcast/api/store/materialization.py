@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import CancelledError
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TypedDict
 
 import torch
@@ -16,7 +15,6 @@ from opentelemetry.trace import Status, StatusCode
 
 from tensorcast._c_ext import (
     compute_view_index_bytes,
-    get_cuda_memory_handle,
     get_cuda_memory_handle_with_offset,
 )
 from tensorcast.api import _metrics as store_metrics
@@ -30,7 +28,7 @@ from tensorcast.api._config import (
 from tensorcast.api._device import device_uuid_for
 from tensorcast.api._materialize import (
     MaterializationPayload,
-    materialize_artifact_v2,
+    materialize_artifact,
 )
 from tensorcast.api.context import CallContext
 from tensorcast.api.store.async_ops import ArtifactFuture, TrackedExecutor
@@ -40,7 +38,7 @@ from tensorcast.api.store.common import (
     canonical_index_to_bytes,
     validate_targets,
 )
-from tensorcast.api.store.region_utils import collect_storage_bases
+from tensorcast.api.store.realization_kernel import resolve_artifact_selection
 from tensorcast.api.store.retry import (
     compute_retry_delay,
     map_materialization_error,
@@ -50,6 +48,11 @@ from tensorcast.api.store.retry import (
     should_retry,
 )
 from tensorcast.api.store.runtime import StoreRuntimeContext
+from tensorcast.api.store.target_region_lifecycle import (
+    TargetRegionRegistration,
+    register_target_regions_for_realization,
+    release_target_region_ids_for_realization,
+)
 from tensorcast.api.store.types import (
     ArtifactError,
     CanonicalIndex,
@@ -63,10 +66,7 @@ from tensorcast.api.store.views import (
     TransformPlacement,
     ViewOrchestrator,
 )
-from tensorcast.common.selection_contract import (
-    build_artifact_selection,
-    compute_selected_index_bytes,
-)
+from tensorcast.common.selection_contract import compute_selected_index_bytes
 from tensorcast.common.selection_identity import (
     compute_logical_layout_hash,
     compute_view_subset_hash,
@@ -75,6 +75,24 @@ from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 logger = logging.getLogger(__name__)
+
+
+def _debug_error(exc: Exception) -> str:
+    detail = str(exc).strip()
+    if not detail:
+        return exc.__class__.__name__
+    return f"{exc.__class__.__name__}: {detail}"
+
+
+def _drop_cached_region(region_id: str, *, context: str) -> None:
+    try:
+        region_cache.unregister_region(region_id)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "%s: region-cache cleanup failed for region_id=%s",
+            context,
+            region_id,
+        )
 
 
 class _MaterializationSummary(TypedDict):
@@ -92,6 +110,22 @@ class _RegionBackedLayout:
     view_id: str | None
     selection_names: tuple[str, ...]
     view_subset_hash: bytes | None
+
+
+@dataclass(frozen=True, slots=True)
+class _RegionBackedIntoResult:
+    used: bool
+    fallback_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GetIntoResult:
+    used_region_backed: bool
+    source: str | None = None
+    source_code: int | None = None
+    replica_uuid: str | None = None
+    total_bytes: int = 0
+    fallback_reason_buckets: Mapping[str, int] = field(default_factory=dict)
 
 
 def _source_label(
@@ -164,18 +198,20 @@ def _selection_debug_fields(
 
     resolved_view_index_hint = bytes(view_index_hint or b"")
     if resolved_view_index_hint:
-        with contextlib.suppress(Exception):
+        try:
             debug["view_index_hint_hash"] = compute_logical_layout_hash(
                 index_bytes=resolved_view_index_hint,
                 needs_view_index=True,
             ).hex()
+        except Exception as exc:  # noqa: BLE001
+            debug["view_index_hint_hash_error"] = _debug_error(exc)
 
     resolved_canonical_index_hint = bytes(canonical_index_hint or b"")
     has_selection = bool(ordered_names or (view is not None and view.tensors))
     if not resolved_canonical_index_hint or not has_selection:
         return debug
 
-    with contextlib.suppress(Exception):
+    try:
         recomputed_view_index = compute_selected_index_bytes(
             canonical_index_bytes=resolved_canonical_index_hint,
             view_spec=view if view is not None and view.tensors else None,
@@ -190,8 +226,35 @@ def _selection_debug_fields(
             debug["view_index_hint_matches_recomputed"] = bool(
                 resolved_view_index_hint == recomputed_view_index
             )
+    except Exception as exc:  # noqa: BLE001
+        debug["recomputed_view_index_error"] = _debug_error(exc)
 
     return debug
+
+
+def _payload_total_bytes(payload: MaterializationPayload) -> int:
+    return sum(int(desc.byte_length) for desc in payload.descriptors)
+
+
+def _get_into_result_from_payload(
+    payload: MaterializationPayload,
+    *,
+    fallback_reason_buckets: Mapping[str, int] | None = None,
+) -> GetIntoResult:
+    buckets: dict[str, int] = {}
+    for key, count in (fallback_reason_buckets or {}).items():
+        buckets[str(key)] = int(count)
+    for key, count in (payload.retry_reason_buckets or {}).items():
+        normalized_key = str(key)
+        buckets[normalized_key] = buckets.get(normalized_key, 0) + int(count)
+    return GetIntoResult(
+        used_region_backed=False,
+        source=_source_label(payload.source),
+        source_code=int(payload.source) if payload.source is not None else None,
+        replica_uuid=str(payload.replica_uuid) if payload.replica_uuid else None,
+        total_bytes=_payload_total_bytes(payload),
+        fallback_reason_buckets=buckets,
+    )
 
 
 def _register_target_regions(
@@ -199,53 +262,80 @@ def _register_target_regions(
     *,
     target: Mapping[str, torch.Tensor],
     device_id: int,
-) -> tuple[str, ...]:
+) -> TargetRegionRegistration:
     ttl_ms = 0
     client = runtime.ensure_client()
-    bases = collect_storage_bases(target)
-    region_ids: list[str] = []
-    try:
-        for base_ptr, nbytes in sorted(bases.items()):
-            base_ptr_value = int(base_ptr)
-            size_value = int(nbytes)
-            base_offset = 0
-            try:
-                handle_bytes, base_offset = get_cuda_memory_handle_with_offset(
-                    int(device_id), base_ptr_value
-                )
-            except Exception:  # noqa: BLE001
-                handle_bytes = get_cuda_memory_handle(int(device_id), base_ptr_value)
-                base_offset = 0
-            if base_offset:
-                base_ptr_value -= int(base_offset)
-                size_value += int(base_offset)
-            handle = client.register_vram_region(
-                device_id=int(device_id),
-                size_bytes=int(size_value),
-                ttl_ms=int(ttl_ms),
-                cuda_ipc_handle=handle_bytes,
-                region_name=None,
+
+    def _register_region(
+        *,
+        device_id: int,
+        base_ptr: int,
+        size_bytes: int,
+        ttl_ms: int,
+    ) -> object:
+        base_ptr_value = int(base_ptr)
+        size_value = int(size_bytes)
+        handle_bytes, base_offset = get_cuda_memory_handle_with_offset(
+            int(device_id), base_ptr_value
+        )
+        if base_offset:
+            base_ptr_value -= int(base_offset)
+            size_value += int(base_offset)
+        handle = client.register_vram_region(
+            device_id=int(device_id),
+            size_bytes=int(size_value),
+            ttl_ms=int(ttl_ms),
+            cuda_ipc_handle=handle_bytes,
+            region_name=None,
+        )
+        region_cache.register_region(
+            region_id=handle.region_id,
+            device_id=int(device_id),
+            base_ptr=int(base_ptr_value),
+            size_bytes=int(size_value),
+            ttl_ms=int(ttl_ms),
+        )
+        return handle
+
+    def _unregister_region(region_id: str, *, force: bool | None = None) -> bool:
+        try:
+            return bool(client.unregister_vram_region(region_id, force=force))
+        finally:
+            _drop_cached_region(
+                region_id,
+                context="get_into.unregister_region",
             )
-            region_cache.register_region(
-                region_id=handle.region_id,
-                device_id=int(device_id),
-                base_ptr=int(base_ptr_value),
-                size_bytes=int(size_value),
-                ttl_ms=int(ttl_ms),
-            )
-            region_ids.append(handle.region_id)
-    except Exception as exc:  # noqa: BLE001
-        for region_id in region_ids:
-            with contextlib.suppress(Exception):
-                client.unregister_vram_region(region_id)
-            with contextlib.suppress(Exception):
-                region_cache.unregister_region(region_id)
-        raise ArtifactError(
-            "Target tensors are not eligible for region-backed operations",
-            status_code="FAILED_PRECONDITION",
-            retryable=False,
-        ) from exc
-    return tuple(region_ids)
+
+    return register_target_regions_for_realization(
+        register_region=_register_region,
+        unregister_region=_unregister_region,
+        target_tensors=target,
+        device_id=device_id,
+        ttl_ms=ttl_ms,
+        context="get_into.register_regions",
+        operation_name="get_into",
+    )
+
+
+def _release_target_regions(
+    runtime: StoreRuntimeContext,
+    *,
+    region_ids: Sequence[str],
+    context: str,
+) -> None:
+    client = runtime.ensure_client()
+
+    def _unregister_region(region_id: str, *, force: bool | None = None) -> bool:
+        try:
+            return bool(client.unregister_vram_region(region_id, force=force))
+        finally:
+            _drop_cached_region(region_id, context=context)
+
+    release_target_region_ids_for_realization(
+        unregister_region=_unregister_region,
+        region_ids=region_ids,
+        context=context,
+    )
 
 
 def _build_region_layout_selection(
@@ -274,18 +364,18 @@ def _build_region_layout_selection(
                 tensor_names=selection_names,
             )
 
-    return build_artifact_selection(
+    return resolve_artifact_selection(
         artifact_id=artifact_id,
         canonical_index_bytes=canonical_index_bytes,
-        layout_index_bytes=layout_index_bytes,
         view_spec=view_spec_for_selection,
         tensor_names=selection_names,
         view_subset_hash=subset_hash if subset_hash else None,
         view_id=str(region_layout.view_id or ""),
+        view_index_hint=layout_index_bytes,
         allow_view_id_without_spec=bool(
             region_layout.view_id and view_spec_for_selection is None
         ),
-    )
+    ).proto
 
 
 def _record_retrieval_event(
@@ -316,7 +406,7 @@ class MaterializationPipeline:
         runtime: StoreRuntimeContext,
         views: ViewOrchestrator,
         *,
-        materialize_fn: Callable[..., MaterializationPayload] = materialize_artifact_v2,
+        materialize_fn: Callable[..., MaterializationPayload] = materialize_artifact,
     ) -> None:
         self._runtime = runtime
         self._views = views
@@ -530,11 +620,12 @@ class MaterializationPipeline:
         view_index_hint: bytes | None = None,
         replica_uuid: str | None = None,
         ctx: CallContext | None = None,
-    ) -> None:
+    ) -> GetIntoResult:
         options = self._apply_client_defaults(self._build_get_options(options))
         start_time = time.monotonic()
+        region_backed_result = _RegionBackedIntoResult(used=False)
         try:
-            if self._maybe_region_backed_into(
+            region_backed_result = self._maybe_region_backed_into(
                 target=target,
                 artifact_id=artifact_id,
                 key=key,
@@ -544,7 +635,8 @@ class MaterializationPipeline:
                 view=view_spec,
                 view_id=None,
                 view_index_hint=view_index_hint,
-            ):
+            )
+            if region_backed_result.used:
                 store_metrics.observe_latency(
                     "get_into",
                     self._runtime.daemon_endpoint,
@@ -552,7 +644,7 @@ class MaterializationPipeline:
                     time.monotonic() - start_time,
                     selection="region_backed",
                 )
-                return
+                return GetIntoResult(used_region_backed=True)
         except ArtifactError as exc:
             store_metrics.observe_latency(
                 "get_into",
@@ -582,6 +674,9 @@ class MaterializationPipeline:
             replica_uuid=replica_uuid,
             ctx=ctx,
         )
+        fallback_reason_buckets: dict[str, int] = {}
+        if region_backed_result.fallback_reason:
+            fallback_reason_buckets[region_backed_result.fallback_reason] = 1
         try:
             layout_bytes = payload.view_index_bytes or payload.canonical_index_bytes
             canonical_index = canonical_index_from_bytes(layout_bytes)
@@ -597,6 +692,10 @@ class MaterializationPipeline:
                 tgt.copy_(src)
         finally:
             self._release_materialized(payload, self._runtime.ensure_client())
+        return _get_into_result_from_payload(
+            payload,
+            fallback_reason_buckets=fallback_reason_buckets,
+        )
 
     def get_into_async(
         self,
@@ -630,7 +729,7 @@ class MaterializationPipeline:
                 if not cancel_event.is_set():
                     start_time = time.monotonic()
                     try:
-                        if self._maybe_region_backed_into(
+                        region_backed_result = self._maybe_region_backed_into(
                             target=target,
                             artifact_id=artifact_id,
                             key=key,
@@ -641,7 +740,8 @@ class MaterializationPipeline:
                             view_id=None,
                             view_index_hint=view_index_hint,
                             mark_started=_mark_region_backed_started,
-                        ):
+                        )
+                        if region_backed_result.used:
                             store_metrics.observe_latency(
                                 "get_into",
                                 self._runtime.daemon_endpoint,
@@ -1678,7 +1778,7 @@ class MaterializationPipeline:
                     region_layout=region_layout,
                     view_spec=view,
                 )
-                response = client.materialize_into_target_v2(
+                response = client.materialize_into_target(
                     selection=selection,
                     target_layout=region_layout.layout,
                     device_uuid=device_uuid_for(device_id),
@@ -1692,16 +1792,22 @@ class MaterializationPipeline:
                     "FAILED_PRECONDITION",
                     "NOT_FOUND",
                 }:
-                    for region_id in region_layout.region_ids:
-                        region_cache.unregister_region(region_id)
+                    _release_target_regions(
+                        self._runtime,
+                        region_ids=region_layout.region_ids,
+                        context="get_into.retry_region_invalidation",
+                    )
                     _register_target_regions(
                         self._runtime, target=target, device_id=device_id
                     )
                     attempt += 1
                     continue
                 if error.status_code in {"DATA_LOSS", "FAILED_PRECONDITION"}:
-                    for region_id in region_layout.region_ids:
-                        region_cache.unregister_region(region_id)
+                    _release_target_regions(
+                        self._runtime,
+                        region_ids=region_layout.region_ids,
+                        context="get_into.failed_region_invalidation",
+                    )
                 raise ArtifactError(
                     str(error),
                     status_code=error.status_code,
@@ -1711,8 +1817,11 @@ class MaterializationPipeline:
                 response.status
                 != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
             ):
-                for region_id in region_layout.region_ids:
-                    region_cache.unregister_region(region_id)
+                _release_target_regions(
+                    self._runtime,
+                    region_ids=region_layout.region_ids,
+                    context="get_into.non_success_region_invalidation",
+                )
                 raise ArtifactError(
                     "MaterializeIntoTarget returned non-success status",
                     status_code="DATA_LOSS",
@@ -1743,10 +1852,10 @@ class MaterializationPipeline:
         view_index_hint: bytes | None,
         span=None,
         mark_started: Callable[[], None] | None = None,
-    ) -> bool:
+    ) -> _RegionBackedIntoResult:
         mode = options.region_backed_mode
         if mode is RegionBackedMode.DISABLE:
-            return False
+            return _RegionBackedIntoResult(used=False)
         if key is not None:
             if mode is RegionBackedMode.REQUIRE:
                 raise ArtifactError(
@@ -1757,7 +1866,10 @@ class MaterializationPipeline:
             store_metrics.record_region_backed_fallback(
                 self._runtime.daemon_endpoint, "key_not_supported"
             )
-            return False
+            return _RegionBackedIntoResult(
+                used=False,
+                fallback_reason="key_not_supported",
+            )
         if not artifact_id:
             if mode is RegionBackedMode.REQUIRE:
                 raise ArtifactError(
@@ -1768,7 +1880,10 @@ class MaterializationPipeline:
             store_metrics.record_region_backed_fallback(
                 self._runtime.daemon_endpoint, "missing_artifact_id"
             )
-            return False
+            return _RegionBackedIntoResult(
+                used=False,
+                fallback_reason="missing_artifact_id",
+            )
         try:
             self._materialize_into_target(
                 target=target,
@@ -1793,8 +1908,11 @@ class MaterializationPipeline:
                     "store.region_backed.fallback",
                     {"tc.store.reason": "layout_mismatch"},
                 )
-            return False
-        return True
+            return _RegionBackedIntoResult(
+                used=False,
+                fallback_reason="layout_mismatch",
+            )
+        return _RegionBackedIntoResult(used=True)
 
     def _materialize(
         self,
@@ -1870,12 +1988,20 @@ class MaterializationPipeline:
         requested_disk = retrieval_policy.preference is RetrievalPreference.PREFER_DISK
         source_policy = _resolve_source_policy_from_options(options)
         if resolved_artifact_id is None and key:
-            with contextlib.suppress(Exception):
+            try:
                 resolved_mapping = self._runtime.resolve_key_mapping_cached(key=key)
                 if isinstance(resolved_mapping, tuple):
                     resolved_artifact_id = resolved_mapping[0]
                 else:
                     resolved_artifact_id = resolved_mapping
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "store.materialize.key_mapping_prefetch_failed",
+                    extra={
+                        "tc.store.daemon": self._runtime.daemon_endpoint,
+                        "tc.store.key": key,
+                    },
+                )
         if resolved_artifact_id and canonical_hint is None:
             cached_entry = self._runtime.get_artifact_index_cached(resolved_artifact_id)
             if cached_entry is not None:
@@ -2523,4 +2649,4 @@ class MaterializationPipeline:
             )
 
 
-__all__ = ["MaterializationPipeline"]
+__all__ = ["GetIntoResult", "MaterializationPipeline"]

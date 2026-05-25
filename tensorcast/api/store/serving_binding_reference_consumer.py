@@ -25,10 +25,12 @@ from tensorcast.types import (
     BindingValueRef,
     BlobRef,
     PrefetchedServingBinding,
+    PrefetchedServingBindingSet,
     PrefetchRetentionPolicy,
     ServingBindingMemberRef,
     ServingBindingResolvedLayout,
     ServingBindingResolvedSpecCacheEntry,
+    ServingBindingSetTarget,
     ServingBindingSourceRef,
     ServingBindingSourceReuseDecision,
     ServingBindingTarget,
@@ -309,6 +311,15 @@ def unpack_prefetched_serving_binding(
     return PrefetchedServingBinding.from_proto(proto)
 
 
+def unpack_prefetched_serving_binding_set(
+    result_any: Any,
+) -> PrefetchedServingBindingSet:
+    proto = operation_pb2.PrefetchServingBindingSetResult()
+    if not result_any.Unpack(proto):
+        raise ValueError("operation result is not PrefetchServingBindingSetResult")
+    return PrefetchedServingBindingSet.from_proto(proto)
+
+
 def prefetch_reference_binding(
     client: DaemonCtl,
     *,
@@ -335,6 +346,34 @@ def prefetch_reference_binding(
             message = response.status.error.message or message
         raise RuntimeError(message)
     return unpack_prefetched_serving_binding(response.status.result)
+
+
+def prefetch_reference_binding_set(
+    client: DaemonCtl,
+    *,
+    source_artifact_id: str,
+    target: ServingBindingSetTarget,
+    retention_policy: PrefetchRetentionPolicy | None = None,
+    operation_id: str | None = None,
+    group_realization: GroupRealization | None = None,
+    timeout_s: float = 30.0,
+) -> PrefetchedServingBindingSet:
+    selection = common_pb2.ArtifactSelection(artifact_id=source_artifact_id)
+    response = client.prefetch_serving_binding(
+        source_selection=selection,
+        target=target,
+        requested_readiness="serving_local_ready",
+        retention_policy=retention_policy,
+        operation_id=operation_id,
+        group_realization=group_realization,
+        timeout_s=timeout_s,
+    )
+    if response.status.state != operation_pb2.OPERATION_STATE_SUCCESS:
+        message = response.status.message or "PrefetchServingBinding did not succeed"
+        if response.status.HasField("error"):
+            message = response.status.error.message or message
+        raise RuntimeError(message)
+    return unpack_prefetched_serving_binding_set(response.status.result)
 
 
 def acquire_reference_binding(
@@ -417,8 +456,10 @@ __all__ = [
     "build_reference_target_layout",
     "build_reference_tensor_index_bytes",
     "prefetch_reference_binding",
+    "prefetch_reference_binding_set",
     "release_reference_acquire",
     "target_from_reference_cache_record",
     "unpack_prefetched_serving_binding",
+    "unpack_prefetched_serving_binding_set",
     "write_reference_resolved_spec_cache_entry",
 ]

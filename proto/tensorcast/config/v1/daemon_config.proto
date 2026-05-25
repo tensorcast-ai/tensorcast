@@ -362,11 +362,8 @@ message DaemonConfig {
   }
 
   message PublicDiskSource {
-    enum UnmatchedPathMode {
-      UNMATCHED_PATH_MODE_UNSPECIFIED = 0;
-      UNMATCHED_PATH_MODE_REJECT = 1;
-      UNMATCHED_PATH_MODE_ALLOW_ABSOLUTE_FALLBACK = 2;
-    }
+    reserved 2;
+    reserved "unmatched_path_mode";
 
     message TrustedRootPolicy {
       string policy_id = 1;
@@ -379,7 +376,6 @@ message DaemonConfig {
     }
 
     repeated TrustedRootPolicy trusted_root_policies = 1;
-    UnmatchedPathMode unmatched_path_mode = 2;
   }
   PublicDiskSource public_disk_source = 31;
 

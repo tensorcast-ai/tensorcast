@@ -80,6 +80,13 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   std::vector<components::ArtifactDiskLocation> disk_locations;
   std::vector<common::v1::ArtifactDescriptor> upserted_artifact_metadata_descriptors;
   std::vector<std::string> upserted_artifact_metadata_indices;
+  std::vector<tensorcast::layout::v1::LayoutSpec> put_layout_specs;
+  std::vector<std::string> put_layout_canonical_index_data;
+  std::vector<std::string> put_layout_json;
+  std::unordered_map<std::string, std::vector<std::string>> artifact_layouts;
+  absl::Status put_layout_spec_status{absl::OkStatus()};
+  absl::Status attach_layout_to_artifact_status{absl::OkStatus()};
+  std::string next_layout_id{"layout-0"};
 
   struct TransportReplicaInfo {
     std::string replica_id;
@@ -390,12 +397,35 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::UnimplementedError("get_layout_spec not supported in RecordingGlobalStoreClient");
   }
 
-  absl::Status attach_layout_to_artifact(std::string_view, std::string_view) override {
-    return absl::UnimplementedError("attach_layout_to_artifact not supported in RecordingGlobalStoreClient");
+  absl::StatusOr<std::string> put_layout_spec(
+      const tensorcast::layout::v1::LayoutSpec& layout_spec,
+      std::string_view canonical_index_data,
+      std::string_view layout_json) override {
+    if (!put_layout_spec_status.ok()) {
+      return put_layout_spec_status;
+    }
+    put_layout_specs.push_back(layout_spec);
+    put_layout_canonical_index_data.emplace_back(canonical_index_data);
+    put_layout_json.emplace_back(layout_json);
+    if (!next_layout_id.empty()) {
+      return next_layout_id;
+    }
+    return absl::StrCat("layout-", put_layout_specs.size() - 1);
   }
 
-  absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view) override {
-    return absl::UnimplementedError("list_artifact_layouts not supported in RecordingGlobalStoreClient");
+  absl::Status attach_layout_to_artifact(std::string_view artifact_id, std::string_view layout_id) override {
+    if (!attach_layout_to_artifact_status.ok()) {
+      return attach_layout_to_artifact_status;
+    }
+    artifact_layouts[std::string(artifact_id)].push_back(std::string(layout_id));
+    return absl::OkStatus();
+  }
+
+  absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view artifact_id) override {
+    if (auto it = artifact_layouts.find(std::string(artifact_id)); it != artifact_layouts.end()) {
+      return it->second;
+    }
+    return std::vector<std::string>{};
   }
 
   absl::StatusOr<tensorcast::global_store::v1::WriteTensorProofCommitmentsResponse> write_tensor_proof_commitments(

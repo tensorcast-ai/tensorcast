@@ -50,7 +50,7 @@ classDiagram
         +restore_tensors(...) unordered_map~string, torch::Tensor~
         +restore_tensors_from_disk(...) unordered_map~string, torch::Tensor~
         +allocate_cuda_memory(device_id, size) uint64_t
-        +get_cuda_memory_handle(device_id, ptr) string
+        +get_cuda_memory_handle_with_offset(device_id, ptr) pair~string, uint64_t~
         +generate_verification_info_from_disk(path) ModelVerificationInfo
     }
 
@@ -167,7 +167,7 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> Allocated: allocate_cuda_memory()
-    Allocated --> IPCShared: get_cuda_memory_handle()
+    Allocated --> IPCShared: get_cuda_memory_handle_with_offset()
     IPCShared --> RemoteAccess: get_cuda_memory_ptr()
     RemoteAccess --> Closed: close_cuda_memory_handle()
     Allocated --> Freed: cudaFree()

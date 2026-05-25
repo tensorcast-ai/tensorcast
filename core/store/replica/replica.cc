@@ -14,7 +14,6 @@
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 
-#include "core/store/device_registry.h"
 #include "core/store/materialization/contracts/representation_contract.h"
 #include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
 #include "core/store/materialization/dataplane/contracts/loader.h"
@@ -26,6 +25,7 @@
 #include "core/store/materialization/dataplane/view/view_plan_source.h"
 #include "core/store/materialization/dataplane/view/view_transform_executor.h"
 #include "core/store/replica/replica_load_controller.h"
+#include "core/store/replica/replica_placement.h"
 #include "nlohmann/json.hpp"
 
 namespace tensorcast::store::replica {
@@ -227,19 +227,11 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
   // --- Create ReplicaLoadController ---
   auto view_id = config.view_id;
 
-  const bool gpu_requested = (config.device_type == DeviceType::GPU) || (config.local_device_id >= 0);
-  DeviceKey dev_key;
-  if (gpu_requested) {
-    // Either explicit GPU target or legacy configs that only set local_device_id.
-    // Bind the Replica to that GPU so CUDA stream initialisation works for GPU copies.
-    const int ordinal = (config.local_device_id >= 0) ? config.local_device_id : 0;
-    dev_key = DeviceRegistry::instance().gpu_key(ordinal);
-  } else {
-    // Default / explicit CPU target (or unsupported type which we map to CPU for now).
-    dev_key.type = DeviceType::CPU;
-    dev_key.ordinal = -1;
-    dev_key.uuid.clear();
+  auto dev_key_or = resolve_replica_config_device_key(config);
+  if (!dev_key_or.ok()) {
+    return dev_key_or.status();
   }
+  DeviceKey dev_key = *dev_key_or;
 
   auto memory_manager = std::make_shared<ReplicaLoadController>(
       config.artifact_identifier,

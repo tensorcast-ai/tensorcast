@@ -4,13 +4,14 @@ title: Unified Artifact Realization Kernel
 status: draft
 areas: ["sdk", "daemon", "core", "serving", "integrations", "tests", "docs"]
 created: 2026-05-23
-last_updated: 2026-05-23
+last_updated: 2026-05-24
 related_code:
   - docs/designs/0120-artifact-centered-model-runtime-realization.md
   - docs/plans/0121-unified-artifact-realization-kernel.md
   - tensorcast/api/store/artifact.py
   - tensorcast/api/store/__init__.py
   - tensorcast/api/store/materialization.py
+  - tensorcast/api/store/realization_kernel.py
   - tensorcast/api/_materialize.py
   - tensorcast/api/store/binding.py
   - tensorcast/api/store/inplace_slot.py
@@ -21,9 +22,12 @@ related_code:
   - tensorcast/serving/runtime_attachment.py
   - tensorcast/serving/retained_binding.py
   - proto/tensorcast/daemon/v2/store_daemon.proto
+  - daemon/service/controllers/materialization_policy_utils.h
+  - daemon/service/controllers/materialization_policy_utils.cc
   - daemon/service/controllers/materialization_target_plan_utils.cc
   - daemon/service/controllers/representation_transform_builder.cc
   - core/store/runtime/ingestion/materialization_strategy_types.h
+  - tests/python/daemon/test_prefetch_serving_binding_real_cuda_e2e.py
 links:
   plan: ../plans/0121-unified-artifact-realization-kernel.md
   dependencies:
@@ -80,8 +84,10 @@ The decision is:
 - new functionality may add a target kind, representation contract, or strategy
   policy, but must not add independent selection, lifecycle, fallback, or
   diagnostics logic;
-- existing daemon RPCs may remain separate implementation lowerings until a
-  later proto cleanup. The kernel is the source of truth above those lowerings.
+- existing daemon RPCs may remain separate implementation lowerings while they
+  share the same kernel-owned plan facts, but redundant compatibility fields
+  should be reserved once callers use the canonical response fields. The kernel
+  is the source of truth above those lowerings.
 
 # Goals / Non-Goals
 
@@ -301,7 +307,10 @@ lowering adapters so every path answers the same questions:
 
 ## Draft API Shape
 
-The long-term public shape remains the `0120` shape:
+The long-term public shape includes both an explicit realization API and
+ergonomic artifact methods. The ergonomic methods are not compatibility shims;
+they are first-class public entrypoints that lower directly to the same
+target-state realization kernel.
 
 ```python
 realization = artifact.realize(
@@ -313,11 +322,14 @@ realization = artifact.realize(
     tc.ArtifactRealizationSpec.binding(device="cuda:0", layout=layout)
 )
 binding = realization.binding()
+
+tensors = artifact.tensor_dict(device="cuda:0")
+binding = artifact.bind(device="cuda:0", layout=layout)
 ```
 
-Existing methods become convenience wrappers:
+Ergonomic artifact methods have required lowerings:
 
-| Existing method | Required lowering |
+| Public method | Required lowering |
 | --- | --- |
 | `Artifact.tensor_dict(...)` | `realize(ArtifactRealizationSpec.tensor_dict(...)).tensor_dict()` |
 | `Artifact.tensor_dict_into(...)` | `realize(ArtifactRealizationSpec.caller_tensors(...)).complete()` |
@@ -327,8 +339,9 @@ Existing methods become convenience wrappers:
 | `Artifact.prefetch(target=...)` | `realize_async(ArtifactRealizationSpec.retained_binding(...))`, projected as `Operation[PrefetchHandoff]` or current retained result types |
 | Runtime attach | `realize(ArtifactRealizationSpec.model_runtime(...)).attach(adapter=...)` |
 
-Wrappers may keep today's names while behavior migrates, but they must not own
-independent selection, target, source strategy, lifecycle, or diagnostics logic.
+These entrypoints may keep the short method names because they are useful. They
+must not own independent selection, target, source strategy, lifecycle, resource
+envelope, or diagnostics logic.
 
 `prefetch_handoff()` is a projection of a completed retained realization. It is
 not a replacement for `Operation[T]`. New asynchronous realization APIs must
@@ -469,7 +482,11 @@ them. Daemon-local byte bodies map naturally to `BodyBackingIntent`,
 `ResolvedSourceCapability`, and `BodyBackingObservation`. Export validity maps
 to `HandleLeaseRegistry`, `SessionLifecycleManager`, and `LifecycleKernel`
 export/placement/retention capabilities. Execution and fallback cost maps to
-the existing `ExecutionStrategyPlan` and `ExecutionCommitReport`. Python
+the existing `ExecutionStrategyPlan` and `ExecutionCommitReport`. Daemon
+controller implementations mirror this with a resource-manager linkage plan so
+BodyBackingManager, HandleLeaseRegistry, SessionLifecycleManager,
+LifecycleKernel, and execution-commit expectations are validated and emitted
+from the same envelope instead of being reconstructed per RPC handler. Python
 `MaterializationPayload`, `OwnedBindingSlot`, retained acquire state, and
 runtime attachment handles become projections of the envelope, not independent
 owners of resource policy.
@@ -541,9 +558,9 @@ The handle should make unsupported actions impossible or fail with
 TensorDict projection has an explicit owner. A successful `tensor_dict()`
 projection must either return a mapping-like projection object that strongly owns
 the realization handle, or attach equivalent finalization ownership to the
-returned tensors. Convenience wrappers must not detach raw tensors from the
-payload lease/export owner. Closing the handle or projection releases the daemon
-materialized payload when no projected tensor still owns it.
+returned tensors. Ergonomic artifact entrypoints must not detach raw tensors
+from the payload lease/export owner. Closing the handle or projection releases
+the daemon materialized payload when no projected tensor still owns it.
 
 Retained resources and runtime attachments have separate lifetimes. Prefetch
 prepares daemon-owned retained state without exporting process-local tensor
@@ -937,7 +954,7 @@ and `NO_LEASE` behavior through `Operation[T]`, not handle-only state.
 
 Mitigation: TensorDict projections must own or retain the payload lease/export
 owner until all projected tensors are safe to release. Tests must cover both
-explicit handle close and wrapper-returned projection lifetimes.
+explicit handle close and artifact-entrypoint-returned projection lifetimes.
 
 Closure gate: returned raw tensors keep their C++ export owner alive, or the SDK
 returns an owning projection that prevents raw tensor escape after close.
@@ -1012,13 +1029,15 @@ staged values, publish barriers, and group acquire claims.
 
 ## Risk: Compatibility pressure keeps old paths alive
 
-Mitigation: compatibility is not a requirement. Old wrapper APIs and helper
-paths should be deleted or rewritten directly to the target-state realization
-model rather than maintained as compatibility code.
+Mitigation: compatibility is not a requirement, but ergonomic artifact methods
+such as `Artifact.tensor_dict(...)` and `Artifact.bind(...)` remain first-class
+APIs. Old helper paths should be deleted or rewritten directly to the
+target-state realization model rather than maintained as compatibility code.
 
 Closure gate: old independent paths are deleted when their target-state
-replacement lands. Temporary wrappers remain only as short-lived migration
-scaffolding and must call `realize(...)` or `realize_async(...)` directly.
+replacement lands. Ergonomic artifact methods stay, but must call `realize(...)`
+or `realize_async(...)` directly and share the same plans, envelopes, and
+reports.
 
 # Schema Changes
 

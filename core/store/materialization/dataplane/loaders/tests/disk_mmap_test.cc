@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // Copyright (c) 2025, TensorCast Team.
 // New test to verify DiskLoader zero-copy mmap path when partition sizes are page-aligned.
@@ -80,7 +80,7 @@ TEST_CASE("DiskArtifact page-aligned load to CPU via mmap", "[replica][disk][cpu
       .source = disk_src,
       .artifact_identifier = artifact_id,
       .device_type = ::tensorcast::DeviceType::CPU,
-      .local_device_id = 0,
+      .local_device_id = -1,
       .pinned_buffer_pool = pool,
       .async_runtime = async_runtime,
       .expected_artifact_size = total_size,

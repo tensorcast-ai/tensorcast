@@ -55,7 +55,7 @@ class _DaemonStub:
         self.materialized_artifact_ids: list[str] = []
         self.wait_for_completion_values: list[bool] = []
 
-    def materialize_by_artifact_id_v2(self, *args, **kwargs):  # noqa: ANN002, ANN003
+    def materialize_by_artifact_id(self, *args, **kwargs):  # noqa: ANN002, ANN003
         self.materialize_timeout_s = kwargs.get("timeout_s")
         selection = kwargs.get("selection")
         if selection is not None:
