@@ -404,8 +404,10 @@ For the full policy model and examples, see [Policy & Persistence](./policy-pers
 
 For region-backed registration and quiesced cleanup:
 
-- `Store.register_vram_region(...)` and `Store.unregister_vram_region(...)` manage
-  reusable CUDA IPC regions.
+- `Store.register_region(...)` / `Store.unregister_region(...)` are the daemon
+  region APIs. `Store.register_vram_region(...)` and
+  `Store.unregister_vram_region(...)` remain SDK conveniences that lower to the
+  same unified `RegisterRegion` / `UnregisterRegion` RPCs.
 - `Store.deregister_artifact(...)` quiesces and drains active exports, then
   revokes the lease, performs best-effort Global Store cleanup, and (by default)
   also deletes any managed shared-disk persistence for that artifact

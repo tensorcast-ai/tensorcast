@@ -17,7 +17,6 @@ from tensorcast.api.store.serving_builder import (
     build_binding_finalize_publication_bundle,
     build_pure_transform_publication_bundle_from_registered_artifact,
     build_pure_transform_publication_spec,
-    build_pure_transform_serving_args,
     prepare_binding_finalize_serving_registration,
     prepare_pure_transform_serving_registration,
 )
@@ -92,32 +91,6 @@ def build_binding_finalize_build_intent(
         builder_mode=BuilderMode.BINDING_FINALIZE,
         build_pipeline_version=build_pipeline_version,
         representation_contract_hash=str(representation_contract_hash),
-    )
-
-
-def build_pure_transform_serving_args_from_context(
-    context: RecipePublicationContext,
-    *,
-    build_pipeline_version: str,
-    representation_contract_hash: str | None = None,
-    contract_family: str | None = None,
-    source_version_key: str | None = None,
-    serving_version_key: str | None = None,
-    serving_manifest_ref: str | None = None,
-    extra_args: dict[str, str | int] | None = None,
-) -> dict[str, str | int]:
-    return build_pure_transform_serving_args(
-        build_intent=build_pure_transform_build_intent(
-            context,
-            build_pipeline_version=build_pipeline_version,
-            representation_contract_hash=representation_contract_hash,
-        ),
-        contract_family=contract_family,
-        source_version_key=source_version_key,
-        serving_version_key=serving_version_key,
-        logical_topology_json=context.logical_topology_json,
-        serving_manifest_ref=serving_manifest_ref,
-        extra_args=extra_args,
     )
 
 
@@ -369,7 +342,6 @@ __all__ = [
     "build_pure_transform_build_intent",
     "build_pure_transform_publication_bundle_from_context",
     "build_pure_transform_publication_spec_from_context",
-    "build_pure_transform_serving_args_from_context",
     "build_recipe_serving_build_intent",
     "prepare_binding_finalize_serving_registration_from_context",
     "prepare_pure_transform_serving_registration_from_context",

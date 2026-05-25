@@ -16,28 +16,15 @@
 #include "absl/time/time.h"
 #include "core/cuda/cuda_api.h"
 #include "core/store/components/eviction_service.h"
-#include "core/store/device_registry.h"
+#include "core/store/replica/replica_placement.h"
 
 namespace tensorcast::store::runtime {
 
 namespace {
 
-DeviceKey normalize_device_key(DeviceKey key) {
-  if (key.type == DeviceType::GPU) {
-    if (key.ordinal < 0) {
-      key.ordinal = 0;
-    }
-    return DeviceRegistry::instance().normalize(key);
-  }
-  if (key.type == DeviceType::CPU) {
-    return DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
-  }
-  return key;
-}
-
 loading::ReplicaKey normalize_replica_key(const loading::ReplicaKey& key) {
   loading::ReplicaKey normalized = key;
-  normalized.device = normalize_device_key(key.device);
+  normalized.device = replica::normalize_replica_device_key(key.device);
   return normalized;
 }
 
@@ -106,7 +93,7 @@ absl::StatusOr<ResolvedUmaReplica> resolve_replica_and_uma_key(
     };
   }
 
-  const auto candidates = registry.find_by_device(normalize_device_key(normalized_requested.device));
+  const auto candidates = registry.find_by_device(replica::normalize_replica_device_key(normalized_requested.device));
   for (const auto& candidate_key : candidates) {
     auto candidate_or = registry.find(candidate_key);
     if (!candidate_or.ok()) {
@@ -348,7 +335,7 @@ absl::StatusOr<int> ReplicaRuntime::get_unique_gpu_residency(
 
 std::vector<loading::ReplicaKey> ReplicaRuntime::list_device_replicas(const DeviceKey& device) const {
   std::vector<loading::ReplicaKey> list;
-  const auto inst_keys = registry().find_by_device(normalize_device_key(device));
+  const auto inst_keys = registry().find_by_device(replica::normalize_replica_device_key(device));
   for (const auto& key : inst_keys) {
     auto replica_or = registry().find(key);
     if (!replica_or.ok()) {
@@ -768,16 +755,13 @@ absl::Status ReplicaRuntime::try_evict_memory_for_replica(size_t required_size) 
 std::shared_ptr<replica::Replica> ReplicaRuntime::get_or_create_replica(
     const std::string& artifact_identifier,
     replica::ReplicaConfig config) {
-  DeviceKey device_key;
-  device_key.type = config.device_type;
-  if (config.device_type == DeviceType::GPU) {
-    const int ordinal = (config.local_device_id >= 0) ? config.local_device_id : 0;
-    device_key = DeviceRegistry::instance().gpu_key(ordinal);
-  } else {
-    device_key.type = DeviceType::CPU;
-    device_key.ordinal = -1;
-    device_key.uuid.clear();
+  auto device_key_or = replica::resolve_replica_config_device_key(config);
+  if (!device_key_or.ok()) {
+    LOG(ERROR) << "Invalid ReplicaConfig placement for artifact=" << artifact_identifier << ": "
+               << device_key_or.status();
+    return nullptr;
   }
+  DeviceKey device_key = *device_key_or;
   loading::ReplicaKey inst_key{
       .artifact_id = artifact_identifier,
       .view_id = config.view_id,

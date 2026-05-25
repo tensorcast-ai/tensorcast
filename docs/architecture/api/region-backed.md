@@ -12,8 +12,8 @@ Current status:
 
 - `RegisterRegion` is the canonical local region-registration surface and
   supports both `VRAM` and `HOST_SHARED`,
-- `RegisterVramRegion` / `UnregisterVramRegion` remain compatibility wrappers
-  for existing VRAM callers,
+- SDK `register_vram_region(...)` remains a convenience helper, but it lowers
+  to `RegisterRegion(memory_kind=VRAM)` rather than a separate daemon RPC,
 - byte-artifact `BatchGetIntoRegion` /
   `BatchPutIfAbsentFromRegion` accept region-backed layouts over both `VRAM`
   and `HOST_SHARED`,
@@ -78,6 +78,8 @@ The canonical SDK and RPC surface is:
 
 - `RegisterRegion` RPC
 - `Store.register_region(...)` API
+- `Store.register_vram_region(...)` API, as a thin SDK helper over
+  `RegisterRegion(memory_kind=VRAM)`
 
 A region is scoped to an owner PID, explicit bounds, and TTL. The daemon stores
 region metadata in `IpcRegionRegistry` and resolves the concrete attachment
@@ -150,30 +152,14 @@ attachment = tensorcast.attach_host_shared_region(handle)
 host_mapping = mmap.mmap(attachment.fd, attachment.size_bytes)
 ```
 
-## Register VRAM Region Compatibility Wrapper
+## SDK VRAM Region Convenience Helper
 
-The SDK still exposes:
-
-- `RegisterVramRegion` RPC
-- `Store.register_vram_region(...)` API
-
-These are compatibility wrappers over the same region registry and remain useful
-for existing callers that already hold a base VRAM pointer and want the SDK to
-mint CUDA IPC handle bytes for them.
-
-### RegisterVramRegionRequest (field reference)
-
-Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast/daemon/v2/store_daemon.proto)
-
-| Field | What it does | Why it exists |
-|---|---|---|
-| `session_id` | Optional client session tag. | Diagnostics and ownership correlation. |
-| `device_id` | GPU ordinal for the region. | Validate/route IPC handle usage. |
-| `cuda_ipc_handle` | CUDA IPC handle bytes for the base allocation. | The core VRAM attachment the daemon needs to map. |
-| `size_bytes` | Region size. | Bounds checks for offsets and storages. |
-| `ttl_ms` | Region TTL. | Auto-cleanup in crash/leak scenarios. |
-| `owner_pid` | Owner process id. | Prevent other processes from hijacking lifecycle. |
-| `region_name` | Optional tag. | Operator-friendly debugging (e.g. “model_weights_slab”). |
+The SDK still exposes `Store.register_vram_region(...)` for callers that hold a
+base VRAM pointer and want the SDK to mint CUDA IPC handle bytes for them. This
+is client-side syntax sugar only: the daemon sees a normal
+`RegisterRegionRequest` with `memory_kind = VRAM`, `device_id`, and
+`cuda_ipc_handle` populated. There is no separate VRAM-specific daemon RPC or
+proto object.
 
 ## HOST_SHARED semantics
 
@@ -245,11 +231,12 @@ Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast
 
 | Field | What it does | Notes |
 |---|---|---|
-| `region_id` | Region identifier returned by `RegisterRegion` or `RegisterVramRegion`. | Required. |
+| `region_id` | Region identifier returned by `RegisterRegion`. | Required. |
 | `owner_pid` | Owner PID verification. | Safety: mismatches fail. |
 | `force` | Best-effort release even if TTL expired. | Useful for cleanup; use with care. |
 
-`UnregisterVramRegion` remains a compatibility wrapper for VRAM-only callers.
+`Store.unregister_vram_region(...)` is the matching SDK helper; it sends the
+same `UnregisterRegionRequest` as `Store.unregister_region(...)`.
 
 ## Region Referenced LIP Storage
 

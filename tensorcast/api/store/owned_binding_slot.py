@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import functools
 import logging
 import time
@@ -30,7 +29,6 @@ from tensorcast.api.store.binding_state import (
     clone_selection,
     parse_binding_value_or_raise,
 )
-from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.inplace_slot import (
     _ctx_timeout_s,
     _map_slot_error,
@@ -39,6 +37,11 @@ from tensorcast.api.store.inplace_slot import (
 )
 from tensorcast.api.store.materialization import _resolve_source_policy_from_options
 from tensorcast.api.store.owned_binding_layout import BindingLayout
+from tensorcast.api.store.realization_kernel import (
+    binding_materialization_diagnostics_from_response,
+    execution_diagnostics_from_response,
+    source_bound_plan_diagnostics_from_response,
+)
 from tensorcast.api.store.realization_plan import binding_realization_plan_to_proto
 from tensorcast.api.store.retry import map_materialization_error
 from tensorcast.api.store.types import ArtifactError
@@ -393,94 +396,6 @@ def _build_source_execution_contract(
             store_daemon_pb2.COLLECTIVE_POLICY_COLLECTIVE_FIRST,
         )
     return topology_proto, store_daemon_pb2.COLLECTIVE_POLICY_DISABLE_COLLECTIVE
-
-
-def _execution_diagnostics_from_response(
-    response: object,
-) -> ExecutionDiagnostics | None:
-    diagnostics_proto = getattr(response, "execution_diagnostics", None)
-    if diagnostics_proto is None:
-        return None
-    has_field = getattr(response, "HasField", None)
-    if callable(has_field):
-        try:
-            if not has_field("execution_diagnostics"):
-                return None
-        except ValueError:
-            pass
-    return ExecutionDiagnostics.from_proto(diagnostics_proto)
-
-
-def _source_bound_plan_diagnostics_from_response(
-    response: object,
-) -> SourceBoundPlanDiagnostics | None:
-    diagnostics_proto = getattr(response, "source_bound_plan_diagnostics", None)
-    if diagnostics_proto is None:
-        return None
-    has_field = getattr(response, "HasField", None)
-    if callable(has_field):
-        try:
-            if not has_field("source_bound_plan_diagnostics"):
-                return None
-        except ValueError:
-            pass
-    return SourceBoundPlanDiagnostics.from_proto(diagnostics_proto)
-
-
-def _materialization_source_label(source: object) -> str | None:
-    try:
-        source_code = int(source)
-    except (TypeError, ValueError):
-        return None
-    if source_code == int(store_daemon_pb2.MATERIALIZATION_SOURCE_P2P):
-        return "p2p"
-    if source_code == int(store_daemon_pb2.MATERIALIZATION_SOURCE_DISK):
-        return "disk"
-    if source_code == int(store_daemon_pb2.MATERIALIZATION_SOURCE_LOCAL_REPLICA):
-        return "local_replica"
-    return None
-
-
-def _binding_layout_total_bytes(layout: BindingLayout) -> int:
-    try:
-        return int(
-            canonical_index_from_bytes(layout.target_index_bytes).total_size_bytes
-        )
-    except Exception:  # noqa: BLE001
-        return 0
-
-
-def _materialization_diagnostics_from_response(
-    response: object,
-    *,
-    layout: BindingLayout,
-) -> Mapping[str, object] | None:
-    source = getattr(
-        response,
-        "source",
-        store_daemon_pb2.MATERIALIZATION_SOURCE_UNSPECIFIED,
-    )
-    source_label = _materialization_source_label(source)
-    if source_label is None:
-        return None
-    try:
-        source_code = int(source)
-    except (TypeError, ValueError):
-        source_code = 0
-    diagnostics: dict[str, object] = {
-        "source": source_label,
-        "source_code": source_code,
-        "total_bytes": _binding_layout_total_bytes(layout),
-        "retry_attempts": 1,
-        "retry_reason_buckets": {},
-    }
-    replica_id = str(getattr(response, "selected_source_replica_id", "") or "")
-    if replica_id:
-        diagnostics["replica_id"] = replica_id
-    transport_id = str(getattr(response, "selected_source_transport_id", "") or "")
-    if transport_id:
-        diagnostics["transport_id"] = transport_id
-    return diagnostics
 
 
 class OwnedBindingSlot:
@@ -1022,7 +937,7 @@ class OwnedBindingSlot:
                 retryable=error.retryable,
             ) from exc
         metadata = parse_binding_value_or_raise(
-            response.current_value if hasattr(response, "current_value") else None,
+            response.current_value,
             rpc_name="SealBinding",
             expected_binding_id=self._binding_id,
             expected_binding_layout_id=self._binding_layout_id,
@@ -1069,7 +984,7 @@ class OwnedBindingSlot:
                 retryable=error.retryable,
             ) from exc
         metadata = parse_binding_value_or_raise(
-            response.current_value if hasattr(response, "current_value") else None,
+            response.current_value,
             rpc_name="FreezeBindingCurrentValue",
             expected_binding_id=self._binding_id,
             expected_binding_layout_id=self._binding_layout_id,
@@ -1114,7 +1029,7 @@ class OwnedBindingSlot:
                 retryable=error.retryable,
             ) from exc
         metadata = parse_binding_value_or_raise(
-            response.current_value if hasattr(response, "current_value") else None,
+            response.current_value,
             rpc_name="PromoteBindingCurrentValue",
             expected_binding_id=self._binding_id,
             expected_binding_layout_id=self._binding_layout_id,
@@ -1130,13 +1045,11 @@ class OwnedBindingSlot:
         self._selection = clone_selection(metadata.selection)
         self._contribution_selection = clone_selection(metadata.selection)
         self._contribution_source_artifact_id = metadata.source_artifact_id
-        token = getattr(response, "binding_current_value_publication_token", b"")
+        token = bytes(response.binding_current_value_publication_token)
         self._binding_current_value_publication_token = bytes(token) if token else None
         self._binding_current_value_publication_operation_id = None
         self._dirty = False
-        self._last_execution_diagnostics = _execution_diagnostics_from_response(
-            response
-        )
+        self._last_execution_diagnostics = execution_diagnostics_from_response(response)
         self._last_source_bound_plan_diagnostics = None
         return response
 
@@ -1273,24 +1186,11 @@ class OwnedBindingSlot:
         self._last_materialization_diagnostics = None
         rpc_timeout_s = _ctx_timeout_s(ctx)
         try:
-            source_selection = None
-            if resolved is not None and hasattr(
-                resolved, "_build_owner_source_selection"
-            ):
-                ensure_metadata = getattr(resolved, "_ensure_metadata", None)
-                if callable(ensure_metadata):
-                    ensure_metadata()
-                canonical_index_bytes = getattr(
-                    resolved, "_canonical_index_bytes", None
-                )
-                if canonical_index_bytes is not None:
-                    view_spec = getattr(resolved, "_view_spec", None)
-                    view_spec_proto = view_spec.proto if view_spec is not None else None
-                    source_selection = resolved._build_owner_source_selection(
-                        packing="byte_space",
-                        view_spec_proto=view_spec_proto,
-                        canonical_index_bytes=canonical_index_bytes,
-                    )
+            source_selection = (
+                None
+                if resolved is None
+                else resolved._resolve_realization_selection().proto
+            )
             response = self._runtime.ensure_client().refill_owned_binding(
                 binding_id=self._binding_id,
                 artifact_id=(
@@ -1341,14 +1241,12 @@ class OwnedBindingSlot:
         self._binding_current_value_publication_token = None
         self._binding_current_value_publication_operation_id = None
         self._current_value_metadata = None
-        self._last_execution_diagnostics = _execution_diagnostics_from_response(
-            response
-        )
+        self._last_execution_diagnostics = execution_diagnostics_from_response(response)
         self._last_source_bound_plan_diagnostics = (
-            _source_bound_plan_diagnostics_from_response(response)
+            source_bound_plan_diagnostics_from_response(response)
         )
         self._last_materialization_diagnostics = (
-            _materialization_diagnostics_from_response(
+            binding_materialization_diagnostics_from_response(
                 response,
                 layout=self._layout,
             )
@@ -1398,22 +1296,7 @@ class OwnedBindingSlot:
         self._last_materialization_diagnostics = None
         rpc_timeout_s = _ctx_timeout_s(ctx)
         try:
-            source_selection = None
-            if hasattr(resolved, "_build_owner_source_selection"):
-                ensure_metadata = getattr(resolved, "_ensure_metadata", None)
-                if callable(ensure_metadata):
-                    ensure_metadata()
-                canonical_index_bytes = getattr(
-                    resolved, "_canonical_index_bytes", None
-                )
-                if canonical_index_bytes is not None:
-                    view_spec = getattr(resolved, "_view_spec", None)
-                    view_spec_proto = view_spec.proto if view_spec is not None else None
-                    source_selection = resolved._build_owner_source_selection(
-                        packing="byte_space",
-                        view_spec_proto=view_spec_proto,
-                        canonical_index_bytes=canonical_index_bytes,
-                    )
+            source_selection = resolved._resolve_realization_selection().proto
             response = self._runtime.ensure_client().refill_owned_binding(
                 binding_id=self._binding_id,
                 artifact_id=resolved._ensure_identified(),
@@ -1440,7 +1323,7 @@ class OwnedBindingSlot:
         self._contribution_source_artifact_id = str(response.artifact_id)
         self._binding_current_value_publication_token = (
             bytes(response.binding_current_value_publication_token)
-            if getattr(response, "binding_current_value_publication_token", b"")
+            if response.binding_current_value_publication_token
             else None
         )
         self._binding_current_value_publication_operation_id = (
@@ -1449,7 +1332,7 @@ class OwnedBindingSlot:
             else None
         )
         metadata = parse_binding_value_or_raise(
-            response.current_value if hasattr(response, "current_value") else None,
+            response.current_value,
             rpc_name="RefillOwnedBinding",
             expected_binding_id=self._binding_id,
             expected_binding_layout_id=self._binding_layout_id,
@@ -1463,14 +1346,12 @@ class OwnedBindingSlot:
             )
         self._seal_generation_counter = int(metadata.seal_generation)
         self._current_value_metadata = metadata
-        self._last_execution_diagnostics = _execution_diagnostics_from_response(
-            response
-        )
+        self._last_execution_diagnostics = execution_diagnostics_from_response(response)
         self._last_source_bound_plan_diagnostics = (
-            _source_bound_plan_diagnostics_from_response(response)
+            source_bound_plan_diagnostics_from_response(response)
         )
         self._last_materialization_diagnostics = (
-            _materialization_diagnostics_from_response(
+            binding_materialization_diagnostics_from_response(
                 response,
                 layout=self._layout,
             )
@@ -1548,10 +1429,16 @@ class OwnedBindingSlot:
             )
         lease_token = bytes(response.mem_handle.lease_token)
         if lease_token:
-            with contextlib.suppress(Exception):
+            try:
                 self._runtime.ensure_client().release_placement_lease(
                     lease_token=lease_token,
                     timeout_s=5.0,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "owned_binding_slot.acquire_staged_value failed to release "
+                    "placement lease (binding_id=%s)",
+                    self._binding_id,
                 )
         self._staged_value_acquired = True
         self._staged_value_metadata = metadata
@@ -1561,11 +1448,24 @@ class OwnedBindingSlot:
         if self._closed:
             return
         if self._restore_future is not None:
-            with contextlib.suppress(Exception):
+            try:
                 self._restore_future.result()
-        with contextlib.suppress(Exception):
-            if self._published_lease_id is not None:
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "owned_binding_slot.close observed failed restore future "
+                    "(binding_id=%s)",
+                    self._binding_id,
+                )
+        if self._published_lease_id is not None:
+            try:
                 self.retire(wait=False)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "owned_binding_slot.close failed to retire published binding "
+                    "lease (binding_id=%s, lease_id=%s)",
+                    self._binding_id,
+                    self._published_lease_id,
+                )
         self._runtime.ensure_client().close_owned_binding(binding_id=self._binding_id)
         self._closed = True
 

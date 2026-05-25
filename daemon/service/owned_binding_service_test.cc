@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -133,6 +134,7 @@ class BindingContributionGuardClient final : public tensorcast::store::testing::
   std::vector<std::string> active_identities;
   std::string cluster_id{"cluster-test"};
   std::vector<tensorcast::store::components::ArtifactDiskLocation> disk_locations;
+  std::optional<std::string> canonical_index_json;
 
   absl::StatusOr<std::vector<std::string>> list_active_worker_identities(bool) override {
     return active_identities;
@@ -193,6 +195,13 @@ class BindingContributionGuardClient final : public tensorcast::store::testing::
       return absl::NotFoundError("disk_locations_not_found");
     }
     return out;
+  }
+
+  absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view) override {
+    if (canonical_index_json.has_value()) {
+      return *canonical_index_json;
+    }
+    return absl::UnimplementedError("get_artifact_index_by_id not supported in BindingContributionGuardClient");
   }
 };
 
@@ -279,6 +288,15 @@ grpc::Status run_create_owned_binding(
   grpc::ServerContext ctx;
   tensorcast::daemon::RpcContext rctx{"CreateOwnedBindingTest", ctx, /*allow_high_card_attrs=*/true};
   return service.create_owned_binding(rctx, req, resp);
+}
+
+grpc::Status run_create_binding(
+    tensorcast::daemon::OwnedBindingService& service,
+    const v2::CreateBindingRequest& req,
+    v2::CreateBindingResponse& resp) {
+  grpc::ServerContext ctx;
+  tensorcast::daemon::RpcContext rctx{"CreateBindingTest", ctx, /*allow_high_card_attrs=*/true};
+  return service.create_binding(rctx, req, resp);
 }
 
 grpc::Status run_begin_binding_update(
@@ -392,6 +410,48 @@ TEST_CASE("CreateOwnedBinding requires binding_layout_id", "[daemon][binding]") 
   REQUIRE_FALSE(status.ok());
   REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
   REQUIRE(status.error_message() == "binding_layout_id is required");
+}
+
+TEST_CASE("CreateBinding uses admitted export envelope before handle lease work", "[daemon][binding]") {
+  Fixture fix;
+
+  v2::CreateBindingRequest client_req;
+  client_req.set_ownership(v2::BINDING_OWNERSHIP_CLIENT);
+  client_req.set_binding_layout_id("layout-client");
+  client_req.set_pid(123);
+  client_req.set_device_uuid(ensure_fake_gpu_uuid());
+  *client_req.mutable_target_layout() = make_target_layout();
+  client_req.set_target_index_bytes(make_target_index_json());
+  v2::CreateBindingResponse client_resp;
+
+  const auto client_status = run_create_binding(fix.service, client_req, client_resp);
+
+  INFO("CreateBinding client status: " << client_status.error_code() << " " << client_status.error_message());
+  REQUIRE(client_status.ok());
+  REQUIRE_FALSE(client_resp.mem_handle().has_cuda_ipc_handle());
+  REQUIRE(client_resp.mem_handle().lease_token().empty());
+  auto record_or = fix.binding_registry.get(client_resp.binding_id());
+  REQUIRE(record_or.ok());
+  {
+    absl::MutexLock lock(&(*record_or)->mu);
+    REQUIRE((*record_or)->export_refs == 0);
+    REQUIRE((*record_or)->ownership == v2::BINDING_OWNERSHIP_CLIENT);
+  }
+
+  v2::CreateBindingRequest daemon_req;
+  daemon_req.set_ownership(v2::BINDING_OWNERSHIP_DAEMON);
+  daemon_req.set_binding_layout_id("layout-daemon");
+  daemon_req.set_pid(123);
+  daemon_req.set_device_uuid(ensure_fake_gpu_uuid());
+  *daemon_req.mutable_target_layout() = make_target_layout();
+  daemon_req.set_target_index_bytes(make_target_index_json());
+  v2::CreateBindingResponse daemon_resp;
+
+  const auto daemon_status = run_create_binding(fix.service, daemon_req, daemon_resp);
+
+  REQUIRE_FALSE(daemon_status.ok());
+  REQUIRE(daemon_status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+  REQUIRE(daemon_status.error_message() == "local handle plane is disabled (no handle leases)");
 }
 
 TEST_CASE("BeginBindingUpdate rejects live assembly contributions", "[daemon][binding]") {
@@ -618,6 +678,7 @@ TEST_CASE(
       /*verify_checksums=*/false);
   REQUIRE(imported_or.ok());
   register_managed_disk_location(fix, imported_or->artifact_id, imported_or->normalized_path);
+  fix.global_store_client->canonical_index_json = imported_or->canonical_index_json;
 
   {
     absl::MutexLock lock(&record->mu);

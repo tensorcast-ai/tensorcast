@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -28,6 +29,7 @@ from tensorcast.types import (
     BindingValueRef,
     BindingValueVerificationState,
     GroupRealizationAcquireRef,
+    PrefetchRetentionPolicy,
     ServingBindingMemberRef,
     ServingBindingResolvedLayout,
     ServingBindingSourceRef,
@@ -42,6 +44,7 @@ def _authority(
     reservation_bytes: int = 4096,
     member_index: int = 0,
     member_count: int = 1,
+    expires_at_ms: int | None = None,
 ) -> ParsedRetainedServingBindingAuthority:
     suffix = member_index + 1
     member = ServingBindingMemberRef(
@@ -65,6 +68,7 @@ def _authority(
         member=member,
         reservation_bytes=reservation_bytes,
         scope_digest="scope-1",
+        expires_at_ms=expires_at_ms,
     )
     return ParsedRetainedServingBindingAuthority(
         group_id="group-1",
@@ -117,7 +121,7 @@ def _set_nested(
 ) -> None:
     current = payload
     for key in path[:-1]:
-        current = current[key]  # type: ignore[assignment,index]
+        current = cast(dict[str, object], current[key])
     current[path[-1]] = value
 
 
@@ -260,10 +264,16 @@ def test_acquire_retained_serving_binding_lease_releases_unrestored_lease_on_con
         assert lease.binding_value_ref == authority.binding_value_ref
         assert lease.member_ref == authority.member
         assert lease.reservation_bytes == 4096
+        assert lease.release_contract.release_policy == (
+            "close_runtime_attachment",
+            "release_placement_lease",
+        )
+        assert lease.release_contract.released is False
 
     assert client.acquire_calls[0]["caller_pid"] == 123
     assert client.acquire_calls[0]["expected_tensor_schema_hash"] == "schema-hash"
     assert client.released_tokens == [b"lease"]
+    assert lease.release_contract.released is True
 
 
 def test_acquire_retained_serving_binding_uses_authority():
@@ -280,6 +290,75 @@ def test_acquire_retained_serving_binding_uses_authority():
     assert client.acquire_calls[0]["caller_pid"] == 456
     assert client.acquire_calls[0]["binding_value_ref"] == authority.binding_value_ref
     assert client.released_tokens == [b"lease"]
+
+
+def test_acquire_retained_binding_rejects_expired_capability_before_daemon_call():
+    authority = _authority(expires_at_ms=1)
+    client = _Client(_response())
+
+    with (
+        pytest.raises(ValueError, match="reservation_capability has expired"),
+        acquire_retained_serving_binding_lease(authority, runtime=_Runtime(client)),
+    ):
+        pass
+
+    assert client.acquire_calls == []
+    assert client.released_tokens == []
+
+
+def test_retained_binding_debug_status_tracks_capability_ttl_and_lifecycle():
+    authority = _authority(expires_at_ms=4_102_444_800_000)
+    client = _Client(_response())
+
+    with acquire_retained_serving_binding_lease(
+        authority, runtime=_Runtime(client)
+    ) as lease:
+        acquired_status = lease.debug_status()
+        assert lease.status() == "acquired"
+        assert acquired_status["state"] == "acquired"
+        assert acquired_status["reservation_capability_id"] == "capability-1"
+        assert acquired_status["reservation_expires_at_ms"] == 4_102_444_800_000
+        assert acquired_status["readiness"] == "serving_local_ready"
+        assert acquired_status["verification_state"] == "local_only"
+        assert acquired_status["lease_token_present"] is True
+        assert acquired_status["release_policy"] == (
+            "close_runtime_attachment",
+            "release_placement_lease",
+        )
+        assert acquired_status["released"] is False
+
+        attached = lease.restore(
+            target_device=torch.device("cuda:0"),
+            restore_fn=lambda **_kwargs: {"w": torch.empty((1,), dtype=torch.float32)},
+        )
+        assert lease.status() == "restored"
+        assert attached.status() == "restored"
+        assert attached.debug_status()["state"] == "restored"
+
+        runtime_handle = attached.transfer_to_runtime()
+        assert runtime_handle.status() == "runtime_owned"
+        assert runtime_handle.debug_status()["state"] == "runtime_owned"
+        runtime_handle.close()
+        assert runtime_handle.status() == "closed"
+        assert runtime_handle.debug_status()["released"] is True
+
+    assert client.released_tokens == [b"lease"]
+
+
+def test_retained_prefetch_retention_policy_round_trips_ttl_and_idle_retire():
+    policy = PrefetchRetentionPolicy(
+        expire_if_unacquired_after_ms=10_000,
+        idle_ttl_after_last_release_ms=500,
+        materialization_timeout_ms=30_000,
+        allow_acquire_after_creator_exit=True,
+    )
+
+    round_tripped = PrefetchRetentionPolicy.from_proto(policy.to_proto())
+
+    assert round_tripped.expire_if_unacquired_after_ms == 10_000
+    assert round_tripped.idle_ttl_after_last_release_ms == 500
+    assert round_tripped.materialization_timeout_ms == 30_000
+    assert round_tripped.allow_acquire_after_creator_exit is True
 
 
 def test_acquire_retained_serving_binding_acquires_local_ready(monkeypatch):
@@ -365,13 +444,17 @@ def test_transfer_to_runtime_moves_close_ownership():
             target_device=torch.device("cuda:0"),
             restore_fn=lambda **_kwargs: {"w": torch.empty((1,), dtype=torch.float32)},
         )
+        assert attached.authority is authority
         runtime_handle = attached.transfer_to_runtime()
+        assert runtime_handle.authority is authority
+        assert runtime_handle.release_contract is lease.release_contract
         attached.close()
         assert runtime_handle.binding_layout_id == "layout-1"
         runtime_handle.close()
         runtime_handle.close()
 
     assert client.released_tokens == [b"lease"]
+    assert runtime_handle.release_contract.released is True
 
 
 def test_restored_lease_releases_on_context_exit_when_not_transferred():

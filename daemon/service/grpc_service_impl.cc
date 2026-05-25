@@ -665,60 +665,6 @@ Status StoreDaemonServiceImpl::ActivateStableLocalBacking(
   return Status::OK;
 }
 
-Status StoreDaemonServiceImpl::RegisterVramRegion(
-    grpc::ServerContext* ctx,
-    const v2::RegisterVramRegionRequest* req,
-    v2::RegisterVramRegionResponse* resp) {
-  v2::RegisterRegionRequest generic_req;
-  if (req->has_session_id()) {
-    generic_req.set_session_id(req->session_id());
-  }
-  generic_req.set_memory_kind(v2::REGION_MEMORY_KIND_VRAM);
-  generic_req.set_owner_pid(req->owner_pid());
-  generic_req.set_size_bytes(req->size_bytes());
-  generic_req.set_ttl_ms(req->ttl_ms());
-  if (req->has_region_name()) {
-    generic_req.set_region_name(req->region_name());
-  }
-  generic_req.set_device_id(req->device_id());
-  generic_req.set_cuda_ipc_handle(req->cuda_ipc_handle());
-
-  v2::RegisterRegionResponse generic_resp;
-  auto status = RegisterRegion(ctx, &generic_req, &generic_resp);
-  if (!status.ok()) {
-    return status;
-  }
-  resp->set_region_id(generic_resp.region().region_id());
-  resp->set_ttl_ms(generic_resp.ttl_ms());
-  if (generic_resp.has_expires_at()) {
-    *resp->mutable_expires_at() = generic_resp.expires_at();
-  }
-  return Status::OK;
-}
-
-Status StoreDaemonServiceImpl::UnregisterVramRegion(
-    grpc::ServerContext* ctx,
-    const v2::UnregisterVramRegionRequest* req,
-    v2::UnregisterVramRegionResponse* resp) {
-  v2::UnregisterRegionRequest generic_req;
-  if (req->has_session_id()) {
-    generic_req.set_session_id(req->session_id());
-  }
-  generic_req.set_region_id(req->region_id());
-  generic_req.set_owner_pid(req->owner_pid());
-  if (req->has_force()) {
-    generic_req.set_force(req->force());
-  }
-
-  v2::UnregisterRegionResponse generic_resp;
-  auto status = UnregisterRegion(ctx, &generic_req, &generic_resp);
-  if (!status.ok()) {
-    return status;
-  }
-  resp->set_released(generic_resp.released());
-  return Status::OK;
-}
-
 Status StoreDaemonServiceImpl::DeregisterArtifact(
     grpc::ServerContext* ctx,
     const v2::DeregisterArtifactRequest* req,
@@ -818,8 +764,8 @@ Status StoreDaemonServiceImpl::DeregisterArtifact(
         global_store_client_.get(), artifact_id, opts_.storage_path, resp);
   }
 
-  // Keep version keys append-only, but retire local disk-import fallback for this artifact
-  // so old versions cannot be re-materialized through daemon-local source paths.
+  // Keep version keys append-only, but retire the daemon-local disk source for
+  // this artifact so old versions cannot be re-materialized from local state.
   if (source_registry_ != nullptr) {
     const bool erased = source_registry_->erase_binding(artifact_id);
     if (!erased) {

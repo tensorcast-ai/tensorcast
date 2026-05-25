@@ -88,7 +88,7 @@ class FakeDaemonCtl:
             cache_ttl_seconds=int(self.cache_ttl_seconds),
         )
 
-    def import_artifact_from_path_v2(self, *, path: str, verify_checksums: bool = True):
+    def import_artifact_from_path(self, *, path: str, verify_checksums: bool = True):
         self.resolve_disk_calls.append((path, bool(verify_checksums)))
         artifact_id = self.disk_artifacts.get(path, path)
 
@@ -103,10 +103,10 @@ class FakeDaemonCtl:
         resp.generation = 0
         return resp
 
-    def import_artifact_from_path_stream_v2(
+    def import_artifact_from_path_stream(
         self, *, path: str, verify_checksums: bool = True
     ):
-        resp = self.import_artifact_from_path_v2(
+        resp = self.import_artifact_from_path(
             path=path,
             verify_checksums=verify_checksums,
         )

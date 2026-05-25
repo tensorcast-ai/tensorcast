@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
 import hashlib
 import logging
 import threading
@@ -16,9 +15,11 @@ from datetime import timezone
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     Mapping,
     Sequence,
     TypedDict,
+    cast,
 )
 
 import torch
@@ -60,6 +61,7 @@ from tensorcast.api.store.mapped_binding import (
     view_narrow_ranges,
 )
 from tensorcast.api.store.materialization import (
+    GetIntoResult,
     MaterializationPipeline,
     _resolve_source_policy_from_options,
 )
@@ -71,13 +73,44 @@ from tensorcast.api.store.owned_binding_layout import (
 )
 from tensorcast.api.store.owned_binding_slot import (
     OwnedBindingSlot,
-    _materialization_diagnostics_from_response,
     restore_owned_binding_tensors,
 )
-from tensorcast.api.store.region_utils import collect_storage_bases
+from tensorcast.api.store.realization_kernel import (
+    ArtifactRealizationHandle,
+    ArtifactRealizationReport,
+    ArtifactRealizationSpec,
+    RealizationTargetKind,
+    RealizationTargetPlan,
+    ResolvedArtifactSelection,
+    binding_materialization_diagnostics_from_response,
+    emit_artifact_realization_profile_event,
+    envelope_for_binding,
+    envelope_for_caller_tensors,
+    envelope_for_mounted_source,
+    envelope_for_retained_binding,
+    envelope_for_retained_replica,
+    envelope_for_target_set,
+    envelope_for_tensor_dict,
+    lifecycle_plan_for_envelope,
+    materialization_source_label,
+    mounted_source_target_digest,
+    publishability_report_for,
+    report_for_binding_realization,
+    report_for_mounted_source,
+    report_for_target_set,
+    representation_admission_for_target,
+    resolve_artifact_selection,
+    retained_binding_lifecycle_plan_for,
+    retained_binding_reports_for,
+    risk_labels_for_target,
+    strategy_plan_for_execution,
+)
 from tensorcast.api.store.retry import (
     map_materialization_error,
     raise_mapped_materialization_error,
+)
+from tensorcast.api.store.target_region_lifecycle import (
+    register_store_target_regions_for_realization as _register_target_regions_for_realization,
 )
 from tensorcast.api.store.types import (
     ArtifactError,
@@ -91,17 +124,11 @@ from tensorcast.api.store.view_composer import (
     compute_view_id,
 )
 from tensorcast.common.identity import is_byte_artifact_id, validate_byte_artifact_cgid
-from tensorcast.common.selection_contract import (
-    build_artifact_selection,
-    compute_selected_index_bytes,
-)
+from tensorcast.common.selection_contract import compute_selected_index_bytes
 from tensorcast.common.selection_identity import (
     compute_view_subset_hash,
 )
-from tensorcast.profile_utils import (
-    emit_tensorcast_profile_event,
-    tensorcast_profile_stage,
-)
+from tensorcast.profile_utils import tensorcast_profile_stage
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.operation.v1 import operation_pb2
@@ -219,6 +246,7 @@ class PrefetchedReplica:
     device_id: int
     daemon_id: str
     source: str | None
+    report: ArtifactRealizationReport | None = None
 
 
 ServingPrefetchResult = PrefetchedServingBinding | PrefetchedServingBindingSet
@@ -254,6 +282,117 @@ def _serving_prefetch_result_from_operation_response(
         status_code="DATA_LOSS",
         retryable=False,
     )
+
+
+def _digest_hex(label: str, payload: bytes) -> str:
+    digest = hashlib.sha256()
+    digest.update(label.encode("utf-8"))
+    digest.update(len(payload).to_bytes(8, "big"))
+    digest.update(payload)
+    return digest.hexdigest()
+
+
+def _serving_target_layout_digest(
+    target: ServingBindingTarget | ServingBindingSetTarget,
+    *,
+    target_bytes: bytes,
+) -> str:
+    if isinstance(target, ServingBindingTarget):
+        return str(target.resolved_layout.target_layout_hash or "") or _digest_hex(
+            "serving-target-layout",
+            target_bytes,
+        )
+    return _digest_hex("serving-target-set-layout", target_bytes)
+
+
+def _serving_target_copy_plan_digest(
+    target: ServingBindingTarget | ServingBindingSetTarget,
+    *,
+    target_bytes: bytes,
+) -> str:
+    if isinstance(target, ServingBindingTarget):
+        digest = str(target.resolved_layout.spec_digest or "")
+        if digest:
+            return digest
+        copy_plan_bytes = bytes(target.resolved_layout.copy_plan_bytes or b"")
+        if copy_plan_bytes:
+            return _digest_hex("serving-target-copy-plan", copy_plan_bytes)
+    return _digest_hex("serving-target-copy-plan", target_bytes)
+
+
+def _with_retained_binding_report(
+    result: ServingPrefetchResult,
+    *,
+    selection: ResolvedArtifactSelection,
+    target: ServingBindingTarget | ServingBindingSetTarget,
+    target_bytes: bytes,
+    operation_id: str,
+) -> ServingPrefetchResult:
+    retained_bindings = retained_binding_reports_for(result)
+    is_target_set = isinstance(result, PrefetchedServingBindingSet)
+    target_plan = RealizationTargetPlan(
+        kind="target_set" if is_target_set else "retained_binding",
+        target_layout_digest=_serving_target_layout_digest(
+            target,
+            target_bytes=target_bytes,
+        ),
+        copy_plan_digest=_serving_target_copy_plan_digest(
+            target,
+            target_bytes=target_bytes,
+        ),
+        member_count=len(retained_bindings),
+    )
+    envelope = (
+        envelope_for_target_set(retained_bindings)
+        if is_target_set
+        else envelope_for_retained_binding(retained_bindings)
+    )
+    envelope.validate_for_target(target_plan)
+    if is_target_set:
+        report = report_for_target_set(
+            selection=selection,
+            target_plan=target_plan,
+            target=target,
+            result=result,
+            envelope=envelope,
+            operation_id=operation_id,
+        )
+        emit_artifact_realization_profile_event(report)
+        members = tuple(
+            member.model_copy(update={"report": report}) for member in result.members
+        )
+        return result.model_copy(update={"report": report, "members": members})
+
+    report = ArtifactRealizationReport(
+        target_kind="retained_binding",
+        source_selection_digest=selection.source_selection_digest,
+        target_layout_digest=target_plan.target_layout_digest,
+        copy_plan_digest=target_plan.copy_plan_digest,
+        artifact_id=selection.artifact_id,
+        view_id=selection.view_id,
+        artifact_profile=selection.artifact_profile,
+        authority_scope=selection.authority_scope,
+        generation_hint=selection.generation_hint,
+        envelope=envelope,
+        target_plan=target_plan,
+        strategy_plan=strategy_plan_for_execution(envelope=envelope),
+        representation_admission=representation_admission_for_target(target_plan),
+        lifecycle_plan=retained_binding_lifecycle_plan_for(
+            retained_bindings,
+            envelope=envelope,
+        ),
+        operation_id=operation_id,
+        operation_backend="daemon_prefetch_serving_binding",
+        risk_labels=risk_labels_for_target(
+            target_plan,
+            envelope,
+            source_selection_digest=selection.source_selection_digest,
+        ),
+        retained_bindings=retained_bindings,
+        publishability=publishability_report_for(),
+    )
+    emit_artifact_realization_profile_event(report)
+    return result.model_copy(update={"report": report})
 
 
 def _operation_status_from_proto(
@@ -338,6 +477,36 @@ class MaterializationDiagnostics:
 class TensorDictMaterializationResult:
     tensors: dict[str, torch.Tensor]
     diagnostics: MaterializationDiagnostics
+    release_fn: Callable[[], None] | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    def release(self) -> None:
+        if self.release_fn is not None:
+            self.release_fn()
+
+
+def _release_materialized_once(
+    *,
+    pipeline: object,
+    runtime: object,
+    payload: MaterializationPayload,
+) -> Callable[[], None]:
+    released = False
+    lock = threading.Lock()
+
+    def release_materialized() -> None:
+        nonlocal released
+        with lock:
+            if released:
+                return
+            release = getattr(pipeline, "_release_materialized", None)
+            ensure_client = getattr(runtime, "ensure_client", None)
+            if callable(release) and callable(ensure_client):
+                release(payload, ensure_client())
+            released = True
+
+    return release_materialized
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,20 +517,6 @@ class _SelectionMaterializationInputs:
     view_index_hint: bytes | None
     view_id_hint: str | None
     view_subset_hash: bytes | None
-
-
-def _materialization_source_label(
-    source: store_daemon_pb2.MaterializationSource | None,
-) -> str | None:
-    if source is None:
-        return None
-    if source == store_daemon_pb2.MATERIALIZATION_SOURCE_P2P:
-        return "p2p"
-    if source == store_daemon_pb2.MATERIALIZATION_SOURCE_DISK:
-        return "disk"
-    if source == store_daemon_pb2.MATERIALIZATION_SOURCE_LOCAL_REPLICA:
-        return "local_replica"
-    return None
 
 
 def _materialization_ticket_status_label(
@@ -410,85 +565,6 @@ def _ctx_timeout_s(ctx: CallContext | None) -> float | None:
     return max(0.001, timeout_s)
 
 
-def _is_active_reference_cleanup_error(exc: Exception) -> bool:
-    message = str(exc).strip().lower()
-    return "region has active references" in message or "active reference" in message
-
-
-def _cleanup_region_ids_best_effort(
-    *,
-    store: "Store",
-    region_ids: Sequence[str],
-    context: str,
-) -> None:
-    for region_id in region_ids:
-        try:
-            released = store.unregister_vram_region(region_id)
-            if not released:
-                logger.warning(
-                    "%s: unregister_vram_region returned False (region_id=%s)",
-                    context,
-                    region_id,
-                )
-            continue
-        except Exception as exc:  # noqa: BLE001
-            if not _is_active_reference_cleanup_error(exc):
-                logger.warning(
-                    "%s: unregister_vram_region failed (region_id=%s): %s",
-                    context,
-                    region_id,
-                    exc,
-                )
-                continue
-            try:
-                forced = store.unregister_vram_region(region_id, force=True)
-            except Exception as force_exc:  # noqa: BLE001
-                logger.warning(
-                    "%s: active-reference cleanup failed for region_id=%s "
-                    "(normal=%s, force=%s)",
-                    context,
-                    region_id,
-                    exc,
-                    force_exc,
-                )
-                continue
-            if not forced:
-                logger.warning(
-                    "%s: region cleanup deferred due to active references "
-                    "(region_id=%s)",
-                    context,
-                    region_id,
-                )
-
-
-def _bind_region_registration_error(
-    *,
-    exc: Exception,
-    requested_regions: int,
-    registered_regions: int,
-) -> ArtifactError:
-    detail = str(exc).strip() or exc.__class__.__name__
-    lowered = detail.lower()
-    if "capacity reached" in lowered or isinstance(exc, MemoryError):
-        return ArtifactError(
-            "bind_into region registration exhausted daemon registry capacity: "
-            f"requested_regions={requested_regions}, "
-            f"registered_before_failure={registered_regions}, "
-            f"cause={detail}. Increase the daemon max_vram_regions limit "
-            "for large bind_into workloads.",
-            status_code="RESOURCE_EXHAUSTED",
-            retryable=False,
-        )
-    return ArtifactError(
-        "bind_into failed to register target CUDA regions: "
-        f"requested_regions={requested_regions}, "
-        f"registered_before_failure={registered_regions}, "
-        f"cause={detail}. bind_into requires user-owned CUDA memory.",
-        status_code="FAILED_PRECONDITION",
-        retryable=False,
-    )
-
-
 def _build_transport_operation_id(
     *,
     base_operation_id: str,
@@ -496,6 +572,22 @@ def _build_transport_operation_id(
 ) -> str:
     _ = ctx
     return base_operation_id
+
+
+def _close_client_binding_best_effort(
+    runtime: "StoreRuntimeContext",
+    binding_id: str,
+    *,
+    context: str,
+) -> None:
+    try:
+        runtime.ensure_client().close_owned_binding(binding_id=binding_id)
+    except Exception:
+        logger.exception(
+            "%s failed to close client binding during rollback: binding_id=%s",
+            context,
+            binding_id,
+        )
 
 
 def _register_client_binding(
@@ -506,7 +598,6 @@ def _register_client_binding(
     canonical_index_bytes: bytes,
     selection: common_pb2.ArtifactSelection | None,
     source_artifact_id: str | None,
-    binding_current_value_publication_token: bytes | None,
     ctx: CallContext | None,
 ) -> tuple[str, BindingLayout, BindingValueMetadata | None, bytes | None]:
     binding_layout = build_binding_layout(
@@ -526,33 +617,38 @@ def _register_client_binding(
         source_artifact_id=source_artifact_id,
         timeout_s=timeout_s if timeout_s is not None else 60.0,
     )
+    binding_id = str(response.binding_id)
     try:
         metadata = parse_binding_value_or_raise(
-            response.current_value if hasattr(response, "current_value") else None,
+            response.current_value,
             rpc_name="CreateBinding",
-            expected_binding_id=str(response.binding_id),
+            expected_binding_id=binding_id,
             expected_binding_layout_id=binding_layout.binding_layout_id,
         )
     except ArtifactError:
-        with contextlib.suppress(Exception):
-            runtime.ensure_client().close_owned_binding(
-                binding_id=str(response.binding_id)
-            )
+        _close_client_binding_best_effort(
+            runtime,
+            binding_id,
+            context="CreateBinding current_value parse",
+        )
         raise
     if metadata is None:
+        _close_client_binding_best_effort(
+            runtime,
+            binding_id,
+            context="CreateBinding missing current_value",
+        )
         raise ArtifactError(
             "CreateBinding returned empty current_value for artifact-backed binding",
             status_code="DATA_LOSS",
             retryable=False,
         )
-    response_publication_token = getattr(
-        response, "binding_current_value_publication_token", None
-    )
+    response_publication_token = bytes(response.binding_current_value_publication_token)
     return (
-        str(response.binding_id),
+        binding_id,
         binding_layout,
         metadata,
-        response_publication_token or binding_current_value_publication_token,
+        response_publication_token or None,
     )
 
 
@@ -591,7 +687,7 @@ class PlacementPin:
             )
         )
         new_token = self.capability_token
-        if hasattr(resp, "lease_token") and resp.lease_token:
+        if resp.lease_token:
             new_token = _encode_capability_token(bytes(resp.lease_token))
         expires_at_ms: int | None = None
         if resp.HasField("expires_at"):
@@ -740,6 +836,437 @@ class Artifact:
             generation=self._generation,
         )
 
+    def _realization_handle(
+        self,
+        *,
+        target_kind: RealizationTargetKind,
+        report: ArtifactRealizationReport,
+        tensor_dict_value: Mapping[str, Any] | None = None,
+        binding_value: Any | None = None,
+        prefetch_value: Any | None = None,
+        promote_fn: Callable[..., Any] | None = None,
+        attach_fn: Callable[..., Any] | None = None,
+        close_fn: Callable[[], None] | None = None,
+    ) -> ArtifactRealizationHandle:
+        handle = ArtifactRealizationHandle(
+            target_kind=target_kind,
+            report=report,
+            tensor_dict_value=tensor_dict_value,
+            binding_value=binding_value,
+            prefetch_value=prefetch_value,
+            promote_fn=promote_fn,
+            attach_fn=attach_fn,
+            close_fn=close_fn,
+        )
+        emit_artifact_realization_profile_event(handle.report)
+        return handle
+
+    def realize(
+        self,
+        spec: ArtifactRealizationSpec,
+        *,
+        ctx: CallContext | None = None,
+    ) -> ArtifactRealizationHandle:
+        if spec.target_kind == "tensor_dict":
+            if spec.device is None:
+                raise ArtifactError(
+                    "tensor_dict realization requires device",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            selection = self._resolve_realization_selection()
+            result = self._execute_tensor_dict_with_diagnostics(
+                device=cast(torch.device | str, spec.device),
+                options=cast("GetArtifactOptions | None", spec.options),
+                ctx=ctx,
+            )
+            envelope = envelope_for_tensor_dict(
+                result.tensors,
+                source=result.diagnostics.source,
+                retry_reason_buckets=result.diagnostics.retry_reason_buckets,
+            )
+            target_plan = RealizationTargetPlan(
+                kind="tensor_dict",
+                device=cast(torch.device | str, spec.device),
+            )
+            envelope.validate_for_target(target_plan)
+            report = ArtifactRealizationReport(
+                target_kind="tensor_dict",
+                source_selection_digest=selection.source_selection_digest,
+                target_layout_digest=target_plan.target_layout_digest,
+                copy_plan_digest=target_plan.copy_plan_digest,
+                artifact_id=selection.artifact_id,
+                view_id=selection.view_id,
+                artifact_profile=selection.artifact_profile,
+                authority_scope=selection.authority_scope,
+                generation_hint=selection.generation_hint,
+                envelope=envelope,
+                target_plan=target_plan,
+                strategy_plan=strategy_plan_for_execution(
+                    envelope=envelope,
+                    options=spec.options,
+                    ctx=ctx,
+                ),
+                representation_admission=representation_admission_for_target(
+                    target_plan
+                ),
+                lifecycle_plan=lifecycle_plan_for_envelope(target_plan, envelope),
+                materialize_sec=result.diagnostics.materialize_sec,
+                tensor_bind_sec=result.diagnostics.tensor_bind_sec,
+                total_sec=result.diagnostics.total_sec,
+                source=result.diagnostics.source,
+                operation_backend="daemon_materialization",
+                risk_labels=risk_labels_for_target(
+                    target_plan,
+                    envelope,
+                    source_selection_digest=selection.source_selection_digest,
+                ),
+                publishability=publishability_report_for(),
+                materialization_diagnostics=result.diagnostics,
+            )
+            return self._realization_handle(
+                target_kind="tensor_dict",
+                report=report,
+                tensor_dict_value=result.tensors,
+                close_fn=result.release,
+            )
+        if spec.target_kind == "caller_tensors":
+            if spec.target is None:
+                raise ArtifactError(
+                    "caller_tensors realization requires target tensors",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            selection = self._resolve_realization_selection()
+            target_digest = self._target_tensors_digest(spec.target)
+            target_plan = RealizationTargetPlan(
+                kind="caller_tensors",
+                device=spec.device,
+                target_layout_digest=target_digest,
+            )
+            into_result = self._execute_tensor_dict_into(
+                cast(dict[str, torch.Tensor], spec.target),
+                device=cast(torch.device | str | None, spec.device),
+                options=cast("GetArtifactOptions | None", spec.options),
+                ctx=ctx,
+            )
+            envelope = envelope_for_caller_tensors(
+                cast(Mapping[str, object], spec.target),
+                used_region_backed=(
+                    into_result.used_region_backed if into_result is not None else None
+                ),
+                actual_total_bytes=(
+                    into_result.total_bytes if into_result is not None else None
+                ),
+                fallback_reason_buckets=(
+                    into_result.fallback_reason_buckets
+                    if into_result is not None
+                    else None
+                ),
+            )
+            envelope.validate_for_target(target_plan)
+            report = ArtifactRealizationReport(
+                target_kind="caller_tensors",
+                source_selection_digest=selection.source_selection_digest,
+                target_layout_digest=target_digest,
+                copy_plan_digest=None,
+                artifact_id=selection.artifact_id,
+                view_id=selection.view_id,
+                artifact_profile=selection.artifact_profile,
+                authority_scope=selection.authority_scope,
+                generation_hint=selection.generation_hint,
+                envelope=envelope,
+                target_plan=target_plan,
+                strategy_plan=strategy_plan_for_execution(
+                    envelope=envelope,
+                    options=spec.options,
+                    ctx=ctx,
+                ),
+                representation_admission=representation_admission_for_target(
+                    target_plan
+                ),
+                lifecycle_plan=lifecycle_plan_for_envelope(target_plan, envelope),
+                operation_backend="daemon_materialize_into_target",
+                source=into_result.source if into_result is not None else None,
+                risk_labels=risk_labels_for_target(
+                    target_plan,
+                    envelope,
+                    source_selection_digest=selection.source_selection_digest,
+                ),
+                publishability=publishability_report_for(),
+            )
+            return self._realization_handle(
+                target_kind="caller_tensors",
+                report=report,
+            )
+        if spec.target_kind == "binding_owned":
+            if spec.device is None:
+                raise ArtifactError(
+                    "binding realization requires device",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            selection = self._resolve_realization_selection()
+            binding = self._execute_bind_owned(
+                cast(torch.device | str, spec.device),
+                mapping=cast(CopyPlan | None, spec.mapping),
+                packing=spec.packing,
+                options=cast("GetArtifactOptions | None", spec.options),
+                capacity_bytes=spec.capacity_bytes,
+                publish=spec.publish,
+                serving_runtime_policy=cast(
+                    ServingRuntimePolicyInput | None,
+                    spec.serving_runtime_policy,
+                ),
+                ctx=ctx,
+            )
+            binding_layout_id = str(getattr(binding, "binding_layout_id", "") or "")
+            target_plan = RealizationTargetPlan(
+                kind="binding_owned",
+                device=spec.device,
+                binding_layout_id=binding_layout_id,
+            )
+            envelope = envelope_for_binding(
+                binding,
+                target_kind="binding_owned",
+                publish_requested=spec.publish,
+            )
+            envelope.validate_for_target(target_plan)
+            report = report_for_binding_realization(
+                target_kind="binding_owned",
+                selection=selection,
+                target_plan=target_plan,
+                binding=binding,
+                envelope=envelope,
+                publish_requested=spec.publish,
+                options=spec.options,
+                ctx=ctx,
+            )
+            return self._realization_handle(
+                target_kind="binding_owned",
+                report=report,
+                binding_value=binding,
+                close_fn=(
+                    binding.close if callable(getattr(binding, "close", None)) else None
+                ),
+            )
+        if spec.target_kind == "binding_adopted":
+            if spec.target is None:
+                raise ArtifactError(
+                    "adopted binding realization requires target tensors",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            selection = self._resolve_realization_selection()
+            target_digest = self._target_tensors_digest(spec.target)
+            binding = self._execute_bind_into(
+                cast(Mapping[str, torch.Tensor], spec.target),
+                mapping=cast(CopyPlan | None, spec.mapping),
+                packing=spec.packing,
+                options=cast("GetArtifactOptions | None", spec.options),
+                publish=spec.publish,
+                serving_runtime_policy=cast(
+                    ServingRuntimePolicyInput | None,
+                    spec.serving_runtime_policy,
+                ),
+                ctx=ctx,
+            )
+            binding_layout_id = str(getattr(binding, "binding_layout_id", "") or "")
+            copy_plan_digest = (
+                compute_mapped_view_id(
+                    canonical_index_bytes=selection.canonical_index_bytes,
+                    source_view_id=selection.view_id,
+                    plan=normalize_copy_plan(cast(CopyPlan, spec.mapping)),
+                    target_tensors=cast(Mapping[str, torch.Tensor], spec.target),
+                )
+                if spec.mapping is not None
+                else None
+            )
+            target_plan = RealizationTargetPlan(
+                kind="binding_adopted",
+                target_layout_digest=target_digest,
+                copy_plan_digest=copy_plan_digest,
+                binding_layout_id=binding_layout_id,
+            )
+            envelope = envelope_for_binding(
+                binding,
+                target_kind="binding_adopted",
+                target_tensors=cast(Mapping[str, object], spec.target),
+                publish_requested=spec.publish,
+            )
+            envelope.validate_for_target(target_plan)
+            report = report_for_binding_realization(
+                target_kind="binding_adopted",
+                selection=selection,
+                target_plan=target_plan,
+                binding=binding,
+                envelope=envelope,
+                publish_requested=spec.publish,
+                options=spec.options,
+                ctx=ctx,
+            )
+            return self._realization_handle(
+                target_kind="binding_adopted",
+                report=report,
+                binding_value=binding,
+                close_fn=(
+                    binding.close if callable(getattr(binding, "close", None)) else None
+                ),
+            )
+        if spec.target_kind == "mounted_source":
+            if self._key_hint:
+                raise ArtifactError(
+                    "mounted_source realization requires an explicit msa1 artifact id, not a key",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            source_artifact_id = self._ensure_identified()
+            if not source_artifact_id.startswith("msa1:"):
+                raise ArtifactError(
+                    "mounted_source realization requires an msa1 mounted-source artifact",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            store, _, _ = self._require_components()
+            promote = getattr(store, "_promote_mounted_source_direct", None)
+            if not callable(promote):
+                raise ArtifactError(
+                    "mounted_source realization requires Store promotion support",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            promoted = promote(
+                source_artifact_id,
+                verify_checksums=spec.verify_checksums,
+                timeout_s=spec.timeout_s,
+            )
+            promoted_artifact_id = str(getattr(promoted, "artifact_id", "") or "")
+            canonical_index_bytes = bytes(
+                getattr(promoted, "_canonical_index_bytes", None) or b""
+            )
+            promoted_generation_raw = getattr(promoted, "_generation", None)
+            promoted_generation = (
+                int(promoted_generation_raw)
+                if promoted_generation_raw is not None
+                else None
+            )
+            selection = resolve_artifact_selection(
+                artifact_id=source_artifact_id,
+                canonical_index_bytes=canonical_index_bytes,
+                generation_hint=self._generation,
+            )
+            target_plan = RealizationTargetPlan(
+                kind="mounted_source",
+                target_layout_digest=mounted_source_target_digest(
+                    source_artifact_id=source_artifact_id,
+                    promoted_artifact_id=promoted_artifact_id,
+                    canonical_index_bytes=canonical_index_bytes,
+                ),
+            )
+            envelope = envelope_for_mounted_source(
+                canonical_index_bytes=canonical_index_bytes,
+            )
+            envelope.validate_for_target(target_plan)
+            report = report_for_mounted_source(
+                selection=selection,
+                promoted_artifact_id=promoted_artifact_id,
+                generation=promoted_generation,
+                canonical_index_bytes=canonical_index_bytes,
+                verify_checksums=spec.verify_checksums,
+                target_plan=target_plan,
+                envelope=envelope,
+            )
+            return self._realization_handle(
+                target_kind="mounted_source",
+                report=report,
+                promote_fn=lambda: promoted,
+            )
+        if spec.target_kind == "model_runtime":
+            raise ArtifactError(
+                "model_runtime realization is not lowered through Artifact.realize yet",
+                status_code="UNIMPLEMENTED",
+                retryable=False,
+            )
+        raise ArtifactError(
+            f"Unsupported realization target kind: {spec.target_kind}",
+            status_code="UNIMPLEMENTED",
+            retryable=False,
+        )
+
+    def realize_async(
+        self,
+        spec: ArtifactRealizationSpec,
+        *,
+        ctx: CallContext | None = None,
+    ) -> Operation[PrefetchedReplica] | Operation[ServingPrefetchResult]:
+        if spec.target_kind == "retained_replica":
+            if spec.device is None:
+                raise ArtifactError(
+                    "retained_replica realization requires device",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            return self._execute_prefetch(
+                device=cast(torch.device | str | int, spec.device),
+                options=cast("GetArtifactOptions | None", spec.options),
+                ctx=ctx,
+            )
+        if spec.target_kind == "retained_binding":
+            if spec.target is None:
+                raise ArtifactError(
+                    "retained_binding realization requires target",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if isinstance(spec.target, ServingBindingSetTarget):
+                raise ArtifactError(
+                    "ServingBindingSetTarget requires target_set realization",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            readiness = (
+                cast(ServingBindingReadiness, spec.readiness)
+                if spec.readiness is not None
+                else "serving_local_ready"
+            )
+            return self._execute_prefetch(
+                target=cast(
+                    ServingBindingTarget | ServingBindingSetTarget, spec.target
+                ),
+                readiness=readiness,
+                retention=cast(PrefetchRetentionPolicy | None, spec.retention),
+                ctx=ctx,
+            )
+        if spec.target_kind == "target_set":
+            if spec.target is None:
+                raise ArtifactError(
+                    "target_set realization requires target",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if not isinstance(spec.target, ServingBindingSetTarget):
+                raise ArtifactError(
+                    "target_set realization requires ServingBindingSetTarget",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            readiness = (
+                cast(ServingBindingReadiness, spec.readiness)
+                if spec.readiness is not None
+                else "serving_local_ready"
+            )
+            return self._execute_prefetch(
+                target=spec.target,
+                readiness=readiness,
+                retention=cast(PrefetchRetentionPolicy | None, spec.retention),
+                ctx=ctx,
+            )
+        raise ArtifactError(
+            f"Unsupported async realization target kind: {spec.target_kind}",
+            status_code="UNIMPLEMENTED",
+            retryable=False,
+        )
+
     def tensor_dict(
         self,
         *,
@@ -747,14 +1274,37 @@ class Artifact:
         options: GetArtifactOptions | None = None,
         ctx: CallContext | None = None,
     ) -> dict[str, torch.Tensor]:
-        result = self.tensor_dict_with_diagnostics(
-            device=device,
-            options=options,
+        handle = self.realize(
+            ArtifactRealizationSpec.tensor_dict(device=device, options=options),
             ctx=ctx,
         )
-        return result.tensors
+        return handle.tensor_dict()
 
     def tensor_dict_with_diagnostics(
+        self,
+        *,
+        device: torch.device | str,
+        options: GetArtifactOptions | None = None,
+        ctx: CallContext | None = None,
+    ) -> TensorDictMaterializationResult:
+        handle = self.realize(
+            ArtifactRealizationSpec.tensor_dict(device=device, options=options),
+            ctx=ctx,
+        )
+        diagnostics = handle.report.materialization_diagnostics
+        if not isinstance(diagnostics, MaterializationDiagnostics):
+            raise ArtifactError(
+                "tensor_dict realization did not produce materialization diagnostics",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        return TensorDictMaterializationResult(
+            tensors=handle.tensor_dict(),
+            diagnostics=diagnostics,
+            release_fn=handle.close,
+        )
+
+    def _execute_tensor_dict_with_diagnostics(
         self,
         *,
         device: torch.device | str,
@@ -817,7 +1367,7 @@ class Artifact:
             for name, value in payload_bind_timing.items():
                 breakdown[f"bind_{name}"] = float(value)
             diagnostics = MaterializationDiagnostics(
-                source=_materialization_source_label(payload.source),
+                source=materialization_source_label(payload.source),
                 source_code=(
                     int(payload.source) if payload.source is not None else None
                 ),
@@ -864,34 +1414,15 @@ class Artifact:
                     "tc.store.total_sec": diagnostics.total_sec,
                 },
             )
-            emit_tensorcast_profile_event(
-                "tensorcast",
-                "artifact.tensor_dict_with_diagnostics",
-                logger=logger,
-                payload={
-                    "artifact_id": artifact_id,
-                    "source": diagnostics.source,
-                    "source_code": diagnostics.source_code,
-                    "ticket_status": diagnostics.ticket_status,
-                    "disk_path": diagnostics.disk_path,
-                    "tensor_count": diagnostics.tensor_count,
-                    "total_bytes": diagnostics.total_bytes,
-                    "generation": diagnostics.generation,
-                    "materialize_sec": diagnostics.materialize_sec,
-                    "tensor_bind_sec": diagnostics.tensor_bind_sec,
-                    "total_sec": diagnostics.total_sec,
-                    "retry_attempts": diagnostics.retry_attempts,
-                    "retry_reason_buckets": diagnostics.retry_reason_buckets,
-                    "budget_deadline_sec": diagnostics.budget_deadline_sec,
-                    "budget_elapsed_sec": diagnostics.budget_elapsed_sec,
-                    "budget_remaining_sec": diagnostics.budget_remaining_sec,
-                    "budget_exit_reason": diagnostics.budget_exit_reason,
-                    "breakdown": diagnostics.breakdown,
-                },
+            release_materialized = _release_materialized_once(
+                pipeline=pipeline,
+                runtime=runtime,
+                payload=payload,
             )
             return TensorDictMaterializationResult(
                 tensors=output,
                 diagnostics=diagnostics,
+                release_fn=release_materialized,
             )
         finally:
             if state is None:
@@ -902,11 +1433,9 @@ class Artifact:
         name: str,
         *,
         device: torch.device | str,
-        cache: bool = True,  # cache retained for compatibility, no-op in v2
         options: GetArtifactOptions | None = None,
         ctx: CallContext | None = None,
     ) -> torch.Tensor:
-        _ = cache  # cache parameter is reserved for future use
         result = self.subset([name]).tensor_dict(
             device=device, options=options, ctx=ctx
         )
@@ -926,9 +1455,27 @@ class Artifact:
         options: GetArtifactOptions | None = None,
         ctx: CallContext | None = None,
     ) -> None:
+        self.realize(
+            ArtifactRealizationSpec.caller_tensors(
+                target=target,
+                device=device,
+                options=options,
+            ),
+            ctx=ctx,
+        ).complete()
+
+    def _execute_tensor_dict_into(
+        self,
+        target: dict[str, torch.Tensor],
+        *,
+        device: torch.device | str | None = None,
+        options: GetArtifactOptions | None = None,
+        ctx: CallContext | None = None,
+    ) -> GetIntoResult | None:
         artifact_id = self._ensure_identified()
         effective_index = self._effective_index()
-        _ = self._validate_tensor_names(effective_index, None)
+        requested_names = tuple(str(name) for name in target)
+        _ = self._validate_tensor_names(effective_index, requested_names)
         _, _, pipeline = self._require_components()
         view_metadata = self._ensure_view_metadata_cache(require_index_bytes=True)
         view_spec_proto = self._view_spec.proto if self._view_spec else None
@@ -937,7 +1484,7 @@ class Artifact:
             view_metadata.view_index_bytes or None if view_metadata else None
         )
         replica_uuid = options.replica_uuid if options is not None else None
-        pipeline.get_into(
+        return pipeline.get_into(
             target,
             artifact_id=artifact_id,
             key=None,
@@ -947,6 +1494,7 @@ class Artifact:
             view_data_hash=view_data_hash,
             view_index_hint=view_index_hint,
             replica_uuid=replica_uuid,
+            tensor_names=requested_names,
             ctx=ctx,
         )
 
@@ -965,33 +1513,15 @@ class Artifact:
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        artifact_id = self._ensure_identified()
-        _, _, pipeline = self._require_components()
-        requested_names = (name,)
-        view_spec_proto = self._view_spec.proto if self._view_spec else None
-        view_data_hash = (
-            self._view_metadata.view_data_hash if self._view_metadata else None
-        )
-        view_index_hint = (
-            self._view_metadata.view_index_bytes if self._view_metadata else None
-        )
-        if view_spec_proto is not None:
-            view_index_hint = None
-        replica_uuid = options.replica_uuid if options is not None else None
         resolved_device = device if device is not None else target_tensor.device
-        pipeline.get_into(
-            {requested_names[0]: target_tensor},
-            artifact_id=artifact_id,
-            key=None,
-            device=resolved_device,
-            options=options,
-            view_spec=view_spec_proto,
-            view_data_hash=view_data_hash,
-            view_index_hint=view_index_hint,
-            replica_uuid=replica_uuid,
-            tensor_names=requested_names,
+        self.subset([name]).realize(
+            ArtifactRealizationSpec.caller_tensors(
+                target={str(name): target_tensor},
+                device=resolved_device,
+                options=options,
+            ),
             ctx=ctx,
-        )
+        ).complete()
 
     def view(
         self,
@@ -1022,6 +1552,32 @@ class Artifact:
         return ViewBuilder(artifact_ref=weakref.ref(self), composer=ViewSpecComposer())
 
     def bind(
+        self,
+        device: torch.device | str,
+        *,
+        mapping: CopyPlan | None = None,
+        packing: str = "byte_space",
+        options: GetArtifactOptions | None = None,
+        capacity_bytes: int | None = None,
+        publish: bool = False,
+        serving_runtime_policy: ServingRuntimePolicyInput | None = None,
+        ctx: CallContext | None = None,
+    ) -> Binding:
+        handle = self.realize(
+            ArtifactRealizationSpec.binding(
+                device=device,
+                mapping=mapping,
+                packing=packing,
+                options=options,
+                capacity_bytes=capacity_bytes,
+                publish=publish,
+                serving_runtime_policy=serving_runtime_policy,
+            ),
+            ctx=ctx,
+        )
+        return handle.binding()
+
+    def _execute_bind_owned(
         self,
         device: torch.device | str,
         *,
@@ -1092,6 +1648,30 @@ class Artifact:
         )
 
     def bind_into(
+        self,
+        target_tensors: Mapping[str, torch.Tensor],
+        *,
+        mapping: CopyPlan | None = None,
+        packing: str = "byte_space",
+        options: GetArtifactOptions | None = None,
+        publish: bool = False,
+        serving_runtime_policy: ServingRuntimePolicyInput | None = None,
+        ctx: CallContext | None = None,
+    ) -> Binding:
+        handle = self.realize(
+            ArtifactRealizationSpec.adopted_binding(
+                target=target_tensors,
+                mapping=mapping,
+                packing=packing,
+                options=options,
+                publish=publish,
+                serving_runtime_policy=serving_runtime_policy,
+            ),
+            ctx=ctx,
+        )
+        return handle.binding()
+
+    def _execute_bind_into(
         self,
         target_tensors: Mapping[str, torch.Tensor],
         *,
@@ -1186,33 +1766,13 @@ class Artifact:
                 )
 
         ttl_ms = 0
-
-        def _register_regions() -> tuple[str, ...]:
-            region_ids: list[str] = []
-            bases = collect_storage_bases(target_tensors)
-            try:
-                for base_ptr, nbytes in sorted(bases.items()):
-                    handle = store.register_vram_region(
-                        device_id=device_id,
-                        base_ptr=base_ptr,
-                        size_bytes=nbytes,
-                        ttl_ms=int(ttl_ms),
-                    )
-                    region_ids.append(handle.region_id)
-            except Exception as exc:  # noqa: BLE001
-                _cleanup_region_ids_best_effort(
-                    store=store,
-                    region_ids=tuple(region_ids),
-                    context="bind_into.register_regions",
-                )
-                raise _bind_region_registration_error(
-                    exc=exc,
-                    requested_regions=len(bases),
-                    registered_regions=len(region_ids),
-                ) from exc
-            return tuple(region_ids)
-
-        region_ids = _register_regions()
+        target_regions = _register_target_regions_for_realization(
+            store=store,
+            target_tensors=target_tensors,
+            device_id=device_id,
+            ttl_ms=ttl_ms,
+            context="bind_into.register_regions",
+        )
 
         selection_order: tuple[str, ...] | None = None
         if mode == "byte_space":
@@ -1258,7 +1818,7 @@ class Artifact:
                         region_layout=region_layout,
                         view_spec_proto=view_spec_proto,
                     )
-                    response = client.materialize_into_target_v2(
+                    response = client.materialize_into_target(
                         selection=selection,
                         target_layout=region_layout.layout,
                         device_uuid=device_uuid_for(device_id),
@@ -1283,19 +1843,17 @@ class Artifact:
                         }
                         and attempt == 0
                     ):
-                        _cleanup_region_ids_best_effort(
+                        target_regions.release(context="bind_into.retry_rebind")
+                        target_regions = _register_target_regions_for_realization(
                             store=store,
-                            region_ids=tuple(region_ids),
-                            context="bind_into.retry_rebind",
+                            target_tensors=target_tensors,
+                            device_id=device_id,
+                            ttl_ms=ttl_ms,
+                            context="bind_into.retry_rebind.register_regions",
                         )
-                        region_ids = _register_regions()
                         attempt += 1
                         continue
-                    _cleanup_region_ids_best_effort(
-                        store=store,
-                        region_ids=tuple(region_ids),
-                        context="bind_into.materialize_error",
-                    )
+                    target_regions.release(context="bind_into.materialize_error")
                     raise ArtifactError(
                         str(error),
                         status_code=error.status_code,
@@ -1306,11 +1864,7 @@ class Artifact:
                     response.status
                     != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
                 ):
-                    _cleanup_region_ids_best_effort(
-                        store=store,
-                        region_ids=tuple(region_ids),
-                        context="bind_into.materialize_status",
-                    )
+                    target_regions.release(context="bind_into.materialize_status")
                     raise ArtifactError(
                         "MaterializeIntoTarget returned non-success status",
                         status_code="DATA_LOSS",
@@ -1325,36 +1879,27 @@ class Artifact:
                     retryable=False,
                 )
         except Exception:
-            _cleanup_region_ids_best_effort(
-                store=store,
-                region_ids=tuple(region_ids),
-                context="bind_into.exception",
-            )
+            target_regions.release(context="bind_into.exception")
             raise
 
-        (
-            binding_id,
-            binding_layout,
-            current_value_metadata,
-            binding_current_value_publication_token,
-        ) = _register_client_binding(
-            runtime=runtime,
-            device_id=device_id,
-            region_layout=region_layout,
-            canonical_index_bytes=canonical_index_bytes,
-            selection=(
-                response.resolved_selection
-                if hasattr(response, "resolved_selection")
-                else None
-            ),
-            source_artifact_id=self._ensure_identified(),
-            binding_current_value_publication_token=getattr(
-                response,
-                "binding_current_value_publication_token",
-                None,
-            ),
-            ctx=ctx,
-        )
+        try:
+            (
+                binding_id,
+                binding_layout,
+                current_value_metadata,
+                binding_current_value_publication_token,
+            ) = _register_client_binding(
+                runtime=runtime,
+                device_id=device_id,
+                region_layout=region_layout,
+                canonical_index_bytes=canonical_index_bytes,
+                selection=response.resolved_selection,
+                source_artifact_id=self._ensure_identified(),
+                ctx=ctx,
+            )
+        except Exception:
+            target_regions.release(context="bind_into.create_binding_error")
+            raise
 
         slot = InplaceSlot(
             store=store,
@@ -1460,33 +2005,15 @@ class Artifact:
 
         ttl_ms = 0
 
-        def _register_regions() -> tuple[str, ...]:
-            region_ids: list[str] = []
-            bases = collect_storage_bases(target_tensors)
-            try:
-                for base_ptr, nbytes in sorted(bases.items()):
-                    handle = store.register_vram_region(
-                        device_id=device_id,
-                        base_ptr=base_ptr,
-                        size_bytes=nbytes,
-                        ttl_ms=int(ttl_ms),
-                    )
-                    region_ids.append(handle.region_id)
-            except Exception as exc:  # noqa: BLE001
-                _cleanup_region_ids_best_effort(
-                    store=store,
-                    region_ids=tuple(region_ids),
-                    context="bind_into_mapped.register_regions",
-                )
-                raise _bind_region_registration_error(
-                    exc=exc,
-                    requested_regions=len(bases),
-                    registered_regions=len(region_ids),
-                ) from exc
-            return tuple(region_ids)
-
         stage_start = time.perf_counter()
-        region_ids = _register_regions()
+        target_regions = _register_target_regions_for_realization(
+            store=store,
+            target_tensors=target_tensors,
+            device_id=device_id,
+            ttl_ms=ttl_ms,
+            context="bind_into_mapped.register_regions",
+        )
+        region_ids = target_regions.region_ids
         region_register_sec = time.perf_counter() - stage_start
         selection_order = tuple(sorted(str(name) for name in target_tensors))
 
@@ -1580,19 +2107,18 @@ class Artifact:
                         }
                         and attempt == 0
                     ):
-                        _cleanup_region_ids_best_effort(
+                        target_regions.release(context="bind_into_mapped.retry_rebind")
+                        target_regions = _register_target_regions_for_realization(
                             store=store,
-                            region_ids=tuple(region_ids),
-                            context="bind_into_mapped.retry_rebind",
+                            target_tensors=target_tensors,
+                            device_id=device_id,
+                            ttl_ms=ttl_ms,
+                            context="bind_into_mapped.retry_rebind.register_regions",
                         )
-                        region_ids = _register_regions()
+                        region_ids = target_regions.region_ids
                         attempt += 1
                         continue
-                    _cleanup_region_ids_best_effort(
-                        store=store,
-                        region_ids=tuple(region_ids),
-                        context="bind_into_mapped.materialize_error",
-                    )
+                    target_regions.release(context="bind_into_mapped.materialize_error")
                     raise ArtifactError(
                         str(error),
                         status_code=error.status_code,
@@ -1603,10 +2129,8 @@ class Artifact:
                     response.status
                     != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
                 ):
-                    _cleanup_region_ids_best_effort(
-                        store=store,
-                        region_ids=tuple(region_ids),
-                        context="bind_into_mapped.materialize_status",
+                    target_regions.release(
+                        context="bind_into_mapped.materialize_status"
                     )
                     raise ArtifactError(
                         "MaterializeIntoMappedTarget returned non-success status",
@@ -1622,37 +2146,28 @@ class Artifact:
                     retryable=False,
                 )
         except Exception:
-            _cleanup_region_ids_best_effort(
-                store=store,
-                region_ids=tuple(region_ids),
-                context="bind_into_mapped.exception",
-            )
+            target_regions.release(context="bind_into_mapped.exception")
             raise
 
         stage_start = time.perf_counter()
-        (
-            binding_id,
-            binding_layout,
-            current_value_metadata,
-            binding_current_value_publication_token,
-        ) = _register_client_binding(
-            runtime=runtime,
-            device_id=device_id,
-            region_layout=region_layout,
-            canonical_index_bytes=canonical_index_bytes,
-            selection=(
-                response.resolved_selection
-                if hasattr(response, "resolved_selection")
-                else None
-            ),
-            source_artifact_id=self._ensure_identified(),
-            binding_current_value_publication_token=getattr(
-                response,
-                "binding_current_value_publication_token",
-                None,
-            ),
-            ctx=ctx,
-        )
+        try:
+            (
+                binding_id,
+                binding_layout,
+                current_value_metadata,
+                binding_current_value_publication_token,
+            ) = _register_client_binding(
+                runtime=runtime,
+                device_id=device_id,
+                region_layout=region_layout,
+                canonical_index_bytes=canonical_index_bytes,
+                selection=response.resolved_selection,
+                source_artifact_id=self._ensure_identified(),
+                ctx=ctx,
+            )
+        except Exception:
+            target_regions.release(context="bind_into_mapped.create_binding_error")
+            raise
         binding_register_sec = time.perf_counter() - stage_start
 
         slot = InplaceSlot(
@@ -1722,11 +2237,6 @@ class Artifact:
                 retryable=False,
             )
         device_id = resolve_device(device, allow_cpu=False)
-        view_spec_proto = (
-            self._view_spec.proto
-            if self._view_spec is not None and not self._view_spec.is_identity
-            else None
-        )
 
         with tensorcast_profile_stage(
             "tensorcast",
@@ -1739,11 +2249,14 @@ class Artifact:
                 "packing": mode,
             },
         ) as profile:
-            source_selection = self._build_owner_source_selection(
-                packing=mode if mapping is None else "byte_space",
-                view_spec_proto=view_spec_proto,
-                canonical_index_bytes=canonical_index_bytes,
+            selection_names_override = (
+                tuple(entry.name for entry in self._effective_index().entries)
+                if mapping is None and mode != "byte_space"
+                else None
             )
+            source_selection = self._resolve_realization_selection(
+                tensor_names_override=selection_names_override
+            ).proto
             index_kind = (
                 store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW
                 if source_selection.view_id or source_selection.tensor_names
@@ -1918,10 +2431,11 @@ class Artifact:
                         for tensor in tensors.values()
                     )
         except Exception:
-            with contextlib.suppress(Exception):
-                runtime.ensure_client().close_owned_binding(
-                    binding_id=str(response.binding_id)
-                )
+            _close_client_binding_best_effort(
+                runtime,
+                str(response.binding_id),
+                context="CreateOwnedBinding tensor restore",
+            )
             raise
 
         current_value_metadata = None
@@ -1935,16 +2449,12 @@ class Artifact:
                 extra={
                     "artifact_id": self._artifact_id,
                     "binding_id": str(response.binding_id),
-                    "created_staged_value": bool(
-                        getattr(response, "created_staged_value", False)
-                    ),
+                    "created_staged_value": bool(response.created_staged_value),
                 },
             ) as profile:
-                if bool(getattr(response, "created_staged_value", False)):
+                if bool(response.created_staged_value):
                     staged_value_metadata = parse_binding_value_or_raise(
-                        response.staged_value
-                        if hasattr(response, "staged_value")
-                        else None,
+                        response.staged_value,
                         rpc_name="CreateOwnedBinding staged_value",
                         expected_binding_id=str(response.binding_id),
                         expected_binding_layout_id=owner_layout.binding_layout_id,
@@ -1960,9 +2470,7 @@ class Artifact:
                         )
                 else:
                     current_value_metadata = parse_binding_value_or_raise(
-                        response.current_value
-                        if hasattr(response, "current_value")
-                        else None,
+                        response.current_value,
                         rpc_name="CreateOwnedBinding",
                         expected_binding_id=str(response.binding_id),
                         expected_binding_layout_id=owner_layout.binding_layout_id,
@@ -1972,16 +2480,18 @@ class Artifact:
                             current_value_metadata, "artifact_id", None
                         )
         except ArtifactError:
-            with contextlib.suppress(Exception):
-                runtime.ensure_client().close_owned_binding(
-                    binding_id=str(response.binding_id)
-                )
+            _close_client_binding_best_effort(
+                runtime,
+                str(response.binding_id),
+                context="CreateOwnedBinding value parse",
+            )
             raise
         except ValueError as exc:
-            with contextlib.suppress(Exception):
-                runtime.ensure_client().close_owned_binding(
-                    binding_id=str(response.binding_id)
-                )
+            _close_client_binding_best_effort(
+                runtime,
+                str(response.binding_id),
+                context="CreateOwnedBinding malformed staged metadata",
+            )
             raise ArtifactError(
                 f"CreateOwnedBinding returned malformed staged metadata: {exc}",
                 status_code="DATA_LOSS",
@@ -1997,82 +2507,30 @@ class Artifact:
             current_value_metadata=current_value_metadata,
             device=device,
             device_id=device_id,
-            binding_current_value_publication_token=getattr(
-                response, "binding_current_value_publication_token", None
-            ),
+            binding_current_value_publication_token=bytes(
+                response.binding_current_value_publication_token
+            )
+            or None,
             staged_value_metadata=staged_value_metadata,
             group_realization_acquire=group_realization_acquire,
             binding_current_value_publication_operation_id=operation_id,
-            materialization_diagnostics=_materialization_diagnostics_from_response(
+            materialization_diagnostics=binding_materialization_diagnostics_from_response(
                 response,
                 layout=owner_layout,
             ),
         )
         if slot.current_value_metadata is None and slot.staged_value_metadata is None:
-            with contextlib.suppress(Exception):
-                runtime.ensure_client().close_owned_binding(
-                    binding_id=str(response.binding_id)
-                )
+            _close_client_binding_best_effort(
+                runtime,
+                str(response.binding_id),
+                context="CreateOwnedBinding missing value metadata",
+            )
             raise ArtifactError(
                 "CreateOwnedBinding returned neither current_value nor staged_value",
                 status_code="DATA_LOSS",
                 retryable=False,
             )
         return Binding(slot, publish=publish, ctx=ctx)
-
-    def _build_owner_source_selection(
-        self,
-        *,
-        packing: str,
-        view_spec_proto: common_pb2.ViewSpec | None,
-        canonical_index_bytes: bytes,
-    ) -> common_pb2.ArtifactSelection:
-        selection_names: tuple[str, ...] = ()
-        view_metadata: ViewMetadataCache | None = None
-        if packing != "byte_space":
-            selection_names = tuple(
-                entry.name for entry in self._effective_index().entries
-            )
-        else:
-            view_metadata = self._ensure_view_metadata_cache(require_index_bytes=True)
-            if view_metadata is not None and view_metadata.tensor_names:
-                selection_names = tuple(view_metadata.tensor_names)
-
-        if view_spec_proto is None and selection_names:
-            view_spec_proto = _build_subset_view_spec_proto(
-                canonical_index=self._ensure_metadata(),
-                tensor_names=selection_names,
-            )
-
-        has_transform = bool(view_spec_proto is not None and view_spec_proto.tensors)
-        layout_index_bytes: bytes | None = None
-        if (
-            packing == "byte_space"
-            and view_metadata is not None
-            and view_metadata.view_index_bytes
-        ):
-            layout_index_bytes = bytes(view_metadata.view_index_bytes)
-        elif has_transform or selection_names:
-            layout_index_bytes = compute_selected_index_bytes(
-                canonical_index_bytes=canonical_index_bytes,
-                view_spec=view_spec_proto,
-                tensor_names=selection_names,
-            )
-
-        try:
-            return build_artifact_selection(
-                artifact_id=self._ensure_identified(),
-                canonical_index_bytes=canonical_index_bytes,
-                layout_index_bytes=layout_index_bytes,
-                view_spec=view_spec_proto,
-                tensor_names=selection_names,
-            )
-        except ValueError as exc:
-            raise ArtifactError(
-                str(exc),
-                status_code="FAILED_PRECONDITION",
-                retryable=False,
-            ) from exc
 
     def batch(self, *, device: torch.device | str) -> "BatchContext":
         from tensorcast.api.store.batch_context import BatchContext
@@ -2126,7 +2584,8 @@ class Artifact:
     ) -> Operation[ServingPrefetchResult]:
         artifact_id = self._ensure_identified()
         _, runtime, _ = self._require_components()
-        selection = self._build_artifact_selection()
+        resolved_selection = self._resolve_realization_selection()
+        selection = resolved_selection.proto
         source_reuse = _serving_target_source_reuse(target)
         if source_reuse.mode in {"serving_transform_required", "unsupported"}:
             reason = source_reuse.reason or (
@@ -2191,12 +2650,28 @@ class Artifact:
             return PollingOperation(
                 operation_id=operation_id,
                 status_fn=lambda: initial_status,
-                result_fn=lambda: _parse_serving_prefetch_result_any(
-                    response.status.result
+                result_fn=lambda: _with_retained_binding_report(
+                    _parse_serving_prefetch_result_any(response.status.result),
+                    selection=resolved_selection,
+                    target=target,
+                    target_bytes=target_bytes,
+                    operation_id=operation_id,
                 ),
                 cancel_fn=lambda: False,
                 ctx=ctx,
             )
+
+        def _result_factory(
+            operation_response: operation_pb2.GetOperationResponse,
+        ) -> ServingPrefetchResult:
+            return _with_retained_binding_report(
+                _serving_prefetch_result_from_operation_response(operation_response),
+                selection=resolved_selection,
+                target=target,
+                target_bytes=target_bytes,
+                operation_id=operation_id,
+            )
+
         return DaemonGlobalStoreOperation(
             operation_id=operation_id,
             runtime_ref=weakref.ref(runtime),
@@ -2206,11 +2681,57 @@ class Artifact:
                 "target_artifact_id": artifact_id,
                 "daemon_endpoint": str(getattr(runtime, "daemon_endpoint", "")),
             },
-            result_factory=_serving_prefetch_result_from_operation_response,
+            result_factory=_result_factory,
             operation_ref=operation_ref,
         )
 
     def prefetch(
+        self,
+        *,
+        device: torch.device | str | int | None = None,
+        target: ServingBindingTarget | ServingBindingSetTarget | None = None,
+        readiness: ServingBindingReadiness = "serving_local_ready",
+        retention: PrefetchRetentionPolicy | None = None,
+        ctx: CallContext | None = None,
+        options: GetArtifactOptions | None = None,
+    ) -> Operation[PrefetchedReplica] | Operation[ServingPrefetchResult]:
+        if target is not None:
+            if device is not None:
+                raise ArtifactError(
+                    "prefetch target and device are mutually exclusive",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            spec = (
+                ArtifactRealizationSpec.target_set(
+                    target=target,
+                    readiness=readiness,
+                    retention=retention,
+                )
+                if isinstance(target, ServingBindingSetTarget)
+                else ArtifactRealizationSpec.retained_binding(
+                    target=target,
+                    readiness=readiness,
+                    retention=retention,
+                )
+            )
+            return self.realize_async(spec, ctx=ctx)
+        if device is None:
+            raise ArtifactError(
+                "prefetch requires device or target",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        return self.realize_async(
+            ArtifactRealizationSpec.retained_replica(
+                device=device,
+                options=options,
+                retention=retention,
+            ),
+            ctx=ctx,
+        )
+
+    def _execute_prefetch(
         self,
         *,
         device: torch.device | str | int | None = None,
@@ -2291,7 +2812,8 @@ class Artifact:
         daemon_id = (
             getattr(runtime, "daemon_id", None) or None
         ) or runtime.daemon_endpoint
-        selection = self._build_artifact_selection()
+        resolved_selection = self._resolve_realization_selection()
+        selection = resolved_selection.proto
         view_id = view_id_hint or selection.view_id
         selection_hash = bytes(selection.selection_hash).hex()
 
@@ -2354,6 +2876,55 @@ class Artifact:
         elif payload.source == store_daemon_pb2.MATERIALIZATION_SOURCE_LOCAL_REPLICA:
             source = "local"
 
+        target_plan = RealizationTargetPlan(
+            kind="retained_replica",
+            device=device_obj,
+        )
+        envelope = envelope_for_retained_replica(
+            total_bytes=_payload_total_bytes(payload),
+            device_kind="cpu" if device_id == CPU_DEVICE_ID else "cuda",
+            retry_reason_buckets=payload.retry_reason_buckets,
+        )
+        envelope.validate_for_target(target_plan)
+        report = ArtifactRealizationReport(
+            target_kind="retained_replica",
+            source_selection_digest=resolved_selection.source_selection_digest,
+            target_layout_digest=target_plan.target_layout_digest,
+            copy_plan_digest=target_plan.copy_plan_digest,
+            artifact_id=resolved_selection.artifact_id,
+            view_id=view_id,
+            artifact_profile=resolved_selection.artifact_profile,
+            authority_scope=resolved_selection.authority_scope,
+            generation_hint=resolved_selection.generation_hint,
+            envelope=envelope,
+            target_plan=target_plan,
+            strategy_plan=strategy_plan_for_execution(
+                envelope=envelope,
+                options=opts,
+                ctx=ctx,
+                lease_mode=store_daemon_pb2.LeaseMode.LEASE_MODE_NO_LEASE,
+            ),
+            representation_admission=representation_admission_for_target(target_plan),
+            lifecycle_plan=lifecycle_plan_for_envelope(target_plan, envelope),
+            source=source,
+            operation_id=operation_id,
+            operation_backend="daemon_materialization",
+            risk_labels=risk_labels_for_target(
+                target_plan,
+                envelope,
+                source_selection_digest=resolved_selection.source_selection_digest,
+            ),
+            publishability=publishability_report_for(),
+            materialization_diagnostics={
+                "replica_uuid": str(payload.replica_uuid or ""),
+                "ticket_replica_uuid": str(payload.ticket_replica_uuid or ""),
+                "ticket_status": _materialization_ticket_status_label(
+                    payload.ticket_status
+                ),
+                "retry_attempts": int(payload.retry_attempts),
+                "retry_reason_buckets": dict(payload.retry_reason_buckets or {}),
+            },
+        )
         replica = PrefetchedReplica(
             artifact_id=artifact_id,
             view_id=view_id,
@@ -2361,6 +2932,7 @@ class Artifact:
             device_id=device_id,
             daemon_id=daemon_id,
             source=source,
+            report=report,
         )
 
         try:
@@ -2372,11 +2944,15 @@ class Artifact:
         except Exception:  # noqa: BLE001
             pass
 
+        def _replica_result_factory() -> PrefetchedReplica:
+            emit_artifact_realization_profile_event(report)
+            return replica
+
         return DaemonReplicaOperation(
             operation_id=operation_id,
             runtime_ref=weakref.ref(runtime),
             ctx=ctx,
-            result_factory=lambda: replica,
+            result_factory=_replica_result_factory,
         )
 
     def pin_device_residency(
@@ -2414,7 +2990,7 @@ class Artifact:
             ttl_ms=ttl_ms,
             timeout_s=timeout_s,
         )
-        token = bytes(resp.lease_token) if hasattr(resp, "lease_token") else b""
+        token = bytes(resp.lease_token)
         if not token:
             raise ArtifactError(
                 "CreatePlacementLease returned empty lease_token",
@@ -2578,6 +3154,92 @@ class Artifact:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+    def _resolve_realization_selection(
+        self,
+        *,
+        tensor_names_override: Sequence[str] | None = None,
+    ) -> ResolvedArtifactSelection:
+        artifact_id = self._ensure_identified()
+        runtime = self._runtime_if_available()
+        inputs = self._resolve_selection_materialization_inputs()
+        canonical_index_bytes = self._canonical_index_bytes
+        if canonical_index_bytes is None and runtime is not None:
+            canonical_index_bytes = runtime.ensure_client().get_artifact_index_by_id(
+                artifact_id
+            )
+        requested_names = inputs.requested_names
+        view_spec_proto = inputs.view_spec_proto
+        view_index_hint = inputs.view_index_hint
+        if tensor_names_override is not None:
+            requested_names = tuple(str(name) for name in tensor_names_override)
+            if view_spec_proto is None and requested_names:
+                view_spec_proto = _build_subset_view_spec_proto(
+                    canonical_index=self._ensure_metadata(),
+                    tensor_names=requested_names,
+                )
+            if canonical_index_bytes is None:
+                raise ArtifactError(
+                    "Canonical index bytes missing while resolving source selection",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            if view_spec_proto is not None or requested_names:
+                view_index_hint = compute_selected_index_bytes(
+                    canonical_index_bytes=canonical_index_bytes,
+                    view_spec=view_spec_proto,
+                    tensor_names=requested_names,
+                )
+        try:
+            return resolve_artifact_selection(
+                artifact_id=artifact_id,
+                canonical_index_bytes=canonical_index_bytes,
+                canonical_index_resolver=(
+                    runtime.ensure_client().get_artifact_index_by_id
+                    if runtime is not None
+                    else None
+                ),
+                view_spec=view_spec_proto,
+                view_id=inputs.view_id_hint,
+                tensor_names=requested_names,
+                view_subset_hash=inputs.view_subset_hash,
+                view_index_hint=view_index_hint,
+                generation_hint=self._generation,
+                allow_view_id_without_spec=bool(
+                    inputs.view_id_hint
+                    and not (view_spec_proto is not None and view_spec_proto.tensors)
+                ),
+            )
+        except ValueError as exc:
+            raise ArtifactError(
+                str(exc),
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            ) from exc
+
+    def _target_tensors_digest(self, target: object) -> str:
+        if not isinstance(target, Mapping) or not target:
+            raise ArtifactError(
+                "target tensors must be a non-empty mapping",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        digest = hashlib.sha256()
+        for raw_name, tensor in sorted(target.items(), key=lambda item: str(item[0])):
+            name = str(raw_name)
+            if not isinstance(tensor, torch.Tensor):
+                raise ArtifactError(
+                    f"target '{name}' must be a torch.Tensor",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            digest.update(name.encode("utf-8"))
+            digest.update(str(tensor.dtype).encode("utf-8"))
+            digest.update(str(tuple(int(v) for v in tensor.shape)).encode("utf-8"))
+            digest.update(str(tuple(int(v) for v in tensor.stride())).encode("utf-8"))
+            digest.update(str(int(tensor.storage_offset())).encode("utf-8"))
+            digest.update(str(tensor.device).encode("utf-8"))
+        return digest.hexdigest()
+
     def _require_components(
         self,
     ) -> tuple["Store", StoreRuntimeContext, MaterializationPipeline]:
@@ -2672,57 +3334,6 @@ class Artifact:
             view_subset_hash=view_subset_hash,
         )
 
-    def _build_artifact_selection(self) -> common_pb2.ArtifactSelection:
-        artifact_id = self._ensure_identified()
-        runtime = self._runtime_if_available()
-        inputs = self._resolve_selection_materialization_inputs()
-        view_spec_proto = inputs.view_spec_proto
-        selection_names = inputs.requested_names or ()
-
-        canonical_index_bytes = self._canonical_index_bytes
-        if canonical_index_bytes is None and runtime is not None:
-            canonical_index_bytes = runtime.ensure_client().get_artifact_index_by_id(
-                artifact_id
-            )
-        if canonical_index_bytes is None:
-            raise ArtifactError(
-                "Canonical index bytes missing while building selection",
-                status_code="FAILED_PRECONDITION",
-                retryable=False,
-            )
-
-        has_transform = bool(view_spec_proto is not None and view_spec_proto.tensors)
-        has_subset = bool(selection_names)
-        layout_index_bytes: bytes | None = None
-        if inputs.view_index_hint:
-            layout_index_bytes = bytes(inputs.view_index_hint)
-        elif has_transform or has_subset:
-            layout_index_bytes = compute_selected_index_bytes(
-                canonical_index_bytes=canonical_index_bytes,
-                view_spec=view_spec_proto,
-                tensor_names=selection_names,
-            )
-
-        try:
-            return build_artifact_selection(
-                artifact_id=artifact_id,
-                canonical_index_bytes=canonical_index_bytes,
-                layout_index_bytes=layout_index_bytes,
-                view_spec=view_spec_proto,
-                tensor_names=selection_names,
-                view_subset_hash=inputs.view_subset_hash,
-                view_id=inputs.view_id_hint,
-                allow_view_id_without_spec=bool(
-                    inputs.view_id_hint and not has_transform
-                ),
-            )
-        except ValueError as exc:
-            raise ArtifactError(
-                str(exc),
-                status_code="FAILED_PRECONDITION",
-                retryable=False,
-            ) from exc
-
     def _build_region_layout_selection(
         self,
         *,
@@ -2769,18 +3380,18 @@ class Artifact:
             selection_view_id = ""
 
         try:
-            return build_artifact_selection(
+            return resolve_artifact_selection(
                 artifact_id=artifact_id,
                 canonical_index_bytes=canonical_index_bytes,
-                layout_index_bytes=layout_index_bytes,
                 view_spec=view_spec_proto,
                 tensor_names=selection_names,
                 view_subset_hash=subset_hash if subset_hash else None,
                 view_id=selection_view_id,
+                view_index_hint=layout_index_bytes,
                 allow_view_id_without_spec=bool(
                     selection_view_id and view_spec_proto is None
                 ),
-            )
+            ).proto
         except ValueError as exc:
             raise ArtifactError(
                 str(exc),

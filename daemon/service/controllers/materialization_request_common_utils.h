@@ -43,7 +43,7 @@ absl::StatusOr<LeaseContext> validate_and_compute_lease_context(
 
 struct ArtifactResolution {
   std::string resolved_artifact_id;
-  std::optional<std::string> fallback_artifact_id;
+  std::optional<std::string> pre_binding_artifact_id;
   std::optional<std::string> bound_artifact_id;
   bool gs_connected{false};
   std::optional<std::filesystem::path> normalized_disk_path;
@@ -74,7 +74,7 @@ absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
     const std::filesystem::path& storage_path,
     std::string artifact_id,
     bool allow_disk,
-    bool allow_local_import_fallback,
+    bool allow_local_import_disk_source,
     bool loopback_peer,
     std::optional<uint64_t> disk_expected_size = std::nullopt,
     bool lightweight_msa1_validation = false);

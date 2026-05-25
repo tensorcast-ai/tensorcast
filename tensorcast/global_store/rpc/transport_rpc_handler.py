@@ -139,10 +139,7 @@ class TransportRpcHandler:
 
             remote_info = self._replica_to_memory_info(replica)
 
-            from contextlib import suppress
-
-            with suppress(Exception):
-                set_span_attributes({"tc.transport.id": str(transport_id)})
+            set_span_attributes({"tc.transport.id": str(transport_id)})
 
             return global_store_pb2.RequestReplicaTransportResponse(
                 status=global_store_pb2.Status.STATUS_OK,

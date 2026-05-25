@@ -60,8 +60,10 @@ using status_utils::to_grpc_status;
 
 namespace {
 
+using materialization_index_source::canonical_index_authority_for_resolution;
+using materialization_index_source::CanonicalIndexAuthority;
 using materialization_index_source::compute_target_layout_multihash;
-using materialization_index_source::load_canonical_index_with_disk_fallback;
+using materialization_index_source::load_canonical_index_from_authority;
 using materialization_index_source::load_descriptor_metadata;
 using materialization_index_source::parse_mi2_data_multihash;
 using materialization_index_source::TargetLayoutSpan;
@@ -70,10 +72,14 @@ using materialization_payload::compute_generation_from_index;
 using materialization_policy::apply_group_realization_begin_context_to_transport_context;
 using materialization_policy::apply_operation_transport_context;
 using materialization_policy::apply_request_context_to_hints;
+using materialization_policy::attach_controller_realization_plan_span_attrs;
 using materialization_policy::begin_or_join_group_realization_if_enabled;
-using materialization_policy::default_collective_policy_for_mapped_target;
+using materialization_policy::build_controller_realization_plan;
+using materialization_policy::ControllerRealizationPlan;
 using materialization_policy::NormalizedMaterializationRequestContext;
 using materialization_policy::OperationTransportContext;
+using materialization_policy::require_controller_export_kind;
+using materialization_policy::require_controller_resource_authority;
 using materialization_policy::resolve_group_realization_transport_context;
 using materialization_policy::resolve_materialization_request_context;
 using materialization_policy::resolve_transform_placement;
@@ -748,10 +754,11 @@ struct TargetMaterializationCommonContext {
   NormalizedMaterializationRequestContext request_context;
   OperationTransportContext transport_context;
   std::optional<materialization_policy::GroupRealizationBeginContext> group_begin_context;
+  ControllerRealizationPlan realization_plan;
   tensorcast::common::v1::ArtifactSelection effective_selection;
   std::string resolved_artifact_id;
-  bool gs_connected{false};
   std::optional<std::filesystem::path> normalized_disk_path;
+  CanonicalIndexAuthority canonical_index_authority{CanonicalIndexAuthority::kEngineMetadata};
 };
 
 std::chrono::milliseconds resolve_target_request_budget(const grpc::ServerContext& server_context) {
@@ -935,7 +942,7 @@ absl::StatusOr<TargetMaterializationCommonContext> prepare_target_materializatio
       storage_path,
       context.effective_selection.artifact_id(),
       context.request_context.retrieval_policy.allow_disk,
-      /*allow_local_import_fallback=*/true,
+      /*allow_local_import_disk_source=*/true,
       /*loopback_peer=*/true);
   if (!resolution_or.ok()) {
     record_materialize_into_target(
@@ -943,8 +950,9 @@ absl::StatusOr<TargetMaterializationCommonContext> prepare_target_materializatio
     return resolution_or.status();
   }
   context.resolved_artifact_id = std::move(resolution_or->resolved_artifact_id);
-  context.gs_connected = resolution_or->gs_connected;
   context.normalized_disk_path = std::move(resolution_or->normalized_disk_path);
+  context.canonical_index_authority =
+      canonical_index_authority_for_resolution(resolution_or->gs_connected, resolution_or->local_import.has_value());
   if (!req.has_target_layout()) {
     record_materialize_into_target(
         "error", "layout_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
@@ -960,6 +968,18 @@ absl::StatusOr<TargetMaterializationCommonContext> prepare_target_materializatio
         "error", "owner_pid_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return absl::InvalidArgumentError(std::format("pid is required for {}", rpc_name));
   }
+  auto realization_plan_or = build_controller_realization_plan(
+      req,
+      context.request_context,
+      context.transport_context,
+      context.group_begin_context.has_value() ? &*context.group_begin_context : nullptr,
+      context.resolved_artifact_id);
+  if (!realization_plan_or.ok()) {
+    record_materialize_into_target(
+        "error", "realization_plan_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return realization_plan_or.status();
+  }
+  context.realization_plan = std::move(*realization_plan_or);
   return context;
 }
 
@@ -1149,10 +1169,22 @@ grpc::Status TargetMaterializationService::materialize_into_target(
   auto effective_req = req;
   effective_req.mutable_selection()->CopyFrom(common.effective_selection);
   const auto request_context = common.request_context;
+  const auto realization_plan = common.realization_plan;
+  if (auto status =
+          require_controller_export_kind(realization_plan, "registered_region_direct_write", "MaterializeIntoTarget");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
+  if (auto status =
+          require_controller_resource_authority(realization_plan, "caller_allocation", "MaterializeIntoTarget");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
   std::string resolved_artifact_id = std::move(common.resolved_artifact_id);
-  const bool gs_connected = common.gs_connected;
   std::optional<std::filesystem::path> normalized_disk_path = std::move(common.normalized_disk_path);
+  const auto canonical_index_authority = common.canonical_index_authority;
   span->SetAttribute("tc.artifact.id_kind", artifact_id_kind_attr(resolved_artifact_id));
+  attach_controller_realization_plan_span_attrs(rctx, realization_plan);
   auto disk_metadata_or =
       build_target_disk_metadata(normalized_disk_path, resolved_artifact_id, device.ordinal, d_.disk_imports);
   if (!disk_metadata_or.ok()) {
@@ -1165,8 +1197,8 @@ grpc::Status TargetMaterializationService::materialize_into_target(
     return {StatusCode::INVALID_ARGUMENT, "selection/view requires tensor-aware mounted-source metadata"};
   }
 
-  auto canonical_json_or = load_canonical_index_with_disk_fallback(
-      d_.engine, resolved_artifact_id, normalized_disk_path, device.ordinal, gs_connected);
+  auto canonical_json_or = load_canonical_index_from_authority(
+      d_.engine, resolved_artifact_id, normalized_disk_path, device.ordinal, canonical_index_authority);
   if (!canonical_json_or.ok()) {
     record_materialize_into_target(
         "error", "index_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
@@ -1463,10 +1495,22 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   auto effective_req = req;
   effective_req.mutable_selection()->CopyFrom(common.effective_selection);
   const auto request_context = common.request_context;
+  const auto realization_plan = common.realization_plan;
+  if (auto status = require_controller_export_kind(
+          realization_plan, "registered_region_direct_write", "MaterializeIntoMappedTarget");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
+  if (auto status =
+          require_controller_resource_authority(realization_plan, "caller_allocation", "MaterializeIntoMappedTarget");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
   std::string resolved_artifact_id = std::move(common.resolved_artifact_id);
-  const bool gs_connected = common.gs_connected;
   std::optional<std::filesystem::path> normalized_disk_path = std::move(common.normalized_disk_path);
+  const auto canonical_index_authority = common.canonical_index_authority;
   span->SetAttribute("tc.artifact.id_kind", artifact_id_kind_attr(resolved_artifact_id));
+  attach_controller_realization_plan_span_attrs(rctx, realization_plan);
   auto disk_metadata_or =
       build_target_disk_metadata(normalized_disk_path, resolved_artifact_id, /*device_ordinal=*/0, d_.disk_imports);
   const auto disk_metadata_ready = std::chrono::steady_clock::now();
@@ -1533,8 +1577,8 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
     return {StatusCode::INVALID_ARGUMENT, "target_layout offsets are required"};
   }
 
-  auto canonical_json_or = load_canonical_index_with_disk_fallback(
-      d_.engine, resolved_artifact_id, normalized_disk_path, device.ordinal, gs_connected);
+  auto canonical_json_or = load_canonical_index_from_authority(
+      d_.engine, resolved_artifact_id, normalized_disk_path, device.ordinal, canonical_index_authority);
   const auto canonical_done = std::chrono::steady_clock::now();
   if (!canonical_json_or.ok()) {
     record_materialize_into_target(
@@ -1654,7 +1698,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   auto prepared_execution = std::move(*prepared_execution_or);
   // Mapped-target RPCs only carry collective topology via operation metadata, so the
   // best-effort default must stay collective-first rather than source-bound strict mode.
-  const auto collective_policy = default_collective_policy_for_mapped_target(request_context.execution_topology);
+  const auto collective_policy = realization_plan.strategy.collective_policy;
   const auto source_facts = store::runtime::ingestion::strategy::SourceBoundSourceFacts{
       .disk_source_available = disk_source.has_value(),
       .disk_source_is_safetensors = disk_metadata.has_value() && disk_metadata->is_safetensors.value_or(false),

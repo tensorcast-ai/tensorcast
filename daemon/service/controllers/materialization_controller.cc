@@ -16,6 +16,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
+#include "daemon/service/controllers/materialization_policy_utils.h"
 #include "daemon/util/grpc_peer_utils.h"
 #include "daemon/util/status_utils.h"
 
@@ -23,8 +24,16 @@ namespace tensorcast::daemon {
 
 using status_utils::to_grpc_status;
 namespace global_store = tensorcast::global_store::v1;
+namespace layout = tensorcast::layout::v1;
 
 namespace {
+
+using materialization_policy::attach_controller_realization_plan_span_attrs;
+using materialization_policy::build_controller_realization_plan;
+using materialization_policy::ControllerRealizationPlan;
+using materialization_policy::require_controller_export_kind;
+using materialization_policy::require_controller_resource_authority;
+using materialization_policy::validate_controller_process_visible_export_authorities;
 
 void merge_operation_ref_metadata(
     const tensorcast::operation::v1::OperationRef& source,
@@ -516,7 +525,29 @@ grpc::Status MaterializationController::prefetch_serving_binding(
   if (auto status = validate_serving_prefetch_request(req); !status.ok()) {
     return to_grpc_status(status);
   }
-  if (req.target_case() == v2::PrefetchServingBindingRequest::kServingBindingSetTarget) {
+  auto realization_plan_or = build_controller_realization_plan(req);
+  if (!realization_plan_or.ok()) {
+    return to_grpc_status(realization_plan_or.status());
+  }
+  const ControllerRealizationPlan& realization_plan = *realization_plan_or;
+  attach_controller_realization_plan_span_attrs(rctx, realization_plan);
+  const bool prefetch_target_set = req.target_case() == v2::PrefetchServingBindingRequest::kServingBindingSetTarget;
+  const std::string_view expected_export_kind = prefetch_target_set ? "binding_reservation_set" : "binding_reservation";
+  if (auto status = require_controller_export_kind(realization_plan, expected_export_kind, "PrefetchServingBinding");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
+  if (auto status =
+          require_controller_resource_authority(realization_plan, "BindingRegistry", "PrefetchServingBinding");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
+  if (auto status =
+          require_controller_resource_authority(realization_plan, "SessionLifecycleManager", "PrefetchServingBinding");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
+  if (prefetch_target_set) {
     tensorcast::operation::v1::PrefetchServingBindingSetResult set_result;
     const auto& target_set = req.serving_binding_set_target();
     set_result.set_runtime(target_set.runtime());
@@ -733,10 +764,13 @@ grpc::Status MaterializationController::prefetch_serving_binding(
       result.set_expires_at_ms(static_cast<uint64_t>(absl::ToUnixMillis(expires_at)));
       result.set_staged_value(created_staged_value);
       if (created_staged_value) {
-        result.set_group_realization_transaction_id(create_resp.group_realization_acquire().transaction_id());
-        result.set_group_realization_version_set_id(create_resp.group_realization_acquire().version_set_id());
-        result.set_group_realization_part_id(create_resp.group_realization_acquire().part_id());
-        result.set_group_realization_staging_token(create_resp.group_realization_acquire().staging_token());
+        const auto& acquire = create_resp.group_realization_acquire();
+        result.set_group_realization_transaction_id(acquire.transaction_id());
+        result.set_group_realization_version_set_id(acquire.version_set_id());
+        result.set_group_realization_part_id(acquire.part_id());
+        result.set_group_realization_staging_token(acquire.staging_token());
+        result.set_group_realization_wait_for_publish(acquire.wait_for_publish());
+        result.set_group_realization_wait_timeout_ms(acquire.wait_timeout_ms());
       }
       auto* capability = result.mutable_reservation_capability();
       capability->set_capability_id(capability_id);
@@ -806,6 +840,20 @@ grpc::Status MaterializationController::acquire_binding_value(
   }
   if (!is_loopback_grpc_peer(rctx.server_context().peer())) {
     return {grpc::StatusCode::PERMISSION_DENIED, "AcquireBindingValue is local-only (loopback/UDS)"};
+  }
+  auto realization_plan_or = build_controller_realization_plan(req);
+  if (!realization_plan_or.ok()) {
+    return to_grpc_status(realization_plan_or.status());
+  }
+  const ControllerRealizationPlan& realization_plan = *realization_plan_or;
+  attach_controller_realization_plan_span_attrs(rctx, realization_plan);
+  if (auto status = require_controller_export_kind(realization_plan, "cuda_ipc_lease", "AcquireBindingValue");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
+  if (auto status = validate_controller_process_visible_export_authorities(realization_plan, "AcquireBindingValue");
+      !status.ok()) {
+    return to_grpc_status(status);
   }
   if (!req.has_group_realization_acquire() && req.binding_value_ref().binding_id().empty() &&
       !req.local_serving_ref().empty()) {
@@ -1226,6 +1274,52 @@ grpc::Status MaterializationController::list_artifact_layouts(
   }
   for (const auto& layout_id : *layouts_or) {
     resp.add_layout_ids(layout_id);
+  }
+  return grpc::Status::OK;
+}
+
+grpc::Status MaterializationController::ensure_canonical_layout(
+    RpcContext& rctx,
+    const v2::EnsureCanonicalLayoutRequest& req,
+    v2::EnsureCanonicalLayoutResponse& resp) {
+  auto& span = rctx.span();
+  span->SetAttribute("tc.artifact.id", req.artifact_id());
+  span->SetAttribute("tc.layout.index_multihash", req.index_multihash());
+  span->SetAttribute("tc.layout.attach_to_artifact", req.attach_to_artifact());
+  if (!global_store_client_ || !global_store_client_->is_connected()) {
+    return {grpc::StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
+  }
+
+  layout::LayoutSpec layout_spec;
+  if (req.has_layout()) {
+    layout_spec.CopyFrom(req.layout());
+  } else {
+    layout_spec.set_layout_schema_version(1);
+  }
+  if (!req.index_multihash().empty()) {
+    layout_spec.set_index_multihash(req.index_multihash());
+  }
+  if (layout_spec.layout_schema_version() == 0) {
+    layout_spec.set_layout_schema_version(1);
+  }
+  if (layout_spec.index_multihash().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "index_multihash is required"};
+  }
+
+  auto layout_id_or = global_store_client_->put_layout_spec(layout_spec, req.canonical_index_data());
+  if (!layout_id_or.ok()) {
+    return to_grpc_status(layout_id_or.status());
+  }
+  resp.set_layout_id(*layout_id_or);
+
+  if (req.attach_to_artifact()) {
+    if (req.artifact_id().empty()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT, "artifact_id is required when attach_to_artifact=true"};
+    }
+    auto attach_status = global_store_client_->attach_layout_to_artifact(req.artifact_id(), *layout_id_or);
+    if (!attach_status.ok()) {
+      return to_grpc_status(attach_status);
+    }
   }
   return grpc::Status::OK;
 }

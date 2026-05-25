@@ -1560,7 +1560,7 @@ hot.tensor_dict_into(target=param_tensors, device="cuda:0", ctx=ctx)
 
 Note: this example uses `CapabilityDirectoryClient` for worker discovery. In the planned “external app + single
 entrypoint” model (`docs/designs/0056-programmable-framework-adv.md`), apps SHOULD instead use daemon-served directory
-queries via `Runtime.signals().list_workers(...)`.
+queries via `Runtime.directory().list_workers(...)`.
 
 ```python
 import tensorcast

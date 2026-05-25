@@ -878,6 +878,17 @@ class IGlobalStoreClient {
   }
 
   virtual absl::StatusOr<layout::LayoutSpecRecord> get_layout_spec(std::string_view layout_id) = 0;
+
+  virtual absl::StatusOr<std::string> put_layout_spec(
+      const layout::LayoutSpec& layout_spec,
+      std::string_view canonical_index_data = {},
+      std::string_view layout_json = {}) {
+    (void)layout_spec;
+    (void)canonical_index_data;
+    (void)layout_json;
+    return absl::UnimplementedError("PutLayoutSpec not available");
+  }
+
   virtual absl::Status attach_layout_to_artifact(std::string_view mi2_id, std::string_view layout_id) = 0;
   virtual absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view mi2_id) = 0;
   virtual absl::StatusOr<global_store::WriteTensorProofCommitmentsResponse> write_tensor_proof_commitments(
@@ -1285,6 +1296,10 @@ class GlobalStoreClient : public IGlobalStoreClient {
       std::optional<absl::Time> lease_expires_at = std::nullopt,
       const std::vector<std::string>& current_states = {}) override;
   absl::StatusOr<layout::LayoutSpecRecord> get_layout_spec(std::string_view layout_id) override;
+  absl::StatusOr<std::string> put_layout_spec(
+      const layout::LayoutSpec& layout_spec,
+      std::string_view canonical_index_data = {},
+      std::string_view layout_json = {}) override;
   absl::Status attach_layout_to_artifact(std::string_view mi2_id, std::string_view layout_id) override;
   absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view mi2_id) override;
   absl::StatusOr<global_store::WriteTensorProofCommitmentsResponse> write_tensor_proof_commitments(

@@ -31,11 +31,11 @@
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/communicator/engine/engine.h"
 #include "core/cuda/cuda_api.h"
-#include "core/store/device_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/dataplane/sources/multi_safetensors_source.h"
 #include "core/store/replica/collective_disk_loader.h"
 #include "core/store/replica/memory_export_registry.h"
+#include "core/store/replica/replica_placement.h"
 #include "core/store/replica/transfer_service.h"
 #include "core/store/replica/types/direct_write_grant.h"
 #include "gsl/pointers"
@@ -48,17 +48,6 @@ using common::memory::PinnedBufferPool;
 using loading::ReplicaKey;
 
 namespace {
-
-DeviceKey normalize_device_key(DeviceKey key) {
-  if (key.type == DeviceType::GPU) {
-    key.ordinal = (key.ordinal >= 0) ? key.ordinal : 0;
-    return DeviceRegistry::instance().normalize(key);
-  }
-  key.type = DeviceType::CPU;
-  key.ordinal = -1;
-  key.uuid.clear();
-  return key;
-}
 
 struct GpuTransferGateState {
   bool active{false};
@@ -174,7 +163,7 @@ ReplicaLoadController::ReplicaLoadController(
               ReplicaKey{
                   .artifact_id = artifact_identifier,
                   .view_id = view_id,
-                  .device = normalize_device_key(device_key),
+                  .device = normalize_replica_device_key(device_key),
                   .replica = 0},
               TransferService::Config{
                   .max_buffer_bytes = max_buffer_bytes_,
@@ -184,7 +173,7 @@ ReplicaLoadController::ReplicaLoadController(
           std::make_shared<MemoryExportRegistry>(
               gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>>{memory_coordinator_})) {
   // Populate replica_key_ using constructor inputs
-  const DeviceKey normalized_device = normalize_device_key(device_key);
+  const DeviceKey normalized_device = normalize_replica_device_key(device_key);
   replica_key_.artifact_id = std::move(artifact_identifier);
   replica_key_.view_id = std::move(view_id);
   replica_key_.device = normalized_device;
@@ -206,7 +195,7 @@ ReplicaLoadController::ReplicaLoadController(
   }
 
   // Initialise CUDA context and non-blocking stream if a valid device id was provided at construction.
-  if (replica_key_.device.ordinal >= 0) {
+  if (replica_key_.device.type == DeviceType::GPU && replica_key_.device.ordinal >= 0) {
     absl::MutexLock lock(&mutex_);
     auto stream_status = ensure_gpu_stream_initialized_locked_();
     if (!stream_status.ok()) {

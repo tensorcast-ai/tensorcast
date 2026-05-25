@@ -105,10 +105,10 @@ TEST_CASE("GetDetailedStatus aggregates mixed CPU/GPU residency", "[daemon][stat
 
   // Query loaded replicas list and ensure both CPU(-1) and GPU(0) are present
   {
-    tensorcast::daemon::v2::GetLoadedReplicasV2Request req;
-    tensorcast::daemon::v2::GetLoadedReplicasV2Response resp;
+    tensorcast::daemon::v2::GetLoadedReplicasRequest req;
+    tensorcast::daemon::v2::GetLoadedReplicasResponse resp;
     grpc::ServerContext ctx;
-    auto st = svc.GetLoadedReplicasV2(&ctx, &req, &resp);
+    auto st = svc.GetLoadedReplicas(&ctx, &req, &resp);
     REQUIRE(st.ok());
     bool seen_cpu = false, seen_gpu0 = false;
     for (const auto& r : resp.replicas()) {
@@ -152,11 +152,11 @@ TEST_CASE("GetLoadedReplicas filters by artifact_id and device_id", "[daemon][st
   // Filter by artifact_id substring (directory basename)
   const std::string filter = dir.filename().string();
   {
-    tensorcast::daemon::v2::GetLoadedReplicasV2Request req;
-    tensorcast::daemon::v2::GetLoadedReplicasV2Response resp;
+    tensorcast::daemon::v2::GetLoadedReplicasRequest req;
+    tensorcast::daemon::v2::GetLoadedReplicasResponse resp;
     req.set_artifact_id_filter(filter);
     grpc::ServerContext ctx;
-    auto st = svc.GetLoadedReplicasV2(&ctx, &req, &resp);
+    auto st = svc.GetLoadedReplicas(&ctx, &req, &resp);
     REQUIRE(st.ok());
     // Expect two entries (CPU -1, GPU 0)
     REQUIRE(resp.replicas_size() >= 2);
@@ -173,11 +173,11 @@ TEST_CASE("GetLoadedReplicas filters by artifact_id and device_id", "[daemon][st
 
   // Filter by device_id only (GPU 0)
   {
-    tensorcast::daemon::v2::GetLoadedReplicasV2Request req;
-    tensorcast::daemon::v2::GetLoadedReplicasV2Response resp;
+    tensorcast::daemon::v2::GetLoadedReplicasRequest req;
+    tensorcast::daemon::v2::GetLoadedReplicasResponse resp;
     req.set_device_id_filter(0);
     grpc::ServerContext ctx;
-    auto st = svc.GetLoadedReplicasV2(&ctx, &req, &resp);
+    auto st = svc.GetLoadedReplicas(&ctx, &req, &resp);
     REQUIRE(st.ok());
     // Only GPU entries should remain
     REQUIRE(resp.replicas_size() >= 1);
@@ -188,12 +188,12 @@ TEST_CASE("GetLoadedReplicas filters by artifact_id and device_id", "[daemon][st
 
   // Combined filter (artifact_id + device_id = CPU should return only CPU replica)
   {
-    tensorcast::daemon::v2::GetLoadedReplicasV2Request req;
-    tensorcast::daemon::v2::GetLoadedReplicasV2Response resp;
+    tensorcast::daemon::v2::GetLoadedReplicasRequest req;
+    tensorcast::daemon::v2::GetLoadedReplicasResponse resp;
     req.set_artifact_id_filter(filter);
     req.set_device_id_filter(-1);
     grpc::ServerContext ctx;
-    auto st = svc.GetLoadedReplicasV2(&ctx, &req, &resp);
+    auto st = svc.GetLoadedReplicas(&ctx, &req, &resp);
     REQUIRE(st.ok());
     REQUIRE(resp.replicas_size() >= 1);
     for (const auto& r : resp.replicas()) {

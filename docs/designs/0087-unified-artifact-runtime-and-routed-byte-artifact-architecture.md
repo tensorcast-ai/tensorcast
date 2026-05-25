@@ -111,7 +111,8 @@ RDMA realization follow-ons still in progress:
   byte-artifact ingress flows.
 - `RegisterRegion(memory_kind=VRAM|HOST_SHARED)` is live, and byte-artifact batch ingress accepts `RegionRef`
   layouts over both memory kinds.
-- `TargetPublicationScope`, `TargetPublicationRegistry`, `target_publication_token`, `PayloadRefScope`, and
+- `BindingCurrentValuePublicationScope`, `TargetPublicationRegistry`,
+  `binding_current_value_publication_token`, `PayloadRefScope`, and
   `BatchPayloadRefScope` are the live capability contracts.
 - `BatchGetIntoRegionRequest` no longer exposes `preference` or `source_policy`.
 - `HomeBatchGet` may now realize one transport either as a staged contiguous
@@ -1683,7 +1684,8 @@ Live surface:
 
 - `RegisterRegion(memory_kind=VRAM|HOST_SHARED)` is the canonical registration
   API,
-- `RegisterVramRegion` remains a compatibility wrapper for VRAM callers,
+- SDK `register_vram_region(...)` remains only as client-side syntax sugar over
+  `RegisterRegion(memory_kind=VRAM)`,
 - `StorageEntry.region_ref` is the generic storage reference for region-backed
   placement,
 - daemon-managed `HOST_SHARED` regions are attached and released through the
@@ -1812,14 +1814,14 @@ Publication remains publication-specific rather than becoming a universal target
 
 Final publication contract:
 
-- `TargetPublicationScope`
+- `BindingCurrentValuePublicationScope`
 - `TargetPublicationRegistry`
-- `target_publication_token`
-- `CAPABILITY_AUDIENCE_TARGET_PUBLICATION`
+- `binding_current_value_publication_token`
+- `CAPABILITY_AUDIENCE_BINDING_CURRENT_VALUE_PUBLICATION`
 
 Rules:
 
-- the token is minted by `TargetMaterializationService`,
+- the token is minted by binding current-value commit/promote paths,
 - the token is consumed by `TargetPublishService`,
 - consume-time verification checks currentness and, when present, exact `operation_id` match,
 - scope identity includes publication id, selection, byte space, device UUID, owner PID, and target layout hash,
@@ -1922,7 +1924,7 @@ Classes, structs, and messages use `PascalCase`:
 - `ByteArtifactBodyStore`
 - `ByteArtifactRouteResolver`
 - `WorkerDirectoryCache`
-- `TargetPublicationScope`
+- `BindingCurrentValuePublicationScope`
 - `TargetPublicationRegistry`
 - `PayloadRefScope`
 - `PutIfAbsentInvariant`
@@ -1941,7 +1943,7 @@ Functions and methods use `snake_case`:
 
 Constants and enum values use `ALL_CAPS`:
 
-- `CAPABILITY_AUDIENCE_TARGET_PUBLICATION`
+- `CAPABILITY_AUDIENCE_BINDING_CURRENT_VALUE_PUBLICATION`
 - `CAPABILITY_AUDIENCE_PAYLOAD_REF`
 - `WORKER_CAPABILITY_FLAG_GATEWAY_INGRESS_ENABLED`
 - `WORKER_CAPABILITY_FLAG_SHARD_HOME_ELIGIBLE`
@@ -1989,7 +1991,8 @@ design delta.
 - `StoreDaemonServiceImpl` keeps delegate-only live paths for `Batch*`, `HomeBatch*`, `FetchPayloadRefChunk`, and
   `FetchBatchPayloadRefChunk`.
 - routed byte-artifact state remains kernel-owned rather than being re-embedded into `StoreDaemonServiceImpl`.
-- publication flows use `target_publication_token` and publication-specific state; new code must not revive superseded
+- publication flows use `binding_current_value_publication_token` and
+  publication-specific state; new code must not revive superseded
   pre-publication naming.
 - payload transport uses typed signed capability scopes:
   `payload_ref` for singular payloads and `batch_payload_ref` for batch payload transports.

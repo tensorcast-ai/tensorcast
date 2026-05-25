@@ -13,6 +13,18 @@ from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
+from tensorcast.api.store.realization_kernel import (
+    ArtifactRealizationHandle,
+    ArtifactRealizationSpec,
+    RealizationReleaseContract,
+    RealizationResourceEnvelope,
+    RealizationTargetPlan,
+    artifact_realization_report_to_dict,
+    emit_artifact_realization_profile_event,
+    envelope_for_publication,
+    release_contract_for,
+    report_for_publication,
+)
 from tensorcast.serving.errors import ReplicaPublicationError
 from tensorcast.serving.runtime_attachment import (
     RuntimeAttachment,
@@ -264,17 +276,90 @@ def _published_replica_projection_for_state(
     )
 
 
+def _publication_release_contract(
+    *,
+    attachment: RuntimeAttachment,
+    projection: PublishedReplicaProjection,
+    envelope: RealizationResourceEnvelope,
+) -> RealizationReleaseContract:
+    binding = state_publication_binding(attachment.state)
+    release_actions: list[Callable[[], None]] = []
+    if (
+        projection.state in _ACTIVE_PUBLICATION_STATES
+        or binding_has_active_published_replica(binding)
+    ):
+        release_actions.append(attachment.state.retire_active_publication)
+    existing_release = getattr(attachment.state.release_contract, "release", None)
+    if callable(existing_release):
+
+        def release_existing_contract() -> None:
+            existing_release()
+
+        release_actions.append(release_existing_contract)
+    else:
+        release_actions.append(attachment.state.close_binding_handle)
+    return release_contract_for(envelope, *release_actions)
+
+
 def _attachment_with_published_replica(
     attachment: RuntimeAttachment,
     projection: PublishedReplicaProjection,
 ) -> RuntimeAttachment:
+    binding = state_publication_binding(attachment.state)
+    spec = ArtifactRealizationSpec.publication(target=projection)
+    target_layout_digest = (
+        projection.binding_layout_id
+        or attachment.view.endpoint.weight_version.binding_layout_id
+        or publication_generation(attachment)
+    )
+    target_plan = RealizationTargetPlan(
+        kind=spec.target_kind,
+        target_layout_digest=target_layout_digest,
+        binding_layout_id=projection.binding_layout_id,
+    )
+    envelope = envelope_for_publication(projection=projection, binding=binding)
+    envelope.validate_for_target(target_plan)
+    report = report_for_publication(
+        artifact_id=(
+            projection.artifact_ref
+            or attachment.view.endpoint.weight_version.serving_artifact_ref
+            or ""
+        ),
+        source_selection_digest=publication_generation(attachment),
+        target_plan=target_plan,
+        envelope=envelope,
+        projection=projection,
+        binding_handle=binding,
+        risk_labels=(projection.state,),
+    )
     weight_version = replace(
         attachment.view.endpoint.weight_version,
         published_replica=projection,
     )
     endpoint = replace(attachment.view.endpoint, weight_version=weight_version)
-    view = replace(attachment.view, endpoint=endpoint)
-    return replace(attachment, view=view)
+    diagnostics = dict(attachment.view.diagnostics)
+    diagnostics["artifact_publication_report"] = artifact_realization_report_to_dict(
+        report
+    )
+    view = replace(attachment.view, endpoint=endpoint, diagnostics=diagnostics)
+    release_contract = _publication_release_contract(
+        attachment=attachment,
+        projection=projection,
+        envelope=envelope,
+    )
+    publication_handle = ArtifactRealizationHandle(
+        target_kind=spec.target_kind,
+        report=report,
+        binding_value=binding,
+        release_contract=release_contract,
+    )
+    emit_artifact_realization_profile_event(report)
+    state = replace(
+        attachment.state,
+        release_contract=release_contract,
+        publication_handle=publication_handle,
+    )
+    return replace(attachment, state=state, view=view)
 
 
 def _publication_error(
@@ -534,7 +619,7 @@ def publish_current_replica(
             binding,
             drain_timeout_s=getattr(policy, "drain_timeout_s", None),
         )
-        details: dict[str, object] = {
+        stale_details: dict[str, object] = {
             "expected_binding_value_ref": None
             if weight_version.binding_value_ref is None
             else weight_version.binding_value_ref.to_dict(),
@@ -543,7 +628,7 @@ def publish_current_replica(
             else actual_ref.to_dict(),
         }
         if retire_error is not None:
-            details["retire_error"] = retire_error
+            stale_details["retire_error"] = retire_error
         _emit_publication_profile(
             profile_sink,
             "runtime_publication.publish.stale",
@@ -559,7 +644,7 @@ def publish_current_replica(
             binding=binding,
             operation=operation,
             result=result,
-            details=details,
+            details=stale_details,
         )
     projection = _published_replica_projection_from_result(
         attachment=current_attachment,

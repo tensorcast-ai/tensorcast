@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -22,6 +24,14 @@ from tensorcast.serving.runtime_view import (
     PublishedReplicaProjection,
     RuntimeWorkerView,
 )
+
+
+def _profile_records(tmp_path) -> list[dict[str, object]]:
+    return [
+        json.loads(line)
+        for path in tmp_path.glob("tensorcast_pid*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
 
 
 class _Operation:
@@ -53,6 +63,7 @@ class _PublicationBinding:
         self.published_replica_id: str | None = None
         self.retired_with: float | None = None
         self.publish_calls = 0
+        self.close_calls = 0
 
     def publish_replica_operation(self) -> _Operation:
         self.publish_calls += 1
@@ -64,6 +75,9 @@ class _PublicationBinding:
         self.retired_with = drain_timeout_s
         self.published_lease_id = None
         self.published_replica_id = None
+
+    def close(self) -> None:
+        self.close_calls += 1
 
 
 class _MissingPublicationCapabilityBinding:
@@ -93,7 +107,10 @@ def _session(
 ) -> ServingRuntimeSession:
     return ServingRuntimeSession.from_config(
         ServingConfig.from_mapping(config),
-        host=IntegrationHost(framework=object(), placement=object()),
+        host=IntegrationHost(
+            framework=cast(Any, object()),
+            placement=cast(Any, object()),
+        ),
         profile_sink=profile_sink,
     )
 
@@ -261,7 +278,9 @@ def test_publish_current_replica_rejects_artifact_scope_mismatch(
 
 def test_publish_current_replica_returns_published_projection(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ) -> None:
+    monkeypatch.setenv("TENSORCAST_PROFILE_DIR", str(tmp_path))
     monkeypatch.setattr(
         integration_mod.tc_runtime_config.RuntimeSettings,
         "ensure_initialized",
@@ -282,7 +301,55 @@ def test_publish_current_replica_returns_published_projection(
     assert projection.artifact_ref == "mi2:test:serving"
     assert projection.binding_value_ref is not None
     assert projection.binding_value_ref.seal_generation == 1
+    report = cast(
+        dict[str, Any],
+        published.view.diagnostics["artifact_publication_report"],
+    )
+    assert report["target_kind"] == "publication"
+    assert report["artifact_id"] == "mi2:test:serving"
+    assert report["operation_backend"] == "runtime_publication"
+    assert report["target_layout_digest"] == "layout-1"
+    assert report["envelope"]["projection_kind"] == "published_replica"
+    assert report["envelope"]["release_policy"] == (
+        "retire_published_replica",
+        "release_publication_lease",
+    )
+    assert report["publication"]["state"] == "published"
+    assert report["publication"]["replica_id"] == "replica-1"
+    assert report["publication"]["lease_id"] == "lease-1"
+    assert report["publishability"]["publishable"] is True
+    assert report["publishability"]["publish_requested"] is True
+    assert report["publishability"]["published"] is True
     assert attachment.view.endpoint.weight_version.published_replica is None
+    assert published.state.release_contract is not None
+    assert published.state.release_contract.release_policy == (
+        "retire_published_replica",
+        "release_publication_lease",
+    )
+    assert published.state.publication_handle is not None
+    assert published.state.publication_handle.release_contract is (
+        published.state.release_contract
+    )
+    assert published.state.publication_handle.report.target_kind == "publication"
+    assert published.state.publication_handle.report.publication is not None
+    assert published.state.publication_handle.report.publication.state == "published"
+    assert published.state.publication_handle.binding() is binding
+    events = [
+        record
+        for record in _profile_records(tmp_path)
+        if record.get("stage") == "artifact.realize"
+    ]
+    assert len(events) == 1
+    assert events[0]["target_kind"] == "publication"
+    assert events[0]["operation_backend"] == "runtime_publication"
+    assert events[0]["publishable"] is True
+    assert events[0]["published"] is True
+    assert events[0]["envelope_projection_kind"] == "published_replica"
+    published.state.close()
+    published.state.close()
+    assert binding.retired_with is None
+    assert binding.close_calls == 1
+    assert published.state.release_contract.released is True
 
 
 def test_project_current_replica_publication_state_returns_typed_projection(
@@ -311,6 +378,19 @@ def test_project_current_replica_publication_state_returns_typed_projection(
     assert pending.artifact_ref == "mi2:test:serving"
     assert pending.binding_value_ref is not None
     assert pending.binding_value_ref.seal_generation == 1
+    pending_report = cast(
+        dict[str, Any],
+        publishing.view.diagnostics["artifact_publication_report"],
+    )
+    assert pending_report["publication"]["state"] == "publishing"
+    assert pending_report["publication"]["reason"] == "after_vllm_ready"
+    assert publishing.state.publication_handle is not None
+    assert publishing.state.publication_handle.report.target_kind == "publication"
+    assert publishing.state.publication_handle.report.publication is not None
+    assert publishing.state.publication_handle.report.publication.state == "publishing"
+    assert publishing.state.publication_handle.release_contract is (
+        publishing.state.release_contract
+    )
     projection = published.view.endpoint.weight_version.published_replica
     assert projection is not None
     assert projection.state == "published"
@@ -346,7 +426,7 @@ def test_publish_and_retire_emit_profile_metrics(
         "ensure_initialized",
         lambda self: None,
     )
-    events: list[dict[str, object]] = []
+    events: list[dict[str, Any]] = []
     binding = _PublicationBinding()
     session = _session(
         {

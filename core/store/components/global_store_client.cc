@@ -1694,6 +1694,44 @@ absl::StatusOr<layout::LayoutSpecRecord> GlobalStoreClient::get_layout_spec(std:
   return response.record();
 }
 
+absl::StatusOr<std::string> GlobalStoreClient::put_layout_spec(
+    const layout::LayoutSpec& layout_spec,
+    std::string_view canonical_index_data,
+    std::string_view layout_json) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (layout_spec.index_multihash().empty()) {
+    return absl::InvalidArgumentError("put_layout_spec requires layout.index_multihash");
+  }
+
+  global_store::PutLayoutSpecRequest request;
+  request.mutable_layout()->CopyFrom(layout_spec);
+  if (!canonical_index_data.empty()) {
+    request.set_canonical_index_data(std::string(canonical_index_data));
+  }
+  if (!layout_json.empty()) {
+    request.set_layout_json(std::string(layout_json));
+  }
+
+  global_store::PutLayoutSpecResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return assembly_view_stub_->PutLayoutSpec(ctx, req, resp); },
+      "PutLayoutSpec");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError(absl::StrFormat("PutLayoutSpec failed: status=%s", status_to_cstr(response.status())));
+  }
+  if (response.layout_id().empty()) {
+    return absl::InternalError("PutLayoutSpec returned empty layout_id");
+  }
+  return response.layout_id();
+}
+
 absl::Status GlobalStoreClient::attach_layout_to_artifact(std::string_view mi2_id, std::string_view layout_id) {
   if (!is_connected()) {
     return absl::FailedPreconditionError("GlobalStoreClient not connected");

@@ -9,7 +9,7 @@ import time
 import traceback
 from collections import deque
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from typing import cast
 
 from duckdb import DuckDBPyConnection
@@ -391,8 +391,12 @@ class _LockedCursor:
             _record_cursor_close(self._owner_conn_obj_id)
 
     def __del__(self):
-        with suppress(Exception):
+        try:
             self.close()
+        except Exception:
+            logger.debug(
+                "Failed to close DuckDB cursor during finalization", exc_info=True
+            )
 
     def __getattr__(self, name):
         return getattr(self._cursor, name)

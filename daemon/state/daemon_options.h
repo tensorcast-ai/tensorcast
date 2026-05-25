@@ -50,11 +50,6 @@ struct DaemonOptions {
       kValidateBeforeRead = 1,
     };
 
-    enum class UnmatchedPathMode : std::uint8_t {
-      kReject = 1,
-      kAllowAbsoluteFallback = 2,
-    };
-
     struct TrustedRootPolicy {
       std::string policy_id;
       std::filesystem::path root_path;
@@ -66,7 +61,6 @@ struct DaemonOptions {
     };
 
     std::vector<TrustedRootPolicy> trusted_root_policies;
-    UnmatchedPathMode unmatched_path_mode{UnmatchedPathMode::kReject};
   };
 
   struct OptimisticLocalReady {
@@ -225,7 +219,7 @@ struct DaemonOptions {
   ProgressiveReplication progressive_replication{};
 
   // API behavior flags
-  // If true, GetLoadedReplicasV2 uses opaque cursor tokens based on a stable
+  // If true, GetLoadedReplicas uses opaque cursor tokens based on a stable
   // ordering (artifact_id, device_id). If false (default), uses numeric
   // index tokens.
   bool use_cursor_pagination{false};

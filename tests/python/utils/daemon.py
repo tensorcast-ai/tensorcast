@@ -236,7 +236,6 @@ def start_daemon_binary(
 
     if public_disk_source_root is not None:
         cfg["public_disk_source"] = {
-            "unmatched_path_mode": "UNMATCHED_PATH_MODE_REJECT",
             "trusted_root_policies": [
                 {
                     "policy_id": "pytest_public_disk_source_root",

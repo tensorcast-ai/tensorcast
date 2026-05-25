@@ -66,7 +66,8 @@ using status_utils::to_grpc_status;
 
 namespace {
 
-using materialization_index_source::load_canonical_index_with_disk_fallback;
+using materialization_index_source::canonical_index_authority_for_resolution;
+using materialization_index_source::load_canonical_index_from_authority;
 using materialization_index_source::load_descriptor_metadata;
 using materialization_layout::parse_canonical_index;
 using materialization_layout::resolve_target_offsets;
@@ -74,22 +75,28 @@ using materialization_payload::build_descriptors_from_index;
 using materialization_policy::apply_group_realization_begin_context_to_transport_context;
 using materialization_policy::apply_operation_transport_context;
 using materialization_policy::apply_request_context_to_hints;
+using materialization_policy::attach_controller_realization_plan_span_attrs;
 using materialization_policy::begin_or_join_group_realization_if_enabled;
+using materialization_policy::build_controller_realization_plan;
 using materialization_policy::build_execution_diagnostics;
 using materialization_policy::build_view_spec_proto;
 using materialization_policy::collective_policy_requests_collective;
 using materialization_policy::compute_view_id_from_spec;
+using materialization_policy::ControllerRealizationPlan;
 using materialization_policy::GroupRealizationBeginContext;
 using materialization_policy::GroupRealizationPreparedMemberContext;
 using materialization_policy::HashExecutionDetails;
 using materialization_policy::NormalizedMaterializationRequestContext;
 using materialization_policy::OperationTransportContext;
 using materialization_policy::report_group_realization_prepared_if_enabled;
+using materialization_policy::require_controller_export_kind;
+using materialization_policy::require_controller_resource_authority;
 using materialization_policy::resolve_collective_policy;
 using materialization_policy::resolve_group_realization_transport_context;
 using materialization_policy::resolve_materialization_request_context;
 using materialization_policy::resolve_source_execution_topology;
 using materialization_policy::resolve_transform_placement;
+using materialization_policy::validate_controller_process_visible_export_authorities;
 using materialization_policy::validate_group_realization_staged_publish_supported;
 using materialization_request_common::resolve_artifact_and_disk_source;
 using materialization_target_plan::build_binding_realization_materialization_plan;
@@ -102,6 +109,27 @@ using store::loading::MaterializationSource;
 namespace coordination = assembly_coordination;
 
 constexpr size_t kBindingRealizationPlanCacheMaxEntries = 8;
+constexpr std::uint32_t kDefaultGroupPublishWaitTimeoutMs = 30000;
+
+std::uint32_t group_publish_wait_timeout_ms(const v2::GroupRealizationOptions& options) {
+  if (options.deadline_unix_nanos() == 0) {
+    return kDefaultGroupPublishWaitTimeoutMs;
+  }
+  const uint64_t max_deadline_nanos = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+  const auto deadline_nanos = static_cast<int64_t>(std::min(options.deadline_unix_nanos(), max_deadline_nanos));
+  const absl::Duration remaining = absl::FromUnixNanos(deadline_nanos) - absl::Now();
+  if (remaining <= absl::ZeroDuration()) {
+    return 1;
+  }
+  const int64_t remaining_ms = absl::ToInt64Milliseconds(remaining);
+  if (remaining_ms <= 0) {
+    return 1;
+  }
+  if (remaining_ms > std::numeric_limits<std::uint32_t>::max()) {
+    return std::numeric_limits<std::uint32_t>::max();
+  }
+  return static_cast<std::uint32_t>(remaining_ms);
+}
 
 std::string hash_cache_payload(std::string_view payload) {
   const std::vector<uint8_t> digest = common::sha256_digest_bytes(
@@ -962,7 +990,7 @@ absl::StatusOr<BindingContributionRegistrationPlan> build_binding_contribution_r
       dep.storage_path,
       selection.artifact_id(),
       /*allow_disk=*/true,
-      /*allow_local_import_fallback=*/true,
+      /*allow_local_import_disk_source=*/true,
       loopback_peer);
   if (!resolution_or.ok()) {
     return resolution_or.status();
@@ -971,12 +999,12 @@ absl::StatusOr<BindingContributionRegistrationPlan> build_binding_contribution_r
   if (resolution.local_import.has_value() && !resolution.local_import->tensor_aware_metadata) {
     return absl::InvalidArgumentError("piece contribution view planning requires tensor-aware mounted-source metadata");
   }
-  auto canonical_index_or = load_canonical_index_with_disk_fallback(
+  auto canonical_index_or = load_canonical_index_from_authority(
       dep.engine,
       resolution.resolved_artifact_id,
       resolution.normalized_disk_path,
       record.device_id,
-      resolution.gs_connected);
+      canonical_index_authority_for_resolution(resolution.gs_connected, resolution.local_import.has_value()));
   if (!canonical_index_or.ok()) {
     return canonical_index_or.status();
   }
@@ -1843,11 +1871,16 @@ void fill_staged_binding_value(
 
 void fill_group_realization_acquire_ref(
     const BindingRegistry::StagedBindingValue& staged,
+    const v2::GroupRealizationOptions& group_realization,
     v2::GroupRealizationAcquireRef& acquire) {
   acquire.set_transaction_id(staged.transaction_id);
   acquire.set_version_set_id(staged.version_set_id);
   acquire.set_part_id(staged.part_id);
   acquire.set_staging_token(staged.staging_token);
+  acquire.set_wait_for_publish(group_realization.require_staged_publish());
+  if (group_realization.require_staged_publish()) {
+    acquire.set_wait_timeout_ms(group_publish_wait_timeout_ms(group_realization));
+  }
 }
 
 void clear_verification_metadata(BindingRegistry::Record* record) {
@@ -2292,7 +2325,7 @@ grpc::Status prepare_source_bound_plan(
         d.storage_path,
         resolved_artifact_id,
         out.request_context.retrieval_policy.allow_disk,
-        /*allow_local_import_fallback=*/true,
+        /*allow_local_import_disk_source=*/true,
         /*loopback_peer=*/true,
         /*disk_expected_size=*/std::nullopt,
         /*lightweight_msa1_validation=*/true);
@@ -2311,7 +2344,7 @@ grpc::Status prepare_source_bound_plan(
         d.storage_path,
         effective_source_selection.artifact_id(),
         out.request_context.retrieval_policy.allow_disk,
-        /*allow_local_import_fallback=*/true,
+        /*allow_local_import_disk_source=*/true,
         loopback_peer);
     if (!resolution_or.ok()) {
       return to_grpc_status(resolution_or.status());
@@ -2359,12 +2392,12 @@ grpc::Status prepare_source_bound_plan(
   absl::StatusOr<std::string> canonical_json_or =
       request.public_disk_source != nullptr && !request.public_disk_source->canonical_index_bytes().empty()
       ? absl::StatusOr<std::string>(request.public_disk_source->canonical_index_bytes())
-      : load_canonical_index_with_disk_fallback(
+      : load_canonical_index_from_authority(
             d.engine,
             out.resolved_artifact_id,
             resolution.normalized_disk_path,
             device.ordinal,
-            resolution.gs_connected);
+            canonical_index_authority_for_resolution(resolution.gs_connected, resolution.local_import.has_value()));
   if (!canonical_json_or.ok()) {
     return to_grpc_status(canonical_json_or.status());
   }
@@ -2847,6 +2880,25 @@ grpc::Status OwnedBindingService::create_binding(
     return {StatusCode::INVALID_ARGUMENT, "binding requires a CUDA device"};
   }
 
+  auto realization_plan_or = build_controller_realization_plan(req);
+  if (!realization_plan_or.ok()) {
+    return to_grpc_status(realization_plan_or.status());
+  }
+  const ControllerRealizationPlan& realization_plan = *realization_plan_or;
+  attach_controller_realization_plan_span_attrs(rctx, realization_plan);
+  const std::string& planned_export_kind = realization_plan.resource_envelope.export_kind;
+  const bool plan_exports_cuda = planned_export_kind == "cuda_ipc_lease";
+  const bool plan_allows_publication_token = planned_export_kind == "publication_token_or_none";
+  if (!plan_exports_cuda && !plan_allows_publication_token) {
+    return to_grpc_status(
+        absl::FailedPreconditionError(
+            absl::StrCat("CreateBinding admitted unsupported export_kind=", planned_export_kind)));
+  }
+  if (auto status = validate_controller_process_visible_export_authorities(realization_plan, "CreateBinding");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
+
   google::protobuf::RepeatedPtrField<std::string> no_tensor_filter;
   auto descriptors_or = build_descriptors_from_index(
       std::string_view(req.target_index_bytes().data(), req.target_index_bytes().size()),
@@ -2858,7 +2910,7 @@ grpc::Status OwnedBindingService::create_binding(
 
   std::unique_ptr<common::memory::GpuDeviceMemory> allocation;
   cuda::IpcHandleBytes handle_bytes;
-  if (req.ownership() == v2::BINDING_OWNERSHIP_DAEMON) {
+  if (plan_exports_cuda) {
     if (d_.handle_leases == nullptr) {
       return {StatusCode::FAILED_PRECONDITION, "local handle plane is disabled (no handle leases)"};
     }
@@ -2907,7 +2959,7 @@ grpc::Status OwnedBindingService::create_binding(
   record->state = v2::BINDING_STATE_ALLOCATED;
   record->mapped = mapped;
   record->closed = false;
-  record->export_refs = req.ownership() == v2::BINDING_OWNERSHIP_DAEMON ? 1 : 0;
+  record->export_refs = plan_exports_cuda ? 1 : 0;
   record->allocation = std::move(allocation);
   record->handle_bytes = handle_bytes;
   record->target_layout = req.target_layout();
@@ -2938,7 +2990,7 @@ grpc::Status OwnedBindingService::create_binding(
     return to_grpc_status(insert_status);
   }
 
-  if (req.ownership() == v2::BINDING_OWNERSHIP_CLIENT && req.has_initial_selection() &&
+  if (plan_allows_publication_token && req.has_initial_selection() &&
       !record->current_artifact_canonical_index_json.empty()) {
     auto storage_layout_or = build_client_binding_publication_storage_layout(req.target_layout(), device.ordinal);
     if (!storage_layout_or.ok()) {
@@ -2970,7 +3022,7 @@ grpc::Status OwnedBindingService::create_binding(
     }
   }
 
-  if (req.ownership() == v2::BINDING_OWNERSHIP_DAEMON) {
+  if (plan_exports_cuda) {
     auto token_or = d_.handle_leases->mint_external_cuda_lease(
         req.pid(),
         [registry = &d_.bindings, binding_id = record->binding_id]() { registry->release_export_ref(binding_id); });
@@ -3063,6 +3115,29 @@ grpc::Status OwnedBindingService::create_owned_binding(
   if (!prepare_status.ok()) {
     return prepare_status;
   }
+  const auto* group_begin_context =
+      prepared_plan.group_begin_context.has_value() ? &*prepared_plan.group_begin_context : nullptr;
+  auto realization_plan_or = build_controller_realization_plan(
+      req,
+      prepared_plan.request_context,
+      prepared_plan.transport_context,
+      group_begin_context,
+      prepared_plan.resolved_artifact_id,
+      prepared_plan.current_selection);
+  if (!realization_plan_or.ok()) {
+    return to_grpc_status(realization_plan_or.status());
+  }
+  const ControllerRealizationPlan& realization_plan = *realization_plan_or;
+  attach_controller_realization_plan_span_attrs(rctx, realization_plan);
+  if (auto status = require_controller_export_kind(realization_plan, "cuda_ipc_lease", "CreateOwnedBinding");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
+  if (auto status = validate_controller_process_visible_export_authorities(realization_plan, "CreateOwnedBinding");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
+
   const bool create_staged_value = req.has_group_realization() && req.group_realization().enabled() &&
       req.group_realization().require_staged_publish();
   if (create_staged_value && !prepared_plan.group_begin_context.has_value()) {
@@ -3333,7 +3408,8 @@ grpc::Status OwnedBindingService::create_owned_binding(
   if (create_staged_value) {
     resp.set_created_staged_value(true);
     fill_staged_binding_value(*record, *created_staged, *resp.mutable_staged_value());
-    fill_group_realization_acquire_ref(*created_staged, *resp.mutable_group_realization_acquire());
+    fill_group_realization_acquire_ref(
+        *created_staged, req.group_realization(), *resp.mutable_group_realization_acquire());
   } else {
     fill_binding_value(*record, *resp.mutable_current_value());
   }
@@ -3380,6 +3456,8 @@ grpc::Status OwnedBindingService::commit_binding_artifact(
   }
   cancel_promotion_jobs_for_value(
       record->binding_id, current_binding_value_id, "binding current value replaced by artifact commit");
+  v2::TargetLayout target_layout;
+  int device_id = -1;
   {
     absl::MutexLock lock(&record->mu);
     if (record->closed) {
@@ -3401,8 +3479,30 @@ grpc::Status OwnedBindingService::commit_binding_artifact(
         record.get(),
         req.has_source_artifact_id() ? req.source_artifact_id() : req.selection().artifact_id(),
         req.selection());
+    target_layout = record->target_layout;
+    device_id = record->device_id;
     resp.set_state(record->state);
     fill_binding_value(*record, *resp.mutable_current_value());
+  }
+  auto storage_layout_or = build_client_binding_publication_storage_layout(target_layout, device_id);
+  if (!storage_layout_or.ok()) {
+    return to_grpc_status(storage_layout_or.status());
+  }
+  auto token_or = maybe_mint_binding_current_value_publication_token(
+      d_.capability_tokens,
+      d_.identity,
+      d_.target_materialization_service,
+      record,
+      d_.daemon_id,
+      d_.daemon_session_id,
+      std::string_view(),
+      std::move(storage_layout_or->publish_segments),
+      std::move(storage_layout_or->publish_storages));
+  if (!token_or.ok()) {
+    return to_grpc_status(token_or.status());
+  }
+  if (!token_or->empty()) {
+    resp.set_binding_current_value_publication_token(*token_or);
   }
   rctx.mark_success();
   return Status::OK;
@@ -4510,6 +4610,40 @@ grpc::Status OwnedBindingService::refill_owned_binding(
       prepared_plan);
   if (!prepare_status.ok()) {
     return prepare_status;
+  }
+  const auto* group_begin_context =
+      prepared_plan.group_begin_context.has_value() ? &*prepared_plan.group_begin_context : nullptr;
+  auto realization_plan_or = build_controller_realization_plan(
+      req,
+      prepared_plan.request_context,
+      prepared_plan.transport_context,
+      group_begin_context,
+      prepared_plan.resolved_artifact_id,
+      prepared_plan.current_selection,
+      target_layout,
+      device_uuid,
+      owner_pid,
+      use_mapped_materialization,
+      prepared_plan.collective_policy,
+      prepared_plan.execution_only_mutable);
+  if (!realization_plan_or.ok()) {
+    return to_grpc_status(realization_plan_or.status());
+  }
+  const ControllerRealizationPlan& realization_plan = *realization_plan_or;
+  attach_controller_realization_plan_span_attrs(rctx, realization_plan);
+  const std::string_view expected_export_kind =
+      prepared_plan.execution_only_mutable ? "none" : "publication_token_or_none";
+  if (auto status = require_controller_export_kind(realization_plan, expected_export_kind, "RefillOwnedBinding");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
+  if (auto status = require_controller_resource_authority(realization_plan, "BodyBackingManager", "RefillOwnedBinding");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
+  if (auto status = require_controller_resource_authority(realization_plan, "BindingRegistry", "RefillOwnedBinding");
+      !status.ok()) {
+    return to_grpc_status(status);
   }
   const auto prepare_plan_done = std::chrono::steady_clock::now();
   prepare_plan_sec = elapsed_sec(prepare_plan_start, prepare_plan_done);

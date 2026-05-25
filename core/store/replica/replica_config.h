@@ -34,13 +34,12 @@ struct ReplicaConfig {
   // Unique identifier for the replica (used for logging, caching keys, RDMA registration).
   std::string artifact_identifier;
 
-  // Explicit target device type (CPU, GPU, REMOTE). Defaults to CPU. If GPU is chosen, also
-  // specify `local_device_id` below. This makes the target placement unambiguous and avoids
-  // the legacy convention of inferring GPU vs. CPU from the sign of `local_device_id`.
+  // Explicit target device type. Defaults to CPU. GPU replicas must also
+  // specify `local_device_id`; CPU replicas must leave it at -1.
   DeviceType device_type = DeviceType::CPU;
 
-  // Target local GPU device for operations (if applicable).
-  int local_device_id = -1; // -1 means unspecified; runtime will decide
+  // Target local GPU device for GPU replicas. CPU replicas use -1.
+  int local_device_id = -1;
 
   // Memory pools for allocation (can be shared across replicas).
   gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> pinned_buffer_pool;

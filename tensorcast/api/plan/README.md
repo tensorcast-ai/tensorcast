@@ -45,11 +45,9 @@ Repository rule:
   prefer the repo-owned helpers
   `build_pure_transform_publication_spec(...)` or
   `build_pure_transform_transform_spec(...)`. These helpers now attach a typed
-  `TransformSpec.publication_spec` carrier instead of relying on internal
-  `tc_serving_*` transform args. The legacy string-arg path is still accepted
-  as a compatibility fallback, but the default identity `transform_register`
-  path now consumes the typed publication spec first and prepares the reserved
-  serving-manifest tensor before registration.
+  `TransformSpec.publication_spec` carrier. The default identity
+  `transform_register` path consumes that typed publication spec and prepares
+  the reserved serving-manifest tensor before registration.
 - If you are building the plan directly, `InstanceStepBuilder.transform_register_pure_transform(...)`
   wraps that helper path and lowers to the same canonical `transform_register`
   IR while preserving typed publish intent (`layout_id`, `requirements`,

@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-from contextlib import suppress
 from typing import Callable
 
 import grpc
@@ -318,18 +317,17 @@ class ReplicaRegistrationRpcHandler:
             else:
                 registered = _register_impl()
 
-            with suppress(Exception):
-                span_attrs: dict[str, bool | int | float | str] = {
-                    "tc.artifact.id": registered.artifact_id,
-                    "tc.replica.id": str(registered.replica_id),
-                    "tc.memory.type": str(registered.memory_type.value),
-                    "tc.memory.size": int(registered.memory_size),
-                    "tc.device.id": int(registered.device_id),
-                }
-                worker_id = registered.worker_id
-                if worker_id:
-                    span_attrs["tc.worker.id"] = worker_id
-                set_span_attributes(span_attrs)
+            span_attrs: dict[str, bool | int | float | str] = {
+                "tc.artifact.id": registered.artifact_id,
+                "tc.replica.id": str(registered.replica_id),
+                "tc.memory.type": str(registered.memory_type.value),
+                "tc.memory.size": int(registered.memory_size),
+                "tc.device.id": int(registered.device_id),
+            }
+            worker_id = registered.worker_id
+            if worker_id:
+                span_attrs["tc.worker.id"] = worker_id
+            set_span_attributes(span_attrs)
 
             response = global_store_pb2.RegisterReplicaResponse(
                 status=global_store_pb2.Status.STATUS_OK,

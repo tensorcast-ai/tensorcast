@@ -2,7 +2,6 @@
 
 import os
 import re
-from contextlib import suppress
 from importlib import resources
 
 import duckdb
@@ -66,12 +65,14 @@ def _resolve_schema_path() -> str:
         return root_schema
 
     # Packaged resource fallback (installed wheel)
-    with suppress(Exception):
+    try:
         res = resources.files("tensorcast").joinpath("schema.sql")
         if res.is_file():
             with resources.as_file(res) as p:
                 logger.info("Using packaged schema: tensorcast/schema.sql")
                 return str(p)
+    except (FileNotFoundError, ModuleNotFoundError) as exc:
+        logger.debug("Packaged schema lookup failed: %s", exc)
 
     raise FileNotFoundError(
         "schema.sql not found. Ensure repo-root schema.sql exists or install a wheel that ships tensorcast/schema.sql."

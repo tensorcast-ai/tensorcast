@@ -91,7 +91,7 @@ TEST_CASE("Multi-GPU Disk Load and Verification", "[replica][disk][multi_gpu]") 
     ReplicaConfig cfg{
         .source = disk_src,
         .artifact_identifier = artifact_id,
-        .device_type = ::tensorcast::DeviceType::CPU,
+        .device_type = ::tensorcast::DeviceType::GPU,
         .local_device_id = dev,
         .pinned_buffer_pool = pool,
         .async_runtime = async_runtime,

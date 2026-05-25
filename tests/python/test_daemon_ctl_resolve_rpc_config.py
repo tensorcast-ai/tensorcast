@@ -43,7 +43,7 @@ def test_import_artifact_from_path_uses_configurable_timeout_and_retries(
     ctl._unary_call = _fake_unary
     ctl._client_span = _fake_span
 
-    response = daemon_ctl.DaemonCtl.import_artifact_from_path_v2(
+    response = daemon_ctl.DaemonCtl.import_artifact_from_path(
         ctl,
         path="/tmp/model",
         verify_checksums=False,
@@ -59,7 +59,7 @@ def test_import_artifact_from_path_uses_configurable_timeout_and_retries(
     daemon_ctl._import_artifact_from_path_retries.cache_clear()
     seen.clear()
 
-    daemon_ctl.DaemonCtl.import_artifact_from_path_v2(
+    daemon_ctl.DaemonCtl.import_artifact_from_path(
         ctl,
         path="/tmp/model",
         verify_checksums=False,
@@ -105,7 +105,7 @@ def test_import_artifact_from_path_stream_uses_configurable_timeout(
     ctl._client_span = _fake_span
 
     events = list(
-        daemon_ctl.DaemonCtl.import_artifact_from_path_stream_v2(
+        daemon_ctl.DaemonCtl.import_artifact_from_path_stream(
             ctl,
             path="/tmp/model",
             verify_checksums=False,

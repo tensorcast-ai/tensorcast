@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
-from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager, suppress
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,20 @@ from typing import Any, cast
 import torch
 
 import tensorcast as tc
+from tensorcast.api.store.common import canonical_index_to_bytes
+from tensorcast.api.store.realization_kernel import (
+    ArtifactRealizationHandle,
+    ArtifactRealizationReport,
+    ArtifactRealizationSpec,
+    RealizationTargetPlan,
+    artifact_realization_report_to_dict,
+    emit_artifact_realization_profile_event,
+    envelope_for_runtime_attachment,
+    model_runtime_report_for,
+    report_for_runtime_attachment,
+    resolve_artifact_selection,
+)
+from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry
 from tensorcast.serving import binding_runtime as tc_binding_runtime
 from tensorcast.serving import config as tc_config
 from tensorcast.serving import contract as tc_contract
@@ -54,6 +69,7 @@ from tensorcast.serving.builder.compiler import TracePlan
 from tensorcast.serving.resolver import (
     ResolvedServingArtifact,
     ServingArtifactResolver,
+    canonical_index_from_descriptor,
     is_reserved_serving_tensor_name,
 )
 from tensorcast.types import (
@@ -75,6 +91,8 @@ DEFAULT_RUNTIME_PROFILE = tc_runtime_config.DEFAULT_RUNTIME_PROFILE
 LOCAL_READY_BOOTSTRAP_BUILD_PIPELINE_VERSION = (
     tc_local_ready.LOCAL_READY_BOOTSTRAP_BUILD_PIPELINE_VERSION
 )
+
+_LOGGER = logging.getLogger(__name__)
 FamilyReadiness = tc_dto.FamilyReadiness
 FrameworkIntegrationContext = tc_dto.FrameworkIntegrationContext
 PreparedServingArtifact = tc_dto.PreparedServingArtifact
@@ -152,6 +170,9 @@ RuntimeWorkerView = tc_runtime_view.RuntimeWorkerView
 SourceBoundContractProjection = tc_runtime_view.SourceBoundContractProjection
 SourceSelectionProjection = tc_runtime_view.SourceSelectionProjection
 WeightVersionProjection = tc_runtime_view.WeightVersionProjection
+source_selection_projection_from_artifact_realization_report = (
+    tc_runtime_view.source_selection_projection_from_artifact_realization_report
+)
 source_selection_projection_from_execution_diagnostics = (
     tc_runtime_view.source_selection_projection_from_execution_diagnostics
 )
@@ -293,7 +314,6 @@ class RuntimeBindingMaterialization:
         expected_tensor_schema_hash: str | None = None,
         semantic_validation_spec: Any | None = None,
     ) -> RuntimeBindingState:
-        del context
         owner: Any = binding_handle
         transferred = False
         try:
@@ -353,18 +373,36 @@ class RuntimeBindingMaterialization:
                 owner = transfer_to_runtime()
                 transferred = True
             view = state_seed.runtime_view()
+            realization_handle = _runtime_attachment_realization_handle(
+                report=state_seed.realization_report,
+                binding_handle=binding_handle,
+                owner=owner,
+            )
+            model_runtime_ref: dict[str, RuntimeBindingState] = {}
+            model_runtime_handle = _model_runtime_realization_handle(
+                context=context,
+                target_device=target_device,
+                runtime_attachment_handle=realization_handle,
+                attach_fn=lambda **_kwargs: model_runtime_ref["state"],
+            )
             try:
                 state = self.state_factory(
                     binding=binding_handle,
                     artifact_ref=state_seed.artifact_ref,
                     runtime_view=view,
                     ownership_handle=owner,
+                    release_contract=None
+                    if realization_handle is None
+                    else realization_handle.release_contract,
+                    realization_handle=realization_handle,
+                    model_runtime_handle=model_runtime_handle,
                 )
             except Exception as exc:
-                self._close_quietly(owner)
+                self._close_quietly(realization_handle or owner)
                 raise OwnershipTransferError(
                     "TensorCast runtime binding state construction failed"
                 ) from exc
+            model_runtime_ref["state"] = state
             self._emit("runtime_materialization.attach.done", state_seed)
             return state
         except OwnershipTransferError:
@@ -715,6 +753,7 @@ class LocalReadyServingResult:
     layout: Any | None = None
     realization_entry_count: int | None = None
     realization: Any | None = None
+    realization_report: ArtifactRealizationReport | None = None
 
 
 @dataclass(frozen=True)
@@ -770,11 +809,293 @@ def _binding_tensors(binding: Any) -> Mapping[str, torch.Tensor]:
     return dict(tensors)
 
 
+def _canonical_index_bytes_from_tensors(
+    tensors: Mapping[str, torch.Tensor],
+) -> bytes:
+    entries: list[tc.CanonicalIndexEntry] = []
+    cursor = 0
+    for key, tensor in sorted(tensors.items(), key=lambda item: str(item[0])):
+        name = str(key)
+        size_bytes = int(tensor.element_size()) * int(tensor.numel())
+        entries.append(
+            CanonicalIndexEntry(
+                name=name,
+                dtype=tensor.dtype,
+                shape=tuple(int(dim) for dim in tensor.shape),
+                stride=tuple(int(dim) for dim in tensor.stride()),
+                storage_offset=int(tensor.storage_offset()),
+                segment_offset=cursor,
+                size_bytes=size_bytes,
+            )
+        )
+        cursor += size_bytes
+    return canonical_index_to_bytes(
+        CanonicalIndex(entries=tuple(entries), total_size_bytes=cursor, avbs_hash="")
+    )
+
+
+def _canonical_index_bytes_for_runtime_selection(
+    *,
+    resolved: ResolvedServingArtifact | Any | None,
+    tensors: Mapping[str, torch.Tensor],
+) -> bytes:
+    descriptor = getattr(resolved, "descriptor", None)
+    if descriptor is not None:
+        try:
+            return canonical_index_to_bytes(canonical_index_from_descriptor(descriptor))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            _LOGGER.debug(
+                "Failed to derive runtime canonical index from descriptor; using tensor metadata",
+                exc_info=True,
+            )
+    return _canonical_index_bytes_from_tensors(tensors)
+
+
+def _target_layout_digest_for_runtime_attachment(
+    *,
+    binding_layout_id: str | None,
+    tensor_schema_hash: str,
+) -> str:
+    if binding_layout_id:
+        return f"binding-layout:{binding_layout_id}"
+    return f"runtime-schema:{tensor_schema_hash}"
+
+
+def _runtime_attachment_report_for_resolved(
+    *,
+    resolved: ResolvedServingArtifact | Any,
+    tensors: Mapping[str, torch.Tensor],
+    binding_handle: Any | None,
+    target_device: Any,
+    tensor_schema_hash: str,
+    execution_diagnostics: Any | None = None,
+    materialization_diagnostics: Any | None = None,
+) -> ArtifactRealizationReport:
+    binding_layout_id = _optional_text(
+        getattr(binding_handle, "binding_layout_id", None)
+    )
+    target_plan = RealizationTargetPlan(
+        kind="runtime_attachment",
+        device=target_device,
+        target_layout_digest=_target_layout_digest_for_runtime_attachment(
+            binding_layout_id=binding_layout_id,
+            tensor_schema_hash=tensor_schema_hash,
+        ),
+        binding_layout_id=binding_layout_id,
+    )
+    envelope = envelope_for_runtime_attachment(tensors, retained=False)
+    envelope.validate_for_target(target_plan)
+    selection = resolve_artifact_selection(
+        artifact_id=str(getattr(resolved, "artifact_ref", "") or ""),
+        canonical_index_bytes=_canonical_index_bytes_for_runtime_selection(
+            resolved=resolved,
+            tensors=tensors,
+        ),
+        tensor_names=tuple(str(name) for name in tensors),
+        artifact_profile="serving_artifact",
+        authority_scope="daemon_mediated_runtime_attachment",
+    )
+    return report_for_runtime_attachment(
+        selection=selection,
+        target_plan=target_plan,
+        envelope=envelope,
+        binding_handle=binding_handle,
+        materialization_diagnostics=materialization_diagnostics,
+        execution_diagnostics=execution_diagnostics,
+        risk_labels=("binding_lifecycle",),
+    )
+
+
+def _runtime_attachment_report_for_retained(
+    *,
+    authority: tc_retained_binding.ParsedRetainedServingBindingAuthority,
+    tensors: Mapping[str, torch.Tensor],
+    binding_handle: Any | None,
+    target_device: Any,
+    tensor_schema_hash: str,
+    reservation_bytes: int,
+) -> ArtifactRealizationReport:
+    binding_layout_id = _optional_text(
+        getattr(binding_handle, "binding_layout_id", None)
+    )
+    target_plan = RealizationTargetPlan(
+        kind="runtime_attachment",
+        device=target_device,
+        target_layout_digest=_target_layout_digest_for_runtime_attachment(
+            binding_layout_id=binding_layout_id,
+            tensor_schema_hash=tensor_schema_hash,
+        ),
+        binding_layout_id=binding_layout_id,
+        copy_plan_digest=authority.expected.resolved_spec_digest,
+    )
+    envelope = envelope_for_runtime_attachment(
+        tensors,
+        retained=True,
+        reservation_bytes=reservation_bytes,
+    )
+    envelope.validate_for_target(target_plan)
+    artifact_id = (
+        authority.serving_artifact_id
+        or authority.local_serving_ref
+        or authority.binding_value_ref.binding_value_id
+    )
+    selection = resolve_artifact_selection(
+        artifact_id=str(artifact_id),
+        canonical_index_bytes=_canonical_index_bytes_from_tensors(tensors),
+        tensor_names=tuple(str(name) for name in tensors),
+        artifact_profile="retained_binding",
+        authority_scope="daemon_retained_runtime_attachment",
+    )
+    return report_for_runtime_attachment(
+        selection=selection,
+        target_plan=target_plan,
+        envelope=envelope,
+        binding_handle=binding_handle,
+        retained_authority=authority,
+        risk_labels=("retained_acquire",),
+    )
+
+
+def _runtime_attachment_report_for_artifact_id(
+    *,
+    artifact_id: str,
+    tensors: Mapping[str, torch.Tensor],
+    binding_handle: Any | None,
+    target_device: Any,
+    tensor_schema_hash: str,
+    artifact_profile: str,
+    authority_scope: str,
+    retained: bool = False,
+    reservation_bytes: int = 0,
+) -> ArtifactRealizationReport:
+    binding_layout_id = _optional_text(
+        getattr(binding_handle, "binding_layout_id", None)
+    )
+    target_plan = RealizationTargetPlan(
+        kind="runtime_attachment",
+        device=target_device,
+        target_layout_digest=_target_layout_digest_for_runtime_attachment(
+            binding_layout_id=binding_layout_id,
+            tensor_schema_hash=tensor_schema_hash,
+        ),
+        binding_layout_id=binding_layout_id,
+    )
+    envelope = envelope_for_runtime_attachment(
+        tensors,
+        retained=retained,
+        reservation_bytes=reservation_bytes,
+    )
+    envelope.validate_for_target(target_plan)
+    selection = resolve_artifact_selection(
+        artifact_id=str(artifact_id),
+        canonical_index_bytes=_canonical_index_bytes_from_tensors(tensors),
+        tensor_names=tuple(str(name) for name in tensors),
+        artifact_profile=artifact_profile,
+        authority_scope=authority_scope,
+    )
+    return report_for_runtime_attachment(
+        selection=selection,
+        target_plan=target_plan,
+        envelope=envelope,
+        binding_handle=binding_handle,
+        risk_labels=(artifact_profile,),
+    )
+
+
 def _close_quietly(handle: object) -> None:
     close = getattr(handle, "close", None)
     if callable(close):
-        with suppress(Exception):
+        try:
             close()
+        except Exception:
+            _LOGGER.exception("Failed to close runtime attachment handle")
+
+
+def _runtime_attachment_realization_handle(
+    *,
+    report: ArtifactRealizationReport | None,
+    binding_handle: Any,
+    owner: Any | None = None,
+) -> ArtifactRealizationHandle | None:
+    if report is None:
+        return None
+    owner_handle = owner if owner is not None else binding_handle
+    close = getattr(owner_handle, "close", None)
+    close_fn = None
+    if callable(close):
+
+        def close_owner_handle() -> None:
+            close()
+
+        close_fn = close_owner_handle
+    handle = ArtifactRealizationHandle(
+        target_kind="runtime_attachment",
+        report=report,
+        binding_value=binding_handle,
+        close_fn=close_fn,
+    )
+    emit_artifact_realization_profile_event(report)
+    return handle
+
+
+def _model_runtime_spec_for_context(
+    *,
+    context: FrameworkIntegrationContext,
+    target_device: Any,
+) -> ArtifactRealizationSpec:
+    placement = getattr(context, "placement", None)
+    framework = str(getattr(context, "framework_name", "") or "unknown_framework")
+    return ArtifactRealizationSpec.model_runtime(
+        framework=framework,
+        device=target_device,
+        topology=getattr(placement, "topology", None),
+        member=getattr(placement, "member", None),
+        adapter_version=_optional_text(getattr(context, "adapter_version", None)),
+        runtime_abi_version=_optional_text(
+            getattr(context, "serving_abi_version", None)
+        ),
+    )
+
+
+def _model_runtime_realization_handle(
+    *,
+    context: FrameworkIntegrationContext,
+    target_device: Any,
+    runtime_attachment_handle: ArtifactRealizationHandle | None,
+    attach_fn: Callable[..., RuntimeBindingState],
+) -> ArtifactRealizationHandle | None:
+    return _model_runtime_realization_handle_for_spec(
+        spec=_model_runtime_spec_for_context(
+            context=context,
+            target_device=target_device,
+        ),
+        runtime_attachment_handle=runtime_attachment_handle,
+        attach_fn=attach_fn,
+    )
+
+
+def _model_runtime_realization_handle_for_spec(
+    *,
+    spec: ArtifactRealizationSpec | None,
+    runtime_attachment_handle: ArtifactRealizationHandle | None,
+    attach_fn: Callable[..., RuntimeBindingState],
+) -> ArtifactRealizationHandle | None:
+    if runtime_attachment_handle is None:
+        return None
+    if spec is None:
+        return None
+    report = model_runtime_report_for(
+        spec=spec,
+        runtime_attachment_report=runtime_attachment_handle.report,
+    )
+    handle = ArtifactRealizationHandle(
+        target_kind="model_runtime",
+        report=report,
+        attach_fn=attach_fn,
+        release_contract=runtime_attachment_handle.release_contract,
+    )
+    emit_artifact_realization_profile_event(report)
+    return handle
 
 
 @dataclass(frozen=True)
@@ -837,6 +1158,10 @@ class RestoredRetainedBinding:
     @property
     def reservation_bytes(self) -> int:
         return self._attached.reservation_bytes
+
+    @property
+    def authority(self) -> tc_retained_binding.ParsedRetainedServingBindingAuthority:
+        return self._attached.authority
 
     @property
     def runtime_handle(
@@ -1113,6 +1438,12 @@ def _execution_facts_payload(
     }
 
 
+def _framework_payload_mapping(payload: object | None) -> dict[str, object] | None:
+    if not isinstance(payload, Mapping):
+        return None
+    return {str(key): value for key, value in payload.items()}
+
+
 def _optional_bytes(value: Any) -> bytes | None:
     if value is None:
         return None
@@ -1243,13 +1574,33 @@ def runtime_binding_state_from_runtime_view(
     runtime_view: RuntimeBindingView,
     artifact_ref: str | None = None,
     ownership_handle: Any | None = None,
+    artifact_realization_report: ArtifactRealizationReport | None = None,
+    model_runtime_spec: ArtifactRealizationSpec | None = None,
 ) -> RuntimeBindingState:
-    return RuntimeBindingState(
+    realization_handle = _runtime_attachment_realization_handle(
+        report=artifact_realization_report,
+        binding_handle=binding,
+        owner=ownership_handle,
+    )
+    model_runtime_ref: dict[str, RuntimeBindingState] = {}
+    model_runtime_handle = _model_runtime_realization_handle_for_spec(
+        spec=model_runtime_spec,
+        runtime_attachment_handle=realization_handle,
+        attach_fn=lambda **_kwargs: model_runtime_ref["state"],
+    )
+    state = RuntimeBindingState(
         binding=binding,
         artifact_ref=artifact_ref or runtime_view.serving_artifact_ref,
         runtime_view=runtime_view,
         ownership_handle=ownership_handle,
+        release_contract=None
+        if realization_handle is None
+        else realization_handle.release_contract,
+        realization_handle=realization_handle,
+        model_runtime_handle=model_runtime_handle,
     )
+    model_runtime_ref["state"] = state
+    return state
 
 
 def _enum_value(value: Any) -> Any:
@@ -1408,6 +1759,8 @@ def build_local_ready_prepared_artifact(
     tp_world_size: int,
     source_bound_contract_state: SourceBoundContractState,
     source_bound_contract_path: str,
+    artifact_realization_report: ArtifactRealizationReport | None = None,
+    model_runtime_spec: ArtifactRealizationSpec | None = None,
 ) -> LocalReadyServingResult:
     current_value_fields = local_ready_current_value_summary_fields(
         current_value,
@@ -1464,6 +1817,10 @@ def build_local_ready_prepared_artifact(
         ),
     )
     diagnostics = realization_report.to_runtime_diagnostics()
+    if artifact_realization_report is not None:
+        diagnostics["artifact_realization_report"] = (
+            artifact_realization_report_to_dict(artifact_realization_report)
+        )
     runtime_view = RuntimeBindingView(
         serving_artifact_ref=None,
         source_artifact_ref=source_artifact_ref,
@@ -1478,6 +1835,8 @@ def build_local_ready_prepared_artifact(
         binding=binding,
         runtime_view=runtime_view,
         artifact_ref=source_artifact_ref,
+        artifact_realization_report=artifact_realization_report,
+        model_runtime_spec=model_runtime_spec,
     )
     prepared = PreparedServingArtifact(
         source_artifact_ref=source_artifact_ref,
@@ -1501,6 +1860,7 @@ def build_local_ready_prepared_artifact(
         runtime_view=runtime_view,
         prepared=prepared,
         binding_value=prepared.to_binding_value(),
+        realization_report=artifact_realization_report,
     )
 
 
@@ -2083,15 +2443,15 @@ class ServingIntegration:
         framework_payload = None
         framework_payload_fn = getattr(self.host.placement, "framework_payload", None)
         if callable(framework_payload_fn):
-            with suppress(Exception):
-                payload = framework_payload_fn(framework_config)
-                framework_payload = None if payload is None else dict(payload)
+            framework_payload = _framework_payload_mapping(
+                framework_payload_fn(framework_config)
+            )
         identity_payload = None
         identity_payload_fn = getattr(self.host.placement, "identity_payload", None)
         if callable(identity_payload_fn):
-            with suppress(Exception):
-                payload = identity_payload_fn(framework_config)
-                identity_payload = None if payload is None else dict(payload)
+            identity_payload = _framework_payload_mapping(
+                identity_payload_fn(framework_config)
+            )
         return serving_placement_from_framework_facts(
             identity_facts=self.host.placement.identity_facts(framework_config),
             admission_facts=self.host.placement.admission_facts(framework_config),
@@ -2197,6 +2557,28 @@ class ServingIntegration:
                 timeout_s=request.timeout_s,
             ) as restored:
                 binding_result = RuntimeBindingResult.from_binding(restored)
+                authority = getattr(restored, "authority", None)
+                if authority is None:
+                    artifact_report = _runtime_attachment_report_for_artifact_id(
+                        artifact_id=str(getattr(resolved, "artifact_ref", "")),
+                        tensors=binding_result.tensors,
+                        binding_handle=restored,
+                        target_device=target_device,
+                        tensor_schema_hash=tensor_schema_hash,
+                        artifact_profile="retained_binding",
+                        authority_scope="daemon_retained_runtime_attachment",
+                        retained=True,
+                        reservation_bytes=int(restored.reservation_bytes),
+                    )
+                else:
+                    artifact_report = _runtime_attachment_report_for_retained(
+                        authority=authority,
+                        tensors=binding_result.tensors,
+                        binding_handle=restored,
+                        target_device=target_device,
+                        tensor_schema_hash=tensor_schema_hash,
+                        reservation_bytes=restored.reservation_bytes,
+                    )
                 state_seed = self._state_seed(
                     resolved,
                     tensor_schema_hash=tensor_schema_hash,
@@ -2205,6 +2587,7 @@ class ServingIntegration:
                         binding_result.materialization_diagnostics
                     ),
                     binding_handle=restored,
+                    artifact_realization_report=artifact_report,
                     readiness="serving_local_ready",
                 )
                 runtime_state = self._materializer().attach_and_finalize(
@@ -2229,12 +2612,22 @@ class ServingIntegration:
                 serving_runtime_policy=policy,
                 options=materialization,
             )
+            artifact_report = _runtime_attachment_report_for_resolved(
+                resolved=resolved,
+                tensors=binding_result.tensors,
+                binding_handle=binding_result.binding,
+                target_device=target_device,
+                tensor_schema_hash=tensor_schema_hash,
+                execution_diagnostics=binding_result.execution_diagnostics,
+                materialization_diagnostics=binding_result.materialization_diagnostics,
+            )
             state_seed = self._state_seed(
                 resolved,
                 tensor_schema_hash=tensor_schema_hash,
                 execution_diagnostics=binding_result.execution_diagnostics,
                 materialization_diagnostics=binding_result.materialization_diagnostics,
                 binding_handle=binding_result.binding,
+                artifact_realization_report=artifact_report,
             )
             runtime_state = self._materializer().attach_and_finalize(
                 model=model,
@@ -2322,12 +2715,22 @@ class ServingIntegration:
             serving_runtime_policy=policy,
             options=materialization,
         )
+        artifact_report = _runtime_attachment_report_for_resolved(
+            resolved=resolved,
+            tensors=binding_result.tensors,
+            binding_handle=binding_result.binding,
+            target_device=target_device,
+            tensor_schema_hash=str(expected_tensor_schema_hash or ""),
+            execution_diagnostics=binding_result.execution_diagnostics,
+            materialization_diagnostics=binding_result.materialization_diagnostics,
+        )
         state_seed = self._state_seed(
             resolved,
             tensor_schema_hash=str(expected_tensor_schema_hash or ""),
             execution_diagnostics=binding_result.execution_diagnostics,
             materialization_diagnostics=binding_result.materialization_diagnostics,
             binding_handle=binding_result.binding,
+            artifact_realization_report=artifact_report,
         )
         if request.model is not None:
             context = context or self._framework_context(
@@ -2346,6 +2749,14 @@ class ServingIntegration:
                 run_process_after_load=False,
             )
         else:
+            realization_handle = _runtime_attachment_realization_handle(
+                report=artifact_report,
+                binding_handle=binding_result.binding,
+                owner=(
+                    getattr(request.current_state, "ownership_handle", None)
+                    or binding_result.binding
+                ),
+            )
             runtime_state = RuntimeBindingState(
                 binding=binding_result.binding,
                 artifact_ref=state_seed.artifact_ref,
@@ -2353,6 +2764,10 @@ class ServingIntegration:
                 ownership_handle=getattr(
                     request.current_state, "ownership_handle", None
                 ),
+                release_contract=None
+                if realization_handle is None
+                else realization_handle.release_contract,
+                realization_handle=realization_handle,
             )
         return ServingReloadResult(
             runtime_state=runtime_state,
@@ -2408,6 +2823,14 @@ class ServingIntegration:
                 expected_tensor_schema_hash = getattr(
                     expected, "tensor_schema_hash", None
                 )
+                artifact_report = _runtime_attachment_report_for_retained(
+                    authority=authority,
+                    tensors=restored.tensors,
+                    binding_handle=restored,
+                    target_device=target_device,
+                    tensor_schema_hash=str(expected_tensor_schema_hash or ""),
+                    reservation_bytes=restored.reservation_bytes,
+                )
                 state_seed = RuntimeStateSeed(
                     artifact_ref=(
                         getattr(authority, "serving_artifact_id", None)
@@ -2428,7 +2851,11 @@ class ServingIntegration:
                         "verification_state": str(
                             getattr(authority, "verification_state", "") or ""
                         ),
+                        "artifact_realization_report": (
+                            artifact_realization_report_to_dict(artifact_report)
+                        ),
                     },
+                    realization_report=artifact_report,
                 )
                 runtime_state = self._materializer().attach_and_finalize(
                     model=model,
@@ -2646,6 +3073,7 @@ class ServingIntegration:
                 layout=realized.layout,
                 realization_entry_count=realized.realization_entry_count,
                 realization=realized.realization,
+                realization_report=finalized.realization_report,
             )
         return realized
 
@@ -2808,9 +3236,14 @@ class ServingIntegration:
         expected_source_artifact_ref: str,
     ) -> None:
         catalog_artifact_ref = getattr(source_catalog, "source_artifact_ref", None)
+        if catalog_artifact_ref is None:
+            raise ServingIntegrationError(
+                "SourceCatalogProvider returned a catalog without a real "
+                "source_artifact_ref"
+            )
         try:
             catalog_source_ref = tc_source_catalog.resolve_source_artifact_ref(
-                catalog_artifact_ref
+                str(catalog_artifact_ref)
             )
         except ValueError as exc:
             raise ServingIntegrationError(
@@ -3008,6 +3441,10 @@ class ServingIntegration:
                 "ServingIntegration._finalize_local_ready_runtime requires manifest_tensor_name"
             )
         try:
+            framework_context = self._framework_context(
+                request.framework_config,
+                request.model_config,
+            )
             self._assert_local_ready_binding_tensor_set(
                 recipe=request.recipe,
                 binding=request.binding,
@@ -3033,10 +3470,7 @@ class ServingIntegration:
                 model=request.model,
                 tensors=_binding_tensors(request.binding),
                 binding_handle=request.binding,
-                context=self._framework_context(
-                    request.framework_config,
-                    request.model_config,
-                ),
+                context=framework_context,
                 state_seed=RuntimeStateSeed(
                     artifact_ref=str(request.source_artifact_ref),
                     source_artifact_ref=str(request.source_artifact_ref),
@@ -3066,6 +3500,15 @@ class ServingIntegration:
                 update_epoch=request.update_epoch,
                 source_artifact_ref=str(request.source_artifact_ref),
             )
+            artifact_report = _runtime_attachment_report_for_artifact_id(
+                artifact_id=str(request.source_artifact_ref),
+                tensors=_binding_tensors(request.binding),
+                binding_handle=request.binding,
+                target_device=target_device,
+                tensor_schema_hash=tensor_schema_hash,
+                artifact_profile="local_ready_source_artifact",
+                authority_scope="daemon_mediated_local_ready_runtime_attachment",
+            )
             prepared = build_local_ready_prepared_artifact(
                 source_artifact_ref=str(request.source_artifact_ref),
                 serving_manifest_ref=str(request.serving_manifest_ref),
@@ -3079,6 +3522,11 @@ class ServingIntegration:
                 tp_world_size=int(request.tp_world_size),
                 source_bound_contract_state=request.source_bound_contract_state,
                 source_bound_contract_path=str(request.source_bound_contract_path),
+                artifact_realization_report=artifact_report,
+                model_runtime_spec=_model_runtime_spec_for_context(
+                    context=framework_context,
+                    target_device=target_device,
+                ),
             )
             return LocalReadyServingResult(
                 model=request.model,
@@ -3090,6 +3538,7 @@ class ServingIntegration:
                 current_value=current_value,
                 binding=request.binding,
                 update_epoch=request.update_epoch,
+                realization_report=artifact_report,
             )
         except Exception:
             _close_quietly(request.binding)
@@ -4346,6 +4795,7 @@ class ServingIntegration:
         execution_diagnostics: Any | None,
         materialization_diagnostics: Any | None = None,
         binding_handle: Any | None = None,
+        artifact_realization_report: ArtifactRealizationReport | None = None,
         readiness: str = "serving",
     ) -> RuntimeStateSeed:
         artifact_ref = str(getattr(resolved, "artifact_ref", "") or "")
@@ -4358,25 +4808,14 @@ class ServingIntegration:
         diagnostics = {}
         if materialization_diagnostics is not None:
             diagnostics["materialization"] = materialization_diagnostics
-            source_selection = (
-                source_selection_projection_from_materialization_diagnostics(
-                    materialization_diagnostics
-                )
-            )
-            if source_selection is not None:
-                diagnostics["source_selection"] = source_selection
         if execution_diagnostics is not None:
             diagnostics["execution"] = execution_diagnostics
-            if "source_selection" not in diagnostics:
-                source_selection = (
-                    source_selection_projection_from_execution_diagnostics(
-                        execution_diagnostics
-                    )
-                )
-                if source_selection is not None:
-                    diagnostics["source_selection"] = source_selection
         if serving_build_digest:
             diagnostics["serving_build_digest"] = str(serving_build_digest)
+        if artifact_realization_report is not None:
+            diagnostics["artifact_realization_report"] = (
+                artifact_realization_report_to_dict(artifact_realization_report)
+            )
         binding_value_ref = getattr(binding_handle, "current_value", None)
         if binding_value_ref is None:
             binding_value_ref = getattr(binding_handle, "binding_value_ref", None)
@@ -4392,6 +4831,7 @@ class ServingIntegration:
             local_serving_ref=getattr(manifest, "local_serving_ref", None),
             readiness=readiness,
             diagnostics=diagnostics or None,
+            realization_report=artifact_realization_report,
         )
 
 

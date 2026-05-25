@@ -1,19 +1,10 @@
 #  Copyright (c) 2025-2026, TensorCast Team.
 
-import sys
 import types
 
 import pytest
 
-# Provide a stub for tensorcast.cuda before importing Store to avoid hard dependency
-sys.modules.setdefault(
-    "tensorcast.cuda",
-    types.SimpleNamespace(
-        get_cuda_memory_handle=lambda device_id, base_ptr: b"fake-handle",
-        get_cuda_memory_handle_with_offset=lambda device_id, base_ptr: (b"fake-handle", 0),
-    ),
-)
-
+from tensorcast.api import _region_cache as region_cache
 from tensorcast.api.store import Store, StoreOptions
 from tensorcast.types import (
     HostSharedRegionAttachment,
@@ -22,7 +13,6 @@ from tensorcast.types import (
     RegionMemoryKind,
     VramRegionHandle,
 )
-from tensorcast.api import _region_cache as region_cache
 
 
 @pytest.fixture
@@ -46,7 +36,6 @@ def store(monkeypatch) -> Store:
     s = Store("dummy:0", runtime=runtime)
 
     # Fake CUDA handle exporter (redundant with sys.modules stub but keeps isolation per test)
-    monkeypatch.setattr("tensorcast.api.store.get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle")
     monkeypatch.setattr(
         "tensorcast.api.store.get_cuda_memory_handle_with_offset",
         lambda *args, **kwargs: (b"fake-handle", 0),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from dataclasses import fields
 from types import SimpleNamespace
@@ -73,7 +74,6 @@ from tensorcast.serving._runtime_impl.lifecycle import (
     SourceCatalogRequest,
     SourceDownloadPolicy,
     SourceProviderError,
-    SourceSelectionProjection,
     SourceSelector,
     SourceSubject,
     TensorcastSemanticValidationSpec,
@@ -91,6 +91,7 @@ from tensorcast.serving._runtime_impl.lifecycle import (
     restore_retained_binding,
     runtime_binding_state_from_runtime_view,
     serving_placement_from_framework_facts,
+    source_selection_projection_from_artifact_realization_report,
     source_selection_projection_from_execution_diagnostics,
     source_selection_projection_from_materialization_diagnostics,
     source_subject_broadcast_payload,
@@ -124,6 +125,14 @@ from tensorcast.types import (
     ServingBindingMemberRef,
     ServingTopologyRef,
 )
+
+
+def _profile_records(tmp_path) -> list[dict[str, object]]:
+    return [
+        json.loads(line)
+        for path in tmp_path.glob("tensorcast_pid*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
 
 
 class _Bound:
@@ -790,16 +799,11 @@ def test_runtime_worker_view_projection_is_typed_not_diagnostics_only():
             "tp_world_size": 2,
             "verification_state": "verified",
             "verification_job_id": "job-1",
-            "source_selection": {
-                "selected_source_kind": "published_memory_replica",
-                "selected_replica_id": "replica-1",
-                "selected_producer_worker_id": "worker-1",
-                "selected_byte_space_kind": "cuda",
-                "selected_byte_space_id": "0",
-                "p2p_bytes": 1024,
-                "fallback_bytes": 0,
-                "disk_bytes": 0,
-                "reselection_attempts": 1,
+            "materialization": {
+                "source": "p2p",
+                "total_bytes": 1024,
+                "replica_id": "replica-1",
+                "retry_attempts": 2,
             },
         },
     )
@@ -827,9 +831,6 @@ def test_runtime_worker_view_projection_is_typed_not_diagnostics_only():
         "schema_version": 1,
         "selected_source_kind": "published_memory_replica",
         "selected_replica_id": "replica-1",
-        "selected_producer_worker_id": "worker-1",
-        "selected_byte_space_kind": "cuda",
-        "selected_byte_space_id": "0",
         "p2p_bytes": 1024,
         "fallback_bytes": 0,
         "disk_bytes": 0,
@@ -838,33 +839,25 @@ def test_runtime_worker_view_projection_is_typed_not_diagnostics_only():
     assert worker_view.diagnostics["verification_job_id"] == "job-1"
 
 
-def test_runtime_worker_view_accepts_typed_source_selection_projection():
+def test_runtime_worker_view_ignores_redundant_source_selection_diagnostics():
     runtime_view = RuntimeBindingView(
         serving_artifact_ref="mi2:serving",
         representation_contract_hash="repr",
         tensor_schema_hash="schema",
         readiness="serving",
         diagnostics={
-            "source_selection": SourceSelectionProjection(
-                selected_source_kind="canonical_fallback",
-                fallback_bytes=2048,
-                fallback_reason_bucket="transport_unavailable",
-            ),
+            "source_selection": {
+                "selected_source_kind": "canonical_fallback",
+                "fallback_bytes": 2048,
+                "fallback_reason_bucket": "transport_unavailable",
+            },
         },
     )
 
     worker_view = RuntimeWorkerView.from_runtime_view(runtime_view)
     payload = worker_view.endpoint.to_weight_version_payload()
 
-    assert payload["source_selection"] == {
-        "schema_version": 1,
-        "selected_source_kind": "canonical_fallback",
-        "p2p_bytes": 0,
-        "fallback_bytes": 2048,
-        "disk_bytes": 0,
-        "reselection_attempts": 0,
-        "fallback_reason_bucket": "transport_unavailable",
-    }
+    assert "source_selection" not in payload
 
 
 def test_source_selection_projection_from_materialization_diagnostics():
@@ -948,7 +941,10 @@ def test_execution_diagnostics_seed_runtime_source_selection_projection():
         ),
         binding_handle=SimpleNamespace(current_value=None),
     )
-    worker_view = RuntimeWorkerView.from_runtime_view(seed.runtime_view())
+    runtime_view = seed.runtime_view()
+    assert "source_selection" not in runtime_view.diagnostics
+
+    worker_view = RuntimeWorkerView.from_runtime_view(runtime_view)
     payload = worker_view.endpoint.to_weight_version_payload()
 
     assert payload["source_selection"] == {
@@ -959,6 +955,81 @@ def test_execution_diagnostics_seed_runtime_source_selection_projection():
         "disk_bytes": 0,
         "reselection_attempts": 0,
     }
+
+
+def test_artifact_realization_report_seeds_runtime_source_selection_projection():
+    report = {
+        "source": "p2p",
+        "envelope": {
+            "retained_bytes": 4096,
+            "fallback_reason_buckets": {},
+        },
+        "strategy_plan": {
+            "fallback_policy": "fail_closed",
+        },
+    }
+
+    projection = source_selection_projection_from_artifact_realization_report(report)
+
+    assert projection is not None
+    assert projection.to_dict() == {
+        "schema_version": 1,
+        "selected_source_kind": "published_memory_replica",
+        "p2p_bytes": 4096,
+        "fallback_bytes": 0,
+        "disk_bytes": 0,
+        "reselection_attempts": 0,
+    }
+
+    runtime_view = RuntimeBindingView(
+        serving_artifact_ref="mi2:serving",
+        representation_contract_hash="repr",
+        tensor_schema_hash="schema",
+        readiness="serving",
+        diagnostics={"artifact_realization_report": report},
+    )
+    worker_view = RuntimeWorkerView.from_runtime_view(runtime_view)
+    payload = worker_view.endpoint.to_weight_version_payload()
+
+    assert payload["source_selection"] == projection.to_dict()
+
+
+def test_artifact_realization_report_fallback_uses_strategy_and_envelope_facts():
+    report = {
+        "envelope": {
+            "copy_bytes": 2048,
+            "temporary_replica_bytes": 2048,
+            "fallback_reason_buckets": {"layout_mismatch": 1},
+        },
+        "strategy_plan": {
+            "fallback_policy": "generic_fallback",
+        },
+    }
+
+    projection = source_selection_projection_from_artifact_realization_report(report)
+
+    assert projection is not None
+    assert projection.to_dict() == {
+        "schema_version": 1,
+        "selected_source_kind": "canonical_fallback",
+        "p2p_bytes": 0,
+        "fallback_bytes": 2048,
+        "disk_bytes": 0,
+        "reselection_attempts": 0,
+        "fallback_reason_bucket": "layout_mismatch",
+    }
+
+    runtime_view = RuntimeBindingView(
+        serving_artifact_ref="mi2:serving",
+        representation_contract_hash="repr",
+        tensor_schema_hash="schema",
+        readiness="serving",
+        diagnostics={"artifact_realization_report": report},
+    )
+    worker_view = RuntimeWorkerView.from_runtime_view(runtime_view)
+    payload = worker_view.endpoint.to_weight_version_payload()
+
+    assert payload["source_selection"] == projection.to_dict()
 
 
 def test_materialization_diagnostics_seed_runtime_source_selection_projection():
@@ -988,7 +1059,10 @@ def test_materialization_diagnostics_seed_runtime_source_selection_projection():
         ),
         binding_handle=SimpleNamespace(current_value=None),
     )
-    worker_view = RuntimeWorkerView.from_runtime_view(seed.runtime_view())
+    runtime_view = seed.runtime_view()
+    assert "source_selection" not in runtime_view.diagnostics
+
+    worker_view = RuntimeWorkerView.from_runtime_view(runtime_view)
     payload = worker_view.endpoint.to_weight_version_payload()
 
     assert payload["source_selection"] == {
@@ -2406,6 +2480,12 @@ def test_serving_integration_load_and_reload_use_materialization():
     assert load_result.runtime_view.source_artifact_ref == "mi2:test:source"
     assert load_result.runtime_view.representation_contract_hash == "repr-a"
     assert load_result.runtime_view.readiness == "serving"
+    load_report = load_result.runtime_view.diagnostics["artifact_realization_report"]
+    assert load_report["target_kind"] == "runtime_attachment"
+    assert load_report["artifact_id"] == "mi2:test:serving-a"
+    assert load_report["operation_backend"] == "runtime_attachment"
+    assert load_report["publishability"]["publishable"] is False
+    assert load_report["envelope"]["backing_kind"] == "daemon_binding_value"
     assert torch.equal(
         load_result.model.w.detach(), torch.ones((1,), dtype=torch.float32)
     )
@@ -2436,6 +2516,12 @@ def test_serving_integration_load_and_reload_use_materialization():
     assert isinstance(reload_result, ServingReloadResult)
     assert reload_result.runtime_view.serving_artifact_ref == "mi2:test:serving-b"
     assert reload_result.runtime_view.representation_contract_hash == "repr-b"
+    reload_report = reload_result.runtime_view.diagnostics[
+        "artifact_realization_report"
+    ]
+    assert reload_report["target_kind"] == "runtime_attachment"
+    assert reload_report["artifact_id"] == "mi2:test:serving-b"
+    assert reload_report["operation_backend"] == "runtime_attachment"
     swapped_artifact = load_result.runtime_state.binding.swapped[0]
     assert isinstance(swapped_artifact, _Subset)
     assert swapped_artifact.names == ("w",)
@@ -3163,35 +3249,50 @@ def test_serving_integration_resolve_source_subject_uses_coordinator(monkeypatch
     ]
 
 
-def test_runtime_binding_materialization_attaches_and_transfers_ownership():
+def test_runtime_binding_materialization_attaches_and_transfers_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    monkeypatch.setenv("TENSORCAST_PROFILE_DIR", str(tmp_path))
     model = _MaterializedModel()
     adapter = _MaterializationAdapter()
     binding = _TransferableBinding()
     profile_events = []
-    context = ServingPlacement(
-        topology=ServingTopologyRef(
-            schema_topology_digest="digest",
-            logical_topology_ref="fake://topology",
-        ),
-        member=_member(),
-        framework_payload={},
-        identity_payload={},
+    placement = _matrix_placement(
+        tp_size=8,
+        eplb_digest="eplb-digest",
     )
+    framework_context = SimpleNamespace(
+        placement=placement,
+        framework_name="vllm",
+        adapter_version="adapter-v1",
+        serving_abi_version="abi-v1",
+    )
+    tensors = {"w": torch.ones((2,), dtype=torch.float32)}
 
     state = RuntimeBindingMaterialization(
         host=_host_for_adapter(adapter),
         profile_sink=profile_events.append,
     ).attach_and_finalize(
         model=model,
-        tensors={"w": torch.ones((2,), dtype=torch.float32)},
+        tensors=tensors,
         binding_handle=binding,
-        context=SimpleNamespace(placement=context),
+        context=framework_context,
         state_seed=RuntimeStateSeed(
             artifact_ref="mi2:test:serving",
             serving_artifact_ref="mi2:test:serving",
             representation_contract_hash="repr",
             tensor_schema_hash="schema",
             readiness="loaded",
+            realization_report=integration_mod._runtime_attachment_report_for_artifact_id(
+                artifact_id="mi2:test:serving",
+                tensors=tensors,
+                binding_handle=binding,
+                target_device=torch.device("cpu"),
+                tensor_schema_hash="schema",
+                artifact_profile="serving_artifact",
+                authority_scope="daemon_mediated_runtime_attachment",
+            ),
         ),
         replace_meta_params=True,
         target_device=torch.device("cpu"),
@@ -3200,6 +3301,24 @@ def test_runtime_binding_materialization_attaches_and_transfers_ownership():
 
     assert state.binding is binding
     assert state.ownership_handle is binding.runtime_handle
+    assert state.realization_handle is not None
+    assert state.release_contract is state.realization_handle.release_contract
+    assert state.realization_handle.report.target_kind == "runtime_attachment"
+    assert state.model_runtime_handle is not None
+    assert state.model_runtime_handle.release_contract is state.release_contract
+    assert state.model_runtime_handle.report.target_kind == "model_runtime"
+    assert state.model_runtime_handle.report.model_runtime is not None
+    assert state.model_runtime_handle.report.model_runtime.framework == "vllm"
+    assert state.model_runtime_handle.report.model_runtime.adapter_version == (
+        "adapter-v1"
+    )
+    assert state.model_runtime_handle.report.model_runtime.runtime_abi_version == (
+        "abi-v1"
+    )
+    assert state.model_runtime_handle.report.model_runtime.topology_digest is not None
+    assert state.model_runtime_handle.report.model_runtime.member_digest is not None
+    assert "framework:vllm" in state.model_runtime_handle.report.risk_labels
+    assert state.model_runtime_handle.attach() is state
     assert state.runtime_view.serving_artifact_ref == "mi2:test:serving"
     assert torch.equal(model.w.detach(), torch.ones((2,)))
     assert not model.runtime_only.is_meta
@@ -3213,6 +3332,21 @@ def test_runtime_binding_materialization_attaches_and_transfers_ownership():
         "runtime_materialization.attach.start",
         "runtime_materialization.attach.done",
     ]
+    events = [
+        record
+        for record in _profile_records(tmp_path)
+        if record.get("stage") == "artifact.realize"
+    ]
+    by_kind = {str(event["target_kind"]): event for event in events}
+    assert set(by_kind) == {"runtime_attachment", "model_runtime"}
+    assert by_kind["runtime_attachment"]["operation_backend"] == "runtime_attachment"
+    assert by_kind["runtime_attachment"]["target_plan_kind"] == "runtime_attachment"
+    assert by_kind["model_runtime"]["operation_backend"] == "model_runtime_attachment"
+    assert by_kind["model_runtime"]["target_plan_kind"] == "model_runtime"
+    assert by_kind["model_runtime"]["envelope_projection_kind"] == "model_runtime"
+    state.close()
+    assert binding.runtime_handle.closed
+    assert state.release_contract.released
 
 
 def test_runtime_binding_materialization_closes_binding_on_finalize_failure():
@@ -3387,6 +3521,20 @@ def test_serving_integration_finalizes_local_ready_runtime_in_core():
     assert result.current_value.local_serving_ref == ("binding-local:binding-1:value-1")
     assert result.runtime_view.readiness == "serving_local_ready"
     assert result.runtime_view.source_artifact_ref == "mi2:test:source"
+    report = result.runtime_view.diagnostics["artifact_realization_report"]
+    assert report["target_kind"] == "runtime_attachment"
+    assert report["artifact_id"] == "mi2:test:source"
+    assert report["operation_backend"] == "runtime_attachment"
+    assert report["envelope"]["projection_kind"] == "runtime_attachment"
+    assert result.runtime_state.realization_handle is not None
+    assert (
+        result.runtime_state.release_contract
+        is result.runtime_state.realization_handle.release_contract
+    )
+    assert result.runtime_state.model_runtime_handle is not None
+    assert result.runtime_state.model_runtime_handle.report.target_kind == (
+        "model_runtime"
+    )
     assert torch.equal(model.w.detach(), torch.ones((1,)))
     assert not model.runtime_only.is_meta
     assert not binding.closed
@@ -4076,11 +4224,26 @@ def test_serving_integration_acquire_retained_binding_uses_materialization():
     assert result.runtime_view.readiness == "serving_local_ready"
     assert result.runtime_view.tensor_schema_hash == "schema-hash"
     assert result.runtime_view.binding_value_ref == _binding_ref()
+    report = result.runtime_view.diagnostics["artifact_realization_report"]
+    assert report["target_kind"] == "runtime_attachment"
+    assert report["artifact_profile"] == "retained_binding"
+    assert report["envelope"]["backing_kind"] == "daemon_retained_binding"
+    assert report["retained_bindings"][0]["reservation_bytes"] == 4096
+    assert result.runtime_state.realization_handle is not None
+    assert (
+        result.runtime_state.release_contract
+        is result.runtime_state.realization_handle.release_contract
+    )
+    assert result.runtime_state.model_runtime_handle is not None
+    assert result.runtime_state.model_runtime_handle.report.target_kind == (
+        "model_runtime"
+    )
     assert adapter.events == [("finalize", model_config, "cuda:0")]
     assert client.released_tokens == []
 
     result.runtime_state.close()
     assert client.released_tokens == [b"lease"]
+    assert result.runtime_state.release_contract.released is True
 
 
 def test_serving_integration_acquire_retained_binding_rejects_published_ready():

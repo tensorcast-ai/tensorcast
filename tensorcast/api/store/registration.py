@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import logging
 import os
@@ -192,8 +191,13 @@ class RegistrationPipeline:
             with handle_lock:
                 handle = handle_ref.get("handle")
             if handle is not None:
-                with contextlib.suppress(Exception):
+                try:
                     return bool(handle.abort(timeout_s=5.0))
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "store.register_async cancel abort failed",
+                        extra={"tc.artifact.key": key or ""},
+                    )
             return True
 
         return self._executor.submit(_task, cancel_callback=_cancel)
@@ -817,8 +821,13 @@ class RegistrationPipeline:
             with handle_lock:
                 handle = handle_ref.get("handle")
             if handle is not None:
-                with contextlib.suppress(Exception):
+                try:
                     return bool(handle.abort(timeout_s=5.0))
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "store.register_view_async cancel abort failed",
+                        extra={"tc.artifact.id": artifact_id or ""},
+                    )
             return True
 
         return self._executor.submit(_task, cancel_callback=_cancel)

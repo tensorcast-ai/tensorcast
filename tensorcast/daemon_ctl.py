@@ -461,7 +461,7 @@ def _raise_import_artifact_from_path_rpc_error(
         )
     _raise_grpc_error(
         RuntimeError(
-            "ImportArtifactFromPathV2 RPC failed: "
+            "ImportArtifactFromPath RPC failed: "
             f"{_grpc_message(err, fallback='rpc failed')}"
         ),
         cause=err,
@@ -936,123 +936,7 @@ class DaemonCtl:
             "Use Store.from_disk(...) to import and then materialize by artifact_id or key."
         )
 
-    def materialize_by_artifact_id(
-        self,
-        artifact_id: str,
-        replica_uuid: str,
-        device_uuid: str,
-        pinned_allocation_timeout_ms: int = int(30e3),
-        wait_for_completion: bool = True,
-        view: common_pb2.ViewSpec | None = None,
-        view_id: str | None = None,
-        placement: store_daemon_pb2.TransformPlacement | None = None,
-        return_response: bool = False,
-        source_policy: store_daemon_pb2.SourcePolicy | None = None,
-    ) -> store_daemon_pb2.MaterializeReplicaResponse | bytes | tuple[bytes, int]:
-        """Materialize a replica by content-addressed artifact_id via daemon.
-
-        Mirrors load_into_gpu but sets artifact_id instead of disk_path.
-        Returns CUDA IPC handle bytes (or (handle, status) when async) unless
-        ``return_response`` is True, in which case the full gRPC response is returned.
-        """
-        if view is not None and view_id is not None:
-            raise ValueError("Specify only one of view or view_id")
-
-        logger.debug(
-            "materialize_by_artifact_id: %s, %s, wait_for_completion=%s",
-            artifact_id,
-            replica_uuid,
-            wait_for_completion,
-        )
-
-        pid = self._get_effective_pid()
-        with self._client_span("Client/MaterializeReplica") as span:
-            selection = common_pb2.ArtifactSelection(artifact_id=artifact_id)
-            if view is not None:
-                selection.view_spec.CopyFrom(view)
-            elif view_id:
-                selection.view_id = view_id
-            resolved_source_policy = _normalize_source_policy(source_policy)
-            request = store_daemon_pb2.MaterializeReplicaRequest(
-                pid=pid,
-                selection=selection,
-                replica_uuid=replica_uuid,
-                device_uuid=device_uuid,
-                target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
-                pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
-                wait_for_completion=wait_for_completion,
-            )
-            request.source_policy.CopyFrom(resolved_source_policy)
-            if placement is not None:
-                request.placement = placement
-            try:
-                response = self._unary_call(
-                    self.stub.MaterializeReplica,
-                    request,
-                    timeout=60,
-                    span=span,
-                    retries=1,
-                )
-            except grpc.RpcError as e:
-                span.record_exception(e)
-                if e.code() == grpc.StatusCode.CANCELLED:
-                    raise RuntimeError(
-                        _grpc_message(e, fallback="Artifact not loaded")
-                    ) from e
-                if e.code() == grpc.StatusCode.UNAVAILABLE:
-                    raise RuntimeError(
-                        f"Local StoreDaemon ({self.server_address}) is not available."
-                    ) from e
-                raise RuntimeError(
-                    _grpc_message(e, fallback="MaterializeReplica RPC failed")
-                ) from e
-
-        load_status = response.status
-        if (
-            load_status
-            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_FAILED
-        ):
-            raise RuntimeError(f"Artifact allocation failed for {artifact_id}")
-
-        if not wait_for_completion:
-            logger.info(
-                "Artifact allocation initiated (async): %s, %s",
-                artifact_id,
-                replica_uuid,
-            )
-            assert response.mem_handle is not None
-            if return_response:
-                return response
-            return response.mem_handle.cuda_ipc_handle, load_status
-
-        logger.info("Artifact loaded: %s, %s", artifact_id, replica_uuid)
-
-        if (
-            response.status
-            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
-        ):
-            # Confirm using disk path from the daemon response.
-            confirm_timeout_s = 500.0
-            success = self.confirm_replica_loaded(
-                response.disk_path or "",
-                replica_uuid,
-                timeout_s=confirm_timeout_s,
-            )
-            if not success:
-                raise RuntimeError(
-                    "Failed to confirm artifact loading: "
-                    f"artifact_id={artifact_id}, "
-                    f"replica_uuid={replica_uuid}, "
-                    f"disk_path={response.disk_path or ''}"
-                )
-
-        if return_response:
-            return response
-
-        assert response.mem_handle is not None
-        return response.mem_handle.cuda_ipc_handle
-
-    def materialize_into_target_v2(
+    def materialize_into_target(
         self,
         *,
         selection: common_pb2.ArtifactSelection,
@@ -1118,12 +1002,10 @@ class DaemonCtl:
                         f"Artifact id '{selection.artifact_id}' was not found by StoreDaemon at {self.server_address}."
                     ) from e
                 raise RuntimeError(
-                    _grpc_message(e, fallback="MaterializeIntoTargetV2 RPC failed")
+                    _grpc_message(e, fallback="MaterializeIntoTarget RPC failed")
                 ) from e
         if not return_response:
-            raise RuntimeError(
-                "materialize_into_target_v2 requires return_response=True"
-            )
+            raise RuntimeError("materialize_into_target requires return_response=True")
         return response
 
     def materialize_into_mapped_target(
@@ -2513,7 +2395,7 @@ class DaemonCtl:
         return response
 
     @overload
-    def materialize_by_artifact_id_v2(
+    def materialize_by_artifact_id(
         self,
         selection: common_pb2.ArtifactSelection,
         replica_uuid: str,
@@ -2537,7 +2419,7 @@ class DaemonCtl:
     ) -> store_daemon_pb2.MaterializeReplicaResponse: ...
 
     @overload
-    def materialize_by_artifact_id_v2(
+    def materialize_by_artifact_id(
         self,
         selection: common_pb2.ArtifactSelection,
         replica_uuid: str,
@@ -2561,7 +2443,7 @@ class DaemonCtl:
     ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus]: ...
 
     @overload
-    def materialize_by_artifact_id_v2(
+    def materialize_by_artifact_id(
         self,
         selection: common_pb2.ArtifactSelection,
         replica_uuid: str,
@@ -2583,7 +2465,7 @@ class DaemonCtl:
         timing_out: dict[str, float] | None = None,
     ) -> bytes: ...
 
-    def materialize_by_artifact_id_v2(
+    def materialize_by_artifact_id(
         self,
         selection: common_pb2.ArtifactSelection,
         replica_uuid: str,
@@ -2613,13 +2495,13 @@ class DaemonCtl:
         if not selection.artifact_id:
             raise ValueError("selection.artifact_id is required")
         logger.debug(
-            "materialize_by_artifact_id_v2: %s, %s, wait_for_completion=%s",
+            "materialize_by_artifact_id: %s, %s, wait_for_completion=%s",
             selection.artifact_id,
             replica_uuid,
             wait_for_completion,
         )
         pid = self._get_effective_pid()
-        with self._client_span("Client/MaterializeReplicaV2") as span:
+        with self._client_span("Client/MaterializeReplica") as span:
             resolved_source_policy = _normalize_source_policy(source_policy)
             device_uuid_value = (
                 ""
@@ -2680,7 +2562,7 @@ class DaemonCtl:
                         f"Artifact id '{selection.artifact_id}' was not found by StoreDaemon at {self.server_address}."
                     ) from e
                 raise RuntimeError(
-                    _grpc_message(e, fallback="MaterializeReplicaV2 RPC failed")
+                    _grpc_message(e, fallback="MaterializeReplica RPC failed")
                 ) from e
 
         load_status = response.status
@@ -2703,7 +2585,7 @@ class DaemonCtl:
                 return response
             if target_device_type != store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU:
                 raise ValueError(
-                    "materialize_by_artifact_id_v2 must use return_response=True for non-GPU targets"
+                    "materialize_by_artifact_id must use return_response=True for non-GPU targets"
                 )
             return response.mem_handle.cuda_ipc_handle, load_status
 
@@ -2734,17 +2616,17 @@ class DaemonCtl:
             return response
         if target_device_type != store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU:
             raise ValueError(
-                "materialize_by_artifact_id_v2 must use return_response=True for non-GPU targets"
+                "materialize_by_artifact_id must use return_response=True for non-GPU targets"
             )
         assert response.mem_handle is not None
         return response.mem_handle.cuda_ipc_handle
 
-    def import_artifact_from_path_v2(
+    def import_artifact_from_path(
         self, *, path: str, verify_checksums: bool = True
     ) -> store_daemon_pb2.ImportArtifactFromPathResponse:
         if not path:
             raise ValueError("path is required")
-        with self._client_span("Client/ImportArtifactFromPathV2") as span:
+        with self._client_span("Client/ImportArtifactFromPath") as span:
             request = store_daemon_pb2.ImportArtifactFromPathRequest(
                 path=path, verify_checksums=bool(verify_checksums)
             )
@@ -2760,7 +2642,7 @@ class DaemonCtl:
                 span.record_exception(e)
                 _raise_import_artifact_from_path_rpc_error(self.server_address, e)
 
-    def import_artifact_from_path_stream_v2(
+    def import_artifact_from_path_stream(
         self, *, path: str, verify_checksums: bool = True
     ) -> Iterator[store_daemon_pb2.ImportArtifactFromPathStreamEvent]:
         if not path:
@@ -2774,7 +2656,7 @@ class DaemonCtl:
         def _event_iter() -> Iterator[
             store_daemon_pb2.ImportArtifactFromPathStreamEvent
         ]:
-            with self._client_span("Client/ImportArtifactFromPathStreamV2") as span:
+            with self._client_span("Client/ImportArtifactFromPathStream") as span:
                 try:
                     stream = self.stub_v2.ImportArtifactFromPathStream(
                         request,
@@ -4467,6 +4349,39 @@ class DaemonCtl:
                 retries=1,
             )
             return [str(item) for item in resp.layout_ids]
+
+    def ensure_canonical_layout(
+        self,
+        *,
+        index_multihash: str,
+        artifact_id: str | None = None,
+        canonical_index_data: bytes | None = None,
+        attach_to_artifact: bool = False,
+        timeout_s: float = 10.0,
+    ) -> str:
+        """Provision a canonical layout through the daemon authority boundary."""
+        normalized_index_multihash = str(index_multihash or "").strip()
+        if not normalized_index_multihash:
+            raise ValueError("index_multihash is required")
+        request = store_daemon_pb2.EnsureCanonicalLayoutRequest(
+            index_multihash=normalized_index_multihash,
+            artifact_id=str(artifact_id or ""),
+            canonical_index_data=bytes(canonical_index_data or b""),
+            attach_to_artifact=bool(attach_to_artifact),
+        )
+        request.layout.layout_schema_version = 1
+        request.layout.index_multihash = normalized_index_multihash
+        with self._client_span("Client/EnsureCanonicalLayout") as span:
+            resp = self._unary_call(
+                self.stub.EnsureCanonicalLayout,
+                request,
+                timeout=timeout_s,
+                span=span,
+                retries=1,
+            )
+        if not resp.layout_id:
+            raise RuntimeError("EnsureCanonicalLayout returned empty layout_id")
+        return str(resp.layout_id)
 
     def start_assembly_attempt(
         self,

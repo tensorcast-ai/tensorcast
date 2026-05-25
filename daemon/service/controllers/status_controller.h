@@ -1,6 +1,6 @@
 // Copyright (c) 2025-2026, TensorCast Team.
 
-// StatusController: handles get_server_config / get_worker_status / get_detailed_status / get_loaded_replicas_v2
+// StatusController: handles get_server_config / get_worker_status / get_detailed_status / get_loaded_replicas
 
 #pragma once
 
@@ -251,16 +251,16 @@ class StatusController {
     return grpc::Status::OK;
   }
 
-  grpc::Status get_loaded_replicas_v2(
+  grpc::Status get_loaded_replicas(
       RpcContext& rctx,
-      const v2::GetLoadedReplicasV2Request& req,
-      v2::GetLoadedReplicasV2Response& resp,
+      const v2::GetLoadedReplicasRequest& req,
+      v2::GetLoadedReplicasResponse& resp,
       bool use_cursor_pagination) {
     if (rctx.allow_high_card_attrs()) {
       if (req.has_artifact_id_filter())
         rctx.span()->SetAttribute("tc.artifact.filter", req.artifact_id_filter());
     }
-    listing::FillLoadedReplicasV2(d_.engine, d_.refs, req, resp, use_cursor_pagination);
+    listing::FillLoadedReplicas(d_.engine, d_.refs, req, resp, use_cursor_pagination);
     try {
       static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
       static auto page_counter = meter->CreateDoubleCounter("tc_status_list_pages_total");

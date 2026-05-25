@@ -88,10 +88,6 @@ pinned_memory:
         == cfg.PUBLIC_DISK_SOURCE_VALIDATION_MODE_VALIDATE_BEFORE_READ
     )
     assert policy.lightweight_attestation_enabled is True
-    assert (
-        cfg.public_disk_source.unmatched_path_mode
-        == cfg.PublicDiskSource.UNMATCHED_PATH_MODE_REJECT
-    )
 
 
 def test_load_daemon_config_rejects_overlapping_public_disk_source_roots(

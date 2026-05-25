@@ -205,8 +205,8 @@ absl::StatusOr<std::string> resolve_layout_json(
     const v2::MaterializeReplicaResponse& v1_resp,
     const v2::MaterializeReplicaRequest& v2_req,
     store::StoreEngine& engine) {
-  if (!v1_resp.view_index_json().empty()) {
-    return v1_resp.view_index_json();
+  if (!v1_resp.view_index_bytes().empty()) {
+    return v1_resp.view_index_bytes();
   }
   std::string artifact_id = v1_resp.artifact_id();
   if (v2_req.has_selection() && !v2_req.selection().artifact_id().empty()) {

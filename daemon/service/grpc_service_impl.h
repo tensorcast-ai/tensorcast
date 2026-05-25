@@ -223,16 +223,6 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::ActivateStableLocalBackingRequest* req,
       v2::ActivateStableLocalBackingResponse* resp) override;
 
-  grpc::Status RegisterVramRegion(
-      grpc::ServerContext* ctx,
-      const v2::RegisterVramRegionRequest* req,
-      v2::RegisterVramRegionResponse* resp) override;
-
-  grpc::Status UnregisterVramRegion(
-      grpc::ServerContext* ctx,
-      const v2::UnregisterVramRegionRequest* req,
-      v2::UnregisterVramRegionResponse* resp) override;
-
   grpc::Status DeregisterArtifact(
       grpc::ServerContext* ctx,
       const v2::DeregisterArtifactRequest* req,
@@ -380,6 +370,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::ListArtifactLayoutsRequest* req,
       v2::ListArtifactLayoutsResponse* resp) override;
 
+  grpc::Status EnsureCanonicalLayout(
+      grpc::ServerContext* ctx,
+      const v2::EnsureCanonicalLayoutRequest* req,
+      v2::EnsureCanonicalLayoutResponse* resp) override;
+
   grpc::Status SealAssembly(
       grpc::ServerContext* ctx,
       const v2::SealAssemblyRequest* req,
@@ -420,10 +415,10 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::GetDetailedStatusRequest* req,
       v2::GetDetailedStatusResponse* resp) override;
 
-  grpc::Status GetLoadedReplicasV2(
+  grpc::Status GetLoadedReplicas(
       grpc::ServerContext* ctx,
-      const v2::GetLoadedReplicasV2Request* req,
-      v2::GetLoadedReplicasV2Response* resp) override;
+      const v2::GetLoadedReplicasRequest* req,
+      v2::GetLoadedReplicasResponse* resp) override;
 
   grpc::Status BatchExists(grpc::ServerContext* ctx, const v2::BatchExistsRequest* req, v2::BatchExistsResponse* resp)
       override;

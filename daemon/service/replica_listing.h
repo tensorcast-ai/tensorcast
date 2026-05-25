@@ -1,6 +1,6 @@
 // Copyright (c) 2025-2026, TensorCast Team.
 
-// Helper to build get_loaded_replicas_v2 response with optional cursor pagination.
+// Helper to build get_loaded_replicas response with optional cursor pagination.
 // Keeps grpc_service_impl thin.
 
 #pragma once
@@ -18,11 +18,11 @@
 
 namespace tensorcast::daemon::listing {
 
-inline void FillLoadedReplicasV2(
+inline void FillLoadedReplicas(
     store::StoreEngine& engine,
     const RefTracker& refs,
-    const v2::GetLoadedReplicasV2Request& req,
-    v2::GetLoadedReplicasV2Response& resp,
+    const v2::GetLoadedReplicasRequest& req,
+    v2::GetLoadedReplicasResponse& resp,
     bool use_cursor_pagination) {
   struct Entry {
     std::string artifact_id;

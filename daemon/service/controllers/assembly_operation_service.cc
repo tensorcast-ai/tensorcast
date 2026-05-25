@@ -59,14 +59,20 @@ namespace pubv1 = tensorcast::publication::v1;
 using materialization_layout::parse_canonical_index;
 using materialization_layout::resolve_target_offsets;
 namespace serving_manifest = serving_artifact_manifest;
+using materialization_policy::attach_controller_realization_plan_span_attrs;
+using materialization_policy::build_controller_realization_plan;
 using materialization_policy::build_execution_diagnostics;
+using materialization_policy::ControllerRealizationPlan;
 using materialization_policy::HashExecutionDetails;
+using materialization_policy::require_controller_export_kind;
+using materialization_policy::require_controller_resource_authority;
 using materialization_policy::spec_includes_transpose;
 using materialization_post_seal::check_post_seal_view_reuse_safe;
 using materialization_post_seal::compute_view_meta_digest;
 using status_utils::to_grpc_status;
 
 namespace {
+
 std::string_view binding_seal_identity_canonical_index_json(const BindingRegistry::Record& record) {
   if (record.sealed_commit_result.has_value() && !record.sealed_commit_result->canonical_index_json.empty()) {
     return record.sealed_commit_result->canonical_index_json;
@@ -1898,6 +1904,23 @@ grpc::Status AssemblyOperationService::start_assembly_attempt(
   const auto operation_ref = build_assembly_attempt_operation_ref(
       coordinator_operation_id, attempt_id, workspace_assembly_id, intent.attempt_intent_digest());
 
+  auto realization_plan_or =
+      build_controller_realization_plan(req, intent, attempt_id, workspace_assembly_id, coordinator_operation_id);
+  if (!realization_plan_or.ok()) {
+    return to_grpc_status(realization_plan_or.status());
+  }
+  const ControllerRealizationPlan& realization_plan = *realization_plan_or;
+  attach_controller_realization_plan_span_attrs(rctx, realization_plan);
+  if (auto status = require_controller_export_kind(realization_plan, "operation_lease", "StartAssemblyAttempt");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
+  if (auto status =
+          require_controller_resource_authority(realization_plan, "OperationLeaseRegistry", "StartAssemblyAttempt");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
+
   tensorcast::operation::v1::AcquireOperationLeaseRequest lease_req;
   lease_req.set_operation_id(coordinator_operation_id);
   lease_req.set_kind("assembly_attempt");
@@ -2030,6 +2053,22 @@ grpc::Status AssemblyOperationService::seal_assembly_attempt(
   auto* out_ref = resp.mutable_operation();
   out_ref->CopyFrom(build_assembly_attempt_operation_ref(
       operation_id, record.attempt_id(), record.workspace_assembly_id(), record.intent().attempt_intent_digest()));
+
+  auto realization_plan_or = build_controller_realization_plan(req, record, operation_id);
+  if (!realization_plan_or.ok()) {
+    return to_grpc_status(realization_plan_or.status());
+  }
+  const ControllerRealizationPlan& realization_plan = *realization_plan_or;
+  attach_controller_realization_plan_span_attrs(rctx, realization_plan);
+  if (auto status = require_controller_export_kind(realization_plan, "operation_lease", "SealAssemblyAttempt");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
+  if (auto status =
+          require_controller_resource_authority(realization_plan, "OperationLeaseRegistry", "SealAssemblyAttempt");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
 
   tensorcast::operation::v1::AcquireOperationLeaseRequest lease_req;
   lease_req.set_operation_id(operation_id);
@@ -2404,6 +2443,12 @@ grpc::Status AssemblyOperationService::seal_assembly(
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
+  auto realization_plan_or = build_controller_realization_plan(req);
+  if (!realization_plan_or.ok()) {
+    return to_grpc_status(realization_plan_or.status());
+  }
+  attach_controller_realization_plan_span_attrs(rctx, *realization_plan_or);
+
   auto result_or = d_.engine.seal_assembly(req.assembly_id(), req.publish_canonical());
   if (!result_or.ok()) {
     return to_grpc_status(result_or.status());
@@ -2436,6 +2481,22 @@ grpc::Status AssemblyOperationService::start_seal_assembly(
   const std::string operation_id = compute_seal_operation_id(req.assembly_id());
   auto* out_ref = resp.mutable_operation();
   out_ref->CopyFrom(build_low_level_seal_operation_ref(operation_id, req.assembly_id()));
+
+  auto realization_plan_or = build_controller_realization_plan(req, operation_id);
+  if (!realization_plan_or.ok()) {
+    return to_grpc_status(realization_plan_or.status());
+  }
+  const ControllerRealizationPlan& realization_plan = *realization_plan_or;
+  attach_controller_realization_plan_span_attrs(rctx, realization_plan);
+  if (auto status = require_controller_export_kind(realization_plan, "operation_lease", "StartSealAssembly");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
+  if (auto status =
+          require_controller_resource_authority(realization_plan, "OperationLeaseRegistry", "StartSealAssembly");
+      !status.ok()) {
+    return to_grpc_status(status);
+  }
 
   tensorcast::operation::v1::AcquireOperationLeaseRequest lease_req;
   lease_req.set_operation_id(operation_id);

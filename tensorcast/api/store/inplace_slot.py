@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import contextlib
+import logging
 import uuid
 import weakref
 from types import MappingProxyType
@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Mapping, Sequence
 import torch
 
 from tensorcast.api import _metrics as store_metrics
-from tensorcast.api import _region_cache as region_cache
 from tensorcast.api._config import GetArtifactOptions
 from tensorcast.api._device import device_uuid_for
 from tensorcast.api.context import CallContext
@@ -34,13 +33,14 @@ from tensorcast.api.store.mapped_binding import (
 )
 from tensorcast.api.store.materialization import _resolve_source_policy_from_options
 from tensorcast.api.store.owned_binding_layout import BindingLayout
+from tensorcast.api.store.realization_kernel import resolve_artifact_selection
 from tensorcast.api.store.region_utils import collect_storage_bases
 from tensorcast.api.store.retry import map_materialization_error
-from tensorcast.api.store.types import ArtifactError
-from tensorcast.common.selection_contract import (
-    build_artifact_selection,
-    compute_selected_index_bytes,
+from tensorcast.api.store.target_region_lifecycle import (
+    release_target_region_ids_for_realization,
 )
+from tensorcast.api.store.types import ArtifactError
+from tensorcast.common.selection_contract import compute_selected_index_bytes
 from tensorcast.common.selection_identity import (
     compute_logical_layout_hash,
     compute_selection_hash,
@@ -48,6 +48,8 @@ from tensorcast.common.selection_identity import (
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import ServingRuntimePolicy
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from tensorcast.api.store import Store
@@ -144,18 +146,18 @@ def _selection_from_region_layout(
                 view_spec=view_spec_for_selection,
                 tensor_names=selection_names,
             )
-    return build_artifact_selection(
+    return resolve_artifact_selection(
         artifact_id=artifact_id,
         canonical_index_bytes=canonical_index_bytes,
-        layout_index_bytes=layout_index_bytes,
         view_spec=view_spec_for_selection,
         tensor_names=selection_names,
         view_subset_hash=subset_hash if subset_hash else None,
         view_id=_normalize_view_id(region_layout.view_id),
+        view_index_hint=layout_index_bytes,
         allow_view_id_without_spec=bool(
             region_layout.view_id and view_spec_for_selection is None
         ),
-    )
+    ).proto
 
 
 class InplaceSlot:
@@ -562,7 +564,7 @@ class InplaceSlot:
                 retryable=error.retryable,
             ) from exc
         metadata = parse_binding_value_or_raise(
-            response.current_value if hasattr(response, "current_value") else None,
+            response.current_value,
             rpc_name="SealBinding",
             expected_binding_id=self._binding_id,
             expected_binding_layout_id=self._binding_layout_id,
@@ -743,16 +745,10 @@ class InplaceSlot:
             self._update_state_from_layout(
                 region_layout=region_layout,
                 view_spec=view_spec_proto,
-                binding_current_value_publication_token=getattr(
-                    response, "binding_current_value_publication_token", None
-                ),
             )
             self._mark_artifact_backed_current(
                 artifact_id=artifact_id,
                 selection=selection,
-                binding_current_value_publication_token=getattr(
-                    response, "binding_current_value_publication_token", None
-                ),
             )
             if publish:
                 self._publish_with_operation_id(
@@ -821,7 +817,7 @@ class InplaceSlot:
                     region_layout=region_layout,
                     view_spec=view_spec_proto,
                 )
-                response = client.materialize_into_target_v2(
+                response = client.materialize_into_target(
                     selection=selection,
                     target_layout=region_layout.layout,
                     device_uuid=device_uuid_for(self._device_id),
@@ -869,16 +865,10 @@ class InplaceSlot:
         self._update_state_from_layout(
             region_layout=region_layout,
             view_spec=view_spec_proto,
-            binding_current_value_publication_token=getattr(
-                response, "binding_current_value_publication_token", None
-            ),
         )
         self._mark_artifact_backed_current(
             artifact_id=artifact_id,
             selection=selection,
-            binding_current_value_publication_token=getattr(
-                response, "binding_current_value_publication_token", None
-            ),
         )
 
         if publish:
@@ -895,16 +885,28 @@ class InplaceSlot:
     def close(self) -> None:
         if self._closed:
             return
-        with contextlib.suppress(Exception):
-            if self._published_lease_id is not None:
+        if self._published_lease_id is not None:
+            try:
                 self.retire(wait=False)
-        with contextlib.suppress(Exception):
-            if self._binding_id:
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "inplace_slot.close failed to retire published binding lease "
+                    "(binding_id=%s, lease_id=%s)",
+                    self._binding_id,
+                    self._published_lease_id,
+                )
+        if self._binding_id:
+            try:
                 self._runtime.ensure_client().close_owned_binding(
                     binding_id=self._binding_id
                 )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "inplace_slot.close failed to close owned binding (binding_id=%s)",
+                    self._binding_id,
+                )
         self._closed = True
-        self._release_regions()
+        self._release_regions(context="inplace_slot.close")
 
     # ------------------------------------------------------------------
     # Internals
@@ -971,13 +973,7 @@ class InplaceSlot:
             )
 
     def _refresh_regions(self) -> None:
-        stale_ids = tuple(self._region_ids)
-        self._release_regions()
-        for region_id in stale_ids:
-            if not region_id:
-                continue
-            with contextlib.suppress(Exception):
-                region_cache.unregister_region(region_id)
+        self._release_regions(context="inplace_slot.refresh_regions")
         ttl_ms = 0
         bases = collect_storage_bases(self._tensors)
         new_ids: list[str] = []
@@ -1072,12 +1068,12 @@ class InplaceSlot:
             resp.replica_id if hasattr(resp, "replica_id") and resp.replica_id else None
         )
 
-    def _release_regions(self) -> None:
-        for region_id in self._region_ids:
-            if not region_id:
-                continue
-            with contextlib.suppress(Exception):
-                self._store.unregister_vram_region(region_id)
+    def _release_regions(self, *, context: str) -> None:
+        release_target_region_ids_for_realization(
+            unregister_region=self._store.unregister_vram_region,
+            region_ids=self._region_ids,
+            context=context,
+        )
         self._region_ids = ()
 
     def _update_state_from_layout(
@@ -1085,7 +1081,6 @@ class InplaceSlot:
         *,
         region_layout: "_RegionBackedLayout",
         view_spec: common_pb2.ViewSpec | None,
-        binding_current_value_publication_token: bytes | None,
     ) -> None:
         self._region_ids = tuple(region_layout.region_ids)
         self._view_spec = view_spec
@@ -1109,18 +1104,12 @@ class InplaceSlot:
             view_id=self._view_id,
             view_subset_hash=self._view_subset_hash,
         )
-        self._binding_current_value_publication_token = (
-            bytes(binding_current_value_publication_token)
-            if binding_current_value_publication_token
-            else None
-        )
 
     def _mark_artifact_backed_current(
         self,
         *,
         artifact_id: str,
         selection: common_pb2.ArtifactSelection,
-        binding_current_value_publication_token: bytes | None,
     ) -> None:
         self._artifact_id = str(artifact_id)
         self._contribution_source_artifact_id = str(artifact_id)
@@ -1139,10 +1128,15 @@ class InplaceSlot:
                 status_code=error.status_code,
                 retryable=error.retryable,
             ) from exc
+        if response is None:
+            self._enter_dirty_state()
+            raise ArtifactError(
+                "CommitBindingArtifact returned no response",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
         metadata = parse_binding_value_or_raise(
-            response.current_value
-            if response is not None and hasattr(response, "current_value")
-            else None,
+            response.current_value,
             rpc_name="CommitBindingArtifact",
             expected_binding_id=self._binding_id,
             expected_binding_layout_id=self._binding_layout_id,
@@ -1156,11 +1150,8 @@ class InplaceSlot:
             )
         self._seal_generation_counter = int(metadata.seal_generation)
         self._current_value_metadata = metadata
-        self._binding_current_value_publication_token = (
-            bytes(binding_current_value_publication_token)
-            if binding_current_value_publication_token
-            else None
-        )
+        publication_token = bytes(response.binding_current_value_publication_token)
+        self._binding_current_value_publication_token = publication_token or None
         self._dirty = False
 
     def _enter_dirty_state(self) -> None:

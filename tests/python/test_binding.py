@@ -188,21 +188,19 @@ class FakeBindingClient:
         self.unregister_calls.append(region_id)
         return True
 
-    def materialize_into_target_v2(self, **kwargs: Any) -> Any:
+    def materialize_into_target(self, **kwargs: Any) -> Any:
         self.materialize_calls.append(kwargs)
-        self._token_counter += 1
-        token = f"token-{self._token_counter}".encode("utf-8")
         selection = common_pb2.ArtifactSelection()
         selection.CopyFrom(kwargs["selection"])
         return types.SimpleNamespace(
             status=store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED,
-            binding_current_value_publication_token=token,
             resolved_selection=selection,
         )
 
     def create_binding(self, **kwargs: Any) -> Any:
         self.create_binding_calls.append(kwargs)
         self._binding_counter += 1
+        self._token_counter += 1
         binding_id = f"binding-{self._binding_counter}"
         self._binding_layout_ids[binding_id] = str(kwargs["binding_layout_id"])
         current_value = None
@@ -220,6 +218,9 @@ class FakeBindingClient:
             binding_id=binding_id,
             target_index_bytes=bytes(kwargs["target_index_bytes"]),
             current_value=current_value,
+            binding_current_value_publication_token=f"token-{self._token_counter}".encode(
+                "utf-8"
+            ),
         )
 
     def publish_target_replica(self, **kwargs: Any) -> Any:
@@ -300,6 +301,7 @@ class FakeBindingClient:
             binding_current_value_publication_token=f"token-{self._token_counter}".encode(
                 "utf-8"
             ),
+            created_staged_value=False,
             current_value=self._make_binding_value(
                 binding_id=binding_id,
                 selection=selection,
@@ -309,10 +311,14 @@ class FakeBindingClient:
     def commit_binding_artifact(self, **kwargs: Any) -> Any:
         self.commit_calls.append(kwargs)
         binding_id = str(kwargs["binding_id"])
+        self._token_counter += 1
         selection = common_pb2.ArtifactSelection()
         selection.CopyFrom(kwargs["selection"])
         self._binding_selections[binding_id] = selection
         return types.SimpleNamespace(
+            binding_current_value_publication_token=f"token-{self._token_counter}".encode(
+                "utf-8"
+            ),
             current_value=self._make_binding_value(
                 binding_id=binding_id,
                 selection=selection,
@@ -326,7 +332,7 @@ class FakeBindingClient:
     def seal_binding(self, **kwargs: Any) -> Any:
         self.seal_calls.append(kwargs)
         if self.omit_current_value_on_seal:
-            return types.SimpleNamespace()
+            return types.SimpleNamespace(current_value=store_daemon_pb2.BindingValue())
         return types.SimpleNamespace(
             current_value=self._make_binding_value(
                 binding_id=str(kwargs["binding_id"]),
@@ -356,6 +362,7 @@ class FakeBindingClient:
                 binding_id=binding_id,
                 selection=selection,
             ),
+            binding_current_value_publication_token=b"",
             existed=False,
         )
         if self.promote_execution_diagnostics is not None:
@@ -397,6 +404,7 @@ class FakeBindingClient:
             binding_current_value_publication_token=f"token-{self._token_counter}".encode(
                 "utf-8"
             ),
+            created_staged_value=False,
             current_value=self._make_binding_value(
                 binding_id=binding_id,
                 selection=selection,
@@ -554,9 +562,6 @@ def _setup_store(
     store = Store("fake://daemon", runtime=runtime)
     _cache_index(runtime, "artifact-1", index_bytes)
     _cache_index(runtime, "artifact-2", index_bytes)
-    monkeypatch.setattr(
-        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
-    )
     monkeypatch.setattr(
         store_mod,
         "get_cuda_memory_handle_with_offset",
@@ -2241,8 +2246,8 @@ def test_binding_swap_does_not_encode_transport_group_tags_into_operation_id() -
     binding = Binding(slot)
     ctx = tc_context(
         tags={
-            "legacy.semantic.group": "ignored",
-            "legacy.semantic.part": "rx1:r0",
+            "transport.semantic.group": "ignored",
+            "transport.semantic.part": "rx1:r0",
         }
     )
 

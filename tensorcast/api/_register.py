@@ -108,6 +108,21 @@ class RegistrationResult:
 
 logger = logging.getLogger(__name__)
 
+
+def _log_best_effort_cleanup_failure(context: str, **fields: object) -> None:
+    handlers = tuple(logger.handlers) + tuple(logging.getLogger().handlers)
+    if any(
+        getattr(getattr(handler, "stream", None), "closed", False)
+        for handler in handlers
+    ):
+        return
+    details = ", ".join(f"{key}={value}" for key, value in fields.items())
+    if details:
+        logger.exception("%s failed (%s)", context, details)
+        return
+    logger.exception("%s failed", context)
+
+
 _LOCAL_HANDLE_RESP_LABELS: dict[int, str] = {
     0: "ok",
     1: "not_found",
@@ -385,6 +400,20 @@ class RegisteredArtifact:
         return self.client.revoke_registered_artifact(self.registration_id, reason)
 
 
+def _abort_registered_artifact_best_effort(
+    handle: RegisteredArtifact,
+    *,
+    context: str,
+) -> None:
+    try:
+        handle.abort(timeout_s=5.0)
+    except Exception:  # noqa: BLE001
+        _log_best_effort_cleanup_failure(
+            context,
+            registration_id=handle.registration_id,
+        )
+
+
 class RegisteredLease:
     """Post-commit lease keepalive and best-effort revoke helper.
 
@@ -459,14 +488,11 @@ class RegisteredLease:
         try:
             self._client.revoke_registered_artifact(self.registration_id)
         except Exception:  # noqa: BLE001
-            with contextlib.suppress(Exception):
-                logger.debug(
-                    "Failed to revoke registered artifact %s",
-                    self.registration_id,
-                    exc_info=True,
-                )
+            _log_best_effort_cleanup_failure(
+                "register_artifact.revoke_registered_artifact",
+                registration_id=self.registration_id,
+            )
             # rely on TTL + pid_watcher
-            pass
 
     @classmethod
     def _revoke_all(cls) -> None:
@@ -1489,7 +1515,8 @@ class _LeaseUploader:
                     )
                 )
             else:
-                # Fallback to legacy handle-based path.
+                # Use the per-storage CUDA IPC source when no registered VRAM
+                # region fully covers this storage window.
                 handle_bytes, base_offset = _export_cuda_ipc_handle(int(entry.base_ptr))
                 if not handle_bytes:
                     raise TensorCastError(
@@ -1696,8 +1723,10 @@ def _register_artifact_core(
         if on_begin is not None:
             on_begin(handle)
         if cancel_event and cancel_event.is_set():
-            with contextlib.suppress(Exception):
-                handle.abort(timeout_s=5.0)
+            _abort_registered_artifact_best_effort(
+                handle,
+                context="register_artifact.cancel_before_upload.abort",
+            )
             raise CancelledError
 
         if view is not None:
@@ -1742,12 +1771,16 @@ def _register_artifact_core(
                             local_stable_tier=commit_res.local_stable_tier,
                         )
                     except CancelledError:
-                        with contextlib.suppress(Exception):
-                            handle.abort(timeout_s=5.0)
+                        _abort_registered_artifact_best_effort(
+                            handle,
+                            context="register_artifact.server_view_cancel.abort",
+                        )
                         raise
                     except Exception:
-                        with contextlib.suppress(Exception):
-                            handle.abort(timeout_s=5.0)
+                        _abort_registered_artifact_best_effort(
+                            handle,
+                            context="register_artifact.server_view_error.abort",
+                        )
                         raise
             elif view.placement != store_daemon_pb2.TRANSFORM_PLACEMENT_CLIENT:
                 raise TensorCastError(
@@ -1852,12 +1885,16 @@ def _register_artifact_core(
                         local_stable_tier=commit_res.local_stable_tier,
                     )
             except CancelledError:
-                with contextlib.suppress(Exception):
-                    handle.abort(timeout_s=5.0)
+                _abort_registered_artifact_best_effort(
+                    handle,
+                    context="register_artifact.upload_cancel.abort",
+                )
                 raise
             except Exception:
-                with contextlib.suppress(Exception):
-                    handle.abort(timeout_s=5.0)
+                _abort_registered_artifact_best_effort(
+                    handle,
+                    context="register_artifact.upload_error.abort",
+                )
                 raise
 
     raise InvalidPlan(f"Unknown plan: {plan_type}")

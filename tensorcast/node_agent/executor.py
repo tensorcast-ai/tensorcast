@@ -1237,7 +1237,7 @@ class NodeAgentExecutor:
         else:
             target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU
             device_uuid = device_uuid_for(device_id)
-        self._client.materialize_by_artifact_id_v2(
+        self._client.materialize_by_artifact_id(
             selection=selection,
             replica_uuid=replica_uuid,
             device_uuid=device_uuid,

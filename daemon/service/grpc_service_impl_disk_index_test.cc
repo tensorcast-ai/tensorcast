@@ -145,10 +145,10 @@ TEST_CASE(
   REQUIRE(status.ok());
   REQUIRE(resp.status() == tensorcast::daemon::v2::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   REQUIRE(resp.source() == tensorcast::daemon::v2::MATERIALIZATION_SOURCE_DISK);
-  REQUIRE_FALSE(resp.view_index_json().empty());
+  REQUIRE_FALSE(resp.view_index_bytes().empty());
 
   // Ensure the bytes are valid canonical index JSON (no Global Store needed).
-  const auto parsed = nlohmann::json::parse(resp.view_index_json());
+  const auto parsed = nlohmann::json::parse(resp.view_index_bytes());
   REQUIRE(parsed.contains("__dummy__"));
 }
 

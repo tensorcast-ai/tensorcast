@@ -5,12 +5,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, cast
 
 import torch
 
 from tensorcast.api.store import BindingRealizationEntry
-from tensorcast.api.store import Range as StoreRange
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.serving.builder.materialization import (
     narrow_by_range_spec,
@@ -23,6 +22,17 @@ from tensorcast.serving.builder.trace_ir import (
     RangeSpec,
     TracePlan,
 )
+
+
+class _RangeLike(Protocol):
+    @property
+    def dim(self) -> int: ...
+
+    @property
+    def start(self) -> int: ...
+
+    @property
+    def end(self) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -165,9 +175,9 @@ def build_tensor_parity_probes_from_recipe(
 ) -> tuple[TensorParityProbe, ...]:
     trace_plan = getattr(recipe, "trace_plan", None)
     copy_plan = tuple(getattr(trace_plan, "copy_plan", ()) or ())
-    if copy_plan:
+    if trace_plan is not None and copy_plan:
         return build_tensor_parity_probes_from_trace_plan(
-            trace_plan,
+            cast(TracePlan, trace_plan),
             dst_names=dst_names,
             max_entries=max_entries,
             include_fill=include_fill,
@@ -304,9 +314,7 @@ def evaluate_recipe_tensor_parity(
     )
 
 
-def _range_spec_from_store_ranges(
-    ranges: Iterable[StoreRange],
-) -> RangeSpec | None:
+def _range_spec_from_store_ranges(ranges: Iterable[_RangeLike]) -> RangeSpec | None:
     converted = tuple(
         Range(
             dim=int(rng.dim),

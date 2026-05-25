@@ -47,7 +47,7 @@ absl::Status bind_replica_handle_for_response(
     std::string_view replica_uuid,
     int32_t effective_pid,
     bool allow_pid_ref,
-    bool cpu_target,
+    std::string_view planned_export_kind,
     std::string_view lease_log_context,
     const std::function<void()>& on_lease_create_failed,
     v2::MemCopyHandle& out_mem_handle);

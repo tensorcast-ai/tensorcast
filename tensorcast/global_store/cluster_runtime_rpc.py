@@ -5,10 +5,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import suppress
 from typing import Any, TypeVar
 
+from tensorcast.logger import init_logger
+
 T = TypeVar("T")
+
+logger = init_logger(__name__)
 
 
 def call_cluster_runtime_rpc(
@@ -41,5 +44,7 @@ def call_cluster_runtime_rpc(
         detail = exc.details() if hasattr(exc, "details") else str(exc)
         return None, f"{rpc_name} RPC failed: {detail}"
     finally:
-        with suppress(Exception):
+        try:
             channel.close()
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to close ClusterRuntimeService channel")

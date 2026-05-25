@@ -64,7 +64,7 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][re
     ReplicaConfig cfg{
         .source = disk_src,
         .artifact_identifier = artifact_id,
-        .device_type = ::tensorcast::DeviceType::CPU,
+        .device_type = ::tensorcast::DeviceType::GPU,
         .local_device_id = 0,
         .pinned_buffer_pool = pool,
         .async_runtime = async_runtime,
@@ -168,7 +168,7 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
       ReplicaConfig cfg{
           .source = disk_src,
           .artifact_identifier = artifact_id,
-          .device_type = ::tensorcast::DeviceType::CPU,
+          .device_type = ::tensorcast::DeviceType::GPU,
           .local_device_id = 0,
           .pinned_buffer_pool = pool,
           .async_runtime = async_runtime,
@@ -206,7 +206,7 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
       ReplicaConfig cfg{
           .source = disk_src,
           .artifact_identifier = artifact_id + "_gpu1",
-          .device_type = ::tensorcast::DeviceType::CPU,
+          .device_type = ::tensorcast::DeviceType::GPU,
           .local_device_id = 1,
           .pinned_buffer_pool = pool,
           .async_runtime = async_runtime,
@@ -272,7 +272,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     ReplicaConfig cfg{
         .source = disk_src,
         .artifact_identifier = artifact_id,
-        .device_type = ::tensorcast::DeviceType::CPU,
+        .device_type = ::tensorcast::DeviceType::GPU,
         .local_device_id = 0,
         .pinned_buffer_pool = pool,
         .async_runtime = async_runtime,
@@ -319,7 +319,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     ReplicaConfig cfg{
         .source = disk_src,
         .artifact_identifier = artifact_id,
-        .device_type = ::tensorcast::DeviceType::CPU,
+        .device_type = ::tensorcast::DeviceType::GPU,
         .local_device_id = 0,
         .pinned_buffer_pool = pool,
         .async_runtime = async_runtime,
@@ -366,7 +366,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     ReplicaConfig cfg{
         .source = disk_src,
         .artifact_identifier = artifact_id,
-        .device_type = ::tensorcast::DeviceType::CPU,
+        .device_type = ::tensorcast::DeviceType::GPU,
         .local_device_id = 0,
         .pinned_buffer_pool = pool,
         .async_runtime = async_runtime,

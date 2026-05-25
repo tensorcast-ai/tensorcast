@@ -21,17 +21,6 @@ from tensorcast.api.plan.transforms import TransformSpec
 from tensorcast.api.store import Artifact, Store
 from tensorcast.api.store.handles import RegisteredArtifact
 from tensorcast.api.store.serving_builder import (
-    PURE_TRANSFORM_SERVING_ARG_ABI_VERSION,
-    PURE_TRANSFORM_SERVING_ARG_ADAPTER_VERSION,
-    PURE_TRANSFORM_SERVING_ARG_BUILD_PIPELINE_VERSION,
-    PURE_TRANSFORM_SERVING_ARG_CONTRACT_FAMILY,
-    PURE_TRANSFORM_SERVING_ARG_ENABLE,
-    PURE_TRANSFORM_SERVING_ARG_FRAMEWORK_NAME,
-    PURE_TRANSFORM_SERVING_ARG_LOGICAL_TOPOLOGY_JSON,
-    PURE_TRANSFORM_SERVING_ARG_MANIFEST_REF,
-    PURE_TRANSFORM_SERVING_ARG_REPRESENTATION_CONTRACT_HASH,
-    PURE_TRANSFORM_SERVING_ARG_SERVING_VERSION_KEY,
-    PURE_TRANSFORM_SERVING_ARG_SOURCE_VERSION_KEY,
     RepresentationPublishSpec,
     build_pure_transform_publication_bundle_from_registered_artifact,
     prepare_pure_transform_serving_registration,
@@ -44,7 +33,7 @@ from tensorcast.engine_adapter.artifact_api import (
     PublishResult,
     SealedByteArtifact,
 )
-from tensorcast.types import BuilderMode, ServingBuildIntent
+from tensorcast.types import ServingBuildIntent
 
 
 def _encode_token(token: bytes) -> str:
@@ -72,79 +61,16 @@ def _spec_payload_bytes(
     return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 
-def _serving_bool_arg(args: Mapping[str, str | int], key: str) -> bool:
-    value = args.get(key)
-    if value is None:
-        return False
-    if isinstance(value, int):
-        return value != 0
-    normalized = str(value).strip().lower()
-    if normalized in {"", "0", "false", "no", "off"}:
-        return False
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    raise ArtifactError(
-        f"TransformSpec.args['{key}'] must be a boolean-like string or int",
-        status_code="INVALID_ARGUMENT",
-        retryable=False,
-    )
-
-
-def _serving_optional_arg(
-    args: Mapping[str, str | int],
-    key: str,
-) -> str | None:
-    value = args.get(key)
-    if value is None:
-        return None
-    normalized = str(value).strip()
-    return normalized or None
-
-
-def _serving_required_arg(
-    args: Mapping[str, str | int],
-    key: str,
-) -> str:
-    value = _serving_optional_arg(args, key)
-    if value is None:
-        raise ArtifactError(
-            f"TransformSpec.args['{key}'] is required when tc_serving_enable=1",
-            status_code="INVALID_ARGUMENT",
-            retryable=False,
-        )
-    return value
-
-
 def _pure_transform_build_intent(
     ctx: "TransformContext",
     *,
     source_artifact: Artifact,
 ) -> ServingBuildIntent | None:
     publication_spec = ctx.spec.publication_spec
-    if publication_spec is not None:
-        return publication_spec.build_intent.model_copy(
-            update={"source_artifact_ref": source_artifact._ensure_identified()}
-        )
-    if not _serving_bool_arg(ctx.spec.args, PURE_TRANSFORM_SERVING_ARG_ENABLE):
+    if publication_spec is None:
         return None
-    return ServingBuildIntent(
-        representation_contract_hash=_serving_optional_arg(
-            ctx.spec.args, PURE_TRANSFORM_SERVING_ARG_REPRESENTATION_CONTRACT_HASH
-        ),
-        builder_mode=BuilderMode.PURE_TRANSFORM,
-        framework_name=_serving_required_arg(
-            ctx.spec.args, PURE_TRANSFORM_SERVING_ARG_FRAMEWORK_NAME
-        ),
-        adapter_version=_serving_required_arg(
-            ctx.spec.args, PURE_TRANSFORM_SERVING_ARG_ADAPTER_VERSION
-        ),
-        serving_abi_version=_serving_required_arg(
-            ctx.spec.args, PURE_TRANSFORM_SERVING_ARG_ABI_VERSION
-        ),
-        build_pipeline_version=_serving_required_arg(
-            ctx.spec.args, PURE_TRANSFORM_SERVING_ARG_BUILD_PIPELINE_VERSION
-        ),
-        source_artifact_ref=source_artifact._ensure_identified(),
+    return publication_spec.build_intent.model_copy(
+        update={"source_artifact_ref": source_artifact._ensure_identified()}
     )
 
 
@@ -165,57 +91,25 @@ def _maybe_build_pure_transform_publication_bundle(
         )
 
     publication_spec = ctx.spec.publication_spec
+    if publication_spec is None:
+        raise ArtifactError(
+            "PURE_TRANSFORM serving publication requires TransformSpec.publication_spec",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
     return build_pure_transform_publication_bundle_from_registered_artifact(
         build_intent=build_intent,
         source_artifact=source_artifact,
-        contract_family=(
-            publication_spec.contract_family
-            if publication_spec is not None
-            else _serving_optional_arg(
-                ctx.spec.args, PURE_TRANSFORM_SERVING_ARG_CONTRACT_FAMILY
-            )
-        ),
+        contract_family=publication_spec.contract_family,
         serving_artifact=registered_artifact,
-        source_version_key=(
-            publication_spec.source_version_key
-            if publication_spec is not None
-            else _serving_optional_arg(
-                ctx.spec.args, PURE_TRANSFORM_SERVING_ARG_SOURCE_VERSION_KEY
-            )
-        ),
-        serving_version_key=(
-            publication_spec.serving_version_key
-            if publication_spec is not None
-            else _serving_optional_arg(
-                ctx.spec.args, PURE_TRANSFORM_SERVING_ARG_SERVING_VERSION_KEY
-            )
-        ),
-        logical_topology_json=(
-            publication_spec.logical_topology_json
-            if publication_spec is not None
-            else _serving_optional_arg(
-                ctx.spec.args, PURE_TRANSFORM_SERVING_ARG_LOGICAL_TOPOLOGY_JSON
-            )
-        ),
-        serving_manifest_ref=(
-            publication_spec.serving_manifest_ref
-            if publication_spec is not None
-            else _serving_optional_arg(
-                ctx.spec.args, PURE_TRANSFORM_SERVING_ARG_MANIFEST_REF
-            )
-        ),
-        layout_id=(
-            publication_spec.layout_id if publication_spec is not None else None
-        ),
-        requirements=(
-            publication_spec.requirements if publication_spec is not None else None
-        ),
-        readiness_policy=(
-            publication_spec.readiness_policy if publication_spec is not None else None
-        ),
-        structural_view_ids=(
-            publication_spec.structural_view_ids if publication_spec is not None else ()
-        ),
+        source_version_key=publication_spec.source_version_key,
+        serving_version_key=publication_spec.serving_version_key,
+        logical_topology_json=publication_spec.logical_topology_json,
+        serving_manifest_ref=publication_spec.serving_manifest_ref,
+        layout_id=publication_spec.layout_id,
+        requirements=publication_spec.requirements,
+        readiness_policy=publication_spec.readiness_policy,
+        structural_view_ids=publication_spec.structural_view_ids,
     )
 
 
@@ -720,26 +614,18 @@ class EngineAdapter:
             )
             registration_tensors = dict(tensors)
             if build_intent is not None:
+                if publication_spec is None:
+                    raise ArtifactError(
+                        "PURE_TRANSFORM serving registration requires TransformSpec.publication_spec",
+                        status_code="INVALID_ARGUMENT",
+                        retryable=False,
+                    )
                 prepared = prepare_pure_transform_serving_registration(
                     build_intent=build_intent,
                     source_artifact=selected_source,
                     tensors=registration_tensors,
-                    logical_topology_json=(
-                        publication_spec.logical_topology_json
-                        if publication_spec is not None
-                        else _serving_optional_arg(
-                            ctx.spec.args,
-                            PURE_TRANSFORM_SERVING_ARG_LOGICAL_TOPOLOGY_JSON,
-                        )
-                    ),
-                    serving_manifest_ref=(
-                        publication_spec.serving_manifest_ref
-                        if publication_spec is not None
-                        else _serving_optional_arg(
-                            ctx.spec.args,
-                            PURE_TRANSFORM_SERVING_ARG_MANIFEST_REF,
-                        )
-                    ),
+                    logical_topology_json=publication_spec.logical_topology_json,
+                    serving_manifest_ref=publication_spec.serving_manifest_ref,
                 )
                 registration_tensors = prepared.tensors
             registered_artifact = ctx.store.register(

@@ -134,10 +134,6 @@ def compute_view_id(
     return _load_c_ext().compute_view_id(canonical_index_bytes, normalized_ops)
 
 
-def get_cuda_memory_handle(device_id: int, memory_ptr: int) -> bytes:
-    return _load_c_ext().get_cuda_memory_handle(device_id, memory_ptr)
-
-
 def get_cuda_memory_handle_with_offset(
     device_id: int, memory_ptr: int
 ) -> tuple[bytes, int]:
@@ -174,7 +170,6 @@ __all__ = [
     "compute_view_index_bytes",
     "compute_view_registration_plan",
     "get_c_ext",
-    "get_cuda_memory_handle",
     "get_cuda_memory_handle_with_offset",
     "get_cuda_memory_ptr",
     "get_device_uuid_map",

@@ -79,16 +79,16 @@ Reviewed baseline: current `tensorcast-280` code as of 2026-05-16.
 
 - Daemon-owned bindings already track `binding_id`, `binding_layout_id`,
   `current_binding_value_id`, `seal_generation`, owner pid, target layout hash,
-  device UUID, current selection, and `target_publication_token` in
+  device UUID, current selection, and
+  `binding_current_value_publication_token` in
   `BindingRegistry::Record`.
 - `AcquireBindingValue` exists for same-daemon local acquire and validates
   local peer, expected device/member/layout/schema/build metadata, retained
   status, and caller pid in
   `daemon/service/controllers/materialization_controller.cc`.
-- `MaterializeIntoTarget` and `MaterializeIntoMappedTarget` currently can mint
-  `target_publication_token` values and insert `TargetPublicationRegistry`
-  records. This is intentionally called out as prework debt: after this plan,
-  those RPCs must not be standalone publication-authority paths.
+- `MaterializeIntoTarget` and `MaterializeIntoMappedTarget` no longer mint
+  publication authority or insert standalone publication records; binding
+  current-value commit/promote paths own that authority.
 - `PublishTargetReplica` validates capability-token signature/audience/issuer,
   token scope against request, token scope against
   `TargetPublicationRegistry::Record`, commits LIP routable exports, and
@@ -125,13 +125,13 @@ feature.
    publication starts from binding lifecycle currentness, not from the
    materialization pipeline.
 
-4. Existing target publication tokens are not binding-generation fenced.
-   `TargetPublicationScope` currently includes publication, selection,
-   byte-space, device UUID, owner pid, layout hash, and operation id, but not
-   `binding_id`, `binding_layout_id`, `binding_value_id`, or
-   `seal_generation`. `TargetPublicationRegistry::Record` has the same gap.
-   `PublishTargetReplica` cannot prove that the token is still for the current
-   binding value.
+4. Retired target publication tokens were not binding-generation fenced.
+   `TargetPublicationScope` included publication, selection, byte-space, device
+   UUID, owner pid, layout hash, and operation id, but not `binding_id`,
+   `binding_layout_id`, `binding_value_id`, or `seal_generation`.
+   `BindingCurrentValuePublicationScope` is now the only generated publication
+   credential scope, so `PublishTargetReplica` proves that the token is still
+   for the current binding value.
 
 5. Published current values are not daemon-guarded against mutation.
    Python SDK guards reject mutation while `_published_lease_id` is set, but
@@ -283,8 +283,9 @@ These controls are part of the plan, not optional review advice.
 
 - [x] Phase 2: Remove Materialize Publish Authority And Bind Tokens To
       `BindingValueRef`
-  - [x] Replace publication validation use of `TargetPublicationScope` with
-        `BindingCurrentValuePublicationScope`. The scope must contain:
+  - [x] Replace publication validation use of retired
+        `TargetPublicationScope` with `BindingCurrentValuePublicationScope`.
+        The scope must contain:
         `publication_id`, `binding_id`, `binding_layout_id`,
         `binding_value_id`, `seal_generation`, owner pid/session identity,
         device UUID, target layout hash, byte-space, resolved selection, and
@@ -435,8 +436,8 @@ bazel test //daemon:grpc_service_impl_publish_target_replica_test \
 
   Required coverage in this target:
   binding value id mismatch, seal generation mismatch, owner/session mismatch,
-  device/layout/selection/byte-space mismatch, old
-  `TargetPublicationScope`/target-materialization token rejection,
+  device/layout/selection/byte-space mismatch, removed
+  `TargetPublicationScope`/target-materialization token authority,
   `MaterializeIntoTarget` response has no publishable token, duplicate same-op
   idempotence, duplicate different-op rejection, and published-value terminal
   cleanup.

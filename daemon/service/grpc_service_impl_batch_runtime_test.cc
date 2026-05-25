@@ -868,13 +868,13 @@ TEST_CASE("Batch* front-door returns per-item outcomes and no UNIMPLEMENTED", "[
   REQUIRE(std::string(out.data(), out.size()) == payload);
   release_test_region(*harness, region);
 
-  MaterializeReplicaRequest legacy_req;
-  legacy_req.mutable_selection()->set_artifact_id("mi2:legacy:ok");
-  legacy_req.set_target_device_type(DeviceType::DEVICE_TYPE_GPU);
-  MaterializeReplicaResponse legacy_resp;
-  grpc::ServerContext legacy_ctx;
-  auto legacy_st = svc.MaterializeReplica(&legacy_ctx, &legacy_req, &legacy_resp);
-  REQUIRE(legacy_st.error_code() != grpc::StatusCode::UNIMPLEMENTED);
+  MaterializeReplicaRequest materialize_req;
+  materialize_req.mutable_selection()->set_artifact_id("mi2:materialize:ok");
+  materialize_req.set_target_device_type(DeviceType::DEVICE_TYPE_GPU);
+  MaterializeReplicaResponse materialize_resp;
+  grpc::ServerContext materialize_ctx;
+  auto materialize_st = svc.MaterializeReplica(&materialize_ctx, &materialize_req, &materialize_resp);
+  REQUIRE(materialize_st.error_code() != grpc::StatusCode::UNIMPLEMENTED);
 }
 
 TEST_CASE("Batch* front-door supports source_layout and payload_ref transport", "[daemon][batch][transport]") {

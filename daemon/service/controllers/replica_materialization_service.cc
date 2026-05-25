@@ -49,7 +49,10 @@ using status_utils::to_grpc_status;
 
 namespace {
 
+using materialization_index_source::canonical_index_authority_for_resolution;
+using materialization_index_source::CanonicalIndexAuthority;
 using materialization_index_source::DescriptorMetadata;
+using materialization_index_source::load_canonical_index_from_authority;
 using materialization_index_source::load_descriptor_metadata;
 using materialization_index_source::validate_descriptor_against_index;
 using materialization_payload::populate_materialize_payloads;
@@ -57,9 +60,12 @@ using materialization_payload::resolve_layout_json;
 using materialization_policy::apply_group_realization_begin_context_to_transport_context;
 using materialization_policy::apply_operation_transport_context;
 using materialization_policy::apply_request_context_to_hints;
+using materialization_policy::attach_controller_realization_plan_span_attrs;
 using materialization_policy::begin_or_join_group_realization_if_enabled;
+using materialization_policy::build_controller_realization_plan;
 using materialization_policy::build_view_spec_proto;
 using materialization_policy::compute_view_id_from_spec;
+using materialization_policy::ControllerRealizationPlan;
 using materialization_policy::convert_view_spec;
 using materialization_policy::NormalizedMaterializationRequestContext;
 using materialization_policy::resolve_collective_group_hint;
@@ -67,6 +73,7 @@ using materialization_policy::resolve_group_realization_transport_context;
 using materialization_policy::resolve_materialization_request_context;
 using materialization_policy::resolve_transform_placement;
 using materialization_policy::to_hint_export_policy;
+using materialization_policy::validate_controller_process_visible_export_authorities;
 using materialization_policy::validate_group_realization_staged_publish_supported;
 using materialization_post_seal::check_post_seal_view_reuse_safe;
 using materialization_replica_handle::bind_replica_handle_for_response;
@@ -343,7 +350,7 @@ absl::Status bind_materialized_handle(
     std::string_view replica_uuid,
     int32_t effective_pid,
     bool allow_pid_ref,
-    bool cpu_target,
+    std::string_view planned_export_kind,
     std::string_view lease_log_context,
     v2::MemCopyHandle& out_mem_handle) {
   return bind_replica_handle_for_response(
@@ -356,7 +363,7 @@ absl::Status bind_materialized_handle(
       replica_uuid,
       effective_pid,
       allow_pid_ref,
-      cpu_target,
+      planned_export_kind,
       lease_log_context,
       [&]() { record_lease_create_failed(); },
       out_mem_handle);
@@ -537,7 +544,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
       storage_path_,
       selection.artifact_id(),
       retrieval_policy.allow_disk,
-      /*allow_local_import_fallback=*/true,
+      /*allow_local_import_disk_source=*/true,
       loopback_peer);
   if (!artifact_resolution_or.ok()) {
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
@@ -546,14 +553,14 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   auto artifact_resolution = std::move(*artifact_resolution_or);
   std::string resolved_artifact_id = std::move(artifact_resolution.resolved_artifact_id);
   std::optional<std::string> bound_artifact_id = std::move(artifact_resolution.bound_artifact_id);
-  std::optional<std::string> fallback_artifact_id = std::move(artifact_resolution.fallback_artifact_id);
+  std::optional<std::string> pre_binding_artifact_id = std::move(artifact_resolution.pre_binding_artifact_id);
   std::optional<bool> post_seal_view_reuse_safe;
   const bool gs_connected = artifact_resolution.gs_connected;
   std::optional<std::filesystem::path> normalized_disk_path = std::move(artifact_resolution.normalized_disk_path);
   std::optional<ArtifactSourceRegistry::Entry> local_import = std::move(artifact_resolution.local_import);
   std::optional<store::loading::DiskSource> disk_source = std::move(artifact_resolution.disk_source);
   span->SetAttribute("tc.store.gs_connected", gs_connected);
-  span->SetAttribute("tc.store.local_import_fallback", local_import.has_value());
+  span->SetAttribute("tc.store.local_import_disk_source", local_import.has_value());
 
   span->SetAttribute("tc.artifact.id", resolved_artifact_id);
   span->SetAttribute("tc.artifact.id_kind", artifact_id_kind_attr(resolved_artifact_id));
@@ -735,35 +742,22 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   std::optional<std::string> resolved_view_id;
   tensorcast::common::v1::ArtifactSelection resolved_selection;
   const std::string& index_source_artifact_id =
-      fallback_artifact_id.has_value() ? *fallback_artifact_id : resolved_artifact_id;
-
-  auto read_canonical_from_disk = [&]() -> absl::StatusOr<std::string> {
-    if (!normalized_disk_path.has_value()) {
-      return absl::FailedPreconditionError("disk source path required for disk-backed canonical planning");
-    }
-    if (disk_index.has_value() && !disk_index->canonical_index_json.empty()) {
-      return disk_index->canonical_index_json;
-    }
-    auto metadata_or = materialization_disk_resolve::build_mounted_source_metadata(*normalized_disk_path);
-    if (!metadata_or.ok()) {
-      return metadata_or.status();
-    }
-    return metadata_or->index_info.canonical_index_json;
-  };
+      pre_binding_artifact_id.has_value() ? *pre_binding_artifact_id : resolved_artifact_id;
 
   if (!has_artifact && !has_disk) {
     return {StatusCode::INVALID_ARGUMENT, "selection requires artifact_id or disk_path for canonical planning"};
   }
 
-  const bool prefer_disk_index = has_disk && (!gs_connected || prefer_disk);
-  absl::StatusOr<std::string> index_or =
-      prefer_disk_index ? read_canonical_from_disk() : d_.engine.get_canonical_index_by_id(index_source_artifact_id);
-  if (!index_or.ok() && has_disk && !prefer_disk_index) {
-    auto disk_or = read_canonical_from_disk();
-    if (disk_or.ok()) {
-      index_or = std::move(disk_or);
+  const CanonicalIndexAuthority canonical_index_authority =
+      canonical_index_authority_for_resolution(gs_connected, local_import.has_value());
+  absl::StatusOr<std::string> index_or = [&]() -> absl::StatusOr<std::string> {
+    if (canonical_index_authority == CanonicalIndexAuthority::kDiskSource && disk_index.has_value() &&
+        !disk_index->canonical_index_json.empty()) {
+      return disk_index->canonical_index_json;
     }
-  }
+    return load_canonical_index_from_authority(
+        d_.engine, index_source_artifact_id, normalized_disk_path, dev.ordinal, canonical_index_authority);
+  }();
   if (!index_or.ok()) {
     return to_grpc_status(index_or.status());
   }
@@ -781,19 +775,19 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
       return {StatusCode::INVALID_ARGUMENT, "selection.view_id requires artifact_id for routing"};
     }
     auto view_meta_or = d_.engine.get_view_metadata(resolved_artifact_id, selection.view_id());
-    if (!view_meta_or.ok() && fallback_artifact_id.has_value() && absl::IsNotFound(view_meta_or.status()) &&
+    if (!view_meta_or.ok() && pre_binding_artifact_id.has_value() && absl::IsNotFound(view_meta_or.status()) &&
         d_.post_seal_policy.reuse_views_if_safe) {
       if (!d_.global_store_client || !d_.global_store_client->is_connected()) {
         return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
       }
       auto safe_or =
-          check_post_seal_view_reuse_safe(*d_.global_store_client, *fallback_artifact_id, resolved_artifact_id);
+          check_post_seal_view_reuse_safe(*d_.global_store_client, *pre_binding_artifact_id, resolved_artifact_id);
       if (!safe_or.ok()) {
         return to_grpc_status(safe_or.status());
       }
       post_seal_view_reuse_safe = *safe_or;
       if (*safe_or) {
-        view_meta_or = d_.engine.get_view_metadata(*fallback_artifact_id, selection.view_id());
+        view_meta_or = d_.engine.get_view_metadata(*pre_binding_artifact_id, selection.view_id());
       }
     }
     if (!view_meta_or.ok()) {
@@ -870,6 +864,28 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     }
     return selection_identity_status;
   }
+  const auto* group_begin_context = begin_context_or->has_value() ? &**begin_context_or : nullptr;
+  auto realization_plan_or = build_controller_realization_plan(
+      req,
+      request_context,
+      transport_context,
+      group_begin_context,
+      resolved_artifact_id,
+      resolved_selection,
+      cpu_target,
+      no_lease);
+  if (!realization_plan_or.ok()) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(realization_plan_or.status());
+  }
+  const ControllerRealizationPlan& realization_plan = *realization_plan_or;
+  attach_controller_realization_plan_span_attrs(rctx, realization_plan);
+  const std::string& planned_export_kind = realization_plan.resource_envelope.export_kind;
+  if (auto status = validate_controller_process_visible_export_authorities(realization_plan, "MaterializeReplica");
+      !status.ok()) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(status);
+  }
 
   v2::MaterializeReplicaRequest effective_req = req;
   effective_req.mutable_selection()->CopyFrom(selection);
@@ -877,15 +893,12 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     if (no_lease) {
       resp.clear_mem_handle();
     }
-    if (!resp.view_index_json().empty() && resp.view_index_bytes().empty()) {
-      resp.set_view_index_bytes(resp.view_index_json());
-    }
 
     auto layout_or = resolve_layout_json(resp, effective_req, d_.engine);
     if (!layout_or.ok()) {
       return to_grpc_status(layout_or.status());
     }
-    const bool prefer_view_plan = view_plan.has_value() && !view_plan->is_identity && resp.view_index_json().empty();
+    const bool prefer_view_plan = view_plan.has_value() && !view_plan->is_identity && resp.view_index_bytes().empty();
     const std::string* ticket_device_uuid = req.device_uuid().empty() ? nullptr : &req.device_uuid();
     absl::Status payload_status = populate_materialize_payloads(
         resp,
@@ -909,7 +922,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
 
   // Artifact LIP fast path: try cross-device consumption
   const bool view_requested = view_spec.has_value() || resolved_view_id.has_value();
-  if (has_artifact && !view_requested && dev.type == DeviceType::GPU) {
+  if (has_artifact && !view_requested && dev.type == DeviceType::GPU && planned_export_kind == "cuda_ipc_lease") {
     LipFastPathRequest lip_request{
         .artifact_id = resolved_artifact_id,
         .target_device_id = dev.ordinal,
@@ -1026,7 +1039,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
                                                                 : store::StoreEngine::MaterializeMode::AUTO;
 
   auto result = d_.engine.materialize_replica(dev, mode, hints, disk_source);
-  if (!result.ok() && view_requested && fallback_artifact_id.has_value() && absl::IsNotFound(result.status())) {
+  if (!result.ok() && view_requested && pre_binding_artifact_id.has_value() && absl::IsNotFound(result.status())) {
     bool allow_reuse = false;
     if (d_.post_seal_policy.reuse_views_if_safe) {
       if (!post_seal_view_reuse_safe.has_value()) {
@@ -1035,9 +1048,9 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
           return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
         }
         auto safe_or =
-            check_post_seal_view_reuse_safe(*d_.global_store_client, *fallback_artifact_id, resolved_artifact_id);
+            check_post_seal_view_reuse_safe(*d_.global_store_client, *pre_binding_artifact_id, resolved_artifact_id);
         if (!safe_or.ok()) {
-          LOG(WARNING) << "post-seal view reuse check failed for assembly=" << *fallback_artifact_id
+          LOG(WARNING) << "post-seal view reuse check failed for assembly=" << *pre_binding_artifact_id
                        << " mi2=" << resolved_artifact_id << ": " << safe_or.status();
           resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
           return to_grpc_status(safe_or.status());
@@ -1047,25 +1060,25 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
       allow_reuse = *post_seal_view_reuse_safe;
       if (!allow_reuse) {
         LOG(WARNING) << "post-seal view reuse disabled: proof commitments mismatch for assembly="
-                     << *fallback_artifact_id << " mi2=" << resolved_artifact_id;
+                     << *pre_binding_artifact_id << " mi2=" << resolved_artifact_id;
       }
     }
 
     if (allow_reuse) {
-      hints.artifact_id = *fallback_artifact_id;
+      hints.artifact_id = *pre_binding_artifact_id;
       if (hints.variant.has_value()) {
-        hints.variant->canonical_artifact_id = *fallback_artifact_id;
+        hints.variant->canonical_artifact_id = *pre_binding_artifact_id;
       }
-      std::optional<store::loading::DiskSource> fallback_disk_source;
-      if (disk_source_artifact_id.has_value() && *disk_source_artifact_id == *fallback_artifact_id) {
-        fallback_disk_source = disk_source;
+      std::optional<store::loading::DiskSource> pre_binding_disk_source;
+      if (disk_source_artifact_id.has_value() && *disk_source_artifact_id == *pre_binding_artifact_id) {
+        pre_binding_disk_source = disk_source;
       }
-      auto fallback_or = d_.engine.materialize_replica(dev, mode, hints, fallback_disk_source);
-      if (fallback_or.ok()) {
-        result = std::move(fallback_or);
+      auto pre_binding_or = d_.engine.materialize_replica(dev, mode, hints, pre_binding_disk_source);
+      if (pre_binding_or.ok()) {
+        result = std::move(pre_binding_or);
       } else {
         resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return to_grpc_status(fallback_or.status());
+        return to_grpc_status(pre_binding_or.status());
       }
     }
   }
@@ -1206,7 +1219,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
       req.replica_uuid(),
       effective_pid,
       loopback_peer,
-      cpu_target,
+      planned_export_kind,
       "engine path",
       *resp.mutable_mem_handle());
   if (!bind_status.ok()) {
@@ -1215,18 +1228,18 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   }
   resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   if (handle.view_index_json.has_value()) {
-    resp.set_view_index_json(*handle.view_index_json);
+    resp.set_view_index_bytes(*handle.view_index_json);
   }
-  if (resp.view_index_json().empty() && normalized_disk_path.has_value()) {
+  if (resp.view_index_bytes().empty() && normalized_disk_path.has_value()) {
     // Prefer disk-local canonical index to avoid Global Store dependency when the client provides a disk_path,
     // even if the engine serves the request from an already-loaded local replica.
     if (disk_index.has_value()) {
-      resp.set_view_index_json(disk_index->canonical_index_json);
+      resp.set_view_index_bytes(disk_index->canonical_index_json);
     } else {
       auto local_index_or = store::loader::read_from_artifact_dir(*normalized_disk_path, dev.ordinal);
       if (local_index_or.ok()) {
-        resp.set_view_index_json(local_index_or->canonical_index_json);
-        VLOG(1) << "MaterializationController: filled view_index_json from disk for artifact_id="
+        resp.set_view_index_bytes(local_index_or->canonical_index_json);
+        VLOG(1) << "MaterializationController: filled view_index_bytes from disk for artifact_id="
                 << handle.replica_key.artifact_id;
       } else {
         LOG(WARNING) << "Failed to read canonical index from disk for artifact_id=" << handle.replica_key.artifact_id
@@ -1234,11 +1247,11 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
       }
     }
   }
-  if (resp.view_index_json().empty() && handle.source == store::loading::MaterializationSource::kDisk) {
+  if (resp.view_index_bytes().empty() && handle.source == store::loading::MaterializationSource::kDisk) {
     auto index_or = d_.engine.get_canonical_index_by_id(handle.replica_key.artifact_id);
     if (index_or.ok()) {
-      resp.set_view_index_json(*index_or);
-      VLOG(1) << "MaterializationController: filled view_index_json from engine for disk artifact_id="
+      resp.set_view_index_bytes(*index_or);
+      VLOG(1) << "MaterializationController: filled view_index_bytes from engine for disk artifact_id="
               << handle.replica_key.artifact_id;
     } else {
       LOG(WARNING) << "Failed to fetch canonical index for disk materialization response: " << index_or.status();

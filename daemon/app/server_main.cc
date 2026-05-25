@@ -61,7 +61,7 @@
 #include <sstream>
 
 ABSL_FLAG(std::string, config, "", "Path to unified daemon config (YAML/JSON)");
-ABSL_FLAG(bool, use_cursor_pagination, false, "Enable opaque cursor pagination for GetLoadedReplicasV2");
+ABSL_FLAG(bool, use_cursor_pagination, false, "Enable opaque cursor pagination for GetLoadedReplicas");
 using namespace tensorcast;
 
 namespace {
@@ -1132,10 +1132,6 @@ int main(int argc, char** argv) {
   }
   daemon_opts.storage_path = storage_root;
   const auto& public_disk_source = cfg.public_disk_source();
-  daemon_opts.public_disk_source_policy.unmatched_path_mode = public_disk_source.unmatched_path_mode() ==
-          tensorcast::config::v1::DaemonConfig::PublicDiskSource::UNMATCHED_PATH_MODE_ALLOW_ABSOLUTE_FALLBACK
-      ? daemon::DaemonOptions::PublicDiskSourcePolicy::UnmatchedPathMode::kAllowAbsoluteFallback
-      : daemon::DaemonOptions::PublicDiskSourcePolicy::UnmatchedPathMode::kReject;
   for (const auto& trusted_root : public_disk_source.trusted_root_policies()) {
     daemon::DaemonOptions::PublicDiskSourcePolicy::TrustedRootPolicy policy;
     policy.policy_id = trusted_root.policy_id();

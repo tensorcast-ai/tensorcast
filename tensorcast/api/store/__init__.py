@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import atexit
-import contextlib
 import logging
 import os
 import threading
@@ -12,13 +11,9 @@ import weakref
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, cast
 
-import grpc
 import torch
 
-from tensorcast._c_ext import (
-    get_cuda_memory_handle,
-    get_cuda_memory_handle_with_offset,
-)
+from tensorcast._c_ext import get_cuda_memory_handle_with_offset
 from tensorcast.api._config import RegisterArtifactOptions, StorePolicy
 from tensorcast.api._device import (
     device_uuid_for,
@@ -27,7 +22,7 @@ from tensorcast.api._device import (
 )
 from tensorcast.api._materialize import (
     MaterializationPayload,
-    materialize_artifact_v2,
+    materialize_artifact,
 )
 from tensorcast.api._region_cache import (
     register_region as _cache_register_region,
@@ -91,13 +86,67 @@ from tensorcast.api.store.owned_binding_slot import (
     OwnedBindingSlot,
     restore_owned_binding_tensors,
 )
+from tensorcast.api.store.realization_kernel import (
+    ArtifactRealizationHandle,
+    ArtifactRealizationReport,
+    ArtifactRealizationSpec,
+    RealizationBindingReport,
+    RealizationExecutionCommitReport,
+    RealizationLifecyclePlan,
+    RealizationModelRuntimeReport,
+    RealizationMountedSourceReport,
+    RealizationPublicationReport,
+    RealizationPublishabilityReport,
+    RealizationReleaseContract,
+    RealizationResourceEnvelope,
+    RealizationRetainedBindingReport,
+    RealizationStrategyPlan,
+    RealizationTargetPlan,
+    RealizationTargetSetMemberReport,
+    RealizationTargetSetReport,
+    RepresentationAdmissionPlan,
+    ResolvedArtifactSelection,
+    TensorDictProjection,
+    artifact_realization_profile_payload,
+    artifact_realization_report_to_dict,
+    binding_report_for,
+    emit_artifact_realization_profile_event,
+    envelope_for_binding,
+    envelope_for_caller_tensors,
+    envelope_for_mounted_source,
+    envelope_for_publication,
+    envelope_for_retained_binding,
+    envelope_for_retained_replica,
+    envelope_for_runtime_attachment,
+    envelope_for_target_region_registration,
+    envelope_for_target_set,
+    execution_commit_report_for,
+    execution_diagnostics_from_response,
+    model_runtime_report_for,
+    mounted_source_report_for,
+    mounted_source_target_digest,
+    publication_report_for,
+    publishability_report_for,
+    release_contract_for,
+    report_for_binding_realization,
+    report_for_mounted_source,
+    report_for_publication,
+    report_for_runtime_attachment,
+    report_for_target_set,
+    resolve_artifact_selection,
+    retained_binding_reports_for,
+    risk_labels_for_target,
+    target_set_lifecycle_plan_for,
+    target_set_report_for_retained_bindings,
+    target_set_representation_admission_for,
+    target_set_strategy_plan_for,
+)
 from tensorcast.api.store.realization_plan import (
     BindingRealizationEntry,
     BindingRealizationPlan,
     binding_realization_plan_to_proto,
     normalize_binding_realization_plan,
 )
-from tensorcast.api.store.region_utils import collect_storage_bases
 from tensorcast.api.store.registration import RegistrationPipeline
 from tensorcast.api.store.retry import raise_mapped_registration_error
 from tensorcast.api.store.runtime import (
@@ -117,9 +166,11 @@ from tensorcast.api.store.serving_binding_reference_consumer import (
     build_reference_target_layout,
     build_reference_tensor_index_bytes,
     prefetch_reference_binding,
+    prefetch_reference_binding_set,
     release_reference_acquire,
     target_from_reference_cache_record,
     unpack_prefetched_serving_binding,
+    unpack_prefetched_serving_binding_set,
     write_reference_resolved_spec_cache_entry,
 )
 from tensorcast.api.store.serving_binding_spec_cache import (
@@ -141,7 +192,6 @@ from tensorcast.api.store.serving_builder import (
     build_pure_transform_publication_bundle,
     build_pure_transform_publication_bundle_from_registered_artifact,
     build_pure_transform_publication_spec,
-    build_pure_transform_serving_args,
     build_pure_transform_transform_spec,
     build_serving_publication_bundle,
     build_serving_publication_bundle_from_registered_artifact,
@@ -151,6 +201,9 @@ from tensorcast.api.store.serving_builder import (
     prepare_binding_finalize_serving_registration,
     prepare_pure_transform_serving_registration,
     prepare_serving_registration,
+)
+from tensorcast.api.store.target_region_lifecycle import (
+    register_store_target_regions_for_realization,
 )
 from tensorcast.api.store.types import (
     ArtifactError,
@@ -170,15 +223,12 @@ from tensorcast.api.store.view_composer import compute_index_multihash
 from tensorcast.api.store.views import TransformPlacement, ViewOrchestrator
 from tensorcast.common.identity import ArtifactIdKind, infer_artifact_id_kind
 from tensorcast.daemon_ctl import get_daemon_client
-from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
 from tensorcast.profile_utils import (
     emit_tensorcast_profile_event,
     tensorcast_profile_stage,
 )
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
-from tensorcast.proto.global_store.v1 import global_store_pb2
-from tensorcast.proto.layout.v1 import layout_pb2
 from tensorcast.proto.operation.v1 import operation_pb2
 from tensorcast.types import (
     SERVING_BUILD_DIGEST_VERSION,
@@ -245,6 +295,21 @@ from tensorcast.types import (
 
 logger = logging.getLogger(__name__)
 
+
+def _log_best_effort_cleanup_failure(context: str, **fields: object) -> None:
+    handlers = tuple(logger.handlers) + tuple(logging.getLogger().handlers)
+    if any(
+        getattr(getattr(handler, "stream", None), "closed", False)
+        for handler in handlers
+    ):
+        return
+    details = ", ".join(f"{key}={value}" for key, value in fields.items())
+    if details:
+        logger.exception("%s failed (%s)", context, details)
+        return
+    logger.exception("%s failed", context)
+
+
 if TYPE_CHECKING:
     from tensorcast.api.plan import PlanResult, PlanStepRef
 
@@ -285,22 +350,6 @@ def _coerce_representation_publish_spec(
     return None
 
 
-def _resolve_runtime_global_store_address() -> str | None:
-    with contextlib.suppress(Exception):
-        import tensorcast.runtime as tensorcast_runtime
-
-        session = tensorcast_runtime.reconcile()
-        if session is not None and session.global_store_address:
-            return str(session.global_store_address)
-    for env_name in ("TENSORCAST_GLOBAL_STORE_ADDRESS", "TENSORCAST_GLOBAL_STORE"):
-        raw = os.getenv(env_name)
-        if raw:
-            resolved = str(raw).strip()
-            if resolved:
-                return resolved
-    return None
-
-
 def _artifact_index_multihash_for_layout_provision(
     store: "Store",
     *,
@@ -320,55 +369,26 @@ def _artifact_index_multihash_for_layout_provision(
 
 
 def _ensure_canonical_layout_for_index(
+    store: "Store",
     *,
     canonical_index: CanonicalIndex,
 ) -> str:
-    global_store_address = _resolve_runtime_global_store_address()
-    if not global_store_address:
-        raise ArtifactError(
-            "Global Store address unavailable while provisioning canonical layout "
-            "for publication canonical index",
-            status_code="FAILED_PRECONDITION",
-            retryable=False,
-        )
-
     canonical_index_data = canonical_index_to_bytes(canonical_index)
     index_multihash = compute_index_multihash(canonical_index_data)
-    channel = grpc.insecure_channel(global_store_address)
     try:
-        stub = GlobalStoreCompositeStub(channel)
-        layout = layout_pb2.LayoutSpec(
-            layout_schema_version=1,
+        return store._runtime.ensure_client().ensure_canonical_layout(
             index_multihash=index_multihash,
+            canonical_index_data=canonical_index_data,
+            attach_to_artifact=False,
         )
-        put_resp = stub.PutLayoutSpec(
-            global_store_pb2.PutLayoutSpecRequest(
-                layout=layout,
-                canonical_index_data=canonical_index_data,
-            ),
-            timeout=10.0,
-        )
-        if (
-            put_resp.status != global_store_pb2.Status.STATUS_OK
-            or not put_resp.layout_id
-        ):
-            raise ArtifactError(
-                "failed to register canonical layout spec for representation publication",
-                status_code="FAILED_PRECONDITION",
-                retryable=False,
-            )
-        return str(put_resp.layout_id)
-    except grpc.RpcError as exc:
-        message = exc.details() or str(exc)
+    except Exception as exc:  # noqa: BLE001
         raise ArtifactError(
-            "failed to provision canonical layout for representation publication: "
-            f"{message}",
+            "failed to provision canonical layout for representation publication "
+            "through StoreDaemon: "
+            f"{exc}",
             status_code="FAILED_PRECONDITION",
             retryable=False,
         ) from exc
-    finally:
-        with contextlib.suppress(Exception):
-            channel.close()
 
 
 def _ensure_canonical_layout_for_artifact(
@@ -387,63 +407,24 @@ def _ensure_canonical_layout_for_artifact(
             retryable=False,
         )
 
-    global_store_address = _resolve_runtime_global_store_address()
-    if not global_store_address:
-        raise ArtifactError(
-            "Global Store address unavailable while provisioning canonical layout "
-            f"for '{artifact_id}'",
-            status_code="FAILED_PRECONDITION",
-            retryable=False,
-        )
-
-    channel = grpc.insecure_channel(global_store_address)
+    index_multihash = _artifact_index_multihash_for_layout_provision(
+        store,
+        artifact_id=artifact_id,
+    )
     try:
-        stub = GlobalStoreCompositeStub(channel)
-        layout = layout_pb2.LayoutSpec(
-            layout_schema_version=1,
-            index_multihash=_artifact_index_multihash_for_layout_provision(
-                store,
-                artifact_id=artifact_id,
-            ),
+        return store._runtime.ensure_client().ensure_canonical_layout(
+            artifact_id=artifact_id,
+            index_multihash=index_multihash,
+            attach_to_artifact=True,
         )
-        put_resp = stub.PutLayoutSpec(
-            global_store_pb2.PutLayoutSpecRequest(layout=layout),
-            timeout=10.0,
-        )
-        if (
-            put_resp.status != global_store_pb2.Status.STATUS_OK
-            or not put_resp.layout_id
-        ):
-            raise ArtifactError(
-                f"failed to register canonical layout spec for '{artifact_id}'",
-                status_code="FAILED_PRECONDITION",
-                retryable=False,
-            )
-        attach_resp = stub.AttachLayoutToArtifact(
-            global_store_pb2.AttachLayoutToArtifactRequest(
-                mi2_id=artifact_id,
-                layout_id=str(put_resp.layout_id),
-            ),
-            timeout=10.0,
-        )
-        if attach_resp.status != global_store_pb2.Status.STATUS_OK:
-            raise ArtifactError(
-                f"failed to attach canonical layout spec to '{artifact_id}'",
-                status_code="FAILED_PRECONDITION",
-                retryable=False,
-            )
-        return str(put_resp.layout_id)
-    except grpc.RpcError as exc:
-        message = exc.details() or str(exc)
+    except Exception as exc:  # noqa: BLE001
         raise ArtifactError(
-            "failed to provision canonical layout for representation publication: "
-            f"{message}",
+            "failed to provision canonical layout for representation publication "
+            "through StoreDaemon: "
+            f"{exc}",
             status_code="FAILED_PRECONDITION",
             retryable=False,
         ) from exc
-    finally:
-        with contextlib.suppress(Exception):
-            channel.close()
 
 
 def _resolve_representation_publish_layout_id(
@@ -467,6 +448,7 @@ def _resolve_representation_publish_layout_id(
         and publication.canonical_index is not None
     ):
         return _ensure_canonical_layout_for_index(
+            store,
             canonical_index=cast(CanonicalIndex, publication.canonical_index),
         )
     if (
@@ -930,10 +912,9 @@ def _decode_published_model_version_from_response(
         ),
         serving_build_digest=str(payload.serving_build_digest or "") or None,
         serving_manifest_ref=str(payload.serving_manifest_ref or "") or None,
-        serving_execution_diagnostics=(
-            ExecutionDiagnostics.from_proto(payload.serving_execution_diagnostics)
-            if payload.HasField("serving_execution_diagnostics")
-            else None
+        serving_execution_diagnostics=execution_diagnostics_from_response(
+            payload,
+            field_name="serving_execution_diagnostics",
         ),
     )
 
@@ -1125,7 +1106,7 @@ class Store:
         self._materialization = MaterializationPipeline(
             self._runtime,
             self._views,
-            materialize_fn=materialize_fn or materialize_artifact_v2,
+            materialize_fn=materialize_fn or materialize_artifact,
         )
         self._enable_batcher = os.getenv(
             "TENSORCAST_STORE_ENABLE_BATCHER", "1"
@@ -1407,9 +1388,7 @@ class Store:
             tensors = None
             try:
                 current_value_metadata = parse_binding_value_or_raise(
-                    response.current_value
-                    if hasattr(response, "current_value")
-                    else None,
+                    response.current_value,
                     rpc_name="CreateBinding",
                     expected_binding_id=str(response.binding_id),
                     expected_binding_layout_id=layout.binding_layout_id,
@@ -1448,8 +1427,13 @@ class Store:
                     )
                     profile_last = now
             except Exception:
-                with contextlib.suppress(Exception):
+                try:
                     client.close_owned_binding(binding_id=str(response.binding_id))
+                except Exception:  # noqa: BLE001
+                    _log_best_effort_cleanup_failure(
+                        "store.create_binding.restore_error.close_owned_binding",
+                        binding_id=str(response.binding_id),
+                    )
                 raise
             slot = OwnedBindingSlot(
                 store=self,
@@ -1560,18 +1544,15 @@ class Store:
                     retryable=False,
                 )
 
-        region_ids: list[str] = []
+        target_regions = register_store_target_regions_for_realization(
+            store=self,
+            target_tensors=target_tensors,
+            device_id=device_id,
+            ttl_ms=0,
+            context="store.create_binding.client.register_regions",
+            operation_name="create_binding",
+        )
         try:
-            for base_ptr, nbytes in sorted(
-                collect_storage_bases(target_tensors).items()
-            ):
-                handle = self.register_vram_region(
-                    device_id=device_id,
-                    base_ptr=base_ptr,
-                    size_bytes=nbytes,
-                    ttl_ms=0,
-                )
-                region_ids.append(handle.region_id)
             readable_layout = _validate_client_binding_targets(
                 layout=layout,
                 target_tensors=target_tensors,
@@ -1604,23 +1585,26 @@ class Store:
                 timeout_s=timeout_s if timeout_s is not None else 600.0,
             )
         except Exception:
-            with contextlib.suppress(Exception):
-                for region_id in region_ids:
-                    self.unregister_vram_region(region_id)
+            target_regions.release(context="store.create_binding.client.rpc_error")
             raise
         try:
             current_value_metadata = parse_binding_value_or_raise(
-                response.current_value if hasattr(response, "current_value") else None,
+                response.current_value,
                 rpc_name="CreateBinding",
                 expected_binding_id=str(response.binding_id),
                 expected_binding_layout_id=layout.binding_layout_id,
             )
         except Exception:
-            with contextlib.suppress(Exception):
+            try:
                 client.close_owned_binding(binding_id=str(response.binding_id))
-            with contextlib.suppress(Exception):
-                for region_id in region_ids:
-                    self.unregister_vram_region(region_id)
+            except Exception:  # noqa: BLE001
+                _log_best_effort_cleanup_failure(
+                    "store.create_binding.client.current_value_error.close_owned_binding",
+                    binding_id=str(response.binding_id),
+                )
+            target_regions.release(
+                context="store.create_binding.client.current_value_error"
+            )
             raise
         inplace_slot = InplaceSlot(
             store=self,
@@ -1631,7 +1615,7 @@ class Store:
             device_id=device_id,
             layout=layout,
             binding_id=str(response.binding_id),
-            region_ids=tuple(region_ids),
+            region_ids=target_regions.region_ids,
             selection_names=tuple(
                 offset.name for offset in layout.target_layout.offsets
             ),
@@ -2282,8 +2266,13 @@ class Store:
                 )
                 results.append(sealed.contribute_to_assembly(attempt=attempt, ctx=ctx))
             finally:
-                with contextlib.suppress(Exception):
+                try:
                     binding.close()
+                except Exception:  # noqa: BLE001
+                    _log_best_effort_cleanup_failure(
+                        "store.assembly.source_artifact.close_binding",
+                        binding_id=getattr(binding, "binding_id", ""),
+                    )
         return tuple(results)
 
     def _contribute_source_current_values_to_attempt_and_keep_bindings(
@@ -2313,14 +2302,24 @@ class Store:
                     current_value.contribute_to_assembly(attempt=attempt, ctx=ctx)
                     live_bindings.append(binding)
                 except Exception:
-                    with contextlib.suppress(Exception):
+                    try:
                         binding.close()
+                    except Exception:  # noqa: BLE001
+                        _log_best_effort_cleanup_failure(
+                            "store.assembly.source_current.close_binding",
+                            binding_id=getattr(binding, "binding_id", ""),
+                        )
                     raise
             return tuple(live_bindings)
         except Exception:
             for binding in live_bindings:
-                with contextlib.suppress(Exception):
+                try:
                     binding.close()
+                except Exception:  # noqa: BLE001
+                    _log_best_effort_cleanup_failure(
+                        "store.assembly.source_current.close_live_binding",
+                        binding_id=getattr(binding, "binding_id", ""),
+                    )
             raise
 
     def _resolve_bound_publication_subject(
@@ -3165,7 +3164,7 @@ class Store:
             startup_retry_count = 0
             while response is None:
                 try:
-                    stream = client.import_artifact_from_path_stream_v2(
+                    stream = client.import_artifact_from_path_stream(
                         path=disk_path,
                         verify_checksums=bool(verify_checksums),
                     )
@@ -3418,6 +3417,33 @@ class Store:
             return self.artifact(source_artifact_id)
         if artifact_kind is not ArtifactIdKind.MSA1:
             raise ValueError("artifact must be an msa1 mounted-source artifact id")
+        source_artifact = (
+            artifact
+            if isinstance(artifact, Artifact)
+            else self.artifact(source_artifact_id)
+        )
+        handle = source_artifact.realize(
+            ArtifactRealizationSpec.mounted_source(
+                verify_checksums=verify_checksums,
+                timeout_s=timeout_s,
+            )
+        )
+        promoted = handle.promote()
+        if not isinstance(promoted, Artifact):
+            raise ArtifactError(
+                "mounted_source realization did not return an Artifact",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        return promoted
+
+    def _promote_mounted_source_direct(
+        self,
+        source_artifact_id: str,
+        *,
+        verify_checksums: bool = True,
+        timeout_s: float | None = None,
+    ) -> Artifact:
         try:
             response = self._runtime.ensure_client().promote_mounted_source_artifact(
                 artifact_id=source_artifact_id,
@@ -3514,8 +3540,13 @@ class Store:
             timeout_s=float(timeout_s),
         )
         if released:
-            with contextlib.suppress(Exception):
+            try:
                 _cache_unregister_region(region_id)
+            except Exception:  # noqa: BLE001
+                _log_best_effort_cleanup_failure(
+                    "store.unregister_region.cache_unregister",
+                    region_id=region_id,
+                )
         return released
 
     def activate_stable_local_backing(
@@ -3564,14 +3595,9 @@ class Store:
         client = self._runtime.ensure_client()
         base_ptr_value = int(base_ptr)
         size_value = int(size_bytes)
-        base_offset = 0
-        try:
-            handle_bytes, base_offset = get_cuda_memory_handle_with_offset(
-                int(device_id), base_ptr_value
-            )
-        except Exception:  # noqa: BLE001
-            handle_bytes = get_cuda_memory_handle(int(device_id), base_ptr_value)
-            base_offset = 0
+        handle_bytes, base_offset = get_cuda_memory_handle_with_offset(
+            int(device_id), base_ptr_value
+        )
         if base_offset:
             base_ptr_value -= int(base_offset)
             size_value += int(base_offset)
@@ -3582,13 +3608,18 @@ class Store:
             cuda_ipc_handle=handle_bytes,
             region_name=name,
         )
-        with contextlib.suppress(Exception):
+        try:
             _cache_register_region(
                 region_id=handle.region_id,
                 device_id=int(device_id),
                 base_ptr=int(base_ptr_value),
                 size_bytes=int(size_value),
                 ttl_ms=int(ttl_ms),
+            )
+        except Exception:  # noqa: BLE001
+            _log_best_effort_cleanup_failure(
+                "store.register_vram_region.cache_register",
+                region_id=handle.region_id,
             )
         return handle
 
@@ -3598,8 +3629,13 @@ class Store:
         client = self._runtime.ensure_client()
         released = client.unregister_vram_region(region_id, force=force)
         if released:
-            with contextlib.suppress(Exception):
+            try:
                 _cache_unregister_region(region_id)
+            except Exception:  # noqa: BLE001
+                _log_best_effort_cleanup_failure(
+                    "store.unregister_vram_region.cache_unregister",
+                    region_id=region_id,
+                )
         return released
 
     def deregister_artifact(
@@ -3651,11 +3687,15 @@ class Store:
         return self._batcher
 
     def close(self) -> None:
-        with contextlib.suppress(Exception):
+        try:
             _LIVE_STORES.discard(self)
-        with contextlib.suppress(Exception):
-            if self._batcher is not None:
+        except Exception:  # noqa: BLE001
+            _log_best_effort_cleanup_failure("store.close.live_store_discard")
+        if self._batcher is not None:
+            try:
                 self._batcher.close()
+            except Exception:  # noqa: BLE001
+                _log_best_effort_cleanup_failure("store.close.batcher_close")
         self._runtime.close()
 
 
@@ -3697,8 +3737,12 @@ def _ensure_process_store(
             )
             _PROCESS_STORE_OPTS = opts_marker
             if prior is not None:
-                with contextlib.suppress(Exception):
+                try:
                     prior.close()
+                except Exception:  # noqa: BLE001
+                    _log_best_effort_cleanup_failure(
+                        "store.ensure_process_store.close_prior"
+                    )
         elif (
             opts is not None
             and _PROCESS_STORE_OPTS is not None
@@ -3733,15 +3777,19 @@ def shutdown_process_store() -> None:
         _PROCESS_STORE = None
         _PROCESS_STORE_OPTS = None
     if current is not None:
-        with contextlib.suppress(Exception):
+        try:
             current.close()
+        except Exception:  # noqa: BLE001
+            _log_best_effort_cleanup_failure("store.shutdown_process_store.close")
     shutdown_context()
 
 
 def _shutdown_live_stores() -> None:
     for current in list(_LIVE_STORES):
-        with contextlib.suppress(Exception):
+        try:
             current.close()
+        except Exception:  # noqa: BLE001
+            _log_best_effort_cleanup_failure("store.shutdown_live_stores.close")
     shutdown_context()
 
 
@@ -4549,6 +4597,9 @@ def realize_into_binding(
 __all__ = [
     "Artifact",
     "ArtifactDescriptor",
+    "ArtifactRealizationHandle",
+    "ArtifactRealizationReport",
+    "ArtifactRealizationSpec",
     "ArtifactError",
     "ArtifactFuture",
     "ArtifactStatusCode",
@@ -4579,6 +4630,20 @@ __all__ = [
     "MaterializationDiagnostics",
     "MaterializationBatcher",
     "PlacementPin",
+    "RealizationBindingReport",
+    "RealizationExecutionCommitReport",
+    "RealizationLifecyclePlan",
+    "RealizationModelRuntimeReport",
+    "RealizationMountedSourceReport",
+    "RealizationPublicationReport",
+    "RealizationPublishabilityReport",
+    "RealizationReleaseContract",
+    "RealizationRetainedBindingReport",
+    "RealizationResourceEnvelope",
+    "RealizationStrategyPlan",
+    "RealizationTargetSetMemberReport",
+    "RealizationTargetSetReport",
+    "RealizationTargetPlan",
     "PrefetchRetentionPolicy",
     "PrefetchedReplica",
     "PrefetchedServingBinding",
@@ -4595,12 +4660,14 @@ __all__ = [
     "IdentityMintStrategy",
     "RegisteredServingPublication",
     "RegisteredArtifact",
+    "RepresentationAdmissionPlan",
     "RepresentationPublishContract",
     "RepresentationPublishSpec",
     "SourceBoundCapability",
     "ServingPublicationSubject",
     "ReplicaInfo",
     "RetryPolicy",
+    "ResolvedArtifactSelection",
     "SERVING_MANIFEST_TENSOR_NAME",
     "SealedBindingValue",
     "StagedBindingValue",
@@ -4622,18 +4689,44 @@ __all__ = [
     "ReferenceServingAcquireResult",
     "ReferenceServingResolvedSpec",
     "ReferenceServingTensorSpec",
+    "artifact_realization_profile_payload",
+    "artifact_realization_report_to_dict",
     "acquire_reference_binding",
     "build_reference_resolved_spec",
+    "emit_artifact_realization_profile_event",
     "build_reference_target_layout",
     "build_reference_tensor_index_bytes",
+    "envelope_for_publication",
+    "envelope_for_runtime_attachment",
+    "envelope_for_mounted_source",
+    "envelope_for_target_region_registration",
+    "envelope_for_target_set",
+    "execution_commit_report_for",
+    "mounted_source_report_for",
+    "mounted_source_target_digest",
+    "model_runtime_report_for",
+    "publishability_report_for",
+    "publication_report_for",
+    "release_contract_for",
+    "report_for_publication",
+    "report_for_mounted_source",
+    "report_for_runtime_attachment",
+    "report_for_target_set",
+    "risk_labels_for_target",
+    "target_set_lifecycle_plan_for",
+    "target_set_representation_admission_for",
     "canonical_json_bytes",
     "prefetch_reference_binding",
+    "prefetch_reference_binding_set",
     "read_matching_resolved_spec_cache_entry",
     "read_resolved_spec_cache_entry",
     "release_reference_acquire",
     "serving_binding_spec_cache_root",
+    "target_set_report_for_retained_bindings",
+    "target_set_strategy_plan_for",
     "target_from_reference_cache_record",
     "unpack_prefetched_serving_binding",
+    "unpack_prefetched_serving_binding_set",
     "write_resolved_spec_cache_entry",
     "write_reference_resolved_spec_cache_entry",
     "ServingBuildIntent",
@@ -4645,6 +4738,7 @@ __all__ = [
     "Store",
     "StoreOptions",
     "TensorMeta",
+    "TensorDictProjection",
     "TensorDictMaterializationResult",
     "TensorDict",
     "TransformPlacement",
@@ -4662,7 +4756,6 @@ __all__ = [
     "build_pure_transform_publication_bundle",
     "build_pure_transform_publication_bundle_from_registered_artifact",
     "build_pure_transform_publication_spec",
-    "build_pure_transform_serving_args",
     "build_pure_transform_transform_spec",
     "build_representation_publish_requirements",
     "complete_binding_finalize_publication_from_binding",
@@ -4697,6 +4790,7 @@ __all__ = [
     "build_reference_tensor_index_bytes",
     "canonical_json_bytes",
     "prefetch_reference_binding",
+    "prefetch_reference_binding_set",
     "read_matching_resolved_spec_cache_entry",
     "read_resolved_spec_cache_entry",
     "read_resolved_spec_cache_group_index",
@@ -4704,16 +4798,26 @@ __all__ = [
     "serving_binding_spec_cache_root",
     "target_from_reference_cache_record",
     "unpack_prefetched_serving_binding",
+    "unpack_prefetched_serving_binding_set",
     "write_resolved_spec_cache_entry",
     "write_resolved_spec_cache_group_index",
     "write_reference_resolved_spec_cache_entry",
     "artifact",
     "artifact_async",
+    "binding_report_for",
     "create_binding",
+    "envelope_for_binding",
+    "envelope_for_caller_tensors",
+    "envelope_for_target_region_registration",
+    "envelope_for_retained_binding",
+    "envelope_for_retained_replica",
     "from_disk",
     "import_from_disk",
     "promote_mounted_source",
     "realize_into_binding",
+    "report_for_binding_realization",
+    "retained_binding_reports_for",
+    "resolve_artifact_selection",
     "resolve_public_disk_source",
     "list_artifact_layouts",
     "store",
@@ -4744,5 +4848,5 @@ __all__ = [
     "get_daemon_client",
     "require_runtime",
     "_register_artifact_core",
-    "materialize_artifact_v2",
+    "materialize_artifact",
 ]

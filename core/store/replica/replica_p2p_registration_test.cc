@@ -218,8 +218,6 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
     REQUIRE(::tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
 
     // Note: No CUDA pool needed for CPU-only test
-    int dummy_device_id = 0; // Still need a device ID for config
-
     DiskSource disk_src;
     disk_src.path = temp_dir / artifact_dir_name;
 
@@ -227,7 +225,7 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
         .source = disk_src,
         .artifact_identifier = artifact_id,
         .device_type = ::tensorcast::DeviceType::CPU,
-        .local_device_id = dummy_device_id,
+        .local_device_id = -1,
         .pinned_buffer_pool = pinned_pool,
         .async_runtime = async_runtime,
         .expected_artifact_size = artifact_size,
@@ -332,7 +330,7 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
         .source = disk_src,
         .artifact_identifier = artifact_id,
         .device_type = ::tensorcast::DeviceType::CPU,
-        .local_device_id = 0,
+        .local_device_id = -1,
         .pinned_buffer_pool = pinned_pool,
         .async_runtime = async_runtime,
         .expected_artifact_size = artifact_size,

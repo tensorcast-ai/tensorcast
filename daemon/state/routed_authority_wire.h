@@ -75,7 +75,7 @@ inline absl::StatusOr<LifecycleFrontDoorKind> lifecycle_front_door_kind_from_lab
   if (label == "retention_handle_token") {
     return LifecycleFrontDoorKind::kRetentionHandleToken;
   }
-  if (label == "binding_current_value_publication_token" || label == "target_publication_token") {
+  if (label == "binding_current_value_publication_token") {
     return LifecycleFrontDoorKind::kTargetPublicationToken;
   }
   if (label == "internal_record") {

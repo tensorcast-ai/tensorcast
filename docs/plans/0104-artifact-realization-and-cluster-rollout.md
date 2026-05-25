@@ -95,10 +95,10 @@ Start from target identity and worker-local stable realization.
         `WorkerDirectoryCache`.
   - [ ] Milestone 2.3: Add `DirectoryController` and wire it through daemon RPC
         delegates.
-  - [ ] Milestone 2.4: Extend SDK signals to use the daemon-served directory:
-    - `runtime.signals().list_workers(...)`
-    - `runtime.signals().list_instances(...)`
-    - `runtime.signals().get_worker_capacity(...)`
+  - [ ] Milestone 2.4: Expose daemon-served directory queries through the SDK:
+    - `runtime.directory().list_workers(...)`
+    - `runtime.directory().list_instances(...)`
+    - `runtime.directory().resolve_instance_execution(...)`
   - [ ] Milestone 2.5: Ensure rollout code no longer depends on direct SDK calls
         to Global Store for worker / instance listing.
 
