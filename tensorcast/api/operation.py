@@ -155,7 +155,7 @@ def _coerce_grpc_status_code(code: object) -> ArtifactStatusCode:
         name = code
     else:
         try:
-            name = str(code.name)  # type: ignore[attr-defined]
+            name = str(code.name)
         except Exception:
             name = "UNKNOWN"
     allowed: set[ArtifactStatusCode] = {
@@ -178,7 +178,7 @@ def _coerce_grpc_status_code(code: object) -> ArtifactStatusCode:
         "UNAUTHENTICATED",
     }
     if name in allowed:
-        return cast(ArtifactStatusCode, name)
+        return name
     return "UNKNOWN"
 
 

@@ -1,14 +1,23 @@
 [build-system]
 # Note: The torch version here is the default. When building releases,
 # use tools/release.sh with --torch-version to specify different versions
-requires = ["setuptools>=68.0.0", "pyyaml", "torch==2.8.0+cu128", "toml"]
+requires = ["setuptools>=68.0.0", "pyyaml", "torch==2.11.0", "toml"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "tensorcast"
-description = "TensorCast"
-readme = "README.md"
+description = "Shared tensor layer for distributed inference — load once, share everywhere."
+authors = [{ name = "TensorCast Team" }]
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 # Note: Runtime torch version should match the build-time version
 # The package name will include the torch version suffix (e.g., tensorcast-0.0.2+torch26)
 dependencies = [
@@ -20,7 +29,7 @@ dependencies = [
     "pytz>=2025.2",
     "prometheus-client>=0.21.1",
     "py-grpc-prometheus>=0.8.0",
-    "torch==2.8.0+cu128",
+    "torch==2.11.0",
     "protobuf==6.31.1",
     # OpenTelemetry is a required dependency. No automatic downgrade.
     "opentelemetry-api>=1.36.0",
@@ -36,7 +45,10 @@ dependencies = [
     "tqdm>=4.66.0",
 ]
 
-dynamic = ["version"]
+dynamic = ["version", "readme"]
+
+[project.urls]
+Repository = "https://github.com/tensorcast-ai/tensorcast"
 
 [dependency-groups]
 dev = [
@@ -59,6 +71,16 @@ dev = [
     "toml>=0.10.2",
     "types-protobuf==5.28.3.20241203",
     "safetensors==0.7.0"
+]
+release = [
+    # Toolchain for packaging and publishing the wheel. Maintainers run
+    # `uv sync --group release` before invoking tools/release.sh post-process /
+    # check / publish*. End users and ordinary developers never need this
+    # group, so it stays out of the default sync.
+    "wheel>=0.47",
+    "auditwheel>=6.6",
+    "patchelf>=0.17",  # Python-wrapped patchelf binary; avoids system apt
+    "twine>=6.0",
 ]
 
 [project.scripts]
@@ -83,6 +105,7 @@ disable_error_code = [
     "var-annotated",
     "no-any-return",
     "misc",
+    "untyped-decorator",
 ]
 show_error_codes = true
 check_untyped_defs = true
@@ -237,6 +260,8 @@ unfixable = []
 # Unlike Flake8, default to a complexity level of 10.
 max-complexity = 10
 
+[tool.ruff.lint.isort]
+known-first-party = ["tensorcast"]
 
 [tool.pyright]
 include = ["tensorcast/**", "tests/python/**"]
@@ -249,6 +274,7 @@ reportMissingModuleSource = "none"
 pythonVersion = "3.10"
 reportAttributeAccessIssue = "none"
 reportUnknownMemberType = "none"
+reportPrivateImportUsage = "none"
 
 [[tool.uv.index]]
 default = true
@@ -262,3 +288,4 @@ torch = { index = "pytorch" }
 name = "pytorch"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
+

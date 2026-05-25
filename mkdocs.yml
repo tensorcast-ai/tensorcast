@@ -1,0 +1,119 @@
+site_name: TensorCast
+site_url: https://tensorcast.ai
+repo_url: https://github.com/tensorcast-ai/tensorcast
+repo_name: tensorcast-ai/tensorcast
+copyright: Copyright &copy; 2025-2026 TensorCast Team
+
+theme:
+  name: material
+  logo: assets/logo.png
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - content.code.copy
+    - content.code.annotate
+    - search.suggest
+    - search.highlight
+
+nav:
+  - Home: index.md
+  - Architecture:
+    - Overview: architecture/architecture-overview.md
+    - API Design: architecture/api/README.md
+    - API:
+      - architecture/api/api-design.md
+      - architecture/api/error-retry-observability.md
+      - architecture/api/materialization-flow.md
+      - architecture/api/policy-persistence.md
+      - architecture/api/region-backed.md
+      - architecture/api/registration-flow.md
+    - P2P Transfer: architecture/p2p-transfer-strategies.md
+    - Artifact Views: architecture/artifact-views-and-retrieval.md
+    - View Replicas: architecture/view-replicas-and-assembly.md
+    - High Availability: architecture/high-availability-design.md
+  - Guides:
+    - SDK Startup: guides/sdk-startup-user-guide.md
+    - vLLM Binding: guides/steptron-vllm-binding-integration.md
+  - Deployment:
+    - Store Daemon: deployment/store-daemon.md
+    - Global Store: deployment/global-store-deployment.md
+    - High Availability: deployment/high-availability-usage.md
+    - Store Session Release: deployment/store-session-release-checklist.md
+    - Weight Publisher: deployment/weight-publisher.md
+  - Development:
+    - Testing: development/testing.md
+  - Benchmarks:
+    - benchmarks/index.md
+  - Designs:
+    - designs/index.md
+  - Internal:
+    - Internals:
+      - internals/adding-metrics.md
+      - internals/byte-range-mapping-and-execution.md
+      - internals/canonical-index.md
+      - internals/chaos-gate-checklist.md
+      - internals/chaos-report-template.md
+      - internals/disk-load-strategy.md
+      - internals/model-loading.md
+      - internals/preemptible-memory.md
+      - internals/save_dict_flow.md
+      - internals/tensor_dict_into_dataflow.md
+      - internals/tensor-first-artifact-architecture.md
+    - Plans:
+      - plans/index.md
+    - Distributed Coordination:
+      - distributed-coordination-series/README.md
+      - distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework.md
+      - distributed-coordination-series/02-mode-switching-workload-playbook-and-governance.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/tensorcast-ai/tensorcast
+  version:
+    provider: mike
+
+extra_css:
+  - stylesheets/extra.css
+
+plugins:
+  - search
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - admonition
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true

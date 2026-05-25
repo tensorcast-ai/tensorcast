@@ -291,6 +291,8 @@ def is_matching_daemon_process(pid: int, expected_cmd0: Optional[str]) -> bool:
                 expected_cmd0
             ):
                 return True
+            if name and os.path.basename(name) == os.path.basename(expected_cmd0):
+                return True
         if "tensorcast_daemon" in (name or ""):
             return True
         if cmdline and any(

@@ -18,7 +18,7 @@ from shutil import copyfile, copytree, ignore_patterns, rmtree, which
 
 import torch  # Import torch to get version info
 import yaml
-from setuptools import find_packages, setup
+from setuptools import find_namespace_packages, setup
 from setuptools.command.build_py import build_py
 from setuptools.command.develop import develop
 from setuptools.command.editable_wheel import editable_wheel
@@ -111,8 +111,8 @@ load_dep_info()
 
 dir_path = str(get_root_dir())
 
-PRE_CXX11_ABI = True
 RELEASE = False
+RELEASE_PYPI = False
 BUILD_EXTENSION = False
 BUILD_CORE = False
 USE_REMOTE = False
@@ -123,6 +123,12 @@ if os.environ.get("RELEASE") == "1":
 if "--release" in sys.argv:
     RELEASE = True
     sys.argv.remove("--release")
+
+if os.environ.get("RELEASE_PYPI") == "1":
+    # PyPI uploads reject `+local` version strings (PEP 440), so this mode
+    # produces a clean public version string. Implies RELEASE.
+    RELEASE_PYPI = True
+    RELEASE = True
 
 if os.environ.get("BUILD_EXTENSION") == "1":
     BUILD_EXTENSION = True
@@ -189,7 +195,12 @@ def get_torch_version_suffix() -> str:
 # Get torch version suffix after configuration is defined
 torch_suffix = get_torch_version_suffix()
 
-if RELEASE:
+if RELEASE_PYPI:
+    base_version = os.environ.get("BUILD_VERSION") or get_base_version()
+    if not base_version:
+        raise ValueError("BUILD_VERSION or version.txt must be set for PyPI release builds")
+    __version__ = base_version
+elif RELEASE:
     base_version = os.environ.get("BUILD_VERSION")
     if base_version:
         __version__ = f"{base_version}+{torch_suffix}"
@@ -335,6 +346,14 @@ def build_checkpoint_runtime_and_daemon(
         cmd.append("--build_metadata=ROLE=CI")
         cmd.append("--jobs=16")
 
+    # Allow callers (e.g. tools/release.sh) to forward extra Bazel flags so
+    # interactive builds can crank up logging without us hard-coding it:
+    #   BAZEL_BUILD_FLAGS="--curses=no --show_progress_rate_limit=0 ..."
+    extra_flags = os.environ.get("BAZEL_BUILD_FLAGS", "").strip()
+    if extra_flags:
+        import shlex as _shlex
+        cmd.extend(_shlex.split(extra_flags))
+
     display_cmd = list(cmd)
     if use_remote:
         for i, arg in enumerate(display_cmd):
@@ -357,6 +376,12 @@ def gen_version_file():
         print("creating version file")
         f.write('__version__ = "' + __version__ + '"\n')
         f.write('__cuda_version__ = "' + __cuda_version__ + '"\n')
+        # Persist the build-time torch version so the runtime ABI guard in
+        # tensorcast/__init__.py can compare against it. Picking up the
+        # currently-installed torch is correct here: setup.py imports torch
+        # to compile the C++ extension, so this is exactly the version the
+        # bits in this wheel were built against.
+        f.write(f'__torch_version__ = "{torch.__version__}"\n')
 
 
 def _place_artifact(src: Path, dst: Path, *, prefer_copy: bool, name: str, make_executable: bool = False) -> None:
@@ -434,6 +459,42 @@ def copy_schema_sql() -> None:
         print(f"Copied schema.sql to {dst}")
     except Exception as e:
         print(f"Warning: Failed to copy schema.sql into package: {e}")
+
+
+# Canonical fallback configs that the SDK / CLI look up via
+# `_discover_packaged_example_config()` when the user does not pass an explicit
+# `--config` (or the corresponding env var). The repo-root `examples/config/`
+# tree contains many bench / cross-host variants too; we only ship the
+# canonical defaults inside the wheel to keep the install lean.
+_PACKAGED_EXAMPLE_CONFIGS = (
+    "store_daemon_config.yaml",
+    "global_store_config.yaml",
+    "node_agent_config.yaml",
+)
+
+
+def copy_example_configs() -> None:
+    """Copy the canonical default configs into `tensorcast/examples/config/`.
+
+    Discovery uses `importlib.resources.files("tensorcast") / "examples/config" /
+    <name>`, so the wheel must carry these yamls under that exact path.
+    """
+    src_dir = Path(dir_path) / "examples" / "config"
+    dst_dir = Path(dir_path) / "tensorcast" / "examples" / "config"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for name in _PACKAGED_EXAMPLE_CONFIGS:
+        src = src_dir / name
+        if not src.exists():
+            print(f"Warning: example config not found at {src}; skipping")
+            continue
+        dst = dst_dir / name
+        if dst.exists() or dst.is_symlink():
+            try:
+                dst.unlink()
+            except Exception:
+                pass
+        copyfile(str(src), str(dst))
+        print(f"Copied {name} to {dst}")
 
 
 def ensure_proto_python_generated() -> None:
@@ -541,7 +602,6 @@ class DevelopCommand(develop):
         develop.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=True,
             use_remote=USE_REMOTE,
@@ -549,6 +609,7 @@ class DevelopCommand(develop):
         copy_checkpoint_extension_lib()
         copy_daemon_binary()
         copy_schema_sql()
+        copy_example_configs()
 
         gen_version_file()
         develop.run(self)
@@ -562,7 +623,6 @@ class BuildExtensionCommand(BuildExtension):
         BuildExtension.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=True,
             use_remote=USE_REMOTE,
@@ -573,6 +633,8 @@ class BuildExtensionCommand(BuildExtension):
         copy_extensions()
         copy_daemon_binary()
         copy_schema_sql()
+        copy_example_configs()
+        gen_version_file()
 
 
 class InstallCommand(install):
@@ -585,7 +647,6 @@ class InstallCommand(install):
         install.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=False,
             use_remote=USE_REMOTE,
@@ -593,6 +654,7 @@ class InstallCommand(install):
         copy_checkpoint_extension_lib()
         copy_daemon_binary()
         copy_schema_sql()
+        copy_example_configs()
 
         gen_version_file()
         install.run(self)
@@ -608,7 +670,6 @@ class BdistCommand(bdist_wheel):
         bdist_wheel.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=False,
             use_remote=USE_REMOTE,
@@ -616,6 +677,7 @@ class BdistCommand(bdist_wheel):
         copy_checkpoint_extension_lib()
         copy_daemon_binary()
         copy_schema_sql()
+        copy_example_configs()
 
         gen_version_file()
         bdist_wheel.run(self)
@@ -631,7 +693,6 @@ class EditableWheelCommand(editable_wheel):
         editable_wheel.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=True,
             use_remote=USE_REMOTE,
@@ -640,6 +701,7 @@ class EditableWheelCommand(editable_wheel):
         copy_checkpoint_extension_lib()
         copy_daemon_binary()
         copy_schema_sql()
+        copy_example_configs()
         editable_wheel.run(self)
 
 class CleanCommand(Command):
@@ -650,6 +712,7 @@ class CleanCommand(Command):
         os.path.join(".", "dist"),
         os.path.join(".", "tensorcast", "__pycache__"),
         os.path.join(".", "tensorcast", "lib"),
+        os.path.join(".", "tensorcast", "examples"),
         os.path.join(".", "*.pyc"),
         os.path.join(".", "*.tgz"),
         os.path.join(".", "*.egg-info"),
@@ -907,8 +970,35 @@ else:
     BuildExtension = None
 
 
+def _rewrite_relative_links(text: str, base_url: str) -> str:
+    """Rewrite Markdown relative links to absolute GitHub URLs.
+
+    PyPI renders the README outside the repo, so relative links like
+    `[docs](docs/README.md)` would be broken. We rewrite them to
+    `[docs]({base_url}/docs/README.md)` in-memory before passing to
+    `setup(long_description=...)`. The repo's README.md on disk is unchanged.
+
+    Skips links that already point at an absolute URL or anchor (`http`,
+    `https`, `mailto`, or starting with `#`).
+    """
+    import re as _re
+
+    pattern = _re.compile(r"\]\(([^)]+)\)")
+
+    def replace(match: "_re.Match[str]") -> str:
+        target = match.group(1).strip()
+        if target.startswith(("http://", "https://", "mailto:", "#", "/")):
+            return match.group(0)
+        # Drop fragment/query for the URL fold; pyPI doesn't need them on the
+        # GitHub side either, but keep them in the output to preserve intent.
+        return f"]({base_url.rstrip('/')}/{target})"
+
+    return pattern.sub(replace, text)
+
+
+_GITHUB_BLOB_BASE = "https://github.com/tensorcast-ai/tensorcast/blob/main"
 with open(os.path.join(get_root_dir(), "README.md"), "r", encoding="utf-8") as fh:
-    long_description = fh.read()
+    long_description = _rewrite_relative_links(fh.read(), _GITHUB_BLOB_BASE)
 
 cmd_class = {
         "install": InstallCommand,
@@ -926,23 +1016,34 @@ setup(
     name="tensorcast",
     ext_modules=ext_modules,
     version=__version__,
+    long_description=long_description,
+    long_description_content_type="text/markdown",
     cmdclass=cmd_class,
     zip_safe=False,
-    packages=find_packages(exclude=["*.csrc.*"]),
+    packages=find_namespace_packages(
+        include=["tensorcast", "tensorcast.*"],
+        exclude=[
+            "tensorcast.csrc",
+            "tensorcast.csrc.*",
+            "tensorcast.dashboard.webui*",
+            "tensorcast.lib",
+        ],
+    ),
     package_data={
         "tensorcast": [
             "schema.sql",
+            "py.typed",
             "*.so",
             "lib/*.so",
+            "lib/*.so.*",
             "bin/*",
+            "examples/config/*.yaml",
             "config/profiles/*/*.yaml",
-        ]
-    },
-    exclude_package_data={
-        "tensorcast": [
-            "proto",
-            "proto/*",
-            "proto/**/*",
         ],
+        "tensorcast.proto": ["**/*.py", "**/*.pyi"],
+    },
+    include_package_data=True,
+    exclude_package_data={
+        "tensorcast.csrc": ["*"],
     },
 )

@@ -23,6 +23,13 @@
 
 common --enable_platform_specific_config
 
+build --crosstool_top=@bazel_tools//tools/cpp:toolchain
+build --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
+build --action_env=CC=/usr/bin/clang
+build --action_env=CXX=/usr/bin/clang++
+build --action_env=AR=/usr/bin/llvm-ar
+build --action_env=LD=/usr/bin/lld
+
 build --cxxopt="-std=c++20"
 build --cxxopt="-Werror=thread-safety-analysis"
 build --cxxopt="-Werror=unused-result"

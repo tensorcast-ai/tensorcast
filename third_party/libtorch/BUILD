@@ -24,6 +24,7 @@ cc_library(
         "torch/lib/libtorch_cpu.so",
         "torch/lib/libtorch_cuda.so",
         "torch/lib/libtorch_global_deps.so",
+        "torch/lib/libtorch_nvshmem.so",
     ],
     hdrs = glob(
         [
@@ -48,6 +49,7 @@ cc_library(
     deps = [
         ":ATen",
         ":c10_cuda",
+        "@nvshmem",
     ],
 )
 
