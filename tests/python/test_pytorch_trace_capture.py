@@ -8,8 +8,8 @@ import torch
 from torch import nn
 
 from tensorcast.pytorch.trace_capture import TraceActivation, trace_model_load
-from tensorcast.serving.builder.materialization import apply_copy_plan
-from tensorcast.serving.builder.trace_ir import MultiRange, Range
+from tensorcast.artifact_runtime.recipe.materialization import apply_copy_plan
+from tensorcast.artifact_runtime.recipe.trace_ir import MultiRange, Range
 
 
 @dataclass(frozen=True)

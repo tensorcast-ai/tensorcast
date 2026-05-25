@@ -15,7 +15,7 @@ from tensorcast.api.plan import ArtifactSetRef, Plan, Worker
 from tensorcast.api.store import (
     BuilderMode,
     RepresentationPublishSpec,
-    ServingBuildIntent,
+    RuntimeArtifactBuildIntent,
     build_pure_transform_publication_bundle_from_registered_artifact,
     build_pure_transform_transform_spec,
     compute_pure_transform_representation_contract_hash,
@@ -41,8 +41,8 @@ from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.node_agent.v1 import node_agent_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
 from tensorcast.types import (
+    RuntimeArtifactManifest,
     ServerConfig,
-    ServingArtifactManifest,
     build_serving_manifest_ref,
 )
 
@@ -227,7 +227,7 @@ def test_engine_adapter_identity_transform_register_can_return_pure_transform_bu
             manifest_tensor = tensors["__tensorcast_meta__.manifest_json"]
             assert manifest_tensor.dtype == torch.uint8
             assert manifest_tensor.ndim == 1
-            manifest = ServingArtifactManifest.from_bytes(
+            manifest = RuntimeArtifactManifest.from_bytes(
                 bytes(manifest_tensor.tolist())
             )
             assert manifest.framework_name == "torch"
@@ -236,7 +236,7 @@ def test_engine_adapter_identity_transform_register_can_return_pure_transform_bu
     result = adapter.execute_transform_register(
         spec=build_pure_transform_transform_spec(
             transform_name="identity.v1",
-            build_intent=ServingBuildIntent(
+            build_intent=RuntimeArtifactBuildIntent(
                 builder_mode=BuilderMode.PURE_TRANSFORM,
                 framework_name="torch",
                 adapter_version="adapter-v1",
@@ -809,7 +809,7 @@ def test_node_agent_servicer_serializes_pure_transform_publication_result() -> N
         instance_id="inst-1", engine="test", register_identity_transform=False
     )
     bundle = build_pure_transform_publication_bundle_from_registered_artifact(
-        build_intent=ServingBuildIntent(
+        build_intent=RuntimeArtifactBuildIntent(
             representation_contract_hash="bafkrepresentation",
             builder_mode=BuilderMode.PURE_TRANSFORM,
             framework_name="torch",

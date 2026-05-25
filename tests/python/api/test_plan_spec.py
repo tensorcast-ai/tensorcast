@@ -25,7 +25,7 @@ from tensorcast.api.plan.artifact_set import resolve_artifact_set_ref
 from tensorcast.api.store import (
     BuilderMode,
     RepresentationPublishSpec,
-    ServingBuildIntent,
+    RuntimeArtifactBuildIntent,
     build_pure_transform_publication_bundle_from_registered_artifact,
 )
 from tensorcast.api.store.artifact import Artifact
@@ -44,11 +44,62 @@ from tensorcast.engine_adapter.artifact_api import (
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.node_agent.v1 import node_agent_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
-from tensorcast.types import build_serving_manifest_ref
+from tensorcast.types import (
+    RealizationTarget,
+    RuntimeBindingMemberRef,
+    RuntimeBindingResolvedLayout,
+    RuntimeBindingSourceRef,
+    RuntimeBindingSourceReuseDecision,
+    RuntimeTopologyRef,
+    build_serving_manifest_ref,
+)
 
 
 def _canonical_index_bytes() -> bytes:
     return b'{"w":[0,4,[1],[1],"torch.float32",0]}'
+
+
+def _realization_target() -> RealizationTarget:
+    topology = RuntimeTopologyRef(schema_topology_digest="topology-schema")
+    member = RuntimeBindingMemberRef(
+        member_id="member-0",
+        member_index=0,
+        member_count=1,
+        group_id="group-1",
+    )
+    source = RuntimeBindingSourceRef(
+        source_kind="checkpoint_artifact",
+        artifact_selection_digest="selection-digest",
+        source_artifact_ref="mi2:source",
+        source_schema_hash="source-schema",
+    )
+    resolved_layout = RuntimeBindingResolvedLayout(
+        binding_layout_id="layout-1",
+        source=source,
+        source_reuse=RuntimeBindingSourceReuseDecision(
+            mode="checkpoint_to_runtime",
+            representation_contract_hash="repr-contract",
+        ),
+        topology=topology,
+        member=member,
+        target_layout=b"target-layout",
+        target_index_bytes=b"target-index",
+        target_layout_hash="target-layout-hash",
+        tensor_schema_hash="tensor-schema",
+        spec_digest="spec-digest",
+        source_schema_hash="source-schema",
+    )
+    return RealizationTarget(
+        runtime="vllm",
+        device="cuda:0",
+        device_uuid="GPU-0",
+        source=source,
+        topology=topology,
+        member=member,
+        model_config_digest="model-config",
+        runtime_build_digest="serving-build",
+        resolved_layout=resolved_layout,
+    )
 
 
 def _sample_publish_manifest() -> PublishManifest:
@@ -148,6 +199,33 @@ def test_plan_view_selection_hash_populated() -> None:
     assert list(selection.tensor_names) == ["w"]
 
 
+def test_plan_prefetch_accepts_realization_target() -> None:
+    store = _StoreStub()
+    canonical_bytes = _canonical_index_bytes()
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="mi2:target-test",
+        canonical_index_bytes=canonical_bytes,
+        canonical_index=canonical_index_from_bytes(canonical_bytes),
+    )
+    target = _realization_target()
+    plan = Plan(CallContext(request_id="req-target"))
+    worker = Worker(
+        worker_id="worker-target",
+        daemon_address="127.0.0.1:50051",
+        daemon_id="daemon-target",
+    )
+
+    ref = plan.on_worker(worker).prefetch(artifact, target=target)
+
+    spec = plan.to_spec()
+    assert spec.steps[0].step_id == ref.step_id
+    prefetch = spec.steps[0].action.prefetch
+    assert prefetch.HasField("serving_binding_target")
+    assert prefetch.serving_binding_target.runtime == "vllm"
+    assert prefetch.serving_binding_target.member.member_id == "member-0"
+
+
 def test_plan_publish_serializes_canonical_action() -> None:
     ctx = CallContext(request_id="req-cache", idempotency_key="idem-cache")
     plan = Plan(ctx)
@@ -233,7 +311,7 @@ def test_plan_transform_register_pure_transform_builds_repo_owned_spec() -> None
 
     step_ref = plan.on_instance(inst).transform_register_pure_transform(
         artifact,
-        build_intent=ServingBuildIntent(
+        build_intent=RuntimeArtifactBuildIntent(
             builder_mode=BuilderMode.PURE_TRANSFORM,
             framework_name="torch",
             adapter_version="adapter-v7",
@@ -681,7 +759,7 @@ def test_plan_result_decodes_pure_transform_publication_result() -> None:
         lease=None,
     )
     bundle = build_pure_transform_publication_bundle_from_registered_artifact(
-        build_intent=ServingBuildIntent(
+        build_intent=RuntimeArtifactBuildIntent(
             representation_contract_hash="bafkrepresentation",
             builder_mode=BuilderMode.PURE_TRANSFORM,
             framework_name="torch",

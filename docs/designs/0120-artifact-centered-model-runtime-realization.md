@@ -4,7 +4,7 @@ title: Artifact-Centered Model Runtime Realization
 status: draft
 areas: ["sdk", "serving", "daemon", "core", "integrations", "docs", "tests"]
 created: 2026-05-23
-last_updated: 2026-05-25
+last_updated: 2026-05-26
 related_code:
   - docs/designs/0039-artifact-first-sdk.md
   - docs/designs/0078-selection-first-artifact-retrieval.md
@@ -24,15 +24,14 @@ related_code:
   - tensorcast/api/store/artifact.py
   - tensorcast/api/store/binding.py
   - tensorcast/types.py
-  - tensorcast/serving/runtime.py
-  - tensorcast/serving/config.py
-  - tensorcast/serving/policy.py
-  - tensorcast/serving/hosts.py
-  - tensorcast/serving/binding_plan.py
-  - tensorcast/serving/retained_binding.py
-  - tensorcast/serving/runtime_attachment.py
-  - tensorcast/serving/replica_publication.py
-  - tensorcast/serving/_runtime_impl/lifecycle.py
+  - tensorcast/artifact_runtime/lifecycle.py
+  - tensorcast/artifact_runtime/config.py
+  - tensorcast/artifact_runtime/policy.py
+  - tensorcast/artifact_runtime/host.py
+  - tensorcast/artifact_runtime/attachment.py
+  - tensorcast/artifact_runtime/binding/retained.py
+  - tensorcast/artifact_runtime/publication/replica.py
+  - tensorcast/artifact_runtime/recipe/
 links:
   plan: ../plans/0120-artifact-centered-model-runtime-realization.md
   dependencies:

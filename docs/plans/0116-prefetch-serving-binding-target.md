@@ -14,7 +14,7 @@ related_code:
   - proto/tensorcast/config/v1/daemon_config.proto
   - tensorcast/api/store/artifact.py
   - tensorcast/api/store/owned_binding_slot.py
-  - tensorcast/api/store/serving_binding_reference_consumer.py
+  - tensorcast/api/store/runtime_realization_reference_consumer.py
   - tensorcast/api/store/serving_binding_spec_cache.py
   - tensorcast/types.py
   - daemon/service/controllers/materialization_controller.cc
@@ -71,7 +71,7 @@ Updated 2026-05-11.
 
 ## P0: Stabilize The Public Example
 
-- [ ] Convert `examples/serving_binding_consumer/` into the canonical
+- [ ] Convert `examples/runtime_realization_reference_consumer/` into the canonical
       TensorCast-side serving binding example.
 - [ ] Document the parent-to-worker handoff payload:
       `ServingBindingTarget`, `PrefetchedServingBinding`, expected digests, and
@@ -157,9 +157,9 @@ bazel test //daemon:grpc_service_impl_operation_rpc_test \
   --ui_event_filters=warning,error
 
 source .venv/bin/activate
-pytest tests/python/api/test_serving_binding_reference_consumer.py \
+pytest tests/python/api/test_runtime_realization_reference_consumer.py \
   tests/python/api/test_serving_binding_spec_cache.py \
-  tests/python/api/test_prefetch_serving_binding_target.py \
+  tests/python/api/test_runtime_realization_target.py \
   tests/python/api/test_operation_semantics.py -q
 
 pytest tests/python/daemon/test_prefetch_serving_binding_real_cuda_e2e.py -q

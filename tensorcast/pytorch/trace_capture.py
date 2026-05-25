@@ -14,7 +14,7 @@ import torch
 from torch import nn
 from torch.utils._python_dispatch import TorchDispatchMode
 
-from tensorcast.serving.builder.trace_ir import (
+from tensorcast.artifact_runtime.recipe.trace_ir import (
     CopyPlanEntry,
     MultiRange,
     Range,

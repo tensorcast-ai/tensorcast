@@ -194,8 +194,8 @@ Notes:
 - The Stepcast reload path assumes vLLM dev endpoints are enabled on each
   replica (e.g. `VLLM_SERVER_DEV_MODE=1`).
 - This path no longer pushes vLLM TensorCast loader config. Current
-  `internal-vllm` serving-artifact runtime must be configured through
-  `tensorcast.serving.ServingConfig` and reloaded with
+  `internal-vllm` artifact runtime must be configured through
+  `tensorcast.TensorCastRuntimeConfig` and reloaded with
   `/reload_serving_artifact`.
 
 ## Retention and Garbage Collection (keep_last)

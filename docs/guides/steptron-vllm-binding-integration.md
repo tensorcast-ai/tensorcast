@@ -54,8 +54,8 @@ consumer model we want to preserve:
   - or bootstrap a local/source input into a serving artifact and then bind it
   - or acquire a retained serving binding through explicit retained authority
   - and later reload through `binding.swap(...)`
-- `gpu_model_runner.py` consumes the dedicated TensorCast serving reload path
-  using `ServingArtifactLocator` and manifest runtime policy
+- `gpu_model_runner.py` consumes the dedicated TensorCast runtime reload path
+  using `ArtifactLocator` and `RuntimePolicy` manifest admission
 - `api_server.py` gates `/reload_serving_artifact` with drain + serialized
   reload, while `/set_model_weight` is rejected for `load_format="tensorcast"`
 
@@ -241,8 +241,8 @@ TensorCast must own:
 - contributor liveness through the existing lease/guard/finalizer runtime
 - final source `seal_assembly(...)`
 - source immutable version-key publication in the current dependency-ready wave
-- optional source -> serving builder or publisher only in the successor wave
-  after typed child closeout contracts exist
+- optional source -> runtime-artifact representation builder or publisher only
+  in the successor wave after typed child closeout contracts exist
 - final serving-key or serving-manifest publication only in that successor wave
 
 `steptron` should not:

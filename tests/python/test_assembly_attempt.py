@@ -19,8 +19,8 @@ from tensorcast.api.store import (
     RegisteredServingPublication,
     RepresentationPublishContract,
     RepresentationPublishSpec,
-    ServingArtifactManifest,
-    ServingBuildIntent,
+    RuntimeArtifactBuildIntent,
+    RuntimeArtifactManifest,
     Store,
     build_binding_finalize_admission_facts,
     build_representation_publish_requirements,
@@ -192,8 +192,8 @@ def _canonical_index_bytes() -> bytes:
     return b'{"w":[0,4,[1],[1],"torch.float32",0]}'
 
 
-def _serving_build_intent() -> ServingBuildIntent:
-    return ServingBuildIntent(
+def _serving_build_intent() -> RuntimeArtifactBuildIntent:
+    return RuntimeArtifactBuildIntent(
         representation_contract_hash="bafkrepresentation",
         builder_mode=BuilderMode.PURE_TRANSFORM,
         framework_name="torch",
@@ -204,8 +204,8 @@ def _serving_build_intent() -> ServingBuildIntent:
     )
 
 
-def _binding_finalize_build_intent() -> ServingBuildIntent:
-    return ServingBuildIntent(
+def _binding_finalize_build_intent() -> RuntimeArtifactBuildIntent:
+    return RuntimeArtifactBuildIntent(
         representation_contract_hash="bafkbindingrepr",
         builder_mode=BuilderMode.BINDING_FINALIZE,
         framework_name="torch",
@@ -217,7 +217,7 @@ def _binding_finalize_build_intent() -> ServingBuildIntent:
 
 
 def _representation_publish_bundle() -> RepresentationPublishSpec:
-    manifest = ServingArtifactManifest(
+    manifest = RuntimeArtifactManifest(
         framework_name="torch",
         adapter_version="adapter-v1",
         serving_abi_version="abi-v1",
@@ -801,7 +801,7 @@ def test_start_representation_publish_attempt_provisions_binding_subject_layout_
     canonical_index = canonical_index_from_bytes(
         b'{"serving.weight":[0,4,[1],[1],"torch.float32",0]}'
     )
-    manifest = ServingArtifactManifest(
+    manifest = RuntimeArtifactManifest(
         framework_name="torch",
         adapter_version="adapter-vbinding",
         serving_abi_version="abi-vbinding",

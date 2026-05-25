@@ -134,19 +134,25 @@ from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.operation.v1 import operation_pb2
 from tensorcast.types import (
     GroupRealizationAcquireRef,
-    PrefetchedServingBinding,
-    PrefetchedServingBindingSet,
+    PrefetchHandoff,
+    PrefetchHandoffSet,
     PrefetchRetentionPolicy,
-    ServingBindingReadiness,
-    ServingBindingSetTarget,
-    ServingBindingSourceReuseDecision,
-    ServingBindingTarget,
-    ServingRuntimePolicy,
-    ServingRuntimePolicyInput,
-    coerce_serving_runtime_policy,
+    RealizationTarget,
+    RealizationTargetSet,
+    RuntimeArtifactPolicy,
+    RuntimeArtifactPolicyInput,
+    RuntimeBindingReadiness,
+    RuntimeBindingSourceReuseDecision,
+    coerce_runtime_artifact_policy,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_runtime_artifact_policy(
+    runtime_artifact_policy: RuntimeArtifactPolicyInput | None,
+) -> RuntimeArtifactPolicy | None:
+    return coerce_runtime_artifact_policy(runtime_artifact_policy)
 
 
 def _has_validated_byte_artifact_profile(artifact_id: str) -> bool:
@@ -249,22 +255,22 @@ class PrefetchedReplica:
     report: ArtifactRealizationReport | None = None
 
 
-ServingPrefetchResult = PrefetchedServingBinding | PrefetchedServingBindingSet
+RuntimePrefetchResult = PrefetchHandoff | PrefetchHandoffSet
 
 
 def _parse_serving_prefetch_result_any(
     result: Any,
-) -> ServingPrefetchResult:
+) -> RuntimePrefetchResult:
     binding_result = operation_pb2.PrefetchServingBindingResult()
     if result.Is(binding_result.DESCRIPTOR):
         result.Unpack(binding_result)
-        return PrefetchedServingBinding.from_proto(binding_result)
+        return PrefetchHandoff.from_proto(binding_result)
     set_result = operation_pb2.PrefetchServingBindingSetResult()
     if result.Is(set_result.DESCRIPTOR):
         result.Unpack(set_result)
-        return PrefetchedServingBindingSet.from_proto(set_result)
+        return PrefetchHandoffSet.from_proto(set_result)
     raise ArtifactError(
-        "Serving prefetch operation did not return a typed serving binding result",
+        "Runtime prefetch operation did not return a typed prefetch handoff result",
         status_code="DATA_LOSS",
         retryable=False,
     )
@@ -272,13 +278,13 @@ def _parse_serving_prefetch_result_any(
 
 def _serving_prefetch_result_from_operation_response(
     response: operation_pb2.GetOperationResponse,
-) -> ServingPrefetchResult:
+) -> RuntimePrefetchResult:
     if response.status.HasField("result"):
         return _parse_serving_prefetch_result_any(response.status.result)
     if response.HasField("snapshot"):
         return _parse_serving_prefetch_result_any(response.snapshot)
     raise ArtifactError(
-        "Serving prefetch operation completed without result metadata",
+        "Runtime prefetch operation completed without result metadata",
         status_code="DATA_LOSS",
         retryable=False,
     )
@@ -293,11 +299,11 @@ def _digest_hex(label: str, payload: bytes) -> str:
 
 
 def _serving_target_layout_digest(
-    target: ServingBindingTarget | ServingBindingSetTarget,
+    target: RealizationTarget | RealizationTargetSet,
     *,
     target_bytes: bytes,
 ) -> str:
-    if isinstance(target, ServingBindingTarget):
+    if isinstance(target, RealizationTarget):
         return str(target.resolved_layout.target_layout_hash or "") or _digest_hex(
             "serving-target-layout",
             target_bytes,
@@ -306,11 +312,11 @@ def _serving_target_layout_digest(
 
 
 def _serving_target_copy_plan_digest(
-    target: ServingBindingTarget | ServingBindingSetTarget,
+    target: RealizationTarget | RealizationTargetSet,
     *,
     target_bytes: bytes,
 ) -> str:
-    if isinstance(target, ServingBindingTarget):
+    if isinstance(target, RealizationTarget):
         digest = str(target.resolved_layout.spec_digest or "")
         if digest:
             return digest
@@ -321,15 +327,15 @@ def _serving_target_copy_plan_digest(
 
 
 def _with_retained_binding_report(
-    result: ServingPrefetchResult,
+    result: RuntimePrefetchResult,
     *,
     selection: ResolvedArtifactSelection,
-    target: ServingBindingTarget | ServingBindingSetTarget,
+    target: RealizationTarget | RealizationTargetSet,
     target_bytes: bytes,
     operation_id: str,
-) -> ServingPrefetchResult:
+) -> RuntimePrefetchResult:
     retained_bindings = retained_binding_reports_for(result)
-    is_target_set = isinstance(result, PrefetchedServingBindingSet)
+    is_target_set = isinstance(result, PrefetchHandoffSet)
     target_plan = RealizationTargetPlan(
         kind="target_set" if is_target_set else "retained_binding",
         target_layout_digest=_serving_target_layout_digest(
@@ -425,13 +431,13 @@ def _operation_status_from_proto(
 
 
 def _serving_target_source_reuse(
-    target: ServingBindingTarget | ServingBindingSetTarget,
-) -> ServingBindingSourceReuseDecision:
-    if isinstance(target, ServingBindingTarget):
+    target: RealizationTarget | RealizationTargetSet,
+) -> RuntimeBindingSourceReuseDecision:
+    if isinstance(target, RealizationTarget):
         return target.resolved_layout.source_reuse
     if not target.members:
         raise ArtifactError(
-            "Serving binding set members must use one source reuse decision",
+            "Realization target set members must use one source reuse decision",
             status_code="FAILED_PRECONDITION",
             retryable=False,
         )
@@ -441,7 +447,7 @@ def _serving_target_source_reuse(
         for member in target.members[1:]
     ):
         raise ArtifactError(
-            "Serving binding set members must use one source reuse decision",
+            "Realization target set members must use one source reuse decision",
             status_code="FAILED_PRECONDITION",
             retryable=False,
         )
@@ -759,6 +765,7 @@ class Artifact:
         view_spec: ViewSpecBuildResult | None = None,
         view_metadata: ViewMetadataCache | None = None,
         view_depth: int = 0,
+        source_subject: Any | None = None,
     ) -> None:
         identifiers = [bool(artifact_id), bool(key)]
         if sum(identifiers) == 0:
@@ -775,6 +782,7 @@ class Artifact:
         self._view_spec = view_spec
         self._view_metadata = view_metadata
         self._view_depth = max(0, int(view_depth))
+        self._source_subject = source_subject
         effective_index = (
             view_metadata.selected_index
             if view_metadata is not None
@@ -861,11 +869,131 @@ class Artifact:
         emit_artifact_realization_profile_event(handle.report)
         return handle
 
+    def _model_runtime_request_facts(
+        self,
+        spec: ArtifactRealizationSpec,
+        runtime_context: Any | None,
+    ) -> tuple[ArtifactRealizationSpec, Any]:
+        from tensorcast.artifact_runtime.request_facts import (
+            ModelRuntimeRequestFactsError,
+            resolve_model_runtime_request_facts,
+        )
+
+        try:
+            facts = resolve_model_runtime_request_facts(
+                spec=spec,
+                runtime_context=runtime_context,
+            )
+        except ModelRuntimeRequestFactsError as exc:
+            raise ArtifactError(
+                str(exc),
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            ) from exc
+        return cast(ArtifactRealizationSpec, facts.spec), facts.context
+
+    def _store_bound_runtime_artifact_resolver(self) -> Any:
+        from tensorcast.artifact_runtime.artifact.resolver import (
+            RuntimeArtifactResolver,
+        )
+        from tensorcast.types import (
+            SERVING_MANIFEST_TENSOR_NAME,
+            RuntimeArtifactManifest,
+        )
+
+        store, _runtime, _pipeline = self._require_components()
+        return RuntimeArtifactResolver(
+            manifest_tensor_name=SERVING_MANIFEST_TENSOR_NAME,
+            schema_version=int(
+                RuntimeArtifactManifest.model_fields["schema_version"].default
+            ),
+            open_artifact_fn=lambda ref: store.artifact(ref=ref),
+        )
+
+    def _execute_model_runtime_realization(
+        self,
+        spec: ArtifactRealizationSpec,
+        *,
+        runtime_host: Any | None,
+        runtime_context: Any | None,
+        runtime_resolver: Any | None,
+        profile_sink: Any | None,
+    ) -> ArtifactRealizationHandle:
+        if runtime_host is None:
+            raise ArtifactError(
+                "model_runtime realization requires runtime_host",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+
+        from tensorcast.artifact_runtime.lifecycle import ArtifactRuntimeIntegration
+
+        artifact_id = self._ensure_identified()
+        resolved_spec, context = self._model_runtime_request_facts(
+            spec,
+            runtime_context,
+        )
+        resolved_runtime_resolver = runtime_resolver
+        if resolved_runtime_resolver is None and not artifact_id.startswith("msa1:"):
+            resolved_runtime_resolver = self._store_bound_runtime_artifact_resolver()
+        integration = ArtifactRuntimeIntegration(
+            resolver=resolved_runtime_resolver,
+            profile_sink=profile_sink,
+            host=runtime_host,
+        )
+        from tensorcast.artifact_runtime.request_facts import (
+            ModelRuntimeRequestFactsError,
+        )
+
+        try:
+            if artifact_id.startswith("msa1:"):
+                if self._source_subject is None:
+                    raise ArtifactError(
+                        "mounted-source model_runtime realization requires a "
+                        "daemon-attested source handle; create the artifact with "
+                        "tensorcast.from_disk(...)",
+                        status_code="FAILED_PRECONDITION",
+                        retryable=False,
+                    )
+                attachment = integration.realize_mounted_source_model_runtime(
+                    artifact_ref=artifact_id,
+                    source_subject=self._source_subject,
+                    spec=resolved_spec,
+                    context=context,
+                    materialization=resolved_spec.options,
+                )
+            else:
+                attachment = integration.realize_model_runtime(
+                    artifact_ref=artifact_id,
+                    spec=resolved_spec,
+                    context=context,
+                    runtime_artifact_policy=resolved_spec.runtime_artifact_policy,
+                    materialization=resolved_spec.options,
+                )
+        except ModelRuntimeRequestFactsError as exc:
+            raise ArtifactError(
+                str(exc),
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            ) from exc
+        handle = getattr(attachment.state, "model_runtime_handle", None)
+        if not isinstance(handle, ArtifactRealizationHandle):
+            raise ArtifactError(
+                "model_runtime realization completed without a realization handle",
+                status_code="INTERNAL",
+                retryable=False,
+            )
+        return handle
+
     def realize(
         self,
         spec: ArtifactRealizationSpec,
         *,
         ctx: CallContext | None = None,
+        runtime_host: Any | None = None,
+        runtime_context: Any | None = None,
+        runtime_resolver: Any | None = None,
+        profile_sink: Any | None = None,
     ) -> ArtifactRealizationHandle:
         if spec.target_kind == "tensor_dict":
             if spec.device is None:
@@ -1014,9 +1142,9 @@ class Artifact:
                 options=cast("GetArtifactOptions | None", spec.options),
                 capacity_bytes=spec.capacity_bytes,
                 publish=spec.publish,
-                serving_runtime_policy=cast(
-                    ServingRuntimePolicyInput | None,
-                    spec.serving_runtime_policy,
+                runtime_artifact_policy=cast(
+                    RuntimeArtifactPolicyInput | None,
+                    spec.runtime_artifact_policy,
                 ),
                 ctx=ctx,
             )
@@ -1065,9 +1193,9 @@ class Artifact:
                 packing=spec.packing,
                 options=cast("GetArtifactOptions | None", spec.options),
                 publish=spec.publish,
-                serving_runtime_policy=cast(
-                    ServingRuntimePolicyInput | None,
-                    spec.serving_runtime_policy,
+                runtime_artifact_policy=cast(
+                    RuntimeArtifactPolicyInput | None,
+                    spec.runtime_artifact_policy,
                 ),
                 ctx=ctx,
             )
@@ -1182,10 +1310,12 @@ class Artifact:
                 promote_fn=lambda: promoted,
             )
         if spec.target_kind == "model_runtime":
-            raise ArtifactError(
-                "model_runtime realization is not lowered through Artifact.realize yet",
-                status_code="UNIMPLEMENTED",
-                retryable=False,
+            return self._execute_model_runtime_realization(
+                spec,
+                runtime_host=runtime_host,
+                runtime_context=runtime_context,
+                runtime_resolver=runtime_resolver,
+                profile_sink=profile_sink,
             )
         raise ArtifactError(
             f"Unsupported realization target kind: {spec.target_kind}",
@@ -1198,7 +1328,7 @@ class Artifact:
         spec: ArtifactRealizationSpec,
         *,
         ctx: CallContext | None = None,
-    ) -> Operation[PrefetchedReplica] | Operation[ServingPrefetchResult]:
+    ) -> Operation[PrefetchedReplica] | Operation[RuntimePrefetchResult]:
         if spec.target_kind == "retained_replica":
             if spec.device is None:
                 raise ArtifactError(
@@ -1218,21 +1348,19 @@ class Artifact:
                     status_code="INVALID_ARGUMENT",
                     retryable=False,
                 )
-            if isinstance(spec.target, ServingBindingSetTarget):
+            if isinstance(spec.target, RealizationTargetSet):
                 raise ArtifactError(
-                    "ServingBindingSetTarget requires target_set realization",
+                    "RealizationTargetSet requires target_set realization",
                     status_code="INVALID_ARGUMENT",
                     retryable=False,
                 )
             readiness = (
-                cast(ServingBindingReadiness, spec.readiness)
+                cast(RuntimeBindingReadiness, spec.readiness)
                 if spec.readiness is not None
-                else "serving_local_ready"
+                else "runtime_local_ready"
             )
             return self._execute_prefetch(
-                target=cast(
-                    ServingBindingTarget | ServingBindingSetTarget, spec.target
-                ),
+                target=cast(RealizationTarget | RealizationTargetSet, spec.target),
                 readiness=readiness,
                 retention=cast(PrefetchRetentionPolicy | None, spec.retention),
                 ctx=ctx,
@@ -1244,16 +1372,16 @@ class Artifact:
                     status_code="INVALID_ARGUMENT",
                     retryable=False,
                 )
-            if not isinstance(spec.target, ServingBindingSetTarget):
+            if not isinstance(spec.target, RealizationTargetSet):
                 raise ArtifactError(
-                    "target_set realization requires ServingBindingSetTarget",
+                    "target_set realization requires RealizationTargetSet",
                     status_code="INVALID_ARGUMENT",
                     retryable=False,
                 )
             readiness = (
-                cast(ServingBindingReadiness, spec.readiness)
+                cast(RuntimeBindingReadiness, spec.readiness)
                 if spec.readiness is not None
-                else "serving_local_ready"
+                else "runtime_local_ready"
             )
             return self._execute_prefetch(
                 target=spec.target,
@@ -1560,7 +1688,7 @@ class Artifact:
         options: GetArtifactOptions | None = None,
         capacity_bytes: int | None = None,
         publish: bool = False,
-        serving_runtime_policy: ServingRuntimePolicyInput | None = None,
+        runtime_artifact_policy: RuntimeArtifactPolicyInput | None = None,
         ctx: CallContext | None = None,
     ) -> Binding:
         handle = self.realize(
@@ -1571,7 +1699,7 @@ class Artifact:
                 options=options,
                 capacity_bytes=capacity_bytes,
                 publish=publish,
-                serving_runtime_policy=serving_runtime_policy,
+                runtime_artifact_policy=runtime_artifact_policy,
             ),
             ctx=ctx,
         )
@@ -1586,7 +1714,7 @@ class Artifact:
         options: GetArtifactOptions | None = None,
         capacity_bytes: int | None = None,
         publish: bool = False,
-        serving_runtime_policy: ServingRuntimePolicyInput | None = None,
+        runtime_artifact_policy: RuntimeArtifactPolicyInput | None = None,
         ctx: CallContext | None = None,
     ) -> Binding:
         """Allocate daemon-owned target tensors, fill from this artifact, and return a Binding."""
@@ -1641,8 +1769,8 @@ class Artifact:
             packing=packing,
             options=options,
             publish=publish,
-            serving_runtime_policy=coerce_serving_runtime_policy(
-                serving_runtime_policy
+            runtime_artifact_policy=_resolve_runtime_artifact_policy(
+                runtime_artifact_policy
             ),
             ctx=ctx,
         )
@@ -1655,7 +1783,7 @@ class Artifact:
         packing: str = "byte_space",
         options: GetArtifactOptions | None = None,
         publish: bool = False,
-        serving_runtime_policy: ServingRuntimePolicyInput | None = None,
+        runtime_artifact_policy: RuntimeArtifactPolicyInput | None = None,
         ctx: CallContext | None = None,
     ) -> Binding:
         handle = self.realize(
@@ -1665,7 +1793,7 @@ class Artifact:
                 packing=packing,
                 options=options,
                 publish=publish,
-                serving_runtime_policy=serving_runtime_policy,
+                runtime_artifact_policy=runtime_artifact_policy,
             ),
             ctx=ctx,
         )
@@ -1679,10 +1807,13 @@ class Artifact:
         packing: str = "byte_space",
         options: GetArtifactOptions | None = None,
         publish: bool = False,
-        serving_runtime_policy: ServingRuntimePolicyInput | None = None,
+        runtime_artifact_policy: RuntimeArtifactPolicyInput | None = None,
         ctx: CallContext | None = None,
     ) -> Binding:
         """Adopt user-owned CUDA tensors, fill once, and return a Binding."""
+        resolved_runtime_artifact_policy = _resolve_runtime_artifact_policy(
+            runtime_artifact_policy
+        )
         if mapping is not None:
             return self._bind_into_mapped(
                 target_tensors=target_tensors,
@@ -1690,9 +1821,7 @@ class Artifact:
                 packing=packing,
                 options=options,
                 publish=publish,
-                serving_runtime_policy=coerce_serving_runtime_policy(
-                    serving_runtime_policy
-                ),
+                runtime_artifact_policy=resolved_runtime_artifact_policy,
                 ctx=ctx,
             )
         store, runtime, pipeline = self._require_components()
@@ -1823,9 +1952,7 @@ class Artifact:
                         target_layout=region_layout.layout,
                         device_uuid=device_uuid_for(device_id),
                         source_policy=source_policy,
-                        serving_runtime_policy=coerce_serving_runtime_policy(
-                            serving_runtime_policy
-                        ),
+                        runtime_artifact_policy=resolved_runtime_artifact_policy,
                         operation_id=operation_id,
                         group_realization=ctx.group_realization
                         if ctx is not None
@@ -1930,7 +2057,7 @@ class Artifact:
         packing: str,
         options: GetArtifactOptions | None,
         publish: bool,
-        serving_runtime_policy: ServingRuntimePolicy | None,
+        runtime_artifact_policy: RuntimeArtifactPolicy | None,
         ctx: CallContext | None,
     ) -> Binding:
         store, runtime, pipeline = self._require_components()
@@ -2076,7 +2203,7 @@ class Artifact:
                         target_layout=region_layout.layout,
                         device_uuid=device_uuid_for(device_id),
                         source_policy=source_policy,
-                        serving_runtime_policy=serving_runtime_policy,
+                        runtime_artifact_policy=runtime_artifact_policy,
                         copy_plan=copy_plan,
                         dst_tensors=target_tensors,
                         operation_id=operation_id,
@@ -2216,7 +2343,7 @@ class Artifact:
         packing: str,
         options: GetArtifactOptions | None,
         publish: bool,
-        serving_runtime_policy: ServingRuntimePolicy | None,
+        runtime_artifact_policy: RuntimeArtifactPolicy | None,
         ctx: CallContext | None,
     ) -> Binding:
         store, runtime, _ = self._require_components()
@@ -2374,7 +2501,7 @@ class Artifact:
                     device_uuid=device_uuid_for(device_id),
                     binding_layout_id=owner_layout.binding_layout_id,
                     source_policy=source_policy,
-                    serving_runtime_policy=serving_runtime_policy,
+                    runtime_artifact_policy=runtime_artifact_policy,
                     copy_plan=copy_plan_proto,
                     dst_specs=dst_specs,
                     operation_id=operation_id,
@@ -2577,24 +2704,24 @@ class Artifact:
     def _prefetch_serving_binding(
         self,
         *,
-        target: ServingBindingTarget | ServingBindingSetTarget,
-        readiness: ServingBindingReadiness,
+        target: RealizationTarget | RealizationTargetSet,
+        readiness: RuntimeBindingReadiness,
         retention: PrefetchRetentionPolicy | None,
         ctx: CallContext | None,
-    ) -> Operation[ServingPrefetchResult]:
+    ) -> Operation[RuntimePrefetchResult]:
         artifact_id = self._ensure_identified()
         _, runtime, _ = self._require_components()
         resolved_selection = self._resolve_realization_selection()
         selection = resolved_selection.proto
         source_reuse = _serving_target_source_reuse(target)
-        if source_reuse.mode in {"serving_transform_required", "unsupported"}:
+        if source_reuse.mode in {"runtime_transform_required", "unsupported"}:
             reason = source_reuse.reason or (
-                "source-to-target serving transform requires a topology-scoped executor"
-                if source_reuse.mode == "serving_transform_required"
-                else "serving binding source is unsupported"
+                "source-to-target runtime transform requires a topology-scoped executor"
+                if source_reuse.mode == "runtime_transform_required"
+                else "runtime binding source is unsupported"
             )
             raise ArtifactError(
-                f"serving binding prefetch rejected before allocation: {reason}",
+                f"runtime binding prefetch rejected before allocation: {reason}",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
@@ -2663,7 +2790,7 @@ class Artifact:
 
         def _result_factory(
             operation_response: operation_pb2.GetOperationResponse,
-        ) -> ServingPrefetchResult:
+        ) -> RuntimePrefetchResult:
             return _with_retained_binding_report(
                 _serving_prefetch_result_from_operation_response(operation_response),
                 selection=resolved_selection,
@@ -2689,12 +2816,12 @@ class Artifact:
         self,
         *,
         device: torch.device | str | int | None = None,
-        target: ServingBindingTarget | ServingBindingSetTarget | None = None,
-        readiness: ServingBindingReadiness = "serving_local_ready",
+        target: RealizationTarget | RealizationTargetSet | None = None,
+        readiness: RuntimeBindingReadiness = "runtime_local_ready",
         retention: PrefetchRetentionPolicy | None = None,
         ctx: CallContext | None = None,
         options: GetArtifactOptions | None = None,
-    ) -> Operation[PrefetchedReplica] | Operation[ServingPrefetchResult]:
+    ) -> Operation[PrefetchedReplica] | Operation[RuntimePrefetchResult]:
         if target is not None:
             if device is not None:
                 raise ArtifactError(
@@ -2708,7 +2835,7 @@ class Artifact:
                     readiness=readiness,
                     retention=retention,
                 )
-                if isinstance(target, ServingBindingSetTarget)
+                if isinstance(target, RealizationTargetSet)
                 else ArtifactRealizationSpec.retained_binding(
                     target=target,
                     readiness=readiness,
@@ -2735,12 +2862,12 @@ class Artifact:
         self,
         *,
         device: torch.device | str | int | None = None,
-        target: ServingBindingTarget | ServingBindingSetTarget | None = None,
-        readiness: ServingBindingReadiness = "serving_local_ready",
+        target: RealizationTarget | RealizationTargetSet | None = None,
+        readiness: RuntimeBindingReadiness = "runtime_local_ready",
         retention: PrefetchRetentionPolicy | None = None,
         ctx: CallContext | None = None,
         options: GetArtifactOptions | None = None,
-    ) -> Operation[PrefetchedReplica] | Operation[ServingPrefetchResult]:
+    ) -> Operation[PrefetchedReplica] | Operation[RuntimePrefetchResult]:
         from tensorcast.api._config import GetArtifactOptions
 
         artifact_id = self._ensure_identified()
@@ -2868,13 +2995,7 @@ class Artifact:
                 retryable=False,
             )
 
-        source: str | None = None
-        if payload.source == store_daemon_pb2.MATERIALIZATION_SOURCE_P2P:
-            source = "p2p"
-        elif payload.source == store_daemon_pb2.MATERIALIZATION_SOURCE_DISK:
-            source = "disk"
-        elif payload.source == store_daemon_pb2.MATERIALIZATION_SOURCE_LOCAL_REPLICA:
-            source = "local"
+        source = materialization_source_label(payload.source)
 
         target_plan = RealizationTargetPlan(
             kind="retained_replica",
@@ -3737,6 +3858,7 @@ class Artifact:
                 view_spec=self._view_spec,
                 view_metadata=self._view_metadata,
                 view_depth=self._view_depth,
+                source_subject=self._source_subject,
             )
         base_index = self._effective_index()
         entry_shapes = {entry.name: tuple(entry.shape) for entry in base_index.entries}
@@ -3765,6 +3887,7 @@ class Artifact:
             view_spec=composed_spec,
             view_metadata=view_cache,
             view_depth=depth,
+            source_subject=self._source_subject,
         )
 
     def _hydrate_from_cache_entry(self, entry: ArtifactCacheEntry) -> None:

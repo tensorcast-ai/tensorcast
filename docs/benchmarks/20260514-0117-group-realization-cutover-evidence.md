@@ -100,7 +100,7 @@ Store strict transport semantics.
 
 ```bash
 source .venv/bin/activate && pytest tests/python/test_binding.py tests/python/api/test_mapped_binding.py tests/python/tools/test_weight_publisher_e2e_tp_bind_retry.py tests/python/tools/test_cross_host_weight_publisher_runner_transport_probe.py tests/python/global_store/test_services.py tests/python/global_store/test_grpc_service.py tests/python/global_store/test_pending_transport_request_repository.py -q
-source .venv/bin/activate && pytest tests/python/api/test_call_context.py tests/python/api/test_serving_binding_reference_consumer.py tests/python/global_store/test_group_realization.py tests/python/global_store/test_services.py tests/python/global_store/test_grpc_service.py tests/python/global_store/test_pending_transport_request_repository.py tests/python/tools/test_weight_publisher_e2e_tp_bind_retry.py tests/python/tools/test_cross_host_weight_publisher_runner_transport_probe.py -q
+source .venv/bin/activate && pytest tests/python/api/test_call_context.py tests/python/api/test_runtime_realization_reference_consumer.py tests/python/global_store/test_group_realization.py tests/python/global_store/test_services.py tests/python/global_store/test_grpc_service.py tests/python/global_store/test_pending_transport_request_repository.py tests/python/tools/test_weight_publisher_e2e_tp_bind_retry.py tests/python/tools/test_cross_host_weight_publisher_runner_transport_probe.py -q
 source .venv/bin/activate && pytest tests/python/test_binding.py tests/python/api/test_mapped_binding.py tests/python/tools/test_weight_publisher_e2e_tp_bind_retry.py tests/python/tools/test_cross_host_weight_publisher_runner_transport_probe.py -q
 ```
 

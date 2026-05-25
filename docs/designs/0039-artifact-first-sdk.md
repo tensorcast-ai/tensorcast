@@ -137,8 +137,9 @@ callers but is not required for common flows.
   target realization and return the binding projection from the realization
   handle.
 - Model runtime: runtime-specific helpers should build
-  `ArtifactRealizationSpec.model_runtime(...)` and attach through
-  `ArtifactRealizationHandle.attach(adapter=...)`.
+  `ArtifactRealizationSpec.model_runtime(...)`, pass framework capabilities via
+  `Artifact.realize(..., runtime_host=...)`, and use the completed
+  `ArtifactRealizationHandle.attachment()` projection.
 - Policy override: `.with_options(...)` or realization spec fields express
   source policy, strategy, fallback, retention, and diagnostics. These policies
   must not remain TensorDict-only retrieval options and must not be serialized

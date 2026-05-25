@@ -33,9 +33,10 @@ from tensorcast.types import (
     GroupRealizationAcquireRef,
     PartialSealResult,
     PublicDiskSourceHandle,
-    ServingRuntimePolicyInput,
+    RuntimeArtifactPolicy,
+    RuntimeArtifactPolicyInput,
     SourceBoundPlanDiagnostics,
-    coerce_serving_runtime_policy,
+    coerce_runtime_artifact_policy,
 )
 
 if TYPE_CHECKING:
@@ -122,6 +123,12 @@ def _reject_live_swap_group_realization(ctx: CallContext | None) -> None:
         status_code="FAILED_PRECONDITION",
         retryable=False,
     )
+
+
+def _resolve_runtime_artifact_policy(
+    runtime_artifact_policy: RuntimeArtifactPolicyInput | None,
+) -> RuntimeArtifactPolicy | None:
+    return coerce_runtime_artifact_policy(runtime_artifact_policy)
 
 
 def _clone_view_spec(
@@ -682,7 +689,7 @@ class Binding:
         *,
         options: "GetArtifactOptions | None" = None,
         publish: bool = False,
-        serving_runtime_policy: ServingRuntimePolicyInput | None = None,
+        runtime_artifact_policy: RuntimeArtifactPolicyInput | None = None,
         activate_key: str | None = None,
         expected_active_artifact_id: str | None = None,
         expected_active_generation: int | None = None,
@@ -709,8 +716,8 @@ class Binding:
                 artifact,
                 options=options,
                 publish=publish,
-                serving_runtime_policy=coerce_serving_runtime_policy(
-                    serving_runtime_policy
+                runtime_artifact_policy=_resolve_runtime_artifact_policy(
+                    runtime_artifact_policy
                 ),
                 wait=wait,
                 drain_timeout_s=drain_timeout_s,

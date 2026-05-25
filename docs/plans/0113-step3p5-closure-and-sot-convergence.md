@@ -73,7 +73,7 @@ Execution policy for this plan:
   evidence, mixed-residual policy, and prototype deletion remain open:
   - `core/store/replica/collective_disk_loader.cc`
 - `0111` repo-owned builder/publication bridge is landed at base scope:
-  - `tensorcast/api/store/serving_builder.py`
+  - `tensorcast/api/store/publication_builder.py`
   - `daemon/service/controllers/assembly_operation_service.cc`
 - `ServingAdmissionFacts.same_binding_fast_path_validated` is already a correctness and
   admission gate for same-binding publication:

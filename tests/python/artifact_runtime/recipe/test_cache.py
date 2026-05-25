@@ -1,0 +1,140 @@
+#  Copyright (c) 2026, TensorCast Team.
+
+import json
+from dataclasses import replace
+from pathlib import Path
+
+from tensorcast.api.store import BindingRealizationEntry
+from tensorcast.api.store import Range as StoreRange
+from tensorcast.artifact_runtime.recipe.cache import (
+    RECIPE_CACHE_PAYLOAD_VERSION,
+    load_compiled_recipe_cache,
+    write_compiled_recipe_cache,
+)
+from tensorcast.artifact_runtime.recipe.compiler import (
+    CompiledRuntimeRecipe,
+    SourceHullEntry,
+    TensorcastRuntimeFacts,
+    TensorcastSemanticValidationSpec,
+    TensorSchemaEntry,
+)
+from tensorcast.artifact_runtime.recipe.trace_ir import CopyPlanEntry, Range, TracePlan
+from tensorcast.types import (
+    FinalizeClass,
+    RuntimeBindingMemberRef,
+    RuntimeTopologyRef,
+    ServingSupportLevel,
+)
+
+
+def _recipe() -> CompiledRuntimeRecipe:
+    trace_plan = TracePlan(
+        copy_plan=[
+            CopyPlanEntry(
+                op="copy",
+                ckpt_name="x",
+                ckpt_range=Range(dim=0, start=0, end=4),
+                dst_name="w",
+                dst_range=None,
+            )
+        ],
+        expected_src_names={"x"},
+        expected_dst_names={"w"},
+        tensorcast_slices={"x": Range(dim=0, start=0, end=4)},
+        src_hull={"x": Range(dim=0, start=0, end=4)},
+    )
+    return CompiledRuntimeRecipe(
+        compile_key="compile-key",
+        source_artifact_ref="msa1:test-source",
+        source_metadata_fingerprint="metadata-fingerprint",
+        runtime_facts=TensorcastRuntimeFacts(
+            framework_name="vllm",
+            framework_version="vllm-test",
+            adapter_version="adapter-v1",
+            serving_abi_version="abi-v1",
+            support_level=ServingSupportLevel.RUNTIME_BIND_SWAP_READY,
+            runtime_only_tensor_names=("runtime",),
+            process_after_load_class=FinalizeClass.RUNTIME_ONLY,
+            post_bind_finalize_class=FinalizeClass.RUNTIME_ONLY,
+        ),
+        trace_plan=trace_plan,
+        tensor_schema=(
+            TensorSchemaEntry(
+                name="w",
+                dtype="torch.float16",
+                shape=(4,),
+                stride=(1,),
+            ),
+        ),
+        source_hull=(SourceHullEntry(name="x", range=Range(dim=0, start=0, end=4)),),
+        realization_plan=(
+            BindingRealizationEntry(
+                op="copy",
+                source_name="x",
+                source_ranges=(StoreRange(dim=0, start=0, end=4),),
+                dst_name="w",
+                dst_ranges=(),
+            ),
+        ),
+        realization_fallback_plan=(),
+        topology_ref=RuntimeTopologyRef(
+            schema_topology_digest="topology-digest",
+            logical_topology_ref="tensorcast://topology/topology-digest",
+        ),
+        member_ref=RuntimeBindingMemberRef(
+            member_id="dp0:pp0:tp0",
+            member_index=0,
+            member_count=2,
+            group_id="group-1",
+        ),
+        semantic_validation_spec=TensorcastSemanticValidationSpec(
+            kind="explicit",
+            payload={"probe": "ok"},
+        ),
+    )
+
+
+def test_compiled_recipe_cache_round_trips(tmp_path: Path) -> None:
+    cache_path = tmp_path / "recipe.json"
+    recipe = _recipe()
+
+    write_compiled_recipe_cache(cache_path, recipe)
+
+    loaded = load_compiled_recipe_cache(cache_path)
+
+    assert loaded == replace(
+        recipe,
+        trace_plan=replace(recipe.trace_plan, copy_plan=[]),
+        realization_plan=(),
+        realization_plan_proto=loaded.realization_plan_proto,
+        realization_plan_count=1,
+    )
+    assert loaded.realization_plan_proto
+    assert loaded.realization_plan_count == len(recipe.realization_plan)
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert payload["version"] == RECIPE_CACHE_PAYLOAD_VERSION
+    assert "realization_plan" not in payload["compiled_recipe"]
+    assert "realization_plan_proto" in payload["compiled_recipe"]
+    assert "trace_plan" not in payload["compiled_recipe"]
+    assert payload["compiled_recipe"]["trace_plan_summary"]["expected_dst_names"] == [
+        "w"
+    ]
+    assert payload["compiled_recipe"]["runtime_facts"]["framework_version"] == (
+        "vllm-test"
+    )
+    assert payload["compiled_recipe"]["topology_ref"]["schema_topology_digest"] == (
+        "topology-digest"
+    )
+    assert payload["compiled_recipe"]["member_ref"]["member_id"] == "dp0:pp0:tp0"
+
+
+def test_compiled_recipe_cache_ignores_missing_and_unknown_version(
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "missing.json"
+    assert load_compiled_recipe_cache(missing) is None
+
+    bad_version = tmp_path / "bad_version.json"
+    bad_version.write_text('{"version": 999, "compiled_recipe": {}}', encoding="utf-8")
+
+    assert load_compiled_recipe_cache(bad_version) is None

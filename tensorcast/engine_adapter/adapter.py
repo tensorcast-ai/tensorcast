@@ -20,8 +20,7 @@ from tensorcast.api.plan.targets import TargetSpec
 from tensorcast.api.plan.transforms import TransformSpec
 from tensorcast.api.store import Artifact, Store
 from tensorcast.api.store.handles import RegisteredArtifact
-from tensorcast.api.store.serving_builder import (
-    RepresentationPublishSpec,
+from tensorcast.api.store.publication_builder import (
     build_pure_transform_publication_bundle_from_registered_artifact,
     prepare_pure_transform_serving_registration,
 )
@@ -33,7 +32,7 @@ from tensorcast.engine_adapter.artifact_api import (
     PublishResult,
     SealedByteArtifact,
 )
-from tensorcast.types import ServingBuildIntent
+from tensorcast.types import RepresentationPublishSpec, RuntimeArtifactBuildIntent
 
 
 def _encode_token(token: bytes) -> str:
@@ -65,7 +64,7 @@ def _pure_transform_build_intent(
     ctx: "TransformContext",
     *,
     source_artifact: Artifact,
-) -> ServingBuildIntent | None:
+) -> RuntimeArtifactBuildIntent | None:
     publication_spec = ctx.spec.publication_spec
     if publication_spec is None:
         return None
@@ -79,7 +78,7 @@ def _maybe_build_pure_transform_publication_bundle(
     registered_artifact: object,
     *,
     source_artifact: Artifact,
-    build_intent: ServingBuildIntent | None,
+    build_intent: RuntimeArtifactBuildIntent | None,
 ) -> RepresentationPublishSpec | None:
     if build_intent is None:
         return None

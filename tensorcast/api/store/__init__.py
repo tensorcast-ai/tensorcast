@@ -86,6 +86,24 @@ from tensorcast.api.store.owned_binding_slot import (
     OwnedBindingSlot,
     restore_owned_binding_tensors,
 )
+from tensorcast.api.store.publication_builder import (
+    PreparedServingRegistration,
+    RegisteredServingPublication,
+    build_binding_finalize_admission_facts,
+    build_binding_finalize_publication_bundle,
+    build_pure_transform_publication_bundle,
+    build_pure_transform_publication_bundle_from_registered_artifact,
+    build_pure_transform_publication_spec,
+    build_pure_transform_transform_spec,
+    build_serving_publication_bundle,
+    build_serving_publication_bundle_from_registered_artifact,
+    compute_pure_transform_representation_contract_hash,
+    compute_serving_tensor_schema_hash,
+    count_canonical_serving_tensors,
+    prepare_binding_finalize_serving_registration,
+    prepare_pure_transform_serving_registration,
+    prepare_serving_registration,
+)
 from tensorcast.api.store.realization_kernel import (
     ArtifactRealizationHandle,
     ArtifactRealizationReport,
@@ -156,11 +174,11 @@ from tensorcast.api.store.runtime import (
 from tensorcast.api.store.runtime import (
     get_context as get_runtime_context,
 )
-from tensorcast.api.store.serving_binding_reference_consumer import (
+from tensorcast.api.store.runtime_realization_reference_consumer import (
     REFERENCE_RUNTIME,
-    ReferenceServingAcquireResult,
-    ReferenceServingResolvedSpec,
-    ReferenceServingTensorSpec,
+    ReferenceRuntimeAcquireResult,
+    ReferenceRuntimeResolvedSpec,
+    ReferenceRuntimeTensorSpec,
     acquire_reference_binding,
     build_reference_resolved_spec,
     build_reference_target_layout,
@@ -169,38 +187,20 @@ from tensorcast.api.store.serving_binding_reference_consumer import (
     prefetch_reference_binding_set,
     release_reference_acquire,
     target_from_reference_cache_record,
-    unpack_prefetched_serving_binding,
-    unpack_prefetched_serving_binding_set,
+    unpack_prefetch_handoff,
+    unpack_prefetch_handoff_set,
     write_reference_resolved_spec_cache_entry,
 )
-from tensorcast.api.store.serving_binding_spec_cache import (
-    ServingBindingSpecCacheGroupIndex,
-    ServingBindingSpecCacheRecord,
+from tensorcast.api.store.runtime_realization_spec_cache import (
+    RuntimeRealizationSpecCacheGroupIndex,
+    RuntimeRealizationSpecCacheRecord,
     canonical_json_bytes,
     read_matching_resolved_spec_cache_entry,
     read_resolved_spec_cache_entry,
     read_resolved_spec_cache_group_index,
-    serving_binding_spec_cache_root,
+    runtime_realization_spec_cache_root,
     write_resolved_spec_cache_entry,
     write_resolved_spec_cache_group_index,
-)
-from tensorcast.api.store.serving_builder import (
-    PreparedServingRegistration,
-    RegisteredServingPublication,
-    build_binding_finalize_admission_facts,
-    build_binding_finalize_publication_bundle,
-    build_pure_transform_publication_bundle,
-    build_pure_transform_publication_bundle_from_registered_artifact,
-    build_pure_transform_publication_spec,
-    build_pure_transform_transform_spec,
-    build_serving_publication_bundle,
-    build_serving_publication_bundle_from_registered_artifact,
-    compute_pure_transform_representation_contract_hash,
-    compute_serving_tensor_schema_hash,
-    count_canonical_serving_tensors,
-    prepare_binding_finalize_serving_registration,
-    prepare_pure_transform_serving_registration,
-    prepare_serving_registration,
 )
 from tensorcast.api.store.target_region_lifecycle import (
     register_store_target_regions_for_realization,
@@ -255,38 +255,40 @@ from tensorcast.types import (
     IdentityMintStrategy,
     LocalRegionHandle,
     PartialSealResult,
-    PrefetchedServingBinding,
-    PrefetchedServingBindingSet,
+    PrefetchHandoff,
+    PrefetchHandoffMemberFailure,
+    PrefetchHandoffSet,
     PrefetchRetentionPolicy,
     PublicDiskSourceHandle,
     PublishedModelVersion,
+    RealizationTarget,
+    RealizationTargetSet,
     RegionMemoryKind,
     RepresentationPublishContract,
     RepresentationPublishSpec,
+    RuntimeArtifactBuildIntent,
+    RuntimeArtifactManifest,
+    RuntimeArtifactPolicy,
+    RuntimeArtifactPolicyInput,
+    RuntimeBindingMemberRef,
+    RuntimeBindingReadiness,
+    RuntimeBindingResolvedLayout,
+    RuntimeBindingSourceKind,
+    RuntimeBindingSourceMemberRef,
+    RuntimeBindingSourceRef,
+    RuntimeBindingSourceReuseDecision,
+    RuntimeBindingSourceReuseMode,
+    RuntimeRealizationSpecCacheEntry,
+    RuntimeTopologyRef,
     SealAssemblyResult,
     ServingAdmissionFacts,
-    ServingArtifactManifest,
-    ServingBindingMemberRef,
-    ServingBindingReadiness,
-    ServingBindingResolvedLayout,
-    ServingBindingResolvedSpecCacheEntry,
-    ServingBindingSetTarget,
-    ServingBindingSourceKind,
-    ServingBindingSourceMemberRef,
-    ServingBindingSourceRef,
-    ServingBindingSourceReuseDecision,
-    ServingBindingSourceReuseMode,
-    ServingBindingTarget,
-    ServingBuildIntent,
     ServingPublicationSubject,
-    ServingRuntimePolicy,
-    ServingRuntimePolicyInput,
     ServingSupportLevel,
     SourceBoundCapability,
     SourceBoundPlanDiagnostics,
     VramRegionHandle,
     build_serving_manifest_ref,
-    coerce_serving_runtime_policy,
+    coerce_runtime_artifact_policy,
     parse_serving_manifest_ref,
 )
 from tensorcast.types import (
@@ -881,7 +883,7 @@ def _decode_published_model_version_from_response(
         source_descriptor=descriptor,
         serving_artifact_id=(
             str(payload.serving_artifact.artifact_id)
-            if payload.HasField("serving_artifact")
+            if payload.HasField("runtime_artifact")
             and payload.serving_artifact.artifact_id
             else None
         ),
@@ -901,7 +903,7 @@ def _decode_published_model_version_from_response(
                     payload.serving_artifact.artifact_id,
                 ),
             )
-            if payload.HasField("serving_artifact")
+            if payload.HasField("runtime_artifact")
             and payload.serving_artifact.artifact_id
             else None
         ),
@@ -1789,7 +1791,7 @@ class Store:
         self,
         tensors: TensorDict,
         *,
-        build_intent: ServingBuildIntent,
+        build_intent: RuntimeArtifactBuildIntent,
         source_artifact: Artifact
         | RegisteredArtifact
         | CanonicalIndex
@@ -1839,7 +1841,7 @@ class Store:
         self,
         tensors: TensorDict,
         *,
-        build_intent: ServingBuildIntent,
+        build_intent: RuntimeArtifactBuildIntent,
         source_artifact: Artifact
         | RegisteredArtifact
         | CanonicalIndex
@@ -1909,7 +1911,7 @@ class Store:
         self,
         binding: Binding | SealedBindingValue,
         *,
-        build_intent: ServingBuildIntent,
+        build_intent: RuntimeArtifactBuildIntent,
         source_artifact: Artifact
         | RegisteredArtifact
         | CanonicalIndex
@@ -2183,7 +2185,7 @@ class Store:
         self,
         binding: Binding | SealedBindingValue,
         *,
-        build_intent: ServingBuildIntent,
+        build_intent: RuntimeArtifactBuildIntent,
         admission_facts: ServingAdmissionFacts,
         source_artifact: Artifact
         | RegisteredArtifact
@@ -3078,6 +3080,7 @@ class Store:
         event_name: str,
         resolution_mode: str,
         trusted_content_artifact_id: str | None = None,
+        source_subject: object | None = None,
     ) -> Artifact:
         if not artifact_id:
             raise ArtifactError(
@@ -3133,6 +3136,7 @@ class Store:
             canonical_index_bytes=canonical_index_bytes or None,
             canonical_index=canonical_index,
             generation=generation,
+            source_subject=source_subject,
         )
 
     def import_from_disk(
@@ -3365,6 +3369,7 @@ class Store:
             event_name="store.from_disk.summary",
             resolution_mode="attested_mounted_source",
             trusted_content_artifact_id=source.trusted_content_artifact_id,
+            source_subject=source,
         )
 
     def resolve_public_disk_source(
@@ -3896,7 +3901,7 @@ def register_piece(
 def register_pure_transform_publication(
     tensors: TensorDict,
     *,
-    build_intent: ServingBuildIntent,
+    build_intent: RuntimeArtifactBuildIntent,
     source_artifact: Artifact
     | RegisteredArtifact
     | CanonicalIndex
@@ -3931,7 +3936,7 @@ def register_pure_transform_publication(
 def complete_pure_transform_publication(
     tensors: TensorDict,
     *,
-    build_intent: ServingBuildIntent,
+    build_intent: RuntimeArtifactBuildIntent,
     source_artifact: Artifact
     | RegisteredArtifact
     | CanonicalIndex
@@ -3982,7 +3987,7 @@ def complete_pure_transform_publication(
 def complete_pure_transform_publication_from_binding(
     binding: Binding | SealedBindingValue,
     *,
-    build_intent: ServingBuildIntent,
+    build_intent: RuntimeArtifactBuildIntent,
     source_artifact: Artifact
     | RegisteredArtifact
     | CanonicalIndex
@@ -4019,7 +4024,7 @@ def complete_pure_transform_publication_from_binding(
 def complete_binding_finalize_publication_from_binding(
     binding: Binding | SealedBindingValue,
     *,
-    build_intent: ServingBuildIntent,
+    build_intent: RuntimeArtifactBuildIntent,
     admission_facts: ServingAdmissionFacts,
     source_artifact: Artifact
     | RegisteredArtifact
@@ -4645,9 +4650,10 @@ __all__ = [
     "RealizationTargetSetReport",
     "RealizationTargetPlan",
     "PrefetchRetentionPolicy",
+    "PrefetchHandoff",
+    "PrefetchHandoffMemberFailure",
+    "PrefetchHandoffSet",
     "PrefetchedReplica",
-    "PrefetchedServingBinding",
-    "PrefetchedServingBindingSet",
     "PartialSealResult",
     "PublicDiskSourceHandle",
     "PreparedServingRegistration",
@@ -4660,9 +4666,15 @@ __all__ = [
     "IdentityMintStrategy",
     "RegisteredServingPublication",
     "RegisteredArtifact",
+    "RealizationTarget",
+    "RealizationTargetSet",
     "RepresentationAdmissionPlan",
     "RepresentationPublishContract",
     "RepresentationPublishSpec",
+    "RuntimeArtifactBuildIntent",
+    "RuntimeArtifactManifest",
+    "RuntimeArtifactPolicy",
+    "RuntimeArtifactPolicyInput",
     "SourceBoundCapability",
     "ServingPublicationSubject",
     "ReplicaInfo",
@@ -4671,24 +4683,22 @@ __all__ = [
     "SERVING_MANIFEST_TENSOR_NAME",
     "SealedBindingValue",
     "StagedBindingValue",
-    "ServingArtifactManifest",
     "ServingAdmissionFacts",
-    "ServingBindingMemberRef",
-    "ServingBindingReadiness",
-    "ServingBindingResolvedLayout",
-    "ServingBindingResolvedSpecCacheEntry",
-    "ServingBindingSetTarget",
-    "ServingBindingSourceKind",
-    "ServingBindingSourceMemberRef",
-    "ServingBindingSourceRef",
-    "ServingBindingSourceReuseDecision",
-    "ServingBindingSourceReuseMode",
-    "ServingBindingTarget",
-    "ServingBindingSpecCacheRecord",
+    "RuntimeBindingMemberRef",
+    "RuntimeBindingReadiness",
+    "RuntimeBindingResolvedLayout",
+    "RuntimeRealizationSpecCacheEntry",
+    "RuntimeBindingSourceKind",
+    "RuntimeBindingSourceMemberRef",
+    "RuntimeBindingSourceRef",
+    "RuntimeBindingSourceReuseDecision",
+    "RuntimeBindingSourceReuseMode",
+    "RuntimeTopologyRef",
+    "RuntimeRealizationSpecCacheRecord",
     "REFERENCE_RUNTIME",
-    "ReferenceServingAcquireResult",
-    "ReferenceServingResolvedSpec",
-    "ReferenceServingTensorSpec",
+    "ReferenceRuntimeAcquireResult",
+    "ReferenceRuntimeResolvedSpec",
+    "ReferenceRuntimeTensorSpec",
     "artifact_realization_profile_payload",
     "artifact_realization_report_to_dict",
     "acquire_reference_binding",
@@ -4721,19 +4731,17 @@ __all__ = [
     "read_matching_resolved_spec_cache_entry",
     "read_resolved_spec_cache_entry",
     "release_reference_acquire",
-    "serving_binding_spec_cache_root",
+    "runtime_realization_spec_cache_root",
     "target_set_report_for_retained_bindings",
     "target_set_strategy_plan_for",
     "target_from_reference_cache_record",
-    "unpack_prefetched_serving_binding",
-    "unpack_prefetched_serving_binding_set",
+    "unpack_prefetch_handoff",
+    "unpack_prefetch_handoff_set",
     "write_resolved_spec_cache_entry",
     "write_reference_resolved_spec_cache_entry",
-    "ServingBuildIntent",
     "SERVING_BUILD_DIGEST_VERSION",
-    "ServingRuntimePolicy",
-    "ServingRuntimePolicyInput",
     "ServingSupportLevel",
+    "coerce_runtime_artifact_policy",
     "StoreCapabilities",
     "Store",
     "StoreOptions",
@@ -4768,7 +4776,6 @@ __all__ = [
     "complete_structural_representation_publish_attempt",
     "compute_pure_transform_representation_contract_hash",
     "build_serving_manifest_ref",
-    "coerce_serving_runtime_policy",
     "compute_serving_tensor_schema_hash",
     "count_canonical_serving_tensors",
     "prepare_binding_finalize_serving_registration",
@@ -4778,12 +4785,12 @@ __all__ = [
     "TargetTensors",
     "PersistenceStatusResult",
     "PersistenceShardStatus",
-    "ServingBindingSpecCacheGroupIndex",
-    "ServingBindingSpecCacheRecord",
+    "RuntimeRealizationSpecCacheGroupIndex",
+    "RuntimeRealizationSpecCacheRecord",
     "REFERENCE_RUNTIME",
-    "ReferenceServingAcquireResult",
-    "ReferenceServingResolvedSpec",
-    "ReferenceServingTensorSpec",
+    "ReferenceRuntimeAcquireResult",
+    "ReferenceRuntimeResolvedSpec",
+    "ReferenceRuntimeTensorSpec",
     "acquire_reference_binding",
     "build_reference_resolved_spec",
     "build_reference_target_layout",
@@ -4795,10 +4802,10 @@ __all__ = [
     "read_resolved_spec_cache_entry",
     "read_resolved_spec_cache_group_index",
     "release_reference_acquire",
-    "serving_binding_spec_cache_root",
+    "runtime_realization_spec_cache_root",
     "target_from_reference_cache_record",
-    "unpack_prefetched_serving_binding",
-    "unpack_prefetched_serving_binding_set",
+    "unpack_prefetch_handoff",
+    "unpack_prefetch_handoff_set",
     "write_resolved_spec_cache_entry",
     "write_resolved_spec_cache_group_index",
     "write_reference_resolved_spec_cache_entry",

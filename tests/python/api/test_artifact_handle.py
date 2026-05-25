@@ -30,8 +30,8 @@ from tensorcast.api.store.types import ArtifactError, StoreOptions
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import (
     BuilderMode,
-    ServingArtifactManifest,
-    ServingRuntimePolicy,
+    RuntimeArtifactManifest,
+    RuntimeArtifactPolicy,
     build_serving_manifest_ref,
 )
 
@@ -718,7 +718,7 @@ def test_bind_coerces_serving_manifest_into_runtime_policy(
 
     monkeypatch.setattr(Artifact, "_bind_owned", _fake_bind_owned)
 
-    manifest = ServingArtifactManifest(
+    manifest = RuntimeArtifactManifest(
         framework_name="torch",
         adapter_version="adapter-v1",
         serving_abi_version="abi-v1",
@@ -733,17 +733,37 @@ def test_bind_coerces_serving_manifest_into_runtime_policy(
 
     result = artifact.bind(
         device="cuda:0",
-        serving_runtime_policy=manifest,
+        runtime_artifact_policy=manifest,
     )
 
     assert result is fake_binding
     assert captured["device"] == torch.device("cuda:0")
-    assert captured["serving_runtime_policy"] == ServingRuntimePolicy(
+    assert captured["runtime_artifact_policy"] == RuntimeArtifactPolicy(
         require_manifest=True,
         serving_manifest_ref="tensor:__alt_manifest__.json",
         expected_representation_contract_hash="bafkrepresentation",
         expected_serving_build_digest="bafkbuilddigest",
     )
+
+
+def test_realization_spec_uses_only_runtime_artifact_policy_name() -> None:
+    neutral_policy = RuntimeArtifactPolicy(
+        serving_manifest_ref="tensor:manifest-a.json",
+    )
+
+    with pytest.raises(TypeError, match="serving_runtime_policy"):
+        ArtifactRealizationSpec.binding(
+            device="cuda:0",
+            runtime_artifact_policy=neutral_policy,
+            serving_runtime_policy=neutral_policy,
+        )
+
+    spec = ArtifactRealizationSpec.binding(
+        device="cuda:0",
+        runtime_artifact_policy=neutral_policy,
+    )
+    assert spec.runtime_artifact_policy is neutral_policy
+    assert not hasattr(spec, "serving_runtime_policy")
 
 
 def test_tensor_dict_and_adopted_binding_share_source_selection_with_separate_target_digests(

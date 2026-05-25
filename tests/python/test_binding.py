@@ -38,8 +38,8 @@ from tensorcast.types import (
     HashLocation,
     IdentityMintStrategy,
     PublishedModelVersion,
+    RuntimeArtifactPolicy,
     ServerConfig,
-    ServingRuntimePolicy,
     SourceBoundCapability,
     SourceBoundPlanDiagnostics,
     VramRegionHandle,
@@ -1855,7 +1855,7 @@ def test_complete_binding_finalize_publication_from_binding_uses_current_value_c
 
     result = store.complete_binding_finalize_publication_from_binding(
         binding,
-        build_intent=store_mod.ServingBuildIntent(
+        build_intent=store_mod.RuntimeArtifactBuildIntent(
             builder_mode=store_mod.BuilderMode.BINDING_FINALIZE,
             framework_name="pytest",
             adapter_version="adapter-v1",
@@ -2280,15 +2280,30 @@ def test_binding_swap_coerces_published_model_version_into_runtime_policy() -> N
         serving_manifest_ref=build_serving_manifest_ref("__alt_manifest__.json"),
     )
 
-    binding.swap("artifact-2", serving_runtime_policy=version)
+    binding.swap("artifact-2", runtime_artifact_policy=version)
 
     assert len(slot.swap_calls) == 1
-    assert slot.swap_calls[0]["serving_runtime_policy"] == ServingRuntimePolicy(
+    assert slot.swap_calls[0]["runtime_artifact_policy"] == RuntimeArtifactPolicy(
         require_manifest=True,
         serving_manifest_ref="tensor:__alt_manifest__.json",
         expected_representation_contract_hash="bafkrepresentation",
         expected_serving_build_digest="bafkbuilddigest",
     )
+
+
+def test_binding_swap_uses_only_runtime_artifact_policy_name() -> None:
+    slot = _FakeBindingSlot()
+    binding = Binding(slot)
+    neutral_policy = RuntimeArtifactPolicy(serving_manifest_ref="tensor:a.json")
+
+    with pytest.raises(TypeError, match="serving_runtime_policy"):
+        binding.swap(
+            "artifact-2",
+            runtime_artifact_policy=neutral_policy,
+            serving_runtime_policy=neutral_policy,
+        )
+
+    assert slot.swap_calls == []
 
 
 def test_bind_does_not_delegate_to_bind_into(monkeypatch: pytest.MonkeyPatch) -> None:

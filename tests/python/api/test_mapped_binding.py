@@ -819,7 +819,7 @@ def test_bind_into_mapping_propagates_collective_hint_in_operation_id(
     import tensorcast.api._device as device_mod
 
     artifact_mod = importlib.import_module("tensorcast.api.store.artifact")
-    store_mod = importlib.import_module("tensorcast.api.store.__init__")
+    store_mod = importlib.import_module("tensorcast.api.store")
 
     monkeypatch.setattr(device_mod, "device_uuid_for", lambda device_id: "gpu-0")
     monkeypatch.setattr(artifact_mod, "device_uuid_for", lambda device_id: "gpu-0")
