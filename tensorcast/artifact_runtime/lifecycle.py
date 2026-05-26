@@ -23,29 +23,19 @@ from typing import Any, NoReturn, cast
 import torch
 
 import tensorcast as tc
-import tensorcast.artifact_runtime.attachment as tc_runtime_attachment
 import tensorcast.artifact_runtime.binding.execution as tc_binding_runtime
 import tensorcast.artifact_runtime.binding.retained as tc_retained_binding
 import tensorcast.artifact_runtime.config as tc_runtime_config
 import tensorcast.artifact_runtime.contract as tc_contract
 import tensorcast.artifact_runtime.diagnostics as tc_diagnostics
-import tensorcast.artifact_runtime.dto as tc_dto
-import tensorcast.artifact_runtime.errors as tc_errors
-import tensorcast.artifact_runtime.host as tc_hosts
 import tensorcast.artifact_runtime.intent as tc_runtime_intent
-import tensorcast.artifact_runtime.locator as tc_runtime_locator
 import tensorcast.artifact_runtime.publication.replica as tc_replica_publication
 import tensorcast.artifact_runtime.readiness as tc_readiness
-import tensorcast.artifact_runtime.recipe.build as tc_recipe_build
-import tensorcast.artifact_runtime.recipe.compiler as tc_compiler
 import tensorcast.artifact_runtime.recipe.local_ready as tc_local_ready
-import tensorcast.artifact_runtime.recipe.materialization as tc_materialization
-import tensorcast.artifact_runtime.recipe.publication as tc_publication
 import tensorcast.artifact_runtime.recipe.semantic_validation as tc_semantic_validation
 import tensorcast.artifact_runtime.recipe.tensor_schema as tc_tensor_schema
 import tensorcast.artifact_runtime.request_facts as tc_request_facts
 import tensorcast.artifact_runtime.source as tc_source_catalog
-import tensorcast.artifact_runtime.view as tc_runtime_view
 from tensorcast.api.store.common import canonical_index_to_bytes
 from tensorcast.api.store.realization_kernel import (
     ArtifactRealizationHandle,
@@ -60,14 +50,89 @@ from tensorcast.api.store.realization_kernel import (
     resolve_artifact_selection,
 )
 from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry
-from tensorcast.artifact_runtime import policy as tc_runtime_policy
 from tensorcast.artifact_runtime.artifact.resolver import (
     ResolvedRuntimeArtifact,
     RuntimeArtifactResolver,
     canonical_index_from_descriptor,
     is_reserved_runtime_tensor_name,
 )
+from tensorcast.artifact_runtime.attachment import (
+    RuntimeAttachment,
+    RuntimeBindingState,
+    RuntimeBindingView,
+    RuntimeStateSeed,
+)
+from tensorcast.artifact_runtime.dto import (
+    FrameworkIntegrationContext,
+    PreparedRuntimeArtifact,
+    RuntimeBindingValue,
+    RuntimePlacement,
+)
+from tensorcast.artifact_runtime.errors import (
+    AdmissionRejectedError,
+    ArtifactLocatorResolutionError,
+    ArtifactRuntimeIntegrationError,
+    ArtifactRuntimeNotImplementedError,
+    AttachFinalizeError,
+    AuthorityValidationError,
+    CapabilityMissingError,
+    ConfigConflictError,
+    ManifestMismatchError,
+    OwnershipTransferError,
+    PlacementAdmissionError,
+    RestoreBindingError,
+    SchemaMismatchError,
+    SourceProviderError,
+    SourceSubjectError,
+)
+from tensorcast.artifact_runtime.errors import (
+    capability_missing as _capability_missing,
+)
+from tensorcast.artifact_runtime.host import (
+    AdmissionDecision,
+    AdmissionRequest,
+    DefaultAdmissionPolicy,
+    FrameworkHost,
+    FrameworkIdentity,
+    IntegrationHost,
+    MaterializationExecutionFacts,
+    MaterializationPolicy,
+    PlacementAdmissionFacts,
+    PlacementIdentityFacts,
+    PlacementMemberFacts,
+    RecipeCachePolicy,
+    RuntimeProfile,
+    SourceCatalogRequest,
+    SourceDownloadPolicy,
+    SourceHost,
+    SourceSelector,
+    SourceSubjectCoordinator,
+    TensorSurfaceHost,
+    TorchTensorHost,
+    runtime_placement_from_framework_facts,
+)
+from tensorcast.artifact_runtime.locator import (
+    ArtifactLocator,
+)
+from tensorcast.artifact_runtime.policy import (
+    RuntimePolicy,
+)
+from tensorcast.artifact_runtime.recipe.build import (
+    RecipeBuildCacheConfig,
+    RecipeBuildSession,
+    RuntimeBindingPlan,
+)
+from tensorcast.artifact_runtime.recipe.compiler import (
+    TensorcastSemanticValidationSpec,
+    TensorSchemaEntry,
+)
 from tensorcast.artifact_runtime.recipe.trace_ir import TracePlan
+from tensorcast.artifact_runtime.view import (
+    RuntimeWorkerView,
+    source_selection_projection_from_artifact_realization_report,
+    source_selection_projection_from_execution_diagnostics,
+    source_selection_projection_from_materialization_diagnostics,
+)
 from tensorcast.retained_realization_authority import (
     ParsedRetainedRealizationAuthority,
 )
@@ -82,33 +147,14 @@ BindingUpdateEpoch = tc.BindingUpdateEpoch
 BindingReservationCapability = tc.BindingReservationCapability
 BindingValueRef = tc.BindingValueRef
 BuilderMode = tc.BuilderMode
-CompiledRuntimeRecipe = tc_compiler.CompiledRuntimeRecipe
-BindingFinalizeMaterializationResult = (
-    tc_materialization.BindingFinalizeMaterializationResult
-)
 DEFAULT_RUNTIME_PROFILE = tc_runtime_config.DEFAULT_RUNTIME_PROFILE
 LOCAL_READY_BOOTSTRAP_BUILD_PIPELINE_VERSION = (
     tc_local_ready.LOCAL_READY_BOOTSTRAP_BUILD_PIPELINE_VERSION
 )
 
 _LOGGER = logging.getLogger(__name__)
-FamilyReadiness = tc_dto.FamilyReadiness
-FrameworkIntegrationContext = tc_dto.FrameworkIntegrationContext
-PreparedRuntimeArtifact = tc_dto.PreparedRuntimeArtifact
-RuntimeBindingValue = tc_dto.RuntimeBindingValue
 PublishedModelVersion = tc.PublishedModelVersion
-RuntimeBindingPlan = tc_recipe_build.RuntimeBindingPlan
-RecipeBuildCacheConfig = tc_recipe_build.RecipeBuildCacheConfig
-RecipeBuildRunResult = tc_recipe_build.RecipeBuildRunResult
-RecipeCacheLookupResult = tc_recipe_build.RecipeCacheLookupResult
-RecipeCacheWriteResult = tc_recipe_build.RecipeCacheWriteResult
-RecipeBuildSession = tc_recipe_build.RecipeBuildSession
-COMPILED_RECIPE_MEMORY_CACHE = tc_recipe_build.COMPILED_RECIPE_MEMORY_CACHE
-TRACE_PLAN_MEMORY_CACHE = tc_recipe_build.TRACE_PLAN_MEMORY_CACHE
-RecipeCompileInputs = tc_compiler.RecipeCompileInputs
-RecipePublicationContext = tc_publication.RecipePublicationContext
 GroupRealizationAcquireRef = tc.GroupRealizationAcquireRef
-RuntimeTensorView = tc_dto.RuntimeTensorView
 SOURCE_BOUND_CONTRACT_PATH_COLLECTIVE_FIRST_V4 = (
     tc_contract.SOURCE_BOUND_CONTRACT_PATH_COLLECTIVE_FIRST_V4
 )
@@ -117,7 +163,6 @@ RuntimeArtifactManifest = tc.RuntimeArtifactManifest
 TensorCastRuntimeConfig = tc_runtime_config.TensorCastRuntimeConfig
 ReplicaPublicationPolicy = tc_runtime_config.ReplicaPublicationPolicy
 RuntimeBindingMemberRef = tc.RuntimeBindingMemberRef
-RuntimePlacement = tc_dto.RuntimePlacement
 RuntimeArtifactPolicy = tc.RuntimeArtifactPolicy
 SourceBoundContractState = tc_contract.SourceBoundContractState
 source_bound_contract_profile_fields = tc_contract.source_bound_contract_profile_fields
@@ -125,157 +170,108 @@ SourceCatalog = tc_source_catalog.SourceCatalog
 SOURCE_CATALOG_SCHEMA_VERSION = tc_source_catalog.SOURCE_CATALOG_SCHEMA_VERSION
 
 
-AdmissionRejectedError = tc_errors.AdmissionRejectedError
-ArtifactLocatorResolutionError = tc_errors.ArtifactLocatorResolutionError
-AttachFinalizeError = tc_errors.AttachFinalizeError
-AuthorityValidationError = tc_errors.AuthorityValidationError
-CapabilityMissingError = tc_errors.CapabilityMissingError
-ConfigConflictError = tc_errors.ConfigConflictError
-ManifestMismatchError = tc_errors.ManifestMismatchError
-OwnershipTransferError = tc_errors.OwnershipTransferError
-PlacementAdmissionError = tc_errors.PlacementAdmissionError
-PolicyMismatchError = tc_errors.PolicyMismatchError
-PublicationRequiredError = tc_errors.PublicationRequiredError
-ReplicaPublicationError = tc_errors.ReplicaPublicationError
-RestoreBindingError = tc_errors.RestoreBindingError
-RuntimeSwapError = tc_errors.RuntimeSwapError
-SchemaMismatchError = tc_errors.SchemaMismatchError
-ArtifactRuntimeIntegrationError = tc_errors.ArtifactRuntimeIntegrationError
-ArtifactRuntimeNotImplementedError = tc_errors.ArtifactRuntimeNotImplementedError
-SourceProviderError = tc_errors.SourceProviderError
-SourceSubjectError = tc_errors.SourceSubjectError
-TensorCastRuntimeError = tc_errors.TensorCastRuntimeError
-_capability_missing = tc_errors.capability_missing
 ModelRuntimeRequestFactsError = tc_request_facts.ModelRuntimeRequestFactsError
 resolve_model_runtime_request_facts = (
     tc_request_facts.resolve_model_runtime_request_facts
 )
 
-RuntimeAttachment = tc_runtime_attachment.RuntimeAttachment
-RuntimeBindingState = tc_runtime_attachment.RuntimeBindingState
-RuntimeBindingView = tc_runtime_attachment.RuntimeBindingView
-RuntimeStateSeed = tc_runtime_attachment.RuntimeStateSeed
-
-BindingValueRefProjection = tc_runtime_view.BindingValueRefProjection
-MaterializationDiagnosticsProjection = (
-    tc_runtime_view.MaterializationDiagnosticsProjection
-)
-PublishedReplicaProjection = tc_runtime_view.PublishedReplicaProjection
-ReloadRequestProjection = tc_runtime_view.ReloadRequestProjection
-ReloadResponseProjection = tc_runtime_view.ReloadResponseProjection
-RuntimeEndpointProjection = tc_runtime_view.RuntimeEndpointProjection
-RuntimeWorkerView = tc_runtime_view.RuntimeWorkerView
-SourceBoundContractProjection = tc_runtime_view.SourceBoundContractProjection
-SourceSelectionProjection = tc_runtime_view.SourceSelectionProjection
-WeightVersionProjection = tc_runtime_view.WeightVersionProjection
-source_selection_projection_from_artifact_realization_report = (
-    tc_runtime_view.source_selection_projection_from_artifact_realization_report
-)
-source_selection_projection_from_execution_diagnostics = (
-    tc_runtime_view.source_selection_projection_from_execution_diagnostics
-)
-source_selection_projection_from_materialization_diagnostics = (
-    tc_runtime_view.source_selection_projection_from_materialization_diagnostics
-)
-
-# Host capability contracts live in hosts.py. Lifecycle uses module-local
-# aliases only to keep the orchestration code readable.
-AdmissionDecision = tc_hosts.AdmissionDecision
-AdmissionPolicy = tc_hosts.AdmissionPolicy
-AdmissionRequest = tc_hosts.AdmissionRequest
-CollectiveHost = tc_hosts.CollectiveHost
-DefaultAdmissionPolicy = tc_hosts.DefaultAdmissionPolicy
-FinalizeHookHost = tc_hosts.FinalizeHookHost
-FinalizePhase = tc_hosts.FinalizePhase
-FinalizePolicy = tc_hosts.FinalizePolicy
-FrameworkHost = tc_hosts.FrameworkHost
-FrameworkIdentity = tc_hosts.FrameworkIdentity
-IntegrationHost = tc_hosts.IntegrationHost
-ManifestPolicy = tc_hosts.ManifestPolicy
-MaterializationExecutionFacts = tc_hosts.MaterializationExecutionFacts
-MaterializationPolicy = tc_hosts.MaterializationPolicy
-NativeLoadHost = tc_hosts.NativeLoadHost
-ObservabilitySink = tc_hosts.ObservabilitySink
-PlacementAdmissionFacts = tc_hosts.PlacementAdmissionFacts
-PlacementHost = tc_hosts.PlacementHost
-PlacementIdentityFacts = tc_hosts.PlacementIdentityFacts
-PlacementMemberFacts = tc_hosts.PlacementMemberFacts
-RecipeCachePolicy = tc_hosts.RecipeCachePolicy
-RecipeTraceHost = tc_hosts.RecipeTraceHost
-RuntimeConfig = tc_hosts.RuntimeConfig
-RuntimeProfile = tc_hosts.RuntimeProfile
-SourceBoundContractProfile = tc_hosts.SourceBoundContractProfile
-SourceCatalogPolicy = tc_hosts.SourceCatalogPolicy
-SourceCatalogProvider = tc_hosts.SourceCatalogProvider
-SourceCatalogRequest = tc_hosts.SourceCatalogRequest
-SourceDownloadPolicy = tc_hosts.SourceDownloadPolicy
-SourceHost = tc_hosts.SourceHost
-SourceSelector = tc_hosts.SourceSelector
-SourceSubjectCoordinator = tc_hosts.SourceSubjectCoordinator
-TensorCastEvent = tc_hosts.TensorCastEvent
-TensorSurfaceHost = tc_hosts.TensorSurfaceHost
-TorchTensorHost = tc_hosts.TorchTensorHost
-semantic_placement_digest = tc_hosts.semantic_placement_digest
-runtime_placement_from_framework_facts = tc_hosts.runtime_placement_from_framework_facts
-TensorcastSemanticValidationSpec = tc_compiler.TensorcastSemanticValidationSpec
-TensorcastRuntimeFacts = tc_compiler.TensorcastRuntimeFacts
-TensorSchemaEntry = tc_compiler.TensorSchemaEntry
 read_source_bound_contract_state = tc_contract.read_source_bound_contract_state
 resolve_runtime_config_profile = tc_runtime_config.resolve_runtime_config_profile
 
-RUNTIME_ENDPOINT_PROJECTION_SCHEMA_VERSION = (
-    tc_runtime_view.RUNTIME_ENDPOINT_PROJECTION_SCHEMA_VERSION
-)
-WEIGHT_VERSION_PROJECTION_SCHEMA_VERSION = (
-    tc_runtime_view.WEIGHT_VERSION_PROJECTION_SCHEMA_VERSION
-)
-RELOAD_RESPONSE_PROJECTION_SCHEMA_VERSION = (
-    tc_runtime_view.RELOAD_RESPONSE_PROJECTION_SCHEMA_VERSION
-)
-PUBLISHED_REPLICA_PROJECTION_SCHEMA_VERSION = (
-    tc_runtime_view.PUBLISHED_REPLICA_PROJECTION_SCHEMA_VERSION
-)
-SOURCE_SELECTION_PROJECTION_SCHEMA_VERSION = (
-    tc_runtime_view.SOURCE_SELECTION_PROJECTION_SCHEMA_VERSION
-)
-ARTIFACT_LOCATOR_SCHEMA_VERSION = tc_runtime_locator.ARTIFACT_LOCATOR_SCHEMA_VERSION
 binding_layout_debug_payload = tc_diagnostics.binding_layout_debug_payload
 binding_layout_profile_fields = tc_diagnostics.binding_layout_profile_fields
 binding_layout_tensor_count = tc_diagnostics.binding_layout_tensor_count
-RUNTIME_POLICY_SCHEMA_VERSION = tc_runtime_policy.RUNTIME_POLICY_SCHEMA_VERSION
-ArtifactLocator = tc_runtime_locator.ArtifactLocator
-RuntimePolicy = tc_runtime_policy.RuntimePolicy
-normalize_runtime_reload_request_payload = (
-    tc_runtime_policy.normalize_runtime_reload_request_payload
-)
-merge_runtime_reload_extra_config = tc_runtime_policy.merge_runtime_reload_extra_config
-load_source_tensors_for_recipe = tc_materialization.load_source_tensors_for_recipe
-materialize_recipe_copy_plan_tensors = (
-    tc_materialization.materialize_recipe_copy_plan_tensors
-)
-materialize_pure_transform_runtime_tensors = (
-    tc_materialization.materialize_pure_transform_runtime_tensors
-)
-materialize_binding_finalize_runtime_tensors = (
-    tc_materialization.materialize_binding_finalize_runtime_tensors
-)
-collect_runtime_tensors_from_model = (
-    tc_materialization.collect_runtime_tensors_from_model
-)
-run_binding_finalize_semantic_validation = (
-    tc_materialization.run_binding_finalize_semantic_validation
-)
-validate_binding_finalize_tensor_schema = (
-    tc_materialization.validate_binding_finalize_tensor_schema
-)
-complete_pure_transform_recipe_publication_from_recipe = (
-    tc_publication.complete_pure_transform_recipe_publication
-)
 PLACEMENT_IDENTITY_FACTS_SCHEMA_VERSION = 1
 PLACEMENT_ADMISSION_FACTS_SCHEMA_VERSION = 1
 SOURCE_DOWNLOAD_POLICY_SCHEMA_VERSION = 1
 RECIPE_CACHE_POLICY_SCHEMA_VERSION = 1
 SOURCE_CATALOG_REQUEST_SCHEMA_VERSION = 1
+
+__all__ = [
+    "AdmissionDecision",
+    "AdmissionRejectedError",
+    "AdmissionRequest",
+    "ArtifactLocatorResolutionError",
+    "ArtifactRuntimeIntegration",
+    "ArtifactRuntimeIntegrationError",
+    "ArtifactRuntimeNotImplementedError",
+    "ArtifactRuntimeSession",
+    "AttachFinalizeError",
+    "AuthorityValidationError",
+    "BootstrapPolicy",
+    "CapabilityMissingError",
+    "ConfigConflictError",
+    "DefaultAdmissionPolicy",
+    "ExistingRuntimeArtifact",
+    "FinalizeClass",
+    "FrameworkIdentity",
+    "IntegrationHost",
+    "LocalReadyBindingContract",
+    "LocalReadyManifestCarrierResult",
+    "LocalReadyMaterializationIdentity",
+    "LocalSourceBootstrap",
+    "ManifestMismatchError",
+    "MaterializationExecutionFacts",
+    "OwnershipTransferError",
+    "PLACEMENT_ADMISSION_FACTS_SCHEMA_VERSION",
+    "PLACEMENT_IDENTITY_FACTS_SCHEMA_VERSION",
+    "PlacementAdmissionError",
+    "PlacementAdmissionFacts",
+    "PlacementIdentityFacts",
+    "PlacementMemberFacts",
+    "RECIPE_CACHE_POLICY_SCHEMA_VERSION",
+    "SERVING_MANIFEST_TENSOR_NAME",
+    "SOURCE_CATALOG_REQUEST_SCHEMA_VERSION",
+    "SOURCE_CATALOG_SCHEMA_VERSION",
+    "SOURCE_DOWNLOAD_POLICY_SCHEMA_VERSION",
+    "RecipeBuildSessionRequest",
+    "RecipeCachePolicy",
+    "RequestContext",
+    "RestoreBindingError",
+    "RetainedBindingAcquire",
+    "RuntimeAttachment",
+    "RuntimeBindingMaterialization",
+    "RuntimeBindingPlan",
+    "RuntimeBindingResult",
+    "RuntimeBindingState",
+    "RuntimeBindingView",
+    "RuntimeLoadResult",
+    "RuntimePlacement",
+    "RuntimeProfile",
+    "RuntimeReloadResult",
+    "RuntimeStateSeed",
+    "RuntimeSupportLevel",
+    "RuntimeWorkerView",
+    "SchemaMismatchError",
+    "SourceCatalogRequest",
+    "SourceDownloadPolicy",
+    "SourceHost",
+    "SourceProviderError",
+    "SourceSelector",
+    "SourceSubject",
+    "TensorSchemaEntry",
+    "TorchTensorHost",
+    "TensorcastSemanticValidationSpec",
+    "_DirectRuntimeLoad",
+    "_LocalReadyBootstrap",
+    "_LocalReadyFinalize",
+    "_RetainedBindingAcquire",
+    "_RuntimeReload",
+    "bind_runtime_artifact",
+    "build_local_ready_prepared_artifact",
+    "is_runtime_binding_swap_capable",
+    "local_ready_current_value_summary_fields",
+    "restore_prepared_local_ready_binding",
+    "restore_retained_binding",
+    "runtime_binding_state_from_runtime_view",
+    "runtime_placement_from_framework_facts",
+    "source_selection_projection_from_artifact_realization_report",
+    "source_selection_projection_from_execution_diagnostics",
+    "source_selection_projection_from_materialization_diagnostics",
+    "source_subject_broadcast_payload",
+    "source_subject_from_broadcast_payload",
+    "swap_runtime_artifact",
+]
 
 
 BootstrapPolicy = tc_runtime_intent.BootstrapPolicy

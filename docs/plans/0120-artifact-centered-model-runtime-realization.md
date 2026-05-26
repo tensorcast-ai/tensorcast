@@ -70,6 +70,10 @@ that are truly model-serving ABI concepts.
   `tensorcast.api.store.publication_builder`. Runtime-facing helper/class names
   now use `Runtime*` / `runtime_artifact` terminology; `serving_*` remains only
   on persisted manifest/protobuf fields that are still wire ABI.
+- `tensorcast/artifact_runtime/lifecycle.py` has started moving away from
+  assignment-style shallow aliases. Host, error, attachment, view, recipe, and
+  publication dependencies are now direct imports where lifecycle still owns the
+  orchestration boundary.
 - Tests have been moved toward `tests/python/artifact_runtime/` and
   runtime-realization API test names. Old serving module tests have been deleted
   or renamed unless they are still testing a daemon/proto/publication ABI term.
@@ -199,6 +203,7 @@ Current local evidence after the latest cleanup batch:
 - `ruff check tensorcast tests/python/api tests/python/artifact_runtime tests/python/test_runtime_publication_types.py` passed.
 - `git diff --check` passed in TensorCast.
 - `TENSORCAST_SKIP_TORCH_ABI_CHECK=1 python -m compileall -q tensorcast tests/python` passed.
+- `ruff check tensorcast/artifact_runtime/lifecycle.py`, `python -m py_compile tensorcast/artifact_runtime/lifecycle.py`, and `TENSORCAST_SKIP_TORCH_ABI_CHECK=1 pytest tests/python/artifact_runtime/test_lifecycle.py tests/python/artifact_runtime/test_readiness.py -q` passed after the lifecycle import cleanup.
 - `TENSORCAST_SKIP_TORCH_ABI_CHECK=1 pytest tests/python/api/test_realization_kernel.py tests/python/artifact_runtime/test_fake_framework_boundary.py tests/python/artifact_runtime/test_lifecycle.py -q` passed.
 - The broad 0120 Python validation slice listed above passed.
 - In `/data/workspace/internal-vllm`, the TensorCast focused suite passed:
