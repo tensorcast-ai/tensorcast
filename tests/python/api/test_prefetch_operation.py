@@ -29,16 +29,16 @@ from tensorcast.types import (
     BindingValueRef,
     BindingValueVerificationState,
     GroupRealizationAcquireRef,
-    PrefetchedServingBinding,
-    PrefetchedServingBindingSet,
-    ServingBindingMemberRef,
-    ServingBindingResolvedLayout,
-    ServingBindingSetTarget,
-    ServingBindingSourceMemberRef,
-    ServingBindingSourceRef,
-    ServingBindingSourceReuseDecision,
-    ServingBindingTarget,
-    ServingTopologyRef,
+    PrefetchHandoff,
+    PrefetchHandoffSet,
+    RealizationTarget,
+    RealizationTargetSet,
+    RuntimeBindingMemberRef,
+    RuntimeBindingResolvedLayout,
+    RuntimeBindingSourceMemberRef,
+    RuntimeBindingSourceRef,
+    RuntimeBindingSourceReuseDecision,
+    RuntimeTopologyRef,
 )
 
 
@@ -85,12 +85,12 @@ class _Client:
 
     def _prefetched_binding(
         self,
-        target: ServingBindingTarget,
+        target: RealizationTarget,
         *,
         readiness: object,
         staged_value: bool = False,
         wait_for_publish: bool = False,
-    ) -> PrefetchedServingBinding:
+    ) -> PrefetchHandoff:
         device_uuid = str(target.device_uuid or "GPU-0")
         suffix = target.member.member_index + 1
         value_id = f"staged-value-{suffix}" if staged_value else f"value-{suffix}"
@@ -111,7 +111,7 @@ class _Client:
             scope_digest=f"scope-digest-{suffix}",
             expires_at_ms=1234,
         )
-        return PrefetchedServingBinding(
+        return PrefetchHandoff(
             local_serving_ref=f"binding-local:binding-{suffix}:{value_id}",
             binding_value_ref=binding_ref,
             daemon_id="daemon-1",
@@ -141,12 +141,12 @@ class _Client:
 
     def prefetch_serving_binding(self, **kwargs):
         self.prefetch_binding_calls.append(kwargs)
-        target = cast(ServingBindingTarget | ServingBindingSetTarget, kwargs["target"])
+        target = cast(RealizationTarget | RealizationTargetSet, kwargs["target"])
         operation_id = str(kwargs.get("operation_id") or "prefetch-binding-op")
         readiness = kwargs["requested_readiness"]
-        if isinstance(target, ServingBindingSetTarget):
-            staged_members = target.source.source_kind == "serving_artifact_set"
-            result = PrefetchedServingBindingSet(
+        if isinstance(target, RealizationTargetSet):
+            staged_members = target.source.source_kind == "runtime_artifact_set"
+            result = PrefetchHandoffSet(
                 runtime=target.runtime,
                 topology=target.topology,
                 group_id=target.group_id,
@@ -224,10 +224,10 @@ def _store_ref(store: _Store) -> Any:
     return cast(Any, weakref.ref(store))
 
 
-def _serving_target(
+def _realization_target(
     *,
-    topology: ServingTopologyRef | None = None,
-    source: ServingBindingSourceRef | None = None,
+    topology: RuntimeTopologyRef | None = None,
+    source: RuntimeBindingSourceRef | None = None,
     member_id: str = "member-0",
     member_index: int = 0,
     member_count: int = 1,
@@ -238,25 +238,25 @@ def _serving_target(
     target_index_bytes: bytes = b"target-index",
     target_layout_hash: str = "target-layout-hash",
     spec_digest: str = "spec-digest",
-) -> ServingBindingTarget:
-    topology = topology or ServingTopologyRef(schema_topology_digest="topology-schema")
-    member = ServingBindingMemberRef(
+) -> RealizationTarget:
+    topology = topology or RuntimeTopologyRef(schema_topology_digest="topology-schema")
+    member = RuntimeBindingMemberRef(
         member_id=member_id,
         member_index=member_index,
         member_count=member_count,
         group_id="group-1",
     )
-    source = source or ServingBindingSourceRef(
+    source = source or RuntimeBindingSourceRef(
         source_kind="checkpoint_artifact",
         artifact_selection_digest="selection-digest",
         source_artifact_ref="mi2:source",
         source_schema_hash="source-schema",
     )
-    source_reuse = ServingBindingSourceReuseDecision(
-        mode="checkpoint_to_serving",
+    source_reuse = RuntimeBindingSourceReuseDecision(
+        mode="checkpoint_to_runtime",
         representation_contract_hash="repr-contract",
     )
-    resolved_layout = ServingBindingResolvedLayout(
+    resolved_layout = RuntimeBindingResolvedLayout(
         binding_layout_id=binding_layout_id,
         source=source,
         source_reuse=source_reuse,
@@ -271,7 +271,7 @@ def _serving_target(
         copy_plan_bytes=b"copy-plan",
         dst_specs_bytes=b"dst-specs",
     )
-    return ServingBindingTarget(
+    return RealizationTarget(
         runtime="vllm",
         device=device,
         device_uuid=device_uuid,
@@ -279,20 +279,20 @@ def _serving_target(
         topology=topology,
         member=member,
         model_config_digest="model-config",
-        serving_build_digest="serving-build",
+        runtime_build_digest="serving-build",
         resolved_layout=resolved_layout,
     )
 
 
-def _serving_target_set() -> ServingBindingSetTarget:
-    topology = ServingTopologyRef(schema_topology_digest="topology-schema")
-    source = ServingBindingSourceRef(
+def _realization_target_set() -> RealizationTargetSet:
+    topology = RuntimeTopologyRef(schema_topology_digest="topology-schema")
+    source = RuntimeBindingSourceRef(
         source_kind="checkpoint_artifact",
         artifact_selection_digest="selection-digest",
         source_artifact_ref="mi2:source",
         source_schema_hash="source-schema",
     )
-    target_0 = _serving_target(
+    target_0 = _realization_target(
         topology=topology,
         source=source,
         member_id="member-0",
@@ -306,7 +306,7 @@ def _serving_target_set() -> ServingBindingSetTarget:
         target_layout_hash="target-layout-hash-0",
         spec_digest="spec-digest-0",
     )
-    target_1 = _serving_target(
+    target_1 = _realization_target(
         topology=topology,
         source=source,
         member_id="member-1",
@@ -320,7 +320,7 @@ def _serving_target_set() -> ServingBindingSetTarget:
         target_layout_hash="target-layout-hash-1",
         spec_digest="spec-digest-1",
     )
-    return ServingBindingSetTarget(
+    return RealizationTargetSet(
         runtime="vllm",
         source=source,
         topology=topology,
@@ -329,37 +329,37 @@ def _serving_target_set() -> ServingBindingSetTarget:
     )
 
 
-def _serving_artifact_set_target_set() -> ServingBindingSetTarget:
-    topology = ServingTopologyRef(schema_topology_digest="topology-schema")
-    member_0 = ServingBindingMemberRef(
+def _serving_artifact_realization_target_set() -> RealizationTargetSet:
+    topology = RuntimeTopologyRef(schema_topology_digest="topology-schema")
+    member_0 = RuntimeBindingMemberRef(
         member_id="member-0",
         member_index=0,
         member_count=2,
         group_id="group-1",
     )
-    member_1 = ServingBindingMemberRef(
+    member_1 = RuntimeBindingMemberRef(
         member_id="member-1",
         member_index=1,
         member_count=2,
         group_id="group-1",
     )
-    source = ServingBindingSourceRef(
-        source_kind="serving_artifact_set",
+    source = RuntimeBindingSourceRef(
+        source_kind="runtime_artifact_set",
         artifact_selection_digest="artifact-set-selection",
         source_schema_hash="source-schema",
         topology=topology,
         members=(
-            ServingBindingSourceMemberRef(
+            RuntimeBindingSourceMemberRef(
                 member=member_0,
                 artifact_ref="mi2:serving-member-0",
             ),
-            ServingBindingSourceMemberRef(
+            RuntimeBindingSourceMemberRef(
                 member=member_1,
                 artifact_ref="mi2:serving-member-1",
             ),
         ),
     )
-    target_0 = _serving_target(
+    target_0 = _realization_target(
         topology=topology,
         source=source,
         member_id=member_0.member_id,
@@ -373,7 +373,7 @@ def _serving_artifact_set_target_set() -> ServingBindingSetTarget:
         target_layout_hash="target-layout-hash-0",
         spec_digest="spec-digest-0",
     )
-    target_1 = _serving_target(
+    target_1 = _realization_target(
         topology=topology,
         source=source,
         member_id=member_1.member_id,
@@ -387,7 +387,7 @@ def _serving_artifact_set_target_set() -> ServingBindingSetTarget:
         target_layout_hash="target-layout-hash-1",
         spec_digest="spec-digest-1",
     )
-    return ServingBindingSetTarget(
+    return RealizationTargetSet(
         runtime="vllm",
         source=source,
         topology=topology,
@@ -518,11 +518,11 @@ def test_realize_async_prefetch_targets_emit_report_shaped_profile_events(
     )
     _ = replica_op.result(timeout_s=1.0)
     retained_op = artifact.realize_async(
-        ArtifactRealizationSpec.retained_binding(target=_serving_target())
+        ArtifactRealizationSpec.retained_binding(target=_realization_target())
     )
     _ = retained_op.result(timeout_s=1.0)
     target_set_op = artifact.realize_async(
-        ArtifactRealizationSpec.target_set(target=_serving_target_set())
+        ArtifactRealizationSpec.target_set(target=_realization_target_set())
     )
     _ = target_set_op.result(timeout_s=1.0)
 
@@ -551,7 +551,7 @@ def test_realize_async_prefetch_targets_emit_report_shaped_profile_events(
 def test_realize_async_retained_binding_completed_operation_status_and_cancel() -> None:
     store = _Store()
     artifact = Artifact(store_ref=_store_ref(store), artifact_id="aid")
-    target = _serving_target()
+    target = _realization_target()
 
     op = artifact.realize_async(ArtifactRealizationSpec.retained_binding(target=target))
 
@@ -559,18 +559,18 @@ def test_realize_async_retained_binding_completed_operation_status_and_cancel() 
     assert op.done() is True
     assert op.cancel() is False
     result = op.result(timeout_s=1.0)
-    assert isinstance(result, PrefetchedServingBinding)
+    assert isinstance(result, PrefetchHandoff)
 
 
 def test_realize_async_retained_binding_attaches_report_to_result() -> None:
     store = _Store()
     artifact = Artifact(store_ref=_store_ref(store), artifact_id="aid")
-    target = _serving_target()
+    target = _realization_target()
 
     op = artifact.realize_async(ArtifactRealizationSpec.retained_binding(target=target))
     result = op.result(timeout_s=1.0)
 
-    assert isinstance(result, PrefetchedServingBinding)
+    assert isinstance(result, PrefetchHandoff)
     assert store._runtime.ensure_client().prefetch_binding_calls
     assert result.report is not None
     report = cast(ArtifactRealizationReport, result.report)
@@ -598,19 +598,19 @@ def test_realize_async_retained_binding_attaches_report_to_result() -> None:
     assert retained.binding_layout_id == "layout-1"
     assert retained.binding_value_id == "value-1"
     assert retained.reservation_bytes == 1024
-    assert retained.readiness == "serving_local_ready"
+    assert retained.readiness == "runtime_local_ready"
     assert retained.verification_state == "local_only"
 
 
 def test_realize_async_retained_binding_set_attaches_target_set_report() -> None:
     store = _Store()
     artifact = Artifact(store_ref=_store_ref(store), artifact_id="aid")
-    target = _serving_target_set()
+    target = _realization_target_set()
 
     op = artifact.realize_async(ArtifactRealizationSpec.target_set(target=target))
     result = op.result(timeout_s=1.0)
 
-    assert isinstance(result, PrefetchedServingBindingSet)
+    assert isinstance(result, PrefetchHandoffSet)
     assert store._runtime.ensure_client().prefetch_binding_calls
     assert result.report is not None
     report = cast(ArtifactRealizationReport, result.report)
@@ -668,22 +668,22 @@ def test_retained_binding_realization_rejects_target_set_bypass() -> None:
 
     with pytest.raises(
         tc.ArtifactError,
-        match="ServingBindingSetTarget requires target_set realization",
+        match="RealizationTargetSet requires target_set realization",
     ):
         artifact.realize_async(
-            ArtifactRealizationSpec.retained_binding(target=_serving_target_set())
+            ArtifactRealizationSpec.retained_binding(target=_realization_target_set())
         )
 
 
 def test_realize_async_target_set_per_part_selection_reports_group_lifecycle() -> None:
     store = _Store()
     artifact = Artifact(store_ref=_store_ref(store), artifact_id="aid")
-    target = _serving_artifact_set_target_set()
+    target = _serving_artifact_realization_target_set()
 
     op = artifact.realize_async(ArtifactRealizationSpec.target_set(target=target))
     result = op.result(timeout_s=1.0)
 
-    assert isinstance(result, PrefetchedServingBindingSet)
+    assert isinstance(result, PrefetchHandoffSet)
     assert result.report is not None
     report = cast(ArtifactRealizationReport, result.report)
     assert report.target_kind == "target_set"
@@ -692,7 +692,7 @@ def test_realize_async_target_set_per_part_selection_reports_group_lifecycle() -
         "release_group_staged_acquire",
     )
     assert report.target_set is not None
-    assert report.target_set.source_kind == "serving_artifact_set"
+    assert report.target_set.source_kind == "runtime_artifact_set"
     assert report.target_set.source_selection_mode == "per_part_selection"
     assert report.target_set.publish_barrier is True
     assert report.target_set.group_realization_transaction_ids == ("txn-1",)
@@ -729,12 +729,12 @@ def test_realize_async_target_set_per_part_selection_reports_group_lifecycle() -
 def test_prefetch_target_set_uses_target_set_realization_spec() -> None:
     store = _Store()
     artifact = Artifact(store_ref=_store_ref(store), artifact_id="aid")
-    target = _serving_target_set()
+    target = _realization_target_set()
 
     op = artifact.prefetch(target=target)
     result = op.result(timeout_s=1.0)
 
-    assert isinstance(result, PrefetchedServingBindingSet)
+    assert isinstance(result, PrefetchHandoffSet)
     assert store._runtime.ensure_client().prefetch_binding_calls[0]["target"] == target
     report = cast(ArtifactRealizationReport, result.report)
     assert report.target_kind == "target_set"

@@ -6,6 +6,7 @@ import pytest
 import torch
 from torch import nn
 
+from tensorcast.artifact_runtime.host import TorchTensorHost
 from tensorcast.pytorch.module_binding import (
     TorchModuleAdapterMixin,
     align_runtime_binding_exclude_names,
@@ -19,7 +20,6 @@ from tensorcast.pytorch.module_binding import (
     snapshot_tensor_invariants,
     validate_tensor_invariants,
 )
-from tensorcast.artifact_runtime.host import TorchTensorHost
 
 
 class _TaggedParameter(nn.Parameter):
