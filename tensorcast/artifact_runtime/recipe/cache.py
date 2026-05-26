@@ -29,8 +29,8 @@ from tensorcast.artifact_runtime.recipe.trace_ir import (
 from tensorcast.types import (
     FinalizeClass,
     RuntimeBindingMemberRef,
+    RuntimeSupportLevel,
     RuntimeTopologyRef,
-    ServingSupportLevel,
 )
 
 RECIPE_CACHE_PAYLOAD_VERSION = 6
@@ -59,7 +59,7 @@ def _runtime_facts_from_dict(data: Mapping[str, Any]) -> TensorcastRuntimeFacts:
         ),
         adapter_version=str(data["adapter_version"]),
         serving_abi_version=str(data["serving_abi_version"]),
-        support_level=ServingSupportLevel(str(data["support_level"])),
+        support_level=RuntimeSupportLevel(str(data["support_level"])),
         runtime_only_tensor_names=tuple(
             str(name) for name in data.get("runtime_only_tensor_names", ())
         ),

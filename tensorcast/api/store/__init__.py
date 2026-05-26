@@ -87,22 +87,22 @@ from tensorcast.api.store.owned_binding_slot import (
     restore_owned_binding_tensors,
 )
 from tensorcast.api.store.publication_builder import (
-    PreparedServingRegistration,
-    RegisteredServingPublication,
+    PreparedRuntimeArtifactRegistration,
+    RegisteredRuntimeArtifactPublication,
     build_binding_finalize_admission_facts,
     build_binding_finalize_publication_bundle,
     build_pure_transform_publication_bundle,
     build_pure_transform_publication_bundle_from_registered_artifact,
     build_pure_transform_publication_spec,
     build_pure_transform_transform_spec,
-    build_serving_publication_bundle,
-    build_serving_publication_bundle_from_registered_artifact,
+    build_runtime_artifact_publication_bundle,
+    build_runtime_artifact_publication_bundle_from_registered_artifact,
     compute_pure_transform_representation_contract_hash,
-    compute_serving_tensor_schema_hash,
-    count_canonical_serving_tensors,
-    prepare_binding_finalize_serving_registration,
-    prepare_pure_transform_serving_registration,
-    prepare_serving_registration,
+    compute_runtime_artifact_tensor_schema_hash,
+    count_canonical_runtime_tensors,
+    prepare_binding_finalize_runtime_registration,
+    prepare_pure_transform_runtime_registration,
+    prepare_runtime_artifact_registration,
 )
 from tensorcast.api.store.realization_kernel import (
     ArtifactRealizationHandle,
@@ -266,6 +266,7 @@ from tensorcast.types import (
     RegionMemoryKind,
     RepresentationPublishContract,
     RepresentationPublishSpec,
+    RuntimeAdmissionFacts,
     RuntimeArtifactBuildIntent,
     RuntimeArtifactManifest,
     RuntimeArtifactPolicy,
@@ -278,12 +279,11 @@ from tensorcast.types import (
     RuntimeBindingSourceRef,
     RuntimeBindingSourceReuseDecision,
     RuntimeBindingSourceReuseMode,
+    RuntimePublicationSubject,
     RuntimeRealizationSpecCacheEntry,
+    RuntimeSupportLevel,
     RuntimeTopologyRef,
     SealAssemblyResult,
-    ServingAdmissionFacts,
-    ServingPublicationSubject,
-    ServingSupportLevel,
     SourceBoundCapability,
     SourceBoundPlanDiagnostics,
     VramRegionHandle,
@@ -877,36 +877,29 @@ def _decode_published_model_version_from_response(
         total_size=int(artifact.total_size),
         id_kind=_artifact_id_kind_from_proto(artifact.id_kind, artifact.artifact_id),
     )
+    serving_descriptor = None
+    if payload.HasField("serving_artifact") and payload.serving_artifact.artifact_id:
+        serving_artifact = payload.serving_artifact
+        serving_descriptor = TypedArtifactDescriptor(
+            artifact_id=str(serving_artifact.artifact_id),
+            index_multihash=str(serving_artifact.index_multihash or "") or None,
+            data_multihash=str(serving_artifact.data_multihash or "") or None,
+            schema_version=str(serving_artifact.schema_version or "") or None,
+            encoding=str(serving_artifact.encoding or "") or None,
+            total_size=int(serving_artifact.total_size),
+            id_kind=_artifact_id_kind_from_proto(
+                serving_artifact.id_kind,
+                serving_artifact.artifact_id,
+            ),
+        )
     return PublishedModelVersion(
         assembly_id=assembly_id,
         source_artifact_id=descriptor.artifact_id,
         source_descriptor=descriptor,
         serving_artifact_id=(
-            str(payload.serving_artifact.artifact_id)
-            if payload.HasField("runtime_artifact")
-            and payload.serving_artifact.artifact_id
-            else None
+            serving_descriptor.artifact_id if serving_descriptor is not None else None
         ),
-        serving_descriptor=(
-            TypedArtifactDescriptor(
-                artifact_id=str(payload.serving_artifact.artifact_id),
-                index_multihash=str(payload.serving_artifact.index_multihash or "")
-                or None,
-                data_multihash=str(payload.serving_artifact.data_multihash or "")
-                or None,
-                schema_version=str(payload.serving_artifact.schema_version or "")
-                or None,
-                encoding=str(payload.serving_artifact.encoding or "") or None,
-                total_size=int(payload.serving_artifact.total_size),
-                id_kind=_artifact_id_kind_from_proto(
-                    payload.serving_artifact.id_kind,
-                    payload.serving_artifact.artifact_id,
-                ),
-            )
-            if payload.HasField("runtime_artifact")
-            and payload.serving_artifact.artifact_id
-            else None
-        ),
+        serving_descriptor=serving_descriptor,
         source_version_key=str(payload.source_version_key or "") or None,
         serving_version_key=str(payload.serving_version_key or "") or None,
         representation_contract_hash=(
@@ -1806,8 +1799,8 @@ class Store:
         serving_version_key: str | None = None,
         logical_topology_json: str | None = None,
         serving_manifest_ref: str | None = None,
-    ) -> RegisteredServingPublication:
-        prepared = prepare_pure_transform_serving_registration(
+    ) -> RegisteredRuntimeArtifactPublication:
+        prepared = prepare_pure_transform_runtime_registration(
             build_intent=build_intent,
             source_artifact=source_artifact,
             tensors=tensors,
@@ -1831,7 +1824,7 @@ class Store:
             logical_topology_json=logical_topology_json,
             serving_manifest_ref=prepared.serving_manifest_ref,
         )
-        return RegisteredServingPublication(
+        return RegisteredRuntimeArtifactPublication(
             registered_artifact=registered_artifact,
             prepared_registration=prepared,
             publication=publication,
@@ -1935,7 +1928,7 @@ class Store:
         authoritative_canonical_index = _build_bound_publication_canonical_index(
             resolved_binding.layout
         )
-        prepared = prepare_pure_transform_serving_registration(
+        prepared = prepare_pure_transform_runtime_registration(
             build_intent=build_intent,
             source_artifact=source_artifact,
             tensors=dict(resolved_binding.tensors),
@@ -1971,7 +1964,7 @@ class Store:
     def _complete_registered_representation_publication(
         self,
         *,
-        publication: RegisteredServingPublication,
+        publication: RegisteredRuntimeArtifactPublication,
         contract_family: AssemblyContractFamily | str | None = None,
         source_artifact: Artifact
         | RegisteredArtifact
@@ -2186,7 +2179,7 @@ class Store:
         binding: Binding | SealedBindingValue,
         *,
         build_intent: RuntimeArtifactBuildIntent,
-        admission_facts: ServingAdmissionFacts,
+        admission_facts: RuntimeAdmissionFacts,
         source_artifact: Artifact
         | RegisteredArtifact
         | CanonicalIndex
@@ -2211,7 +2204,7 @@ class Store:
         authoritative_canonical_index = _build_bound_publication_canonical_index(
             resolved_binding.layout
         )
-        prepared = prepare_binding_finalize_serving_registration(
+        prepared = prepare_binding_finalize_runtime_registration(
             build_intent=build_intent,
             tensors=dict(resolved_binding.tensors),
             representation_contract_hash=representation_contract_hash,
@@ -3916,7 +3909,7 @@ def register_pure_transform_publication(
     serving_version_key: str | None = None,
     logical_topology_json: str | None = None,
     serving_manifest_ref: str | None = None,
-) -> RegisteredServingPublication:
+) -> RegisteredRuntimeArtifactPublication:
     return _coerce_store().register_pure_transform_publication(
         tensors,
         build_intent=build_intent,
@@ -4025,7 +4018,7 @@ def complete_binding_finalize_publication_from_binding(
     binding: Binding | SealedBindingValue,
     *,
     build_intent: RuntimeArtifactBuildIntent,
-    admission_facts: ServingAdmissionFacts,
+    admission_facts: RuntimeAdmissionFacts,
     source_artifact: Artifact
     | RegisteredArtifact
     | CanonicalIndex
@@ -4656,7 +4649,7 @@ __all__ = [
     "PrefetchedReplica",
     "PartialSealResult",
     "PublicDiskSourceHandle",
-    "PreparedServingRegistration",
+    "PreparedRuntimeArtifactRegistration",
     "PublishedModelVersion",
     "RegionMemoryKind",
     "ExecutionDiagnostics",
@@ -4664,7 +4657,7 @@ __all__ = [
     "HashBackend",
     "HashLocation",
     "IdentityMintStrategy",
-    "RegisteredServingPublication",
+    "RegisteredRuntimeArtifactPublication",
     "RegisteredArtifact",
     "RealizationTarget",
     "RealizationTargetSet",
@@ -4676,14 +4669,14 @@ __all__ = [
     "RuntimeArtifactPolicy",
     "RuntimeArtifactPolicyInput",
     "SourceBoundCapability",
-    "ServingPublicationSubject",
+    "RuntimePublicationSubject",
     "ReplicaInfo",
     "RetryPolicy",
     "ResolvedArtifactSelection",
     "SERVING_MANIFEST_TENSOR_NAME",
     "SealedBindingValue",
     "StagedBindingValue",
-    "ServingAdmissionFacts",
+    "RuntimeAdmissionFacts",
     "RuntimeBindingMemberRef",
     "RuntimeBindingReadiness",
     "RuntimeBindingResolvedLayout",
@@ -4740,7 +4733,7 @@ __all__ = [
     "write_resolved_spec_cache_entry",
     "write_reference_resolved_spec_cache_entry",
     "SERVING_BUILD_DIGEST_VERSION",
-    "ServingSupportLevel",
+    "RuntimeSupportLevel",
     "coerce_runtime_artifact_policy",
     "StoreCapabilities",
     "Store",
@@ -4759,8 +4752,8 @@ __all__ = [
     "build_binding_finalize_admission_facts",
     "build_binding_finalize_publication_bundle",
     "build_owned_layout",
-    "build_serving_publication_bundle",
-    "build_serving_publication_bundle_from_registered_artifact",
+    "build_runtime_artifact_publication_bundle",
+    "build_runtime_artifact_publication_bundle_from_registered_artifact",
     "build_pure_transform_publication_bundle",
     "build_pure_transform_publication_bundle_from_registered_artifact",
     "build_pure_transform_publication_spec",
@@ -4776,11 +4769,11 @@ __all__ = [
     "complete_structural_representation_publish_attempt",
     "compute_pure_transform_representation_contract_hash",
     "build_serving_manifest_ref",
-    "compute_serving_tensor_schema_hash",
-    "count_canonical_serving_tensors",
-    "prepare_binding_finalize_serving_registration",
-    "prepare_serving_registration",
-    "prepare_pure_transform_serving_registration",
+    "compute_runtime_artifact_tensor_schema_hash",
+    "count_canonical_runtime_tensors",
+    "prepare_binding_finalize_runtime_registration",
+    "prepare_runtime_artifact_registration",
+    "prepare_pure_transform_runtime_registration",
     "parse_serving_manifest_ref",
     "TargetTensors",
     "PersistenceStatusResult",

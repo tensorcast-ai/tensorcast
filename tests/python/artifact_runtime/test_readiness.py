@@ -16,7 +16,7 @@ from tensorcast.artifact_runtime.readiness import (
     is_runtime_bind_swap_allowlisted,
     runtime_support_level_display_name,
 )
-from tensorcast.types import FinalizeClass, ServingSupportLevel
+from tensorcast.types import FinalizeClass, RuntimeSupportLevel
 
 
 def _row(**overrides):
@@ -24,7 +24,7 @@ def _row(**overrides):
         "family": "fake",
         "process_after_load_class": FinalizeClass.RUNTIME_ONLY,
         "post_bind_finalize_class": FinalizeClass.RUNTIME_ONLY,
-        "support_level": ServingSupportLevel.RUNTIME_BIND_SWAP_READY,
+        "support_level": RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY,
         "pure_transform_candidate": True,
         "serving_only_runtime_allowed": True,
     }

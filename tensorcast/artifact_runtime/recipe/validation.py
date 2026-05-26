@@ -10,7 +10,7 @@ from tensorcast.artifact_runtime.readiness import (
     runtime_support_level_at_least,
     runtime_support_level_display_name,
 )
-from tensorcast.types import BuilderMode, FinalizeClass, ServingSupportLevel
+from tensorcast.types import BuilderMode, FinalizeClass, RuntimeSupportLevel
 
 
 def validate_recipe_for_builder_mode(recipe: Any, mode: BuilderMode | str) -> Any:
@@ -18,7 +18,7 @@ def validate_recipe_for_builder_mode(recipe: Any, mode: BuilderMode | str) -> An
     builder_mode = _coerce_builder_mode(mode)
     failures: list[str] = []
     if not runtime_support_level_at_least(
-        facts.support_level, ServingSupportLevel.BUILDER_PUBLICATION_READY
+        facts.support_level, RuntimeSupportLevel.BUILDER_PUBLICATION_READY
     ):
         failures.append(
             "support_level="

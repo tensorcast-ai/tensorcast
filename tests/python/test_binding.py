@@ -322,7 +322,7 @@ class FakeBindingClient:
             current_value=self._make_binding_value(
                 binding_id=binding_id,
                 selection=selection,
-            )
+            ),
         )
 
     def begin_binding_update(self, **kwargs: Any) -> Any:
@@ -1865,7 +1865,7 @@ def test_complete_binding_finalize_publication_from_binding_uses_current_value_c
             source_artifact_ref="mi2:test:source",
         ),
         admission_facts=store_mod.build_binding_finalize_admission_facts(
-            support_level=store_mod.ServingSupportLevel.BUILDER_PUBLICATION_READY,
+            support_level=store_mod.RuntimeSupportLevel.BUILDER_PUBLICATION_READY,
             same_binding_fast_path_validated=True,
         ),
         contract_family="canonical_full",

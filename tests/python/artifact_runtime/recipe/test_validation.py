@@ -23,7 +23,7 @@ from tensorcast.artifact_runtime.recipe.trace_ir import TracePlan
 from tensorcast.artifact_runtime.recipe.validation import (
     validate_recipe_for_builder_mode,
 )
-from tensorcast.types import BuilderMode, FinalizeClass, ServingSupportLevel
+from tensorcast.types import BuilderMode, FinalizeClass, RuntimeSupportLevel
 
 
 def _recipe() -> CompiledRuntimeRecipe:
@@ -35,7 +35,7 @@ def _recipe() -> CompiledRuntimeRecipe:
             framework_name="vllm",
             adapter_version="adapter-v1",
             serving_abi_version="abi-v1",
-            support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY,
+            support_level=RuntimeSupportLevel.BUILDER_PUBLICATION_READY,
             runtime_only_tensor_names=("runtime_only",),
             process_after_load_class=FinalizeClass.RUNTIME_ONLY,
             post_bind_finalize_class=FinalizeClass.RUNTIME_ONLY,
@@ -81,7 +81,7 @@ def test_validate_recipe_for_builder_mode_rejects_non_publication_ready() -> Non
         _recipe(),
         runtime_facts=replace(
             _recipe().runtime_facts,
-            support_level=ServingSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY,
+            support_level=RuntimeSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY,
         ),
     )
 

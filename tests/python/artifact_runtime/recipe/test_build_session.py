@@ -19,8 +19,8 @@ from tensorcast.artifact_runtime.recipe.build import (
 )
 from tensorcast.types import (
     RuntimeBindingMemberRef,
+    RuntimeSupportLevel,
     RuntimeTopologyRef,
-    ServingSupportLevel,
 )
 
 
@@ -338,7 +338,7 @@ def test_recipe_build_session_owns_compile_identity_and_cached_rebind():
             framework_name="vllm",
             adapter_version="adapter-v1",
             serving_abi_version="abi-v1",
-            support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY,
+            support_level=RuntimeSupportLevel.BUILDER_PUBLICATION_READY,
             runtime_only_tensor_names=(),
             process_after_load_class=tc.FinalizeClass.RUNTIME_ONLY,
             post_bind_finalize_class=tc.FinalizeClass.RUNTIME_ONLY,
@@ -486,7 +486,7 @@ def test_recipe_build_session_owns_recipe_metadata_collection():
 
         def support_level(self, model, model_config):
             assert model_config == "model-config"
-            return ServingSupportLevel.BUILDER_PUBLICATION_READY
+            return RuntimeSupportLevel.BUILDER_PUBLICATION_READY
 
         def runtime_only_tensor_names(self, model):
             return ("runtime_only",)
@@ -571,7 +571,7 @@ def test_recipe_build_session_build_recipe_runs_core_orchestration():
 
         def support_level(self, model, model_config):
             assert model_config.model == "fake-model"
-            return ServingSupportLevel.BUILDER_PUBLICATION_READY
+            return RuntimeSupportLevel.BUILDER_PUBLICATION_READY
 
         def runtime_only_tensor_names(self, model):
             return ("runtime_only",)

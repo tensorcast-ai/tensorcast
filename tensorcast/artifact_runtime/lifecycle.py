@@ -74,7 +74,7 @@ from tensorcast.retained_realization_authority import (
 from tensorcast.types import (
     CollectivePolicy,
     FinalizeClass,
-    ServingSupportLevel,
+    RuntimeSupportLevel,
 )
 
 ArtifactError = tc.ArtifactError
@@ -4727,15 +4727,15 @@ class ArtifactRuntimeIntegration:
         self,
         model: object,
         model_config: object,
-    ) -> ServingSupportLevel:
+    ) -> RuntimeSupportLevel:
         host = self._framework_host()
         support_level = getattr(host, "support_level", None)
         if callable(support_level):
             return tc_readiness.coerce_runtime_support_level(
                 support_level(model, model_config),
-                default=ServingSupportLevel.BLOCKED,
+                default=RuntimeSupportLevel.BLOCKED,
             )
-        return ServingSupportLevel.BLOCKED
+        return RuntimeSupportLevel.BLOCKED
 
     def process_after_load_class(
         self,

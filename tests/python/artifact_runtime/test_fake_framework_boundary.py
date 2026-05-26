@@ -50,7 +50,7 @@ from tensorcast.types import (
     FinalizeClass,
     RuntimeArtifactManifest,
     RuntimeBindingMemberRef,
-    ServingSupportLevel,
+    RuntimeSupportLevel,
 )
 
 
@@ -302,7 +302,7 @@ def _recipe(source_artifact_ref="mi2:source"):
             framework_version="fakefw-v1",
             adapter_version="adapter-v1",
             serving_abi_version="abi-v1",
-            support_level=ServingSupportLevel.RUNTIME_BIND_SWAP_READY,
+            support_level=RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY,
             runtime_only_tensor_names=(),
             process_after_load_class=FinalizeClass.RUNTIME_ONLY,
             post_bind_finalize_class=FinalizeClass.RUNTIME_ONLY,

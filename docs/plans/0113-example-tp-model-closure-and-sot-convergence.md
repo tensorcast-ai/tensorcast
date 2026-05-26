@@ -75,7 +75,7 @@ Execution policy for this plan:
 - `0111` repo-owned builder/publication bridge is landed at base scope:
   - `tensorcast/api/store/publication_builder.py`
   - `daemon/service/controllers/assembly_operation_service.cc`
-- `ServingAdmissionFacts.same_binding_fast_path_validated` is already a correctness and
+- `RuntimeAdmissionFacts.same_binding_fast_path_validated` is already a correctness and
   admission gate for same-binding publication:
   - `tensorcast/types.py`
   - `docs/designs/0111-source-to-serving-builder-and-representation-publication.md`

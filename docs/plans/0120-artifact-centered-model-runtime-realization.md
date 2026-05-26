@@ -67,13 +67,9 @@ that are truly model-serving ABI concepts.
   options. `runtime_artifact_policy` is a separate manifest/build/preflight
   policy and is passed independently through direct runtime realization.
 - Store representation-publication helpers live in
-  `tensorcast.api.store.publication_builder`. Some publication DTO fields and
-  helper names still contain `serving`; these are the remaining
-  serving-publication ABI classification boundary. Serving-named publication
-  helpers and `ServingSupportLevel` are no longer exported from the root
-  `tensorcast` package; callers that intentionally operate on this ABI boundary
-  must import them from `tensorcast.api.store`, `tensorcast.types`, or the owning
-  builder module.
+  `tensorcast.api.store.publication_builder`. Runtime-facing helper/class names
+  now use `Runtime*` / `runtime_artifact` terminology; `serving_*` remains only
+  on persisted manifest/protobuf fields that are still wire ABI.
 - Tests have been moved toward `tests/python/artifact_runtime/` and
   runtime-realization API test names. Old serving module tests have been deleted
   or renamed unless they are still testing a daemon/proto/publication ABI term.
@@ -153,18 +149,13 @@ that are truly model-serving ABI concepts.
 
 # Remaining Work
 
-- Complete the serving-publication field-map cleanup in
-  `tensorcast/types.py`, `tensorcast/api/store/publication_builder.py`, and
-  related tests. Keep true serving-manifest ABI fields; rename accidental
-  runtime fields.
-- Audit docs and tests for stale serving module paths, old test filenames, and
-  accidental runtime aliases.
-- Run the broad Python validation slice after each cleanup batch.
-- Run the available internal-vLLM TensorCast focused suite after cross-repo API
-  or boundary changes.
 - Decide whether daemon protobuf serving-prefetch message names need a later
   wire-ABI migration. Do not silently rename proto fields without a separate
   migration plan.
+- Continue reducing `tensorcast/artifact_runtime/lifecycle.py` by moving
+  local-ready, build-session, retained-binding, and publication orchestration
+  into the existing responsibility modules. Avoid reintroducing compatibility
+  aliases while splitting this file.
 
 # Validation
 
@@ -172,7 +163,8 @@ Use these as the recurring local gates for this plan:
 
 ```bash
 source .venv/bin/activate
-ruff check .
+ruff check tensorcast tests/python/api tests/python/artifact_runtime \
+  tests/python/test_runtime_publication_types.py
 git diff --check
 TENSORCAST_SKIP_TORCH_ABI_CHECK=1 pytest \
   tests/python/api/test_runtime_realization_target.py \
@@ -182,7 +174,7 @@ TENSORCAST_SKIP_TORCH_ABI_CHECK=1 pytest \
   tests/python/api/test_runtime_realization_spec_cache.py \
   tests/python/api/test_runtime_realization_reference_consumer.py \
   tests/python/artifact_runtime \
-  tests/python/test_serving_publication_types.py \
+  tests/python/test_runtime_publication_types.py \
   tests/python/api/test_public_surface.py \
   tests/python/examples/test_runtime_reference_framework.py -q
 ```
@@ -204,12 +196,15 @@ TENSORCAST_SKIP_TORCH_ABI_CHECK=1 pytest \
 
 Current local evidence after the latest cleanup batch:
 
-- `ruff check .` passed.
-- `git diff HEAD --check` passed.
+- `ruff check tensorcast tests/python/api tests/python/artifact_runtime tests/python/test_runtime_publication_types.py` passed.
+- `git diff --check` passed in TensorCast.
+- `TENSORCAST_SKIP_TORCH_ABI_CHECK=1 python -m compileall -q tensorcast tests/python` passed.
 - `TENSORCAST_SKIP_TORCH_ABI_CHECK=1 pytest tests/python/api/test_realization_kernel.py tests/python/artifact_runtime/test_fake_framework_boundary.py tests/python/artifact_runtime/test_lifecycle.py -q` passed.
 - The broad 0120 Python validation slice listed above passed.
 - In `/data/workspace/internal-vllm`, the TensorCast focused suite passed:
-  `136 passed, 1 warning`, plus compile and diff checks.
+  `196 passed, 1 warning`, plus compile and diff checks.
+- Single-GPU real CUDA retained-prefetch E2E passed on this host:
+  `CUDA_VISIBLE_DEVICES=0 LD_LIBRARY_PATH=/data/cuda/compat TENSORCAST_SKIP_TORCH_ABI_CHECK=1 pytest tests/python/daemon/test_prefetch_serving_binding_real_cuda_e2e.py::test_prefetch_serving_binding_real_cuda_worker_read_and_release -q`.
 
 # Audit Commands
 

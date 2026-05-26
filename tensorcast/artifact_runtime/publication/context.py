@@ -102,15 +102,11 @@ def build_binding_finalize_build_intent(
     )
 
 
-build_recipe_serving_build_intent = build_recipe_runtime_build_intent
-
-
 __all__ = [
     "RecipePublicationContext",
     "build_binding_finalize_build_intent",
     "build_pure_transform_build_intent",
     "build_recipe_runtime_build_intent",
-    "build_recipe_serving_build_intent",
     "logical_topology_json",
     "logical_topology_json_from_recipe",
     "publication_context_from_recipe",

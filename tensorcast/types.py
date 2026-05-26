@@ -721,7 +721,7 @@ class FinalizeClass(str, Enum):
     UNKNOWN_BLOCKED = "unknown_blocked"
 
 
-class ServingSupportLevel(str, Enum):
+class RuntimeSupportLevel(str, Enum):
     BLOCKED = "blocked"
     SOURCE_BIND_BOOTSTRAP_ONLY = "source_bind_bootstrap_only"
     BUILDER_PUBLICATION_READY = "builder_publication_ready"
@@ -752,30 +752,30 @@ _PUBLICATION_FINALIZE_CLASS_FROM_PROTO: dict[int, FinalizeClass] = {
         FinalizeClass.UNKNOWN_BLOCKED
     ),
 }
-_PUBLICATION_SERVING_SUPPORT_LEVEL_TO_PROTO: dict[
-    ServingSupportLevel, publication_pb2.ServingSupportLevel
+_PUBLICATION_RUNTIME_SUPPORT_LEVEL_TO_PROTO: dict[
+    RuntimeSupportLevel, publication_pb2.ServingSupportLevel
 ] = {
-    ServingSupportLevel.BLOCKED: publication_pb2.SERVING_SUPPORT_LEVEL_BLOCKED,
-    ServingSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY: (
+    RuntimeSupportLevel.BLOCKED: publication_pb2.SERVING_SUPPORT_LEVEL_BLOCKED,
+    RuntimeSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY: (
         publication_pb2.SERVING_SUPPORT_LEVEL_SOURCE_BIND_BOOTSTRAP_ONLY
     ),
-    ServingSupportLevel.BUILDER_PUBLICATION_READY: (
+    RuntimeSupportLevel.BUILDER_PUBLICATION_READY: (
         publication_pb2.SERVING_SUPPORT_LEVEL_BUILDER_PUBLICATION_READY
     ),
-    ServingSupportLevel.RUNTIME_BIND_SWAP_READY: (
+    RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY: (
         publication_pb2.SERVING_SUPPORT_LEVEL_RUNTIME_BIND_SWAP_READY
     ),
 }
-_PUBLICATION_SERVING_SUPPORT_LEVEL_FROM_PROTO: dict[int, ServingSupportLevel] = {
-    int(publication_pb2.SERVING_SUPPORT_LEVEL_BLOCKED): ServingSupportLevel.BLOCKED,
+_PUBLICATION_RUNTIME_SUPPORT_LEVEL_FROM_PROTO: dict[int, RuntimeSupportLevel] = {
+    int(publication_pb2.SERVING_SUPPORT_LEVEL_BLOCKED): RuntimeSupportLevel.BLOCKED,
     int(publication_pb2.SERVING_SUPPORT_LEVEL_SOURCE_BIND_BOOTSTRAP_ONLY): (
-        ServingSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY
+        RuntimeSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY
     ),
     int(publication_pb2.SERVING_SUPPORT_LEVEL_BUILDER_PUBLICATION_READY): (
-        ServingSupportLevel.BUILDER_PUBLICATION_READY
+        RuntimeSupportLevel.BUILDER_PUBLICATION_READY
     ),
     int(publication_pb2.SERVING_SUPPORT_LEVEL_RUNTIME_BIND_SWAP_READY): (
-        ServingSupportLevel.RUNTIME_BIND_SWAP_READY
+        RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY
     ),
 }
 _PUBLICATION_ASSEMBLY_TARGET_KIND_TO_PROTO: dict[
@@ -1215,7 +1215,7 @@ class PureTransformPublicationSpec(BaseModel):
     requirements: AssemblyRequirementSetRef | None = None
     readiness_policy: AssemblyReadinessPolicy | None = None
     structural_view_ids: tuple[str, ...] = ()
-    admission_facts: ServingAdmissionFacts | None = None
+    admission_facts: RuntimeAdmissionFacts | None = None
 
     @model_validator(mode="after")
     def _validate_publication_spec(self) -> "PureTransformPublicationSpec":
@@ -1289,18 +1289,18 @@ class PureTransformPublicationSpec(BaseModel):
             ),
             structural_view_ids=tuple(str(item) for item in proto.structural_view_ids),
             admission_facts=(
-                ServingAdmissionFacts.from_publication_proto(proto.admission_facts)
+                RuntimeAdmissionFacts.from_publication_proto(proto.admission_facts)
                 if proto.HasField("admission_facts")
                 else None
             ),
         )
 
 
-class ServingAdmissionFacts(BaseModel):
+class RuntimeAdmissionFacts(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     finalize_class: FinalizeClass
-    support_level: ServingSupportLevel
+    support_level: RuntimeSupportLevel
     topology_admission_digest: str | None = None
     same_binding_fast_path_validated: bool = False
 
@@ -1312,7 +1312,7 @@ class ServingAdmissionFacts(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _validate_admission_facts(self) -> "ServingAdmissionFacts":
+    def _validate_admission_facts(self) -> "RuntimeAdmissionFacts":
         if (
             self.finalize_class == FinalizeClass.REPRESENTATION_CHANGING
             and not self.same_binding_fast_path_validated
@@ -1329,8 +1329,8 @@ class ServingAdmissionFacts(BaseModel):
                 "representation publish requires a non-blocked finalize_class"
             )
         if self.support_level not in {
-            ServingSupportLevel.BUILDER_PUBLICATION_READY,
-            ServingSupportLevel.RUNTIME_BIND_SWAP_READY,
+            RuntimeSupportLevel.BUILDER_PUBLICATION_READY,
+            RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY,
         }:
             raise ValueError(
                 "representation publish requires support_level to admit builder publication"
@@ -1359,12 +1359,12 @@ class ServingAdmissionFacts(BaseModel):
 
     def admits_builder_publication(self) -> bool:
         return self.support_level in {
-            ServingSupportLevel.BUILDER_PUBLICATION_READY,
-            ServingSupportLevel.RUNTIME_BIND_SWAP_READY,
+            RuntimeSupportLevel.BUILDER_PUBLICATION_READY,
+            RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY,
         }
 
     def admits_runtime_bind_swap(self) -> bool:
-        return self.support_level == ServingSupportLevel.RUNTIME_BIND_SWAP_READY
+        return self.support_level == RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY
 
     def require_runtime_bind_swap_ready(self) -> None:
         if not self.admits_runtime_bind_swap():
@@ -1381,7 +1381,7 @@ class ServingAdmissionFacts(BaseModel):
     def to_publication_proto(self) -> publication_pb2.ServingAdmissionFacts:
         proto = publication_pb2.ServingAdmissionFacts(
             finalize_class=_PUBLICATION_FINALIZE_CLASS_TO_PROTO[self.finalize_class],
-            support_level=_PUBLICATION_SERVING_SUPPORT_LEVEL_TO_PROTO[
+            support_level=_PUBLICATION_RUNTIME_SUPPORT_LEVEL_TO_PROTO[
                 self.support_level
             ],
             same_binding_fast_path_validated=bool(
@@ -1396,18 +1396,18 @@ class ServingAdmissionFacts(BaseModel):
     def from_publication_proto(
         cls,
         proto: publication_pb2.ServingAdmissionFacts,
-    ) -> "ServingAdmissionFacts":
+    ) -> "RuntimeAdmissionFacts":
         if int(proto.finalize_class) == int(publication_pb2.FINALIZE_CLASS_UNSPECIFIED):
-            raise ValueError("ServingAdmissionFacts.finalize_class must be specified")
+            raise ValueError("RuntimeAdmissionFacts.finalize_class must be specified")
         if int(proto.support_level) == int(
             publication_pb2.SERVING_SUPPORT_LEVEL_UNSPECIFIED
         ):
-            raise ValueError("ServingAdmissionFacts.support_level must be specified")
+            raise ValueError("RuntimeAdmissionFacts.support_level must be specified")
         return cls(
             finalize_class=_PUBLICATION_FINALIZE_CLASS_FROM_PROTO[
                 int(proto.finalize_class)
             ],
-            support_level=_PUBLICATION_SERVING_SUPPORT_LEVEL_FROM_PROTO[
+            support_level=_PUBLICATION_RUNTIME_SUPPORT_LEVEL_FROM_PROTO[
                 int(proto.support_level)
             ],
             topology_admission_digest=(
@@ -2994,21 +2994,21 @@ class PrefetchHandoffSet(BaseModel):
         )
 
 
-class ServingPublicationSubject(BaseModel):
+class RuntimePublicationSubject(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     serving_artifact_id: str | None = None
     binding_value_ref: BindingValueRef | None = None
 
     @model_validator(mode="after")
-    def _validate_subject(self) -> "ServingPublicationSubject":
+    def _validate_subject(self) -> "RuntimePublicationSubject":
         artifact_id = self.serving_artifact_id
         binding_value_ref = self.binding_value_ref
         if artifact_id is not None and not artifact_id:
             raise ValueError("serving_artifact_id must not be empty")
         if (artifact_id is None) == (binding_value_ref is None):
             raise ValueError(
-                "ServingPublicationSubject requires exactly one of serving_artifact_id or binding_value_ref"
+                "RuntimePublicationSubject requires exactly one of serving_artifact_id or binding_value_ref"
             )
         return self
 
@@ -3053,9 +3053,8 @@ class ServingPublicationSubject(BaseModel):
     @classmethod
     def from_proto(
         cls,
-        proto: publication_pb2.ServingPublicationSubject
-        | publication_pb2.ServingPublicationSubject,
-    ) -> "ServingPublicationSubject":
+        proto: publication_pb2.ServingPublicationSubject,
+    ) -> "RuntimePublicationSubject":
         ref_case = proto.WhichOneof("ref")
         if ref_case == "serving_artifact_id":
             return cls(serving_artifact_id=str(proto.serving_artifact_id))
@@ -3063,13 +3062,13 @@ class ServingPublicationSubject(BaseModel):
             return cls(
                 binding_value_ref=BindingValueRef.from_proto(proto.binding_value)
             )
-        raise ValueError("ServingPublicationSubject requires exactly one ref")
+        raise ValueError("RuntimePublicationSubject requires exactly one ref")
 
 
 class RepresentationPublishContract(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    subject: ServingPublicationSubject
+    subject: RuntimePublicationSubject
     serving_manifest_ref: str
     representation_contract_hash: str
     serving_build_digest: str
@@ -3122,7 +3121,7 @@ class RepresentationPublishContract(BaseModel):
             raise ValueError(
                 "RepresentationPublishContract requires a serving publication subject"
             )
-        subject = ServingPublicationSubject.from_proto(proto.subject)
+        subject = RuntimePublicationSubject.from_proto(proto.subject)
         return cls(
             subject=subject,
             serving_manifest_ref=str(proto.serving_manifest_ref),
@@ -3199,7 +3198,7 @@ class RepresentationPublishContract(BaseModel):
             raise ValueError(
                 "RepresentationPublishContract requires a serving publication subject"
             )
-        subject = ServingPublicationSubject.from_proto(proto.subject)
+        subject = RuntimePublicationSubject.from_proto(proto.subject)
         return cls(
             subject=subject,
             serving_manifest_ref=str(proto.serving_manifest_ref),
@@ -3332,7 +3331,7 @@ class RepresentationPublishSpec(BaseModel):
     layout_id: str | None = None
     requirements: AssemblyRequirementSetRef | None = None
     readiness_policy: AssemblyReadinessPolicy | None = None
-    admission_facts: ServingAdmissionFacts | None = None
+    admission_facts: RuntimeAdmissionFacts | None = None
 
     @model_validator(mode="after")
     def _validate_representation_publish_spec(self) -> "RepresentationPublishSpec":
@@ -3496,7 +3495,7 @@ class RepresentationPublishSpec(BaseModel):
                 else None
             ),
             admission_facts=(
-                ServingAdmissionFacts.from_publication_proto(proto.admission_facts)
+                RuntimeAdmissionFacts.from_publication_proto(proto.admission_facts)
                 if proto.HasField("admission_facts")
                 else None
             ),
@@ -3965,7 +3964,7 @@ __all__ = [
     "PrefetchHandoffMemberFailure",
     "PrefetchHandoffSet",
     "BuilderMode",
-    "ServingPublicationSubject",
+    "RuntimePublicationSubject",
     "AssemblyCloseoutContract",
     "AssemblyAttemptRef",
     "AssemblyContractFamily",
@@ -3986,11 +3985,11 @@ __all__ = [
     "RuntimeArtifactManifest",
     "RuntimeArtifactPolicy",
     "RuntimeArtifactPolicyInput",
-    "ServingAdmissionFacts",
+    "RuntimeAdmissionFacts",
     "ViewRegistrationKind",
     "SealAssemblyResult",
     "SERVING_BUILD_DIGEST_VERSION",
-    "ServingSupportLevel",
+    "RuntimeSupportLevel",
     "SERVING_MANIFEST_TENSOR_NAME",
     "PlanBase",
     "CoalescedPlan",

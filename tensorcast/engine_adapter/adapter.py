@@ -22,7 +22,7 @@ from tensorcast.api.store import Artifact, Store
 from tensorcast.api.store.handles import RegisteredArtifact
 from tensorcast.api.store.publication_builder import (
     build_pure_transform_publication_bundle_from_registered_artifact,
-    prepare_pure_transform_serving_registration,
+    prepare_pure_transform_runtime_registration,
 )
 from tensorcast.engine_adapter.artifact_api import (
     BatchResult,
@@ -619,7 +619,7 @@ class EngineAdapter:
                         status_code="INVALID_ARGUMENT",
                         retryable=False,
                     )
-                prepared = prepare_pure_transform_serving_registration(
+                prepared = prepare_pure_transform_runtime_registration(
                     build_intent=build_intent,
                     source_artifact=selected_source,
                     tensors=registration_tensors,

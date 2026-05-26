@@ -189,7 +189,7 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
     spec directly and forward it into `start_assembly_attempt(...)` through the
     typed `representation_publish_spec` daemon ingress instead of re-authoring
     the generic closeout shell at each call site.
-    When the spec carries optional `ServingAdmissionFacts`, TensorCast validates
+    When the spec carries optional `RuntimeAdmissionFacts`, TensorCast validates
     the supplied finalize classification, same-binding proof, and support level
     for consistency without inferring missing integration-private rollout state.
   - `BINDING_FINALIZE` publication is same-binding-only. Use
@@ -271,12 +271,12 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
     artifact is accepted into the serving path.
     If you pass a full `RepresentationPublishSpec` instead of a plain runtime
     policy, TensorCast also requires
-    `ServingSupportLevel.RUNTIME_BIND_SWAP_READY` when caller-supplied
+    `RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY` when caller-supplied
     admission facts are present.
   - The same runtime-ready gate now also applies to serving-key activation on
     typed `representation_publish` specs: a spec carrying
     `serving_version_key` must be admitted at
-    `ServingSupportLevel.RUNTIME_BIND_SWAP_READY`.
+    `RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY`.
 - `Store.seal_assembly(assembly_id, publish_canonical=True)` seals an assembly
   into a stable MI2 identity and returns the bound descriptor.
 

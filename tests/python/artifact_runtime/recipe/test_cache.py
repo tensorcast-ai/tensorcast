@@ -22,8 +22,8 @@ from tensorcast.artifact_runtime.recipe.trace_ir import CopyPlanEntry, Range, Tr
 from tensorcast.types import (
     FinalizeClass,
     RuntimeBindingMemberRef,
+    RuntimeSupportLevel,
     RuntimeTopologyRef,
-    ServingSupportLevel,
 )
 
 
@@ -52,7 +52,7 @@ def _recipe() -> CompiledRuntimeRecipe:
             framework_version="vllm-test",
             adapter_version="adapter-v1",
             serving_abi_version="abi-v1",
-            support_level=ServingSupportLevel.RUNTIME_BIND_SWAP_READY,
+            support_level=RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY,
             runtime_only_tensor_names=("runtime",),
             process_after_load_class=FinalizeClass.RUNTIME_ONLY,
             post_bind_finalize_class=FinalizeClass.RUNTIME_ONLY,

@@ -22,8 +22,8 @@ from tensorcast.artifact_runtime.source import SourceCatalog, SourceTensorMeta
 from tensorcast.types import (
     FinalizeClass,
     RuntimeBindingMemberRef,
+    RuntimeSupportLevel,
     RuntimeTopologyRef,
-    ServingSupportLevel,
 )
 
 
@@ -70,7 +70,7 @@ def _runtime_facts(adapter_version: str = "adapter-v1") -> TensorcastRuntimeFact
         framework_version="vllm-test",
         adapter_version=adapter_version,
         serving_abi_version="abi-v1",
-        support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY,
+        support_level=RuntimeSupportLevel.BUILDER_PUBLICATION_READY,
         runtime_only_tensor_names=("runtime_only",),
         process_after_load_class=FinalizeClass.RUNTIME_ONLY,
         post_bind_finalize_class=FinalizeClass.RUNTIME_ONLY,

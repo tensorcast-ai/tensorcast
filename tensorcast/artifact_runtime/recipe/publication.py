@@ -16,8 +16,8 @@ from tensorcast.api.store.publication_builder import (
     build_binding_finalize_publication_bundle,
     build_pure_transform_publication_bundle_from_registered_artifact,
     build_pure_transform_publication_spec,
-    prepare_binding_finalize_serving_registration,
-    prepare_pure_transform_serving_registration,
+    prepare_binding_finalize_runtime_registration,
+    prepare_pure_transform_runtime_registration,
 )
 from tensorcast.api.store.types import CanonicalIndex
 from tensorcast.artifact_runtime.publication.context import (
@@ -25,7 +25,6 @@ from tensorcast.artifact_runtime.publication.context import (
     build_binding_finalize_build_intent,
     build_pure_transform_build_intent,
     build_recipe_runtime_build_intent,
-    build_recipe_serving_build_intent,
 )
 from tensorcast.artifact_runtime.recipe.materialization import (
     load_source_tensors_for_recipe,
@@ -37,13 +36,13 @@ from tensorcast.types import (
     BindingValueRef,
     PureTransformPublicationSpec,
     RepresentationPublishSpec,
-    ServingAdmissionFacts,
-    ServingPublicationSubject,
-    ServingSupportLevel,
+    RuntimeAdmissionFacts,
+    RuntimePublicationSubject,
+    RuntimeSupportLevel,
 )
 
 
-def prepare_pure_transform_serving_registration_from_context(
+def prepare_pure_transform_runtime_registration_from_context(
     context: RecipePublicationContext,
     *,
     tensors: Mapping[str, torch.Tensor],
@@ -53,7 +52,7 @@ def prepare_pure_transform_serving_registration_from_context(
     serving_manifest_ref: str | None = None,
     topology_admission_digest: str | None = None,
 ) -> Any:
-    return prepare_pure_transform_serving_registration(
+    return prepare_pure_transform_runtime_registration(
         build_intent=build_pure_transform_build_intent(
             context,
             build_pipeline_version=build_pipeline_version,
@@ -135,7 +134,7 @@ def build_pure_transform_publication_bundle_from_context(
     )
 
 
-def prepare_binding_finalize_serving_registration_from_context(
+def prepare_binding_finalize_runtime_registration_from_context(
     context: RecipePublicationContext,
     *,
     tensors: dict[str, torch.Tensor],
@@ -144,7 +143,7 @@ def prepare_binding_finalize_serving_registration_from_context(
     serving_manifest_ref: str | None = None,
     topology_admission_digest: str | None = None,
 ) -> Any:
-    return prepare_binding_finalize_serving_registration(
+    return prepare_binding_finalize_runtime_registration(
         build_intent=build_binding_finalize_build_intent(
             context,
             build_pipeline_version=build_pipeline_version,
@@ -160,10 +159,10 @@ def prepare_binding_finalize_serving_registration_from_context(
 
 def build_binding_finalize_admission_facts_from_context(
     *,
-    support_level: ServingSupportLevel,
+    support_level: RuntimeSupportLevel,
     topology_admission_digest: str | None = None,
     same_binding_fast_path_validated: bool = True,
-) -> ServingAdmissionFacts:
+) -> RuntimeAdmissionFacts:
     return build_binding_finalize_admission_facts(
         support_level=support_level,
         topology_admission_digest=topology_admission_digest,
@@ -174,7 +173,7 @@ def build_binding_finalize_admission_facts_from_context(
 def build_binding_finalize_publication_bundle_from_context(
     context: RecipePublicationContext,
     *,
-    publication_subject: ServingPublicationSubject | BindingValueRef,
+    publication_subject: RuntimePublicationSubject | BindingValueRef,
     canonical_index: CanonicalIndex,
     build_pipeline_version: str,
     representation_contract_hash: str,
@@ -186,7 +185,7 @@ def build_binding_finalize_publication_bundle_from_context(
     requirements: AssemblyRequirementSetRef | None = None,
     readiness_policy: AssemblyReadinessPolicy | None = None,
     structural_view_ids: tuple[str, ...] = (),
-    admission_facts: ServingAdmissionFacts | None = None,
+    admission_facts: RuntimeAdmissionFacts | None = None,
 ) -> RepresentationPublishSpec:
     if admission_facts is None:
         raise ValueError(
@@ -292,7 +291,6 @@ __all__ = [
     "build_pure_transform_publication_bundle_from_context",
     "build_pure_transform_publication_spec_from_context",
     "build_recipe_runtime_build_intent",
-    "build_recipe_serving_build_intent",
-    "prepare_binding_finalize_serving_registration_from_context",
-    "prepare_pure_transform_serving_registration_from_context",
+    "prepare_binding_finalize_runtime_registration_from_context",
+    "prepare_pure_transform_runtime_registration_from_context",
 ]

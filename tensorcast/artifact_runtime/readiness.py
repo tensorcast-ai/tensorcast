@@ -7,13 +7,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from tensorcast.types import BuilderMode, FinalizeClass, ServingSupportLevel
+from tensorcast.types import BuilderMode, FinalizeClass, RuntimeSupportLevel
 
-_SUPPORT_LEVEL_ORDER: dict[ServingSupportLevel, int] = {
-    ServingSupportLevel.BLOCKED: -1,
-    ServingSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY: 0,
-    ServingSupportLevel.BUILDER_PUBLICATION_READY: 1,
-    ServingSupportLevel.RUNTIME_BIND_SWAP_READY: 2,
+_SUPPORT_LEVEL_ORDER: dict[RuntimeSupportLevel, int] = {
+    RuntimeSupportLevel.BLOCKED: -1,
+    RuntimeSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY: 0,
+    RuntimeSupportLevel.BUILDER_PUBLICATION_READY: 1,
+    RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY: 2,
 }
 
 
@@ -32,19 +32,19 @@ def coerce_finalize_class(
 def coerce_runtime_support_level(
     value: Any,
     *,
-    default: ServingSupportLevel = ServingSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY,
-) -> ServingSupportLevel:
+    default: RuntimeSupportLevel = RuntimeSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY,
+) -> RuntimeSupportLevel:
     if value is None:
         return default
-    if isinstance(value, ServingSupportLevel):
+    if isinstance(value, RuntimeSupportLevel):
         return value
     normalized = str(value).strip().lower()
-    return ServingSupportLevel(normalized)
+    return RuntimeSupportLevel(normalized)
 
 
 def runtime_support_level_at_least(
-    value: ServingSupportLevel | str,
-    minimum: ServingSupportLevel | str,
+    value: RuntimeSupportLevel | str,
+    minimum: RuntimeSupportLevel | str,
 ) -> bool:
     resolved_value = coerce_runtime_support_level(value)
     resolved_minimum = coerce_runtime_support_level(minimum)
@@ -53,7 +53,7 @@ def runtime_support_level_at_least(
     )
 
 
-def runtime_support_level_display_name(value: ServingSupportLevel | str) -> str:
+def runtime_support_level_display_name(value: RuntimeSupportLevel | str) -> str:
     return coerce_runtime_support_level(value).value
 
 
@@ -75,7 +75,7 @@ def readiness_post_bind_finalize_class(row: Any) -> FinalizeClass:
     )
 
 
-def readiness_support_level(row: Any) -> ServingSupportLevel:
+def readiness_support_level(row: Any) -> RuntimeSupportLevel:
     return coerce_runtime_support_level(getattr(row, "support_level", None))
 
 
@@ -96,7 +96,7 @@ def is_pure_transform_publication_allowlisted(row: Any) -> bool:
         and readiness_post_bind_finalize_class(row) == FinalizeClass.RUNTIME_ONLY
         and runtime_support_level_at_least(
             readiness_support_level(row),
-            ServingSupportLevel.BUILDER_PUBLICATION_READY,
+            RuntimeSupportLevel.BUILDER_PUBLICATION_READY,
         )
     )
 
@@ -112,7 +112,7 @@ def is_binding_finalize_publication_allowlisted(row: Any) -> bool:
         binding_finalize_candidate
         and runtime_support_level_at_least(
             readiness_support_level(row),
-            ServingSupportLevel.BUILDER_PUBLICATION_READY,
+            RuntimeSupportLevel.BUILDER_PUBLICATION_READY,
         )
         and readiness_process_after_load_class(row)
         == FinalizeClass.REPRESENTATION_CHANGING
@@ -130,7 +130,7 @@ def is_runtime_bind_swap_allowlisted(row: Any) -> bool:
         and readiness_post_bind_finalize_class(row) == FinalizeClass.RUNTIME_ONLY
         and runtime_support_level_at_least(
             readiness_support_level(row),
-            ServingSupportLevel.RUNTIME_BIND_SWAP_READY,
+            RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY,
         )
     )
 

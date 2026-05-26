@@ -21,8 +21,8 @@ from tensorcast.artifact_runtime.source import resolve_source_artifact_ref
 from tensorcast.types import (
     FinalizeClass,
     RuntimeBindingMemberRef,
+    RuntimeSupportLevel,
     RuntimeTopologyRef,
-    ServingSupportLevel,
 )
 
 
@@ -31,7 +31,7 @@ class TensorcastRuntimeFacts:
     framework_name: str
     adapter_version: str
     serving_abi_version: str
-    support_level: ServingSupportLevel
+    support_level: RuntimeSupportLevel
     runtime_only_tensor_names: tuple[str, ...]
     process_after_load_class: FinalizeClass
     post_bind_finalize_class: FinalizeClass

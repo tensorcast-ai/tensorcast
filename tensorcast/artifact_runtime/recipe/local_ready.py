@@ -20,7 +20,9 @@ from tensorcast.api.store.owned_binding_layout import (
     build_mapped_tensor_spec,
     build_owned_layout,
 )
-from tensorcast.api.store.publication_builder import prepare_serving_manifest_carrier
+from tensorcast.api.store.publication_builder import (
+    prepare_runtime_artifact_manifest_carrier,
+)
 from tensorcast.api.store.types import CanonicalIndexEntry
 from tensorcast.artifact_runtime.publication.context import (
     logical_topology_json_from_recipe,
@@ -143,7 +145,7 @@ def prepare_same_binding_manifest_carrier(
             build_pipeline_version=build_pipeline_version,
             representation_contract_hash=representation_contract_hash,
         )
-    carrier = prepare_serving_manifest_carrier(
+    carrier = prepare_runtime_artifact_manifest_carrier(
         build_intent=build_intent,
         canonical_index=base_canonical_index,
         representation_contract_hash=representation_contract_hash,

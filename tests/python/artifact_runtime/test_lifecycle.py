@@ -76,9 +76,9 @@ from tensorcast.artifact_runtime.lifecycle import (
     RuntimeProfile,
     RuntimeReloadResult,
     RuntimeStateSeed,
+    RuntimeSupportLevel,
     RuntimeWorkerView,
     SchemaMismatchError,
-    ServingSupportLevel,
     SourceCatalogRequest,
     SourceDownloadPolicy,
     SourceProviderError,
@@ -1509,7 +1509,7 @@ def test_integration_host_delegates_recipe_trace_capabilities():
 
         def support_level(self, model, model_config):
             self.events.append(("support", model, model_config))
-            return ServingSupportLevel.RUNTIME_BIND_SWAP_READY
+            return RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY
 
         def process_after_load_class(self, model, model_config):
             self.events.append(("process_class", model, model_config))
@@ -1541,7 +1541,7 @@ def test_integration_host_delegates_recipe_trace_capabilities():
     )
     assert (
         integration.support_level("model", "model-config")
-        is ServingSupportLevel.RUNTIME_BIND_SWAP_READY
+        is RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY
     )
     assert (
         integration.process_after_load_class("model", "model-config")
@@ -2186,7 +2186,7 @@ class _AdapterFrameworkHost:
         support_level = getattr(self.adapter, "support_level", None)
         if callable(support_level):
             return support_level(model, model_config)
-        return ServingSupportLevel.RUNTIME_BIND_SWAP_READY
+        return RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY
 
     def process_after_load_class(self, model, model_config):
         process_after_load = getattr(self.adapter, "process_after_load_class", None)
@@ -2346,7 +2346,7 @@ def test_framework_boundary_reexports_serving_identity_types():
     assert IntegrationRuntimeBindingMemberRef is RuntimeBindingMemberRef
     assert SERVING_MANIFEST_TENSOR_NAME.startswith("__tensorcast_meta__.")
     assert FinalizeClass.RUNTIME_ONLY.value == "runtime_only"
-    assert ServingSupportLevel.RUNTIME_BIND_SWAP_READY.value
+    assert RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY.value
 
 
 def test_retained_binding_authority_uses_parsed_retained_authority():
