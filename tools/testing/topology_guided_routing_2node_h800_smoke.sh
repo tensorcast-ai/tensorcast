@@ -3,7 +3,7 @@
 set -euo pipefail
 
 namespace="${NAMESPACE:-tensorcast}"
-charged_group="${CHARGED_GROUP:-tensorcast-dev}"
+charged_group="${CHARGED_GROUP:-}"
 positive_tags="${POSITIVE_TAGS:-H800,ib}"
 worker_gpu_count="${WORKER_GPU_COUNT:-8}"
 worker_cpu_count="${WORKER_CPU_COUNT:-32}"
@@ -26,11 +26,15 @@ comment_prefix="${COMMENT_PREFIX:-topology-guided-routing-smoke}"
 extra_launch_flags="${EXTRA_LAUNCH_FLAGS:-}"
 max_transfer_attempts="${MAX_TRANSFER_ATTEMPTS:-3}"
 timestamp="$(date +%Y%m%d_%H%M%S)"
-log_dir="${LOG_DIR:-/data/tensorcast/tests/topology_guided_routing_${timestamp}}"
+log_dir="${LOG_DIR:-/tmp/tensorcast/tests/topology_guided_routing_${timestamp}}"
 
 declare -a extra_launch_args=()
 if [[ -n "${extra_launch_flags}" ]]; then
   read -r -a extra_launch_args <<< "${extra_launch_flags}"
+fi
+charged_group_args=()
+if [[ -n "${charged_group}" ]]; then
+  charged_group_args=(--charged-group="${charged_group}")
 fi
 
 if (( transfer_gpu_count < 8 )); then
@@ -376,7 +380,7 @@ bazel build //core/communicator:gpu_ce_test_binary \
 
 echo "[predict] capacity check"
 orchestratorctl launch \
-  --charged-group="${charged_group}" \
+  "${charged_group_args[@]}" \
   --gpu "${worker_gpu_count}" \
   --cpu "${worker_cpu_count}" \
   --memory "${worker_memory_mb}" \
@@ -386,7 +390,7 @@ orchestratorctl launch \
 
 echo "[launch] server worker"
 server_worker_pid="$(orchestratorctl launch -d \
-  --charged-group="${charged_group}" \
+  "${charged_group_args[@]}" \
   --gpu "${worker_gpu_count}" \
   --cpu "${worker_cpu_count}" \
   --memory "${worker_memory_mb}" \
@@ -401,7 +405,7 @@ print_process_status "${server_worker_pid}"
 
 echo "[launch] client worker"
 client_worker_pid="$(orchestratorctl launch -d \
-  --charged-group="${charged_group}" \
+  "${charged_group_args[@]}" \
   --gpu "${worker_gpu_count}" \
   --cpu "${worker_cpu_count}" \
   --memory "${worker_memory_mb}" \

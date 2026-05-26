@@ -8,6 +8,6 @@ platform(
     exec_properties = {
         "EstimatedFreeDiskBytes": "50GB",
         "OSFamily": "Linux",
-        "container-image": "docker://yuchuluo/tensorcast-cuda:12.4.0-devel-ubuntu22.04",
+        "container-image": "docker://nvidia/cuda:12.4.0-devel-ubuntu22.04",
     },
 )

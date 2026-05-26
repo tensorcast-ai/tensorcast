@@ -341,8 +341,7 @@ Current SOT rule for this work:
     against same-host `safetensors` `220.242s` and `fastsafetensors`
     `222.243s`.
 - 2026-04-28:
-  - the mounted TP8 follow-up on
-    `dev-yuchu-lxnsr-358366-worker-0` moved the dominant
+  - the mounted TP8 follow-up on an anonymized 8-GPU worker moved the dominant
     `w13_weight` family into the concat fast path with
     `mapped_expert_dim0_concat_job_summary requested=168 accepted=168`;
   - `collective_mapped_target prepared` now reports `concat_jobs=258`,
@@ -363,9 +362,8 @@ Current SOT rule for this work:
     peer/NCCL distribution path if it needs to match the same-host
     `safetensors` / `fastsafetensors` baselines.
 - 2026-04-28:
-  - a follow-up 8xH800 no-collective strategy probe ran at
-    `/data/tc/0113-tp8-8gpu-ab-20260428-064325/0113-tp8-nocollective-rerun-20260428-064445`
-    on `dev-yuchu-kk2x2-362559-worker-0`;
+  - a follow-up 8xH800 no-collective strategy probe ran on an anonymized
+    8-GPU worker;
   - the probe used
     `{"materialization":{"collective":"disabled"}}` and selected
     `SourceOrderedMappedTargetExecutor` with
@@ -379,10 +377,7 @@ Current SOT rule for this work:
     `fastsafetensors` `162.179s`, with daemon profile showing
     `375,214` to `375,310` mapped byte-range segments per rank.
 - 2026-04-28:
-  - the tensor-aware mapped executor closure ran on
-    `ws-7681b3683947089e-worker-k68dd`
-    (`dev-yuchu-4thvk-367119-worker-0`) at
-    `/data/tc/0113-tp8-rect2d-final-20260428-125500`;
+  - the tensor-aware mapped executor closure ran on an anonymized 8-GPU worker;
   - the fix routes same-host disjoint TP shard work to the local typed mapped
     executor while the owner-file collective lane only carries the small
     replicated overlap selected by the overlap/dedup gate;
@@ -399,20 +394,15 @@ Current SOT rule for this work:
     `docs/benchmarks/20260427-example-tp-model-fp8-mounted-tp8-cold-start-evidence.md`;
   - the compared request is
     `{"prompt":"Say hi in five words.","max_tokens":8,"temperature":0}`;
-  - TensorCast artifact
-    `/data/tc/0113-tp8-20260428-004448/completion.json`,
-    same-host `safetensors`
-    `/data/tc/0113-safetensors-tp8-final-20260428-125212/completion.json`,
-    and same-host `fastsafetensors`
-    `/data/tc/0113-fastsafetensors-tp8-final-20260428-125809/completion.json`
+  - the TensorCast artifact completion, same-host `safetensors` completion, and
+    same-host `fastsafetensors` completion
     all return `"\tCHITCHAT\nI'm going"` with `finish_reason=length`,
     `prompt_tokens=7`, `completion_tokens=8`, and `total_tokens=15`;
   - normalized response equality is `true` after excluding only expected
     volatile envelope fields `id`, `created`, and `model`; and
   - the final `136.271s` TensorCast performance packet only issued a shorter
     smoke completion. Rerunning that optimized packet with the same prompt was
-    attempted on 2026-04-28 but blocked by 8-GPU scheduling capacity:
-    `codesign` quota check reported `gpu: 133/128`, and `tensorcast-dev`
+    attempted on 2026-04-28 but blocked by 8-GPU scheduling capacity
     returned `no machine available`.
 
 ## Evidence package

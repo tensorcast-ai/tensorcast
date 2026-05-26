@@ -15,7 +15,9 @@ source .venv/bin/activate
 
 TC_DAEMON_CONFIG="${TC_DAEMON_CONFIG:-examples/config/store_daemon_config_cross_host_bench.yaml}"
 TC_DAEMON_CONNECT_ADDRESS="${TC_DAEMON_CONNECT_ADDRESS:-127.0.0.1:50052}"
-TC_OUT_DIR="${TC_OUT_DIR:-/data/tc_cross_rerun/results_weight_publisher}"
+TC_OUT_DIR="${TC_OUT_DIR:-/tmp/tensorcast/cross_host/results_weight_publisher}"
+TC_REMOTE_OUT_DIR="${TC_REMOTE_OUT_DIR:-${TC_OUT_DIR}}"
+TC_WEIGHTS_ROOT="${TC_WEIGHTS_ROOT:-/tmp/tensorcast/cross_host/weights_single_host}"
 TC_RUN_ID="${TC_RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 TC_MODEL_NAME_PREFIX="${TC_MODEL_NAME_PREFIX:-wp-multihost-suite}"
 TC_START_VERSION="${TC_START_VERSION:-1}"
@@ -184,7 +186,7 @@ fi
 
 run_single_host_functional() {
   local model_name="${TC_MODEL_NAME_PREFIX}-${TC_RUN_ID}-single"
-  local remote_summary="/data/tc_cross_rerun/results_weight_publisher/${TC_RUN_ID}/single_host_summary.json"
+  local remote_summary="${TC_REMOTE_OUT_DIR}/${TC_RUN_ID}/single_host_summary.json"
   local local_summary="${RUN_DIR}/single_host_summary.json"
   local daemon_session="wp-suite-single-${TC_RUN_ID}"
   local daemon_port="${TC_DAEMON_CONNECT_ADDRESS##*:}"
@@ -237,7 +239,7 @@ python ./tensorcast/tools/weight_publisher_e2e.py single-host \
   --tp-device-map-policy ${TC_WP_TP_DEVICE_MAP_POLICY} \
   --transport-group-namespace ${model_name}:single \
   --transport-group-total-parts ${TC_WP_TP_WORLD_SIZE} \
-  --weights-root /data/tc_cross_rerun/weights_single_host \
+  --weights-root ${TC_WEIGHTS_ROOT} \
   --run-id ${TC_RUN_ID}-single \
   --output-json ${remote_summary}
 EOF

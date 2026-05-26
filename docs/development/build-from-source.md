@@ -98,6 +98,9 @@ If Bazel fails to download LLVM, run:
 bash tools/download_and_set_local_llvm.sh
 ```
 
+The helper only downloads and verifies the public LLVM release tarball; Bazel
+continues to resolve LLVM from the public URLs in `MODULE.bazel`.
+
 If Bazel hits missing header errors like
 `fatal error: absl/log/log.h: No such file or directory`, the repo-root
 `external/` or `bazel-bin` symlink is likely stale. Fix it with:

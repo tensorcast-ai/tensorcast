@@ -15,8 +15,6 @@ bazel_dep(name = "platforms", version = "1.0.0")
 #    },
 #    urls = {
 #        "linux-x86_64": [
-#            "file:///io/LLVM-21.1.0-Linux-X64.tar.xz",
-#            "file://./downloads/LLVM-21.1.0-Linux-X64.tar.xz",
 #            "https://githubfast.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/LLVM-21.1.0-Linux-X64.tar.xz",
 #            "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/LLVM-21.1.0-Linux-X64.tar.xz",
 #        ],

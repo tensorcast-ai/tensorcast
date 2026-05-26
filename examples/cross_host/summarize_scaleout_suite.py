@@ -656,25 +656,25 @@ def main() -> None:
     parser.add_argument(
         "--fanout-dir",
         type=Path,
-        default=Path("/data/tc_cross_20260226/results_multi_host_scaleout"),
+        default=Path("/tmp/tensorcast/cross_host/results_multi_host_scaleout"),
         help="Directory that contains fanout/cascade JSON outputs.",
     )
     parser.add_argument(
         "--tp-dir",
         type=Path,
-        default=Path("/data/tc_cross_20260226/results_0083_tp4"),
+        default=Path("/tmp/tensorcast/cross_host/results_tp4"),
         help="Directory that contains TP case JSON outputs.",
     )
     parser.add_argument(
         "--out-json",
         type=Path,
-        default=Path("/data/tc_cross_20260226/report/scaleout_summary.json"),
+        default=Path("/tmp/tensorcast/cross_host/report/scaleout_summary.json"),
         help="Output path for merged JSON summary.",
     )
     parser.add_argument(
         "--out-md",
         type=Path,
-        default=Path("/data/tc_cross_20260226/report/scaleout_summary.md"),
+        default=Path("/tmp/tensorcast/cross_host/report/scaleout_summary.md"),
         help="Output path for markdown report snippet.",
     )
     args = parser.parse_args()

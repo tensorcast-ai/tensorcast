@@ -152,10 +152,10 @@ spec:
         image: ghcr.io/tensorcast-ai/global-store:latest
         env:
         - name: GLOBAL_STORE_DB_PATH
-          value: /data/models.db
+          value: /var/lib/tensorcast/global-store/models.db
         volumeMounts:
         - name: data
-          mountPath: /data
+          mountPath: /var/lib/tensorcast/global-store
   volumeClaimTemplates:
   - metadata:
       name: data

@@ -447,9 +447,8 @@ The key differences from ordinary `tensor_dict` startup are:
   now reports through typed source-bound executor names rather than the generic
   replica-path label.
 
-The Example TP Model TP8 same-host closure case
-`/data/tc/0113-tp8-rect2d-final-20260428-125500` is the reference profile for
-this mixed mapped strategy: `137` local rect2d jobs absorbed the previous
+The anonymized Example TP Model TP8 same-host closure profile is the reference
+for this mixed mapped strategy: `137` local rect2d jobs absorbed the previous
 `873,562,112` byte residual tail, `actual_generic_backend_bytes=0`, and ready
 time improved to `136.271s`.
 

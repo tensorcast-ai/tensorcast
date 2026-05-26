@@ -3,7 +3,7 @@
 // Standalone microbenchmark for TensorCast cold-start copy-path triage.
 // Build example:
 //   /data/cuda/cuda-12.8/bin/nvcc -O3 -std=c++17 \
-//     tools/testing/atomic_path_bandwidth.cu -o /data/tc/atomic_path_bandwidth
+//     tools/testing/atomic_path_bandwidth.cu -o /tmp/tensorcast/atomic_path_bandwidth
 
 #include <cuda_runtime.h>
 #include <fcntl.h>

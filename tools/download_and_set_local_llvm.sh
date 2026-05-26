@@ -23,8 +23,9 @@ fi
 TARBALL="LLVM-${LLVM_VERSION}-Linux-X64.tar.xz"
 DEST_PATH="$REPO_ROOT/$TARBALL"
 
-# Candidate download URLs (try mirrors first)
+# Candidate public download URLs.
 URLS=(
+  "https://githubfast.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/LLVM-${LLVM_VERSION}-Linux-X64.tar.xz"
   "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/LLVM-${LLVM_VERSION}-Linux-X64.tar.xz"
 )
 
@@ -83,22 +84,4 @@ else
   fi
 fi
 
-# After successful verification, prepend local file URL to MODULE.bazel if not present
-FILE_URL="file://$DEST_PATH"
-if ! grep -qF "$FILE_URL" "$MODULE_FILE"; then
-  echo "Updating $MODULE_FILE to prepend local LLVM URL ..."
-  awk -v dest="$FILE_URL" '
-    BEGIN { inserted=0 }
-    {
-      print $0
-      if ($0 ~ /"linux-x86_64": \[/ && inserted==0) {
-        printf("            \"%s\",\n", dest)
-        inserted=1
-      }
-    }
-  ' "$MODULE_FILE" > "$MODULE_FILE.tmp" && mv "$MODULE_FILE.tmp" "$MODULE_FILE"
-else
-  echo "Local LLVM URL already present in MODULE.bazel"
-fi
-
-echo "Done."
+echo "Done. Verified local LLVM tarball: $DEST_PATH"

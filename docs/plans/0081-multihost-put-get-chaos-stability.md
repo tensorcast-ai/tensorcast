@@ -204,8 +204,8 @@ Use this section as the step-by-step handoff checklist for implementation owners
   - update schema parsing in `examples/cross_host/cross_host_chaos_runner.py` with strict validation and actionable error messages.
   - persist normalized gate config into case result artifacts.
 - Verification commands:
-  - `source .venv/bin/activate && python examples/cross_host/cross_host_chaos_runner.py --case-schema <invalid_schema.json> --out-dir /tmp/tc_cross_20260222/dryrun --run-id dryrun`
-  - `source .venv/bin/activate && python examples/cross_host/cross_host_chaos_runner.py --case-schema examples/cross_host/case_schemas/chaos_suite_example.json --out-dir /tmp/tc_cross_20260222/dryrun --run-id dryrun-valid`
+  - `source .venv/bin/activate && python examples/cross_host/cross_host_chaos_runner.py --case-schema <invalid_schema.json> --out-dir /tmp/tensorcast/cross_host/dryrun --run-id dryrun`
+  - `source .venv/bin/activate && python examples/cross_host/cross_host_chaos_runner.py --case-schema examples/cross_host/case_schemas/chaos_suite_example.json --out-dir /tmp/tensorcast/cross_host/dryrun --run-id dryrun-valid`
 - Required artifacts:
   - parser validation evidence (invalid schema fails).
   - valid run artifact showing parsed gate config persisted.
@@ -340,7 +340,7 @@ This runbook is mandatory for anyone executing the remaining items.
 
 - After every run, verify temporary workers are deleted.
 - Verification command:
-  - `orchestratorctl get process -n tensorcast | rg "ws-<workspace-id>-worker-|<owner-name>"`
+  - `orchestratorctl get process -n tensorcast | rg "<case-worker-prefix>|<owner-name>"`
 - If stale workers exist, delete explicitly:
   - `orchestratorctl delete process <worker_id> -n tensorcast`
 
@@ -456,34 +456,23 @@ Chaos suite:
 
 - Global Store service tests passed:
   - `pytest tests/python/global_store/test_maintenance_coordinator.py tests/python/global_store/test_repositories.py tests/python/global_store/test_services.py -q`
-- Revalidation runs after fix (strict order `small -> medium -> large`):
-  - `/tmp/tc_cross_20260222/results_chaos_phase_relaunch/phase-small-20260222e` (`passed=true`)
-  - `/tmp/tc_cross_20260222/results_chaos_phase_relaunch/phase-medium-20260222e` (`passed=true`)
-  - `/tmp/tc_cross_20260222/results_chaos_phase_relaunch/phase-large-20260222f` (`passed=true`)
+- Revalidation runs after fix (strict order `small -> medium -> large`) passed.
 - Phase aggregate gate review:
-  - `/tmp/tc_cross_20260222/results_chaos_phase_relaunch/phase_gate_review_fixed.json` (`passed=true`)
-  - `/tmp/tc_cross_20260222/results_chaos_phase_relaunch/phase_gate_review_fixed.md`
+  - anonymized phase gate JSON (`passed=true`)
+  - anonymized phase gate markdown report
 
 ## Resource lifecycle
 
 - Launched workers with required placement constraint `--private-machine group`.
-- Post-validation cleanup completed: all temporary `ws-7681b3683947089e-worker-*` workers deleted.
+- Post-validation cleanup completed for all temporary workers.
 
 ## Re-execution snapshot (2026-02-22, private-machine group)
 
 - Re-launched 8 workers with `orchestratorctl launch --private-machine group`.
-- Re-generated phase schemas using current worker ids/pod IPs:
-  - `/tmp/tc_cross_20260222/chaos_phase_schemas_0081_exec/small.json`
-  - `/tmp/tc_cross_20260222/chaos_phase_schemas_0081_exec/medium.json`
-  - `/tmp/tc_cross_20260222/chaos_phase_schemas_0081_exec/large.json`
-- Re-executed strict order `small -> medium -> large`:
-  - `/tmp/tc_cross_20260222/results_chaos_phase_0081_exec/phase-small-20260222g` (`passed=true`)
-  - `/tmp/tc_cross_20260222/results_chaos_phase_0081_exec/phase-medium-20260222f` (`passed=true`)
-  - `/tmp/tc_cross_20260222/results_chaos_phase_0081_exec/phase-large-20260222g` (`passed=true`)
-- Re-generated phase aggregate gate review:
-  - `/tmp/tc_cross_20260222/results_chaos_phase_0081_exec/phase_gate_review_0081_exec.json` (`passed=true`)
-  - `/tmp/tc_cross_20260222/results_chaos_phase_0081_exec/phase_gate_review_0081_exec.md`
-- Post-run cleanup completed: all temporary `ws-7681b3683947089e-worker-{hhnxx,7dtq7,dm7sk,r4sh7,5l5p6,994zx,sq7d2,hldhs}` deleted.
+- Re-generated phase schemas using current worker ids/pod IPs.
+- Re-executed strict order `small -> medium -> large`; all phases passed.
+- Re-generated the phase aggregate gate review; final result passed.
+- Post-run cleanup completed for all temporary workers.
 - Fixed launcher entrypoint added for repeatable 0081 execution:
   - `examples/cross_host/run_0081_multihost_chaos.sh`
 

@@ -11,7 +11,9 @@ from typing import Any
 def _load_probe_module() -> Any:
     repo_root = Path(__file__).resolve().parents[3]
     script_path = repo_root / "examples" / "cross_host" / "cross_host_iperf3_probe.py"
-    spec = importlib.util.spec_from_file_location("cross_host_iperf3_probe", script_path)
+    spec = importlib.util.spec_from_file_location(
+        "cross_host_iperf3_probe", script_path
+    )
     if spec is None or spec.loader is None:
         raise RuntimeError("failed to load cross_host_iperf3_probe.py")
     module = importlib.util.module_from_spec(spec)
@@ -37,12 +39,12 @@ def test_compute_summary_uses_pair_floor_p50_for_single_link_ref() -> None:
     pair1 = probe.PairProbeResult(
         getter_name="get1",
         getter_process="p1",
-        getter_ip="100.1.1.1",
+        getter_ip="198.51.100.1",
         seed_to_getter=probe.ProbeDirectionResult(
             direction="seed_to_getter",
             server_process="p1",
             client_process="seed",
-            server_host="100.1.1.1",
+            server_host="198.51.100.1",
             port=63900,
             gibps=2.2,
             error=None,
@@ -53,7 +55,7 @@ def test_compute_summary_uses_pair_floor_p50_for_single_link_ref() -> None:
             direction="getter_to_seed",
             server_process="seed",
             client_process="p1",
-            server_host="100.1.1.10",
+            server_host="198.51.100.10",
             port=63901,
             gibps=2.0,
             error=None,
@@ -64,12 +66,12 @@ def test_compute_summary_uses_pair_floor_p50_for_single_link_ref() -> None:
     pair2 = probe.PairProbeResult(
         getter_name="get2",
         getter_process="p2",
-        getter_ip="100.1.1.2",
+        getter_ip="198.51.100.2",
         seed_to_getter=probe.ProbeDirectionResult(
             direction="seed_to_getter",
             server_process="p2",
             client_process="seed",
-            server_host="100.1.1.2",
+            server_host="198.51.100.2",
             port=63902,
             gibps=1.8,
             error=None,
@@ -80,7 +82,7 @@ def test_compute_summary_uses_pair_floor_p50_for_single_link_ref() -> None:
             direction="getter_to_seed",
             server_process="seed",
             client_process="p2",
-            server_host="100.1.1.10",
+            server_host="198.51.100.10",
             port=63903,
             gibps=2.4,
             error=None,

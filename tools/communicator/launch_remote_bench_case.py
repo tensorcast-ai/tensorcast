@@ -161,7 +161,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bind-numa", action="store_true")
     parser.add_argument("--no-verify", action="store_true")
     parser.add_argument("--worker-max-wait-duration", default="20m")
-    parser.add_argument("--charged-group", default="tensorcast-dev")
+    parser.add_argument("--charged-group", default="")
     parser.add_argument("--worker-gpu", type=int, default=8)
     parser.add_argument("--worker-cpu", type=int, default=8)
     parser.add_argument("--worker-memory-mib", type=int, default=32768)
@@ -186,8 +186,6 @@ def launch_flags(args: argparse.Namespace, comment: str) -> list[str]:
     flags = [
         "orchestratorctl",
         "launch",
-        "--charged-group",
-        args.charged_group,
         "--gpu",
         str(args.worker_gpu),
         "--cpu",
@@ -204,6 +202,8 @@ def launch_flags(args: argparse.Namespace, comment: str) -> list[str]:
         "--comment",
         comment,
     ]
+    if args.charged_group:
+        flags.extend(["--charged-group", args.charged_group])
     if args.private_machine:
         flags.extend(["--private-machine", args.private_machine])
     if args.pool:

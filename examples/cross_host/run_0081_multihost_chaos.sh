@@ -10,12 +10,12 @@ cd "${REPO_ROOT}"
 source .venv/bin/activate
 
 PHASE="${TC0081_PHASE:-all}"
-OUT_ROOT="${TC0081_OUT_ROOT:-/tmp/tc_cross_20260222/results_chaos_0081_fixed}"
+OUT_ROOT="${TC0081_OUT_ROOT:-/tmp/tensorcast/cross_host/results_chaos_0081_fixed}"
 RUN_LABEL="${TC0081_RUN_LABEL:-$(date +%Y%m%d-%H%M%S)}"
 GS_ADDR="${TC0081_GS_ADDR:-}"
 WORKER_COUNT="${TC0081_WORKER_COUNT:-0}"
 
-CHARGED_GROUP="${TC0081_CHARGED_GROUP:-tensorcast-dev}"
+CHARGED_GROUP="${TC0081_CHARGED_GROUP:-}"
 PRIVATE_MACHINE="${TC0081_PRIVATE_MACHINE:-group}"
 GPU="${TC0081_GPU:-1}"
 CPU="${TC0081_CPU:-4}"
@@ -40,11 +40,11 @@ Usage:
 
 Options:
   --phase <small|medium|large|all>     Phase to run (default: all)
-  --out-root <path>                     Output root (default: /tmp/tc_cross_20260222/results_chaos_0081_fixed)
+  --out-root <path>                     Output root (default: /tmp/tensorcast/cross_host/results_chaos_0081_fixed)
   --run-label <label>                   Run label (default: timestamp)
   --gs-addr <host:port>                 Global Store address (default: from tensorcast-cli global status --json)
   --workers <n>                         Worker count to launch (default: auto by phase)
-  --charged-group <name>                orchestratorctl charged group (default: tensorcast-dev)
+  --charged-group <name>                Optional orchestratorctl charged group
   --private-machine <mode>              orchestratorctl private-machine (default: group)
   --gpu <n>                             GPU per worker (default: 1)
   --cpu <n>                             CPU per worker (default: 4)
@@ -352,8 +352,13 @@ echo "[0081-fixed] run_label=${RUN_LABEL} phase=${PHASE} gs=${GS_ADDR}"
 echo "[0081-fixed] preflight orchestratorctl..."
 orchestratorctl version >/dev/null 2>&1
 orchestratorctl options >/dev/null 2>&1
+charged_group_args=()
+if [[ -n "${CHARGED_GROUP}" ]]; then
+  charged_group_args=(--charged-group="${CHARGED_GROUP}")
+fi
+
 orchestratorctl launch \
-  --charged-group="${CHARGED_GROUP}" \
+  "${charged_group_args[@]}" \
   --gpu "${GPU}" \
   --cpu "${CPU}" \
   --memory "${MEMORY_MIB}" \
@@ -365,7 +370,7 @@ echo "[0081-fixed] launching ${WORKER_COUNT} workers..."
 for idx in $(seq 1 "${WORKER_COUNT}"); do
   launch_cmd=(
     orchestratorctl launch -d
-    --charged-group="${CHARGED_GROUP}"
+    "${charged_group_args[@]}"
     --gpu "${GPU}"
     --cpu "${CPU}"
     --memory "${MEMORY_MIB}"

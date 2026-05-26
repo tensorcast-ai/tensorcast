@@ -34,7 +34,7 @@ data:
       description: "public-k8s-global-store"
       cluster_token: ""
     database:
-      db_file: /data/models.db
+      db_file: /var/lib/tensorcast/global-store/models.db
     server:
       listen:
         host: 0.0.0.0
@@ -90,7 +90,7 @@ spec:
               subPath: global_store.yaml
               readOnly: true
             - name: data
-              mountPath: /data
+              mountPath: /var/lib/tensorcast/global-store
           readinessProbe:
             tcpSocket:
               port: grpc

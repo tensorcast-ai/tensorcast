@@ -15,7 +15,6 @@ import sys
 import time
 from pathlib import Path
 
-
 LOCAL_REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNNER_REL = Path("tools/communicator/run_mapping_host.py")
 RUNNER = LOCAL_REPO_ROOT / RUNNER_REL
@@ -109,11 +108,9 @@ def orchestratorctl_exec(
 
 
 def launch_flags(args: argparse.Namespace, comment: str) -> list[str]:
-    return [
+    flags = [
         "orchestratorctl",
         "launch",
-        "--charged-group",
-        args.charged_group,
         "--gpu",
         "8",
         "--cpu",
@@ -132,6 +129,9 @@ def launch_flags(args: argparse.Namespace, comment: str) -> list[str]:
         "--comment",
         comment,
     ]
+    if args.charged_group:
+        flags.extend(["--charged-group", args.charged_group])
+    return flags
 
 
 def predict_worker(
@@ -224,7 +224,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-verify", action="store_true")
     parser.add_argument("--case-timeout-sec", type=int, default=1800)
     parser.add_argument("--worker-max-wait-duration", default="20m")
-    parser.add_argument("--charged-group", default="tensorcast-dev")
+    parser.add_argument("--charged-group", default="")
     parser.add_argument("--require-target-host", default="")
     parser.add_argument("--require-initiator-host", default="")
     parser.add_argument(

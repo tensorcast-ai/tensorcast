@@ -353,7 +353,7 @@ Examples:
 import tensorcast
 
 # Import metadata from disk (explicit import).
-handle = tensorcast.from_disk("/mnt/models/model_a")
+handle = tensorcast.from_disk("/shared/tensorcast/models/model_a")
 weights = handle.tensor_dict(device="cuda:0")  # requires managed disk locations or existing replicas
 
 # Local-only reads (no P2P, no disk fallback).
