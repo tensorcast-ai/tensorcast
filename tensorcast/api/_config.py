@@ -718,9 +718,12 @@ class CollectivePolicyMode(str, Enum):
     def parse(value: object) -> "CollectivePolicyMode":
         if isinstance(value, CollectivePolicyMode):
             return value
-        normalized = (
-            "require_collective" if value is None else str(value).strip().lower()
-        )
+        if value is None or value == "":
+            raise ValueError(
+                "collective_policy must be explicit when parsed directly; "
+                "leave it unset for request normalization to choose the default."
+            )
+        normalized = str(value).strip().lower()
         if normalized == "require_collective":
             return CollectivePolicyMode.REQUIRE_COLLECTIVE
         if normalized == "collective_first":

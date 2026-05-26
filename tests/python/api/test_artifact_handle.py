@@ -749,7 +749,7 @@ def test_bind_coerces_serving_manifest_into_runtime_policy(
     )
 
 
-def test_tensor_dict_and_adopted_binding_share_source_selection_with_separate_target_digests(
+def test_tensor_dict_and_mapped_bindings_share_source_selection_with_separate_target_digests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     canonical_bytes, payload = _build_payload({"foo": torch.ones(2)})
@@ -803,6 +803,50 @@ def test_tensor_dict_and_adopted_binding_share_source_selection_with_separate_ta
             "last_source_bound_plan_diagnostics": None,
         },
     )()
+    owned_binding_value = type(
+        "_OwnedBindingValueStub",
+        (),
+        {
+            "binding_id": "owned-binding",
+            "binding_layout_id": "bl1:owned",
+            "binding_value_id": "owned-value-1",
+            "seal_generation": 1,
+            "source_artifact_id": "aid",
+            "is_artifact_backed": True,
+            "verification_state": 0,
+            "is_published": False,
+        },
+    )()
+    owned_layout = type(
+        "_OwnedLayoutStub",
+        (),
+        {
+            "binding_layout_id": "bl1:owned",
+            "target_layout": store_daemon_pb2.TargetLayout(
+                view_id="mapped:v1:owned-target"
+            ),
+            "target_index_bytes": canonical_bytes,
+            "dst_specs": (),
+        },
+    )()
+    fake_owned_binding = type(
+        "_OwnedBindingStub",
+        (),
+        {
+            "binding_id": "owned-binding",
+            "binding_layout_id": "bl1:owned",
+            "layout": owned_layout,
+            "current_value": owned_binding_value,
+            "staged_value": None,
+            "last_materialization_diagnostics": {
+                "source": "disk",
+                "total_bytes": 8,
+                "retry_reason_buckets": {},
+            },
+            "last_execution_diagnostics": None,
+            "last_source_bound_plan_diagnostics": None,
+        },
+    )()
 
     def _fake_execute_bind_into(self, target_tensors, **kwargs):
         del self
@@ -810,7 +854,16 @@ def test_tensor_dict_and_adopted_binding_share_source_selection_with_separate_ta
         captured.update(kwargs)
         return fake_binding
 
+    owned_captured: dict[str, object] = {}
+
+    def _fake_execute_bind_owned(self, device, **kwargs):
+        del self
+        owned_captured["device"] = device
+        owned_captured.update(kwargs)
+        return fake_owned_binding
+
     monkeypatch.setattr(Artifact, "_execute_bind_into", _fake_execute_bind_into)
+    monkeypatch.setattr(Artifact, "_execute_bind_owned", _fake_execute_bind_owned)
 
     tensor_handle = artifact.realize(ArtifactRealizationSpec.tensor_dict(device="cpu"))
     adopted_handle = artifact.realize(
@@ -820,29 +873,49 @@ def test_tensor_dict_and_adopted_binding_share_source_selection_with_separate_ta
             packing="byte_space",
         )
     )
+    owned_handle = artifact.realize(
+        ArtifactRealizationSpec.binding(
+            device="cuda:0",
+            mapping=copy_plan,
+            packing="byte_space",
+        )
+    )
 
     tensor_report = tensor_handle.report
     adopted_report = adopted_handle.report
+    owned_report = owned_handle.report
     assert adopted_handle.binding() is fake_binding
     assert captured["mapping"] == copy_plan
+    assert owned_handle.binding() is fake_owned_binding
+    assert owned_captured["mapping"] == copy_plan
     assert (
         adopted_report.source_selection_digest == tensor_report.source_selection_digest
     )
+    assert owned_report.source_selection_digest == tensor_report.source_selection_digest
     assert adopted_report.target_layout_digest
     assert adopted_report.copy_plan_digest
+    assert owned_report.target_layout_digest == "binding-layout:bl1:owned"
+    assert owned_report.copy_plan_digest == "mapped:v1:owned-target"
+    assert owned_report.representation_admission is not None
+    assert owned_report.representation_admission.transform_required is True
     assert adopted_report.target_layout_digest != adopted_report.source_selection_digest
     assert adopted_report.copy_plan_digest != adopted_report.target_layout_digest
+    assert owned_report.target_layout_digest != owned_report.source_selection_digest
+    assert owned_report.copy_plan_digest != owned_report.target_layout_digest
     assert str(adopted_report.copy_plan_digest).startswith("mapped:v1:")
     assert adopted_report.target_plan is not None
+    assert owned_report.target_plan is not None
     assert adopted_report.target_plan.target_layout_digest == (
         adopted_report.target_layout_digest
     )
     assert (
         adopted_report.target_plan.copy_plan_digest == adopted_report.copy_plan_digest
     )
+    assert owned_report.target_plan.copy_plan_digest == owned_report.copy_plan_digest
 
     tensor_handle.close()
     adopted_handle.close()
+    owned_handle.close()
 
 
 def test_tensor_into_materializes_subset_only():

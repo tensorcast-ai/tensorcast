@@ -25,6 +25,7 @@ using tensorcast::daemon::materialization_policy::GroupRealizationPreparedMember
 using tensorcast::daemon::materialization_policy::report_group_realization_prepared_if_enabled;
 using tensorcast::daemon::materialization_policy::require_controller_export_kind;
 using tensorcast::daemon::materialization_policy::require_controller_resource_authority;
+using tensorcast::daemon::materialization_policy::resolve_collective_policy;
 using tensorcast::daemon::materialization_policy::resolve_group_realization_transport_context;
 using tensorcast::daemon::materialization_policy::resolve_materialization_request_context;
 using tensorcast::daemon::materialization_policy::resolve_operation_transport_context;
@@ -1208,6 +1209,19 @@ TEST_CASE(
   CHECK(
       default_collective_policy_for_mapped_target(execution_topology) ==
       v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST);
+}
+
+TEST_CASE(
+    "Unspecified collective policy defaults to collective-first when topology is present",
+    "[daemon][materialization][policy]") {
+  ExecutionTopologyContext execution_topology;
+  execution_topology.collective_load_group =
+      CollectiveLoadGroupHint{.group_id = "same-host-tp-load", .world_size = 8, .rank = 3};
+
+  auto policy_or = resolve_collective_policy(v2::CollectivePolicy::COLLECTIVE_POLICY_UNSPECIFIED, execution_topology);
+
+  REQUIRE(policy_or.ok());
+  CHECK(*policy_or == v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST);
 }
 
 TEST_CASE(

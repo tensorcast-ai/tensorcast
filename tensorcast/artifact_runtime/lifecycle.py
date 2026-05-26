@@ -39,6 +39,7 @@ from tensorcast.api.store.realization_kernel import (
     ArtifactRealizationReport,
     ArtifactRealizationSpec,
     RealizationTargetPlan,
+    ResolvedArtifactSelection,
     artifact_realization_report_to_dict,
     emit_artifact_realization_profile_event,
     envelope_for_runtime_attachment,
@@ -608,6 +609,7 @@ class _DirectRuntimeLoad:
     expected_member: Any | None = None
     timeout_s: float | None = 30.0
     artifact_ref: str | None = None
+    source_selection: ResolvedArtifactSelection | None = None
     resolved_artifact: ResolvedRuntimeArtifact | None = None
     model: Any | None = None
     model_runtime_spec: ArtifactRealizationSpec | None = None
@@ -709,6 +711,7 @@ class _LocalReadyBootstrap:
     source_subject: Any | None = None
     placement: Any | None = None
     source_artifact_ref: str | None = None
+    source_selection: ResolvedArtifactSelection | None = None
     serving_manifest_ref: str | None = None
     representation_contract_hash: str | None = None
     serving_build_digest: str | None = None
@@ -748,6 +751,7 @@ class _LocalReadyFinalize:
     binding: Any
     update_epoch: Any
     source_artifact_ref: str
+    source_selection: ResolvedArtifactSelection | None
     serving_manifest_ref: str
     representation_contract_hash: str
     serving_build_digest: str
@@ -886,6 +890,7 @@ def _runtime_attachment_report_for_resolved(
     binding_handle: Any | None,
     target_device: Any,
     tensor_schema_hash: str,
+    source_selection: ResolvedArtifactSelection | None = None,
     execution_diagnostics: Any | None = None,
     materialization_diagnostics: Any | None = None,
 ) -> ArtifactRealizationReport:
@@ -903,7 +908,7 @@ def _runtime_attachment_report_for_resolved(
     )
     envelope = envelope_for_runtime_attachment(tensors, retained=False)
     envelope.validate_for_target(target_plan)
-    selection = resolve_artifact_selection(
+    selection = source_selection or resolve_artifact_selection(
         artifact_id=str(getattr(resolved, "artifact_ref", "") or ""),
         canonical_index_bytes=_canonical_index_bytes_for_runtime_selection(
             resolved=resolved,
@@ -932,6 +937,7 @@ def _runtime_attachment_report_for_retained(
     target_device: Any,
     tensor_schema_hash: str,
     reservation_bytes: int,
+    source_selection: ResolvedArtifactSelection | None = None,
 ) -> ArtifactRealizationReport:
     binding_layout_id = _optional_text(
         getattr(binding_handle, "binding_layout_id", None)
@@ -957,7 +963,7 @@ def _runtime_attachment_report_for_retained(
         or authority.local_serving_ref
         or authority.binding_value_ref.binding_value_id
     )
-    selection = resolve_artifact_selection(
+    selection = source_selection or resolve_artifact_selection(
         artifact_id=str(artifact_id),
         canonical_index_bytes=_canonical_index_bytes_from_tensors(tensors),
         tensor_names=tuple(str(name) for name in tensors),
@@ -983,6 +989,7 @@ def _runtime_attachment_report_for_artifact_id(
     tensor_schema_hash: str,
     artifact_profile: str,
     authority_scope: str,
+    source_selection: ResolvedArtifactSelection | None = None,
     retained: bool = False,
     reservation_bytes: int = 0,
 ) -> ArtifactRealizationReport:
@@ -1004,7 +1011,7 @@ def _runtime_attachment_report_for_artifact_id(
         reservation_bytes=reservation_bytes,
     )
     envelope.validate_for_target(target_plan)
-    selection = resolve_artifact_selection(
+    selection = source_selection or resolve_artifact_selection(
         artifact_id=str(artifact_id),
         canonical_index_bytes=_canonical_index_bytes_from_tensors(tensors),
         tensor_names=tuple(str(name) for name in tensors),
@@ -1796,6 +1803,7 @@ class ArtifactRuntimeIntegration:
         artifact_ref: str,
         spec: ArtifactRealizationSpec,
         context: RequestContext,
+        source_selection: ResolvedArtifactSelection | None = None,
         runtime_artifact_policy: Any | None = None,
         materialization: Any | None = None,
     ) -> RuntimeAttachment:
@@ -1836,6 +1844,7 @@ class ArtifactRuntimeIntegration:
                 configured_collective_policy=(
                     materialization_request.configured_collective_policy
                 ),
+                source_selection=source_selection,
                 source_bound_contract_state=(
                     materialization_request.source_bound_contract_state
                 ),
@@ -1908,6 +1917,7 @@ class ArtifactRuntimeIntegration:
         source_subject: Any,
         spec: ArtifactRealizationSpec,
         context: RequestContext,
+        source_selection: ResolvedArtifactSelection | None = None,
         source_selector: SourceSelector | None = None,
         bootstrap_policy: Any | None = None,
         materialization: Any | None = None,
@@ -1963,6 +1973,7 @@ class ArtifactRuntimeIntegration:
                 request,
                 source_subject=subject,
                 source_artifact_ref=source_artifact_ref,
+                source_selection=source_selection,
             )
         )
         if local_ready_result.model is None or local_ready_result.runtime_state is None:
@@ -2538,6 +2549,7 @@ class ArtifactRuntimeIntegration:
                         tensor_schema_hash=tensor_schema_hash,
                         artifact_profile="retained_binding",
                         authority_scope="daemon_retained_runtime_attachment",
+                        source_selection=request.source_selection,
                         retained=True,
                         reservation_bytes=int(restored.reservation_bytes),
                     )
@@ -2549,6 +2561,7 @@ class ArtifactRuntimeIntegration:
                         target_device=target_device,
                         tensor_schema_hash=tensor_schema_hash,
                         reservation_bytes=restored.reservation_bytes,
+                        source_selection=request.source_selection,
                     )
                 state_seed = self._state_seed(
                     resolved,
@@ -2590,6 +2603,7 @@ class ArtifactRuntimeIntegration:
                 binding_handle=binding_result.binding,
                 target_device=target_device,
                 tensor_schema_hash=tensor_schema_hash,
+                source_selection=request.source_selection,
                 execution_diagnostics=binding_result.execution_diagnostics,
                 materialization_diagnostics=binding_result.materialization_diagnostics,
             )
@@ -2991,6 +3005,7 @@ class ArtifactRuntimeIntegration:
                     binding=realization.binding,
                     update_epoch=realization.update_epoch,
                     source_artifact_ref=str(request.source_artifact_ref),
+                    source_selection=request.source_selection,
                     serving_manifest_ref=str(serving_manifest_ref),
                     representation_contract_hash=str(representation_contract_hash),
                     serving_build_digest=str(serving_build_digest),
@@ -3479,6 +3494,7 @@ class ArtifactRuntimeIntegration:
                 tensor_schema_hash=tensor_schema_hash,
                 artifact_profile=artifact_profile,
                 authority_scope=authority_scope,
+                source_selection=request.source_selection,
             )
             prepared = build_local_ready_prepared_artifact(
                 source_artifact_ref=str(request.source_artifact_ref),

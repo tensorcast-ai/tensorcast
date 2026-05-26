@@ -1376,7 +1376,7 @@ absl::StatusOr<v2::CollectivePolicy> resolve_collective_policy(
     const ExecutionTopologyContext& execution_topology) {
   const bool has_collective_group = execution_topology.collective_load_group.has_value();
   if (requested == v2::CollectivePolicy::COLLECTIVE_POLICY_UNSPECIFIED) {
-    return has_collective_group ? v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE
+    return has_collective_group ? v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST
                                 : v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE;
   }
   if (requested == v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE && has_collective_group) {

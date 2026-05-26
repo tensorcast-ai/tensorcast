@@ -701,7 +701,7 @@ def test_binding_swap_forwards_first_class_execution_topology(
     assert execution_topology.source_sharing_domain == "node-a"
     assert (
         refill_call["collective_policy"]
-        == store_daemon_pb2.COLLECTIVE_POLICY_REQUIRE_COLLECTIVE
+        == store_daemon_pb2.COLLECTIVE_POLICY_COLLECTIVE_FIRST
     )
     assert "clid=same-host-tp-load" not in str(refill_call["operation_id"])
 
@@ -1101,6 +1101,42 @@ def test_binding_realize_from_accepts_rank_zero_collective_group(
         == store_daemon_pb2.COLLECTIVE_POLICY_REQUIRE_COLLECTIVE
     )
     assert "clid=same-host-tp-load" not in str(refill_call["operation_id"])
+
+
+def test_binding_realize_from_defaults_collective_group_to_collective_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
+    artifact = store.artifact(artifact_id="artifact-1")
+    layout = artifact.bind(device="cuda:0", packing="byte_space").layout
+    binding = store.create_binding(layout, ownership="daemon", device="cuda:0")
+
+    binding.realize_from(
+        artifact,
+        realization_plan=(
+            store_mod.BindingRealizationEntry(
+                op="copy",
+                source_name="alpha",
+                dst_name="alpha",
+            ),
+        ),
+        options=GetArtifactOptions(
+            execution_topology=ExecutionTopologyContext(
+                collective_group=CollectiveLoadGroup(
+                    group_id="same-host-tp-load",
+                    world_size=8,
+                    rank=0,
+                ),
+                source_locality="shared_source",
+            )
+        ),
+    )
+
+    refill_call = client.refill_calls[-1]
+    assert (
+        refill_call["collective_policy"]
+        == store_daemon_pb2.COLLECTIVE_POLICY_COLLECTIVE_FIRST
+    )
 
 
 def test_binding_realize_from_serializes_partial_const_fill_ranges(

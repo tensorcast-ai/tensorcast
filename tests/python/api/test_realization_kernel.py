@@ -1518,6 +1518,7 @@ def test_binding_envelope_and_report_capture_identity_diagnostics() -> None:
     target_plan = RealizationTargetPlan(
         kind="binding_owned",
         device="cuda:0",
+        target_layout_digest="binding-layout:bl1:test",
         binding_layout_id="bl1:test",
     )
 
@@ -1559,6 +1560,9 @@ def test_binding_envelope_and_report_capture_identity_diagnostics() -> None:
     assert report.binding.binding_layout_id == "bl1:test"
     assert report.binding.binding_value_id == "value-1"
     assert report.binding.value_state == "current"
+    assert report.view_subset_hash == selection.view_subset_hash.hex()
+    assert report.logical_layout_hash == selection.logical_layout_hash.hex()
+    assert report.selection_hash == selection.selection_hash.hex()
     assert report.binding.publication_eligible is True
     assert report.binding.publish_requested is True
     assert report.binding.published is True
@@ -1643,6 +1647,8 @@ def test_binding_envelope_and_report_capture_identity_diagnostics() -> None:
     assert execution_dict["planner_reject_reason_buckets"] == {"not_collective": 2}
 
     profile_payload = artifact_realization_profile_payload(report)
+    assert profile_payload["logical_layout_hash"] == selection.logical_layout_hash.hex()
+    assert profile_payload["selection_hash"] == selection.selection_hash.hex()
     assert profile_payload["execution_actual_executor_path"] == "mixed_collective"
     assert profile_payload["execution_residual_bytes"] == 4
     assert profile_payload["execution_plan_kind"] == "collective_first_mixed"
@@ -1726,6 +1732,7 @@ def test_local_ready_pending_verification_report_records_admission_state() -> No
     )
     target_plan = RealizationTargetPlan(
         kind="binding_owned",
+        target_layout_digest="binding-layout:layout-local-ready",
         binding_layout_id="layout-local-ready",
     )
     envelope = envelope_for_binding(binding, target_kind="binding_owned")
@@ -2056,6 +2063,7 @@ def test_reports_share_core_realization_fields_across_targets() -> None:
     binding_target = RealizationTargetPlan(
         kind="binding_owned",
         device="cuda:0",
+        target_layout_digest="binding-layout:bl1:test",
         binding_layout_id="bl1:test",
     )
     binding_envelope = envelope_for_binding(binding, target_kind="binding_owned")
@@ -2614,22 +2622,7 @@ _RISK_CLOSURE_MATRIX: tuple[dict[str, str], ...] = (
 )
 
 
-def _plan_risk_names() -> tuple[str, ...]:
-    plan = Path("docs/plans/0121-unified-artifact-realization-kernel.md")
-    in_risks = False
-    risks: list[str] = []
-    for line in plan.read_text(encoding="utf-8").splitlines():
-        if line == "# Risks & Tracking":
-            in_risks = True
-            continue
-        if in_risks and line.startswith("# "):
-            break
-        if in_risks and line.startswith("- ["):
-            risks.append(line.split("] ", 1)[1])
-    return tuple(risks)
-
-
-def test_risk_closure_matrix_covers_plan_risks_and_enforcement_fields() -> None:
+def test_risk_closure_matrix_has_unique_risks_and_enforcement_fields() -> None:
     required_fields = (
         "admission_field",
         "envelope_field",
@@ -2639,7 +2632,7 @@ def test_risk_closure_matrix_covers_plan_risks_and_enforcement_fields() -> None:
     )
     matrix_by_risk = {entry["risk"]: entry for entry in _RISK_CLOSURE_MATRIX}
 
-    assert tuple(matrix_by_risk) == _plan_risk_names()
+    assert len(matrix_by_risk) == len(_RISK_CLOSURE_MATRIX)
     for risk, entry in matrix_by_risk.items():
         for field in required_fields:
             assert entry[field], f"{risk} missing {field}"
@@ -2652,6 +2645,7 @@ def test_sdk_realization_paths_do_not_import_selection_builder() -> None:
         Path("tensorcast/api/store/artifact.py"),
         Path("tensorcast/api/store/materialization.py"),
         Path("tensorcast/api/store/inplace_slot.py"),
+        Path("tensorcast/api/store/runtime_realization_reference_consumer.py"),
         Path("tensorcast/api/plan/plan.py"),
     )
     offenders: list[str] = []

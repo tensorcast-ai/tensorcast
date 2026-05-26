@@ -636,6 +636,7 @@ def test_artifact_realize_model_runtime_uses_direct_runtime_host(monkeypatch):
     artifact = Artifact(
         store_ref=weakref.ref(_Store()),
         artifact_id="mi2:serving",
+        canonical_index_bytes=b"index",
     )
     host = tc.RuntimeHostCapabilities(
         framework=_FakeFrameworkHost(),
@@ -664,6 +665,10 @@ def test_artifact_realize_model_runtime_uses_direct_runtime_host(monkeypatch):
     assert handle.attach() is attachment
     assert attachment.state.model_runtime_handle is handle
     assert handle.report.target_kind == "model_runtime"
+    assert handle.report.artifact_id == "mi2:serving"
+    assert handle.report.artifact_profile == "durable_artifact"
+    assert handle.report.authority_scope == "daemon_mediated_durable"
+    assert handle.report.source_selection_digest
     assert handle.report.model_runtime is not None
     assert handle.report.model_runtime.framework == "fakefw"
     assert handle.report.model_runtime.adapter_version == "adapter-v1"
@@ -1065,6 +1070,7 @@ def test_artifact_realize_model_runtime_uses_local_ready_restore(monkeypatch):
     artifact = Artifact(
         store_ref=weakref.ref(_Store()),
         artifact_id="mi2:serving-local",
+        canonical_index_bytes=b"index",
     )
     handle = artifact.realize(
         tc.ArtifactRealizationSpec.model_runtime(
@@ -1095,8 +1101,11 @@ def test_artifact_realize_model_runtime_uses_local_ready_restore(monkeypatch):
     assert not restored.closed
     assert restore_calls
     assert restore_calls[0]["resolved_artifact"].artifact_ref == "mi2:serving-local"
-    assert handle.report.artifact_profile == "retained_binding"
-    assert handle.report.authority_scope == "daemon_retained_runtime_attachment"
+    assert handle.report.artifact_id == "mi2:serving-local"
+    assert handle.report.artifact_profile == "durable_artifact"
+    assert handle.report.authority_scope == "daemon_mediated_durable"
+    assert handle.report.lifecycle_plan is not None
+    assert handle.report.lifecycle_plan.retained is True
     assert handle.report.runtime_attach_sec is not None
     assert handle.report.runtime_attach_sec >= 0.0
     assert handle.report.runtime_finalize_sec is not None
@@ -1228,6 +1237,7 @@ def test_artifact_realize_model_runtime_uses_mounted_source_artifact(monkeypatch
     assert handle.report.model_runtime.adapter_version == "adapter-v1"
     assert handle.report.artifact_profile == "mounted_source"
     assert handle.report.authority_scope == "daemon_local_mounted_source"
+    assert handle.report.logical_layout_hash
     assert calls[0][0] == "catalog"
     assert calls[0][1].source_selector == SourceSelector.local_path("/tmp/fake-model")
     assert calls[0][1].source_subject.subject is source_handle

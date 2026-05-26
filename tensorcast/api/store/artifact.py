@@ -103,6 +103,7 @@ from tensorcast.api.store.realization_kernel import (
     retained_binding_lifecycle_plan_for,
     retained_binding_reports_for,
     risk_labels_for_target,
+    selection_report_fields,
     strategy_plan_for_execution,
 )
 from tensorcast.api.store.retry import (
@@ -326,6 +327,33 @@ def _serving_target_copy_plan_digest(
     return _digest_hex("serving-target-copy-plan", target_bytes)
 
 
+def _binding_layout_target_digest(binding_layout_id: str) -> str | None:
+    normalized = str(binding_layout_id or "").strip()
+    if not normalized:
+        return None
+    return f"binding-layout:{normalized}"
+
+
+def _mapped_target_specs_from_layout(
+    layout: object | None,
+) -> tuple[dict[str, object], ...]:
+    if layout is None:
+        return ()
+    specs = getattr(layout, "dst_specs", None)
+    if specs is None:
+        return ()
+    return tuple(
+        {
+            "name": str(getattr(spec, "name", "")),
+            "dtype": str(getattr(spec, "dtype", "")),
+            "shape": tuple(int(v) for v in getattr(spec, "shape", ())),
+            "stride": tuple(int(v) for v in getattr(spec, "stride", ())),
+            "logical_length": int(getattr(spec, "logical_length", 0) or 0),
+        }
+        for spec in specs
+    )
+
+
 def _with_retained_binding_report(
     result: RuntimePrefetchResult,
     *,
@@ -379,6 +407,7 @@ def _with_retained_binding_report(
         artifact_profile=selection.artifact_profile,
         authority_scope=selection.authority_scope,
         generation_hint=selection.generation_hint,
+        **selection_report_fields(selection),
         envelope=envelope,
         target_plan=target_plan,
         strategy_plan=strategy_plan_for_execution(envelope=envelope),
@@ -957,18 +986,26 @@ class Artifact:
                         status_code="FAILED_PRECONDITION",
                         retryable=False,
                     )
+                source_selection = self._resolve_model_runtime_source_selection(
+                    artifact_id
+                )
                 attachment = integration.realize_mounted_source_model_runtime(
                     artifact_ref=artifact_id,
                     source_subject=self._source_subject,
                     spec=resolved_spec,
                     context=context,
+                    source_selection=source_selection,
                     materialization=resolved_spec.options,
                 )
             else:
+                source_selection = self._resolve_model_runtime_source_selection(
+                    artifact_id
+                )
                 attachment = integration.realize_model_runtime(
                     artifact_ref=artifact_id,
                     spec=resolved_spec,
                     context=context,
+                    source_selection=source_selection,
                     runtime_artifact_policy=resolved_spec.runtime_artifact_policy,
                     materialization=resolved_spec.options,
                 )
@@ -986,6 +1023,41 @@ class Artifact:
                 retryable=False,
             )
         return handle
+
+    def _resolve_model_runtime_source_selection(
+        self,
+        artifact_id: str,
+    ) -> ResolvedArtifactSelection | None:
+        if not artifact_id.startswith("msa1:"):
+            if (
+                self._canonical_index_bytes is None
+                and not self._model_runtime_can_resolve_artifact_index()
+                and self._view_spec is None
+                and self._view_metadata is None
+            ):
+                return None
+            return self._resolve_realization_selection()
+        canonical_index_bytes = self._canonical_index_bytes
+        if canonical_index_bytes is None and self._source_subject is not None:
+            canonical_index_bytes = bytes(
+                getattr(self._source_subject, "canonical_index_bytes", None) or b""
+            )
+        return resolve_artifact_selection(
+            artifact_id=artifact_id,
+            canonical_index_bytes=canonical_index_bytes,
+            generation_hint=(
+                self._key_generation
+                if self._key_generation is not None
+                else self._generation
+            ),
+        )
+
+    def _model_runtime_can_resolve_artifact_index(self) -> bool:
+        store = self._store_ref() if self._store_ref is not None else None
+        if store is None or bool(getattr(store, "closed", False)):
+            return False
+        runtime = getattr(store, "_runtime", None)
+        return callable(getattr(runtime, "ensure_client", None))
 
     def realize(
         self,
@@ -1030,6 +1102,7 @@ class Artifact:
                 artifact_profile=selection.artifact_profile,
                 authority_scope=selection.authority_scope,
                 generation_hint=selection.generation_hint,
+                **selection_report_fields(selection),
                 envelope=envelope,
                 target_plan=target_plan,
                 strategy_plan=strategy_plan_for_execution(
@@ -1105,6 +1178,7 @@ class Artifact:
                 artifact_profile=selection.artifact_profile,
                 authority_scope=selection.authority_scope,
                 generation_hint=selection.generation_hint,
+                **selection_report_fields(selection),
                 envelope=envelope,
                 target_plan=target_plan,
                 strategy_plan=strategy_plan_for_execution(
@@ -1150,11 +1224,42 @@ class Artifact:
                 ),
                 ctx=ctx,
             )
-            binding_layout_id = str(getattr(binding, "binding_layout_id", "") or "")
+            binding_layout = getattr(binding, "layout", None)
+            layout_binding_id = str(
+                getattr(binding_layout, "binding_layout_id", "") or ""
+            )
+            binding_layout_id = str(
+                getattr(binding, "binding_layout_id", "") or layout_binding_id
+            )
+            mapped_view_id = None
+            copy_plan_digest = None
+            if spec.mapping is not None:
+                target_layout = getattr(binding_layout, "target_layout", None)
+                mapped_view_id = str(getattr(target_layout, "view_id", "") or "")
+                if not mapped_view_id:
+                    target_specs = _mapped_target_specs_from_layout(binding_layout)
+                    if target_specs:
+                        mapped_view_id = compute_mapped_view_id_from_specs(
+                            canonical_index_bytes=selection.canonical_index_bytes,
+                            source_view_id=selection.view_id,
+                            plan=normalize_copy_plan(cast(CopyPlan, spec.mapping)),
+                            target_specs=target_specs,
+                        )
+                if not mapped_view_id:
+                    raise ArtifactError(
+                        "mapped owned binding realization requires mapped target "
+                        "layout identity",
+                        status_code="FAILED_PRECONDITION",
+                        retryable=False,
+                    )
+                copy_plan_digest = mapped_view_id
             target_plan = RealizationTargetPlan(
                 kind="binding_owned",
                 device=spec.device,
+                target_layout_digest=_binding_layout_target_digest(binding_layout_id),
                 binding_layout_id=binding_layout_id,
+                mapped_view_id=mapped_view_id,
+                copy_plan_digest=copy_plan_digest,
             )
             envelope = envelope_for_binding(
                 binding,
@@ -3023,6 +3128,7 @@ class Artifact:
             artifact_profile=resolved_selection.artifact_profile,
             authority_scope=resolved_selection.authority_scope,
             generation_hint=resolved_selection.generation_hint,
+            **selection_report_fields(resolved_selection),
             envelope=envelope,
             target_plan=target_plan,
             strategy_plan=strategy_plan_for_execution(

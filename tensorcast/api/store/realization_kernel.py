@@ -9,7 +9,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, Literal, NoReturn
+from typing import Any, Literal, NoReturn, TypedDict
 
 from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.types import ArtifactError
@@ -187,6 +187,22 @@ class ResolvedArtifactSelection:
     authority_scope: str
     source_selection_digest: str
     diagnostics: Mapping[str, object] = field(default_factory=dict)
+
+
+class SelectionReportFields(TypedDict):
+    view_subset_hash: str
+    logical_layout_hash: str
+    selection_hash: str
+
+
+def selection_report_fields(
+    selection: ResolvedArtifactSelection,
+) -> SelectionReportFields:
+    return {
+        "view_subset_hash": selection.view_subset_hash.hex(),
+        "logical_layout_hash": selection.logical_layout_hash.hex(),
+        "selection_hash": selection.selection_hash.hex(),
+    }
 
 
 def resolve_artifact_selection(
@@ -456,7 +472,7 @@ class RealizationResourceEnvelope:
                     retryable=False,
                 )
         if (
-            target.kind in {"binding_adopted", "caller_tensors"}
+            target.kind in {"binding_owned", "binding_adopted", "caller_tensors"}
             and not target.target_layout_digest
         ):
             raise ArtifactError(
@@ -744,6 +760,9 @@ class ArtifactRealizationReport:
     execution_commit: RealizationExecutionCommitReport | None = None
     execution_diagnostics: object | None = None
     source_bound_plan_diagnostics: object | None = None
+    view_subset_hash: str = ""
+    logical_layout_hash: str = ""
+    selection_hash: str = ""
 
     def validate_for_handle(self, target_kind: RealizationTargetKind) -> None:
         if self.target_kind != target_kind:
@@ -795,6 +814,9 @@ def artifact_realization_profile_payload(
         "artifact_profile": report.artifact_profile,
         "authority_scope": report.authority_scope,
         "source_selection_digest": report.source_selection_digest,
+        "view_subset_hash": report.view_subset_hash,
+        "logical_layout_hash": report.logical_layout_hash,
+        "selection_hash": report.selection_hash,
         "target_layout_digest": report.target_layout_digest,
         "copy_plan_digest": report.copy_plan_digest,
         "operation_backend": report.operation_backend,
@@ -2522,6 +2544,7 @@ def report_for_binding_realization(
         artifact_profile=selection.artifact_profile,
         authority_scope=selection.authority_scope,
         generation_hint=selection.generation_hint,
+        **selection_report_fields(selection),
         envelope=envelope,
         target_plan=target_plan,
         strategy_plan=strategy_plan_for_execution(
@@ -2601,6 +2624,7 @@ def report_for_runtime_attachment(
         artifact_profile=selection.artifact_profile,
         authority_scope=selection.authority_scope,
         generation_hint=selection.generation_hint,
+        **selection_report_fields(selection),
         envelope=envelope,
         target_plan=target_plan,
         strategy_plan=strategy_plan_for_execution(
@@ -2769,6 +2793,7 @@ def report_for_mounted_source(
         artifact_profile=selection.artifact_profile,
         authority_scope=selection.authority_scope,
         generation_hint=selection.generation_hint,
+        **selection_report_fields(selection),
         envelope=envelope,
         target_plan=target_plan,
         representation_admission=representation_admission_for_target(target_plan),
@@ -2812,6 +2837,7 @@ def report_for_target_set(
         artifact_profile=selection.artifact_profile,
         authority_scope=selection.authority_scope,
         generation_hint=selection.generation_hint,
+        **selection_report_fields(selection),
         envelope=envelope,
         target_plan=target_plan,
         strategy_plan=target_set_strategy_plan_for(

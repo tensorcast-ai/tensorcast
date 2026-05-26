@@ -12,6 +12,7 @@ from google.protobuf.any_pb2 import Any
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from tensorcast.api.context import GroupRealization
+from tensorcast.api.store.realization_kernel import resolve_artifact_selection
 from tensorcast.api.store.runtime_realization_spec_cache import (
     RuntimeRealizationSpecCacheRecord,
     read_matching_resolved_spec_cache_entry,
@@ -320,6 +321,21 @@ def unpack_prefetch_handoff_set(
     return PrefetchHandoffSet.from_proto(proto)
 
 
+def _reference_source_selection(
+    *,
+    source_artifact_id: str,
+    target: RealizationTarget | RealizationTargetSet,
+) -> common_pb2.ArtifactSelection:
+    if isinstance(target, RealizationTarget):
+        index_bytes = bytes(target.resolved_layout.target_index_bytes)
+    else:
+        index_bytes = bytes(target.members[0].resolved_layout.target_index_bytes)
+    return resolve_artifact_selection(
+        artifact_id=source_artifact_id,
+        canonical_index_bytes=index_bytes,
+    ).proto
+
+
 def prefetch_reference_binding(
     client: DaemonCtl,
     *,
@@ -330,7 +346,10 @@ def prefetch_reference_binding(
     group_realization: GroupRealization | None = None,
     timeout_s: float = 30.0,
 ) -> PrefetchHandoff:
-    selection = common_pb2.ArtifactSelection(artifact_id=source_artifact_id)
+    selection = _reference_source_selection(
+        source_artifact_id=source_artifact_id,
+        target=target,
+    )
     response = client.prefetch_serving_binding(
         source_selection=selection,
         target=target,
@@ -358,7 +377,10 @@ def prefetch_reference_binding_set(
     group_realization: GroupRealization | None = None,
     timeout_s: float = 30.0,
 ) -> PrefetchHandoffSet:
-    selection = common_pb2.ArtifactSelection(artifact_id=source_artifact_id)
+    selection = _reference_source_selection(
+        source_artifact_id=source_artifact_id,
+        target=target,
+    )
     response = client.prefetch_serving_binding(
         source_selection=selection,
         target=target,

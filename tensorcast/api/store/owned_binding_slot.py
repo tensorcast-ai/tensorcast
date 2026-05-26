@@ -342,7 +342,7 @@ def _build_source_execution_contract(
     if policy_mode is None and explicit_collective_group is not None:
         from tensorcast.api._config import CollectivePolicyMode
 
-        policy_mode = CollectivePolicyMode.REQUIRE_COLLECTIVE
+        policy_mode = CollectivePolicyMode.COLLECTIVE_FIRST
 
     if str(getattr(policy_mode, "value", policy_mode) or "") == "disable_collective":
         if explicit_collective_group is not None:
