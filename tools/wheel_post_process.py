@@ -68,6 +68,7 @@ _RPATH_PARTS_FROM_PACKAGE_ROOT = [
     "nvidia/nvjitlink/lib",
     "nvidia/nvtx/lib",
     "nvidia/cufile/lib",
+    "nvidia/nvshmem/lib",
 ]
 
 
@@ -117,6 +118,8 @@ AUDITWHEEL_EXCLUDES = [
     "libnvrtc.so.12",
     "libnvToolsExt.so.1",
     "libnvidia-ml.so.1",
+    "libtorch_nvshmem.so",
+    "libnvshmem_host.so.3",
 ]
 
 
