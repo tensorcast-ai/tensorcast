@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
+from typing import Any
 
 import torch
 
@@ -21,7 +22,9 @@ from tensorcast.api.store.common import (
     canonical_index_to_bytes,
 )
 from tensorcast.api.store.types import CanonicalIndex
+from tensorcast.artifact_runtime.errors import SourceSubjectError
 from tensorcast.common.identity import ArtifactIdKind, validate_artifact_id
+from tensorcast.types import PublicDiskSourceHandle
 
 _SOURCE_CATALOG_FINGERPRINT_VERSION = "tensorcast-source-catalog-v1"
 SOURCE_CATALOG_SCHEMA_VERSION = 1
@@ -67,6 +70,165 @@ class SourceCatalog:
             "source_artifact_ref",
             resolve_source_artifact_ref(self.source_artifact_ref),
         )
+
+
+@dataclass(frozen=True)
+class SourceSubject:
+    """Framework-facing source subject with a durable source artifact root."""
+
+    artifact_ref: str
+    subject: Any
+    source_kind: str = "opaque"
+    metadata_fingerprint: str | None = None
+
+    def broadcast_payload(self) -> dict[str, Any]:
+        if self.source_kind == "public_disk":
+            subject_payload = _public_disk_source_payload(self.subject)
+        else:
+            subject_payload = self.subject
+        return {
+            "kind": self.source_kind,
+            "artifact_ref": self.artifact_ref,
+            "subject": subject_payload,
+            "metadata_fingerprint": self.metadata_fingerprint,
+        }
+
+    def profile_fields(self) -> dict[str, Any]:
+        source = self.subject
+        fields: dict[str, Any] = {
+            "artifact_ref": self.artifact_ref,
+            "source_kind": self.source_kind,
+        }
+        if self.metadata_fingerprint is not None:
+            fields["metadata_fingerprint"] = self.metadata_fingerprint
+        canonical_index = getattr(source, "canonical_index_bytes", None)
+        if canonical_index is not None:
+            fields["canonical_index_bytes"] = len(canonical_index)
+        source_index = getattr(source, "source_index_bytes", None)
+        if source_index is not None:
+            fields["source_index_bytes"] = len(bytes(source_index or b""))
+        for name in ("format_kind", "metadata_capability"):
+            value = getattr(source, name, None)
+            if value is not None:
+                fields[name] = str(value or "")
+        return fields
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text or None
+
+
+def _optional_text(value: Any) -> str | None:
+    return _optional_str(value)
+
+
+def _optional_bytes(value: Any) -> bytes | None:
+    if value is None:
+        return None
+    data = bytes(value)
+    return data or None
+
+
+def _enum_wire_value(value: Any) -> str | int | None:
+    if value is None:
+        return None
+    enum_value = getattr(value, "value", value)
+    if isinstance(enum_value, (str, int)):
+        return enum_value
+    return str(enum_value)
+
+
+def _public_disk_source_payload(source: Any) -> dict[str, Any]:
+    return {
+        "path": str(getattr(source, "path", "") or ""),
+        "canonical_index_bytes": bytes(source.canonical_index_bytes),
+        "artifact_id": str(getattr(source, "artifact_id", "") or ""),
+        "generation": int(getattr(source, "generation", 0) or 0),
+        "verify_checksums": bool(getattr(source, "verify_checksums", True)),
+        "trusted_content_artifact_id": _optional_str(
+            getattr(source, "trusted_content_artifact_id", None)
+        ),
+        "source_index_bytes": _optional_bytes(
+            getattr(source, "source_index_bytes", None)
+        ),
+        "format_kind": _enum_wire_value(getattr(source, "format_kind", None)),
+        "metadata_capability": _enum_wire_value(
+            getattr(source, "metadata_capability", None)
+        ),
+        "resolution_strategy": _enum_wire_value(
+            getattr(source, "resolution_strategy", None)
+        ),
+        "validation_mode": _enum_wire_value(getattr(source, "validation_mode", None)),
+        "policy_id": _optional_str(getattr(source, "policy_id", None)),
+        "exact_size_bytes": int(getattr(source, "exact_size_bytes", 0) or 0),
+    }
+
+
+def _source_subject_from_handle(source: Any) -> SourceSubject:
+    artifact_ref = str(getattr(source, "artifact_id", "") or "")
+    if not artifact_ref:
+        raise RuntimeError("TensorCast source subject is missing a source artifact_id")
+    return SourceSubject(
+        artifact_ref=artifact_ref,
+        subject=source,
+        source_kind="public_disk",
+    )
+
+
+def resolve_source_subject(
+    path: str,
+    *,
+    verify_checksums: bool,
+) -> SourceSubject:
+    from tensorcast.api.store import resolve_public_disk_source
+
+    return _source_subject_from_handle(
+        resolve_public_disk_source(
+            path,
+            verify_checksums=verify_checksums,
+        )
+    )
+
+
+def source_subject_from_broadcast_payload(payload: Mapping[str, Any]) -> SourceSubject:
+    payload_dict = dict(payload)
+    if "kind" not in payload_dict:
+        raise SourceSubjectError(
+            "TensorCast source subject broadcast payload is missing kind"
+        )
+    kind = str(payload_dict.get("kind") or "")
+    artifact_ref = str(payload_dict.get("artifact_ref") or "")
+    if not artifact_ref:
+        raise SourceSubjectError(
+            "TensorCast source subject broadcast payload is missing artifact_ref"
+        )
+    source: Any
+    if kind == "public_disk":
+        subject_payload = payload_dict.get("subject")
+        if not isinstance(subject_payload, Mapping):
+            raise SourceSubjectError(
+                "TensorCast public_disk source subject payload must be a mapping"
+            )
+        source = PublicDiskSourceHandle(**dict(subject_payload))
+    else:
+        source = payload_dict.get("subject")
+    return SourceSubject(
+        artifact_ref=artifact_ref,
+        subject=source,
+        source_kind=kind,
+        metadata_fingerprint=_optional_text(payload_dict.get("metadata_fingerprint")),
+    )
+
+
+def source_subject_broadcast_payload(subject: SourceSubject) -> dict[str, Any]:
+    return subject.broadcast_payload()
+
+
+def is_public_disk_source_subject(subject: Any) -> bool:
+    return isinstance(subject, PublicDiskSourceHandle)
 
 
 def source_catalog_from_selected_safetensors(
@@ -279,11 +441,16 @@ __all__ = [
     "SourceCatalog",
     "SourceFileEntry",
     "SourceManifest",
+    "SourceSubject",
     "SourceTensorMeta",
     "compute_source_metadata_fingerprint",
+    "is_public_disk_source_subject",
     "resolve_source_artifact_ref",
+    "resolve_source_subject",
     "source_catalog_from_all_safetensors_dir",
     "source_catalog_from_canonical_index",
     "source_catalog_from_manifest",
     "source_catalog_from_selected_safetensors",
+    "source_subject_broadcast_payload",
+    "source_subject_from_broadcast_payload",
 ]
