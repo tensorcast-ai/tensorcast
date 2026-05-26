@@ -751,7 +751,6 @@ class _LocalReadyFinalize:
     binding: Any
     update_epoch: Any
     source_artifact_ref: str
-    source_selection: ResolvedArtifactSelection | None
     serving_manifest_ref: str
     representation_contract_hash: str
     serving_build_digest: str
@@ -759,6 +758,7 @@ class _LocalReadyFinalize:
     source_bound_contract_state: Any
     source_bound_contract_path: str
     target_device: Any
+    source_selection: ResolvedArtifactSelection | None = None
     manifest_bytes: bytes | None = None
     framework_config: Any | None = None
     model_config: Any | None = None
