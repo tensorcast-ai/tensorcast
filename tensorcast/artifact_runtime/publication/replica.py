@@ -810,6 +810,15 @@ def reject_reload_with_active_publication(
     )
 
 
+def _policy_validation_payload(policy: object) -> object:
+    if isinstance(policy, Mapping):
+        return dict(policy)
+    model_dump = getattr(policy, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(mode="python")
+    return policy
+
+
 def replica_publication_policy(
     policy: object | None,
     *,
@@ -821,7 +830,7 @@ def replica_publication_policy(
         return policy
     validate = getattr(type(default_policy), "model_validate", None)
     if callable(validate):
-        return validate(dict(policy))  # type: ignore[arg-type]
+        return validate(_policy_validation_payload(policy))
     return policy
 
 

@@ -14,7 +14,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from tensorcast.artifact_runtime.recipe.identity import RuntimeBindingPlan
 
@@ -112,16 +112,22 @@ def _unique_paths(paths: Sequence[Path]) -> tuple[Path, ...]:
     return tuple(unique)
 
 
-def _model_adjacent_cache_root(source_catalog: object) -> Path | None:
-    selected_files = tuple(getattr(source_catalog, "selected_files", ()) or ())
-    if not selected_files:
-        return None
+def _selected_file_parent_paths(source_catalog: object) -> tuple[str, ...]:
+    selected_files_value = getattr(source_catalog, "selected_files", None)
+    if selected_files_value is None:
+        return ()
+    selected_files = cast(Sequence[object], selected_files_value)
     parent_paths: list[str] = []
     for entry in selected_files:
         path = getattr(entry, "path", None)
         if path is None:
             continue
         parent_paths.append(str(Path(path).expanduser().resolve().parent))
+    return tuple(parent_paths)
+
+
+def _model_adjacent_cache_root(source_catalog: object) -> Path | None:
+    parent_paths = _selected_file_parent_paths(source_catalog)
     if not parent_paths:
         return None
     return Path(os.path.commonpath(parent_paths)) / ".tensorcast" / "bootstrap_cache"

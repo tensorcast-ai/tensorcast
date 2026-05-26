@@ -2754,6 +2754,11 @@ class ArtifactRuntimeIntegration:
     ) -> RetainedBindingResult:
         target_device = self._require_target_device(request.target_device)
         authority = request.authority
+        if authority is None:
+            raise RestoreBindingError(
+                "ArtifactRuntimeIntegration._restore_retained_for_intent requires "
+                "authority"
+            )
         rejection_reason = runtime_restore_rejection_reason(authority)
         if rejection_reason is not None:
             raise RestoreBindingError(rejection_reason)

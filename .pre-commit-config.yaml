@@ -1,6 +1,7 @@
 default_install_hook_types:
   - pre-commit
   - commit-msg
+  - pre-push
 exclude: ^.github/actions/assigner/dist
 repos:
     - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -90,6 +91,20 @@ repos:
             - --use-current-year
     - repo: local
       hooks:
+        - id: pyright
+          name: pyright (tensorcast)
+          language: system
+          entry: env UV_NO_SYNC=1 uv run pyright ./tensorcast
+          pass_filenames: false
+          files: ^(tensorcast/.*\.py|pyproject\.toml)$
+          stages: [pre-push]
+        - id: mypy
+          name: mypy (tensorcast)
+          language: system
+          entry: env UV_NO_SYNC=1 uv run mypy ./tensorcast
+          pass_filenames: false
+          files: ^(tensorcast/.*\.py|pyproject\.toml)$
+          stages: [pre-push]
         - id: webui-prettier
           name: webui-prettier-check
           language: system

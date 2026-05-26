@@ -680,12 +680,8 @@ def retained_binding_acquire_mode(extra: Mapping[str, Any] | None) -> str:
 
 
 def runtime_restore_rejection_reason(
-    authority: ParsedRetainedRealizationAuthority | None,
+    authority: ParsedRetainedRealizationAuthority,
 ) -> str | None:
-    if authority is None:
-        return (
-            "ArtifactRuntimeIntegration._restore_retained_for_intent requires authority"
-        )
     readiness = getattr(authority, "readiness", None)
     if readiness == "runtime_reserved":
         return (
