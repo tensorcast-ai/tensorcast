@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import inspect
+from pathlib import Path
 
 import tensorcast as tc
 import tensorcast.artifact_runtime.diagnostics as tc_runtime_diagnostics
@@ -169,6 +170,8 @@ def test_tensorcast_exports_artifact_helpers() -> None:
         "ServingSupportLevel",
         "PreparedServingRegistration",
         "RegisteredServingPublication",
+        "CapabilityDirectoryClient",
+        "CapabilityDirectoryOptions",
         "RegisteredRuntimeArtifactPublication",
         "PreparedRuntimeArtifactRegistration",
         "RuntimePublicationSubject",
@@ -218,6 +221,7 @@ def test_tensorcast_exports_artifact_helpers() -> None:
     assert "RuntimeArtifactLocator" in tc.__all__
     assert "RuntimePolicy" in tc.__all__
     assert "RuntimeRealizationReport" in tc.__all__
+
     assert "RuntimeArtifactBuildIntent" in tc.__all__
     assert "RuntimeArtifactManifest" in tc.__all__
     assert "RuntimeArtifactPolicy" in tc.__all__
@@ -319,6 +323,39 @@ def test_tensorcast_exports_artifact_helpers() -> None:
     assert "normalize_runtime_reload_request_payload" in tc.__all__
     assert callable(tc_runtime_diagnostics.binding_layout_tensor_count)
     assert tc_runtime_readiness.ReadinessInventoryAdmissionPolicy is not None
+
+
+def test_public_sdk_surface_does_not_open_global_store_channels() -> None:
+    forbidden = (
+        "GlobalStoreCompositeStub",
+        "tensorcast.global_store",
+        "global_store_pb2",
+        "global_store_pb2_grpc",
+        "tensorcast.proto.global_store",
+        "grpc.insecure_channel",
+        "grpc.secure_channel",
+        "grpc.aio.insecure_channel",
+        "grpc.aio.secure_channel",
+    )
+    roots = (
+        Path("tensorcast/__init__.py"),
+        Path("tensorcast/api"),
+        Path("tensorcast/artifact_runtime"),
+        Path("tensorcast/retained_realization.py"),
+    )
+    checked = [
+        path
+        for root in roots
+        for path in ([root] if root.is_file() else sorted(root.rglob("*.py")))
+    ]
+    offenders = [
+        f"{path}:{token}"
+        for path in checked
+        for token in forbidden
+        if token in path.read_text(encoding="utf-8")
+    ]
+
+    assert offenders == []
 
 
 def test_tensorcast_exports_programmable_primitives() -> None:

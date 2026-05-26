@@ -3,6 +3,7 @@
 #include "daemon/service/controllers/materialization_policy_utils.h"
 
 #include <algorithm>
+#include <cctype>
 #include <format>
 #include <memory>
 #include <string>
@@ -82,6 +83,18 @@ bool has_resource_authority(const ControllerRealizationPlan& plan, std::string_v
       plan.resource_envelope.resource_authorities.begin(),
       plan.resource_envelope.resource_authorities.end(),
       [authority](const std::string& current) { return std::string_view(current) == authority; });
+}
+
+bool is_sha256_hex(std::string_view value) {
+  return value.size() == 64 && std::all_of(value.begin(), value.end(), [](char ch) {
+           return std::isxdigit(static_cast<unsigned char>(ch)) != 0;
+         });
+}
+
+void check_controller_source_selection_digest(const std::optional<std::string>& digest) {
+  REQUIRE(digest.has_value());
+  CHECK(is_sha256_hex(*digest));
+  CHECK(*digest != "73656c656374696f6e2d68617368");
 }
 
 v2::GroupRealizationOptions build_group_realization_options() {
@@ -180,7 +193,7 @@ TEST_CASE("Controller realization plan mirrors caller target materialization", "
   CHECK(plan_or->target.member_count == 1);
   CHECK(plan_or->strategy.source_selection_mode == "single_selection");
   CHECK(plan_or->strategy.source_coordination == "single_request");
-  CHECK(plan_or->strategy.source_selection_digest == "73656c656374696f6e2d68617368");
+  check_controller_source_selection_digest(plan_or->strategy.source_selection_digest);
   CHECK(plan_or->lifecycle.capability == "caller_tensors");
   CHECK((plan_or->lifecycle.release_policy == std::vector<std::string>{"release_external_target_storage_lease"}));
   CHECK(plan_or->resource_envelope.projection_kind == "completion");
@@ -189,6 +202,44 @@ TEST_CASE("Controller realization plan mirrors caller target materialization", "
   CHECK(has_resource_authority(*plan_or, "caller_allocation"));
   REQUIRE(require_controller_export_kind(*plan_or, "registered_region_direct_write", "MaterializeIntoTarget").ok());
   REQUIRE(require_controller_resource_authority(*plan_or, "caller_allocation", "MaterializeIntoTarget").ok());
+}
+
+TEST_CASE(
+    "Controller source selection digest is independent from target layout digest",
+    "[daemon][materialization][policy]") {
+  v2::MaterializeIntoTargetRequest base_request;
+  base_request.mutable_selection()->set_artifact_id("mi2:test:artifact");
+  base_request.mutable_selection()->set_logical_layout_hash("logical-layout");
+  base_request.mutable_selection()->set_selection_hash("selection-hash");
+  base_request.set_pid(1234);
+  base_request.set_device_uuid("GPU-0");
+  fill_target_layout(base_request.mutable_target_layout());
+  auto request_context_or = resolve_materialization_request_context(nullptr);
+  REQUIRE(request_context_or.ok());
+
+  const auto first_transport = resolve_operation_transport_context("op-identity-1");
+  auto first_or = build_controller_realization_plan(
+      base_request, *request_context_or, first_transport, nullptr, "mi2:test:artifact");
+  REQUIRE(first_or.ok());
+
+  v2::MaterializeIntoTargetRequest target_changed_request = base_request;
+  target_changed_request.mutable_target_layout()->mutable_storages(0)->set_storage_length(2048);
+  const auto target_changed_transport = resolve_operation_transport_context("op-identity-2");
+  auto target_changed_or = build_controller_realization_plan(
+      target_changed_request, *request_context_or, target_changed_transport, nullptr, "mi2:test:artifact");
+  REQUIRE(target_changed_or.ok());
+
+  v2::MaterializeIntoTargetRequest source_changed_request = base_request;
+  source_changed_request.mutable_selection()->set_logical_layout_hash("other-logical-layout");
+  const auto source_changed_transport = resolve_operation_transport_context("op-identity-3");
+  auto source_changed_or = build_controller_realization_plan(
+      source_changed_request, *request_context_or, source_changed_transport, nullptr, "mi2:test:artifact");
+  REQUIRE(source_changed_or.ok());
+
+  check_controller_source_selection_digest(first_or->strategy.source_selection_digest);
+  CHECK(first_or->strategy.source_selection_digest == target_changed_or->strategy.source_selection_digest);
+  CHECK(first_or->target.target_layout_digest != target_changed_or->target.target_layout_digest);
+  CHECK(first_or->strategy.source_selection_digest != source_changed_or->strategy.source_selection_digest);
 }
 
 TEST_CASE("Controller realization plan mirrors binding creation ownership", "[daemon][materialization][policy]") {
@@ -243,8 +294,7 @@ TEST_CASE("Controller realization plan mirrors binding creation ownership", "[da
   CHECK(adopted_plan_or->target.resolved_artifact_id == "mi2:source-override");
   CHECK(adopted_plan_or->strategy.source_selection_mode == "single_selection");
   CHECK(adopted_plan_or->strategy.source_coordination == "binding_initial_value");
-  REQUIRE(adopted_plan_or->strategy.source_selection_digest.has_value());
-  CHECK(*adopted_plan_or->strategy.source_selection_digest == "73656c656374696f6e2d68617368");
+  check_controller_source_selection_digest(adopted_plan_or->strategy.source_selection_digest);
   CHECK(adopted_plan_or->lifecycle.export_lifetime_kind == "binding_registry");
   CHECK(adopted_plan_or->lifecycle.mutability_contract == "caller_region_borrowed");
   CHECK(adopted_plan_or->resource_envelope.backing_kind == "caller_region");
@@ -450,8 +500,7 @@ TEST_CASE("Controller realization plan mirrors owned binding refill", "[daemon][
   CHECK(*plan_or->target.operation_id == "refill-op");
   CHECK(plan_or->strategy.source_selection_mode == "single_selection");
   CHECK(plan_or->strategy.collective_policy == v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE);
-  REQUIRE(plan_or->strategy.source_selection_digest.has_value());
-  CHECK(*plan_or->strategy.source_selection_digest == "73656c656374696f6e2d68617368");
+  check_controller_source_selection_digest(plan_or->strategy.source_selection_digest);
   CHECK(plan_or->lifecycle.capability == "binding_owned");
   CHECK(plan_or->lifecycle.export_lifetime_kind == "binding_current_value");
   CHECK(plan_or->lifecycle.mutability_contract == "binding_controlled_read_only");
@@ -688,8 +737,7 @@ TEST_CASE(
   CHECK(plan_or->strategy.source_selection_mode == "single_selection");
   CHECK(plan_or->strategy.source_coordination == "single_request");
   CHECK(plan_or->strategy.collective_policy == v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST);
-  REQUIRE(plan_or->strategy.source_selection_digest.has_value());
-  CHECK(*plan_or->strategy.source_selection_digest == "73656c656374696f6e2d68617368");
+  check_controller_source_selection_digest(plan_or->strategy.source_selection_digest);
   CHECK(plan_or->lifecycle.capability == "tensor_dict");
   CHECK(plan_or->lifecycle.export_lifetime_kind == "handle_lease");
   CHECK(
@@ -827,6 +875,8 @@ TEST_CASE(
   fill_serving_target(target_set->add_members(), "member-1", 1, "GPU-1");
   target_set->mutable_source()->CopyFrom(request.source());
   request.mutable_group_realization()->CopyFrom(build_group_realization_options());
+  request.mutable_group_realization()->mutable_version()->mutable_explicit_version_set()->set_version_set_id(
+      "vs-requested");
   request.mutable_group_realization()->set_require_staged_publish(true);
 
   auto plan_or = build_controller_realization_plan(request);
@@ -840,6 +890,10 @@ TEST_CASE(
   CHECK(plan_or->strategy.source_selection_mode == "same_selection");
   CHECK(plan_or->strategy.source_coordination == "group_realization_transport");
   CHECK(plan_or->strategy.collective_policy == v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST);
+  REQUIRE(plan_or->strategy.version_set_id.has_value());
+  CHECK(*plan_or->strategy.version_set_id == "vs-requested");
+  REQUIRE(plan_or->strategy.source_selection_digest.has_value());
+  CHECK(*plan_or->strategy.source_selection_digest == "source-selection");
   CHECK(
       (plan_or->strategy.group_barriers ==
        std::vector<std::string>{"member_readiness", "group_acquire", "staged_values", "publish_barrier"}));
@@ -977,8 +1031,7 @@ TEST_CASE("Controller realization plan mirrors target publication lifecycle", "[
   CHECK(plan_or->strategy.source_selection_mode == "single_selection");
   CHECK(plan_or->strategy.source_coordination == "publication_lifecycle");
   CHECK(plan_or->strategy.collective_policy == v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE);
-  REQUIRE(plan_or->strategy.source_selection_digest.has_value());
-  CHECK(*plan_or->strategy.source_selection_digest == "73656c656374696f6e2d68617368");
+  check_controller_source_selection_digest(plan_or->strategy.source_selection_digest);
   CHECK(plan_or->lifecycle.capability == "publication");
   CHECK(plan_or->lifecycle.export_lifetime_kind == "publication_lease");
   CHECK(plan_or->lifecycle.mutability_contract == "published_read_only");

@@ -116,7 +116,7 @@ class ViewOrchestrator:
             if isinstance(resolved, tuple):
                 resolved_artifact_id = resolved[0]
             else:
-                resolved_artifact_id = resolved
+                resolved_artifact_id = resolved.artifact_id
             if not resolved_artifact_id:
                 raise ArtifactError(
                     f"Artifact key '{resolved_key}' is not mapped",

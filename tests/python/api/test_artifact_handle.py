@@ -211,7 +211,7 @@ class _RuntimeStub:
         self._artifact_cache = ArtifactCache(
             daemon_endpoint="daemon", ttl_seconds=10, max_entries=8
         )
-        self._key_cache: dict[str, tuple[str | None, str | None]] = {}
+        self._key_cache: dict[str, tuple[str | None, str | None, int | None]] = {}
         self._client = client
 
     def ensure_client(self) -> _ClientStub:
@@ -228,8 +228,10 @@ class _RuntimeStub:
     ) -> None:
         self._artifact_cache.invalidate_artifact(artifact_id or "", reason=reason)
 
-    def resolve_key_mapping_cached(self, *, key: str) -> tuple[str | None, str | None]:
-        return self._key_cache.get(key, (None, None))
+    def resolve_key_mapping_cached(
+        self, *, key: str
+    ) -> tuple[str | None, str | None, int | None]:
+        return self._key_cache.get(key, (None, None, None))
 
     def cache_key_mapping(
         self,
@@ -237,10 +239,11 @@ class _RuntimeStub:
         *,
         artifact_id: str | None,
         disk_path: str | None = None,
+        generation: int | None = None,
         ttl_override=None,
     ) -> None:
         del ttl_override
-        self._key_cache[key] = (artifact_id, disk_path)
+        self._key_cache[key] = (artifact_id, disk_path, generation)
 
 
 class _PipelineStub:
@@ -969,6 +972,27 @@ def test_subset_clone_handles_multiple_identifiers():
     assert clone.artifact_id == "aid"
     assert clone.key == "mapped"
     assert clone.tensor_names == ("foo",)
+
+
+def test_key_mapping_generation_flows_into_realization_selection_digest():
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    runtime.cache_key_mapping("mapped-v7", artifact_id="aid", generation=7)
+    runtime.cache_key_mapping("mapped-v8", artifact_id="aid", generation=8)
+    store = _StoreStub(runtime, _PipelineStub(payload))
+
+    selection_v7 = Artifact(
+        store_ref=_store_ref(store),
+        key="mapped-v7",
+    )._resolve_realization_selection()
+    selection_v8 = Artifact(
+        store_ref=_store_ref(store),
+        key="mapped-v8",
+    )._resolve_realization_selection()
+
+    assert selection_v7.generation_hint == 7
+    assert selection_v8.generation_hint == 8
+    assert selection_v7.source_selection_digest != selection_v8.source_selection_digest
 
 
 def test_describe_uses_cached_generation_without_fetch():

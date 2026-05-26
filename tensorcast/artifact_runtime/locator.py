@@ -125,8 +125,13 @@ class ArtifactLocator(BaseModel):
 
         from tensorcast.api.store import get_runtime_context
 
-        artifact_id, _disk_path = get_runtime_context().resolve_key_mapping_cached(
+        resolved_mapping = get_runtime_context().resolve_key_mapping_cached(
             key=self.resolve_version_key(member=member, placement=placement)
+        )
+        artifact_id = (
+            resolved_mapping[0]
+            if isinstance(resolved_mapping, tuple)
+            else getattr(resolved_mapping, "artifact_id", None)
         )
         if not artifact_id:
             raise ValueError(

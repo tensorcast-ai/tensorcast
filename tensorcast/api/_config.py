@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import threading
 from collections.abc import Mapping
 from enum import Enum
@@ -26,7 +25,6 @@ DEFAULT_COLD_TTL_MS: int = 60_000
 # Global daemon address configuration
 _daemon_address_lock = threading.RLock()
 _global_daemon_address: str | None = None
-_global_store_address = os.environ.get("TENSORCAST_GLOBAL_STORE", "127.0.0.1:8085")
 
 
 def set_daemon_address(address: str) -> None:
@@ -54,15 +52,6 @@ def clear_daemon_address() -> None:
 def has_daemon_address() -> bool:
     with _daemon_address_lock:
         return _global_daemon_address is not None
-
-
-def set_global_store_address(address: str) -> None:
-    global _global_store_address
-    _global_store_address = address
-
-
-def get_global_store_address() -> str:
-    return _global_store_address
 
 
 class PlanType(Enum):
@@ -893,8 +882,6 @@ __all__ = [
     "policy_requires_persistence",
     "clear_daemon_address",
     "get_daemon_address",
-    "get_global_store_address",
     "has_daemon_address",
     "set_daemon_address",
-    "set_global_store_address",
 ]

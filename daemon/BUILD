@@ -1683,6 +1683,7 @@ sc_cc_library(
         "//proto/tensorcast/global_store/v1:global_store_grpc_cc",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
+        "@protobuf",
     ],
 )
 

@@ -277,14 +277,6 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "GroupVersionSetRef": ("tensorcast.api", "GroupVersionSetRef"),
     "GovernanceContext": ("tensorcast.api", "GovernanceContext"),
     "DirectorySnapshot": ("tensorcast.api", "DirectorySnapshot"),
-    "CapabilityDirectoryClient": (
-        "tensorcast.capability_directory",
-        "CapabilityDirectoryClient",
-    ),
-    "CapabilityDirectoryOptions": (
-        "tensorcast.capability_directory",
-        "CapabilityDirectoryOptions",
-    ),
     "Operation": ("tensorcast.api", "Operation"),
     "OperationError": ("tensorcast.api", "OperationError"),
     "OperationStatus": ("tensorcast.api", "OperationStatus"),
@@ -659,8 +651,6 @@ if TYPE_CHECKING:
         CallContext,
         CanonicalIndex,
         CanonicalIndexEntry,
-        CapabilityDirectoryClient,
-        CapabilityDirectoryOptions,
         CollectiveLoadGroup,
         DirectorySnapshot,
         ExecutionDiagnostics,

@@ -762,6 +762,7 @@ class Artifact:
         canonical_index_bytes: bytes | None = None,
         canonical_index: CanonicalIndex | None = None,
         generation: int | None = None,
+        key_generation: int | None = None,
         view_spec: ViewSpecBuildResult | None = None,
         view_metadata: ViewMetadataCache | None = None,
         view_depth: int = 0,
@@ -793,6 +794,7 @@ class Artifact:
                 entry.name: _meta_from_entry(entry) for entry in effective_index.entries
             }
         self._generation = generation
+        self._key_generation = key_generation
         self._store_ref = store_ref
         self._lock = threading.RLock()
         self._released = False
@@ -1281,7 +1283,11 @@ class Artifact:
             selection = resolve_artifact_selection(
                 artifact_id=source_artifact_id,
                 canonical_index_bytes=canonical_index_bytes,
-                generation_hint=self._generation,
+                generation_hint=(
+                    self._key_generation
+                    if self._key_generation is not None
+                    else self._generation
+                ),
             )
             target_plan = RealizationTargetPlan(
                 kind="mounted_source",
@@ -3324,7 +3330,11 @@ class Artifact:
                 tensor_names=requested_names,
                 view_subset_hash=inputs.view_subset_hash,
                 view_index_hint=view_index_hint,
-                generation_hint=self._generation,
+                generation_hint=(
+                    self._key_generation
+                    if self._key_generation is not None
+                    else self._generation
+                ),
                 allow_view_id_without_spec=bool(
                     inputs.view_id_hint
                     and not (view_spec_proto is not None and view_spec_proto.tensors)
@@ -3540,9 +3550,19 @@ class Artifact:
             if self._artifact_id:
                 return self._artifact_id
             if self._key_hint:
-                artifact_id, _disk_path = runtime.resolve_key_mapping_cached(
+                resolved_mapping = runtime.resolve_key_mapping_cached(
                     key=self._key_hint
                 )
+                if isinstance(resolved_mapping, tuple):
+                    artifact_id = resolved_mapping[0]
+                    generation = (
+                        int(resolved_mapping[2])
+                        if len(resolved_mapping) > 2 and resolved_mapping[2] is not None
+                        else None
+                    )
+                else:
+                    artifact_id = getattr(resolved_mapping, "artifact_id", None)
+                    generation = getattr(resolved_mapping, "generation", None)
                 if not artifact_id:
                     raise ArtifactError(
                         f"Artifact key '{self._key_hint}' is not mapped",
@@ -3550,6 +3570,8 @@ class Artifact:
                         retryable=False,
                     )
                 self._artifact_id = artifact_id
+                if self._key_generation is None and generation is not None:
+                    self._key_generation = int(generation)
                 return artifact_id
             raise ArtifactError(
                 "Artifact handle missing identity",
@@ -3884,6 +3906,7 @@ class Artifact:
             canonical_index_bytes=self._canonical_index_bytes,
             canonical_index=self._canonical_index,
             generation=self._generation,
+            key_generation=self._key_generation,
             view_spec=composed_spec,
             view_metadata=view_cache,
             view_depth=depth,
