@@ -26,7 +26,7 @@ def _row(**overrides):
         "post_bind_finalize_class": FinalizeClass.RUNTIME_ONLY,
         "support_level": RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY,
         "pure_transform_candidate": True,
-        "serving_only_runtime_allowed": True,
+        "runtime_bind_swap_allowed": True,
     }
     values.update(overrides)
     return SimpleNamespace(**values)

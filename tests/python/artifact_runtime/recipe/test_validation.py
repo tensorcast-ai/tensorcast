@@ -116,6 +116,28 @@ def test_evaluate_semantic_validation_spec_rejects_explicit_mismatch() -> None:
         evaluate_semantic_validation_spec(spec, {"values": [3, 2, 1]})
 
 
+def test_evaluate_semantic_validation_spec_compares_framework_probes() -> None:
+    spec = TensorcastSemanticValidationSpec(
+        kind="framework_semantic_probes",
+        payload={"values": [1, 2, 3]},
+    )
+
+    assert evaluate_semantic_validation_spec(
+        spec,
+        _ProbePayload(values=(1, 2, 3)),
+    ) == {"values": [1, 2, 3]}
+
+
+def test_evaluate_semantic_validation_spec_rejects_framework_probe_mismatch() -> None:
+    spec = TensorcastSemanticValidationSpec(
+        kind="framework_semantic_probes",
+        payload={"values": [1, 2, 3]},
+    )
+
+    with pytest.raises(RuntimeError, match="semantic validation failed"):
+        evaluate_semantic_validation_spec(spec, {"values": [1, 2]})
+
+
 def test_validate_tensor_schema_against_tensors_checks_names_shape_stride_dtype() -> (
     None
 ):

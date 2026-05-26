@@ -121,10 +121,7 @@ def is_binding_finalize_publication_allowlisted(row: Any) -> bool:
 
 
 def is_runtime_bind_swap_allowlisted(row: Any) -> bool:
-    allowed = bool(
-        getattr(row, "runtime_bind_swap_allowed", False)
-        or getattr(row, "serving_only_runtime_allowed", False)
-    )
+    allowed = bool(getattr(row, "runtime_bind_swap_allowed", False))
     return (
         allowed
         and readiness_post_bind_finalize_class(row) == FinalizeClass.RUNTIME_ONLY

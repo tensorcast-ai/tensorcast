@@ -14,18 +14,34 @@ def evaluate_semantic_validation_spec(spec: Any, actual_payload: Any) -> Any:
         return None
     actual = _jsonable(actual_payload)
     if spec.kind == "framework_semantic_probes":
-        return actual
+        return _compare_semantic_payload(
+            label="framework probe",
+            expected=_jsonable(spec.payload),
+            actual=actual,
+        )
     if spec.kind == "explicit":
-        expected = _jsonable(spec.payload)
-        if actual != expected:
-            raise RuntimeError(
-                "TensorCast semantic validation failed for explicit probe "
-                f"spec: expected={expected!r}, actual={actual!r}"
-            )
-        return actual
+        return _compare_semantic_payload(
+            label="explicit probe",
+            expected=_jsonable(spec.payload),
+            actual=actual,
+        )
     raise RuntimeError(
         f"Unsupported TensorCast semantic validation spec kind: {spec.kind!r}"
     )
+
+
+def _compare_semantic_payload(
+    *,
+    label: str,
+    expected: Any,
+    actual: Any,
+) -> Any:
+    if actual != expected:
+        raise RuntimeError(
+            f"TensorCast semantic validation failed for {label} "
+            f"spec: expected={expected!r}, actual={actual!r}"
+        )
+    return actual
 
 
 def _jsonable(value: Any) -> Any:
