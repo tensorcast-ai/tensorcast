@@ -1029,4 +1029,4 @@ represented by `0121`.
 - `docs/designs/0111-source-to-serving-builder-and-representation-publication.md`
 - `docs/designs/0112-binding-native-serving-realization-and-publication.md`
 - `docs/designs/0115-trusted-disk-source-format-aware-source-handle-and-metadata-first-resolve.md`
-- `/data/workspace/internal-vllm/docs/tensorcast/plans/tensorcast_preloaded_local_serving_binding_plan.md`
+- `/opt/vllm/docs/tensorcast/plans/tensorcast_preloaded_local_serving_binding_plan.md`

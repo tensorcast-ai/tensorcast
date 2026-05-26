@@ -1,10 +1,10 @@
 ---
-slug: step3p5-closure-and-sot-convergence
-title: Step3p5 Closure and Single-SOT Convergence Plan
+slug: example-tp-model-closure-and-sot-convergence
+title: Example TP Model Closure and Single-SOT Convergence Plan
 status: in_progress
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests", "benchmarks", "serving"]
 related_code:
-  - docs/designs/0113-step3p5-closure-and-sot-convergence.md
+  - docs/designs/0113-example-tp-model-closure-and-sot-convergence.md
   - proto/tensorcast/daemon/v2/store_daemon.proto
   - tensorcast/api/store/binding.py
   - tensorcast/api/store/owned_binding_slot.py
@@ -16,15 +16,15 @@ related_code:
   - daemon/service/controllers/target_materialization_service.cc
   - daemon/service/controllers/assembly_operation_service.cc
   - daemon/state/lip_manager.cc
-  - /data/workspace/internal-vllm/vllm/model_executor/model_loader/tensorcast_loader.py
-  - /data/workspace/internal-vllm/docs/tensorcast/tensorcast_step3p5_from_disk_cold_start_performance_followup.md
+  - /opt/vllm/vllm/model_executor/model_loader/tensorcast_loader.py
+  - /opt/vllm/docs/tensorcast/tensorcast_example-tp-model_from_disk_cold_start_performance_followup.md
 links:
-  design: ../designs/0113-step3p5-closure-and-sot-convergence.md
+  design: ../designs/0113-example-tp-model-closure-and-sot-convergence.md
 ---
 
 # Objective
 
-Finish the remaining Step3p5-facing closure work after the architectural cuts
+Finish the remaining Example TP Model-facing closure work after the architectural cuts
 from `0107` through `0112`, while preserving a clean handoff into the new total
 plan arrangement.
 
@@ -94,12 +94,12 @@ Execution policy for this plan:
   `0109` / `0112` / `0114` owner boundaries in:
   - `docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md`
   - `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`
-- `internal-vllm` now exposes stable bootstrap summary fields for source-bound
+- `vllm` now exposes stable bootstrap summary fields for source-bound
   contract/version gating plus typed execution/hash/identity diagnostics:
   - `vllm/model_executor/model_loader/tensorcast_loader.py`
-  - `/data/workspace/internal-vllm/docs/tensorcast/tensorcast_step3p5_from_disk_cold_start_performance_followup.md`
+  - `/opt/vllm/docs/tensorcast/tensorcast_example-tp-model_from_disk_cold_start_performance_followup.md`
 - the remaining closure blockers before the final 2026-04-28 TP8 run were:
-  - broader Step3p5 mounted `TP=8` / `8xH800` evidence and performance signoff
+  - broader Example TP Model mounted `TP=8` / `8xH800` evidence and performance signoff
     versus default and `fastsafetensors` loaders,
   - `0109` residual mixed-residual policy and prototype-delete gate decisions
     backed by explicit evidence,
@@ -115,7 +115,7 @@ Execution policy for this plan:
   - `0110-artifact-representation-contract-and-transform-unification.md`
   - `0111-source-to-serving-builder-and-representation-publication.md`
   - `0112-binding-native-serving-realization-and-publication-plan.md`
-  - `0112-step3p5-binding-native-serving-bootstrap-performance-followup.md`
+  - `0112-example-tp-model-binding-native-serving-bootstrap-performance-followup.md`
 
 Current SOT rule for this work:
 
@@ -133,7 +133,7 @@ Current SOT rule for this work:
     record for residual `0107`-`0112` work.
   - [x] Milestone 1.2: Fold landed execution history back into the owning
     designs and delete the superseded companion plans.
-  - [x] Milestone 1.3: Correct stale `internal-vllm` current-state wording so
+  - [x] Milestone 1.3: Correct stale `vllm` current-state wording so
     it matches the code that already passes collective context.
 
 - [x] Phase 2: Source-Bound Contract Cutover
@@ -173,7 +173,7 @@ Current SOT rule for this work:
     decided against explicit mounted and benchmark evidence.
 
 - [ ] Phase 6: Downstream Handoff, Evidence, And Deletion
-  - [x] Milestone 6.1: `internal-vllm` can detect TensorCast readiness through a
+  - [x] Milestone 6.1: `vllm` can detect TensorCast readiness through a
     stable capability or version surface and switch to the first-class contract.
   - [x] Milestone 6.2: mounted TP=8 serving and benchmark evidence is recaptured
     against the new contract, diagnostics surface, and executor path.
@@ -189,8 +189,8 @@ Current SOT rule for this work:
     execution tracking.
   - [x] Delete the superseded `0108`-`0112` companion plans.
   - [x] Update `docs/README.md` to list the new closure pair.
-  - [x] Update `internal-vllm` follow-up docs to remove stale references to the
-    deleted Step3p5 plan and to current-state-correct collective context notes.
+  - [x] Update `vllm` follow-up docs to remove stale references to the
+    deleted Example TP Model plan and to current-state-correct collective context notes.
 
 - [x] TensorCast contract work
   - [x] Extend `proto/tensorcast/daemon/v2/store_daemon.proto` source-bound
@@ -244,12 +244,12 @@ Current SOT rule for this work:
     proven.
 
 - [ ] Integration and validation work
-  - [x] Switch `internal-vllm` from bridge-style source-bound collective
+  - [x] Switch `vllm` from bridge-style source-bound collective
     lowering to the first-class request contract once the capability surface is
     ready.
   - [x] Execute compatibility retirement in repo order:
-    `internal-vllm` caller migration first, then TensorCast compatibility
-    lowering deletion, then residual `internal-vllm` compat fallback cleanup.
+    `vllm` caller migration first, then TensorCast compatibility
+    lowering deletion, then residual `vllm` compat fallback cleanup.
   - [x] Expand bootstrap summary and profile fields only after TensorCast
     exposes stable typed facts and separates them from
     `same_binding_fast_path_validated`.
@@ -267,7 +267,7 @@ Current SOT rule for this work:
 
 - [x] One active closure plan now exists for residual `0107`-`0112` work.
 - [x] The superseded companion plans have been removed from the repo.
-- [x] Stale `internal-vllm` wording about missing collective context has been
+- [x] Stale `vllm` wording about missing collective context has been
   corrected.
 - [x] `RefillOwnedBinding` no longer relies on `operation_id` side-channeling
   as its primary collective contract.
@@ -279,7 +279,7 @@ Current SOT rule for this work:
 - [x] same-binding closeout no longer pays a second-stage full-data hash.
 - [x] same-binding closeout no longer remints content identity from the same
   immutable bytes.
-- [x] mounted Step3p5 no longer remains indefinitely on
+- [x] mounted Example TP Model no longer remains indefinitely on
   `GenericByteRangeExecutor(source_ordered)` as dominant executor.
 - [ ] final deletion of compatibility/prototype scaffolding is backed by one
   committed evidence package.
@@ -290,17 +290,17 @@ Current SOT rule for this work:
 ## Test plan
 
 - [x] Link hygiene and stale-reference sweep:
-  - `rg -n "0108-01-pre-109-strategy-plane-convergence.md|0108-tensor-aware-materialization-strategy-plane.md|0109-batched-owner-file-collective-executor.md|0110-artifact-representation-contract-and-transform-unification.md|0111-source-to-serving-builder-and-representation-publication.md|0112-binding-native-serving-realization-and-publication-plan.md|0112-step3p5-binding-native-serving-bootstrap-performance-followup.md" docs /data/workspace/internal-vllm/docs -S`
+  - `rg -n "0108-01-pre-109-strategy-plane-convergence.md|0108-tensor-aware-materialization-strategy-plane.md|0109-batched-owner-file-collective-executor.md|0110-artifact-representation-contract-and-transform-unification.md|0111-source-to-serving-builder-and-representation-publication.md|0112-binding-native-serving-realization-and-publication-plan.md|0112-example-tp-model-binding-native-serving-bootstrap-performance-followup.md" docs /opt/vllm/docs -S`
 - [ ] Once contract code work starts:
   - [x] `bash tools/build_proto_python.sh`
   - [x] `source .venv/bin/activate && pytest tests/python/test_binding.py tests/python/test_daemon_ctl_resolve_rpc_config.py tests/python/api/test_config_models.py tests/python/api/test_retrieval_options.py`
   - [x] `bazel test //daemon:owned_binding_service_test //daemon:grpc_service_impl_startup_gate_test //daemon:grpc_service_impl_start_seal_assembly_test --test_output=errors`
   - [x] `bazel test //daemon:owned_binding_service_test //daemon:grpc_service_impl_startup_gate_test //daemon:materialize_into_mapped_target_test --test_output=errors`
-  - [x] `rg -n "#tcg:|clid=|clws=|clrk=" tests/python /data/workspace/internal-vllm/tests tensorcast/api/store -S`
+  - [x] `rg -n "#tcg:|clid=|clws=|clrk=" tests/python /opt/vllm/tests tensorcast/api/store -S`
     only leaves non-source-bound transport/mapped-path coverage plus negative
     source-bound assertions that `operation_id` no longer carries collective
     topology.
-  - mounted TP=8 `internal-vllm` cold-start validation after integration cutover
+  - mounted TP=8 `vllm` cold-start validation after integration cutover
 
 ## Latest implementation status
 
@@ -328,15 +328,15 @@ Current SOT rule for this work:
     `GenericByteRangeExecutor...`;
   - representative mounted closure evidence for the `v4` path is committed in
     `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`,
-    which closes the `0114` owner boundary but not the broader Step3p5 `TP=8`
+    which closes the `0114` owner boundary but not the broader Example TP Model `TP=8`
     signoff required by this plan;
   - strict collective failures now surface
     `collective_failure_class` through structured gRPC trailing metadata only;
   - TP8 mounted evidence is now committed in
-    `docs/benchmarks/20260427-step3p5-fp8-mounted-tp8-cold-start-evidence.md`,
+    `docs/benchmarks/20260427-example-tp-model-fp8-mounted-tp8-cold-start-evidence.md`,
     including run identifiers, typed `/weight_version` facts, baseline
     comparison, and the explicit delete-gate conclusion; and
-  - broader Step3p5 `TP=8` performance signoff remains open because the
+  - broader Example TP Model `TP=8` performance signoff remains open because the
     committed 2026-04-27 packet measured TensorCast ready time `370.346s`
     against same-host `safetensors` `220.242s` and `fastsafetensors`
     `222.243s`.
@@ -350,7 +350,7 @@ Current SOT rule for this work:
     `concat_job_exec_sec=73.948`;
   - TensorCast ready time improved to `326.319s`, with rank-local
     `Tensorcast load_model timings` around `167.526s` to `171.516s`; but
-  - broader Step3p5 `TP=8` performance signoff still remains open because
+  - broader Example TP Model `TP=8` performance signoff still remains open because
     same-host `safetensors` measured `158.172s` and same-host
     `fastsafetensors` measured `162.179s`;
   - daemon-side profiling identified the remaining gap as disk-loader strategy:
@@ -396,7 +396,7 @@ Current SOT rule for this work:
     same-host `safetensors` `144.155s` and `fastsafetensors` `152.174s`.
 - 2026-04-28:
   - the same-prompt TP8 model-output comparison is recorded in
-    `docs/benchmarks/20260427-step3p5-fp8-mounted-tp8-cold-start-evidence.md`;
+    `docs/benchmarks/20260427-example-tp-model-fp8-mounted-tp8-cold-start-evidence.md`;
   - the compared request is
     `{"prompt":"Say hi in five words.","max_tokens":8,"temperature":0}`;
   - TensorCast artifact
@@ -412,7 +412,7 @@ Current SOT rule for this work:
   - the final `136.271s` TensorCast performance packet only issued a shorter
     smoke completion. Rerunning that optimized packet with the same prompt was
     attempted on 2026-04-28 but blocked by 8-GPU scheduling capacity:
-    `codesign` quota check reported `gpu: 133/128`, and `tensorcast_dev`
+    `codesign` quota check reported `gpu: 133/128`, and `tensorcast-dev`
     returned `no machine available`.
 
 ## Evidence package
@@ -421,7 +421,7 @@ Current SOT rule for this work:
   - mounted run identifiers and linked `status.json`
   - TensorCast typed execution diagnostics for collective, executor, hash, and
     identity outcomes
-  - `internal-vllm` additive summary or profile output derived from those typed
+  - `vllm` additive summary or profile output derived from those typed
     facts
   - baseline comparison against the default loader on the same host class
   - explicit delete-gate conclusion for compatibility bridge retirement
@@ -436,14 +436,14 @@ Current SOT rule for this work:
   minimal, short-lived cutover aid only if technically required, plus an
   explicit readiness surface.
 - [x] Compatibility retirement order is normative:
-  1. `internal-vllm` must first stop depending on compatibility inputs as its
+  1. `vllm` must first stop depending on compatibility inputs as its
      primary caller contract and switch to
      `GetArtifactOptions.execution_topology` plus stable
      capability/version gating.
   2. TensorCast may then delete repo-local compatibility lowering
      (`ctx.collective` / `operation_id` merge paths) once mounted evidence shows
      the caller no longer depends on them.
-  3. Only after that should `internal-vllm` delete any residual compat fallback
+  3. Only after that should `vllm` delete any residual compat fallback
      branches, summary shims, or tests that exist solely for the old path.
   Deleting TensorCast-side lowering before caller migration is not an intended
   rollout path unless both repos are updated atomically and no other caller
@@ -476,7 +476,7 @@ Current SOT rule for this work:
 - [ ] Risk: deleting old plans hides useful implementation history.
   - Mitigation: keep landed outcomes in the owning designs and list deleted
     plans explicitly in this plan's grounding.
-- [ ] Risk: `internal-vllm` keeps growing around the side-channel bridge while
+- [ ] Risk: `vllm` keeps growing around the side-channel bridge while
   TensorCast delays first-class ingress.
   - Mitigation: treat first-class ingress as Phase 2 critical path and do not
     add new Python data-plane workaround logic.

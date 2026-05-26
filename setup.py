@@ -27,7 +27,7 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension  # noqa: E40
 from wheel.bdist_wheel import bdist_wheel
 
 # Import torch version validation utilities
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tools'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "tools"))
 from torch_version_manager import validate_torch_versions
 
 __version__: str = "0.0.0"
@@ -35,19 +35,35 @@ __cuda_version__: str = "0.0"
 
 
 def get_root_dir() -> Path:
-    return Path(
-        subprocess.check_output(["git", "rev-parse", "--show-toplevel"])
-        .decode("ascii")
-        .strip()
-    )
+    try:
+        return Path(
+            subprocess.check_output(
+                ["git", "rev-parse", "--show-toplevel"],
+                stderr=subprocess.DEVNULL,
+            )
+            .decode("ascii")
+            .strip()
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return Path(__file__).resolve().parent
 
 
 def get_git_revision_short_hash() -> str:
-    return (
-        subprocess.check_output(["git", "rev-parse", "--short", "HEAD"])
-        .decode("ascii")
-        .strip()
-    )
+    for env_name in ("TENSORCAST_BUILD_COMMIT", "BUILD_COMMIT", "GITHUB_SHA"):
+        value = os.environ.get(env_name)
+        if value:
+            return value.strip()[:12]
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                stderr=subprocess.DEVNULL,
+            )
+            .decode("ascii")
+            .strip()
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return "nogit"
 
 
 def get_base_version() -> str:
@@ -68,6 +84,7 @@ def load_dep_info():
         else:
             __cuda_version__ = versions["__cuda_version__"]
 
+
 # Validate torch versions early in setup.py
 def validate_build_environment():
     """Validate that the build environment has consistent torch versions."""
@@ -80,17 +97,23 @@ def validate_build_environment():
         is_consistent, versions = validate_torch_versions(raise_on_error=False)
 
         if not is_consistent:
-            print("\n" + "="*60, file=sys.stderr)
+            print("\n" + "=" * 60, file=sys.stderr)
             print("ERROR: Torch version mismatch detected!", file=sys.stderr)
-            print("="*60, file=sys.stderr)
+            print("=" * 60, file=sys.stderr)
             print("\nFound versions:", file=sys.stderr)
             for source, version in sorted(versions.items()):
                 print(f"  {source}: {version}", file=sys.stderr)
             print("\nPlease ensure all torch versions are consistent:", file=sys.stderr)
-            print("1. Run 'uv sync' to update .venv based on pyproject.toml", file=sys.stderr)
+            print(
+                "1. Run 'uv sync' to update .venv based on pyproject.toml",
+                file=sys.stderr,
+            )
             print("2. Update pyproject.toml if needed", file=sys.stderr)
-            print("3. Ensure MODULE.bazel points to the correct .venv path", file=sys.stderr)
-            print("="*60 + "\n", file=sys.stderr)
+            print(
+                "3. Ensure MODULE.bazel points to the correct .venv path",
+                file=sys.stderr,
+            )
+            print("=" * 60 + "\n", file=sys.stderr)
 
             # Only fail if we're actually building
             if BUILD_EXTENSION or BUILD_CORE:
@@ -156,11 +179,12 @@ if (release_env_var := os.environ.get("RELEASE")) is not None:
         RELEASE = True
 
 if (gpu_arch_version := os.environ.get("CU_VERSION")) is None:
-    gpu_arch_version = f"cu{__cuda_version__.replace('.','')}"
+    gpu_arch_version = f"cu{__cuda_version__.replace('.', '')}"
 
 # Validate environment before proceeding with build
 if BUILD_EXTENSION or BUILD_CORE:
     validate_build_environment()
+
 
 def _format_cuda_suffix(cuda_version: str | None) -> str | None:
     if not cuda_version:
@@ -174,8 +198,8 @@ def _format_cuda_suffix(cuda_version: str | None) -> str | None:
 def get_torch_version_suffix() -> str:
     """Get torch version suffix for package versioning."""
     # Get PyTorch version
-    torch_version = torch.__version__.split('+')[0]  # Remove +cu118 etc.
-    torch_major_minor = '.'.join(torch_version.split('.')[:2])  # Get major.minor
+    torch_version = torch.__version__.split("+")[0]  # Remove +cu118 etc.
+    torch_major_minor = ".".join(torch_version.split(".")[:2])  # Get major.minor
 
     # Get CUDA version from torch even when no GPU is present.
     cuda_suffix = ""
@@ -198,16 +222,22 @@ torch_suffix = get_torch_version_suffix()
 if RELEASE_PYPI:
     base_version = os.environ.get("BUILD_VERSION") or get_base_version()
     if not base_version:
-        raise ValueError("BUILD_VERSION or version.txt must be set for PyPI release builds")
+        raise ValueError(
+            "BUILD_VERSION or version.txt must be set for PyPI release builds"
+        )
     __version__ = base_version
 elif RELEASE:
     base_version = os.environ.get("BUILD_VERSION")
     if base_version:
         __version__ = f"{base_version}+{torch_suffix}"
     else:
-        raise ValueError("BUILD_VERSION environment variable must be set for release builds")
+        raise ValueError(
+            "BUILD_VERSION environment variable must be set for release builds"
+        )
 else:
-    __version__ = f"{get_base_version()}.dev0+{get_git_revision_short_hash()}.{torch_suffix}"
+    __version__ = (
+        f"{get_base_version()}.dev0+{get_git_revision_short_hash()}.{torch_suffix}"
+    )
 
 
 # Resolve bazel from PATH; do not use repo-local bazel wrapper
@@ -266,7 +296,9 @@ def ensure_external_symlink() -> None:
                 output_base_path = None
         if output_base_path is None and BAZEL_EXE is not None:
             output_base_path = Path(
-                subprocess.check_output([BAZEL_EXE, "info", "output_base"]).decode("utf-8").strip()
+                subprocess.check_output([BAZEL_EXE, "info", "output_base"])
+                .decode("utf-8")
+                .strip()
             )
 
         if output_base_path is None:
@@ -280,7 +312,9 @@ def ensure_external_symlink() -> None:
                 current_target = (link_path.parent / current_target).resolve()
 
             expected = target_path.resolve() if target_path.exists() else target_path
-            current = current_target.resolve() if current_target.exists() else current_target
+            current = (
+                current_target.resolve() if current_target.exists() else current_target
+            )
             if current == expected:
                 return
 
@@ -340,7 +374,9 @@ def build_checkpoint_runtime_and_daemon(
     if use_remote:
         api_key = os.environ.get("BUILDBUDDY_API_KEY")
         if not api_key:
-            sys.exit("BUILDBUDDY_API_KEY environment variable must be set when USE_REMOTE=1")
+            sys.exit(
+                "BUILDBUDDY_API_KEY environment variable must be set when USE_REMOTE=1"
+            )
         cmd.append("--config=remote")
         cmd.append(f"--remote_header=x-buildbuddy-api-key={api_key}")
         cmd.append("--build_metadata=ROLE=CI")
@@ -352,12 +388,15 @@ def build_checkpoint_runtime_and_daemon(
     extra_flags = os.environ.get("BAZEL_BUILD_FLAGS", "").strip()
     if extra_flags:
         import shlex as _shlex
+
         cmd.extend(_shlex.split(extra_flags))
 
     display_cmd = list(cmd)
     if use_remote:
         for i, arg in enumerate(display_cmd):
-            if isinstance(arg, str) and arg.startswith("--remote_header=x-buildbuddy-api-key="):
+            if isinstance(arg, str) and arg.startswith(
+                "--remote_header=x-buildbuddy-api-key="
+            ):
                 display_cmd[i] = "--remote_header=x-buildbuddy-api-key=***REDACTED***"
     print(f"building checkpoint runtime and daemon cmd={display_cmd}")
 
@@ -384,7 +423,9 @@ def gen_version_file():
         f.write(f'__torch_version__ = "{torch.__version__}"\n')
 
 
-def _place_artifact(src: Path, dst: Path, *, prefer_copy: bool, name: str, make_executable: bool = False) -> None:
+def _place_artifact(
+    src: Path, dst: Path, *, prefer_copy: bool, name: str, make_executable: bool = False
+) -> None:
     """Create dst from src using either copy or symlink depending on prefer_copy.
 
     - If dst exists and the existing type (file vs symlink) differs from the desired
@@ -436,7 +477,13 @@ def copy_checkpoint_extension_lib() -> None:
     src = Path(dir_path) / "bazel-bin" / "core" / "libcheckpoint_ext.so"
     dst = Path(dir_path) / "tensorcast" / "lib" / "libcheckpoint_ext.so"
 
-    _place_artifact(src, dst, prefer_copy=prefer_copy, name="libcheckpoint_ext.so", make_executable=False)
+    _place_artifact(
+        src,
+        dst,
+        prefer_copy=prefer_copy,
+        name="libcheckpoint_ext.so",
+        make_executable=False,
+    )
 
 
 def copy_schema_sql() -> None:
@@ -447,7 +494,9 @@ def copy_schema_sql() -> None:
     src = Path(dir_path) / "schema.sql"
     dst = Path(dir_path) / "tensorcast" / "schema.sql"
     if not src.exists():
-        print("Warning: schema.sql not found at repo root; package will not include schema.")
+        print(
+            "Warning: schema.sql not found at repo root; package will not include schema."
+        )
         return
     try:
         if dst.exists() or dst.is_symlink():
@@ -561,6 +610,7 @@ def find_bazel_daemon_binary() -> Path | None:
     candidate = Path(dir_path) / "bazel-bin" / "daemon" / "tensorcast_daemon"
     return candidate if candidate.exists() else None
 
+
 def copy_daemon_binary() -> None:
     """Place daemon binary into package at tensorcast/bin/tensorcast_daemon.
 
@@ -576,21 +626,37 @@ def copy_daemon_binary() -> None:
     src_env = os.environ.get("TENSORCAST_DAEMON_BIN")
     if src_env and Path(src_env).exists():
         src = Path(src_env)
-        _place_artifact(src, target, prefer_copy=prefer_copy, name="tensorcast_daemon", make_executable=True)
+        _place_artifact(
+            src,
+            target,
+            prefer_copy=prefer_copy,
+            name="tensorcast_daemon",
+            make_executable=True,
+        )
         return
 
     bazel_bin = find_bazel_daemon_binary()
     if bazel_bin is not None:
-        _place_artifact(bazel_bin, target, prefer_copy=prefer_copy, name="tensorcast_daemon", make_executable=True)
+        _place_artifact(
+            bazel_bin,
+            target,
+            prefer_copy=prefer_copy,
+            name="tensorcast_daemon",
+            make_executable=True,
+        )
         return
 
-    print("Warning: tensorcast_daemon binary not found; package will not include daemon binary.")
+    print(
+        "Warning: tensorcast_daemon binary not found; package will not include daemon binary."
+    )
+
 
 def copy_extensions():
     files = glob.glob(dir_path + "/build/lib.linux-*/tensorcast/*.so")
     for file in files:
         print(f"Copying {file} to {dir_path}/tensorcast/")
         copyfile(file, dir_path + "/tensorcast/" + os.path.basename(file))
+
 
 class DevelopCommand(develop):
     description = "Builds the package and symlinks it into the PYTHONPATH"
@@ -614,8 +680,10 @@ class DevelopCommand(develop):
         gen_version_file()
         develop.run(self)
 
+
 class BuildExtensionCommand(BuildExtension):
     description = "Builds the package extension"
+
     def initialize_options(self):
         BuildExtension.initialize_options(self)
 
@@ -703,6 +771,7 @@ class EditableWheelCommand(editable_wheel):
         copy_schema_sql()
         copy_example_configs()
         editable_wheel.run(self)
+
 
 class CleanCommand(Command):
     """Custom clean command to tidy up the project root."""
@@ -829,7 +898,10 @@ def find_cuda_include_dirs() -> list[str]:
     for candidate in candidates:
         if not candidate.is_dir():
             continue
-        if not ((candidate / "cuda.h").is_file() and (candidate / "cuda_runtime_api.h").is_file()):
+        if not (
+            (candidate / "cuda.h").is_file()
+            and (candidate / "cuda_runtime_api.h").is_file()
+        ):
             continue
         path_str = str(candidate)
         if path_str in seen:
@@ -867,6 +939,7 @@ def ensure_cudart_unversioned_symlink(lib_dir: str) -> None:
         # Non-fatal; build may still succeed if system CUDA provides libcudart.so
         print(f"Warning: could not create libcudart.so symlink in {lib_dir}: {e}")
 
+
 if BUILD_EXTENSION:
     CUDA_RUNTIME_LIB_DIR = find_cuda_runtime_lib_dir()
     CUDA_INCLUDE_DIRS = find_cuda_include_dirs()
@@ -895,10 +968,10 @@ if BUILD_EXTENSION:
             dir_path + "/external/nlohmann_json+/include",
             dir_path + "/external/opentelemetry-cpp+/api/include",
             dir_path + "/external/opentelemetry-cpp+/exporters/otlp/include",
-            dir_path + '/external/fmt+/include',
-            dir_path + '/external/double-conversion+',
-            dir_path + '/external/folly+',
-            dir_path + '/bazel-bin/external/folly+',
+            dir_path + "/external/fmt+/include",
+            dir_path + "/external/double-conversion+",
+            dir_path + "/external/folly+",
+            dir_path + "/bazel-bin/external/folly+",
             dir_path + "/proto/gen/cc",
             dir_path + "/external/yaml-cpp+/include",
             dir_path + "/external/fast_float+/include",
@@ -942,9 +1015,9 @@ if BUILD_EXTENSION:
                         "-Wno-pragmas",
                     ]
                     + [
-                        '-DGLOG_DEPRECATED=__attribute__((deprecated))',
+                        "-DGLOG_DEPRECATED=__attribute__((deprecated))",
                         '-DGLOG_EXPORT=__attribute__((visibility("default")))',
-                        '-DGLOG_NO_EXPORT=__attribute__((visibility("default")))'
+                        '-DGLOG_NO_EXPORT=__attribute__((visibility("default")))',
                     ]
                 ),
                 extra_link_args=(
@@ -964,8 +1037,8 @@ if BUILD_EXTENSION:
                     + rpath_flags
                 ),
                 undef_macros=["NDEBUG"],
-        )
-    ]
+            )
+        ]
 else:
     BuildExtension = None
 
@@ -1001,12 +1074,12 @@ with open(os.path.join(get_root_dir(), "README.md"), "r", encoding="utf-8") as f
     long_description = _rewrite_relative_links(fh.read(), _GITHUB_BLOB_BASE)
 
 cmd_class = {
-        "install": InstallCommand,
-        "clean": CleanCommand,
-        "develop": DevelopCommand,
-        "bdist_wheel": BdistCommand,
-        "editable_wheel": EditableWheelCommand,
-        "build_py": BuildPyCommand,
+    "install": InstallCommand,
+    "clean": CleanCommand,
+    "develop": DevelopCommand,
+    "bdist_wheel": BdistCommand,
+    "editable_wheel": EditableWheelCommand,
+    "build_py": BuildPyCommand,
 }
 
 if BuildExtension is not None:

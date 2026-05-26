@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 
 
-REPO_ROOT = Path("/data/workspace/tensorcast-280")
+REPO_ROOT = Path("./")
 IMAGE_DIR = REPO_ROOT / "docs/benchmarks/image"
 DATA_DIR = REPO_ROOT / "docs/benchmarks/data"
 

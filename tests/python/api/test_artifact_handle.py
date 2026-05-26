@@ -746,26 +746,6 @@ def test_bind_coerces_serving_manifest_into_runtime_policy(
     )
 
 
-def test_realization_spec_uses_only_runtime_artifact_policy_name() -> None:
-    neutral_policy = RuntimeArtifactPolicy(
-        serving_manifest_ref="tensor:manifest-a.json",
-    )
-
-    with pytest.raises(TypeError, match="serving_runtime_policy"):
-        ArtifactRealizationSpec.binding(
-            device="cuda:0",
-            runtime_artifact_policy=neutral_policy,
-            serving_runtime_policy=neutral_policy,
-        )
-
-    spec = ArtifactRealizationSpec.binding(
-        device="cuda:0",
-        runtime_artifact_policy=neutral_policy,
-    )
-    assert spec.runtime_artifact_policy is neutral_policy
-    assert not hasattr(spec, "serving_runtime_policy")
-
-
 def test_tensor_dict_and_adopted_binding_share_source_selection_with_separate_target_digests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -32,9 +32,9 @@ from tensorcast.api.store.runtime_realization_reference_consumer import (
 from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.types import (
     PrefetchRetentionPolicy,
-    RealizationTargetSet,
-    RuntimeBindingMemberRef,
-    RuntimeTopologyRef,
+    ServingBindingMemberRef,
+    ServingBindingSetTarget,
+    ServingTopologyRef,
 )
 from tests.python.utils.daemon import start_daemon_binary
 from tests.python.utils.ports import get_free_port
@@ -99,20 +99,20 @@ import torch
 
 from tensorcast.api.store.owned_binding_slot import restore_owned_binding_tensors
 from tensorcast.api.store.runtime import StoreRuntimeContext
-from tensorcast.api.store.runtime_realization_reference_consumer import (
+from tensorcast.api.store.serving_binding_reference_consumer import (
     acquire_reference_binding_response,
 )
 from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.proto.operation.v1 import operation_pb2
-from tensorcast.types import PrefetchHandoffSet, RealizationTargetSet
+from tensorcast.types import PrefetchedServingBindingSet, ServingBindingSetTarget
 
 daemon_addr, target_path, prefetched_path = sys.argv[1:4]
 target_proto = operation_pb2.ServingBindingSetTarget()
 target_proto.ParseFromString(open(target_path, "rb").read())
 prefetched_proto = operation_pb2.PrefetchServingBindingSetResult()
 prefetched_proto.ParseFromString(open(prefetched_path, "rb").read())
-target_set = RealizationTargetSet.from_proto(target_proto)
-prefetched_set = PrefetchHandoffSet.from_proto(prefetched_proto)
+target_set = ServingBindingSetTarget.from_proto(target_proto)
+prefetched_set = PrefetchedServingBindingSet.from_proto(prefetched_proto)
 targets_by_member = {target.member.member_id: target for target in target_set.members}
 
 runtime = StoreRuntimeContext(daemon_addr)
@@ -344,7 +344,7 @@ def test_prefetch_serving_binding_set_real_cuda_worker_reads_members(tmp_path) -
     source_root = tmp_path / "public-source-root"
     artifact_dir = source_root / "model"
     expected_value = 7.5
-    tensor = ReferenceRuntimeTensorSpec(
+    tensor = ReferenceServingTensorSpec(
         name="alpha",
         size_bytes=4,
         dtype="torch.float32",
@@ -369,13 +369,13 @@ def test_prefetch_serving_binding_set_real_cuda_worker_reads_members(tmp_path) -
         selection_digest = source.trusted_content_artifact_id or source.artifact_id
         members = []
         cache_root = tmp_path / "resolved-spec-cache"
-        topology = RuntimeTopologyRef(
+        topology = ServingTopologyRef(
             schema_topology_digest="vllm-tp2-schema",
             admission_topology_digest="vllm-tp2-admission",
             logical_topology_ref="vllm://parallelism?tp=2&pp=1&dp=1",
         )
         for index in range(2):
-            member = RuntimeBindingMemberRef(
+            member = ServingBindingMemberRef(
                 member_id=f"dp0:pp0:tp{index}",
                 member_index=index,
                 member_count=2,
@@ -401,7 +401,7 @@ def test_prefetch_serving_binding_set_real_cuda_worker_reads_members(tmp_path) -
                     device_uuid=device_uuid_for(0),
                 )
             )
-        target_set = RealizationTargetSet(
+        target_set = ServingBindingSetTarget(
             runtime="vllm",
             source=members[0].source,
             topology=topology,

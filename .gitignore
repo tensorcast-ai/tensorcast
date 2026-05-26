@@ -1,5 +1,6 @@
 cmake-build-debug
 .idea
+.DS_Store
 MODULE.bazel.lock
 uv.lock
 bazel-*

@@ -62,11 +62,11 @@ def run_remote(
     process_id: str, inner_cmd: str, *, timeout_sec: float
 ) -> subprocess.CompletedProcess[str]:
     cmd = [
-        "brainctl",
+        "orchestratorctl",
         "exec",
         f"process/{process_id}",
         "-n",
-        "shai-core",
+        "tensorcast",
         "--",
         "bash",
         "-lc",

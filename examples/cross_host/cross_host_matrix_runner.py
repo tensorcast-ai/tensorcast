@@ -40,7 +40,7 @@ def run(cmd: str) -> str:
 
 def run_remote(process_id: str, inner_cmd: str) -> str:
     cmd = (
-        f"brainctl exec process/{process_id} -n shai-core -- bash -lc "
+        f"orchestratorctl exec process/{process_id} -n tensorcast -- bash -lc "
         f"{shlex.quote(inner_cmd)}"
     )
     return run(cmd)

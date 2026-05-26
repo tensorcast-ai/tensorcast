@@ -200,27 +200,27 @@ being present.
 Relevant local workspace references:
 
 - code:
-  - `/data/workspace/fastsafetensors/fastsafetensors/loader.py`
-  - `/data/workspace/fastsafetensors/fastsafetensors/file_buffer.py`
-  - `/data/workspace/fastsafetensors/fastsafetensors/tensor_factory.py`
+  - `/opt/fastsafetensors/fastsafetensors/loader.py`
+  - `/opt/fastsafetensors/fastsafetensors/file_buffer.py`
+  - `/opt/fastsafetensors/fastsafetensors/tensor_factory.py`
 - docs:
-  - `/data/workspace/fastsafetensors/docs/architecture.md`
-  - `/data/workspace/fastsafetensors/docs/safetensors-load-optimization.md`
+  - `/opt/fastsafetensors/docs/architecture.md`
+  - `/opt/fastsafetensors/docs/safetensors-load-optimization.md`
 
 The most important implementation behaviors are:
 
 - owner-file batching and orchestration:
   - `BaseSafeTensorsFileLoader.add_filenames(...)`
   - `BaseSafeTensorsFileLoader.copy_files_to_device(...)`
-  - `/data/workspace/fastsafetensors/fastsafetensors/loader.py`
+  - `/opt/fastsafetensors/fastsafetensors/loader.py`
 - per-batch device-buffer lifetime:
   - `FilesBufferOnDevice`
   - `fb.close()`
-  - `/data/workspace/fastsafetensors/fastsafetensors/file_buffer.py`
+  - `/opt/fastsafetensors/fastsafetensors/file_buffer.py`
 - owner-mediated GPU-side distribution:
   - `LazyTensorFactory.shuffle(...)`
   - `LazyTensorFactory.push(...)`
-  - `/data/workspace/fastsafetensors/fastsafetensors/tensor_factory.py`
+  - `/opt/fastsafetensors/fastsafetensors/tensor_factory.py`
 
 The key lesson from those files is not merely “use owner rank”.
 The key lesson is:
@@ -241,7 +241,7 @@ ordinary `tensor_dict(...)` startup:
 
 The current shared-filesystem regression shows that these shapes are not enough.
 
-Observed behavior on the Step3p5 TP=8 workload:
+Observed behavior on the Example TP Model TP=8 workload:
 
 - Current eager collective path can read far more source bytes than the actual
   selected TP-local target workload.
@@ -813,8 +813,8 @@ Normative implementation note:
 - it should not become long-lived GPU residency comparable to the current
   `owned_payload` field in `collective_disk_loader.cc`,
 - its lifetime should be closer to the current batch/file-buffer lifetime in:
-  - `/data/workspace/fastsafetensors/fastsafetensors/loader.py`
-  - `/data/workspace/fastsafetensors/fastsafetensors/file_buffer.py`
+  - `/opt/fastsafetensors/fastsafetensors/loader.py`
+  - `/opt/fastsafetensors/fastsafetensors/file_buffer.py`
 
 # Relation To Existing Executors
 
@@ -881,7 +881,7 @@ Its eager memory behavior does not survive:
 ## 4. Closure status (2026-04-27)
 
 The current mounted TP8 closure packet is
-`docs/benchmarks/20260427-step3p5-fp8-mounted-tp8-cold-start-evidence.md`.
+`docs/benchmarks/20260427-example-tp-model-fp8-mounted-tp8-cold-start-evidence.md`.
 
 That packet freezes the `0109` policy conclusion:
 
@@ -1026,14 +1026,14 @@ That is the consistent form for this project.
 Practical reference points:
 
 - batch orchestration:
-  - `/data/workspace/fastsafetensors/fastsafetensors/loader.py`
+  - `/opt/fastsafetensors/fastsafetensors/loader.py`
 - current batch lifetime and release behavior:
-  - `/data/workspace/fastsafetensors/fastsafetensors/file_buffer.py`
+  - `/opt/fastsafetensors/fastsafetensors/file_buffer.py`
 - owner-rank collective distribution behavior:
-  - `/data/workspace/fastsafetensors/fastsafetensors/tensor_factory.py`
+  - `/opt/fastsafetensors/fastsafetensors/tensor_factory.py`
 - higher-level architecture rationale:
-  - `/data/workspace/fastsafetensors/docs/architecture.md`
-  - `/data/workspace/fastsafetensors/docs/safetensors-load-optimization.md`
+  - `/opt/fastsafetensors/docs/architecture.md`
+  - `/opt/fastsafetensors/docs/safetensors-load-optimization.md`
 
 # Rollout Plan
 
@@ -1124,7 +1124,7 @@ Required comparisons:
 Primary success criteria:
 
 - shared-FS TP cold-start wall time matches or beats `fastsafetensors`
-- no OOM on the current Step3p5 TP=8 workload
+- no OOM on the current Example TP Model TP=8 workload
 - shared-FS eligible requests choose this executor by default once rollout is
   enabled
 - host-local default path remains no worse than current best local-batched path
@@ -1149,10 +1149,10 @@ In short:
 
 # References
 
-- [`docs/designs/0107-retrieval-policy-plane-cleanup.md`](/data/workspace/tensorcast-280/docs/designs/0107-retrieval-policy-plane-cleanup.md)
-- [`docs/designs/0108-tensor-aware-materialization-strategy-plane.md`](/data/workspace/tensorcast-280/docs/designs/0108-tensor-aware-materialization-strategy-plane.md)
-- [`docs/designs/0112-binding-native-serving-realization-and-publication.md`](/data/workspace/tensorcast-280/docs/designs/0112-binding-native-serving-realization-and-publication.md)
-- [`docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`](/data/workspace/tensorcast-280/docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md)
-- [`docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md`](/data/workspace/tensorcast-280/docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md)
-- [`docs/internals/disk-load-strategy.md`](/data/workspace/tensorcast-280/docs/internals/disk-load-strategy.md)
-- [`core/store/replica/collective_disk_loader.cc`](/data/workspace/tensorcast-280/core/store/replica/collective_disk_loader.cc)
+- [`docs/designs/0107-retrieval-policy-plane-cleanup.md`](./docs/designs/0107-retrieval-policy-plane-cleanup.md)
+- [`docs/designs/0108-tensor-aware-materialization-strategy-plane.md`](./docs/designs/0108-tensor-aware-materialization-strategy-plane.md)
+- [`docs/designs/0112-binding-native-serving-realization-and-publication.md`](./docs/designs/0112-binding-native-serving-realization-and-publication.md)
+- [`docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`](./docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md)
+- [`docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md`](./docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md)
+- [`docs/internals/disk-load-strategy.md`](./docs/internals/disk-load-strategy.md)
+- [`core/store/replica/collective_disk_loader.cc`](./core/store/replica/collective_disk_loader.cc)

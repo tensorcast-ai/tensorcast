@@ -1,6 +1,6 @@
 ---
-slug: step3p5-closure-and-sot-convergence
-title: Step3p5 Closure and Single-SOT Convergence for 0107-0112
+slug: example-tp-model-closure-and-sot-convergence
+title: Example TP Model Closure and Single-SOT Convergence for 0107-0112
 status: accepted
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests", "benchmarks", "serving"]
 created: 2026-03-31
@@ -23,7 +23,7 @@ related_code:
   - daemon/service/controllers/target_materialization_service.cc
   - daemon/service/controllers/assembly_operation_service.cc
   - daemon/state/lip_manager.cc
-  - /data/workspace/internal-vllm/docs/design/tensorcast_step3p5_from_disk_cold_start_performance_followup.md
+  - /opt/vllm/docs/design/tensorcast_example-tp-model_from_disk_cold_start_performance_followup.md
 links:
   related:
     - ./0114-collective-first-binding-realization-for-tp-serving-startup.md
@@ -47,12 +47,12 @@ links:
 
 # Summary
 
-Define the closure strategy for the remaining Step3p5-facing work after the
+Define the closure strategy for the remaining Example TP Model-facing work after the
 architectural cuts from `0107` through `0112`.
 
 This design does not replace those designs. It defines how to finish them
 cleanly, how to keep documentation authoritative while doing so, and which
-TensorCast-side contracts must be frozen before downstream `internal-vllm`
+TensorCast-side contracts must be frozen before downstream `vllm`
 follow-up code should start.
 
 The key policy is:
@@ -65,7 +65,7 @@ The key policy is:
   closeout evidence lives in:
   - `docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md`
   - `docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`
-- `docs/plans/0113-step3p5-closure-and-sot-convergence.md` remains a historical
+- `docs/plans/0113-example-tp-model-closure-and-sot-convergence.md` remains a historical
   closure-handoff record rather than an active total plan;
 - the old split execution notes under `0108` through `0112` are folded back
   into their owning designs and deleted so they do not continue to compete as
@@ -101,7 +101,7 @@ flowchart LR
 - Keep one active execution SOT for the remaining `0107`-`0112` closure work.
 - Keep the base architecture in the existing designs instead of reopening it in
   a new plan-only document.
-- Explicitly track the residual undo items that still matter for Step3p5:
+- Explicitly track the residual undo items that still matter for Example TP Model:
   - source-bound collective ingress still relying on side-channel lowering,
   - missing typed collective policy and typed fallback reasons,
   - missing stable execution/hash/identity diagnostics for downstream
@@ -110,7 +110,7 @@ flowchart LR
   - source-bound mapped execution staying on generic dominant executor,
   - and prototype or compatibility scaffolding that should be deleted once the
     new path is proven.
-- Freeze the TensorCast-side contracts that downstream `internal-vllm`
+- Freeze the TensorCast-side contracts that downstream `vllm`
   follow-up code needs before it can safely switch from compatibility bridges to
   first-class source-bound APIs.
 - Treat unlaunched-project status as a design constraint: `0113` should optimize
@@ -132,7 +132,7 @@ flowchart LR
 - Reintroduce a second semantic truth outside `0110`.
 - Reintroduce helper-layer or runtime bridge semantics as the preferred path
   after `0112`.
-- Define `internal-vllm`-specific profile or summary field names; `0113` freezes
+- Define `vllm`-specific profile or summary field names; `0113` freezes
   TensorCast-facing typed facts and capability surfaces, while downstream docs
   remain free to expose additive fields derived from them.
 - Preserve multiple long-lived plan documents for the same residual work.
@@ -178,7 +178,7 @@ Kept:
 Revised:
 
 - the residual work is not another strategy-plane redesign;
-- the residual work is to make the source-bound Step3p5 path actually consume
+- the residual work is to make the source-bound Example TP Model path actually consume
   the converged seam and to delete prototype debt after proof.
 
 ## `0110`
@@ -250,7 +250,7 @@ Normative rules after this change:
 
 `0113` is not complete merely because TensorCast has "improved performance."
 It is complete only when the TensorCast-side contracts needed by downstream
-integration work are frozen enough that `internal-vllm` follow-up code can start
+integration work are frozen enough that `vllm` follow-up code can start
 without rediscovering or redefining upstream behavior.
 
 Normative completion rules:
@@ -369,7 +369,7 @@ Normative completion rules:
 
 ### D. Executor Convergence
 
-- the Step3p5 source-bound mapped path must stop living indefinitely on
+- the Example TP Model source-bound mapped path must stop living indefinitely on
   `GenericByteRangeExecutor(source_ordered)` as the dominant executor;
 - the path must consume either owner-file collective or a non-generic local
   tensor-aware executor through the converged common-runtime seam.
@@ -470,7 +470,7 @@ or helper-only aliases that bypass these conventions.
 # Current Closure Status
 
 As of 2026-04-28, the current closure packet is
-`docs/benchmarks/20260427-step3p5-fp8-mounted-tp8-cold-start-evidence.md`.
+`docs/benchmarks/20260427-example-tp-model-fp8-mounted-tp8-cold-start-evidence.md`.
 
 That packet proves:
 
@@ -481,7 +481,7 @@ That packet proves:
 - same-binding closeout remains on the single-mint `seal_reuse` path; and
 - the latest same-host follow-up moved the dominant `w13_weight` family into
   `expert_dim0_concat`, improving TensorCast ready time to `326.319s`, but
-  broader Step3p5 TP8 performance signoff is still open because same-host
+  broader Example TP Model TP8 performance signoff is still open because same-host
   `safetensors` reached `158.172s` and `fastsafetensors` reached `162.179s`.
 
 # Trade-offs & Risks
@@ -502,7 +502,7 @@ That packet proves:
 # Compatibility & Acceptance Criteria
 
 - `0107` through `0112` keep their existing architectural commitments.
-- One active closure pair exists for the remaining Step3p5 work:
+- One active closure pair exists for the remaining Example TP Model work:
   `0113` design plus `0113` plan.
 - The deleted `0108`-`0112` companion plans are folded back into design text
   and removed from the repo.
@@ -521,14 +521,14 @@ That packet proves:
 
 # References
 
-- [`docs/designs/0001-docs-system-design.md`](/data/workspace/tensorcast-280/docs/designs/0001-docs-system-design.md)
-- [`docs/designs/0107-retrieval-policy-plane-cleanup.md`](/data/workspace/tensorcast-280/docs/designs/0107-retrieval-policy-plane-cleanup.md)
-- [`docs/designs/0108-tensor-aware-materialization-strategy-plane.md`](/data/workspace/tensorcast-280/docs/designs/0108-tensor-aware-materialization-strategy-plane.md)
-- [`docs/designs/0109-batched-owner-file-collective-executor.md`](/data/workspace/tensorcast-280/docs/designs/0109-batched-owner-file-collective-executor.md)
-- [`docs/designs/0110-artifact-representation-contract-and-transform-unification.md`](/data/workspace/tensorcast-280/docs/designs/0110-artifact-representation-contract-and-transform-unification.md)
-- [`docs/designs/0111-source-to-serving-builder-and-representation-publication.md`](/data/workspace/tensorcast-280/docs/designs/0111-source-to-serving-builder-and-representation-publication.md)
-- [`docs/designs/0112-binding-native-serving-realization-and-publication.md`](/data/workspace/tensorcast-280/docs/designs/0112-binding-native-serving-realization-and-publication.md)
-- [`docs/plans/0113-step3p5-closure-and-sot-convergence.md`](/data/workspace/tensorcast-280/docs/plans/0113-step3p5-closure-and-sot-convergence.md)
-- [`docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md`](/data/workspace/tensorcast-280/docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md)
-- [`docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`](/data/workspace/tensorcast-280/docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md)
-- [`/data/workspace/internal-vllm/docs/design/tensorcast_step3p5_from_disk_cold_start_performance_followup.md`](/data/workspace/internal-vllm/docs/design/tensorcast_step3p5_from_disk_cold_start_performance_followup.md)
+- [`docs/designs/0001-docs-system-design.md`](./docs/designs/0001-docs-system-design.md)
+- [`docs/designs/0107-retrieval-policy-plane-cleanup.md`](./docs/designs/0107-retrieval-policy-plane-cleanup.md)
+- [`docs/designs/0108-tensor-aware-materialization-strategy-plane.md`](./docs/designs/0108-tensor-aware-materialization-strategy-plane.md)
+- [`docs/designs/0109-batched-owner-file-collective-executor.md`](./docs/designs/0109-batched-owner-file-collective-executor.md)
+- [`docs/designs/0110-artifact-representation-contract-and-transform-unification.md`](./docs/designs/0110-artifact-representation-contract-and-transform-unification.md)
+- [`docs/designs/0111-source-to-serving-builder-and-representation-publication.md`](./docs/designs/0111-source-to-serving-builder-and-representation-publication.md)
+- [`docs/designs/0112-binding-native-serving-realization-and-publication.md`](./docs/designs/0112-binding-native-serving-realization-and-publication.md)
+- [`docs/plans/0113-example-tp-model-closure-and-sot-convergence.md`](./docs/plans/0113-example-tp-model-closure-and-sot-convergence.md)
+- [`docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md`](./docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md)
+- [`docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md`](./docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md)
+- [`/opt/vllm/docs/design/tensorcast_example-tp-model_from_disk_cold_start_performance_followup.md`](/opt/vllm/docs/design/tensorcast_example-tp-model_from_disk_cold_start_performance_followup.md)

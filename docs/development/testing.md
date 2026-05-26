@@ -62,7 +62,7 @@ Run:
 bazel test //core/communicator:routing_context_test --test_output=errors
 ```
 
-### Two-node 8xH800 affinity smoke (brainctl automated)
+### Two-node 8xH800 affinity smoke (orchestratorctl automated)
 
 For a reproducible end-to-end validation (including worker launch, non-root
 remote execution, RNIC intersection filtering, and log assertions), run:

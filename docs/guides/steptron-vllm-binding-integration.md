@@ -8,13 +8,13 @@ Describe the concrete landing path for the binding work from:
 - `docs/designs/0085-distributed-binding-assembly-and-coordinator.md`
 
 This guide is intentionally grounded in the current `steptron` training code and
-the current `internal-vllm` TensorCast runtime so the design can be mapped to
+the current `vllm` TensorCast runtime so the design can be mapped to
 real integration points instead of staying abstract.
 
 Repository roots referenced below:
 
-- `steptron`: `/data/workspace/steptron`
-- `internal-vllm`: `/data/workspace/internal-vllm`
+- `steptron`: `/opt/example-framework`
+- `vllm`: `/opt/vllm`
 
 ## Current Steptron Training Path
 
@@ -44,9 +44,9 @@ Important current properties:
   `steptron/core/tensor_parallel/layers.py` around lines 1205-1277 and
   1469-1542
 
-## Current internal-vLLM TensorCast Path
+## Current vllm TensorCast Path
 
-The current `internal-vllm` TensorCast runtime already has the serving-side
+The current `vllm` TensorCast runtime already has the serving-side
 consumer model we want to preserve:
 
 - `tensorcast_loader.py` can:
@@ -54,24 +54,24 @@ consumer model we want to preserve:
   - or bootstrap a local/source input into a serving artifact and then bind it
   - or acquire a retained serving binding through explicit retained authority
   - and later reload through `binding.swap(...)`
-- `gpu_model_runner.py` consumes the dedicated TensorCast runtime reload path
-  using `ArtifactLocator` and `RuntimePolicy` manifest admission
+- `gpu_model_runner.py` consumes the dedicated TensorCast serving reload path
+  using `ServingArtifactLocator` and manifest runtime policy
 - `api_server.py` gates `/reload_serving_artifact` with drain + serialized
   reload, while `/set_model_weight` is rejected for `load_format="tensorcast"`
 
 Concrete current anchors:
 
 - direct serving-artifact startup path in
-  `internal-vllm/vllm/model_executor/model_loader/tensorcast_loader.py`
+  `vllm/vllm/model_executor/model_loader/tensorcast_loader.py`
   (`TensorcastModelLoader.load_model(...)`)
 - retained binding acquire path in
-  `internal-vllm/vllm/tensorcast/retained_binding.py`
+  `vllm/vllm/tensorcast/retained_binding.py`
 - local bootstrap path in
-  `internal-vllm/vllm/model_executor/model_loader/tensorcast_builder/local_dir_prepare.py`
+  `vllm/vllm/model_executor/model_loader/tensorcast_builder/local_dir_prepare.py`
 - reload-by-swap path in
-  `internal-vllm/vllm/model_executor/model_loader/tensorcast_loader.py`
+  `vllm/vllm/model_executor/model_loader/tensorcast_loader.py`
 - HTTP drain + serialized serving reload in
-  `internal-vllm/vllm/entrypoints/openai/api_server.py`
+  `vllm/vllm/entrypoints/openai/api_server.py`
 
 This means the integration goal is not to redesign vLLM reload semantics. It is
 to make training publish the right versions in the right representation.
@@ -117,7 +117,7 @@ The binding work should land around one simple separation:
   mutation
 - TensorCast owns stable weight location lifecycle, sealing, publishability, and
   distributed assembly
-- `internal-vllm` continues to consume published serving versions through the
+- `vllm` continues to consume published serving versions through the
   existing runtime binding path
 
 ## Local Binding Landing in Steptron
@@ -251,19 +251,19 @@ TensorCast must own:
 - dump per-rank fragments for later reassembly outside TensorCast
 - restate tensor subsets every update
 
-## Serving-Artifact Hand-off to internal-vLLM
+## Serving-Artifact Hand-off to vllm
 
 ### Preferred End State
 
 The best consumer contract remains:
 
 - `steptron` publishes serving-compatible versions
-- `internal-vllm` receives those versions as a serving selector
+- `vllm` receives those versions as a serving selector
   (`selector.kind="version_key"` or `selector.kind="artifact_ref"`)
-- `internal-vllm` reloads through `/reload_serving_artifact` and the current
+- `vllm` reloads through `/reload_serving_artifact` and the current
   runtime binding path
 
-This keeps `internal-vllm` close to its current design:
+This keeps `vllm` close to its current design:
 
 - startup may still use direct serving-artifact bind or bootstrap bind-into
 - reload stays `binding.swap(...)`
@@ -281,9 +281,9 @@ serving split:
   returns `PublishedModelVersion` with serving fields unset
 - a later typed closeout wave may extend that same lineage with a serving
   artifact
-- `internal-vllm` consumes the serving artifact
+- `vllm` consumes the serving artifact
 
-Do not force `internal-vllm` back into consuming arbitrary training-local
+Do not force `vllm` back into consuming arbitrary training-local
 layouts at reload time.
 
 ## Minimal Change Matrix
@@ -306,7 +306,7 @@ layouts at reload time.
   of a bare assembly artifact outcome
 - keep publish/retire/activation daemon-mediated
 
-### internal-vLLM
+### vllm
 
 - keep current runtime binding and reload path as-is
 - optionally add only the minimal integration needed to resolve the new
@@ -321,7 +321,7 @@ layouts at reload time.
 4. Land typed child closeout contracts for source -> serving publication.
 5. Land serving publication and immutable serving-key output on that same
    lineage.
-6. Point `internal-vllm` at the published serving selector and validate
+6. Point `vllm` at the published serving selector and validate
    `/reload_serving_artifact`.
 7. Only after that, expand toward `TP > 1` range coverage and
    transform-aware assembly.
@@ -337,7 +337,7 @@ layouts at reload time.
 - distributed assembly succeeds on incomplete or stale contributor data
 - source assembly succeeds but serving-artifact publication or immutable
   serving-key publication does not
-- `internal-vllm` is handed a source-layout version when it expects a serving
+- `vllm` is handed a source-layout version when it expects a serving
   artifact
 
 ## When To Revisit The Design
@@ -347,5 +347,5 @@ Revisit `0084` and `0085` if any of the following become true:
 - `steptron` needs `TP > 1` for the production path
 - local weight layouts require transform-aware distributed assembly
 - daemon-owned training slabs become necessary instead of client-owned slabs
-- `internal-vllm` can consume the training-local layout directly without a
+- `vllm` can consume the training-local layout directly without a
   source -> serving conversion boundary

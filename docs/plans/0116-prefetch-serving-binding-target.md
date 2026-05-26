@@ -41,7 +41,7 @@ item into `0121` before implementation.
 
 The shipped baseline already supports daemon-retained `serving_local_ready`
 bindings, process-external `AcquireBindingValue`, resolved spec cache
-validation, TensorCast reference consumer coverage, internal-vLLM basic
+validation, TensorCast reference consumer coverage, vllm basic
 consumption, and real CUDA E2E validation.
 
 # Current Baseline
@@ -64,7 +64,7 @@ Updated 2026-05-11.
   public disk source resolve, retained prefetch, worker-process acquire, CUDA
   IPC restore/read, worker exit, parent reacquire, tensor-lifetime release, and
   idle TTL expiry.
-- internal-vLLM has the basic integration path for consuming prefetched binding
+- vllm has the basic integration path for consuming prefetched binding
   metadata and acquiring during model load.
 
 # Retired Follow-up TODO Source
@@ -83,14 +83,14 @@ Updated 2026-05-11.
 
 ## P1: Harden Consumer-Side E2E
 
-- [ ] Add an internal-vLLM real GPU E2E that consumes a
+- [ ] Add a vllm real GPU E2E that consumes a
       `PrefetchedServingBinding` from parent orchestration, reaches worker
       `load_model()`, acquires tensors, and exits cleanly.
-- [ ] Add internal-vLLM fail-closed E2E coverage for wrong daemon session,
+- [ ] Add vllm fail-closed E2E coverage for wrong daemon session,
       wrong member, wrong device UUID, wrong layout/schema/build digest, missing
       reservation capability, and late injection after memory snapshot.
 - [ ] Keep TensorCast reference consumer E2E as the consumer-agnostic contract
-      test, with internal-vLLM E2E covering runtime adapter behavior only.
+      test, with vllm E2E covering runtime adapter behavior only.
 
 ## P2: Add Operational Visibility
 
@@ -108,7 +108,7 @@ Updated 2026-05-11.
       test documentation.
 - [ ] Add a nightly or GPU-runner command group that includes:
       `bazel build //daemon:tensorcast_daemon`, daemon fake-GPU RPC tests,
-      TensorCast real CUDA E2E, and internal-vLLM real GPU E2E.
+      TensorCast real CUDA E2E, and vllm real GPU E2E.
 - [ ] Keep ordinary Python API compatibility tests in the default non-GPU tier.
 
 ## P4: Runtime-Owned Resolved Spec Production

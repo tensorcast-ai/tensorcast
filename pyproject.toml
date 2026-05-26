@@ -8,8 +8,8 @@ build-backend = "setuptools.build_meta"
 name = "tensorcast"
 description = "Shared tensor layer for distributed inference — load once, share everywhere."
 authors = [{ name = "TensorCast Team" }]
-license = "MIT"
-license-files = ["LICENSE"]
+license = "MIT AND Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "LICENSES/*.txt"]
 requires-python = ">=3.10"
 classifiers = [
     "Operating System :: POSIX :: Linux",

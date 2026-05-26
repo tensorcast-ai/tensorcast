@@ -1,4 +1,3 @@
----
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -6,191 +5,122 @@ metadata:
   namespace: tensorcast
   labels:
     app: store-daemon
-  annotations:
-    kubernetes.io/description: StoreDaemon default configuration
 data:
-  store-daemon.yaml: |
+  store_daemon.yaml: |
+    meta:
+      schema_version: "v1"
+      description: "public-k8s-store-daemon"
+      cluster_token: ""
     server:
       listen:
-        host: "0.0.0.0"
-        port: 61052
+        host: 0.0.0.0
+        port: 50052
+      advertise:
+        host: ""
       p2p_listen:
-        host: "0.0.0.0"
+        host: 0.0.0.0
         port: 65090
-      storage_path: "/mnt/stepcloud/prod/"
-      num_threads: 16
-
+      storage_path: "/data/tensorcast"
+      num_threads: 8
     engine:
       artifact_chunk_bytes: 256MB
-      streaming_buffer_chunks: 16
-
+      streaming_buffer_chunks: 4
+      memory_tiers:
+        enable_preemptible: false
+        stable_bytes: 64MB
+        preemptible_limit_bytes: 0
+        preemptible_low_watermark_ratio: 0.4
     pinned_memory:
-      # Phase 1 fixed-allocation: total pinned bytes is derived as sum(classes[].pool_bytes)
       allocation_timeout: 30s
       classes:
         - name: engine
-          slice_bytes: 256MB
-          pool_bytes: 8GB
+          slice_bytes: 64MB
+          pool_bytes: 2GB
         - name: comm_gpu
           slice_bytes: 16MB
-          pool_bytes: 8GB
+          pool_bytes: 1GB
         - name: comm_cpu
           slice_bytes: 4MB
-          pool_bytes: 1GB
-
+          pool_bytes: 64MB
     high_availability:
       enabled: true
       global_store_endpoints:
-        - host: "10.148.40.11"
+        - host: global-store.tensorcast.svc.cluster.local
           port: 50051
-      heartbeat_interval: 30s
+      heartbeat_interval: 5s
       registration_retry_delay: 5s
       max_retries: -1
-
     lifecycle:
-      gpu_memory_limit_fraction: 0.1
+      gpu_memory_limit_fraction: 0.8
       proc_check_interval: 5s
       eviction_check_interval: 15s
-
 ---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: store-daemon-set
+  name: store-daemon
   namespace: tensorcast
+  labels:
+    app: store-daemon
 spec:
-  revisionHistoryLimit: 10
   selector:
     matchLabels:
       app: store-daemon
   template:
     metadata:
-      annotations:
       labels:
         app: store-daemon
-        logs.monitoring.basemind.com/collect: 'true'
     spec:
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: nodeGroup
-                    operator: NotIn
-                    values:
-                      - aliyun-juicefs
-                      - aliyun-juicefs-shanghai
-                  - key: step.com/cloud-provider
-                    operator: In
-                    values:
-                      - ali
       containers:
         - name: store-daemon
-          image: 'hub.i.basemind.com/tensorcast/tensorcast:2025.07.11-3d8ec'
+          image: ghcr.io/tensorcast-ai/tensorcast:latest
           imagePullPolicy: IfNotPresent
-          command: ["python"]
+          command:
+            - tensorcast-cli
           args:
-            - -m
-            - tensorcast.cli
+            - daemon
             - start
-            - "--config"
-            - /etc/tensorcast/store-daemon.yaml
-            - "--blocking"
-          env:
-            - name: NVIDIA_VISIBLE_DEVICES
-              value: "all"
-            - name: NVIDIA_DRIVER_CAPABILITIES
-              value: "all"
+            - --blocking
+            - --config
+            - /etc/tensorcast/store_daemon.yaml
+            - --global-store-mode
+            - connect
+            - --global-store-address
+            - global-store.tensorcast.svc.cluster.local:50051
           ports:
-            - containerPort: 61052
-              name: grpc
-              protocol: TCP
-            - containerPort: 65090
-              name: p2p
-              protocol: TCP
-
-          livenessProbe:
-            tcpSocket:
-              port: 61052
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
-          readinessProbe:
-            tcpSocket:
-              port: 61052
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
-          resources:
-            limits:
-              cpu: '12'
-              memory: 48Gi
-            requests:
-              cpu: '4'
-              memory: 16Gi
-          terminationMessagePath: /dev/termination-log
-          terminationMessagePolicy: File
+            - name: grpc
+              containerPort: 50052
+            - name: p2p
+              containerPort: 65090
           volumeMounts:
             - name: config
-              mountPath: /etc/tensorcast/store-daemon.yaml
-              subPath: store-daemon.yaml
-            - mountPath: /mnt/stepcloud
-              mountPropagation: HostToContainer
-              name: stepcloud-sh-aliyun-juicefs-pvc
+              mountPath: /etc/tensorcast/store_daemon.yaml
+              subPath: store_daemon.yaml
               readOnly: true
-            - name: tmp
-              mountPath: /tmp
-            - name: nvidia-driver
-              mountPath: /usr/local/nvidia
-            - name: dev
-              mountPath: /dev
-      dnsPolicy: ClusterFirstWithHostNet
-      hostNetwork: true
-      restartPolicy: Always
-      schedulerName: default-scheduler
-      hostPID: true
-      hostIPC: true
-      securityContext:
-        privileged: true
-      terminationGracePeriodSeconds: 30
-      tolerations:
-        - effect: NoExecute
-          key: node.kubernetes.io/not-ready
-          operator: Exists
-        - effect: NoExecute
-          key: node.kubernetes.io/unreachable
-          operator: Exists
-        - effect: NoSchedule
-          key: node.kubernetes.io/disk-pressure
-          operator: Exists
-        - effect: NoSchedule
-          key: node.kubernetes.io/memory-pressure
-          operator: Exists
-        - effect: NoSchedule
-          key: node.kubernetes.io/pid-pressure
-          operator: Exists
-        - effect: NoSchedule
-          key: node.kubernetes.io/unschedulable
-          operator: Exists
+            - name: data
+              mountPath: /data/tensorcast
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
       volumes:
-        - emptyDir: {}
-          name: tmp
         - name: config
           configMap:
             name: store-daemon-config
-        - name: stepcloud-sh-aliyun-juicefs-pvc
-          persistentVolumeClaim:
-            claimName: stepcloud-sh-aliyun-juicefs-pvc
-        - name: nvidia-driver
-          hostPath:
-            path: /usr/local/nvidia
-        - name: dev
-          hostPath:
-            path: /dev
+        - name: data
+          emptyDir: {}
   updateStrategy:
     type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 0
-      maxUnavailable: "100%"

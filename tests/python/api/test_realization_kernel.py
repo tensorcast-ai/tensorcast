@@ -35,7 +35,6 @@ from tensorcast.api.store.realization_kernel import (
     envelope_for_target_set,
     envelope_for_tensor_dict,
     lifecycle_plan_for_envelope,
-    materialization_source_label,
     model_runtime_report_for,
     mounted_source_target_digest,
     publishability_report_for,
@@ -66,7 +65,7 @@ from tensorcast.types import (
     BindingReservationCapability,
     BindingValueRef,
     GroupRealizationAcquireRef,
-    RuntimeBindingMemberRef,
+    ServingBindingMemberRef,
 )
 
 
@@ -94,21 +93,6 @@ def _canonical_index_bytes() -> bytes:
     return canonical_index_to_bytes(
         CanonicalIndex(entries=entries, total_size_bytes=24, avbs_hash="")
     )
-
-
-def test_materialization_source_label_uses_realization_report_vocabulary() -> None:
-    assert (
-        materialization_source_label(
-            store_daemon_pb2.MATERIALIZATION_SOURCE_LOCAL_REPLICA
-        )
-        == "local_replica"
-    )
-    assert materialization_source_label(
-        store_daemon_pb2.MATERIALIZATION_SOURCE_P2P
-    ) == ("p2p")
-    assert materialization_source_label(
-        store_daemon_pb2.MATERIALIZATION_SOURCE_DISK
-    ) == ("disk")
 
 
 def test_resolve_artifact_selection_subset_digest_is_stable() -> None:
@@ -579,7 +563,7 @@ def test_resource_envelope_adapter_matrix_covers_implementation_objects() -> Non
             binding_value_id=f"value-{member_index}",
             seal_generation=1,
         )
-        member = RuntimeBindingMemberRef(
+        member = ServingBindingMemberRef(
             member_id=f"member-{member_index}",
             member_index=member_index,
             member_count=2,
@@ -604,7 +588,7 @@ def test_resource_envelope_adapter_matrix_covers_implementation_objects() -> Non
             daemon_session_id="session-1",
             device_uuid=f"GPU-{member_index}",
             reservation_bytes=reservation_bytes,
-            readiness="runtime_local_ready",
+            readiness="serving_local_ready",
             verification_state="local_only",
             staged_value=staged_value,
             group_realization_acquire=GroupRealizationAcquireRef(
@@ -1283,7 +1267,7 @@ def test_model_runtime_report_wraps_runtime_attachment_report() -> None:
         artifact_id="mi2:test:serving",
         canonical_index_bytes=_canonical_index_bytes(),
         tensor_names=("a",),
-        artifact_profile="runtime_artifact",
+        artifact_profile="serving_artifact",
         authority_scope="daemon_mediated_runtime_attachment",
     )
     target_plan = RealizationTargetPlan(
@@ -1366,7 +1350,7 @@ def test_publication_spec_and_handle_facade_own_release_contract() -> None:
         publish_replica=lambda: None,
         size_bytes=1024,
     )
-    spec = ArtifactRealizationSpec._publication(target=projection, timeout_s=5)
+    spec = ArtifactRealizationSpec.publication(target=projection, timeout_s=5)
     target_plan = RealizationTargetPlan(
         kind=spec.target_kind,
         target_layout_digest="layout-1",
@@ -1760,7 +1744,7 @@ def test_runtime_attachment_envelope_and_report_capture_release_contract() -> No
         artifact_id="mi2:test:serving",
         canonical_index_bytes=_canonical_index_bytes(),
         tensor_names=("a",),
-        artifact_profile="runtime_artifact",
+        artifact_profile="serving_artifact",
         authority_scope="daemon_mediated_runtime_attachment",
     )
     target_plan = RealizationTargetPlan(
@@ -1848,7 +1832,7 @@ def _target_set_retained_member(member_index: int) -> RealizationRetainedBinding
         reservation_bytes=1024,
         reservation_capability_id=f"cap-{suffix}",
         reservation_scope_digest=f"scope-{suffix}",
-        readiness="runtime_local_ready",
+        readiness="serving_local_ready",
         verification_state="local_only",
     )
 
@@ -1878,7 +1862,7 @@ def test_retained_binding_report_captures_capability_expiry() -> None:
         daemon_session_id="session-1",
         device_uuid="GPU-0",
         reservation_bytes=4096,
-        readiness="runtime_local_ready",
+        readiness="serving_local_ready",
         verification_state="local_only",
         expires_at_ms=4_102_444_800_000,
     )
@@ -1908,7 +1892,7 @@ def test_target_set_report_groups_retained_member_facts() -> None:
             reservation_bytes=1024,
             reservation_capability_id="cap-0",
             reservation_scope_digest="scope-0",
-            readiness="runtime_local_ready",
+            readiness="serving_local_ready",
             verification_state="local_only",
             staged_value=True,
             group_realization_transaction_id="txn-1",
@@ -1931,7 +1915,7 @@ def test_target_set_report_groups_retained_member_facts() -> None:
             reservation_bytes=2048,
             reservation_capability_id="cap-1",
             reservation_scope_digest="scope-1",
-            readiness="runtime_local_ready",
+            readiness="serving_local_ready",
             verification_state="local_only",
             staged_value=True,
             group_realization_transaction_id="txn-1",
@@ -1966,7 +1950,7 @@ def test_target_set_report_groups_retained_member_facts() -> None:
         runtime="vllm",
         group_id="group-1",
         topology=target.topology,
-        readiness="runtime_local_ready",
+        readiness="serving_local_ready",
         partial=False,
         member_failures=(),
     )
@@ -2224,7 +2208,7 @@ def test_reports_share_core_realization_fields_across_targets() -> None:
     assert retained_profile["retained_binding_capability_expires_at_ms"] == (
         4_102_444_800_000,
     )
-    assert retained_profile["retained_binding_readiness"] == ("runtime_local_ready",)
+    assert retained_profile["retained_binding_readiness"] == ("serving_local_ready",)
     assert retained_profile["retained_binding_verification_states"] == ("local_only",)
 
 
@@ -2274,7 +2258,7 @@ def test_target_set_strategy_and_lifecycle_plans_capture_group_barriers() -> Non
                     group_id="group-1",
                 ),
                 model_config_digest="model-config",
-                runtime_build_digest="serving-build",
+                serving_build_digest="serving-build",
                 source=source,
                 resolved_layout=SimpleNamespace(
                     target_layout_hash="target-layout-0",
@@ -2292,7 +2276,7 @@ def test_target_set_strategy_and_lifecycle_plans_capture_group_barriers() -> Non
                     group_id="group-1",
                 ),
                 model_config_digest="model-config",
-                runtime_build_digest="serving-build",
+                serving_build_digest="serving-build",
                 source=source,
                 resolved_layout=SimpleNamespace(
                     target_layout_hash="target-layout-1",
@@ -2349,7 +2333,7 @@ def test_target_set_report_marks_serving_artifact_set_as_per_part() -> None:
         runtime="vllm",
         group_id="group-1",
         source=SimpleNamespace(
-            source_kind="runtime_artifact_set",
+            source_kind="serving_artifact_set",
             artifact_selection_digest="artifact-set-selection",
             source_artifact_ref=None,
             members=(
@@ -2382,7 +2366,7 @@ def test_target_set_report_marks_serving_artifact_set_as_per_part() -> None:
         source_selection_digest="fallback-selection",
     )
 
-    assert report.source_kind == "runtime_artifact_set"
+    assert report.source_kind == "serving_artifact_set"
     assert report.source_selection_mode == "per_part_selection"
     assert [member.source_artifact_ref for member in report.members] == [
         "mi2:serving-member-0",
@@ -2480,169 +2464,6 @@ def test_risk_labels_are_derived_from_target_plan_and_envelope() -> None:
         "target_set",
         "custom-risk",
     )
-
-
-_RISK_CLOSURE_MATRIX: tuple[dict[str, str], ...] = (
-    {
-        "risk": "Selection resolver becomes too broad.",
-        "admission_field": "artifact_id/key exclusivity, view_id, generation_hint",
-        "envelope_field": "target_layout_digest remains target-plan owned",
-        "report_field": "source_selection_digest",
-        "guardrail_test": "test_resolve_artifact_selection_keeps_target_plan_identity_separate",
-        "blocking_condition": "target layout or copy-plan policy moves into selection",
-    },
-    {
-        "risk": "SDK direct Global Store access survives behind helper APIs.",
-        "admission_field": "authority_scope",
-        "envelope_field": "owner_kind",
-        "report_field": "authority_scope",
-        "guardrail_test": "test_sdk_api_paths_do_not_open_global_store_channels",
-        "blocking_condition": "SDK artifact realization opens Global Store channels",
-    },
-    {
-        "risk": "`PublicDiskSourceHandle` becomes a permanent source authority.",
-        "admission_field": "artifact_profile=mounted_source",
-        "envelope_field": "backing_kind=mounted_source_metadata",
-        "report_field": "mounted_source.source_artifact_id",
-        "guardrail_test": "test_mounted_source_realize_rejects_non_msa1_subject",
-        "blocking_condition": "mounted source executes without msa1 identity",
-    },
-    {
-        "risk": "Mapped target layout is confused with source selection.",
-        "admission_field": "target_layout_digest",
-        "envelope_field": "projection_kind",
-        "report_field": "copy_plan_digest",
-        "guardrail_test": "test_resolve_artifact_selection_accepts_mapped_source_view_hint",
-        "blocking_condition": "mapped/adopted target reports reuse selection digest as layout",
-    },
-    {
-        "risk": "TensorDict accidentally inherits binding lifecycle.",
-        "admission_field": "target_kind=tensor_dict",
-        "envelope_field": "projection_kind=tensor_dict",
-        "report_field": "publishability.reason",
-        "guardrail_test": "test_tensor_dict_handle_rejects_binding_lifecycle_capabilities",
-        "blocking_condition": "TensorDict handle can publish, promote, or retain",
-    },
-    {
-        "risk": "TensorDict projections release daemon payloads too early or leak them.",
-        "admission_field": "release_strictness",
-        "envelope_field": "release_policy",
-        "report_field": "envelope.release_policy",
-        "guardrail_test": "test_tensor_subset_materialization_and_release",
-        "blocking_condition": "projection close does not unload daemon payload exactly once",
-    },
-    {
-        "risk": "Resource lifecycle remains path-specific under a unified API.",
-        "admission_field": "release_strictness",
-        "envelope_field": "release_policy",
-        "report_field": "lifecycle_plan.capability",
-        "guardrail_test": "test_release_contract_lifecycle_matrix_runs_policy_actions_once",
-        "blocking_condition": "cleanup action exists outside a release contract",
-    },
-    {
-        "risk": "Handle-lease mint failure silently weakens export lifetime.",
-        "admission_field": "export_lifetime_kind",
-        "envelope_field": "export_kind",
-        "report_field": "envelope.export_lifetime_kind",
-        "guardrail_test": "test_cpu_memfd_materialization_fails_before_tensor_restore_without_export_authority",
-        "blocking_condition": "CPU memfd or CUDA IPC export succeeds without token authority",
-    },
-    {
-        "risk": "CPU TensorDict mutability stays ambiguous.",
-        "admission_field": "mutability_contract",
-        "envelope_field": "mutability_contract",
-        "report_field": "envelope.mutability_contract",
-        "guardrail_test": "test_tensor_dict_projection_rejects_mapping_mutations",
-        "blocking_condition": "TensorDict mapping mutation succeeds",
-    },
-    {
-        "risk": "`get_into` hides expensive fallback copies.",
-        "admission_field": "fallback_policy",
-        "envelope_field": "fallback_reason_buckets",
-        "report_field": "copy_bytes",
-        "guardrail_test": "test_get_into_returns_fallback_result_and_unloads",
-        "blocking_condition": "temporary-payload fallback has no report bucket",
-    },
-    {
-        "risk": "Prefetch grows a second continuation model.",
-        "admission_field": "operation_id",
-        "envelope_field": "projection_kind=prefetch_handoff",
-        "report_field": "operation_backend",
-        "guardrail_test": "test_realize_async_retained_replica_operation_status_wait_and_cancel",
-        "blocking_condition": "prefetch bypasses Operation status/wait/cancel",
-    },
-    {
-        "risk": "Binding paths bypass strategy planning.",
-        "admission_field": "fallback_policy",
-        "envelope_field": "direct_write_bytes",
-        "report_field": "strategy_plan.fallback_policy",
-        "guardrail_test": "test_binding_envelope_and_report_capture_identity_diagnostics",
-        "blocking_condition": "binding materialization report lacks strategy facts",
-    },
-    {
-        "risk": "Tensor-aware strategy loses lane/residual visibility.",
-        "admission_field": "execution_plan_kind",
-        "envelope_field": "temporary_replica_bytes",
-        "report_field": "execution_commit.lane_allocation_bytes",
-        "guardrail_test": "test_binding_envelope_and_report_capture_identity_diagnostics",
-        "blocking_condition": "mixed execution omits lane, residual, or reject buckets",
-    },
-    {
-        "risk": "TP grows special-case orchestration.",
-        "admission_field": "target_set.source_selection_mode",
-        "envelope_field": "projection_kind=target_set",
-        "report_field": "target_set.members",
-        "guardrail_test": "test_group_member_same_and_per_part_selection_identity",
-        "blocking_condition": "TP path adds non-target-set realization state",
-    },
-    {
-        "risk": "RPC cleanup is attempted too early.",
-        "admission_field": "controller plan validation",
-        "envelope_field": "resource_authorities",
-        "report_field": "controller plan spans",
-        "guardrail_test": "daemon controller realization plan tests",
-        "blocking_condition": "proto cleanup lands before shared controller path",
-    },
-    {
-        "risk": "Target-state behavior regresses while compatibility code is deleted.",
-        "admission_field": "scenario acceptance coverage",
-        "envelope_field": "runtime_attachment release_policy",
-        "report_field": "model_runtime.runtime_attachment_target_kind",
-        "guardrail_test": "serving integration/runtime publication scenarios",
-        "blocking_condition": "compatibility code deletion lacks runtime scenario coverage",
-    },
-)
-
-
-def _plan_risk_names() -> tuple[str, ...]:
-    plan = Path("docs/plans/0121-unified-artifact-realization-kernel.md")
-    in_risks = False
-    risks: list[str] = []
-    for line in plan.read_text(encoding="utf-8").splitlines():
-        if line == "# Risks & Tracking":
-            in_risks = True
-            continue
-        if in_risks and line.startswith("# "):
-            break
-        if in_risks and line.startswith("- ["):
-            risks.append(line.split("] ", 1)[1])
-    return tuple(risks)
-
-
-def test_risk_closure_matrix_covers_plan_risks_and_enforcement_fields() -> None:
-    required_fields = (
-        "admission_field",
-        "envelope_field",
-        "report_field",
-        "guardrail_test",
-        "blocking_condition",
-    )
-    matrix_by_risk = {entry["risk"]: entry for entry in _RISK_CLOSURE_MATRIX}
-
-    assert tuple(matrix_by_risk) == _plan_risk_names()
-    for risk, entry in matrix_by_risk.items():
-        for field in required_fields:
-            assert entry[field], f"{risk} missing {field}"
 
 
 def test_sdk_realization_paths_do_not_import_selection_builder() -> None:
@@ -2762,9 +2583,7 @@ def test_client_binding_rollbacks_log_cleanup_failures_instead_of_suppressing() 
     assert "logger.exception" in helper_source
 
 
-def test_realization_lifecycle_code_does_not_silently_suppress_broad_exceptions() -> (
-    None
-):
+def test_realization_lifecycle_code_does_not_silently_suppress_broad_exceptions() -> None:
     guarded_paths = (
         Path("tensorcast/api/_register.py"),
         Path("tensorcast/api/store/__init__.py"),
@@ -2782,10 +2601,10 @@ def test_realization_lifecycle_code_does_not_silently_suppress_broad_exceptions(
         Path("tensorcast/global_store/rpc/replica_registration_rpc_handler.py"),
         Path("tensorcast/global_store/rpc/transport_rpc_handler.py"),
         Path("tensorcast/global_store/services/instance_service.py"),
-        Path("tensorcast/artifact_runtime/binding/retained.py"),
-        Path("tensorcast/artifact_runtime/lifecycle.py"),
-        Path("tensorcast/artifact_runtime/recipe/local_ready.py"),
-        Path("tensorcast/artifact_runtime/recipe/build.py"),
+        Path("tensorcast/serving/retained_binding.py"),
+        Path("tensorcast/serving/_runtime_impl/lifecycle.py"),
+        Path("tensorcast/serving/local_ready.py"),
+        Path("tensorcast/serving/recipe_build.py"),
     )
     offenders = [
         str(path)
@@ -2855,9 +2674,7 @@ def test_mounted_source_config_no_longer_exposes_absolute_fallback_mode() -> Non
     assert offenders == []
 
 
-def test_daemon_canonical_index_loading_uses_explicit_authority_not_disk_fallback() -> (
-    None
-):
+def test_daemon_canonical_index_loading_uses_explicit_authority_not_disk_fallback() -> None:
     guarded_paths = (
         Path("daemon/service/controllers/materialization_index_source_utils.h"),
         Path("daemon/service/controllers/materialization_index_source_utils.cc"),

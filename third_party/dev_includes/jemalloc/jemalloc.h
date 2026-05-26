@@ -1,4 +1,14 @@
-// Copyright (c) 2025, TensorCast Team.
+// Generated development header derived from jemalloc 5.3.0 public headers.
+//
+// Upstream jemalloc copyright:
+// Copyright (C) 2002-2022 Jason Evans <jasone@canonware.com>.
+// Copyright (C) 2007-2012 Mozilla Foundation. All rights reserved.
+// Copyright (C) 2009-2022 Facebook, Inc. All rights reserved.
+//
+// jemalloc is distributed under a BSD-style license. See
+// THIRD_PARTY_NOTICES.md for the retained upstream notice.
+//
+// Modified by TensorCast Team, 2025-2026.
 
 #ifndef JEMALLOC_H_
 #define JEMALLOC_H_

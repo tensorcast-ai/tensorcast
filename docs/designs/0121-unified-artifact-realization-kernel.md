@@ -319,12 +319,12 @@ realization = artifact.realize(
 tensors = realization.tensor_dict()
 
 realization = artifact.realize(
-    tc.ArtifactRealizationSpec.binding(device="cuda:0", mapping=copy_plan)
+    tc.ArtifactRealizationSpec.binding(device="cuda:0", layout=layout)
 )
 binding = realization.binding()
 
 tensors = artifact.tensor_dict(device="cuda:0")
-binding = artifact.bind(device="cuda:0", mapping=copy_plan)
+binding = artifact.bind(device="cuda:0", layout=layout)
 ```
 
 Ergonomic artifact methods have required lowerings:
@@ -337,7 +337,7 @@ Ergonomic artifact methods have required lowerings:
 | `Artifact.bind_into(...)` | `realize(ArtifactRealizationSpec.adopted_binding(...)).binding()` |
 | `Artifact.prefetch(device=...)` | `realize_async(ArtifactRealizationSpec.retained_replica(...))`, projected as `Operation[PrefetchedReplica]` during migration |
 | `Artifact.prefetch(target=...)` | `realize_async(ArtifactRealizationSpec.retained_binding(...))`, projected as `Operation[PrefetchHandoff]` or current retained result types |
-| Runtime attach | `realize(ArtifactRealizationSpec.model_runtime(...), runtime_host=...).attachment()` |
+| Runtime attach | `realize(ArtifactRealizationSpec.model_runtime(...)).attach(adapter=...)` |
 
 These entrypoints may keep the short method names because they are useful. They
 must not own independent selection, target, source strategy, lifecycle, resource

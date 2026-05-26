@@ -5,7 +5,7 @@ meta:
   # Free-form description for operators and change tracking.
   description: "default-global-store"
   # Cluster identity token used by daemons to avoid split-brain; echoed by HealthCheck.
-  cluster_token: "16d3eca3825e0914ac8b676bb339426b"
+  cluster_token: ""
 
 # Metadata persistence (DuckDB).
 database:

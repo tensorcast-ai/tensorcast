@@ -961,12 +961,12 @@ def run_local(cmd: list[str], *, timeout_sec: float) -> str:
 
 def probe_process_state(process_id: str, *, timeout_sec: float) -> dict[str, Any]:
     cmd = [
-        "brainctl",
+        "orchestratorctl",
         "get",
         "process",
         str(process_id),
         "-n",
-        "shai-core",
+        "tensorcast",
     ]
     proc = subprocess.run(
         cmd,
@@ -1018,11 +1018,11 @@ def run_remote(process_id: str, inner_cmd: str, *, timeout_sec: float) -> str:
         run_as_user=run_as_user,
     )
     cmd = [
-        "brainctl",
+        "orchestratorctl",
         "exec",
         f"process/{process_id}",
         "-n",
-        "shai-core",
+        "tensorcast",
         "--",
         "bash",
         "-lc",

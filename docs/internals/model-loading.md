@@ -229,8 +229,8 @@ authority for compiled runtime recipes:
   builder accepts `mi2` content identities and daemon-attested `msa1` mounted
   sources; synthetic `disk:`, `key:`, path, and cache-local references are
   rejected before compile.
-- `RuntimeBindingPlan` is the single recipe, compile, resolved-spec, and
-  realization identity. It must agree with `TensorcastRuntimeFacts` for
+- `ServingBindingPlan` is the single recipe, compile, resolved-spec, and
+  realization identity. It must agree with `TensorcastServingFacts` for
   `framework_name`, `adapter_version`, and `serving_abi_version`; its compile
   payload also carries source/schema/realization digests and destination tensor
   schema coverage for every trace-plan destination.
@@ -238,7 +238,7 @@ authority for compiled runtime recipes:
   Destination `MultiRange` slices stay on the binding-realization path until the
   mapped-binding protocol has an explicit flattened-layout contract; coverage
   validation fails closed for unsupported `MultiRange` writes.
-- Retained realization authority may carry a `group_realization_acquire`
+- Retained serving binding authority may carry a `group_realization_acquire`
   reference. Acquire passes it through to the Store Daemon, and retained
   attachment handles own lease release unless ownership has been explicitly
   transferred to runtime.

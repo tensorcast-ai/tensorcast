@@ -23,7 +23,7 @@ from tensorcast.api.plan.plan import (
 )
 from tensorcast.api.plan.targets import TargetSpec
 from tensorcast.api.plan.transforms import TransformSpec
-from tensorcast.api.store.publication_builder import build_pure_transform_transform_spec
+from tensorcast.api.store.serving_builder import build_pure_transform_transform_spec
 
 __all__ = [
     "ARTIFACT_SET_CARRIER_INLINE",

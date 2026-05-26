@@ -9,7 +9,7 @@ cd "${REPO_ROOT}"
 
 source .venv/bin/activate
 
-: "${TC_SEED_PROC:?set TC_SEED_PROC (seed brainctl process id)}"
+: "${TC_SEED_PROC:?set TC_SEED_PROC (seed orchestratorctl process id)}"
 : "${TC_SEED_IP:?set TC_SEED_IP (seed advertise ip)}"
 : "${TC_GET_PROCS:?set TC_GET_PROCS (comma-separated getter process ids)}"
 : "${TC_GET_IPS:?set TC_GET_IPS (comma-separated getter advertise ips)}"
@@ -47,7 +47,7 @@ TC_PHASE="${TC_PHASE:-all}"
 TC_SCALE_WORKERS="${TC_SCALE_WORKERS:-2,4,8,16,32}"
 TC_SCALE_SIZES_MIB="${TC_SCALE_SIZES_MIB:-1024,8192}"
 TC_QUOTA_PREFLIGHT_ENABLE="${TC_QUOTA_PREFLIGHT_ENABLE:-1}"
-TC_QUOTA_CHARGED_GROUP="${TC_QUOTA_CHARGED_GROUP:-tensorcast_dev}"
+TC_QUOTA_CHARGED_GROUP="${TC_QUOTA_CHARGED_GROUP:-tensorcast-dev}"
 TC_XLARGE_STABLE_PREFLIGHT_ENABLE="${TC_XLARGE_STABLE_PREFLIGHT_ENABLE:-1}"
 TC_XLARGE_STABLE_OVERLAP_VERSIONS="${TC_XLARGE_STABLE_OVERLAP_VERSIONS:-2}"
 TC_XLARGE_STABLE_PREFLIGHT_MARGIN_RATIO="${TC_XLARGE_STABLE_PREFLIGHT_MARGIN_RATIO:-1.05}"
@@ -206,14 +206,14 @@ probe_quota_gpu_available() {
   if [[ "${TC_QUOTA_PREFLIGHT_ENABLE}" != "1" ]]; then
     return 0
   fi
-  if ! command -v brainctl >/dev/null 2>&1; then
-    echo "[suite] quota preflight skipped: brainctl not found"
+  if ! command -v orchestratorctl >/dev/null 2>&1; then
+    echo "[suite] quota preflight skipped: orchestratorctl not found"
     return 0
   fi
 
   local output
   output="$(
-    brainctl launch \
+    orchestratorctl launch \
       --charged-group "${TC_QUOTA_CHARGED_GROUP}" \
       --gpu 1 --cpu 1 --memory 1024 \
       --predict-only 2>&1 || true

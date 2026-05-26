@@ -1,4 +1,4 @@
-<!-- Copyright (c) 2025, TensorCast -->
+<!-- Copyright (c) 2025, TensorCast Team -->
 
 # Materialization Module
 

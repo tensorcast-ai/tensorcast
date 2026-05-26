@@ -161,7 +161,7 @@ def _run_remote(
         run_as_user=run_as_user,
     )
     cmd = (
-        f"brainctl exec process/{process_id} -n shai-core -- bash -lc "
+        f"orchestratorctl exec process/{process_id} -n tensorcast -- bash -lc "
         f"{shlex.quote(wrapped_cmd)}"
     )
     return _run(cmd, timeout_sec=timeout_sec)
@@ -179,7 +179,7 @@ def _start_remote_server(
         run_as_user=run_as_user,
     )
     cmd = (
-        f"brainctl exec process/{process_id} -n shai-core -- bash -lc "
+        f"orchestratorctl exec process/{process_id} -n tensorcast -- bash -lc "
         f"{shlex.quote(wrapped_cmd)}"
     )
     return subprocess.Popen(  # noqa: S603
@@ -440,7 +440,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Probe cross-host single-link ceiling via bidirectional iperf3."
     )
-    parser.add_argument("--seed-proc", required=True, help="Seed brainctl process id.")
+    parser.add_argument(
+        "--seed-proc", required=True, help="Seed orchestratorctl process id."
+    )
     parser.add_argument(
         "--seed-ip",
         required=True,

@@ -111,7 +111,7 @@ Group realization note:
 # Implementation Status
 
 As of `2026-04-10`, the repository has landed the main repo-local contract and
-ingress pieces for `0112`, and the audited Step3p5 same-binding mounted path is
+ingress pieces for `0112`, and the audited Example TP Model same-binding mounted path is
 closed end-to-end:
 
 - `RepresentationPublishContract` is no longer artifact-id-only; it now carries
@@ -134,7 +134,7 @@ closed end-to-end:
   cold-path `mi2:` hashing.
 - same-binding README guidance now points users at the binding-native path
   rather than presenting tensor-publication helpers as the preferred surface.
-- the audited Step3p5 path now reaches `stage=ready` through public disk
+- the audited Example TP Model path now reaches `stage=ready` through public disk
   ingress, `BindingRealizationPlan`, binding-subject publication, and
   fail-closed canonical-full seal without taking runtime fallback.
 - the ready service also serves a real validation completion request, so the
@@ -171,7 +171,7 @@ blocker work. It is:
 In particular:
 
 - `0112` closed the correctness path for binding-native same-binding serving
-  startup and now also records the audited Step3p5 same-binding closure result,
+  startup and now also records the audited Example TP Model same-binding closure result,
 - while the shared runtime strategy trunk that feeds that path is owned by
   `0108`,
 - and the remaining mounted operator evidence is now captured directly in the
@@ -263,9 +263,9 @@ the ordinary target materialization path.
 What remains is audited integration migration onto that ingress, not the
 absence of the ingress itself.
 
-## 4. Audited Step3p5 integration semantics are now closed to same-binding
+## 4. Audited Example TP Model integration semantics are now closed to same-binding
 
-For the audited Step3p5 path, this blocker is now closed in practice.
+For the audited Example TP Model path, this blocker is now closed in practice.
 
 The validated cold-start chain is:
 
@@ -275,10 +275,10 @@ The validated cold-start chain is:
 4. finalize on the same bound runtime tensors,
 5. publish from the same binding value subject,
 6. seal canonical-full from explicit binding-backed source evidence,
-7. reach ordinary serving runtime without runtime fallback.
+7. reach ordinary vllm without runtime fallback.
 
 The broader repo now uses the same rule for all `BINDING_FINALIZE` families:
-same-binding publication is the only admitted path. The audited Step3p5 family
+same-binding publication is the only admitted path. The audited Example TP Model family
 therefore no longer routes through tensor-publication helpers or runtime bridge
 behavior.
 
@@ -290,11 +290,11 @@ Tensor-entry `BINDING_FINALIZE` helper names have been removed from the public
 surface. Same-binding code no longer has a path back to the older
 register-then-closeout model.
 
-## 6. Step3p5 runtime bridge is now closed
+## 6. Example TP Model runtime bridge is now closed
 
-This blocker is now closed for the audited Step3p5 path.
+This blocker is now closed for the audited Example TP Model path.
 
-The public realization contract and the admitted Step3p5 trace plan now meet
+The public realization contract and the admitted Example TP Model trace plan now meet
 without a late runtime bridge. The path either lowers into
 `BindingRealizationPlan` or fails earlier; it no longer drops at runtime to
 legacy `tensor_dict/materialize_subset(...)`.
@@ -304,7 +304,7 @@ is optimize the slow but now-correct path.
 
 ## 7. Audited mounted closure and remaining follow-up
 
-For the audited Step3p5 same-binding path, the old "generic-dominant mounted
+For the audited Example TP Model same-binding path, the old "generic-dominant mounted
 baseline" is no longer the current state. The closure packet now shows:
 
 - collective-dominant realization on the audited operator path,
@@ -979,9 +979,9 @@ Implemented on `2026-04-10`:
   - and any closeout result that mutates the reused
     `artifact_id` / `index_multihash` / `data_multihash`;
 - repo coverage for this invariant now lives in:
-  - [assembly_closeout_identity_utils_test.cc](/data/workspace/tensorcast-280/daemon/service/assembly_closeout_identity_utils_test.cc)
-  - [grpc_service_impl_start_seal_assembly_test.cc](/data/workspace/tensorcast-280/daemon/service/grpc_service_impl_start_seal_assembly_test.cc)
-  - [test_assembly_attempt.py](/data/workspace/tensorcast-280/tests/python/test_assembly_attempt.py)
+  - [assembly_closeout_identity_utils_test.cc](./daemon/service/assembly_closeout_identity_utils_test.cc)
+  - [grpc_service_impl_start_seal_assembly_test.cc](./daemon/service/grpc_service_impl_start_seal_assembly_test.cc)
+  - [test_assembly_attempt.py](./tests/python/test_assembly_attempt.py)
 
 # Compatibility and Migration
 
@@ -1022,7 +1022,7 @@ The current helpers should be classified as follows:
 3. complete the public metadata-first mounted-source artifact semantics from
    `0115` and route `realize_into_binding(...)` through that artifact-first
    contract rather than through artifact-id-only assumptions.
-4. switch audited integrations such as `/data/workspace/internal-vllm` to the
+4. switch audited integrations such as `/opt/vllm` to the
    same-binding host-and-publication model end to end.
 5. rename tensor-entry publication helpers to explicit `*_bridge(...)`
    surfaces and stop exposing the old ambiguous names.
@@ -1051,7 +1051,7 @@ That is acceptable as long as:
 
 ## Public plan design must avoid overfitting to one integration
 
-The first consumer is `/data/workspace/internal-vllm`, but the public
+The first consumer is `/opt/vllm`, but the public
 `BindingRealizationPlan` must not hardcode vLLM-specific naming or framework
 assumptions.
 
@@ -1072,7 +1072,7 @@ The final preferred same-binding path must satisfy all of the following:
 
 - `RepresentationPublishContract` no longer forces `serving_artifact_id` as
   the only serving publication subject,
-- the audited Step3p5 loading chain completes without runtime fallback or
+- the audited Example TP Model loading chain completes without runtime fallback or
   bridge behavior,
 - same-binding / binding-finalize audited families no longer route to tensor
   entry or bridge publication,
@@ -1100,7 +1100,7 @@ Required test areas:
 - manifest and representation contract preflight during promotion,
 - optimistic local-ready barrier ordering before async promotion starts,
 - no canonical cache/config/key update while verification is pending,
-- Step3p5 trace-plan gap lowering vs early rejection,
+- Example TP Model trace-plan gap lowering vs early rejection,
 - explicit bridge helper naming and bridge-path coverage.
 
 # Review Checklist

@@ -34,10 +34,10 @@ publisher = WeightPublisher(cfg)
 # tensors = {
 #     "transformer.wte.weight": torch.empty((10, 10), device="cuda:0"),
 # }
-# load tensros from safetensors: /mnt/step3-alignment/inference/Qwen3-0.6B-Base
+# load tensros from safetensors: /models/example/inference/Qwen3-0.6B-Base
 
 tensors = {}
-weights_path = "/mnt/step3-alignment/inference/Qwen3-0.6B-Base"
+weights_path = "/models/example/inference/Qwen3-0.6B-Base"
 for filename in os.listdir(weights_path):
     if filename.endswith(".safetensors"):
         file_path = os.path.join(weights_path, filename)

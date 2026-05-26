@@ -63,6 +63,12 @@ repos:
       rev: v1.34.0
       hooks:
           - id: typos
+    - repo: https://github.com/gitleaks/gitleaks
+      rev: v8.28.0
+      hooks:
+          - id: gitleaks
+            args:
+                - --config=.gitleaks.toml
     - repo: https://github.com/Lucas-C/pre-commit-hooks
       rev: v1.5.4
       hooks:

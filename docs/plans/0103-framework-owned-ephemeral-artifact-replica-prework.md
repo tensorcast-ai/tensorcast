@@ -37,9 +37,9 @@ links:
 # Objective
 
 Close the TensorCast prerequisites required before implementing the
-internal-vLLM framework-owned ephemeral artifact replica plan at:
+vllm framework-owned ephemeral artifact replica plan at:
 
-`/data/workspace/internal-vllm/docs/tensorcast/plans/tensorcast_framework_owned_ephemeral_artifact_replica_plan.md`
+`/opt/vllm/docs/tensorcast/plans/tensorcast_framework_owned_ephemeral_artifact_replica_plan.md`
 
 This is a TensorCast prework plan only. It does not implement the vLLM
 producer/consumer integration. The handoff criterion is that TensorCast can
@@ -101,7 +101,7 @@ Reviewed baseline: current `tensorcast-280` code as of 2026-05-16.
 
 ## Blocking Gaps
 
-These gaps must be closed before the internal-vLLM plan starts using the
+These gaps must be closed before the vllm plan starts using the
 feature.
 
 1. Local acquire has a snapshot race.
@@ -121,7 +121,7 @@ feature.
    currentness.
    Current materialize-into-target token minting lets a filled target buffer
    become publishable without proving it is still the current value of a
-   daemon-owned binding. The internal-vLLM plan needs the opposite boundary:
+   daemon-owned binding. The vllm plan needs the opposite boundary:
    publication starts from binding lifecycle currentness, not from the
    materialization pipeline.
 
@@ -386,7 +386,7 @@ These controls are part of the plan, not optional review advice.
   - [x] Add a TensorCast-side readiness contract note for vLLM handoff:
         default health must not wait for async publish; explicit P2P-ready mode
         must fail closed if publication fails.
-  - [x] Do not start internal-vLLM integration until Phase 0 through Phase 4 are
+  - [x] Do not start vllm integration until Phase 0 through Phase 4 are
         accepted and tested.
 
 : Optional GS Diagnostics Only
@@ -530,9 +530,9 @@ ruff format tensorcast/api/store tensorcast/serving tests/python/test_binding.py
       no test relies on target materialization as publication authority.
 - [x] SDK publish and retire behavior is covered by Python tests.
 
- For internal-vLLM Work
+ For vllm work
 
-Only start the internal-vLLM producer/consumer work after all of the following
+Only start the vllm producer/consumer work after all of the following
 are true:
 
 - Phase 0 through Phase 4 are implemented, reviewed, and tested.
@@ -558,7 +558,7 @@ are true:
   `PublishTargetReplica` in the same change set.
 - Land lifecycle terminal cleanup and mutation guards before enabling any
   framework integration.
-- Keep the internal-vLLM optional publish path disabled by default until
+- Keep the vllm optional publish path disabled by default until
   TensorCast gates pass.
 - Backout strategy for Phase 2 is to disable binding-current-value publication
   entirely and keep ordinary materialization working. Do not back out by
@@ -597,5 +597,5 @@ are true:
 - Serving publication trunk: `docs/designs/0111-source-to-serving-builder-and-representation-publication.md`
 - Binding-native serving boundary: `docs/designs/0112-binding-native-serving-realization-and-publication.md`
 - Local-ready acquire contract: `docs/designs/0116-prefetch-serving-binding-target.md`
-- Internal-vLLM downstream plan:
-  `/data/workspace/internal-vllm/docs/tensorcast/plans/tensorcast_framework_owned_ephemeral_artifact_replica_plan.md`
+- vllm downstream plan:
+  `/opt/vllm/docs/tensorcast/plans/tensorcast_framework_owned_ephemeral_artifact_replica_plan.md`
