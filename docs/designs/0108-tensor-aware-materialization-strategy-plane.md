@@ -238,7 +238,7 @@ Partially implemented in this repository:
 host-local `0108` scope:
 
 - source model:
-  `/models/example/inference/Qwen2.5-32B-Instruct`
+  `<public-hf-model-dir>`
 - current `vllm` TP4 trace output now yields:
   - `773` trace entries / rank,
   - `771` source-backed copy ops / rank,

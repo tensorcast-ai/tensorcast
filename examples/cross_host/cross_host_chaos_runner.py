@@ -84,7 +84,7 @@ def stable_case_token(case_name: str) -> str:
 
 
 def worker_home(case_name: str, role: str, getter_index: int | None = None) -> str:
-    case_root = f"/tmp/tc_cross_20260221/{stable_case_token(case_name)}"
+    case_root = f"/tmp/tensorcast/cross_host/chaos/{stable_case_token(case_name)}"
     if role == "seed":
         return f"{case_root}/seed_h"
     if role == "getter" and getter_index is not None:

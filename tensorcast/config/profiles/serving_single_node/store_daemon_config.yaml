@@ -12,13 +12,13 @@ server:
   p2p_listen:
     host: 0.0.0.0
     port: 0
-  storage_path: "/data/models"
+  storage_path: "/var/lib/tensorcast/models"
   num_threads: 8
 
 public_disk_source:
   trusted_root_policies:
-    - root_path: "/data/models"
-    - root_path: "/mnt/host0"
+    - root_path: "/var/lib/tensorcast/models"
+    - root_path: "/shared/tensorcast/models"
 
 engine:
   artifact_chunk_bytes: 256MB

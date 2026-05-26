@@ -113,7 +113,7 @@ publisher = WeightPublisher(
     )
 )
 
-artifact_id = publisher.publish_from_disk("/mnt/shared/it123_hf", version=123)
+artifact_id = publisher.publish_from_disk("/shared/tensorcast/models/demo_hf_v123", version=123)
 print("published", artifact_id)
 ```
 
@@ -140,7 +140,7 @@ cfg = WeightPublisherConfig(
     reload_url="http://127.0.0.1:8000/set_model_weight",
     trigger_reload=True,
 )
-WeightPublisher(cfg).publish_from_disk("/mnt/shared/it123_hf", version=123)
+WeightPublisher(cfg).publish_from_disk("/shared/tensorcast/models/demo_hf_v123", version=123)
 ```
 
 For current vLLM TensorCast serving reload, the request shape is instead:
@@ -187,7 +187,7 @@ cfg = WeightPublisherConfig(
 )
 
 publisher = WeightPublisher(cfg)
-publisher.publish_from_disk("/mnt/shared/it123_hf", version=123)
+publisher.publish_from_disk("/shared/tensorcast/models/demo_hf_v123", version=123)
 ```
 
 Notes:

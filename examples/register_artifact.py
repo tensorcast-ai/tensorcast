@@ -1,6 +1,7 @@
 #  Copyright (c) 2025, TensorCast Team.
 
 import gc
+import os
 
 import torch
 from transformers.models.auto.modeling_auto import AutoModelForCausalLM
@@ -10,7 +11,7 @@ from tensorcast.testing.dict import assert_state_dict_equal
 
 tc.init(mode="connect", address="127.0.0.1:50052")
 
-hf_model_name = "Qwen/Qwen3-0.6B"
+hf_model_name = os.environ.get("TENSORCAST_EXAMPLE_HF_MODEL", "sshleifer/tiny-gpt2")
 # Load a artifact from HuggingFace artifact hub.
 artifact = AutoModelForCausalLM.from_pretrained(
     hf_model_name, torch_dtype=torch.bfloat16, trust_remote_code=True

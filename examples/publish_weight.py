@@ -7,7 +7,7 @@ from safetensors.torch import load_file
 import tensorcast as tc
 from tensorcast.tools.weight_publisher import WeightPublisher, WeightPublisherConfig
 
-# tc.init(global_store_address="100.102.113.111:50051", mode="create")
+# tc.init(global_store_address="127.0.0.1:50051", mode="create")
 tc.init(mode="connect")
 
 
@@ -34,10 +34,12 @@ publisher = WeightPublisher(cfg)
 # tensors = {
 #     "transformer.wte.weight": torch.empty((10, 10), device="cuda:0"),
 # }
-# load tensros from safetensors: /models/example/inference/Qwen3-0.6B-Base
+# load tensors from a local safetensors directory
 
 tensors = {}
-weights_path = "/models/example/inference/Qwen3-0.6B-Base"
+weights_path = os.environ.get(
+    "TENSORCAST_EXAMPLE_WEIGHTS_DIR", "/tmp/tensorcast/example-safetensors"
+)
 for filename in os.listdir(weights_path):
     if filename.endswith(".safetensors"):
         file_path = os.path.join(weights_path, filename)

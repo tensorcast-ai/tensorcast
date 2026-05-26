@@ -1,7 +1,9 @@
 #  Copyright (c) 2025-2026, TensorCast Team.
 
-import torch
+import os
 from typing import Any
+
+import torch
 
 from tensorcast import from_disk, startup
 
@@ -79,13 +81,15 @@ def compare_tensor_dicts(
 
 if __name__ == "__main__":
     # Example usage:
-    # Replace with actual paths to your artifact files
-    # Ensure the artifact files exist at these paths before running.
-    path_to_torch_state_dict = (
-        "/tmp/tensorcast-test-models/Qwen/Qwen3-0.6B/state_dict.pth"
+    # Replace with actual paths to your artifact files. Ensure the artifact files
+    # exist at these paths before running.
+    path_to_sc_model_dir = os.environ.get(
+        "TENSORCAST_TEST_MODEL_DIR",
+        "/tmp/tensorcast/example-model",
     )
-    path_to_sc_model_dir = (
-        "/tmp/tensorcast-test-models/Qwen/Qwen3-0.6B"
+    path_to_torch_state_dict = os.environ.get(
+        "TENSORCAST_TEST_STATE_DICT",
+        f"{path_to_sc_model_dir}/state_dict.pth",
     )
 
     try:

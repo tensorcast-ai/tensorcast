@@ -1,6 +1,8 @@
 #  Copyright (c) 2025, TensorCast Team.
 
 
+import os
+
 import torch
 from transformers import AutoModelForCausalLM
 
@@ -25,7 +27,7 @@ from transformers import AutoModelForCausalLM
 # artifact_name = args.artifact_name
 # storage_path = args.storage_path
 
-hf_model_name = "Qwen/Qwen3-0.6B"
+hf_model_name = os.environ.get("TENSORCAST_EXAMPLE_HF_MODEL", "sshleifer/tiny-gpt2")
 # Load a artifact from HuggingFace artifact hub.
 artifact = AutoModelForCausalLM.from_pretrained(
     hf_model_name, torch_dtype=torch.bfloat16, trust_remote_code=True

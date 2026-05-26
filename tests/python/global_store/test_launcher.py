@@ -9,7 +9,7 @@ def test_auto_advertise_tracks_explicit_loopback_listen_host(
     monkeypatch.setattr(
         launcher,
         "_resolve_default_advertise_host",
-        lambda: "100.99.184.156",
+        lambda: "198.51.100.156",
     )
 
     host, port, source = launcher._resolve_advertise_address(
@@ -30,7 +30,7 @@ def test_auto_advertise_uses_routable_default_for_unspecified_listen_host(
     monkeypatch.setattr(
         launcher,
         "_resolve_default_advertise_host",
-        lambda: "100.99.184.156",
+        lambda: "198.51.100.156",
     )
 
     host, port, source = launcher._resolve_advertise_address(
@@ -40,6 +40,6 @@ def test_auto_advertise_uses_routable_default_for_unspecified_listen_host(
         explicit_port=None,
     )
 
-    assert host == "100.99.184.156"
+    assert host == "198.51.100.156"
     assert port == 50051
     assert source == "default"

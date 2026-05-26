@@ -18,7 +18,7 @@
 1. 本机（CPU 节点）启动 Global Store（blocking）。
 2. 两台 GPU worker 已通过 `orchestratorctl` 启动，能拿到：
 - `put_proc` / `get_proc`（process id）
-- 两侧 daemon advertise IP（推荐使用 worker `Pod IP`，通常是 `100.x`，不要用节点 `Host IP` 的 `10.x`）
+- 两侧 daemon advertise IP（推荐使用 worker 的可路由 Pod IP，不要使用节点 Host IP）
 - 两侧 daemon gRPC 地址（`host:port`）
 3. 两侧 worker 都有同一份代码目录（默认 `./`）和 `.venv`。
 
@@ -41,7 +41,7 @@ python examples/cross_host/cross_host_matrix_runner.py \
   --get-daemon-addr <GET_WORKER_IP>:62011 \
   --gs-addr <GS_HOST_IP>:50051 \
   --daemon-config examples/config/store_daemon_config_cross_host_bench.yaml \
-  --out-dir /tmp/tc_cross_20260221/results
+  --out-dir /tmp/tensorcast/cross_host/results
 ```
 
 反向链路（reverse link）只需要交换 put/get 两侧参数（`--put-*` 与 `--get-*`）。
@@ -72,7 +72,7 @@ python examples/cross_host/cross_host_fanout_runner.py \
   --daemon-start-timeout-sec 600 \
   --remote-timeout-sec 900 \
   --stop-timeout-sec 240 \
-  --out-dir /tmp/tc_cross_20260221/results_multi_host
+  --out-dir /tmp/tensorcast/cross_host/results_multi_host
 ```
 
 如果你要做“严格 VRAM 源”验证（上一跳必须不可用），可以使用：
@@ -94,7 +94,7 @@ python examples/cross_host/cross_host_fanout_runner.py \
   --source-stop-settle-sec 2 \
   --require-p2p \
   --daemon-config examples/config/store_daemon_config_cross_host_bench.yaml \
-  --out-dir /tmp/tc_cross_20260222/results_multi_host
+  --out-dir /tmp/tensorcast/cross_host/results_multi_host
 ```
 
 说明：
@@ -123,7 +123,7 @@ python examples/cross_host/cross_host_fanout_runner.py \
   --daemon-start-timeout-sec 600 \
   --remote-timeout-sec 900 \
   --stop-timeout-sec 240 \
-  --out-dir /tmp/tc_cross_20260221/results_multi_host
+  --out-dir /tmp/tensorcast/cross_host/results_multi_host
 ```
 
 ## 2.2 标准化多机套件（一键跑）
@@ -143,8 +143,8 @@ export TC_GS_ADDR=<GS_IP>:50051
 # export TC_DAEMON_CONFIG=examples/config/store_daemon_config_cross_host_bench.yaml
 # 大负载（>=8GiB）建议：
 # export TC_DAEMON_CONFIG=examples/config/store_daemon_config_cross_host_bench_large_payload.yaml
-# export TC_OUT_DIR=/data/tc_cross_rerun/results_multi_host_scaleout
-# export TC_RUNTIME_ROOT=/data/tc_cross_rerun/runtime
+# export TC_OUT_DIR=/tmp/tensorcast/cross_host/results_multi_host_scaleout
+# export TC_RUNTIME_ROOT=/tmp/tensorcast/cross_host/runtime
 # export TC_FAILURE_DIAG=1
 # export TC_FAILURE_DIAG_TIMEOUT_SEC=45
 # export TC_VISIBILITY_TIMEOUT_SEC=120
@@ -160,7 +160,7 @@ export TC_GS_ADDR=<GS_IP>:50051
 # export TC_EARLY_GATE_BASELINE_LINK_GIBPS=<micro_baseline_gibps>
 # export TC_EARLY_GATE_MIN_BASELINE_RATIO=0.60
 # export TC_QUOTA_PREFLIGHT_ENABLE=1
-# export TC_QUOTA_CHARGED_GROUP=tensorcast-dev
+# export TC_QUOTA_CHARGED_GROUP=<charged-group>
 # export TC_XLARGE_STABLE_PREFLIGHT_ENABLE=1
 # export TC_XLARGE_STABLE_OVERLAP_VERSIONS=2
 # export TC_XLARGE_STABLE_PREFLIGHT_MARGIN_RATIO=1.05
@@ -220,15 +220,15 @@ bash examples/cross_host/run_multihost_benchmark_suite.sh --phase xlarge
 source .venv/bin/activate
 
 python examples/cross_host/scaleout_early_gate.py \
-  --fanout-dir /data/tc_cross_rerun/results_multi_host_scaleout \
+  --fanout-dir /tmp/tensorcast/cross_host/results_multi_host_scaleout \
   --run-id <run_id> \
   --round-workers 3,4 \
   --target-size-mib 1024 \
   --min-cluster-scale-ratio 1.10 \
   --baseline-link-gibps <micro_baseline_gibps> \
   --min-baseline-ratio 0.60 \
-  --out-json /data/tc_cross_rerun/results_multi_host_scaleout/suite_<run_id>_early_gate.json \
-  --out-md /data/tc_cross_rerun/results_multi_host_scaleout/suite_<run_id>_early_gate.md
+  --out-json /tmp/tensorcast/cross_host/results_multi_host_scaleout/suite_<run_id>_early_gate.json \
+  --out-md /tmp/tensorcast/cross_host/results_multi_host_scaleout/suite_<run_id>_early_gate.md
 ```
 
 ## 2.3 Chaos 套件（事件时间线 + expected-failure 门禁）
@@ -258,10 +258,10 @@ python examples/cross_host/scaleout_early_gate.py \
 source .venv/bin/activate
 
 export TC_CASE_SCHEMA=examples/cross_host/case_schemas/chaos_suite_example.json
-export TC_OUT_DIR=/tmp/tc_cross_20260222/results_chaos
+export TC_OUT_DIR=/tmp/tensorcast/cross_host/results_chaos
 export TC_RUN_ID=chaos-20260222
 
-# 可选：让脚本托管 orchestratorctl 生命周期（技能默认 charged-group=tensorcast-dev）
+# 可选：让脚本托管 orchestratorctl 生命周期（需要时显式设置 charged group）
 # export TC_ORCHESTRATOR_ENABLE_LAUNCH=true
 # export TC_ORCHESTRATOR_GPU=1
 # export TC_ORCHESTRATOR_CPU=4
@@ -332,10 +332,10 @@ Common parameters:
 ```bash
 bash examples/cross_host/run_0081_multihost_chaos.sh \
   --phase all \
-  --gs-addr 100.97.246.95:50051 \
+  --gs-addr <GS_IP>:50051 \
   --run-label 0081-manual-$(date +%Y%m%d-%H%M%S) \
-  --out-root /tmp/tc_cross_20260222/results_chaos_0081_fixed \
-  --charged-group tensorcast-dev \
+  --out-root /tmp/tensorcast/cross_host/results_chaos_0081_fixed \
+  --charged-group <charged-group> \
   --private-machine group \
   --keep-workers
 ```
@@ -359,7 +359,7 @@ source .venv/bin/activate
 export TC_WP_PUBLISHER_PROC=<PUBLISHER_PROCESS_ID>
 export TC_WP_RECEIVER_PROCS=<RECEIVER1_PROCESS_ID>,<RECEIVER2_PROCESS_ID>
 export TC_GS_ADDR=<GS_IP>:50051
-export TC_OUT_DIR=/data/tc_cross_rerun/results_weight_publisher
+export TC_OUT_DIR=/tmp/tensorcast/cross_host/results_weight_publisher
 export TC_RUN_AS_USER=$(id -un)
 export TC_PUBLISH_INTERVAL_S=60
 export TC_RECEIVER_TIMEOUT_S=95
@@ -462,7 +462,7 @@ chaos 报告模板：
 
 5. `No daemon found at <ip:port>`
 - 常见原因：误把节点 `Host IP(10.x)` 作为 `--seed-adv-ip/--get-adv-ips`。
-- 处理：统一改用 worker `Pod IP(100.x)`。
+- 处理：统一改用 worker 的可路由 Pod IP。
 
 6. `cannot exec into ... Stopped`
 - 表示 worker 被平台自动回收。

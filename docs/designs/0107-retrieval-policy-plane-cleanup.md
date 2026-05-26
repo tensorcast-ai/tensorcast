@@ -692,7 +692,7 @@ Use explicit disk import instead of path-shaped fallback:
 ```python
 import tensorcast as tc
 
-handle = tc.from_disk("/mnt/models/model_a")
+handle = tc.from_disk("/shared/tensorcast/models/model_a")
 weights = handle.tensor_dict(
     device="cuda:0",
     options=tc.GetArtifactOptions(source="disk_first"),

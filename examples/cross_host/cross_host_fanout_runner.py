@@ -2670,10 +2670,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--runtime-root",
-        default="/data/tc_cross_rerun/runtime",
+        default="/tmp/tensorcast/cross_host/runtime",
         help=(
             "Remote runtime root for daemon home/storage state; "
-            "use a /data path for reproducible reruns."
+            "override for persistent scratch storage on your workers."
         ),
     )
     parser.add_argument(
@@ -2715,7 +2715,7 @@ def parse_args() -> argparse.Namespace:
         help="Consecutive suspicious cleanup iterations required to fail-fast.",
     )
     parser.add_argument(
-        "--out-dir", default="/data/tc_cross_rerun/results_multi_host_scaleout"
+        "--out-dir", default="/tmp/tensorcast/cross_host/results_multi_host_scaleout"
     )
     return parser.parse_args()
 

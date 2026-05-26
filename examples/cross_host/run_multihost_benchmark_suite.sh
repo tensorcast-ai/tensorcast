@@ -16,7 +16,7 @@ source .venv/bin/activate
 : "${TC_GS_ADDR:?set TC_GS_ADDR (global store host:port)}"
 
 TC_DAEMON_CONFIG="${TC_DAEMON_CONFIG:-examples/config/store_daemon_config_cross_host_bench.yaml}"
-TC_OUT_DIR="${TC_OUT_DIR:-/data/tc_cross_rerun/results_multi_host_scaleout}"
+TC_OUT_DIR="${TC_OUT_DIR:-/tmp/tensorcast/cross_host/results_multi_host_scaleout}"
 TC_RUN_ID="${TC_RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 TC_PORT_BASE="${TC_PORT_BASE:-62800}"
 TC_REMOTE_TIMEOUT_SEC="${TC_REMOTE_TIMEOUT_SEC:-900}"
@@ -27,7 +27,7 @@ TC_VISIBILITY_RETRY_SEC="${TC_VISIBILITY_RETRY_SEC:-0.05}"
 TC_GET_PINNED_ALLOCATION_TIMEOUT_MS="${TC_GET_PINNED_ALLOCATION_TIMEOUT_MS:-0}"
 TC_FAILURE_DIAG="${TC_FAILURE_DIAG:-1}"
 TC_FAILURE_DIAG_TIMEOUT_SEC="${TC_FAILURE_DIAG_TIMEOUT_SEC:-45}"
-TC_RUNTIME_ROOT="${TC_RUNTIME_ROOT:-/data/tc_cross_rerun/runtime}"
+TC_RUNTIME_ROOT="${TC_RUNTIME_ROOT:-/tmp/tensorcast/cross_host/runtime}"
 TC_EARLY_GATE_ENABLE="${TC_EARLY_GATE_ENABLE:-1}"
 TC_EARLY_GATE_HARD_FAIL="${TC_EARLY_GATE_HARD_FAIL:-1}"
 TC_EARLY_GATE_TARGET_SIZE_MIB="${TC_EARLY_GATE_TARGET_SIZE_MIB:-1024}"
@@ -47,7 +47,7 @@ TC_PHASE="${TC_PHASE:-all}"
 TC_SCALE_WORKERS="${TC_SCALE_WORKERS:-2,4,8,16,32}"
 TC_SCALE_SIZES_MIB="${TC_SCALE_SIZES_MIB:-1024,8192}"
 TC_QUOTA_PREFLIGHT_ENABLE="${TC_QUOTA_PREFLIGHT_ENABLE:-1}"
-TC_QUOTA_CHARGED_GROUP="${TC_QUOTA_CHARGED_GROUP:-tensorcast-dev}"
+TC_QUOTA_CHARGED_GROUP="${TC_QUOTA_CHARGED_GROUP:-}"
 TC_XLARGE_STABLE_PREFLIGHT_ENABLE="${TC_XLARGE_STABLE_PREFLIGHT_ENABLE:-1}"
 TC_XLARGE_STABLE_OVERLAP_VERSIONS="${TC_XLARGE_STABLE_OVERLAP_VERSIONS:-2}"
 TC_XLARGE_STABLE_PREFLIGHT_MARGIN_RATIO="${TC_XLARGE_STABLE_PREFLIGHT_MARGIN_RATIO:-1.05}"
@@ -208,6 +208,10 @@ probe_quota_gpu_available() {
   fi
   if ! command -v orchestratorctl >/dev/null 2>&1; then
     echo "[suite] quota preflight skipped: orchestratorctl not found"
+    return 0
+  fi
+  if [[ -z "${TC_QUOTA_CHARGED_GROUP}" ]]; then
+    echo "[suite] quota preflight skipped: set TC_QUOTA_CHARGED_GROUP to enable orchestrator quota probing"
     return 0
   fi
 

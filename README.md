@@ -214,7 +214,7 @@ sharded folders such as `model.safetensors.index.json` plus
 native `tensor.data*` layout.
 
 ```python
-disk_artifact = tc.from_disk("/models/demo-model")
+disk_artifact = tc.from_disk("/shared/tensorcast/models/demo-model")
 
 weights = disk_artifact.tensor_dict(
     device="cuda:0",

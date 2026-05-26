@@ -3208,11 +3208,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--weights-root",
-        default="/data/tensorcast_weight_publisher_e2e",
+        default="/tmp/tensorcast/weight_publisher_e2e",
     )
     parser.add_argument(
         "--out-dir",
-        default="/data/tc_cross_20260223/results_weight_publisher",
+        default="/tmp/tensorcast/cross_host/results_weight_publisher",
     )
     parser.add_argument("--cluster-id", default="")
     parser.add_argument(
