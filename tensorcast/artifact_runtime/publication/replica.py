@@ -810,12 +810,28 @@ def reject_reload_with_active_publication(
     )
 
 
+def replica_publication_policy(
+    policy: object | None,
+    *,
+    default_policy: object,
+) -> object:
+    if policy is None:
+        return default_policy
+    if isinstance(policy, type(default_policy)):
+        return policy
+    validate = getattr(type(default_policy), "model_validate", None)
+    if callable(validate):
+        return validate(dict(policy))  # type: ignore[arg-type]
+    return policy
+
+
 __all__ = [
     "binding_has_active_published_replica",
     "project_current_replica_publication_state",
     "publication_generation",
     "publish_current_replica",
     "reject_reload_with_active_publication",
+    "replica_publication_policy",
     "retire_current_replica",
     "state_publication_binding",
 ]

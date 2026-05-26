@@ -11,7 +11,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, MutableMapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -82,6 +82,109 @@ class RecipeBuildCacheConfig:
     trace_cache_schema_version: int = 1
     synchronous_cache_write: bool = True
     synchronous_recipe_cache_write: bool = False
+
+
+def _optional_bool(fields: Mapping[str, object], name: str, default: bool) -> bool:
+    value = fields.get(name)
+    if value is None:
+        return default
+    return bool(value)
+
+
+def _optional_path(value: object | None) -> Path | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return Path(text).expanduser()
+
+
+def _unique_paths(paths: Sequence[Path]) -> tuple[Path, ...]:
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return tuple(unique)
+
+
+def _model_adjacent_cache_root(source_catalog: object) -> Path | None:
+    selected_files = tuple(getattr(source_catalog, "selected_files", ()) or ())
+    if not selected_files:
+        return None
+    parent_paths: list[str] = []
+    for entry in selected_files:
+        path = getattr(entry, "path", None)
+        if path is None:
+            continue
+        parent_paths.append(str(Path(path).expanduser().resolve().parent))
+    if not parent_paths:
+        return None
+    return Path(os.path.commonpath(parent_paths)) / ".tensorcast" / "bootstrap_cache"
+
+
+def _is_writable_or_creatable(path: Path) -> bool:
+    if path.exists():
+        return os.access(path, os.W_OK)
+    parent = path.parent
+    while not parent.exists() and parent != parent.parent:
+        parent = parent.parent
+    return parent.exists() and os.access(parent, os.W_OK)
+
+
+def recipe_build_cache_config_from_policy(
+    policy: object,
+    *,
+    source_catalog: object,
+) -> RecipeBuildCacheConfig:
+    fields = dict(getattr(policy, "fields", None) or {})
+    explicit_cache_root = _optional_bool(fields, "explicit_cache_root", False)
+    prefer_model_adjacent = _optional_bool(fields, "prefer_model_adjacent", True)
+    cache_root = _optional_path(fields.get("cache_root"))
+
+    roots: list[Path] = []
+    if prefer_model_adjacent:
+        model_adjacent = _model_adjacent_cache_root(source_catalog)
+        if model_adjacent is not None:
+            roots.append(model_adjacent)
+    if cache_root is not None and (explicit_cache_root or not roots):
+        roots.append(cache_root)
+    roots = list(_unique_paths(roots))
+
+    write_roots: list[Path] = []
+    if prefer_model_adjacent:
+        model_adjacent = _model_adjacent_cache_root(source_catalog)
+        if model_adjacent is not None and _is_writable_or_creatable(model_adjacent):
+            write_roots.append(model_adjacent)
+    if cache_root is not None and (explicit_cache_root or not write_roots):
+        write_roots.append(cache_root)
+    write_roots = list(_unique_paths(write_roots))
+
+    debug_output_dir = _optional_path(fields.get("debug_output_dir"))
+    return RecipeBuildCacheConfig(
+        cache_dirs=tuple(str(root / "trace_plans") for root in roots),
+        trace_write_dirs=tuple(str(root / "trace_plans") for root in write_roots),
+        recipe_cache_dirs=tuple(str(root / "compiled_recipes") for root in roots),
+        recipe_cache_write_dirs=tuple(
+            str(root / "compiled_recipes") for root in write_roots
+        ),
+        debug_output_dir=debug_output_dir,
+        allow_cache=_optional_bool(fields, "allow_cache", True),
+        allow_recipe_cache=_optional_bool(fields, "allow_recipe_cache", True),
+        allow_trace=_optional_bool(fields, "allow_trace", True),
+        trace_tp_slices=_optional_bool(fields, "trace_tp_slices", True),
+        debug_dump_trace=_optional_bool(fields, "debug_dump_trace", False),
+        synchronous_cache_write=_optional_bool(
+            fields, "synchronous_cache_write", False
+        ),
+        synchronous_recipe_cache_write=_optional_bool(
+            fields, "synchronous_recipe_cache_write", False
+        ),
+    )
 
 
 DEFAULT_RECIPE_BUILD_MEMORY_CACHE_ENTRIES = 128
@@ -174,6 +277,119 @@ class RecipeCacheWriteResult:
 class RecipeBuildRunResult:
     recipe: Any
     diagnostics: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RecipeBuildSessionRequest:
+    source_subject: Any | None = None
+    framework_config: Any | None = None
+    model_config: Any | None = None
+    placement: Any | None = None
+    cache_config: Any | None = None
+    identity: RuntimeBindingPlan | None = None
+    trace_cache_schema_version: int | None = None
+    tp_rank: int | None = None
+    tp_world_size: int | None = None
+
+
+@dataclass(frozen=True)
+class RecipeBuildResult:
+    session: "RecipeBuildSession"
+    recipe: Any | None = None
+    diagnostics: Mapping[str, Any] | None = None
+
+
+def _adapter_text(
+    adapter: Any | None,
+    method_name: str,
+    *args: Any,
+) -> str:
+    method = getattr(adapter, method_name, None)
+    if callable(method):
+        return str(method(*args))
+    return ""
+
+
+def recipe_build_identity(
+    request: RecipeBuildSessionRequest,
+    *,
+    adapter: Any | None,
+    placement: Any | None,
+) -> RuntimeBindingPlan:
+    model_config = request.model_config
+    if model_config is None:
+        raise ValueError("RecipeBuildSessionRequest requires model_config")
+    runtime_placement = getattr(placement, "runtime_placement", placement)
+    member = getattr(runtime_placement, "member", None)
+    stable_identity_payload = getattr(
+        runtime_placement, "stable_identity_payload", None
+    )
+    if callable(stable_identity_payload):
+        placement_payload = stable_identity_payload()
+    else:
+        placement_payload = getattr(placement, "identity_payload", None)
+        if placement_payload is None:
+            placement_payload = getattr(runtime_placement, "identity_payload", None)
+    trace_cache_schema_version = request.trace_cache_schema_version
+    if trace_cache_schema_version is None:
+        trace_cache_schema_version = getattr(
+            request.cache_config,
+            "trace_cache_schema_version",
+            1,
+        )
+    tp_rank = request.tp_rank
+    if tp_rank is None:
+        tp_rank = getattr(placement, "tp_rank", None)
+    if tp_rank is None and member is not None:
+        tp_rank = getattr(member, "member_index", None)
+    tp_world_size = request.tp_world_size
+    if tp_world_size is None:
+        tp_world_size = getattr(placement, "tp_world_size", None)
+    if tp_world_size is None and member is not None:
+        tp_world_size = getattr(member, "member_count", None)
+    compute_hash = getattr(model_config, "compute_hash", None)
+    framework_version = _adapter_text(adapter, "framework_version")
+    return RuntimeBindingPlan(
+        model_hash=str(
+            compute_hash()
+            if callable(compute_hash)
+            else getattr(model_config, "model", "unknown")
+        ),
+        model_id=str(getattr(model_config, "model", "unknown")),
+        model_revision=getattr(model_config, "revision", None),
+        dtype=str(getattr(model_config, "dtype", "unknown")),
+        runtime_version=framework_version,
+        framework_name=_adapter_text(adapter, "framework_name"),
+        framework_version=framework_version,
+        adapter_version=_adapter_text(adapter, "adapter_version"),
+        serving_abi_version=_adapter_text(
+            adapter,
+            "serving_abi_version",
+            model_config,
+        ),
+        trace_cache_schema_version=int(trace_cache_schema_version),
+        tp_rank=int(tp_rank or 0),
+        tp_world_size=int(tp_world_size or 1),
+        topology_ref=getattr(runtime_placement, "topology", None),
+        member_ref=member,
+        placement=placement_payload,
+    )
+
+
+def build_recipe_session(
+    request: RecipeBuildSessionRequest,
+    *,
+    adapter: Any | None = None,
+    placement: Any | None = None,
+) -> "RecipeBuildSession":
+    identity = request.identity
+    if identity is None:
+        identity = recipe_build_identity(
+            request,
+            adapter=adapter,
+            placement=placement,
+        )
+    return RecipeBuildSession(identity)
 
 
 def _metadata_fingerprint(source_catalog: Any) -> str:
@@ -1243,16 +1459,21 @@ __all__ = [
     "RuntimeBindingPlan",
     "RecipeBuildMemoryCache",
     "RecipeBuildCacheConfig",
+    "RecipeBuildResult",
     "RecipeBuildRunResult",
+    "RecipeBuildSessionRequest",
     "RecipeCacheLookupResult",
     "RecipeCacheWriteResult",
     "RecipeBuildSession",
     "COMPILED_RECIPE_MEMORY_CACHE",
     "DEFAULT_RECIPE_BUILD_MEMORY_CACHE_ENTRIES",
     "TRACE_PLAN_MEMORY_CACHE",
+    "build_recipe_session",
     "compute_recipe_cache_key",
     "compute_trace_cache_key",
     "recipe_cache_path",
+    "recipe_build_cache_config_from_policy",
+    "recipe_build_identity",
     "stable_recipe_build_hash",
     "trace_cache_path",
 ]

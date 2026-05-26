@@ -93,7 +93,7 @@ The decision is:
   model-runtime stacks;
 - preserve the current vLLM scenario semantics, fastest compatible data path,
   retained memory-credit timing, and zero-extra-weight-residency behavior even
-  when TensorCast and internal-vLLM APIs are changed incompatibly.
+  when TensorCast and vLLM APIs are changed incompatibly.
 
 ```mermaid
 flowchart LR
@@ -283,7 +283,7 @@ publication, or diagnostics.
 | `tensorcast.serving` | internal serving ABI helpers, optional private lowerings, builder/publication implementation details while they remain serving-ABI-specific | public runtime session root, public locator authority, independent retained acquire model, independent diagnostics/report model |
 | Store Daemon | binding values, leases, mounted-source attestation, local realization ownership, PID/session safety, device-local movement | framework construction/finalize hooks, durable metadata authority |
 | Global Store | durable artifact metadata, replica metadata, coordination records, publication visibility | SDK direct control path, process-local attachment state |
-| internal-vLLM `vllm.tensorcast.*` | runtime host capability construction, vLLM placement/source/collective facts, model construction/finalize hooks, reload/publication calls | TensorCast artifact selection authority, daemon lease authority, duplicate serving runtime session model |
+| vLLM `vllm.tensorcast.*` | runtime host capability construction, vLLM placement/source/collective facts, model construction/finalize hooks, reload/publication calls | TensorCast artifact selection authority, daemon lease authority, duplicate serving runtime session model |
 
 The intended end state is one public root and one professional framework
 boundary. If a serving-named object remains after migration, it must satisfy one
@@ -628,9 +628,9 @@ parallel TensorDict or source subsystem:
    current publication state, swap the active binding value, and project the
    reload response from the new attachment.
 
-## internal-vLLM target integration flow
+## vLLM target integration flow
 
-internal-vLLM should become a client of the artifact-runtime professional API,
+vLLM should become a client of the artifact-runtime professional API,
 not a client of a public TensorCast serving session. The expected final flow is:
 
 1. `model_loader_extra_config` is normalized into an artifact/runtime request:
@@ -658,7 +658,7 @@ not a client of a public TensorCast serving session. The expected final flow is:
    local-ready durable promotion call artifact-runtime publication actions. They
    do not call a separate serving publication authority.
 
-| internal-vLLM concern | Target TensorCast interaction | Decision logic |
+| vLLM concern | Target TensorCast interaction | Decision logic |
 | --- | --- | --- |
 | loader startup | `Artifact.realize(... model_runtime ..., runtime_host=...)` | model loading is a realization of an artifact selection |
 | placement/topology facts | `ArtifactRealizationSpec` plus runtime host admission facts | topology affects realization/admission, not artifact identity |
@@ -670,7 +670,7 @@ not a client of a public TensorCast serving session. The expected final flow is:
 | publication/shutdown | handle or attachment publication actions with active-generation CAS | publication is artifact replica lifecycle |
 | main/draft models | target-set transaction or documented sequential semantics | partial reload behavior must be explicit |
 
-At the end of migration, internal-vLLM should not import public
+At the end of migration, vLLM should not import public
 `tensorcast.serving.*` session/config/retained/publication APIs for normal
 startup, reload, memory accounting, runtime view, or shutdown. Any remaining
 serving import must be either an internal implementation dependency with no
@@ -1041,7 +1041,7 @@ artifact-realization stack:
 - The final `tensorcast.serving` module is shallow: normal startup, reload,
   retained memory credit, runtime view, and shutdown/publication do not require
   public serving-session/config/retained/publication APIs.
-- internal-vLLM normal paths use the direct artifact-runtime API and runtime
+- vLLM normal paths use the direct artifact-runtime API and runtime
   host capabilities; remaining serving imports are private implementation or
   serving-ABI-specific builder paths with owners.
 - Retained pre-admission credit, mounted-source bootstrap, active-generation
@@ -1090,10 +1090,10 @@ the same migration window instead of kept as permanent compatibility aliases.
 - `docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md`
 - `docs/designs/0116-prefetch-serving-binding-target.md`
 - `docs/architecture/p2p-transfer-strategies.md`
-- `/data/workspace/internal-vllm/vllm/tensorcast/loader.py`
-- `/data/workspace/internal-vllm/vllm/tensorcast/placement.py`
-- `/data/workspace/internal-vllm/vllm/tensorcast/source.py`
-- `/data/workspace/internal-vllm/vllm/tensorcast/collective.py`
-- `/data/workspace/internal-vllm/vllm/tensorcast/adapter.py`
-- `/data/workspace/internal-vllm/vllm/model_executor/model_loader/memory_accounting.py`
-- `/data/workspace/internal-vllm/vllm/v1/worker/gpu_model_runner.py`
+- `vllm/tensorcast/loader.py`
+- `vllm/tensorcast/placement.py`
+- `vllm/tensorcast/source.py`
+- `vllm/tensorcast/collective.py`
+- `vllm/tensorcast/adapter.py`
+- `vllm/model_executor/model_loader/memory_accounting.py`
+- `vllm/v1/worker/gpu_model_runner.py`

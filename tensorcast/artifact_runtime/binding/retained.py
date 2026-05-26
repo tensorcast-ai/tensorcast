@@ -196,6 +196,51 @@ class AttachedRetainedBinding:
         self.close()
 
 
+@dataclass
+class RestoredRetainedBinding:
+    """Restored retained binding tensors before runtime ownership transfer."""
+
+    _attached: AttachedRetainedBinding
+    _runtime_handle: RuntimeRetainedBindingAttachmentHandle | None = None
+
+    @property
+    def tensors(self) -> Mapping[str, torch.Tensor]:
+        return self._attached.tensors
+
+    @property
+    def binding_layout_id(self) -> str:
+        return self._attached.binding_layout_id
+
+    @property
+    def binding_value_ref(self) -> tc.BindingValueRef:
+        return self._attached.binding_value_ref
+
+    @property
+    def member_ref(self) -> tc.RuntimeBindingMemberRef:
+        return self._attached.member_ref
+
+    @property
+    def reservation_bytes(self) -> int:
+        return self._attached.reservation_bytes
+
+    @property
+    def authority(self) -> ParsedRetainedRealizationAuthority:
+        return self._attached.authority
+
+    @property
+    def runtime_handle(self) -> RuntimeRetainedBindingAttachmentHandle | None:
+        return self._runtime_handle
+
+    def transfer_to_runtime(self) -> RuntimeRetainedBindingAttachmentHandle:
+        if self._runtime_handle is None:
+            self._runtime_handle = self._attached.transfer_to_runtime()
+        return self._runtime_handle
+
+    def close(self) -> None:
+        if self._runtime_handle is None:
+            self._attached.close()
+
+
 @dataclass(frozen=True)
 class BorrowedRetainedBindingLease:
     """Single-owner acquire lease for a retained binding value."""
@@ -634,6 +679,34 @@ def retained_binding_acquire_mode(extra: Mapping[str, Any] | None) -> str:
     return retained_realization_claim_mode(extra)
 
 
+def runtime_restore_rejection_reason(
+    authority: ParsedRetainedRealizationAuthority | None,
+) -> str | None:
+    if authority is None:
+        return (
+            "ArtifactRuntimeIntegration._restore_retained_for_intent requires authority"
+        )
+    readiness = getattr(authority, "readiness", None)
+    if readiness == "runtime_reserved":
+        return (
+            "TensorCast retained acquire readiness='runtime_reserved' is not attachable"
+        )
+    if readiness in {
+        "serving_group_prepared",
+        "serving_group_published_ready",
+    }:
+        return (
+            "TensorCast retained acquire group readiness requires a "
+            "published group-realization transaction authority"
+        )
+    if readiness == "runtime_published_ready":
+        return (
+            "TensorCast retained acquire readiness='runtime_published_ready' "
+            "requires a swap-capable runtime binding handle"
+        )
+    return None
+
+
 @contextmanager
 def acquire_retained_binding(
     *,
@@ -717,6 +790,107 @@ def acquire_retained_binding(
         timeout_s=timeout_s,
     ) as lease:
         yield lease
+
+
+@contextmanager
+def restore_retained_binding(
+    *,
+    authority: ParsedRetainedRealizationAuthority | None = None,
+    local_serving_ref: str | None = None,
+    target_device: torch.device | str,
+    expected_member: tc.RuntimeBindingMemberRef | None = None,
+    expected_tensor_schema_hash: str | None = None,
+    expected_serving_build_digest: str | None = None,
+    expected_target_layout_hash: str | None = None,
+    expected_daemon_id: str | None = None,
+    expected_daemon_session_id: str | None = None,
+    serving_artifact_id: str | None = None,
+    caller_pid: int | None = None,
+    runtime: Any | None = None,
+    client: Any | None = None,
+    restore_fn: Any | None = None,
+    timeout_s: float | None = None,
+) -> Iterator[RestoredRetainedBinding]:
+    """Acquire and restore a retained binding value for framework attach.
+
+    If the framework does not call ``transfer_to_runtime()``, the restored owner
+    is released automatically when the context exits. After transfer, close
+    ownership belongs to the returned runtime handle.
+    """
+
+    with acquire_retained_binding(
+        authority=authority,
+        local_serving_ref=local_serving_ref,
+        target_device=target_device,
+        expected_member=expected_member,
+        expected_tensor_schema_hash=expected_tensor_schema_hash,
+        expected_serving_build_digest=expected_serving_build_digest,
+        expected_target_layout_hash=expected_target_layout_hash,
+        expected_daemon_id=expected_daemon_id,
+        expected_daemon_session_id=expected_daemon_session_id,
+        serving_artifact_id=serving_artifact_id,
+        caller_pid=caller_pid if caller_pid is not None else os.getpid(),
+        runtime=runtime,
+        client=client,
+        timeout_s=timeout_s,
+    ) as lease:
+        attached = lease.restore(
+            target_device=torch.device(target_device),
+            restore_fn=restore_fn,
+        )
+        restored = RestoredRetainedBinding(attached)
+        try:
+            yield restored
+        finally:
+            restored.close()
+
+
+@contextmanager
+def restore_prepared_local_ready_binding(
+    *,
+    resolved_artifact: Any,
+    target_device: torch.device | str,
+    expected_member: tc.RuntimeBindingMemberRef,
+    expected_tensor_schema_hash: str,
+    expected_serving_build_digest: str | None = None,
+    caller_pid: int | None = None,
+    timeout_s: float | None = None,
+    runtime: Any | None = None,
+    client: Any | None = None,
+    restore_fn: Any | None = None,
+) -> Iterator[RestoredRetainedBinding]:
+    """Restore a local-ready retained value referenced by a runtime manifest."""
+
+    manifest = getattr(resolved_artifact, "manifest", None)
+    local_serving_ref = getattr(manifest, "local_serving_ref", None)
+    if manifest is None or not local_serving_ref:
+        raise RuntimeError(
+            "TensorCast prepared local-ready startup requires local_serving_ref "
+            "in the runtime artifact manifest"
+        )
+    serving_build_digest = (
+        expected_serving_build_digest
+        if expected_serving_build_digest is not None
+        else getattr(manifest, "serving_build_digest", None)
+    )
+    if not serving_build_digest:
+        raise RuntimeError(
+            "TensorCast prepared local-ready startup requires serving_build_digest"
+        )
+    with restore_retained_binding(
+        local_serving_ref=str(local_serving_ref),
+        target_device=target_device,
+        expected_member=expected_member,
+        expected_tensor_schema_hash=expected_tensor_schema_hash,
+        expected_serving_build_digest=str(serving_build_digest),
+        serving_artifact_id=str(getattr(resolved_artifact, "artifact_ref", "")),
+        caller_pid=caller_pid,
+        timeout_s=timeout_s,
+        runtime=runtime,
+        client=client,
+        restore_fn=restore_fn,
+    ) as restored:
+        yield restored
 
 
 def promote_current_value_and_wait(

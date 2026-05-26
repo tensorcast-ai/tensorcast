@@ -13,10 +13,8 @@ import json
 import logging
 import os
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, NoReturn, cast
 
@@ -24,7 +22,6 @@ import torch
 
 import tensorcast as tc
 import tensorcast.artifact_runtime.binding.execution as tc_binding_runtime
-import tensorcast.artifact_runtime.binding.retained as tc_retained_binding
 import tensorcast.artifact_runtime.config as tc_runtime_config
 import tensorcast.artifact_runtime.contract as tc_contract
 import tensorcast.artifact_runtime.diagnostics as tc_diagnostics
@@ -61,6 +58,12 @@ from tensorcast.artifact_runtime.attachment import (
     RuntimeBindingState,
     RuntimeBindingView,
     RuntimeStateSeed,
+)
+from tensorcast.artifact_runtime.binding.retained import (
+    RestoredRetainedBinding,
+    restore_prepared_local_ready_binding,
+    restore_retained_binding,
+    runtime_restore_rejection_reason,
 )
 from tensorcast.artifact_runtime.dto import (
     FrameworkIntegrationContext,
@@ -120,7 +123,12 @@ from tensorcast.artifact_runtime.policy import (
 from tensorcast.artifact_runtime.recipe.build import (
     RecipeBuildCacheConfig,
     RecipeBuildSession,
+    RecipeBuildSessionRequest,
     RuntimeBindingPlan,
+    recipe_build_cache_config_from_policy,
+)
+from tensorcast.artifact_runtime.recipe.build import (
+    build_recipe_session as build_recipe_session_from_request,
 )
 from tensorcast.artifact_runtime.recipe.compiler import (
     TensorcastSemanticValidationSpec,
@@ -787,26 +795,6 @@ class LocalReadyRuntimeResult:
 
 
 @dataclass(frozen=True)
-class RecipeBuildSessionRequest:
-    source_subject: SourceSubject | Any | None = None
-    framework_config: Any | None = None
-    model_config: Any | None = None
-    placement: RuntimePlacement | None = None
-    cache_config: Any | None = None
-    identity: RuntimeBindingPlan | None = None
-    trace_cache_schema_version: int | None = None
-    tp_rank: int | None = None
-    tp_world_size: int | None = None
-
-
-@dataclass(frozen=True)
-class RecipeBuildResult:
-    session: RecipeBuildSession
-    recipe: Any | None = None
-    diagnostics: Mapping[str, Any] | None = None
-
-
-@dataclass(frozen=True)
 class LocalReadyBindingContract:
     excluded_names: tuple[str, ...]
     canonical_tensor_names: tuple[str, ...]
@@ -1191,57 +1179,6 @@ class RuntimeBindingResult:
         )
 
 
-@dataclass
-class RestoredRetainedBinding:
-    """Restored retained binding tensors before runtime ownership transfer."""
-
-    _attached: tc_retained_binding.AttachedRetainedBinding
-    _runtime_handle: (
-        tc_retained_binding.RuntimeRetainedBindingAttachmentHandle | None
-    ) = None
-
-    @property
-    def tensors(self) -> Mapping[str, torch.Tensor]:
-        return self._attached.tensors
-
-    @property
-    def binding_layout_id(self) -> str:
-        return self._attached.binding_layout_id
-
-    @property
-    def binding_value_ref(self) -> tc.BindingValueRef:
-        return self._attached.binding_value_ref
-
-    @property
-    def member_ref(self) -> tc.RuntimeBindingMemberRef:
-        return self._attached.member_ref
-
-    @property
-    def reservation_bytes(self) -> int:
-        return self._attached.reservation_bytes
-
-    @property
-    def authority(self) -> ParsedRetainedRealizationAuthority:
-        return self._attached.authority
-
-    @property
-    def runtime_handle(
-        self,
-    ) -> tc_retained_binding.RuntimeRetainedBindingAttachmentHandle | None:
-        return self._runtime_handle
-
-    def transfer_to_runtime(
-        self,
-    ) -> tc_retained_binding.RuntimeRetainedBindingAttachmentHandle:
-        if self._runtime_handle is None:
-            self._runtime_handle = self._attached.transfer_to_runtime()
-        return self._runtime_handle
-
-    def close(self) -> None:
-        if self._runtime_handle is None:
-            self._attached.close()
-
-
 def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
@@ -1299,110 +1236,6 @@ def _artifact_locator_kind(artifact_locator: object) -> str:
     if isinstance(artifact_locator, Mapping):
         return str(artifact_locator.get("kind") or "")
     return str(getattr(artifact_locator, "kind", "") or "")
-
-
-def _optional_bool(fields: Mapping[str, object], name: str, default: bool) -> bool:
-    value = fields.get(name)
-    if value is None:
-        return default
-    return bool(value)
-
-
-def _optional_path(value: object | None) -> Path | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    return Path(text).expanduser()
-
-
-def _unique_paths(paths: Sequence[Path]) -> tuple[Path, ...]:
-    unique: list[Path] = []
-    seen: set[str] = set()
-    for path in paths:
-        key = str(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(path)
-    return tuple(unique)
-
-
-def _model_adjacent_cache_root(source_catalog: object) -> Path | None:
-    raw_selected_files = getattr(source_catalog, "selected_files", ()) or ()
-    selected_files = tuple(cast(Sequence[Any], raw_selected_files))
-    if not selected_files:
-        return None
-    parent_paths: list[str] = []
-    for entry in selected_files:
-        path = getattr(entry, "path", None)
-        if path is None:
-            continue
-        parent_paths.append(str(Path(path).expanduser().resolve().parent))
-    if not parent_paths:
-        return None
-    return Path(os.path.commonpath(parent_paths)) / ".tensorcast" / "bootstrap_cache"
-
-
-def _is_writable_or_creatable(path: Path) -> bool:
-    if path.exists():
-        return os.access(path, os.W_OK)
-    parent = path.parent
-    while not parent.exists() and parent != parent.parent:
-        parent = parent.parent
-    return parent.exists() and os.access(parent, os.W_OK)
-
-
-def _recipe_build_cache_config_from_policy(
-    policy: RecipeCachePolicy,
-    *,
-    source_catalog: object,
-) -> RecipeBuildCacheConfig:
-    fields = dict(policy.fields or {})
-    explicit_cache_root = _optional_bool(fields, "explicit_cache_root", False)
-    prefer_model_adjacent = _optional_bool(fields, "prefer_model_adjacent", True)
-    cache_root = _optional_path(fields.get("cache_root"))
-
-    roots: list[Path] = []
-    if prefer_model_adjacent:
-        model_adjacent = _model_adjacent_cache_root(source_catalog)
-        if model_adjacent is not None:
-            roots.append(model_adjacent)
-    if cache_root is not None and (explicit_cache_root or not roots):
-        roots.append(cache_root)
-    roots = list(_unique_paths(roots))
-
-    write_roots: list[Path] = []
-    if prefer_model_adjacent:
-        model_adjacent = _model_adjacent_cache_root(source_catalog)
-        if model_adjacent is not None and _is_writable_or_creatable(model_adjacent):
-            write_roots.append(model_adjacent)
-    if cache_root is not None and (explicit_cache_root or not write_roots):
-        write_roots.append(cache_root)
-    write_roots = list(_unique_paths(write_roots))
-
-    debug_output_dir = _optional_path(fields.get("debug_output_dir"))
-    return RecipeBuildCacheConfig(
-        cache_dirs=tuple(str(root / "trace_plans") for root in roots),
-        trace_write_dirs=tuple(str(root / "trace_plans") for root in write_roots),
-        recipe_cache_dirs=tuple(str(root / "compiled_recipes") for root in roots),
-        recipe_cache_write_dirs=tuple(
-            str(root / "compiled_recipes") for root in write_roots
-        ),
-        debug_output_dir=debug_output_dir,
-        allow_cache=_optional_bool(fields, "allow_cache", True),
-        allow_recipe_cache=_optional_bool(fields, "allow_recipe_cache", True),
-        allow_trace=_optional_bool(fields, "allow_trace", True),
-        trace_tp_slices=_optional_bool(fields, "trace_tp_slices", True),
-        debug_dump_trace=_optional_bool(fields, "debug_dump_trace", False),
-        synchronous_cache_write=_optional_bool(
-            fields, "synchronous_cache_write", False
-        ),
-        synchronous_recipe_cache_write=_optional_bool(
-            fields, "synchronous_recipe_cache_write", False
-        ),
-    )
 
 
 def _collective_policy_value(policy: MaterializationPolicy) -> str:
@@ -2921,29 +2754,9 @@ class ArtifactRuntimeIntegration:
     ) -> RetainedBindingResult:
         target_device = self._require_target_device(request.target_device)
         authority = request.authority
-        if authority is None:
-            raise RestoreBindingError(
-                "ArtifactRuntimeIntegration._restore_retained_for_intent requires authority"
-            )
-        readiness = getattr(authority, "readiness", None)
-        if readiness == "runtime_reserved":
-            raise RestoreBindingError(
-                "TensorCast retained acquire readiness='runtime_reserved' "
-                "is not attachable"
-            )
-        if readiness in {
-            "serving_group_prepared",
-            "serving_group_published_ready",
-        }:
-            raise RestoreBindingError(
-                "TensorCast retained acquire group readiness requires a "
-                "published group-realization transaction authority"
-            )
-        if readiness == "runtime_published_ready":
-            raise RestoreBindingError(
-                "TensorCast retained acquire readiness='runtime_published_ready' "
-                "requires a swap-capable runtime binding handle"
-            )
+        rejection_reason = runtime_restore_rejection_reason(authority)
+        if rejection_reason is not None:
+            raise RestoreBindingError(rejection_reason)
         model = self._build_meta_model(
             request.framework_config,
             request.model_config,
@@ -3408,7 +3221,7 @@ class ArtifactRuntimeIntegration:
         if callable(cache_config_factory):
             return cache_config_factory(source_catalog=source_catalog)
         if isinstance(request.cache_config, RecipeCachePolicy):
-            return _recipe_build_cache_config_from_policy(
+            return recipe_build_cache_config_from_policy(
                 request.cache_config,
                 source_catalog=source_catalog,
             )
@@ -4175,92 +3988,23 @@ class ArtifactRuntimeIntegration:
     def build_recipe_session(
         self, request: RecipeBuildSessionRequest
     ) -> RecipeBuildSession:
-        identity = request.identity
-        if identity is None:
-            identity = self._recipe_build_identity(request)
-        return RecipeBuildSession(identity)
-
-    def _recipe_build_identity(
-        self,
-        request: RecipeBuildSessionRequest,
-    ) -> RuntimeBindingPlan:
-        model_config = request.model_config
-        if model_config is None:
-            self._lifecycle_not_implemented("build_recipe_session", "P2")
-        adapter = self._recipe_framework_adapter(model_config)
+        adapter = None
         placement = request.placement
-        if placement is None and self.host is not None:
-            placement = self._framework_context(
-                request.framework_config,
-                model_config,
-            ).placement
-        runtime_placement = getattr(placement, "runtime_placement", placement)
-        member = getattr(runtime_placement, "member", None)
-        stable_identity_payload = getattr(
-            runtime_placement, "stable_identity_payload", None
+        if request.identity is None:
+            model_config = request.model_config
+            if model_config is None:
+                self._lifecycle_not_implemented("build_recipe_session", "P2")
+            adapter = self._recipe_framework_adapter(model_config)
+            if placement is None and self.host is not None:
+                placement = self._framework_context(
+                    request.framework_config,
+                    model_config,
+                ).placement
+        return build_recipe_session_from_request(
+            request,
+            adapter=adapter,
+            placement=placement,
         )
-        if callable(stable_identity_payload):
-            placement_payload = stable_identity_payload()
-        else:
-            placement_payload = getattr(placement, "identity_payload", None)
-            if placement_payload is None:
-                placement_payload = getattr(runtime_placement, "identity_payload", None)
-        trace_cache_schema_version = request.trace_cache_schema_version
-        if trace_cache_schema_version is None:
-            trace_cache_schema_version = getattr(
-                request.cache_config,
-                "trace_cache_schema_version",
-                1,
-            )
-        tp_rank = request.tp_rank
-        if tp_rank is None:
-            tp_rank = getattr(placement, "tp_rank", None)
-        if tp_rank is None and member is not None:
-            tp_rank = getattr(member, "member_index", None)
-        tp_world_size = request.tp_world_size
-        if tp_world_size is None:
-            tp_world_size = getattr(placement, "tp_world_size", None)
-        if tp_world_size is None and member is not None:
-            tp_world_size = getattr(member, "member_count", None)
-        compute_hash = getattr(model_config, "compute_hash", None)
-        model_id = str(getattr(model_config, "model", "unknown"))
-        framework_version = self._adapter_text(adapter, "framework_version")
-        return RuntimeBindingPlan(
-            model_hash=str(
-                compute_hash()
-                if callable(compute_hash)
-                else getattr(model_config, "model", "unknown")
-            ),
-            model_id=model_id,
-            model_revision=getattr(model_config, "revision", None),
-            dtype=str(getattr(model_config, "dtype", "unknown")),
-            runtime_version=framework_version,
-            framework_name=self._adapter_text(adapter, "framework_name"),
-            framework_version=framework_version,
-            adapter_version=self._adapter_text(adapter, "adapter_version"),
-            serving_abi_version=self._adapter_text(
-                adapter,
-                "serving_abi_version",
-                model_config,
-            ),
-            trace_cache_schema_version=int(trace_cache_schema_version),
-            tp_rank=int(tp_rank or 0),
-            tp_world_size=int(tp_world_size or 1),
-            topology_ref=getattr(runtime_placement, "topology", None),
-            member_ref=member,
-            placement=placement_payload,
-        )
-
-    @staticmethod
-    def _adapter_text(
-        adapter: Any | None,
-        method_name: str,
-        *args: Any,
-    ) -> str:
-        method = getattr(adapter, method_name, None)
-        if callable(method):
-            return str(method(*args))
-        return ""
 
     def resolve_source_subject(
         self,
@@ -5120,7 +4864,10 @@ class ArtifactRuntimeSession:
         del context
         return tc_replica_publication.publish_current_replica(
             current_attachment=current_attachment,
-            policy=self._replica_publication_policy(policy),
+            policy=tc_replica_publication.replica_publication_policy(
+                policy,
+                default_policy=self.runtime_config.replica_publication,
+            ),
             ensure_runtime_initialized=self._ensure_runtime_initialized,
             profile_sink=self.profile_sink,
         )
@@ -5227,16 +4974,6 @@ class ArtifactRuntimeSession:
 
     def _ensure_runtime_initialized(self) -> None:
         self.runtime_config.runtime.ensure_initialized()
-
-    def _replica_publication_policy(
-        self,
-        policy: ReplicaPublicationPolicy | Mapping[str, Any] | None,
-    ) -> ReplicaPublicationPolicy:
-        if policy is None:
-            return self.runtime_config.replica_publication
-        if isinstance(policy, ReplicaPublicationPolicy):
-            return policy
-        return ReplicaPublicationPolicy.model_validate(dict(policy))
 
     @staticmethod
     def _reject_reload_with_active_publication(
@@ -5356,104 +5093,3 @@ def swap_runtime_artifact(
         result_binding,
         operation_result=operation_result,
     )
-
-
-@contextmanager
-def restore_retained_binding(
-    *,
-    authority: ParsedRetainedRealizationAuthority | None = None,
-    local_serving_ref: str | None = None,
-    target_device: torch.device | str,
-    expected_member: tc.RuntimeBindingMemberRef | None = None,
-    expected_tensor_schema_hash: str | None = None,
-    expected_serving_build_digest: str | None = None,
-    expected_target_layout_hash: str | None = None,
-    expected_daemon_id: str | None = None,
-    expected_daemon_session_id: str | None = None,
-    serving_artifact_id: str | None = None,
-    caller_pid: int | None = None,
-    runtime: Any | None = None,
-    client: Any | None = None,
-    restore_fn: Any | None = None,
-    timeout_s: float | None = None,
-) -> Iterator[RestoredRetainedBinding]:
-    """Acquire and restore a retained binding value for framework attach.
-
-    If the framework does not call ``transfer_to_runtime()``, the restored owner
-    is released automatically when the context exits. After transfer, close
-    ownership belongs to the returned runtime handle.
-    """
-
-    with tc_retained_binding.acquire_retained_binding(
-        authority=authority,
-        local_serving_ref=local_serving_ref,
-        target_device=target_device,
-        expected_member=expected_member,
-        expected_tensor_schema_hash=expected_tensor_schema_hash,
-        expected_serving_build_digest=expected_serving_build_digest,
-        expected_target_layout_hash=expected_target_layout_hash,
-        expected_daemon_id=expected_daemon_id,
-        expected_daemon_session_id=expected_daemon_session_id,
-        serving_artifact_id=serving_artifact_id,
-        caller_pid=caller_pid if caller_pid is not None else os.getpid(),
-        runtime=runtime,
-        client=client,
-        timeout_s=timeout_s,
-    ) as lease:
-        attached = lease.restore(
-            target_device=torch.device(target_device),
-            restore_fn=restore_fn,
-        )
-        restored = RestoredRetainedBinding(attached)
-        try:
-            yield restored
-        finally:
-            restored.close()
-
-
-@contextmanager
-def restore_prepared_local_ready_binding(
-    *,
-    resolved_artifact: ResolvedRuntimeArtifact,
-    target_device: torch.device | str,
-    expected_member: tc.RuntimeBindingMemberRef,
-    expected_tensor_schema_hash: str,
-    expected_serving_build_digest: str | None = None,
-    caller_pid: int | None = None,
-    timeout_s: float | None = None,
-    runtime: Any | None = None,
-    client: Any | None = None,
-    restore_fn: Any | None = None,
-) -> Iterator[RestoredRetainedBinding]:
-    """Restore a local-ready retained value referenced by a runtime manifest."""
-
-    manifest = resolved_artifact.manifest
-    local_serving_ref = getattr(manifest, "local_serving_ref", None)
-    if manifest is None or not local_serving_ref:
-        raise RuntimeError(
-            "TensorCast prepared local-ready startup requires local_serving_ref "
-            "in the runtime artifact manifest"
-        )
-    serving_build_digest = (
-        expected_serving_build_digest
-        if expected_serving_build_digest is not None
-        else getattr(manifest, "serving_build_digest", None)
-    )
-    if not serving_build_digest:
-        raise RuntimeError(
-            "TensorCast prepared local-ready startup requires serving_build_digest"
-        )
-    with restore_retained_binding(
-        local_serving_ref=str(local_serving_ref),
-        target_device=target_device,
-        expected_member=expected_member,
-        expected_tensor_schema_hash=expected_tensor_schema_hash,
-        expected_serving_build_digest=str(serving_build_digest),
-        serving_artifact_id=str(resolved_artifact.artifact_ref),
-        caller_pid=caller_pid,
-        timeout_s=timeout_s,
-        runtime=runtime,
-        client=client,
-        restore_fn=restore_fn,
-    ) as restored:
-        yield restored
