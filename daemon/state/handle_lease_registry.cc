@@ -858,6 +858,9 @@ absl::StatusOr<std::string> HandleLeaseRegistry::mint_external_cuda_lease(pid_t 
   if (!cleanup) {
     return absl::InvalidArgumentError("cleanup is required");
   }
+  if (lifecycle_ == nullptr) {
+    return absl::FailedPreconditionError("lifecycle manager is unavailable");
+  }
 
   std::string token;
   {
@@ -880,11 +883,13 @@ absl::StatusOr<std::string> HandleLeaseRegistry::mint_external_cuda_lease(pid_t 
         .external_cleanup = std::move(cleanup),
     };
   }
+  lifecycle_->watch_pid(pid);
   return token;
 }
 
 absl::Status HandleLeaseRegistry::release(const std::string& lease_token) {
   SessionLifecycleManager::LeaseId id = 0;
+  pid_t external_owner_pid = 0;
   std::function<void()> external_cleanup;
   {
     absl::MutexLock lock(&mu_);
@@ -893,6 +898,7 @@ absl::Status HandleLeaseRegistry::release(const std::string& lease_token) {
       return absl::NotFoundError("lease_token not found");
     }
     if (it->second.kind == HandleKind::kExternal) {
+      external_owner_pid = it->second.external_owner_pid;
       external_cleanup = std::move(it->second.external_cleanup);
       leases_.erase(it);
     } else {
@@ -901,6 +907,9 @@ absl::Status HandleLeaseRegistry::release(const std::string& lease_token) {
   }
   if (external_cleanup) {
     external_cleanup();
+    if (lifecycle_ != nullptr && external_owner_pid > 0) {
+      lifecycle_->unwatch_pid(external_owner_pid);
+    }
     return absl::OkStatus();
   }
   lifecycle_->release_lease(id);

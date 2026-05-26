@@ -207,6 +207,7 @@ std::string serialize_proto_for_cache_key(const google::protobuf::MessageLite& p
 
 std::string compute_target_layout_geometry_hash(const v2::TargetLayout& layout) {
   std::string payload;
+  absl::flat_hash_map<std::string, uint64_t> storage_ordinals;
   absl::StrAppend(
       &payload,
       "layout_kind=",
@@ -218,15 +219,26 @@ std::string compute_target_layout_geometry_hash(const v2::TargetLayout& layout) 
       "|view_id=");
   append_cache_field(&payload, layout.view_id());
   append_cache_field(&payload, layout.logical_layout_hash());
+  uint64_t storage_ordinal = 0;
   for (const auto& storage : layout.storages()) {
-    append_cache_field(&payload, storage.storage_id());
+    if (!storage.storage_id().empty()) {
+      storage_ordinals.emplace(storage.storage_id(), storage_ordinal);
+    }
+    append_cache_uint64(&payload, storage_ordinal);
     append_cache_uint64(&payload, static_cast<uint64_t>(storage.device_id()));
     append_cache_uint64(&payload, storage.storage_length());
     append_cache_uint64(&payload, storage.mapping_base_offset());
+    storage_ordinal++;
   }
   for (const auto& entry : layout.offsets()) {
     append_cache_field(&payload, entry.name());
-    append_cache_field(&payload, entry.storage_id());
+    auto storage_it = storage_ordinals.find(entry.storage_id());
+    if (storage_it == storage_ordinals.end()) {
+      append_cache_field(&payload, "unknown-storage");
+      append_cache_field(&payload, entry.storage_id());
+    } else {
+      append_cache_uint64(&payload, storage_it->second);
+    }
     append_cache_uint64(&payload, entry.storage_offset());
     append_cache_uint64(&payload, entry.logical_length());
   }
@@ -242,7 +254,7 @@ std::string binding_realization_plan_cache_key(
     std::string_view canonical_index_json,
     v2::TransformPlacement placement) {
   std::string payload;
-  append_cache_field(&payload, "binding-realization-plan-v1");
+  append_cache_field(&payload, "binding-realization-plan-v2");
   append_cache_field(&payload, resolved_artifact_id);
   append_cache_field(&payload, serialize_proto_for_cache_key(selection));
   append_cache_field(&payload, serialize_proto_for_cache_key(realization_plan));
@@ -306,7 +318,7 @@ std::string mapped_execution_template_cache_key(
     const store::loading::ExecutionTopologyContext& topology,
     bool disk_source_available) {
   std::string payload;
-  append_cache_field(&payload, "mapped-execution-template-v1");
+  append_cache_field(&payload, "mapped-execution-template-v2");
   append_cache_field(&payload, plan_key);
   append_cache_field(
       &payload,

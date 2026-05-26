@@ -1966,7 +1966,9 @@ cc_test(
     name = "pid_monitor_unwatch_integration_test",
     srcs = ["state/pid_monitor_unwatch_integration_test.cc"],
     deps = [
+        ":handle_lease_registry_lib",
         ":ipc_region_registry_lib",
+        ":lifecycle_kernel_lib",
         ":lip_manager_lib",
         ":pid_monitor_lib",
         ":ref_tracker_hdr",
@@ -1974,6 +1976,7 @@ cc_test(
         ":session_lifecycle_lib",
         ":session_manager_hdr",
         "//core/store:device_registry",
+        "//core/store:store_engine",
         "@catch2//:catch2_main",
     ],
 )
