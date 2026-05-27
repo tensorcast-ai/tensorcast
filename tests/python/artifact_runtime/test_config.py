@@ -138,6 +138,24 @@ def test_runtime_config_parses_nested_schema_defaults() -> None:
     assert config.materialization.collective_policy_value() == "require_collective"
 
 
+def test_runtime_config_defaults_to_direct_materialization() -> None:
+    config = TensorCastRuntimeConfig.from_mapping({})
+
+    assert config.materialization.collective == "disabled"
+    assert config.materialization.collective_policy_value() == "disable_collective"
+
+
+def test_runtime_config_rejects_implicit_collective_auto() -> None:
+    with pytest.raises(ValueError, match="materialization.collective"):
+        TensorCastRuntimeConfig.from_mapping(
+            {
+                "materialization": {
+                    "collective": "auto",
+                },
+            }
+        )
+
+
 def test_runtime_config_rejects_removed_serving_section() -> None:
     with pytest.raises(ValueError, match="serving.*removed"):
         TensorCastRuntimeConfig.from_mapping(

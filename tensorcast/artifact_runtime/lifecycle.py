@@ -8,12 +8,10 @@ low-level helpers out of the framework-facing host/runtime modules.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
-import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any, NoReturn, cast
@@ -29,29 +27,18 @@ import tensorcast.artifact_runtime.intent as tc_runtime_intent
 import tensorcast.artifact_runtime.publication.replica as tc_replica_publication
 import tensorcast.artifact_runtime.readiness as tc_readiness
 import tensorcast.artifact_runtime.recipe.local_ready as tc_local_ready
-import tensorcast.artifact_runtime.recipe.semantic_validation as tc_semantic_validation
 import tensorcast.artifact_runtime.recipe.tensor_schema as tc_tensor_schema
 import tensorcast.artifact_runtime.request_facts as tc_request_facts
 import tensorcast.artifact_runtime.source as tc_source_catalog
-from tensorcast.api.store.common import canonical_index_to_bytes
 from tensorcast.api.store.realization_kernel import (
-    ArtifactRealizationHandle,
     ArtifactRealizationReport,
     ArtifactRealizationSpec,
-    RealizationTargetPlan,
     ResolvedArtifactSelection,
     artifact_realization_report_to_dict,
-    emit_artifact_realization_profile_event,
-    envelope_for_runtime_attachment,
-    model_runtime_report_for,
-    report_for_runtime_attachment,
-    resolve_artifact_selection,
 )
-from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry
 from tensorcast.artifact_runtime.artifact.resolver import (
     ResolvedRuntimeArtifact,
     RuntimeArtifactResolver,
-    canonical_index_from_descriptor,
     is_reserved_runtime_tensor_name,
 )
 from tensorcast.artifact_runtime.attachment import (
@@ -59,6 +46,25 @@ from tensorcast.artifact_runtime.attachment import (
     RuntimeBindingState,
     RuntimeBindingView,
     RuntimeStateSeed,
+)
+from tensorcast.artifact_runtime.attachment_materialization import (
+    RuntimeBindingMaterialization,
+    runtime_binding_state_from_runtime_view,
+)
+from tensorcast.artifact_runtime.attachment_materialization import (
+    close_quietly as _close_quietly,
+)
+from tensorcast.artifact_runtime.attachment_materialization import (
+    model_runtime_spec_for_context as _model_runtime_spec_for_context,
+)
+from tensorcast.artifact_runtime.attachment_materialization import (
+    model_runtime_spec_with_context_defaults as _model_runtime_spec_with_context_defaults,
+)
+from tensorcast.artifact_runtime.attachment_materialization import (
+    project_model_runtime_attachment as _project_model_runtime_attachment,
+)
+from tensorcast.artifact_runtime.attachment_materialization import (
+    runtime_attachment_realization_handle as _runtime_attachment_realization_handle,
 )
 from tensorcast.artifact_runtime.binding.retained import (
     RestoredRetainedBinding,
@@ -92,6 +98,21 @@ from tensorcast.artifact_runtime.errors import (
 from tensorcast.artifact_runtime.errors import (
     capability_missing as _capability_missing,
 )
+from tensorcast.artifact_runtime.execution_context import (
+    HostMaterializationRequest as _HostMaterializationRequest,
+)
+from tensorcast.artifact_runtime.execution_context import (
+    build_collective_group_id as _build_collective_group_id,
+)
+from tensorcast.artifact_runtime.execution_context import (
+    build_materialization_options as _build_materialization_options,
+)
+from tensorcast.artifact_runtime.execution_context import (
+    execution_facts_payload as _execution_facts_payload,
+)
+from tensorcast.artifact_runtime.execution_context import (
+    host_materialization_request as _host_materialization_request,
+)
 from tensorcast.artifact_runtime.host import (
     AdmissionDecision,
     AdmissionRequest,
@@ -100,7 +121,6 @@ from tensorcast.artifact_runtime.host import (
     FrameworkIdentity,
     IntegrationHost,
     MaterializationExecutionFacts,
-    MaterializationPolicy,
     PlacementAdmissionFacts,
     PlacementIdentityFacts,
     PlacementMemberFacts,
@@ -120,6 +140,15 @@ from tensorcast.artifact_runtime.locator import (
 )
 from tensorcast.artifact_runtime.policy import (
     RuntimePolicy,
+)
+from tensorcast.artifact_runtime.realization_reports import (
+    runtime_attachment_report_for_artifact_id as _runtime_attachment_report_for_artifact_id,
+)
+from tensorcast.artifact_runtime.realization_reports import (
+    runtime_attachment_report_for_resolved as _runtime_attachment_report_for_resolved,
+)
+from tensorcast.artifact_runtime.realization_reports import (
+    runtime_attachment_report_for_retained as _runtime_attachment_report_for_retained,
 )
 from tensorcast.artifact_runtime.recipe.build import (
     RecipeBuildCacheConfig,
@@ -296,300 +325,7 @@ ExistingRuntimeArtifact = tc_runtime_intent.ExistingRuntimeArtifact
 LocalSourceBootstrap = tc_runtime_intent.LocalSourceBootstrap
 RetainedBindingAcquire = tc_runtime_intent.RetainedBindingAcquire
 RequestContext = tc_runtime_intent.RequestContext
-
-
-@dataclass(frozen=True)
-class RuntimeBindingMaterialization:
-    """Core primitive for adapter-driven attach/finalize/state ownership."""
-
-    host: IntegrationHost
-    profile_sink: Any | None = None
-    state_factory: Any = RuntimeBindingState
-
-    def attach_and_finalize(
-        self,
-        *,
-        model: object,
-        tensors: Mapping[str, object],
-        binding_handle: object,
-        context: FrameworkIntegrationContext,
-        state_seed: RuntimeStateSeed,
-        replace_meta_params: bool,
-        target_device: Any,
-        model_config: object | None = None,
-        run_process_after_load: bool = True,
-        run_post_bind_finalize: bool = True,
-        expected_tensor_schema_hash: str | None = None,
-        semantic_validation_spec: Any | None = None,
-        model_runtime_spec: ArtifactRealizationSpec | None = None,
-    ) -> RuntimeBindingState:
-        owner: Any = binding_handle
-        transferred = False
-        try:
-            attach_start = time.perf_counter()
-            self._emit("runtime_materialization.attach.start", state_seed)
-            self._attach_bound_tensors(
-                model,
-                tensors,
-                replace_meta_params=replace_meta_params,
-            )
-            attach_done = time.perf_counter()
-            canonical = self._collect_runtime_tensors(
-                model,
-                remove_duplicate=False,
-            )
-            if expected_tensor_schema_hash is not None:
-                actual_tensor_schema_hash = self._compute_tensor_schema_hash(
-                    canonical,
-                    remove_duplicate=False,
-                )
-                if actual_tensor_schema_hash != expected_tensor_schema_hash:
-                    raise SchemaMismatchError(
-                        "TensorCast runtime tensor schema hash mismatch: "
-                        f"expected={expected_tensor_schema_hash}, "
-                        f"actual={actual_tensor_schema_hash}"
-                    )
-            invariants = self._snapshot_tensor_invariants(canonical)
-            self._allocate_runtime_only_tensors(
-                model,
-                torch.device(target_device),
-            )
-            if run_process_after_load:
-                self._maybe_run_hook(
-                    "run_process_after_load",
-                    model,
-                    model_config,
-                    torch.device(target_device),
-                )
-            if run_post_bind_finalize:
-                self._maybe_run_hook(
-                    "run_runtime_only_post_bind",
-                    model,
-                    model_config,
-                    torch.device(target_device),
-                )
-            if semantic_validation_spec is not None:
-                self._run_semantic_validation(
-                    semantic_validation_spec,
-                    model,
-                    model_config,
-                )
-            after = self._collect_runtime_tensors(
-                model,
-                remove_duplicate=False,
-            )
-            self._validate_tensor_invariants(invariants, after)
-            transfer_to_runtime = getattr(binding_handle, "transfer_to_runtime", None)
-            if callable(transfer_to_runtime):
-                owner = transfer_to_runtime()
-                transferred = True
-            finalize_done = time.perf_counter()
-            view = state_seed.runtime_view()
-            realization_report = state_seed.realization_report
-            if realization_report is not None:
-                realization_report = replace(
-                    realization_report,
-                    runtime_attach_sec=max(0.0, attach_done - attach_start),
-                    runtime_finalize_sec=max(0.0, finalize_done - attach_done),
-                    total_sec=max(0.0, finalize_done - attach_start),
-                )
-            realization_handle = _runtime_attachment_realization_handle(
-                report=realization_report,
-                binding_handle=binding_handle,
-                owner=owner,
-            )
-            model_runtime_ref: dict[str, RuntimeBindingState] = {}
-            model_runtime_handle = _model_runtime_realization_handle_for_spec(
-                spec=(
-                    _model_runtime_spec_with_context_defaults(
-                        spec=model_runtime_spec,
-                        context=context,
-                        target_device=target_device,
-                    )
-                    if model_runtime_spec is not None
-                    else _model_runtime_spec_for_context(
-                        context=context,
-                        target_device=target_device,
-                    )
-                ),
-                runtime_attachment_handle=realization_handle,
-                attach_fn=lambda **_kwargs: model_runtime_ref["state"],
-            )
-            try:
-                state = self.state_factory(
-                    binding=binding_handle,
-                    artifact_ref=state_seed.artifact_ref,
-                    runtime_view=view,
-                    ownership_handle=owner,
-                    release_contract=None
-                    if realization_handle is None
-                    else realization_handle.release_contract,
-                    realization_handle=realization_handle,
-                    model_runtime_handle=model_runtime_handle,
-                )
-            except Exception as exc:
-                self._close_quietly(realization_handle or owner)
-                raise OwnershipTransferError(
-                    "TensorCast runtime binding state construction failed"
-                ) from exc
-            model_runtime_ref["state"] = state
-            self._emit("runtime_materialization.attach.done", state_seed)
-            return state
-        except OwnershipTransferError:
-            raise
-        except ModelRuntimeRequestFactsError:
-            self._close_quietly(owner)
-            raise
-        except SchemaMismatchError:
-            self._close_quietly(owner)
-            raise
-        except Exception as exc:
-            self._close_quietly(owner)
-            if transferred:
-                raise OwnershipTransferError(
-                    "TensorCast runtime binding ownership transfer failed"
-                ) from exc
-            raise AttachFinalizeError(
-                "TensorCast runtime binding attach/finalize failed"
-            ) from exc
-
-    def _maybe_run_hook(
-        self,
-        name: str,
-        model: object,
-        model_config: object | None,
-        target_device: torch.device,
-    ) -> None:
-        hook_host = self.host.framework
-        hook = getattr(hook_host, name, None)
-        if callable(hook):
-            hook(model, model_config, target_device)
-            return
-        phase = {
-            "run_process_after_load": "process_after_load",
-            "run_runtime_only_post_bind": "runtime_only_post_bind",
-        }.get(name)
-        if phase is None:
-            return
-        run_hook = getattr(hook_host, "run_finalize_hook", None)
-        if callable(run_hook):
-            run_hook(phase, model, model_config, target_device)
-
-    def _run_semantic_validation(
-        self,
-        spec: Any,
-        model: object,
-        model_config: object | None,
-    ) -> Any:
-        if getattr(spec, "kind", None) == "none":
-            return tc_semantic_validation.evaluate_semantic_validation_spec(spec, None)
-        hook_host = self.host.framework
-        semantic_probes = getattr(hook_host, "semantic_probes", None)
-        actual_payload = (
-            semantic_probes(model, model_config) if callable(semantic_probes) else None
-        )
-        return tc_semantic_validation.evaluate_semantic_validation_spec(
-            spec, actual_payload
-        )
-
-    def _surface(self) -> TensorSurfaceHost:
-        if self.host.tensor_surface is None:
-            raise _capability_missing(
-                "IntegrationHost requires TensorSurfaceHost for runtime "
-                "tensor attach/schema/invariant operations",
-                level="level1-runtime",
-                capability="tensor_surface",
-                operation="runtime_tensor_surface",
-                required_methods=(
-                    "attach_bound_tensors",
-                    "collect_runtime_tensors",
-                    "compute_runtime_tensor_schema_hash",
-                    "snapshot_tensor_invariants",
-                    "validate_tensor_invariants",
-                ),
-                next_action=(
-                    "Pass IntegrationHost(tensor_surface=...) or use "
-                    "TorchTensorHost for PyTorch module carriers."
-                ),
-            )
-        return self.host.tensor_surface
-
-    def _attach_bound_tensors(
-        self,
-        model: object,
-        tensors: Mapping[str, object],
-        *,
-        replace_meta_params: bool,
-    ) -> object:
-        return self._surface().attach_bound_tensors(
-            model,
-            tensors,
-            replace_meta_params=replace_meta_params,
-        )
-
-    def _collect_runtime_tensors(
-        self,
-        model: object,
-        *,
-        remove_duplicate: bool,
-    ) -> Mapping[str, object]:
-        return self._surface().collect_runtime_tensors(
-            model,
-            remove_duplicate=remove_duplicate,
-        )
-
-    def _compute_tensor_schema_hash(
-        self,
-        tensors: Mapping[str, object],
-        *,
-        remove_duplicate: bool,
-    ) -> str:
-        return self._surface().compute_runtime_tensor_schema_hash(
-            tensors,
-            remove_duplicate=remove_duplicate,
-        )
-
-    def _allocate_runtime_only_tensors(
-        self,
-        model: object,
-        target_device: object,
-    ) -> Mapping[str, object]:
-        return self._surface().allocate_runtime_only_tensors(model, target_device)
-
-    def _snapshot_tensor_invariants(self, tensors: Mapping[str, object]) -> object:
-        return self._surface().snapshot_tensor_invariants(tensors)
-
-    def _validate_tensor_invariants(
-        self,
-        before: object,
-        after: Mapping[str, object],
-    ) -> None:
-        self._surface().validate_tensor_invariants(before, after)
-
-    def _emit(self, event: str, state_seed: RuntimeStateSeed) -> None:
-        sink = self.profile_sink
-        if callable(sink):
-            sink(
-                {
-                    "event": event,
-                    "artifact_ref": state_seed.artifact_ref,
-                    "readiness": state_seed.readiness,
-                }
-            )
-
-    @staticmethod
-    def _close_quietly(handle: object) -> None:
-        _close_quietly(handle)
-
-
-@dataclass(frozen=True)
-class _HostMaterializationRequest:
-    configured_collective_policy: Any | None = None
-    source_bound_contract_state: Any | None = None
-    source_bound_contract_path: str | None = None
-    execution_facts: Mapping[str, Any] | None = None
-    operation_scope: str = ""
-    require_materialization_options: bool = False
+build_collective_group_id = _build_collective_group_id
 
 
 @dataclass(frozen=True)
@@ -831,329 +567,6 @@ def _binding_tensors(binding: Any) -> Mapping[str, torch.Tensor]:
     return dict(tensors)
 
 
-def _canonical_index_bytes_from_tensors(
-    tensors: Mapping[str, torch.Tensor],
-) -> bytes:
-    entries: list[tc.CanonicalIndexEntry] = []
-    cursor = 0
-    for key, tensor in sorted(tensors.items(), key=lambda item: str(item[0])):
-        name = str(key)
-        size_bytes = int(tensor.element_size()) * int(tensor.numel())
-        entries.append(
-            CanonicalIndexEntry(
-                name=name,
-                dtype=tensor.dtype,
-                shape=tuple(int(dim) for dim in tensor.shape),
-                stride=tuple(int(dim) for dim in tensor.stride()),
-                storage_offset=int(tensor.storage_offset()),
-                segment_offset=cursor,
-                size_bytes=size_bytes,
-            )
-        )
-        cursor += size_bytes
-    return canonical_index_to_bytes(
-        CanonicalIndex(entries=tuple(entries), total_size_bytes=cursor, avbs_hash="")
-    )
-
-
-def _canonical_index_bytes_for_runtime_selection(
-    *,
-    resolved: ResolvedRuntimeArtifact | Any | None,
-    tensors: Mapping[str, torch.Tensor],
-) -> bytes:
-    descriptor = getattr(resolved, "descriptor", None)
-    if descriptor is not None:
-        try:
-            return canonical_index_to_bytes(canonical_index_from_descriptor(descriptor))
-        except (AttributeError, KeyError, TypeError, ValueError):
-            _LOGGER.debug(
-                "Failed to derive runtime canonical index from descriptor; using tensor metadata",
-                exc_info=True,
-            )
-    return _canonical_index_bytes_from_tensors(tensors)
-
-
-def _target_layout_digest_for_runtime_attachment(
-    *,
-    binding_layout_id: str | None,
-    tensor_schema_hash: str,
-) -> str:
-    if binding_layout_id:
-        return f"binding-layout:{binding_layout_id}"
-    return f"runtime-schema:{tensor_schema_hash}"
-
-
-def _runtime_attachment_report_for_resolved(
-    *,
-    resolved: ResolvedRuntimeArtifact | Any,
-    tensors: Mapping[str, torch.Tensor],
-    binding_handle: Any | None,
-    target_device: Any,
-    tensor_schema_hash: str,
-    source_selection: ResolvedArtifactSelection | None = None,
-    execution_diagnostics: Any | None = None,
-    materialization_diagnostics: Any | None = None,
-) -> ArtifactRealizationReport:
-    binding_layout_id = _optional_text(
-        getattr(binding_handle, "binding_layout_id", None)
-    )
-    target_plan = RealizationTargetPlan(
-        kind="runtime_attachment",
-        device=target_device,
-        target_layout_digest=_target_layout_digest_for_runtime_attachment(
-            binding_layout_id=binding_layout_id,
-            tensor_schema_hash=tensor_schema_hash,
-        ),
-        binding_layout_id=binding_layout_id,
-    )
-    envelope = envelope_for_runtime_attachment(tensors, retained=False)
-    envelope.validate_for_target(target_plan)
-    selection = source_selection or resolve_artifact_selection(
-        artifact_id=str(getattr(resolved, "artifact_ref", "") or ""),
-        canonical_index_bytes=_canonical_index_bytes_for_runtime_selection(
-            resolved=resolved,
-            tensors=tensors,
-        ),
-        tensor_names=tuple(str(name) for name in tensors),
-        artifact_profile="runtime_artifact",
-        authority_scope="daemon_mediated_runtime_attachment",
-    )
-    return report_for_runtime_attachment(
-        selection=selection,
-        target_plan=target_plan,
-        envelope=envelope,
-        binding_handle=binding_handle,
-        materialization_diagnostics=materialization_diagnostics,
-        execution_diagnostics=execution_diagnostics,
-        risk_labels=("binding_lifecycle",),
-    )
-
-
-def _runtime_attachment_report_for_retained(
-    *,
-    authority: ParsedRetainedRealizationAuthority,
-    tensors: Mapping[str, torch.Tensor],
-    binding_handle: Any | None,
-    target_device: Any,
-    tensor_schema_hash: str,
-    reservation_bytes: int,
-    source_selection: ResolvedArtifactSelection | None = None,
-) -> ArtifactRealizationReport:
-    binding_layout_id = _optional_text(
-        getattr(binding_handle, "binding_layout_id", None)
-    )
-    target_plan = RealizationTargetPlan(
-        kind="runtime_attachment",
-        device=target_device,
-        target_layout_digest=_target_layout_digest_for_runtime_attachment(
-            binding_layout_id=binding_layout_id,
-            tensor_schema_hash=tensor_schema_hash,
-        ),
-        binding_layout_id=binding_layout_id,
-        copy_plan_digest=authority.expected.resolved_spec_digest,
-    )
-    envelope = envelope_for_runtime_attachment(
-        tensors,
-        retained=True,
-        reservation_bytes=reservation_bytes,
-    )
-    envelope.validate_for_target(target_plan)
-    artifact_id = (
-        authority.serving_artifact_id
-        or authority.local_serving_ref
-        or authority.binding_value_ref.binding_value_id
-    )
-    selection = source_selection or resolve_artifact_selection(
-        artifact_id=str(artifact_id),
-        canonical_index_bytes=_canonical_index_bytes_from_tensors(tensors),
-        tensor_names=tuple(str(name) for name in tensors),
-        artifact_profile="retained_binding",
-        authority_scope="daemon_retained_runtime_attachment",
-    )
-    return report_for_runtime_attachment(
-        selection=selection,
-        target_plan=target_plan,
-        envelope=envelope,
-        binding_handle=binding_handle,
-        retained_authority=authority,
-        risk_labels=("retained_acquire",),
-    )
-
-
-def _runtime_attachment_report_for_artifact_id(
-    *,
-    artifact_id: str,
-    tensors: Mapping[str, torch.Tensor],
-    binding_handle: Any | None,
-    target_device: Any,
-    tensor_schema_hash: str,
-    artifact_profile: str,
-    authority_scope: str,
-    source_selection: ResolvedArtifactSelection | None = None,
-    retained: bool = False,
-    reservation_bytes: int = 0,
-) -> ArtifactRealizationReport:
-    binding_layout_id = _optional_text(
-        getattr(binding_handle, "binding_layout_id", None)
-    )
-    target_plan = RealizationTargetPlan(
-        kind="runtime_attachment",
-        device=target_device,
-        target_layout_digest=_target_layout_digest_for_runtime_attachment(
-            binding_layout_id=binding_layout_id,
-            tensor_schema_hash=tensor_schema_hash,
-        ),
-        binding_layout_id=binding_layout_id,
-    )
-    envelope = envelope_for_runtime_attachment(
-        tensors,
-        retained=retained,
-        reservation_bytes=reservation_bytes,
-    )
-    envelope.validate_for_target(target_plan)
-    selection = source_selection or resolve_artifact_selection(
-        artifact_id=str(artifact_id),
-        canonical_index_bytes=_canonical_index_bytes_from_tensors(tensors),
-        tensor_names=tuple(str(name) for name in tensors),
-        artifact_profile=artifact_profile,
-        authority_scope=authority_scope,
-    )
-    return report_for_runtime_attachment(
-        selection=selection,
-        target_plan=target_plan,
-        envelope=envelope,
-        binding_handle=binding_handle,
-        risk_labels=(artifact_profile,),
-    )
-
-
-def _close_quietly(handle: object) -> None:
-    close = getattr(handle, "close", None)
-    if callable(close):
-        try:
-            close()
-        except Exception:
-            _LOGGER.exception("Failed to close runtime attachment handle")
-
-
-def _runtime_attachment_realization_handle(
-    *,
-    report: ArtifactRealizationReport | None,
-    binding_handle: Any,
-    owner: Any | None = None,
-) -> ArtifactRealizationHandle | None:
-    if report is None:
-        return None
-    owner_handle = owner if owner is not None else binding_handle
-    close = getattr(owner_handle, "close", None)
-    close_fn = None
-    if callable(close):
-
-        def close_owner_handle() -> None:
-            close()
-
-        close_fn = close_owner_handle
-    handle = ArtifactRealizationHandle(
-        target_kind="runtime_attachment",
-        report=report,
-        binding_value=binding_handle,
-        close_fn=close_fn,
-    )
-    emit_artifact_realization_profile_event(report)
-    return handle
-
-
-def _model_runtime_spec_for_context(
-    *,
-    context: FrameworkIntegrationContext,
-    target_device: Any,
-) -> ArtifactRealizationSpec:
-    placement = getattr(context, "placement", None)
-    framework = str(getattr(context, "framework_name", "") or "unknown_framework")
-    return ArtifactRealizationSpec.model_runtime(
-        framework=framework,
-        device=target_device,
-        topology=getattr(placement, "topology", None),
-        member=getattr(placement, "member", None),
-        adapter_version=_optional_text(getattr(context, "adapter_version", None)),
-        runtime_abi_version=_optional_text(
-            getattr(context, "serving_abi_version", None)
-        ),
-    )
-
-
-def _model_runtime_spec_with_context_defaults(
-    *,
-    spec: ArtifactRealizationSpec,
-    context: FrameworkIntegrationContext,
-    target_device: Any,
-) -> ArtifactRealizationSpec:
-    facts = resolve_model_runtime_request_facts(
-        spec=spec,
-        runtime_context=RequestContext(target_device=target_device),
-        host_context=context,
-        host_target_device=target_device,
-    )
-    return cast(ArtifactRealizationSpec, facts.spec)
-
-
-def _model_runtime_realization_handle(
-    *,
-    context: FrameworkIntegrationContext,
-    target_device: Any,
-    runtime_attachment_handle: ArtifactRealizationHandle | None,
-    attach_fn: Callable[..., RuntimeBindingState],
-) -> ArtifactRealizationHandle | None:
-    return _model_runtime_realization_handle_for_spec(
-        spec=_model_runtime_spec_for_context(
-            context=context,
-            target_device=target_device,
-        ),
-        runtime_attachment_handle=runtime_attachment_handle,
-        attach_fn=attach_fn,
-    )
-
-
-def _model_runtime_realization_handle_for_spec(
-    *,
-    spec: ArtifactRealizationSpec | None,
-    runtime_attachment_handle: ArtifactRealizationHandle | None,
-    attach_fn: Callable[..., RuntimeBindingState],
-) -> ArtifactRealizationHandle | None:
-    if runtime_attachment_handle is None:
-        return None
-    if spec is None:
-        return None
-    report = model_runtime_report_for(
-        spec=spec,
-        runtime_attachment_report=runtime_attachment_handle.report,
-    )
-    handle = ArtifactRealizationHandle(
-        target_kind="model_runtime",
-        report=report,
-        attach_fn=attach_fn,
-        release_contract=runtime_attachment_handle.release_contract,
-    )
-    emit_artifact_realization_profile_event(report)
-    return handle
-
-
-def _project_model_runtime_attachment(
-    state: RuntimeBindingState,
-    attachment: RuntimeAttachment,
-) -> RuntimeAttachment:
-    handle = state.model_runtime_handle
-    if not isinstance(handle, ArtifactRealizationHandle):
-        return attachment
-    state.model_runtime_handle = ArtifactRealizationHandle(
-        target_kind="model_runtime",
-        report=handle.report,
-        attachment_value=attachment,
-        release_contract=handle.release_contract,
-    )
-    return attachment
-
-
 @dataclass(frozen=True)
 class RuntimeBindingResult:
     """Attach-ready result from a runtime bind or swap operation."""
@@ -1206,116 +619,16 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
-def _serving_realization_report(
-    diagnostics: Mapping[str, object],
-) -> Mapping[str, object] | None:
-    value = diagnostics.get("serving_realization_report")
-    if isinstance(value, Mapping):
-        return value
-    return None
-
-
-def _nested_mapping(
-    value: Mapping[str, object] | None,
-    key: str,
-) -> Mapping[str, object] | None:
-    if value is None:
-        return None
-    nested = value.get(key)
-    if isinstance(nested, Mapping):
-        return nested
-    return None
-
-
-def _nested_value(
-    value: Mapping[str, object] | None,
-    *path: str,
-) -> object | None:
-    current: object | None = value
-    for key in path:
-        if not isinstance(current, Mapping):
-            return None
-        current = current.get(key)
-    return current
-
-
 def _artifact_locator_kind(artifact_locator: object) -> str:
     if isinstance(artifact_locator, Mapping):
         return str(artifact_locator.get("kind") or "")
     return str(getattr(artifact_locator, "kind", "") or "")
 
 
-def _collective_policy_value(policy: MaterializationPolicy) -> str:
-    collective = str(policy.fields.get("collective", "auto") or "auto")
-    return {
-        "auto": "collective_first",
-        "required": "require_collective",
-        "disabled": "disable_collective",
-        "collective_first": "collective_first",
-        "require_collective": "require_collective",
-        "disable_collective": "disable_collective",
-    }.get(collective, collective)
-
-
-def _execution_facts_payload(
-    facts: MaterializationExecutionFacts,
-) -> dict[str, object]:
-    return {
-        "tp_rank": facts.collective_rank,
-        "tp_world_size": facts.collective_world_size,
-        "same_node_tp": facts.same_node_tensor_parallel,
-        "tp_ranks": tuple(int(rank) for rank in facts.tensor_parallel_ranks),
-        "collective_world_size": facts.collective_world_size,
-        "collective_rank": facts.collective_rank,
-        "collective_context_unavailable": facts.collective_context_unavailable,
-    }
-
-
 def _framework_payload_mapping(payload: object | None) -> dict[str, object] | None:
     if not isinstance(payload, Mapping):
         return None
     return {str(key): value for key, value in payload.items()}
-
-
-def source_subject_slice_count(recipe: Any, subject: Any) -> int:
-    if is_public_disk_source_subject(subject):
-        return 0
-    return tc_local_ready.tensorcast_view_slice_count(recipe)
-
-
-def runtime_binding_state_from_runtime_view(
-    *,
-    binding: Any,
-    runtime_view: RuntimeBindingView,
-    artifact_ref: str | None = None,
-    ownership_handle: Any | None = None,
-    artifact_realization_report: ArtifactRealizationReport | None = None,
-    model_runtime_spec: ArtifactRealizationSpec | None = None,
-) -> RuntimeBindingState:
-    realization_handle = _runtime_attachment_realization_handle(
-        report=artifact_realization_report,
-        binding_handle=binding,
-        owner=ownership_handle,
-    )
-    model_runtime_ref: dict[str, RuntimeBindingState] = {}
-    model_runtime_handle = _model_runtime_realization_handle_for_spec(
-        spec=model_runtime_spec,
-        runtime_attachment_handle=realization_handle,
-        attach_fn=lambda **_kwargs: model_runtime_ref["state"],
-    )
-    state = RuntimeBindingState(
-        binding=binding,
-        artifact_ref=artifact_ref or runtime_view.serving_artifact_ref,
-        runtime_view=runtime_view,
-        ownership_handle=ownership_handle,
-        release_contract=None
-        if realization_handle is None
-        else realization_handle.release_contract,
-        realization_handle=realization_handle,
-        model_runtime_handle=model_runtime_handle,
-    )
-    model_runtime_ref["state"] = state
-    return state
 
 
 def _enum_value(value: Any) -> Any:
@@ -1588,25 +901,6 @@ def _strip_report_prefix(fields: Mapping[str, Any], *, prefix: str) -> dict[str,
         for key, value in fields.items()
         if key.startswith(prefix_text)
     }
-
-
-def build_collective_group_id(
-    *,
-    artifact_ref: str,
-    operation_scope: str,
-    tp_ranks: tuple[int, ...],
-    contract_identity: str | None = None,
-) -> str:
-    payload_dict: dict[str, Any] = {
-        "artifact_ref": str(artifact_ref),
-        "operation_scope": operation_scope,
-        "tp_ranks": [int(rank) for rank in tp_ranks],
-    }
-    if contract_identity:
-        payload_dict["contract_identity"] = str(contract_identity)
-    payload = json.dumps(payload_dict, sort_keys=True)
-    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
-    return f"tensorcast-{digest}"
 
 
 @dataclass(frozen=True)
@@ -2398,20 +1692,12 @@ class ArtifactRuntimeIntegration:
         *,
         operation_scope: str,
     ) -> _HostMaterializationRequest:
-        if self.host is None:
-            return _HostMaterializationRequest(operation_scope=operation_scope)
-        profile = self.host.runtime_profile or RuntimeProfile()
-        return _HostMaterializationRequest(
-            configured_collective_policy=CollectivePolicy(
-                _collective_policy_value(profile.materialization_policy)
-            ),
-            source_bound_contract_state=read_source_bound_contract_state(),
-            source_bound_contract_path=SOURCE_BOUND_CONTRACT_PATH_COLLECTIVE_FIRST_V4,
-            execution_facts=_execution_facts_payload(
-                self.host.placement.execution_facts(context.framework_config)
-            ),
+        return _host_materialization_request(
+            host=self.host,
+            framework_config=context.framework_config,
             operation_scope=operation_scope,
-            require_materialization_options=True,
+            read_contract_state=read_source_bound_contract_state,
+            source_bound_contract_path=SOURCE_BOUND_CONTRACT_PATH_COLLECTIVE_FIRST_V4,
         )
 
     def _host_runtime_placement(
@@ -3980,30 +3266,14 @@ class ArtifactRuntimeIntegration:
         execution_facts: Mapping[str, Any],
         contract_identity: str | None = None,
     ) -> tuple[Any, dict[str, object]]:
-        facts = dict(execution_facts)
-        return tc_binding_runtime.build_materialization_execution_context(
+        return _build_materialization_options(
             artifact_ref=artifact_ref,
             operation_scope=operation_scope,
             configured_policy=configured_policy,
-            tp_rank=int(facts.get("tp_rank", 0) or 0),
-            tp_world_size=int(facts.get("tp_world_size", 1) or 1),
-            same_node_tp=bool(facts.get("same_node_tp", False)),
-            tp_ranks=tuple(int(rank) for rank in facts.get("tp_ranks", ()) or ()),
-            collective_world_size=int(
-                facts.get("collective_world_size", facts.get("tp_world_size", 1)) or 1
-            ),
-            collective_rank=int(
-                facts.get("collective_rank", facts.get("tp_rank", 0)) or 0
-            ),
-            source_bound_contract_profile_fields=source_bound_contract_profile_fields(
-                source_bound_contract_state,
-                source_bound_contract_path,
-            ),
-            build_group_id=build_collective_group_id,
+            source_bound_contract_state=source_bound_contract_state,
+            source_bound_contract_path=source_bound_contract_path,
+            execution_facts=execution_facts,
             contract_identity=contract_identity,
-            collective_context_unavailable=bool(
-                facts.get("collective_context_unavailable", False)
-            ),
         )
 
     def build_recipe_session(

@@ -35,6 +35,9 @@ todo list.
   `RetainedRealizationClaim.realize_model_runtime(...)`.
 - Runtime artifact policy and materialization options are separate fields on
   `ArtifactRealizationSpec`.
+- Materialization defaults to the direct path
+  (`materialization.collective=disabled`). Collective is an explicit strategy,
+  not the implicit runtime default.
 - Runtime request facts are resolved once and shared by direct and retained
   realization paths.
 - Direct realization uses the current `Artifact` store when no custom resolver
@@ -53,7 +56,8 @@ todo list.
 - [ ] Continue deleting compatibility aliases, shallow wrappers, and duplicate
       tests once a public artifact-runtime test covers the behavior.
 - [ ] Keep `serving.policy` and `materialization.collective` semantics
-      separate: manifest/admission policy is not materialization strategy.
+      separate: manifest/admission policy is not materialization strategy, and
+      collective stays opt-in until a topology/model has measured benefit.
 - [ ] Keep placement and framework facts fail-closed across direct,
       retained, mounted-source, reload, and publication paths.
 - [ ] Keep direct model-runtime realization off TensorDict/Python state-dict

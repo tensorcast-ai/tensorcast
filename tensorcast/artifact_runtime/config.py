@@ -28,7 +28,7 @@ DEFAULT_RUNTIME_PROFILE = "serving_single_node"
 _RUNTIME_MODES = {"auto", "connect", "create"}
 _GLOBAL_STORE_MODES = {"auto", "connect", "start", "none"}
 _BOOTSTRAP_MODES = {"disabled", "auto", "required"}
-_COLLECTIVE_MODES = {"auto", "required", "disabled"}
+_COLLECTIVE_MODES = {"required", "disabled"}
 _RETAINED_BINDING_ACQUIRE_MODES = {"disabled", "external"}
 _REPLICA_PUBLICATION_MODES = {"disabled", "optional", "required"}
 _REPLICA_PUBLICATION_TRIGGERS = {"after_vllm_ready"}
@@ -342,13 +342,13 @@ class BootstrapSettings(BaseModel):
 class MaterializationSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    collective: str = "auto"
+    collective: str = "disabled"
 
     @field_validator("collective", mode="before")
     @classmethod
     def _normalize_collective(cls, value: Any) -> str:
         if value is None:
-            return "auto"
+            return "disabled"
         return _normalize_enum(
             value,
             allowed=_COLLECTIVE_MODES,
@@ -357,7 +357,6 @@ class MaterializationSettings(BaseModel):
 
     def collective_policy_value(self) -> str:
         return {
-            "auto": "collective_first",
             "required": "require_collective",
             "disabled": "disable_collective",
         }[self.collective]
