@@ -47,7 +47,7 @@ from tensorcast.common.selection_identity import (
 )
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
-from tensorcast.types import ServingRuntimePolicy
+from tensorcast.types import RuntimeArtifactPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -589,7 +589,7 @@ class InplaceSlot:
         *,
         options: GetArtifactOptions | None = None,
         publish: bool = False,
-        serving_runtime_policy: ServingRuntimePolicy | None = None,
+        runtime_artifact_policy: RuntimeArtifactPolicy | None = None,
         wait: bool = True,
         drain_timeout_s: float | None = None,
         ctx: CallContext | None = None,
@@ -690,7 +690,7 @@ class InplaceSlot:
                         target_layout=region_layout.layout,
                         device_uuid=device_uuid_for(self._device_id),
                         source_policy=source_policy,
-                        serving_runtime_policy=serving_runtime_policy,
+                        runtime_artifact_policy=runtime_artifact_policy,
                         copy_plan=self._copy_plan,
                         dst_tensors=self._tensors,
                         operation_id=operation_id,
@@ -822,7 +822,7 @@ class InplaceSlot:
                     target_layout=region_layout.layout,
                     device_uuid=device_uuid_for(self._device_id),
                     source_policy=source_policy,
-                    serving_runtime_policy=serving_runtime_policy,
+                    runtime_artifact_policy=runtime_artifact_policy,
                     operation_id=operation_id,
                     timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
                 )

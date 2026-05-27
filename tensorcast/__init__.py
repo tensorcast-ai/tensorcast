@@ -200,6 +200,9 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "ArtifactDescriptor": ("tensorcast.api", "ArtifactDescriptor"),
     "ArtifactError": ("tensorcast.api", "ArtifactError"),
     "ArtifactFuture": ("tensorcast.api", "ArtifactFuture"),
+    "ArtifactRealizationHandle": ("tensorcast.api", "ArtifactRealizationHandle"),
+    "ArtifactRealizationReport": ("tensorcast.api", "ArtifactRealizationReport"),
+    "ArtifactRealizationSpec": ("tensorcast.api", "ArtifactRealizationSpec"),
     "AssemblyAttemptRef": ("tensorcast.api", "AssemblyAttemptRef"),
     "BindingReservationCapability": (
         "tensorcast.api",
@@ -219,44 +222,42 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "PlanType": ("tensorcast.api", "PlanType"),
     "RegisterArtifactOptions": ("tensorcast.api", "RegisterArtifactOptions"),
     "RegisteredArtifact": ("tensorcast.api", "RegisteredArtifact"),
-    "RegisteredServingPublication": (
-        "tensorcast.api",
-        "RegisteredServingPublication",
-    ),
     "PrefetchRetentionPolicy": ("tensorcast.api", "PrefetchRetentionPolicy"),
-    "PrefetchedServingBinding": ("tensorcast.api", "PrefetchedServingBinding"),
-    "PrefetchedServingBindingSet": (
+    "PrefetchHandoff": ("tensorcast.api", "PrefetchHandoff"),
+    "PrefetchHandoffMemberFailure": (
         "tensorcast.api",
-        "PrefetchedServingBindingSet",
+        "PrefetchHandoffMemberFailure",
     ),
+    "PrefetchHandoffSet": ("tensorcast.api", "PrefetchHandoffSet"),
     "RegisteredLease": ("tensorcast.api", "RegisteredLease"),
     "RegistrationResult": ("tensorcast.api", "RegistrationResult"),
-    "ServingBindingMemberRef": ("tensorcast.api", "ServingBindingMemberRef"),
-    "ServingBindingReadiness": ("tensorcast.api", "ServingBindingReadiness"),
-    "ServingBindingResolvedLayout": (
+    "RuntimeBindingMemberRef": ("tensorcast.api", "RuntimeBindingMemberRef"),
+    "RuntimeBindingReadiness": ("tensorcast.api", "RuntimeBindingReadiness"),
+    "RuntimeBindingResolvedLayout": (
         "tensorcast.api",
-        "ServingBindingResolvedLayout",
+        "RuntimeBindingResolvedLayout",
     ),
-    "ServingBindingResolvedSpecCacheEntry": (
+    "RuntimeRealizationSpecCacheEntry": (
         "tensorcast.api",
-        "ServingBindingResolvedSpecCacheEntry",
+        "RuntimeRealizationSpecCacheEntry",
     ),
-    "ServingBindingSetTarget": ("tensorcast.api", "ServingBindingSetTarget"),
-    "ServingBindingSourceKind": ("tensorcast.api", "ServingBindingSourceKind"),
-    "ServingBindingSourceMemberRef": (
+    "RuntimeBindingSourceKind": ("tensorcast.api", "RuntimeBindingSourceKind"),
+    "RuntimeBindingSourceMemberRef": (
         "tensorcast.api",
-        "ServingBindingSourceMemberRef",
+        "RuntimeBindingSourceMemberRef",
     ),
-    "ServingBindingSourceRef": ("tensorcast.api", "ServingBindingSourceRef"),
-    "ServingBindingSourceReuseDecision": (
+    "RuntimeBindingSourceRef": ("tensorcast.api", "RuntimeBindingSourceRef"),
+    "RuntimeBindingSourceReuseDecision": (
         "tensorcast.api",
-        "ServingBindingSourceReuseDecision",
+        "RuntimeBindingSourceReuseDecision",
     ),
-    "ServingBindingSourceReuseMode": (
+    "RuntimeBindingSourceReuseMode": (
         "tensorcast.api",
-        "ServingBindingSourceReuseMode",
+        "RuntimeBindingSourceReuseMode",
     ),
-    "ServingBindingTarget": ("tensorcast.api", "ServingBindingTarget"),
+    "RuntimeTopologyRef": ("tensorcast.api", "RuntimeTopologyRef"),
+    "RealizationTarget": ("tensorcast.api", "RealizationTarget"),
+    "RealizationTargetSet": ("tensorcast.api", "RealizationTargetSet"),
     "SealAssemblyResult": ("tensorcast.api", "SealAssemblyResult"),
     "SERVING_MANIFEST_TENSOR_NAME": ("tensorcast.api", "SERVING_MANIFEST_TENSOR_NAME"),
     "ViewRegistrationKind": ("tensorcast.api", "ViewRegistrationKind"),
@@ -276,14 +277,6 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "GroupVersionSetRef": ("tensorcast.api", "GroupVersionSetRef"),
     "GovernanceContext": ("tensorcast.api", "GovernanceContext"),
     "DirectorySnapshot": ("tensorcast.api", "DirectorySnapshot"),
-    "CapabilityDirectoryClient": (
-        "tensorcast.capability_directory",
-        "CapabilityDirectoryClient",
-    ),
-    "CapabilityDirectoryOptions": (
-        "tensorcast.capability_directory",
-        "CapabilityDirectoryOptions",
-    ),
     "Operation": ("tensorcast.api", "Operation"),
     "OperationError": ("tensorcast.api", "OperationError"),
     "OperationStatus": ("tensorcast.api", "OperationStatus"),
@@ -295,10 +288,6 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "PlanStepResult": ("tensorcast.api", "PlanStepResult"),
     "PartialSealResult": ("tensorcast.api", "PartialSealResult"),
     "PublicDiskSourceHandle": ("tensorcast.api", "PublicDiskSourceHandle"),
-    "PreparedServingRegistration": (
-        "tensorcast.api",
-        "PreparedServingRegistration",
-    ),
     "PublishedModelVersion": ("tensorcast.api", "PublishedModelVersion"),
     "ExecutionDiagnostics": ("tensorcast.api", "ExecutionDiagnostics"),
     "BindingUpdateEpoch": ("tensorcast.api", "BindingUpdateEpoch"),
@@ -321,23 +310,138 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "tensorcast.api",
         "RepresentationPublishSpec",
     ),
+    "RuntimeArtifactBuildIntent": ("tensorcast.api", "RuntimeArtifactBuildIntent"),
+    "RuntimeArtifactManifest": ("tensorcast.api", "RuntimeArtifactManifest"),
+    "RuntimeArtifactPolicy": ("tensorcast.api", "RuntimeArtifactPolicy"),
+    "RuntimeArtifactPolicyInput": ("tensorcast.api", "RuntimeArtifactPolicyInput"),
     "SourceBoundCapability": ("tensorcast.api", "SourceBoundCapability"),
-    "ServingPublicationSubject": ("tensorcast.api", "ServingPublicationSubject"),
-    "ServingAdmissionFacts": ("tensorcast.api", "ServingAdmissionFacts"),
-    "ServingArtifactManifest": ("tensorcast.api", "ServingArtifactManifest"),
-    "SERVING_BUILD_DIGEST_VERSION": (
+    "coerce_runtime_artifact_policy": (
         "tensorcast.api",
-        "SERVING_BUILD_DIGEST_VERSION",
+        "coerce_runtime_artifact_policy",
     ),
-    "ServingBuildIntent": ("tensorcast.api", "ServingBuildIntent"),
-    "ServingRuntimePolicy": ("tensorcast.api", "ServingRuntimePolicy"),
-    "ServingSupportLevel": ("tensorcast.api", "ServingSupportLevel"),
     "Instance": ("tensorcast.api", "Instance"),
     "InstanceExecutionRoute": ("tensorcast.api", "InstanceExecutionRoute"),
     "Worker": ("tensorcast.api", "Worker"),
     "TargetSpec": ("tensorcast.api", "TargetSpec"),
     "TransformSpec": ("tensorcast.api", "TransformSpec"),
     "Runtime": ("tensorcast.api", "Runtime"),
+    "RuntimeAttachment": (
+        "tensorcast.artifact_runtime.attachment",
+        "RuntimeAttachment",
+    ),
+    "RuntimeBindingState": (
+        "tensorcast.artifact_runtime.attachment",
+        "RuntimeBindingState",
+    ),
+    "RuntimeAdmissionDecision": (
+        "tensorcast.artifact_runtime.host",
+        "RuntimeAdmissionDecision",
+    ),
+    "RuntimeAdmissionPolicy": (
+        "tensorcast.artifact_runtime.host",
+        "RuntimeAdmissionPolicy",
+    ),
+    "RuntimeAdmissionRequest": (
+        "tensorcast.artifact_runtime.host",
+        "RuntimeAdmissionRequest",
+    ),
+    "RuntimeHostCapabilities": (
+        "tensorcast.artifact_runtime.host",
+        "RuntimeHostCapabilities",
+    ),
+    "RuntimePlacement": ("tensorcast.artifact_runtime.host", "RuntimePlacement"),
+    "RuntimeProfile": ("tensorcast.artifact_runtime.host", "RuntimeProfile"),
+    "RuntimeTensorView": ("tensorcast.artifact_runtime.host", "RuntimeTensorView"),
+    "ArtifactLocator": ("tensorcast.artifact_runtime.locator", "ArtifactLocator"),
+    "RuntimeArtifactLocator": (
+        "tensorcast.artifact_runtime.config",
+        "RuntimeArtifactLocator",
+    ),
+    "RuntimeStartPlanError": (
+        "tensorcast.artifact_runtime.config",
+        "RuntimeStartPlanError",
+    ),
+    "RuntimePolicy": ("tensorcast.artifact_runtime.policy", "RuntimePolicy"),
+    "RuntimeRealizationReport": (
+        "tensorcast.artifact_runtime.diagnostics",
+        "RuntimeRealizationReport",
+    ),
+    "TensorCastRuntimeConfig": (
+        "tensorcast.artifact_runtime.config",
+        "TensorCastRuntimeConfig",
+    ),
+    "plan_runtime_start": ("tensorcast.artifact_runtime.config", "plan_runtime_start"),
+    "RuntimeRequestContext": (
+        "tensorcast.artifact_runtime.intent",
+        "RuntimeRequestContext",
+    ),
+    "ModelAttributeNames": ("tensorcast.artifact_runtime.state", "ModelAttributeNames"),
+    "ModelAttributeRuntimeState": (
+        "tensorcast.artifact_runtime.state",
+        "ModelAttributeRuntimeState",
+    ),
+    "OneShotRuntimeHook": ("tensorcast.artifact_runtime.state", "OneShotRuntimeHook"),
+    "BindingValueRefProjection": (
+        "tensorcast.artifact_runtime.view",
+        "BindingValueRefProjection",
+    ),
+    "RuntimeEndpointProjection": (
+        "tensorcast.artifact_runtime.view",
+        "RuntimeEndpointProjection",
+    ),
+    "RuntimeWorkerView": ("tensorcast.artifact_runtime.view", "RuntimeWorkerView"),
+    "SourceSelectionProjection": (
+        "tensorcast.artifact_runtime.view",
+        "SourceSelectionProjection",
+    ),
+    "WeightVersionProjection": (
+        "tensorcast.artifact_runtime.view",
+        "WeightVersionProjection",
+    ),
+    "aggregate_runtime_view_outputs": (
+        "tensorcast.artifact_runtime.view",
+        "aggregate_runtime_view_outputs",
+    ),
+    "RuntimeReplicaPublicationSettings": (
+        "tensorcast.artifact_runtime.publication.actions",
+        "RuntimeReplicaPublicationSettings",
+    ),
+    "RetainedRealizationClaim": (
+        "tensorcast.retained_realization",
+        "RetainedRealizationClaim",
+    ),
+    "RetainedRealizationExpectedDigests": (
+        "tensorcast.retained_realization",
+        "RetainedRealizationExpectedDigests",
+    ),
+    "project_runtime_replica_publication_state": (
+        "tensorcast.artifact_runtime.publication.actions",
+        "project_runtime_replica_publication_state",
+    ),
+    "publish_runtime_replica": (
+        "tensorcast.artifact_runtime.publication.actions",
+        "publish_runtime_replica",
+    ),
+    "reload_runtime_attachment": (
+        "tensorcast.artifact_runtime.reload",
+        "reload_runtime_attachment",
+    ),
+    "merge_runtime_reload_extra_config": (
+        "tensorcast.artifact_runtime.reload",
+        "merge_runtime_reload_extra_config",
+    ),
+    "normalize_runtime_reload_request_payload": (
+        "tensorcast.artifact_runtime.reload",
+        "normalize_runtime_reload_request_payload",
+    ),
+    "retire_runtime_replica": (
+        "tensorcast.artifact_runtime.publication.actions",
+        "retire_runtime_replica",
+    ),
+    "runtime_replica_publication_settings": (
+        "tensorcast.artifact_runtime.publication.actions",
+        "runtime_replica_publication_settings",
+    ),
     "SignalSnapshot": ("tensorcast.api", "SignalSnapshot"),
     "TensorCastDirectory": ("tensorcast.api", "TensorCastDirectory"),
     "TensorCastSignals": ("tensorcast.api", "TensorCastSignals"),
@@ -346,10 +450,29 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "connect": ("tensorcast.api", "connect"),
     "context": ("tensorcast.api", "context"),
     "plan": ("tensorcast.api", "plan"),
-    "runtime": ("tensorcast.api", "runtime"),
     "RetentionHandle": ("tensorcast.retention", "RetentionHandle"),
     "acquire_retention_handle": ("tensorcast.retention", "acquire_retention_handle"),
+    "parse_retained_realization_claim": (
+        "tensorcast.retained_realization",
+        "parse_retained_realization_claim",
+    ),
     "renew_retention_handle": ("tensorcast.retention", "renew_retention_handle"),
+    "retained_realization_claim_extra_from_handoff": (
+        "tensorcast.retained_realization",
+        "retained_realization_claim_extra_from_handoff",
+    ),
+    "retained_realization_claim_extra_json_from_handoff": (
+        "tensorcast.retained_realization",
+        "retained_realization_claim_extra_json_from_handoff",
+    ),
+    "retained_realization_claim_mode": (
+        "tensorcast.retained_realization",
+        "retained_realization_claim_mode",
+    ),
+    "retained_realization_trusted_reservation_bytes": (
+        "tensorcast.retained_realization",
+        "retained_realization_trusted_reservation_bytes",
+    ),
     "release_retention_handle": ("tensorcast.retention", "release_retention_handle"),
     "artifact": ("tensorcast.api.store", "artifact"),
     "artifact_async": ("tensorcast.api.store", "artifact_async"),
@@ -422,17 +545,9 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "tensorcast.api.store",
         "build_binding_finalize_publication_bundle",
     ),
-    "build_serving_publication_bundle": (
-        "tensorcast.api.store",
-        "build_serving_publication_bundle",
-    ),
     "build_pure_transform_publication_bundle_from_registered_artifact": (
         "tensorcast.api.store",
         "build_pure_transform_publication_bundle_from_registered_artifact",
-    ),
-    "build_serving_publication_bundle_from_registered_artifact": (
-        "tensorcast.api.store",
-        "build_serving_publication_bundle_from_registered_artifact",
     ),
     "build_pure_transform_publication_spec": (
         "tensorcast.api.store",
@@ -478,41 +593,9 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "tensorcast.api.store",
         "complete_structural_representation_publish_attempt",
     ),
-    "build_serving_manifest_ref": (
-        "tensorcast.api.store",
-        "build_serving_manifest_ref",
-    ),
-    "coerce_serving_runtime_policy": (
-        "tensorcast.api.store",
-        "coerce_serving_runtime_policy",
-    ),
     "compute_pure_transform_representation_contract_hash": (
         "tensorcast.api.store",
         "compute_pure_transform_representation_contract_hash",
-    ),
-    "compute_serving_tensor_schema_hash": (
-        "tensorcast.api.store",
-        "compute_serving_tensor_schema_hash",
-    ),
-    "count_canonical_serving_tensors": (
-        "tensorcast.api.store",
-        "count_canonical_serving_tensors",
-    ),
-    "prepare_pure_transform_serving_registration": (
-        "tensorcast.api.store",
-        "prepare_pure_transform_serving_registration",
-    ),
-    "prepare_binding_finalize_serving_registration": (
-        "tensorcast.api.store",
-        "prepare_binding_finalize_serving_registration",
-    ),
-    "prepare_serving_registration": (
-        "tensorcast.api.store",
-        "prepare_serving_registration",
-    ),
-    "parse_serving_manifest_ref": (
-        "tensorcast.api.store",
-        "parse_serving_manifest_ref",
     ),
     "init": ("tensorcast.startup", "init"),
     "PortConfig": ("tensorcast.startup", "PortConfig"),
@@ -522,11 +605,19 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
 
 context: Any
 plan: Any
+runtime: Any
+RuntimeAdmissionDecision: Any
+RuntimeAdmissionPolicy: Any
+RuntimeAdmissionRequest: Any
+RuntimePlacement: Any
+RuntimeProfile: Any
+RuntimeTensorView: Any
+coerce_runtime_artifact_policy: Any
 
 
 def __getattr__(name: str) -> Any:
-    if name == "serving":
-        module = importlib.import_module("tensorcast.serving")
+    if name == "runtime":
+        module = importlib.import_module("tensorcast.runtime")
         globals()[name] = module
         return module
     if name not in _LAZY_ATTRS:
@@ -539,16 +630,18 @@ def __getattr__(name: str) -> Any:
 
 
 def __dir__() -> list[str]:
-    return sorted(set(globals()).union(_LAZY_ATTRS).union({"serving"}))
+    return sorted(set(globals()).union(_LAZY_ATTRS).union({"runtime"}))
 
 
 if TYPE_CHECKING:
-    import tensorcast.serving as serving  # noqa: F401
     from tensorcast.api import (  # noqa: F401
         Artifact,
         ArtifactDescriptor,
         ArtifactError,
         ArtifactFuture,
+        ArtifactRealizationHandle,
+        ArtifactRealizationReport,
+        ArtifactRealizationSpec,
         BindingRealizationEntry,
         BindingRealizationPlan,
         BindingReservationCapability,
@@ -558,8 +651,6 @@ if TYPE_CHECKING:
         CallContext,
         CanonicalIndex,
         CanonicalIndexEntry,
-        CapabilityDirectoryClient,
-        CapabilityDirectoryOptions,
         CollectiveLoadGroup,
         DirectorySnapshot,
         ExecutionDiagnostics,
@@ -584,30 +675,33 @@ if TYPE_CHECKING:
         PlanStepRef,
         PlanStepResult,
         PlanType,
-        PrefetchedServingBinding,
-        PrefetchedServingBindingSet,
+        PrefetchHandoff,
+        PrefetchHandoffMemberFailure,
+        PrefetchHandoffSet,
         PrefetchRetentionPolicy,
-        PreparedServingRegistration,
         PublicDiskSourceHandle,
+        RealizationTarget,
+        RealizationTargetSet,
         RegisterArtifactOptions,
         RegisteredArtifact,
         RegisteredLease,
-        RegisteredServingPublication,
         RegistrationResult,
         RetentionHandle,
         Runtime,
-        ServingBindingMemberRef,
-        ServingBindingReadiness,
-        ServingBindingResolvedLayout,
-        ServingBindingResolvedSpecCacheEntry,
-        ServingBindingSetTarget,
-        ServingBindingSourceKind,
-        ServingBindingSourceMemberRef,
-        ServingBindingSourceRef,
-        ServingBindingSourceReuseDecision,
-        ServingBindingSourceReuseMode,
-        ServingBindingTarget,
-        ServingPublicationSubject,
+        RuntimeArtifactBuildIntent,
+        RuntimeArtifactManifest,
+        RuntimeArtifactPolicy,
+        RuntimeArtifactPolicyInput,
+        RuntimeBindingMemberRef,
+        RuntimeBindingReadiness,
+        RuntimeBindingResolvedLayout,
+        RuntimeBindingSourceKind,
+        RuntimeBindingSourceMemberRef,
+        RuntimeBindingSourceRef,
+        RuntimeBindingSourceReuseDecision,
+        RuntimeBindingSourceReuseMode,
+        RuntimeRealizationSpecCacheEntry,
+        RuntimeTopologyRef,
         SignalSnapshot,
         SourceBoundCapability,
         Store,
@@ -630,8 +724,6 @@ if TYPE_CHECKING:
         artifact,
         artifact_async,
         binding_realization_plan_to_proto,
-        build_serving_publication_bundle,
-        build_serving_publication_bundle_from_registered_artifact,
         complete_pure_transform_publication,
         deregister_artifact,
         from_disk,
@@ -639,7 +731,6 @@ if TYPE_CHECKING:
         normalize_binding_realization_plan,
         persist_artifact,
         persistence_operation,
-        prepare_serving_registration,
         promote_mounted_source,
         put,
         put_async,
@@ -654,6 +745,57 @@ if TYPE_CHECKING:
         store,
         unregister_vram_region,
     )
+    from tensorcast.artifact_runtime.attachment import (  # noqa: F401
+        RuntimeAttachment,
+        RuntimeBindingState,
+    )
+    from tensorcast.artifact_runtime.config import (  # noqa: F401
+        RuntimeArtifactLocator,
+        RuntimeStartPlanError,
+        TensorCastRuntimeConfig,
+        plan_runtime_start,
+    )
+    from tensorcast.artifact_runtime.diagnostics import (
+        RuntimeRealizationReport,  # noqa: F401
+    )
+    from tensorcast.artifact_runtime.host import RuntimeHostCapabilities  # noqa: F401
+    from tensorcast.artifact_runtime.intent import RuntimeRequestContext  # noqa: F401
+    from tensorcast.artifact_runtime.locator import ArtifactLocator  # noqa: F401
+    from tensorcast.artifact_runtime.policy import RuntimePolicy  # noqa: F401
+    from tensorcast.artifact_runtime.publication.actions import (  # noqa: F401
+        RuntimeReplicaPublicationSettings,
+        project_runtime_replica_publication_state,
+        publish_runtime_replica,
+        retire_runtime_replica,
+        runtime_replica_publication_settings,
+    )
+    from tensorcast.artifact_runtime.reload import (  # noqa: F401
+        merge_runtime_reload_extra_config,
+        normalize_runtime_reload_request_payload,
+        reload_runtime_attachment,
+    )
+    from tensorcast.artifact_runtime.state import (  # noqa: F401
+        ModelAttributeNames,
+        ModelAttributeRuntimeState,
+        OneShotRuntimeHook,
+    )
+    from tensorcast.artifact_runtime.view import (  # noqa: F401
+        BindingValueRefProjection,
+        RuntimeEndpointProjection,
+        RuntimeWorkerView,
+        SourceSelectionProjection,
+        WeightVersionProjection,
+        aggregate_runtime_view_outputs,
+    )
+    from tensorcast.retained_realization import (  # noqa: F401
+        RetainedRealizationClaim,
+        RetainedRealizationExpectedDigests,
+        parse_retained_realization_claim,
+        retained_realization_claim_extra_from_handoff,
+        retained_realization_claim_extra_json_from_handoff,
+        retained_realization_claim_mode,
+        retained_realization_trusted_reservation_bytes,
+    )
     from tensorcast.startup import (  # noqa: F401
         PortConfig,
         init,
@@ -664,14 +806,13 @@ if TYPE_CHECKING:
 
 __all__ = [
     "__version__",
-    "serving",
+    "runtime",
     "init",
     "is_initialized",
     "shutdown",
     "Store",
     "StoreOptions",
     "RegisteredArtifact",
-    "RegisteredServingPublication",
     "ArtifactError",
     "ArtifactFuture",
     "BindingReservationCapability",
@@ -689,8 +830,9 @@ __all__ = [
     "RegisterArtifactOptions",
     "GetArtifactOptions",
     "PrefetchRetentionPolicy",
-    "PrefetchedServingBinding",
-    "PrefetchedServingBindingSet",
+    "PrefetchHandoff",
+    "PrefetchHandoffMemberFailure",
+    "PrefetchHandoffSet",
     "calculate_tensor_device_offsets",
     "build_indices_from_safetensors",
     "binding_realization_plan_to_proto",
@@ -698,6 +840,8 @@ __all__ = [
     "CollectiveLoadGroup",
     "GroupRealization",
     "GroupVersionSetRef",
+    "RealizationTarget",
+    "RealizationTargetSet",
     "ExecutionDiagnostics",
     "BindingUpdateEpoch",
     "HashBackend",
@@ -726,20 +870,21 @@ __all__ = [
     "resolve_public_disk_source",
     "Artifact",
     "ArtifactDescriptor",
+    "ArtifactRealizationHandle",
+    "ArtifactRealizationReport",
+    "ArtifactRealizationSpec",
     "PublicDiskSourceHandle",
     "SourceBoundCapability",
-    "ServingBindingMemberRef",
-    "ServingBindingReadiness",
-    "ServingBindingResolvedLayout",
-    "ServingBindingResolvedSpecCacheEntry",
-    "ServingBindingSetTarget",
-    "ServingBindingSourceKind",
-    "ServingBindingSourceMemberRef",
-    "ServingBindingSourceRef",
-    "ServingBindingSourceReuseDecision",
-    "ServingBindingSourceReuseMode",
-    "ServingBindingTarget",
-    "ServingPublicationSubject",
+    "RuntimeBindingMemberRef",
+    "RuntimeBindingReadiness",
+    "RuntimeBindingResolvedLayout",
+    "RuntimeRealizationSpecCacheEntry",
+    "RuntimeBindingSourceKind",
+    "RuntimeBindingSourceMemberRef",
+    "RuntimeBindingSourceRef",
+    "RuntimeBindingSourceReuseDecision",
+    "RuntimeBindingSourceReuseMode",
+    "RuntimeTopologyRef",
     "store",
     "register",
     "register_async",
@@ -755,4 +900,50 @@ __all__ = [
     "unregister_vram_region",
     "deregister_artifact",
     "BuildConfigMismatchError",
+    "RuntimeAttachment",
+    "RuntimeAdmissionDecision",
+    "RuntimeAdmissionPolicy",
+    "RuntimeAdmissionRequest",
+    "RuntimeArtifactBuildIntent",
+    "RuntimeArtifactManifest",
+    "RuntimeArtifactPolicy",
+    "RuntimeArtifactPolicyInput",
+    "RuntimeBindingState",
+    "RuntimeHostCapabilities",
+    "RuntimePlacement",
+    "RuntimeProfile",
+    "RuntimeRequestContext",
+    "ArtifactLocator",
+    "RuntimeArtifactLocator",
+    "RuntimePolicy",
+    "RuntimeRealizationReport",
+    "RuntimeStartPlanError",
+    "RuntimeTensorView",
+    "TensorCastRuntimeConfig",
+    "ModelAttributeNames",
+    "ModelAttributeRuntimeState",
+    "OneShotRuntimeHook",
+    "BindingValueRefProjection",
+    "RuntimeEndpointProjection",
+    "RuntimeWorkerView",
+    "SourceSelectionProjection",
+    "WeightVersionProjection",
+    "aggregate_runtime_view_outputs",
+    "RuntimeReplicaPublicationSettings",
+    "coerce_runtime_artifact_policy",
+    "RetainedRealizationClaim",
+    "RetainedRealizationExpectedDigests",
+    "parse_retained_realization_claim",
+    "project_runtime_replica_publication_state",
+    "publish_runtime_replica",
+    "reload_runtime_attachment",
+    "merge_runtime_reload_extra_config",
+    "normalize_runtime_reload_request_payload",
+    "plan_runtime_start",
+    "retained_realization_claim_extra_from_handoff",
+    "retained_realization_claim_extra_json_from_handoff",
+    "retained_realization_claim_mode",
+    "retained_realization_trusted_reservation_bytes",
+    "retire_runtime_replica",
+    "runtime_replica_publication_settings",
 ]

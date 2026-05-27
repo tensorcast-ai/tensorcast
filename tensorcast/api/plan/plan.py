@@ -39,7 +39,7 @@ from tensorcast.api.store.artifact import (
     PrefetchedReplica,
     _decode_capability_token,
 )
-from tensorcast.api.store.serving_builder import build_pure_transform_transform_spec
+from tensorcast.api.store.publication_builder import build_pure_transform_transform_spec
 from tensorcast.api.store.view_composer import compute_view_id
 from tensorcast.engine_adapter.artifact_api import (
     BatchOutcome,
@@ -59,20 +59,20 @@ from tensorcast.types import (
     AssemblyContractFamily,
     AssemblyReadinessPolicy,
     AssemblyRequirementSetRef,
-    PrefetchedServingBinding,
-    PrefetchedServingBindingSet,
+    PrefetchHandoff,
+    PrefetchHandoffSet,
     PrefetchRetentionPolicy,
+    RealizationTarget,
+    RealizationTargetSet,
     RepresentationPublishContract,
     RepresentationPublishSpec,
-    ServingArtifactManifest,
-    ServingBindingReadiness,
-    ServingBindingSetTarget,
-    ServingBindingTarget,
+    RuntimeArtifactManifest,
+    RuntimeBindingReadiness,
 )
 
 if TYPE_CHECKING:
     from tensorcast.api.store import Store
-    from tensorcast.types import ServingBuildIntent
+    from tensorcast.types import RuntimeArtifactBuildIntent
 
 T = TypeVar("T")
 ArtifactActionResult = (
@@ -223,8 +223,8 @@ class _PrefetchAction:
     artifact: Artifact
     device: str | int | None
     device_id: int
-    target: ServingBindingTarget | ServingBindingSetTarget | None = None
-    readiness: ServingBindingReadiness = "serving_local_ready"
+    target: RealizationTarget | RealizationTargetSet | None = None
+    readiness: RuntimeBindingReadiness = "runtime_local_ready"
     retention: PrefetchRetentionPolicy | None = None
 
 
@@ -426,7 +426,7 @@ def _artifact_result_from_proto(
             serving_manifest_ref=str(
                 result.pure_transform_publication.serving_manifest_ref
             ),
-            serving_manifest=ServingArtifactManifest.from_bytes(
+            serving_manifest=RuntimeArtifactManifest.from_bytes(
                 bytes(result.pure_transform_publication.serving_manifest_bytes)
             ),
             serving_manifest_bytes=bytes(
@@ -761,13 +761,11 @@ class WorkerStepBuilder:
         art: Artifact,
         *,
         device: str | int | None = None,
-        target: ServingBindingTarget | ServingBindingSetTarget | None = None,
-        readiness: ServingBindingReadiness = "serving_local_ready",
+        target: RealizationTarget | RealizationTargetSet | None = None,
+        readiness: RuntimeBindingReadiness = "runtime_local_ready",
         retention: PrefetchRetentionPolicy | None = None,
         depends_on: Sequence[PlanStepRef[Any]] | None = None,
-    ) -> PlanStepRef[
-        PrefetchedReplica | PrefetchedServingBinding | PrefetchedServingBindingSet
-    ]:
+    ) -> PlanStepRef[PrefetchedReplica | PrefetchHandoff | PrefetchHandoffSet]:
         if target is not None and device is not None:
             raise ArtifactError(
                 "prefetch target and device are mutually exclusive",
@@ -1012,7 +1010,7 @@ class InstanceStepBuilder:
         self,
         art: Artifact,
         *,
-        build_intent: "ServingBuildIntent",
+        build_intent: "RuntimeArtifactBuildIntent",
         contract_family: str | None = None,
         out_key: str,
         transform_name: str = "identity.v1",
@@ -1329,7 +1327,7 @@ class Plan:
                 _fill_selection_proto(selection, prefetch_action.selection)
                 prefetch_action.device_id = int(step.action.device_id)
                 if step.action.target is not None:
-                    if isinstance(step.action.target, ServingBindingTarget):
+                    if isinstance(step.action.target, RealizationTarget):
                         prefetch_action.serving_binding_target.CopyFrom(
                             step.action.target.to_proto()
                         )

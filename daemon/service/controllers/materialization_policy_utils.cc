@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <format>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -18,6 +19,9 @@
 #include "core/common/artifact_hash.h"
 #include "core/store/materialization/dataplane/view/view_identity.h"
 #include "daemon/service/rpc_context.h"
+#include "google/protobuf/io/coded_stream.h"
+#include "google/protobuf/io/zero_copy_stream_impl_lite.h"
+#include "google/protobuf/message_lite.h"
 
 namespace tensorcast::daemon::materialization_policy {
 
@@ -30,6 +34,7 @@ using store::loader::ViewOp;
 constexpr std::string_view kGroupRealizationTransportKind = "group_realization_transport";
 constexpr std::string_view kGroupRealizationChildTransportRequestProfile =
     "tensorcast.group_realization.child_transport_request.v1";
+constexpr std::string_view kControllerSourceSelectionDigestProfile = "tensorcast.controller.source_selection_digest.v1";
 
 store::loading::SourceLocalityHint to_source_locality(v2::SourceLocality locality) {
   switch (locality) {
@@ -375,20 +380,124 @@ std::vector<std::string> acquire_group_barriers_for(const v2::GroupRealizationAc
   return barriers;
 }
 
+std::string serialize_deterministic(const google::protobuf::MessageLite& message) {
+  std::string output;
+  {
+    google::protobuf::io::StringOutputStream string_stream(&output);
+    google::protobuf::io::CodedOutputStream coded_stream(&string_stream);
+    coded_stream.SetSerializationDeterministic(true);
+    if (!message.SerializeToCodedStream(&coded_stream) || coded_stream.HadError()) {
+      return message.SerializeAsString();
+    }
+  }
+  return output;
+}
+
+void append_big_endian_u64(std::vector<uint8_t>* out, uint64_t value) {
+  for (int shift = 56; shift >= 0; shift -= 8) {
+    out->push_back(static_cast<uint8_t>((value >> shift) & 0xffU));
+  }
+}
+
+void append_digest_part(std::vector<uint8_t>* out, std::string_view part) {
+  append_big_endian_u64(out, static_cast<uint64_t>(part.size()));
+  out->insert(out->end(), part.begin(), part.end());
+}
+
+std::string sha256_hex_for_parts(const std::vector<std::string_view>& parts) {
+  uint64_t total_size = 0;
+  for (std::string_view part : parts) {
+    total_size += 8U + static_cast<uint64_t>(part.size());
+  }
+  std::vector<uint8_t> payload;
+  if (total_size <= static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+    payload.reserve(static_cast<size_t>(total_size));
+  }
+  for (std::string_view part : parts) {
+    append_digest_part(&payload, part);
+  }
+  const std::vector<uint8_t> digest = common::sha256_digest_bytes(absl::MakeConstSpan(payload));
+  return absl::BytesToHexString(std::string(reinterpret_cast<const char*>(digest.data()), digest.size()));
+}
+
+std::string artifact_profile_for(std::string_view artifact_id) {
+  if (artifact_id.starts_with("msa1:")) {
+    return "mounted_source";
+  }
+  if (artifact_id.starts_with("cgid:")) {
+    return "byte_artifact";
+  }
+  return "durable_artifact";
+}
+
+std::string authority_scope_for(std::string_view artifact_id) {
+  if (artifact_id.starts_with("msa1:")) {
+    return "daemon_local_mounted_source";
+  }
+  return "daemon_mediated_durable";
+}
+
+std::optional<std::string> requested_generation_hint_for(const v2::GroupRealizationOptions* group_realization) {
+  if (group_realization == nullptr || !group_realization->enabled()) {
+    return std::nullopt;
+  }
+  if (group_realization->version().value_case() != v2::VersionReference::kKeyReference) {
+    return std::nullopt;
+  }
+  const v2::KeyVersionReference& key_ref = group_realization->version().key_reference();
+  if (!key_ref.has_expected_generation()) {
+    return std::nullopt;
+  }
+  return std::to_string(key_ref.expected_generation());
+}
+
+std::optional<std::string> requested_version_set_id_for(const v2::GroupRealizationOptions* group_realization) {
+  if (group_realization == nullptr || !group_realization->enabled()) {
+    return std::nullopt;
+  }
+  if (group_realization->version().value_case() != v2::VersionReference::kExplicitVersionSet) {
+    return std::nullopt;
+  }
+  const std::string& version_set_id = group_realization->version().explicit_version_set().version_set_id();
+  if (version_set_id.empty()) {
+    return std::nullopt;
+  }
+  return version_set_id;
+}
+
 std::optional<std::string> selection_digest_for(
     const v2::GroupRealizationOptions* group_realization,
     const GroupRealizationBeginContext* begin_context,
     const tensorcast::common::v1::ArtifactSelection& selection) {
-  if (begin_context != nullptr && !begin_context->selection_hash.empty()) {
-    return absl::BytesToHexString(begin_context->selection_hash);
-  }
-  if (!selection.selection_hash().empty()) {
-    return absl::BytesToHexString(selection.selection_hash());
-  }
-  if (group_realization != nullptr && group_realization->enabled()) {
+  const tensorcast::common::v1::ArtifactSelection& effective_selection =
+      begin_context != nullptr && !begin_context->part_selection.artifact_id().empty() ? begin_context->part_selection
+                                                                                       : selection;
+  if (effective_selection.artifact_id().empty()) {
     return std::nullopt;
   }
-  return std::nullopt;
+
+  const std::string serialized_selection = serialize_deterministic(effective_selection);
+  const std::string selection_identity = begin_context != nullptr && !begin_context->selection_hash.empty()
+      ? begin_context->selection_hash
+      : effective_selection.selection_hash();
+  std::string generation_hint;
+  if (begin_context != nullptr && begin_context->key_generation != 0) {
+    generation_hint = std::to_string(begin_context->key_generation);
+  } else if (std::optional<std::string> requested_generation = requested_generation_hint_for(group_realization);
+             requested_generation.has_value()) {
+    generation_hint = *requested_generation;
+  }
+  const std::string profile = artifact_profile_for(effective_selection.artifact_id());
+  const std::string scope = authority_scope_for(effective_selection.artifact_id());
+  return sha256_hex_for_parts({
+      kControllerSourceSelectionDigestProfile,
+      serialized_selection,
+      effective_selection.logical_layout_hash(),
+      selection_identity,
+      profile,
+      scope,
+      generation_hint,
+  });
 }
 
 std::optional<std::string> operation_id_for(const v2::MaterializeIntoTargetRequest& request) {
@@ -896,7 +1005,7 @@ absl::StatusOr<ControllerRealizationPlan> build_controller_realization_plan_impl
       .group_barriers = group_barriers_for(group_realization),
       .version_set_id = group_begin_context != nullptr && !group_begin_context->version_set.version_set_id().empty()
           ? std::optional<std::string>(group_begin_context->version_set.version_set_id())
-          : std::nullopt,
+          : requested_version_set_id_for(group_realization),
       .transaction_id = group_begin_context != nullptr && !group_begin_context->transaction_id.empty()
           ? std::optional<std::string>(group_begin_context->transaction_id)
           : std::nullopt,
@@ -956,11 +1065,15 @@ absl::StatusOr<ControllerRealizationPlan> build_prefetch_target_set_realization_
           : "same_daemon_session",
       .collective_policy = prefetch_collective_policy_for(request, member_count),
       .group_barriers = group_barriers_for(request.has_group_realization() ? &request.group_realization() : nullptr),
-      .version_set_id = std::nullopt,
+      .version_set_id =
+          requested_version_set_id_for(request.has_group_realization() ? &request.group_realization() : nullptr),
       .transaction_id = std::nullopt,
       .source_selection_digest = !request.source().artifact_selection_digest().empty()
           ? std::optional<std::string>(request.source().artifact_selection_digest())
-          : selection_digest_for(nullptr, nullptr, request.source_selection()),
+          : selection_digest_for(
+                request.has_group_realization() ? &request.group_realization() : nullptr,
+                nullptr,
+                request.source_selection()),
   };
   plan.lifecycle = ControllerRealizationLifecyclePlan{
       .capability = "target_set",
@@ -1020,11 +1133,15 @@ absl::StatusOr<ControllerRealizationPlan> build_prefetch_member_realization_plan
           : "same_daemon_session",
       .collective_policy = prefetch_collective_policy_for(request, member_count),
       .group_barriers = group_barriers_for(request.has_group_realization() ? &request.group_realization() : nullptr),
-      .version_set_id = std::nullopt,
+      .version_set_id =
+          requested_version_set_id_for(request.has_group_realization() ? &request.group_realization() : nullptr),
       .transaction_id = std::nullopt,
       .source_selection_digest = !request.source().artifact_selection_digest().empty()
           ? std::optional<std::string>(request.source().artifact_selection_digest())
-          : selection_digest_for(nullptr, nullptr, request.source_selection()),
+          : selection_digest_for(
+                request.has_group_realization() ? &request.group_realization() : nullptr,
+                nullptr,
+                request.source_selection()),
   };
   plan.lifecycle = ControllerRealizationLifecyclePlan{
       .capability = "retained_binding",
@@ -1259,7 +1376,7 @@ absl::StatusOr<v2::CollectivePolicy> resolve_collective_policy(
     const ExecutionTopologyContext& execution_topology) {
   const bool has_collective_group = execution_topology.collective_load_group.has_value();
   if (requested == v2::CollectivePolicy::COLLECTIVE_POLICY_UNSPECIFIED) {
-    return has_collective_group ? v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE
+    return has_collective_group ? v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST
                                 : v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE;
   }
   if (requested == v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE && has_collective_group) {
@@ -1367,13 +1484,11 @@ absl::StatusOr<ControllerRealizationPlan> build_controller_realization_plan(
       .group_barriers = group_barriers_for(group_realization),
       .version_set_id = group_begin_context != nullptr && !group_begin_context->version_set.version_set_id().empty()
           ? std::optional<std::string>(group_begin_context->version_set.version_set_id())
-          : std::nullopt,
+          : requested_version_set_id_for(group_realization),
       .transaction_id = group_begin_context != nullptr && !group_begin_context->transaction_id.empty()
           ? std::optional<std::string>(group_begin_context->transaction_id)
           : std::nullopt,
-      .source_selection_digest = !resolved_selection.selection_hash().empty()
-          ? std::optional<std::string>(absl::BytesToHexString(resolved_selection.selection_hash()))
-          : std::nullopt,
+      .source_selection_digest = selection_digest_for(group_realization, group_begin_context, resolved_selection),
   };
   plan.lifecycle = ControllerRealizationLifecyclePlan{
       .capability = target_kind,
@@ -1439,9 +1554,8 @@ absl::StatusOr<ControllerRealizationPlan> build_controller_realization_plan(cons
       .group_barriers = {},
       .version_set_id = std::nullopt,
       .transaction_id = std::nullopt,
-      .source_selection_digest =
-          request.has_initial_selection() && !request.initial_selection().selection_hash().empty()
-          ? std::optional<std::string>(absl::BytesToHexString(request.initial_selection().selection_hash()))
+      .source_selection_digest = request.has_initial_selection()
+          ? selection_digest_for(nullptr, nullptr, request.initial_selection())
           : std::nullopt,
   };
   const bool daemon_owned = request.ownership() == v2::BindingOwnership::BINDING_OWNERSHIP_DAEMON;
@@ -1967,9 +2081,7 @@ absl::StatusOr<ControllerRealizationPlan> build_controller_realization_plan(
       .group_barriers = group_barriers_for(group_realization),
       .version_set_id = std::nullopt,
       .transaction_id = std::nullopt,
-      .source_selection_digest = !scope.selection().selection_hash().empty()
-          ? std::optional<std::string>(absl::BytesToHexString(scope.selection().selection_hash()))
-          : std::nullopt,
+      .source_selection_digest = selection_digest_for(group_realization, nullptr, scope.selection()),
   };
   plan.lifecycle = ControllerRealizationLifecyclePlan{
       .capability = "publication",

@@ -667,6 +667,9 @@ _ASSEMBLY_EP_PIECE_COVERAGE_CONTRACT = "ep_structural_view"
 _ASSEMBLY_CANONICAL_COVERAGE_CONTRACT = "canonical_full"
 SERVING_MANIFEST_TENSOR_NAME = "__tensorcast_meta__.manifest_json"
 SERVING_BUILD_DIGEST_VERSION = "tensorcast.serving_build_digest.v1"
+# Serving-manifest names below are persisted publication/wire ABI, not a
+# separate runtime source authority. Runtime-facing DTOs use artifact/runtime
+# names and map to these fields only at serialization boundaries.
 
 
 def _canonical_json_bytes(payload: object) -> bytes:
@@ -718,7 +721,7 @@ class FinalizeClass(str, Enum):
     UNKNOWN_BLOCKED = "unknown_blocked"
 
 
-class ServingSupportLevel(str, Enum):
+class RuntimeSupportLevel(str, Enum):
     BLOCKED = "blocked"
     SOURCE_BIND_BOOTSTRAP_ONLY = "source_bind_bootstrap_only"
     BUILDER_PUBLICATION_READY = "builder_publication_ready"
@@ -749,30 +752,30 @@ _PUBLICATION_FINALIZE_CLASS_FROM_PROTO: dict[int, FinalizeClass] = {
         FinalizeClass.UNKNOWN_BLOCKED
     ),
 }
-_PUBLICATION_SERVING_SUPPORT_LEVEL_TO_PROTO: dict[
-    ServingSupportLevel, publication_pb2.ServingSupportLevel
+_PUBLICATION_RUNTIME_SUPPORT_LEVEL_TO_PROTO: dict[
+    RuntimeSupportLevel, publication_pb2.ServingSupportLevel
 ] = {
-    ServingSupportLevel.BLOCKED: publication_pb2.SERVING_SUPPORT_LEVEL_BLOCKED,
-    ServingSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY: (
+    RuntimeSupportLevel.BLOCKED: publication_pb2.SERVING_SUPPORT_LEVEL_BLOCKED,
+    RuntimeSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY: (
         publication_pb2.SERVING_SUPPORT_LEVEL_SOURCE_BIND_BOOTSTRAP_ONLY
     ),
-    ServingSupportLevel.BUILDER_PUBLICATION_READY: (
+    RuntimeSupportLevel.BUILDER_PUBLICATION_READY: (
         publication_pb2.SERVING_SUPPORT_LEVEL_BUILDER_PUBLICATION_READY
     ),
-    ServingSupportLevel.RUNTIME_BIND_SWAP_READY: (
+    RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY: (
         publication_pb2.SERVING_SUPPORT_LEVEL_RUNTIME_BIND_SWAP_READY
     ),
 }
-_PUBLICATION_SERVING_SUPPORT_LEVEL_FROM_PROTO: dict[int, ServingSupportLevel] = {
-    int(publication_pb2.SERVING_SUPPORT_LEVEL_BLOCKED): ServingSupportLevel.BLOCKED,
+_PUBLICATION_RUNTIME_SUPPORT_LEVEL_FROM_PROTO: dict[int, RuntimeSupportLevel] = {
+    int(publication_pb2.SERVING_SUPPORT_LEVEL_BLOCKED): RuntimeSupportLevel.BLOCKED,
     int(publication_pb2.SERVING_SUPPORT_LEVEL_SOURCE_BIND_BOOTSTRAP_ONLY): (
-        ServingSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY
+        RuntimeSupportLevel.SOURCE_BIND_BOOTSTRAP_ONLY
     ),
     int(publication_pb2.SERVING_SUPPORT_LEVEL_BUILDER_PUBLICATION_READY): (
-        ServingSupportLevel.BUILDER_PUBLICATION_READY
+        RuntimeSupportLevel.BUILDER_PUBLICATION_READY
     ),
     int(publication_pb2.SERVING_SUPPORT_LEVEL_RUNTIME_BIND_SWAP_READY): (
-        ServingSupportLevel.RUNTIME_BIND_SWAP_READY
+        RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY
     ),
 }
 _PUBLICATION_ASSEMBLY_TARGET_KIND_TO_PROTO: dict[
@@ -1122,7 +1125,7 @@ class AssemblyReadinessPolicy(BaseModel):
         )
 
 
-class ServingBuildIntent(BaseModel):
+class RuntimeArtifactBuildIntent(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     representation_contract_hash: str | None = None
@@ -1134,7 +1137,7 @@ class ServingBuildIntent(BaseModel):
     source_artifact_ref: str | None = None
 
     @model_validator(mode="after")
-    def _validate_fields(self) -> "ServingBuildIntent":
+    def _validate_fields(self) -> "RuntimeArtifactBuildIntent":
         if (
             self.representation_contract_hash is not None
             and not self.representation_contract_hash
@@ -1182,7 +1185,7 @@ class ServingBuildIntent(BaseModel):
     def from_publication_proto(
         cls,
         proto: publication_pb2.ServingBuildIntent,
-    ) -> "ServingBuildIntent":
+    ) -> "RuntimeArtifactBuildIntent":
         builder_mode = BuilderMode.PURE_TRANSFORM
         if int(proto.builder_mode) != int(publication_pb2.BUILDER_MODE_UNSPECIFIED):
             builder_mode = _PUBLICATION_BUILDER_MODE_FROM_PROTO[int(proto.builder_mode)]
@@ -1202,7 +1205,7 @@ class ServingBuildIntent(BaseModel):
 class PureTransformPublicationSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    build_intent: ServingBuildIntent
+    build_intent: RuntimeArtifactBuildIntent
     contract_family: AssemblyContractFamily | None = None
     source_version_key: str | None = None
     serving_version_key: str | None = None
@@ -1212,7 +1215,7 @@ class PureTransformPublicationSpec(BaseModel):
     requirements: AssemblyRequirementSetRef | None = None
     readiness_policy: AssemblyReadinessPolicy | None = None
     structural_view_ids: tuple[str, ...] = ()
-    admission_facts: ServingAdmissionFacts | None = None
+    admission_facts: RuntimeAdmissionFacts | None = None
 
     @model_validator(mode="after")
     def _validate_publication_spec(self) -> "PureTransformPublicationSpec":
@@ -1262,7 +1265,9 @@ class PureTransformPublicationSpec(BaseModel):
         proto: publication_pb2.PureTransformPublicationSpec,
     ) -> "PureTransformPublicationSpec":
         return cls(
-            build_intent=ServingBuildIntent.from_publication_proto(proto.build_intent),
+            build_intent=RuntimeArtifactBuildIntent.from_publication_proto(
+                proto.build_intent
+            ),
             contract_family=cast(
                 AssemblyContractFamily | None,
                 str(proto.contract_family or "") or None,
@@ -1284,18 +1289,18 @@ class PureTransformPublicationSpec(BaseModel):
             ),
             structural_view_ids=tuple(str(item) for item in proto.structural_view_ids),
             admission_facts=(
-                ServingAdmissionFacts.from_publication_proto(proto.admission_facts)
+                RuntimeAdmissionFacts.from_publication_proto(proto.admission_facts)
                 if proto.HasField("admission_facts")
                 else None
             ),
         )
 
 
-class ServingAdmissionFacts(BaseModel):
+class RuntimeAdmissionFacts(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     finalize_class: FinalizeClass
-    support_level: ServingSupportLevel
+    support_level: RuntimeSupportLevel
     topology_admission_digest: str | None = None
     same_binding_fast_path_validated: bool = False
 
@@ -1307,7 +1312,7 @@ class ServingAdmissionFacts(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _validate_admission_facts(self) -> "ServingAdmissionFacts":
+    def _validate_admission_facts(self) -> "RuntimeAdmissionFacts":
         if (
             self.finalize_class == FinalizeClass.REPRESENTATION_CHANGING
             and not self.same_binding_fast_path_validated
@@ -1324,8 +1329,8 @@ class ServingAdmissionFacts(BaseModel):
                 "representation publish requires a non-blocked finalize_class"
             )
         if self.support_level not in {
-            ServingSupportLevel.BUILDER_PUBLICATION_READY,
-            ServingSupportLevel.RUNTIME_BIND_SWAP_READY,
+            RuntimeSupportLevel.BUILDER_PUBLICATION_READY,
+            RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY,
         }:
             raise ValueError(
                 "representation publish requires support_level to admit builder publication"
@@ -1354,12 +1359,12 @@ class ServingAdmissionFacts(BaseModel):
 
     def admits_builder_publication(self) -> bool:
         return self.support_level in {
-            ServingSupportLevel.BUILDER_PUBLICATION_READY,
-            ServingSupportLevel.RUNTIME_BIND_SWAP_READY,
+            RuntimeSupportLevel.BUILDER_PUBLICATION_READY,
+            RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY,
         }
 
     def admits_runtime_bind_swap(self) -> bool:
-        return self.support_level == ServingSupportLevel.RUNTIME_BIND_SWAP_READY
+        return self.support_level == RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY
 
     def require_runtime_bind_swap_ready(self) -> None:
         if not self.admits_runtime_bind_swap():
@@ -1376,7 +1381,7 @@ class ServingAdmissionFacts(BaseModel):
     def to_publication_proto(self) -> publication_pb2.ServingAdmissionFacts:
         proto = publication_pb2.ServingAdmissionFacts(
             finalize_class=_PUBLICATION_FINALIZE_CLASS_TO_PROTO[self.finalize_class],
-            support_level=_PUBLICATION_SERVING_SUPPORT_LEVEL_TO_PROTO[
+            support_level=_PUBLICATION_RUNTIME_SUPPORT_LEVEL_TO_PROTO[
                 self.support_level
             ],
             same_binding_fast_path_validated=bool(
@@ -1391,18 +1396,18 @@ class ServingAdmissionFacts(BaseModel):
     def from_publication_proto(
         cls,
         proto: publication_pb2.ServingAdmissionFacts,
-    ) -> "ServingAdmissionFacts":
+    ) -> "RuntimeAdmissionFacts":
         if int(proto.finalize_class) == int(publication_pb2.FINALIZE_CLASS_UNSPECIFIED):
-            raise ValueError("ServingAdmissionFacts.finalize_class must be specified")
+            raise ValueError("RuntimeAdmissionFacts.finalize_class must be specified")
         if int(proto.support_level) == int(
             publication_pb2.SERVING_SUPPORT_LEVEL_UNSPECIFIED
         ):
-            raise ValueError("ServingAdmissionFacts.support_level must be specified")
+            raise ValueError("RuntimeAdmissionFacts.support_level must be specified")
         return cls(
             finalize_class=_PUBLICATION_FINALIZE_CLASS_FROM_PROTO[
                 int(proto.finalize_class)
             ],
-            support_level=_PUBLICATION_SERVING_SUPPORT_LEVEL_FROM_PROTO[
+            support_level=_PUBLICATION_RUNTIME_SUPPORT_LEVEL_FROM_PROTO[
                 int(proto.support_level)
             ],
             topology_admission_digest=(
@@ -1414,7 +1419,7 @@ class ServingAdmissionFacts(BaseModel):
         )
 
 
-class ServingArtifactManifest(BaseModel):
+class RuntimeArtifactManifest(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     schema_version: int = 1
@@ -1435,7 +1440,7 @@ class ServingArtifactManifest(BaseModel):
     topology_admission_digest: str | None = None
 
     @model_validator(mode="after")
-    def _validate_manifest(self) -> "ServingArtifactManifest":
+    def _validate_manifest(self) -> "RuntimeArtifactManifest":
         if self.schema_version <= 0:
             raise ValueError("schema_version must be positive")
         if self.artifact_kind != "serving":
@@ -1465,14 +1470,14 @@ class ServingArtifactManifest(BaseModel):
     def from_build_intent(
         cls,
         *,
-        intent: ServingBuildIntent,
+        intent: RuntimeArtifactBuildIntent,
         representation_contract_hash: str | None = None,
         tensor_schema_hash: str,
         canonical_tensor_count: int,
         serving_manifest_ref: str | None = None,
         logical_topology_json: str | None = None,
         topology_admission_digest: str | None = None,
-    ) -> "ServingArtifactManifest":
+    ) -> "RuntimeArtifactManifest":
         resolved_representation_contract_hash = (
             representation_contract_hash or intent.representation_contract_hash
         )
@@ -1505,7 +1510,7 @@ class ServingArtifactManifest(BaseModel):
         return _canonical_json_bytes(self.model_dump(mode="json"))
 
     @classmethod
-    def from_bytes(cls, payload: bytes | bytearray | str) -> "ServingArtifactManifest":
+    def from_bytes(cls, payload: bytes | bytearray | str) -> "RuntimeArtifactManifest":
         raw = (
             payload.decode("utf-8")
             if isinstance(payload, (bytes, bytearray))
@@ -1517,8 +1522,8 @@ class ServingArtifactManifest(BaseModel):
         self,
         *,
         require_manifest: bool = True,
-    ) -> "ServingRuntimePolicy":
-        return ServingRuntimePolicy(
+    ) -> "RuntimeArtifactPolicy":
+        return RuntimeArtifactPolicy(
             require_manifest=bool(require_manifest),
             serving_manifest_ref=str(self.serving_manifest_ref),
             expected_representation_contract_hash=str(
@@ -1533,7 +1538,7 @@ class ServingArtifactManifest(BaseModel):
         )
 
 
-class ServingRuntimePolicy(BaseModel):
+class RuntimeArtifactPolicy(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     require_manifest: bool = True
@@ -1543,7 +1548,7 @@ class ServingRuntimePolicy(BaseModel):
     expected_topology_admission_digest: str | None = None
 
     @model_validator(mode="after")
-    def _validate_policy(self) -> "ServingRuntimePolicy":
+    def _validate_policy(self) -> "RuntimeArtifactPolicy":
         if self.serving_manifest_ref is not None:
             parse_serving_manifest_ref(self.serving_manifest_ref)
         return self
@@ -1578,7 +1583,7 @@ class ServingRuntimePolicy(BaseModel):
     def from_proto(
         cls,
         proto: store_daemon_pb2.ServingArtifactRuntimePolicy,
-    ) -> "ServingRuntimePolicy":
+    ) -> "RuntimeArtifactPolicy":
         return cls(
             require_manifest=bool(proto.require_manifest),
             serving_manifest_ref=str(proto.serving_manifest_ref or "") or None,
@@ -1643,25 +1648,25 @@ class BindingValueRef(BaseModel):
         )
 
 
-ServingBindingReadiness = Literal[
-    "serving_reserved",
-    "serving_local_ready",
-    "serving_published_ready",
+RuntimeBindingReadiness = Literal[
+    "runtime_reserved",
+    "runtime_local_ready",
+    "runtime_published_ready",
 ]
 
 _SERVING_READINESS_TO_PROTO: dict[
-    ServingBindingReadiness, operation_pb2.ServingBindingReadiness
+    RuntimeBindingReadiness, operation_pb2.ServingBindingReadiness
 ] = {
-    "serving_reserved": operation_pb2.SERVING_BINDING_READINESS_RESERVED,
-    "serving_local_ready": operation_pb2.SERVING_BINDING_READINESS_LOCAL_READY,
-    "serving_published_ready": operation_pb2.SERVING_BINDING_READINESS_PUBLISHED_READY,
+    "runtime_reserved": operation_pb2.SERVING_BINDING_READINESS_RESERVED,
+    "runtime_local_ready": operation_pb2.SERVING_BINDING_READINESS_LOCAL_READY,
+    "runtime_published_ready": operation_pb2.SERVING_BINDING_READINESS_PUBLISHED_READY,
 }
-_SERVING_READINESS_FROM_PROTO: dict[int, ServingBindingReadiness] = {
+_SERVING_READINESS_FROM_PROTO: dict[int, RuntimeBindingReadiness] = {
     int(value): key for key, value in _SERVING_READINESS_TO_PROTO.items()
 }
 
 
-class ServingTopologyRef(BaseModel):
+class RuntimeTopologyRef(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     schema_version: int = 1
@@ -1671,7 +1676,7 @@ class ServingTopologyRef(BaseModel):
     runtime_topology_diagnostics_ref: str | None = None
 
     @model_validator(mode="after")
-    def _validate_topology(self) -> "ServingTopologyRef":
+    def _validate_topology(self) -> "RuntimeTopologyRef":
         if int(self.schema_version) <= 0:
             raise ValueError("schema_version must be positive")
         if not self.schema_topology_digest:
@@ -1696,7 +1701,7 @@ class ServingTopologyRef(BaseModel):
     @classmethod
     def from_proto(
         cls, proto: operation_pb2.ServingTopologyRef
-    ) -> "ServingTopologyRef":
+    ) -> "RuntimeTopologyRef":
         return cls(
             schema_version=int(proto.schema_version),
             schema_topology_digest=str(proto.schema_topology_digest),
@@ -1718,7 +1723,7 @@ class ServingTopologyRef(BaseModel):
         )
 
 
-class ServingBindingMemberRef(BaseModel):
+class RuntimeBindingMemberRef(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     member_id: str
@@ -1727,7 +1732,7 @@ class ServingBindingMemberRef(BaseModel):
     group_id: str | None = None
 
     @model_validator(mode="after")
-    def _validate_member(self) -> "ServingBindingMemberRef":
+    def _validate_member(self) -> "RuntimeBindingMemberRef":
         if not self.member_id:
             raise ValueError("member_id must not be empty")
         if int(self.member_index) < 0:
@@ -1753,7 +1758,7 @@ class ServingBindingMemberRef(BaseModel):
     @classmethod
     def from_proto(
         cls, proto: operation_pb2.ServingBindingMemberRef
-    ) -> "ServingBindingMemberRef":
+    ) -> "RuntimeBindingMemberRef":
         return cls(
             member_id=str(proto.member_id),
             member_index=int(proto.member_index),
@@ -1795,52 +1800,52 @@ class BlobRef(BaseModel):
         )
 
 
-ServingBindingSourceKind = Literal[
+RuntimeBindingSourceKind = Literal[
     "checkpoint_artifact",
-    "serving_artifact",
-    "serving_artifact_set",
+    "runtime_artifact",
+    "runtime_artifact_set",
 ]
-ServingBindingSourceReuseMode = Literal[
-    "checkpoint_to_serving",
-    "serving_direct_member_copy",
-    "serving_transform_required",
+RuntimeBindingSourceReuseMode = Literal[
+    "checkpoint_to_runtime",
+    "runtime_direct_member_copy",
+    "runtime_transform_required",
     "unsupported",
 ]
 
 _SOURCE_KIND_TO_PROTO: dict[
-    ServingBindingSourceKind, operation_pb2.ServingBindingSourceKind
+    RuntimeBindingSourceKind, operation_pb2.ServingBindingSourceKind
 ] = {
     "checkpoint_artifact": operation_pb2.SERVING_BINDING_SOURCE_KIND_CHECKPOINT_ARTIFACT,
-    "serving_artifact": operation_pb2.SERVING_BINDING_SOURCE_KIND_SERVING_ARTIFACT,
-    "serving_artifact_set": operation_pb2.SERVING_BINDING_SOURCE_KIND_SERVING_ARTIFACT_SET,
+    "runtime_artifact": operation_pb2.SERVING_BINDING_SOURCE_KIND_SERVING_ARTIFACT,
+    "runtime_artifact_set": operation_pb2.SERVING_BINDING_SOURCE_KIND_SERVING_ARTIFACT_SET,
 }
-_SOURCE_KIND_FROM_PROTO: dict[int, ServingBindingSourceKind] = {
+_SOURCE_KIND_FROM_PROTO: dict[int, RuntimeBindingSourceKind] = {
     int(value): key for key, value in _SOURCE_KIND_TO_PROTO.items()
 }
 _SOURCE_REUSE_TO_PROTO: dict[
-    ServingBindingSourceReuseMode, operation_pb2.ServingBindingSourceReuseMode
+    RuntimeBindingSourceReuseMode, operation_pb2.ServingBindingSourceReuseMode
 ] = {
-    "checkpoint_to_serving": operation_pb2.SERVING_BINDING_SOURCE_REUSE_MODE_CHECKPOINT_TO_SERVING,
-    "serving_direct_member_copy": operation_pb2.SERVING_BINDING_SOURCE_REUSE_MODE_SERVING_DIRECT_MEMBER_COPY,
-    "serving_transform_required": operation_pb2.SERVING_BINDING_SOURCE_REUSE_MODE_SERVING_TRANSFORM_REQUIRED,
+    "checkpoint_to_runtime": operation_pb2.SERVING_BINDING_SOURCE_REUSE_MODE_CHECKPOINT_TO_SERVING,
+    "runtime_direct_member_copy": operation_pb2.SERVING_BINDING_SOURCE_REUSE_MODE_SERVING_DIRECT_MEMBER_COPY,
+    "runtime_transform_required": operation_pb2.SERVING_BINDING_SOURCE_REUSE_MODE_SERVING_TRANSFORM_REQUIRED,
     "unsupported": operation_pb2.SERVING_BINDING_SOURCE_REUSE_MODE_UNSUPPORTED,
 }
-_SOURCE_REUSE_FROM_PROTO: dict[int, ServingBindingSourceReuseMode] = {
+_SOURCE_REUSE_FROM_PROTO: dict[int, RuntimeBindingSourceReuseMode] = {
     int(value): key for key, value in _SOURCE_REUSE_TO_PROTO.items()
 }
 
 
-class ServingBindingSourceMemberRef(BaseModel):
+class RuntimeBindingSourceMemberRef(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    member: ServingBindingMemberRef
+    member: RuntimeBindingMemberRef
     artifact_ref: str
     serving_manifest_ref: str | None = None
     tensor_schema_hash: str | None = None
     target_layout_hash: str | None = None
 
     @model_validator(mode="after")
-    def _validate_source_member(self) -> "ServingBindingSourceMemberRef":
+    def _validate_source_member(self) -> "RuntimeBindingSourceMemberRef":
         if not self.artifact_ref:
             raise ValueError("artifact_ref must not be empty")
         for field_name in (
@@ -1869,9 +1874,9 @@ class ServingBindingSourceMemberRef(BaseModel):
     @classmethod
     def from_proto(
         cls, proto: operation_pb2.ServingBindingSourceMemberRef
-    ) -> "ServingBindingSourceMemberRef":
+    ) -> "RuntimeBindingSourceMemberRef":
         return cls(
-            member=ServingBindingMemberRef.from_proto(proto.member),
+            member=RuntimeBindingMemberRef.from_proto(proto.member),
             artifact_ref=str(proto.artifact_ref),
             serving_manifest_ref=(
                 str(proto.serving_manifest_ref)
@@ -1891,21 +1896,21 @@ class ServingBindingSourceMemberRef(BaseModel):
         )
 
 
-class ServingBindingSourceRef(BaseModel):
+class RuntimeBindingSourceRef(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    source_kind: ServingBindingSourceKind
+    source_kind: RuntimeBindingSourceKind
     artifact_selection_digest: str
     source_artifact_ref: str | None = None
     source_schema_hash: str
     representation_contract_hash: str | None = None
-    serving_build_digest: str | None = None
+    runtime_build_digest: str | None = None
     tensor_schema_hash: str | None = None
-    topology: ServingTopologyRef | None = None
-    members: tuple[ServingBindingSourceMemberRef, ...] = ()
+    topology: RuntimeTopologyRef | None = None
+    members: tuple[RuntimeBindingSourceMemberRef, ...] = ()
 
     @model_validator(mode="after")
-    def _validate_source(self) -> "ServingBindingSourceRef":
+    def _validate_source(self) -> "RuntimeBindingSourceRef":
         if not self.artifact_selection_digest:
             raise ValueError("artifact_selection_digest must not be empty")
         if not self.source_schema_hash:
@@ -1917,7 +1922,7 @@ class ServingBindingSourceRef(BaseModel):
                 )
             if self.members:
                 raise ValueError("checkpoint_artifact sources must not carry members")
-        if self.source_kind == "serving_artifact_set":
+        if self.source_kind == "runtime_artifact_set":
             if self.topology is None:
                 raise ValueError(
                     "topology is required for serving_artifact_set sources"
@@ -1938,8 +1943,8 @@ class ServingBindingSourceRef(BaseModel):
             proto.source_artifact_ref = str(self.source_artifact_ref)
         if self.representation_contract_hash is not None:
             proto.representation_contract_hash = str(self.representation_contract_hash)
-        if self.serving_build_digest is not None:
-            proto.serving_build_digest = str(self.serving_build_digest)
+        if self.runtime_build_digest is not None:
+            proto.serving_build_digest = str(self.runtime_build_digest)
         if self.tensor_schema_hash is not None:
             proto.tensor_schema_hash = str(self.tensor_schema_hash)
         if self.topology is not None:
@@ -1950,10 +1955,10 @@ class ServingBindingSourceRef(BaseModel):
     @classmethod
     def from_proto(
         cls, proto: operation_pb2.ServingBindingSourceRef
-    ) -> "ServingBindingSourceRef":
+    ) -> "RuntimeBindingSourceRef":
         source_kind = _SOURCE_KIND_FROM_PROTO.get(int(proto.source_kind))
         if source_kind is None:
-            raise ValueError("ServingBindingSourceRef source_kind is required")
+            raise ValueError("RuntimeBindingSourceRef source_kind is required")
         return cls(
             source_kind=source_kind,
             artifact_selection_digest=str(proto.artifact_selection_digest),
@@ -1968,7 +1973,7 @@ class ServingBindingSourceRef(BaseModel):
                 if proto.HasField("representation_contract_hash")
                 else None
             ),
-            serving_build_digest=(
+            runtime_build_digest=(
                 str(proto.serving_build_digest)
                 if proto.HasField("serving_build_digest")
                 else None
@@ -1979,36 +1984,36 @@ class ServingBindingSourceRef(BaseModel):
                 else None
             ),
             topology=(
-                ServingTopologyRef.from_proto(proto.topology)
+                RuntimeTopologyRef.from_proto(proto.topology)
                 if proto.HasField("topology")
                 else None
             ),
             members=tuple(
-                ServingBindingSourceMemberRef.from_proto(member)
+                RuntimeBindingSourceMemberRef.from_proto(member)
                 for member in proto.members
             ),
         )
 
 
-class ServingBindingSourceReuseDecision(BaseModel):
+class RuntimeBindingSourceReuseDecision(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    mode: ServingBindingSourceReuseMode
+    mode: RuntimeBindingSourceReuseMode
     representation_contract_hash: str | None = None
     work_plan_hash: str | None = None
     reason: str | None = None
 
     @model_validator(mode="after")
-    def _validate_reuse(self) -> "ServingBindingSourceReuseDecision":
+    def _validate_reuse(self) -> "RuntimeBindingSourceReuseDecision":
         for field_name in ("representation_contract_hash", "work_plan_hash", "reason"):
             value = getattr(self, field_name)
             if value is not None and not value:
                 raise ValueError(f"{field_name} must not be empty when provided")
-        if self.mode == "serving_transform_required" and not (
+        if self.mode == "runtime_transform_required" and not (
             self.work_plan_hash or self.reason
         ):
             raise ValueError(
-                "serving_transform_required requires work_plan_hash or reason"
+                "runtime_transform_required requires work_plan_hash or reason"
             )
         if self.mode == "unsupported" and not self.reason:
             raise ValueError("unsupported source reuse requires reason")
@@ -2029,10 +2034,10 @@ class ServingBindingSourceReuseDecision(BaseModel):
     @classmethod
     def from_proto(
         cls, proto: operation_pb2.ServingBindingSourceReuseDecision
-    ) -> "ServingBindingSourceReuseDecision":
+    ) -> "RuntimeBindingSourceReuseDecision":
         mode = _SOURCE_REUSE_FROM_PROTO.get(int(proto.mode))
         if mode is None:
-            raise ValueError("ServingBindingSourceReuseDecision mode is required")
+            raise ValueError("RuntimeBindingSourceReuseDecision mode is required")
         return cls(
             mode=mode,
             representation_contract_hash=(
@@ -2047,45 +2052,45 @@ class ServingBindingSourceReuseDecision(BaseModel):
         )
 
 
-def plan_serving_binding_source_reuse(
+def plan_runtime_binding_source_reuse(
     *,
-    source: ServingBindingSourceRef,
-    topology: ServingTopologyRef,
-    member: ServingBindingMemberRef,
+    source: RuntimeBindingSourceRef,
+    topology: RuntimeTopologyRef,
+    member: RuntimeBindingMemberRef,
     tensor_schema_hash: str,
     target_layout_hash: str,
     representation_contract_hash: str | None = None,
-) -> ServingBindingSourceReuseDecision:
+) -> RuntimeBindingSourceReuseDecision:
     if source.source_kind == "checkpoint_artifact":
-        return ServingBindingSourceReuseDecision(
-            mode="checkpoint_to_serving",
+        return RuntimeBindingSourceReuseDecision(
+            mode="checkpoint_to_runtime",
             representation_contract_hash=representation_contract_hash,
         )
-    if source.source_kind not in {"serving_artifact", "serving_artifact_set"}:
-        return ServingBindingSourceReuseDecision(
+    if source.source_kind not in {"runtime_artifact", "runtime_artifact_set"}:
+        return RuntimeBindingSourceReuseDecision(
             mode="unsupported",
-            reason=f"unsupported serving binding source kind: {source.source_kind}",
+            reason=f"unsupported runtime binding source kind: {source.source_kind}",
         )
     if (
         representation_contract_hash is not None
         and source.representation_contract_hash is not None
         and representation_contract_hash != source.representation_contract_hash
     ):
-        return ServingBindingSourceReuseDecision(
-            mode="serving_transform_required",
+        return RuntimeBindingSourceReuseDecision(
+            mode="runtime_transform_required",
             reason="source representation contract does not match target",
         )
     if source.topology is not None and source.topology != topology:
-        return ServingBindingSourceReuseDecision(
-            mode="serving_transform_required",
+        return RuntimeBindingSourceReuseDecision(
+            mode="runtime_transform_required",
             reason="source topology does not match target topology",
         )
     if (
         source.tensor_schema_hash is not None
         and source.tensor_schema_hash != tensor_schema_hash
     ):
-        return ServingBindingSourceReuseDecision(
-            mode="serving_transform_required",
+        return RuntimeBindingSourceReuseDecision(
+            mode="runtime_transform_required",
             reason="source tensor schema does not match target tensor schema",
         )
     matching_members = [
@@ -2093,43 +2098,43 @@ def plan_serving_binding_source_reuse(
         for source_member in source.members
         if source_member.member == member
     ]
-    if source.source_kind == "serving_artifact_set" and not matching_members:
-        return ServingBindingSourceReuseDecision(
-            mode="serving_transform_required",
-            reason="source serving set does not contain target member",
+    if source.source_kind == "runtime_artifact_set" and not matching_members:
+        return RuntimeBindingSourceReuseDecision(
+            mode="runtime_transform_required",
+            reason="source runtime set does not contain target member",
         )
     for source_member in matching_members:
         if (
             source_member.tensor_schema_hash is not None
             and source_member.tensor_schema_hash != tensor_schema_hash
         ):
-            return ServingBindingSourceReuseDecision(
-                mode="serving_transform_required",
+            return RuntimeBindingSourceReuseDecision(
+                mode="runtime_transform_required",
                 reason="source member tensor schema does not match target",
             )
         if (
             source_member.target_layout_hash is not None
             and source_member.target_layout_hash != target_layout_hash
         ):
-            return ServingBindingSourceReuseDecision(
-                mode="serving_transform_required",
+            return RuntimeBindingSourceReuseDecision(
+                mode="runtime_transform_required",
                 reason="source member layout does not match target layout",
             )
-    return ServingBindingSourceReuseDecision(
-        mode="serving_direct_member_copy",
+    return RuntimeBindingSourceReuseDecision(
+        mode="runtime_direct_member_copy",
         representation_contract_hash=representation_contract_hash
         or source.representation_contract_hash,
     )
 
 
-class ServingBindingResolvedLayout(BaseModel):
+class RuntimeBindingResolvedLayout(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     binding_layout_id: str
-    source: ServingBindingSourceRef
-    source_reuse: ServingBindingSourceReuseDecision
-    topology: ServingTopologyRef
-    member: ServingBindingMemberRef
+    source: RuntimeBindingSourceRef
+    source_reuse: RuntimeBindingSourceReuseDecision
+    topology: RuntimeTopologyRef
+    member: RuntimeBindingMemberRef
     target_layout: bytes
     target_index_bytes: bytes
     target_layout_hash: str
@@ -2140,7 +2145,7 @@ class ServingBindingResolvedLayout(BaseModel):
     dst_specs_bytes: bytes | None = None
 
     @model_validator(mode="after")
-    def _validate_layout(self) -> "ServingBindingResolvedLayout":
+    def _validate_layout(self) -> "RuntimeBindingResolvedLayout":
         if not self.binding_layout_id:
             raise ValueError("binding_layout_id must not be empty")
         if not self.target_layout:
@@ -2153,13 +2158,13 @@ class ServingBindingResolvedLayout(BaseModel):
             raise ValueError("tensor_schema_hash must not be empty")
         if not self.spec_digest:
             raise ValueError("spec_digest must not be empty")
-        if self.source_reuse.mode == "serving_direct_member_copy":
+        if self.source_reuse.mode == "runtime_direct_member_copy":
             if self.source.source_kind not in {
-                "serving_artifact",
-                "serving_artifact_set",
+                "runtime_artifact",
+                "runtime_artifact_set",
             }:
                 raise ValueError(
-                    "serving_direct_member_copy requires a serving artifact source"
+                    "runtime_direct_member_copy requires a runtime artifact source"
                 )
             if (
                 self.source.representation_contract_hash is not None
@@ -2174,7 +2179,7 @@ class ServingBindingResolvedLayout(BaseModel):
                 self.source.tensor_schema_hash != self.tensor_schema_hash
             ):
                 raise ValueError(
-                    "serving_direct_member_copy tensor_schema_hash must match target"
+                    "runtime_direct_member_copy tensor_schema_hash must match target"
                 )
             matching_members = [
                 source_member
@@ -2182,11 +2187,11 @@ class ServingBindingResolvedLayout(BaseModel):
                 if source_member.member == self.member
             ]
             if (
-                self.source.source_kind == "serving_artifact_set"
+                self.source.source_kind == "runtime_artifact_set"
                 and not matching_members
             ):
                 raise ValueError(
-                    "serving_direct_member_copy requires a matching source member"
+                    "runtime_direct_member_copy requires a matching source member"
                 )
             for source_member in matching_members:
                 if (
@@ -2194,14 +2199,14 @@ class ServingBindingResolvedLayout(BaseModel):
                     and source_member.target_layout_hash != self.target_layout_hash
                 ):
                     raise ValueError(
-                        "serving_direct_member_copy target_layout_hash must match source member"
+                        "runtime_direct_member_copy target_layout_hash must match source member"
                     )
                 if (
                     source_member.tensor_schema_hash is not None
                     and source_member.tensor_schema_hash != self.tensor_schema_hash
                 ):
                     raise ValueError(
-                        "serving_direct_member_copy tensor_schema_hash must match source member"
+                        "runtime_direct_member_copy tensor_schema_hash must match source member"
                     )
         return self
 
@@ -2229,15 +2234,15 @@ class ServingBindingResolvedLayout(BaseModel):
     @classmethod
     def from_proto(
         cls, proto: operation_pb2.ServingBindingResolvedLayout
-    ) -> "ServingBindingResolvedLayout":
+    ) -> "RuntimeBindingResolvedLayout":
         return cls(
             binding_layout_id=str(proto.binding_layout_id),
-            source=ServingBindingSourceRef.from_proto(proto.source),
-            source_reuse=ServingBindingSourceReuseDecision.from_proto(
+            source=RuntimeBindingSourceRef.from_proto(proto.source),
+            source_reuse=RuntimeBindingSourceReuseDecision.from_proto(
                 proto.source_reuse
             ),
-            topology=ServingTopologyRef.from_proto(proto.topology),
-            member=ServingBindingMemberRef.from_proto(proto.member),
+            topology=RuntimeTopologyRef.from_proto(proto.topology),
+            member=RuntimeBindingMemberRef.from_proto(proto.member),
             target_layout=bytes(proto.target_layout),
             target_index_bytes=bytes(proto.target_index_bytes),
             target_layout_hash=str(proto.target_layout_hash),
@@ -2261,22 +2266,22 @@ class ServingBindingResolvedLayout(BaseModel):
         )
 
 
-class ServingBindingTarget(BaseModel):
+class RealizationTarget(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     runtime: str
     device: str | int
     device_uuid: str | None = None
-    source: ServingBindingSourceRef
-    topology: ServingTopologyRef
-    member: ServingBindingMemberRef
+    source: RuntimeBindingSourceRef
+    topology: RuntimeTopologyRef
+    member: RuntimeBindingMemberRef
     model_config_digest: str
     load_config_digest: str | None = None
-    serving_build_digest: str
-    resolved_layout: ServingBindingResolvedLayout
+    runtime_build_digest: str
+    resolved_layout: RuntimeBindingResolvedLayout
 
     @model_validator(mode="after")
-    def _validate_target(self) -> "ServingBindingTarget":
+    def _validate_target(self) -> "RealizationTarget":
         if not self.runtime:
             raise ValueError("runtime must not be empty")
         if str(self.device) == "":
@@ -2287,19 +2292,19 @@ class ServingBindingTarget(BaseModel):
             raise ValueError("model_config_digest must not be empty")
         if self.load_config_digest is not None and not self.load_config_digest:
             raise ValueError("load_config_digest must not be empty when provided")
-        if not self.serving_build_digest:
-            raise ValueError("serving_build_digest must not be empty")
+        if not self.runtime_build_digest:
+            raise ValueError("runtime_build_digest must not be empty")
         if self.source != self.resolved_layout.source:
             raise ValueError("resolved_layout.source must match target source")
         if self.source.topology is not None and self.source.topology != self.topology:
             raise ValueError("source topology must match target topology when provided")
         if (
-            self.resolved_layout.source_reuse.mode == "serving_direct_member_copy"
-            and self.source.serving_build_digest is not None
-            and self.source.serving_build_digest != self.serving_build_digest
+            self.resolved_layout.source_reuse.mode == "runtime_direct_member_copy"
+            and self.source.runtime_build_digest is not None
+            and self.source.runtime_build_digest != self.runtime_build_digest
         ):
             raise ValueError(
-                "serving_direct_member_copy serving_build_digest must match source"
+                "runtime_direct_member_copy runtime_build_digest must match source"
             )
         if self.topology != self.resolved_layout.topology:
             raise ValueError("resolved_layout.topology must match target topology")
@@ -2312,7 +2317,7 @@ class ServingBindingTarget(BaseModel):
             runtime=str(self.runtime),
             device=str(self.device),
             model_config_digest=str(self.model_config_digest),
-            serving_build_digest=str(self.serving_build_digest),
+            serving_build_digest=str(self.runtime_build_digest),
         )
         if self.device_uuid is not None:
             proto.device_uuid = str(self.device_uuid)
@@ -2327,40 +2332,40 @@ class ServingBindingTarget(BaseModel):
     @classmethod
     def from_proto(
         cls, proto: operation_pb2.ServingBindingTarget
-    ) -> "ServingBindingTarget":
+    ) -> "RealizationTarget":
         return cls(
             runtime=str(proto.runtime),
             device=str(proto.device),
             device_uuid=str(proto.device_uuid)
             if proto.HasField("device_uuid")
             else None,
-            source=ServingBindingSourceRef.from_proto(proto.source),
-            topology=ServingTopologyRef.from_proto(proto.topology),
-            member=ServingBindingMemberRef.from_proto(proto.member),
+            source=RuntimeBindingSourceRef.from_proto(proto.source),
+            topology=RuntimeTopologyRef.from_proto(proto.topology),
+            member=RuntimeBindingMemberRef.from_proto(proto.member),
             model_config_digest=str(proto.model_config_digest),
             load_config_digest=(
                 str(proto.load_config_digest)
                 if proto.HasField("load_config_digest")
                 else None
             ),
-            serving_build_digest=str(proto.serving_build_digest),
-            resolved_layout=ServingBindingResolvedLayout.from_proto(
+            runtime_build_digest=str(proto.serving_build_digest),
+            resolved_layout=RuntimeBindingResolvedLayout.from_proto(
                 proto.resolved_layout
             ),
         )
 
 
-class ServingBindingSetTarget(BaseModel):
+class RealizationTargetSet(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     runtime: str
-    source: ServingBindingSourceRef
-    topology: ServingTopologyRef
+    source: RuntimeBindingSourceRef
+    topology: RuntimeTopologyRef
     group_id: str
-    members: tuple[ServingBindingTarget, ...]
+    members: tuple[RealizationTarget, ...]
 
     @model_validator(mode="after")
-    def _validate_set_target(self) -> "ServingBindingSetTarget":
+    def _validate_set_target(self) -> "RealizationTargetSet":
         if not self.runtime:
             raise ValueError("runtime must not be empty")
         if not self.group_id:
@@ -2391,40 +2396,40 @@ class ServingBindingSetTarget(BaseModel):
     @classmethod
     def from_proto(
         cls, proto: operation_pb2.ServingBindingSetTarget
-    ) -> "ServingBindingSetTarget":
+    ) -> "RealizationTargetSet":
         return cls(
             runtime=str(proto.runtime),
-            source=ServingBindingSourceRef.from_proto(proto.source),
-            topology=ServingTopologyRef.from_proto(proto.topology),
+            source=RuntimeBindingSourceRef.from_proto(proto.source),
+            topology=RuntimeTopologyRef.from_proto(proto.topology),
             group_id=str(proto.group_id),
             members=tuple(
-                ServingBindingTarget.from_proto(member) for member in proto.members
+                RealizationTarget.from_proto(member) for member in proto.members
             ),
         )
 
 
-class ServingBindingResolvedSpecCacheEntry(BaseModel):
+class RuntimeRealizationSpecCacheEntry(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     schema_version: int
     cache_key_digest: str
     spec_digest: str
     runtime: str
-    source: ServingBindingSourceRef
-    source_reuse: ServingBindingSourceReuseDecision
-    topology: ServingTopologyRef
-    member: ServingBindingMemberRef
+    source: RuntimeBindingSourceRef
+    source_reuse: RuntimeBindingSourceReuseDecision
+    topology: RuntimeTopologyRef
+    member: RuntimeBindingMemberRef
     source_schema_hash: str
     model_config_digest: str
     load_config_digest: str | None = None
-    serving_build_digest: str
+    runtime_build_digest: str
     binding_layout_id: str
     target_layout_hash: str
     tensor_schema_hash: str
     blob_refs: Mapping[str, BlobRef]
 
     @model_validator(mode="after")
-    def _validate_cache_entry(self) -> "ServingBindingResolvedSpecCacheEntry":
+    def _validate_cache_entry(self) -> "RuntimeRealizationSpecCacheEntry":
         if int(self.schema_version) <= 0:
             raise ValueError("schema_version must be positive")
         for field_name in (
@@ -2433,7 +2438,7 @@ class ServingBindingResolvedSpecCacheEntry(BaseModel):
             "runtime",
             "source_schema_hash",
             "model_config_digest",
-            "serving_build_digest",
+            "runtime_build_digest",
             "binding_layout_id",
             "target_layout_hash",
             "tensor_schema_hash",
@@ -2453,7 +2458,7 @@ class ServingBindingResolvedSpecCacheEntry(BaseModel):
             "load_config_digest": self.load_config_digest,
             "topology": self.topology.model_dump(mode="json", exclude_none=True),
             "member": self.member.model_dump(mode="json", exclude_none=True),
-            "serving_build_digest": self.serving_build_digest,
+            "runtime_build_digest": self.runtime_build_digest,
             "source": self.source.model_dump(mode="json", exclude_none=True),
             "source_reuse": self.source_reuse.model_dump(
                 mode="json", exclude_none=True
@@ -2472,7 +2477,7 @@ class ServingBindingResolvedSpecCacheEntry(BaseModel):
             "target_layout_hash": self.target_layout_hash,
             "tensor_schema_hash": self.tensor_schema_hash,
             "source_schema_hash": self.source_schema_hash,
-            "serving_build_digest": self.serving_build_digest,
+            "runtime_build_digest": self.runtime_build_digest,
             "source_reuse": self.source_reuse.model_dump(
                 mode="json", exclude_none=True
             ),
@@ -2496,7 +2501,7 @@ class ServingBindingResolvedSpecCacheEntry(BaseModel):
             runtime=str(self.runtime),
             source_schema_hash=str(self.source_schema_hash),
             model_config_digest=str(self.model_config_digest),
-            serving_build_digest=str(self.serving_build_digest),
+            serving_build_digest=str(self.runtime_build_digest),
             binding_layout_id=str(self.binding_layout_id),
             target_layout_hash=str(self.target_layout_hash),
             tensor_schema_hash=str(self.tensor_schema_hash),
@@ -2514,18 +2519,18 @@ class ServingBindingResolvedSpecCacheEntry(BaseModel):
     @classmethod
     def from_proto(
         cls, proto: operation_pb2.ServingBindingResolvedSpecCacheEntry
-    ) -> "ServingBindingResolvedSpecCacheEntry":
+    ) -> "RuntimeRealizationSpecCacheEntry":
         return cls(
             schema_version=int(proto.schema_version),
             cache_key_digest=str(proto.cache_key_digest),
             spec_digest=str(proto.spec_digest),
             runtime=str(proto.runtime),
-            source=ServingBindingSourceRef.from_proto(proto.source),
-            source_reuse=ServingBindingSourceReuseDecision.from_proto(
+            source=RuntimeBindingSourceRef.from_proto(proto.source),
+            source_reuse=RuntimeBindingSourceReuseDecision.from_proto(
                 proto.source_reuse
             ),
-            topology=ServingTopologyRef.from_proto(proto.topology),
-            member=ServingBindingMemberRef.from_proto(proto.member),
+            topology=RuntimeTopologyRef.from_proto(proto.topology),
+            member=RuntimeBindingMemberRef.from_proto(proto.member),
             source_schema_hash=str(proto.source_schema_hash),
             model_config_digest=str(proto.model_config_digest),
             load_config_digest=(
@@ -2533,7 +2538,7 @@ class ServingBindingResolvedSpecCacheEntry(BaseModel):
                 if proto.HasField("load_config_digest")
                 else None
             ),
-            serving_build_digest=str(proto.serving_build_digest),
+            runtime_build_digest=str(proto.serving_build_digest),
             binding_layout_id=str(proto.binding_layout_id),
             target_layout_hash=str(proto.target_layout_hash),
             tensor_schema_hash=str(proto.tensor_schema_hash),
@@ -2614,7 +2619,7 @@ class BindingReservationCapability(BaseModel):
     daemon_id: str
     daemon_session_id: str
     device_uuid: str
-    member: ServingBindingMemberRef
+    member: RuntimeBindingMemberRef
     reservation_bytes: int
     scope_digest: str
     expires_at_ms: int | None = None
@@ -2661,7 +2666,7 @@ class BindingReservationCapability(BaseModel):
             daemon_id=str(proto.daemon_id),
             daemon_session_id=str(proto.daemon_session_id),
             device_uuid=str(proto.device_uuid),
-            member=ServingBindingMemberRef.from_proto(proto.member),
+            member=RuntimeBindingMemberRef.from_proto(proto.member),
             reservation_bytes=int(proto.reservation_bytes),
             scope_digest=str(proto.scope_digest),
             expires_at_ms=(
@@ -2718,7 +2723,7 @@ class GroupRealizationAcquireRef(BaseModel):
         )
 
 
-class PrefetchedServingBinding(BaseModel):
+class PrefetchHandoff(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     local_serving_ref: str | None = None
@@ -2726,10 +2731,10 @@ class PrefetchedServingBinding(BaseModel):
     daemon_id: str
     daemon_session_id: str
     device_uuid: str
-    member: ServingBindingMemberRef
+    member: RuntimeBindingMemberRef
     reservation_bytes: int
     reservation_capability: BindingReservationCapability
-    readiness: ServingBindingReadiness
+    readiness: RuntimeBindingReadiness
     verification_state: BindingValueVerificationState
     serving_artifact_id: str | None = None
     expires_at_ms: int | None = None
@@ -2738,7 +2743,7 @@ class PrefetchedServingBinding(BaseModel):
     report: object | None = Field(default=None, exclude=True, repr=False)
 
     @model_validator(mode="after")
-    def _validate_result(self) -> "PrefetchedServingBinding":
+    def _validate_result(self) -> "PrefetchHandoff":
         if self.local_serving_ref is not None and not self.local_serving_ref:
             raise ValueError("local_serving_ref must not be empty when provided")
         for field_name in ("daemon_id", "daemon_session_id", "device_uuid"):
@@ -2799,7 +2804,7 @@ class PrefetchedServingBinding(BaseModel):
     @classmethod
     def from_proto(
         cls, proto: operation_pb2.PrefetchServingBindingResult
-    ) -> "PrefetchedServingBinding":
+    ) -> "PrefetchHandoff":
         readiness = _SERVING_READINESS_FROM_PROTO.get(int(proto.readiness))
         if readiness is None:
             raise ValueError("PrefetchServingBindingResult readiness is required")
@@ -2831,7 +2836,7 @@ class PrefetchedServingBinding(BaseModel):
             daemon_id=str(proto.daemon_id),
             daemon_session_id=str(proto.daemon_session_id),
             device_uuid=str(proto.device_uuid),
-            member=ServingBindingMemberRef.from_proto(proto.member),
+            member=RuntimeBindingMemberRef.from_proto(proto.member),
             reservation_bytes=int(proto.reservation_bytes),
             reservation_capability=BindingReservationCapability.from_proto(
                 proto.reservation_capability
@@ -2853,10 +2858,10 @@ class PrefetchedServingBinding(BaseModel):
         )
 
 
-class PrefetchedServingBindingMemberFailure(BaseModel):
+class PrefetchHandoffMemberFailure(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    member: ServingBindingMemberRef
+    member: RuntimeBindingMemberRef
     code: str
     message: str
     phase: str | None = None
@@ -2864,7 +2869,7 @@ class PrefetchedServingBindingMemberFailure(BaseModel):
     spec_digest: str | None = None
 
     @model_validator(mode="after")
-    def _validate_failure(self) -> "PrefetchedServingBindingMemberFailure":
+    def _validate_failure(self) -> "PrefetchHandoffMemberFailure":
         if not self.code:
             raise ValueError("code must not be empty")
         if not self.message:
@@ -2894,9 +2899,9 @@ class PrefetchedServingBindingMemberFailure(BaseModel):
     @classmethod
     def from_proto(
         cls, proto: operation_pb2.PrefetchServingBindingMemberFailure
-    ) -> "PrefetchedServingBindingMemberFailure":
+    ) -> "PrefetchHandoffMemberFailure":
         return cls(
-            member=ServingBindingMemberRef.from_proto(proto.member),
+            member=RuntimeBindingMemberRef.from_proto(proto.member),
             code=str(proto.code),
             message=str(proto.message),
             phase=str(proto.phase) if proto.HasField("phase") else None,
@@ -2911,21 +2916,21 @@ class PrefetchedServingBindingMemberFailure(BaseModel):
         )
 
 
-class PrefetchedServingBindingSet(BaseModel):
+class PrefetchHandoffSet(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     runtime: str
-    topology: ServingTopologyRef
+    topology: RuntimeTopologyRef
     group_id: str
-    members: tuple[PrefetchedServingBinding, ...]
-    readiness: ServingBindingReadiness
+    members: tuple[PrefetchHandoff, ...]
+    readiness: RuntimeBindingReadiness
     expires_at_ms: int | None = None
-    member_failures: tuple[PrefetchedServingBindingMemberFailure, ...] = ()
+    member_failures: tuple[PrefetchHandoffMemberFailure, ...] = ()
     partial: bool = False
     report: object | None = Field(default=None, exclude=True, repr=False)
 
     @model_validator(mode="after")
-    def _validate_result_set(self) -> "PrefetchedServingBindingSet":
+    def _validate_result_set(self) -> "PrefetchHandoffSet":
         if not self.runtime:
             raise ValueError("runtime must not be empty")
         if not self.group_id:
@@ -2935,7 +2940,7 @@ class PrefetchedServingBindingSet(BaseModel):
         if self.expires_at_ms is not None and int(self.expires_at_ms) < 0:
             raise ValueError("expires_at_ms must be non-negative")
         if self.partial and not self.member_failures:
-            raise ValueError("partial serving binding set requires member_failures")
+            raise ValueError("partial runtime binding set requires member_failures")
         success_member_ids = {member.member.member_id for member in self.members}
         failed_member_ids = {
             failure.member.member_id for failure in self.member_failures
@@ -2943,7 +2948,7 @@ class PrefetchedServingBindingSet(BaseModel):
         overlap = success_member_ids & failed_member_ids
         if overlap:
             raise ValueError(
-                "serving binding set member cannot be both success and failure"
+                "runtime binding set member cannot be both success and failure"
             )
         return self
 
@@ -2966,44 +2971,44 @@ class PrefetchedServingBindingSet(BaseModel):
     @classmethod
     def from_proto(
         cls, proto: operation_pb2.PrefetchServingBindingSetResult
-    ) -> "PrefetchedServingBindingSet":
+    ) -> "PrefetchHandoffSet":
         readiness = _SERVING_READINESS_FROM_PROTO.get(int(proto.readiness))
         if readiness is None:
             raise ValueError("PrefetchServingBindingSetResult readiness is required")
         return cls(
             runtime=str(proto.runtime),
-            topology=ServingTopologyRef.from_proto(proto.topology),
+            topology=RuntimeTopologyRef.from_proto(proto.topology),
             group_id=str(proto.group_id),
             members=tuple(
-                PrefetchedServingBinding.from_proto(member) for member in proto.members
+                PrefetchHandoff.from_proto(member) for member in proto.members
             ),
             readiness=readiness,
             expires_at_ms=(
                 int(proto.expires_at_ms) if proto.HasField("expires_at_ms") else None
             ),
             member_failures=tuple(
-                PrefetchedServingBindingMemberFailure.from_proto(failure)
+                PrefetchHandoffMemberFailure.from_proto(failure)
                 for failure in proto.member_failures
             ),
             partial=bool(proto.partial),
         )
 
 
-class ServingPublicationSubject(BaseModel):
+class RuntimePublicationSubject(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     serving_artifact_id: str | None = None
     binding_value_ref: BindingValueRef | None = None
 
     @model_validator(mode="after")
-    def _validate_subject(self) -> "ServingPublicationSubject":
+    def _validate_subject(self) -> "RuntimePublicationSubject":
         artifact_id = self.serving_artifact_id
         binding_value_ref = self.binding_value_ref
         if artifact_id is not None and not artifact_id:
             raise ValueError("serving_artifact_id must not be empty")
         if (artifact_id is None) == (binding_value_ref is None):
             raise ValueError(
-                "ServingPublicationSubject requires exactly one of serving_artifact_id or binding_value_ref"
+                "RuntimePublicationSubject requires exactly one of serving_artifact_id or binding_value_ref"
             )
         return self
 
@@ -3048,9 +3053,8 @@ class ServingPublicationSubject(BaseModel):
     @classmethod
     def from_proto(
         cls,
-        proto: publication_pb2.ServingPublicationSubject
-        | publication_pb2.ServingPublicationSubject,
-    ) -> "ServingPublicationSubject":
+        proto: publication_pb2.ServingPublicationSubject,
+    ) -> "RuntimePublicationSubject":
         ref_case = proto.WhichOneof("ref")
         if ref_case == "serving_artifact_id":
             return cls(serving_artifact_id=str(proto.serving_artifact_id))
@@ -3058,13 +3062,13 @@ class ServingPublicationSubject(BaseModel):
             return cls(
                 binding_value_ref=BindingValueRef.from_proto(proto.binding_value)
             )
-        raise ValueError("ServingPublicationSubject requires exactly one ref")
+        raise ValueError("RuntimePublicationSubject requires exactly one ref")
 
 
 class RepresentationPublishContract(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    subject: ServingPublicationSubject
+    subject: RuntimePublicationSubject
     serving_manifest_ref: str
     representation_contract_hash: str
     serving_build_digest: str
@@ -3117,7 +3121,7 @@ class RepresentationPublishContract(BaseModel):
             raise ValueError(
                 "RepresentationPublishContract requires a serving publication subject"
             )
-        subject = ServingPublicationSubject.from_proto(proto.subject)
+        subject = RuntimePublicationSubject.from_proto(proto.subject)
         return cls(
             subject=subject,
             serving_manifest_ref=str(proto.serving_manifest_ref),
@@ -3130,7 +3134,7 @@ class RepresentationPublishContract(BaseModel):
 
     def validate_against_manifest(
         self,
-        manifest: ServingArtifactManifest,
+        manifest: RuntimeArtifactManifest,
     ) -> None:
         if manifest.serving_manifest_ref != self.serving_manifest_ref:
             raise ValueError(
@@ -3157,13 +3161,13 @@ class RepresentationPublishContract(BaseModel):
         self,
         *,
         require_manifest: bool = True,
-    ) -> ServingRuntimePolicy:
+    ) -> RuntimeArtifactPolicy:
         serving_artifact_id = self.serving_artifact_id
         if serving_artifact_id is None:
             raise ValueError(
                 "binding publication subjects do not resolve to a serving runtime policy until closeout promotion completes"
             )
-        return ServingRuntimePolicy(
+        return RuntimeArtifactPolicy(
             require_manifest=bool(require_manifest),
             serving_manifest_ref=str(self.serving_manifest_ref),
             expected_representation_contract_hash=str(
@@ -3194,7 +3198,7 @@ class RepresentationPublishContract(BaseModel):
             raise ValueError(
                 "RepresentationPublishContract requires a serving publication subject"
             )
-        subject = ServingPublicationSubject.from_proto(proto.subject)
+        subject = RuntimePublicationSubject.from_proto(proto.subject)
         return cls(
             subject=subject,
             serving_manifest_ref=str(proto.serving_manifest_ref),
@@ -3316,7 +3320,7 @@ class RepresentationPublishSpec(BaseModel):
 
     serving_artifact_id: str | None = None
     serving_manifest_ref: str
-    serving_manifest: ServingArtifactManifest
+    serving_manifest: RuntimeArtifactManifest
     serving_manifest_bytes: bytes
     canonical_index: object | None = None
     representation_publish_contract: RepresentationPublishContract
@@ -3327,7 +3331,7 @@ class RepresentationPublishSpec(BaseModel):
     layout_id: str | None = None
     requirements: AssemblyRequirementSetRef | None = None
     readiness_policy: AssemblyReadinessPolicy | None = None
-    admission_facts: ServingAdmissionFacts | None = None
+    admission_facts: RuntimeAdmissionFacts | None = None
 
     @model_validator(mode="after")
     def _validate_representation_publish_spec(self) -> "RepresentationPublishSpec":
@@ -3338,7 +3342,7 @@ class RepresentationPublishSpec(BaseModel):
             "canonical_full",
         }:
             raise ValueError("contract_family must be one of: pp, ep, canonical_full")
-        manifest_from_bytes = ServingArtifactManifest.from_bytes(
+        manifest_from_bytes = RuntimeArtifactManifest.from_bytes(
             self.serving_manifest_bytes
         )
         if manifest_from_bytes != self.serving_manifest:
@@ -3408,11 +3412,11 @@ class RepresentationPublishSpec(BaseModel):
     def manifest_tensor_name(self) -> str:
         return parse_serving_manifest_ref(self.serving_manifest_ref)
 
-    def require_serving_runtime_policy(
+    def require_runtime_artifact_policy(
         self,
         *,
         require_manifest: bool = True,
-    ) -> ServingRuntimePolicy:
+    ) -> RuntimeArtifactPolicy:
         if self.admission_facts is not None:
             self.admission_facts.require_runtime_bind_swap_ready()
         return self.representation_publish_contract.to_runtime_policy(
@@ -3465,7 +3469,7 @@ class RepresentationPublishSpec(BaseModel):
             representation_publish_contract=representation_publish_contract,
         )
         manifest_bytes = bytes(proto.serving_manifest_bytes)
-        manifest = ServingArtifactManifest.from_bytes(manifest_bytes)
+        manifest = RuntimeArtifactManifest.from_bytes(manifest_bytes)
         return cls(
             serving_artifact_id=representation_publish_contract.serving_artifact_id,
             serving_manifest_ref=representation_publish_contract.serving_manifest_ref,
@@ -3491,7 +3495,7 @@ class RepresentationPublishSpec(BaseModel):
                 else None
             ),
             admission_facts=(
-                ServingAdmissionFacts.from_publication_proto(proto.admission_facts)
+                RuntimeAdmissionFacts.from_publication_proto(proto.admission_facts)
                 if proto.HasField("admission_facts")
                 else None
             ),
@@ -3671,7 +3675,7 @@ class PublishedModelVersion(BaseModel):
     serving_manifest_ref: str | None = None
     serving_execution_diagnostics: ExecutionDiagnostics | None = None
 
-    def require_serving_runtime_policy(self) -> ServingRuntimePolicy:
+    def require_runtime_artifact_policy(self) -> RuntimeArtifactPolicy:
         if not self.serving_manifest_ref:
             raise ValueError(
                 "PublishedModelVersion does not carry serving_manifest_ref"
@@ -3684,7 +3688,7 @@ class PublishedModelVersion(BaseModel):
             raise ValueError(
                 "PublishedModelVersion does not carry serving_build_digest"
             )
-        return ServingRuntimePolicy(
+        return RuntimeArtifactPolicy(
             require_manifest=True,
             serving_manifest_ref=str(self.serving_manifest_ref),
             expected_representation_contract_hash=str(
@@ -3694,32 +3698,32 @@ class PublishedModelVersion(BaseModel):
         )
 
 
-ServingRuntimePolicyInput = Union[
-    ServingRuntimePolicy,
-    ServingArtifactManifest,
+RuntimeArtifactPolicyInput = Union[
+    RuntimeArtifactPolicy,
+    RuntimeArtifactManifest,
     RepresentationPublishContract,
     RepresentationPublishSpec,
     PublishedModelVersion,
 ]
 
 
-def coerce_serving_runtime_policy(
-    value: ServingRuntimePolicyInput | None,
-) -> ServingRuntimePolicy | None:
+def coerce_runtime_artifact_policy(
+    value: RuntimeArtifactPolicyInput | None,
+) -> RuntimeArtifactPolicy | None:
     if value is None:
         return None
-    if isinstance(value, ServingRuntimePolicy):
+    if isinstance(value, RuntimeArtifactPolicy):
         return value
-    if isinstance(value, ServingArtifactManifest):
+    if isinstance(value, RuntimeArtifactManifest):
         return value.to_runtime_policy()
     if isinstance(value, RepresentationPublishContract):
         return value.to_runtime_policy()
     if isinstance(value, RepresentationPublishSpec):
-        return value.require_serving_runtime_policy()
+        return value.require_runtime_artifact_policy()
     if isinstance(value, PublishedModelVersion):
-        return value.require_serving_runtime_policy()
+        return value.require_runtime_artifact_policy()
     raise TypeError(
-        "serving runtime policy requires ServingRuntimePolicy, ServingArtifactManifest, "
+        "runtime artifact policy requires RuntimeArtifactPolicy, RuntimeArtifactManifest, "
         "RepresentationPublishContract, RepresentationPublishSpec, or PublishedModelVersion"
     )
 
@@ -3939,28 +3943,28 @@ __all__ = [
     "BeginRegisterArtifactResult",
     "ArtifactDescriptor",
     "BindingValueRef",
-    "ServingBindingReadiness",
-    "ServingBindingSourceKind",
-    "ServingBindingSourceReuseMode",
-    "ServingTopologyRef",
-    "ServingBindingMemberRef",
+    "RuntimeBindingReadiness",
+    "RuntimeBindingSourceKind",
+    "RuntimeBindingSourceReuseMode",
+    "RuntimeTopologyRef",
+    "RuntimeBindingMemberRef",
     "BlobRef",
-    "ServingBindingSourceMemberRef",
-    "ServingBindingSourceRef",
-    "ServingBindingSourceReuseDecision",
-    "plan_serving_binding_source_reuse",
-    "ServingBindingResolvedLayout",
-    "ServingBindingTarget",
-    "ServingBindingSetTarget",
-    "ServingBindingResolvedSpecCacheEntry",
+    "RuntimeBindingSourceMemberRef",
+    "RuntimeBindingSourceRef",
+    "RuntimeBindingSourceReuseDecision",
+    "plan_runtime_binding_source_reuse",
+    "RuntimeBindingResolvedLayout",
+    "RealizationTarget",
+    "RealizationTargetSet",
+    "RuntimeRealizationSpecCacheEntry",
     "PrefetchRetentionPolicy",
     "BindingReservationCapability",
     "GroupRealizationAcquireRef",
-    "PrefetchedServingBinding",
-    "PrefetchedServingBindingMemberFailure",
-    "PrefetchedServingBindingSet",
+    "PrefetchHandoff",
+    "PrefetchHandoffMemberFailure",
+    "PrefetchHandoffSet",
     "BuilderMode",
-    "ServingPublicationSubject",
+    "RuntimePublicationSubject",
     "AssemblyCloseoutContract",
     "AssemblyAttemptRef",
     "AssemblyContractFamily",
@@ -3977,15 +3981,15 @@ __all__ = [
     "RepresentationPublishContract",
     "RepresentationPublishSpec",
     "PublicDiskSourceHandle",
-    "ServingAdmissionFacts",
+    "RuntimeArtifactBuildIntent",
+    "RuntimeArtifactManifest",
+    "RuntimeArtifactPolicy",
+    "RuntimeArtifactPolicyInput",
+    "RuntimeAdmissionFacts",
     "ViewRegistrationKind",
     "SealAssemblyResult",
-    "ServingArtifactManifest",
-    "ServingBuildIntent",
     "SERVING_BUILD_DIGEST_VERSION",
-    "ServingRuntimePolicy",
-    "ServingRuntimePolicyInput",
-    "ServingSupportLevel",
+    "RuntimeSupportLevel",
     "SERVING_MANIFEST_TENSOR_NAME",
     "PlanBase",
     "CoalescedPlan",
@@ -4002,6 +4006,6 @@ __all__ = [
     "VramRegionHandle",
     "DeregisterArtifactOutcome",
     "build_serving_manifest_ref",
-    "coerce_serving_runtime_policy",
+    "coerce_runtime_artifact_policy",
     "parse_serving_manifest_ref",
 ]

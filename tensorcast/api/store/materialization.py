@@ -1993,7 +1993,7 @@ class MaterializationPipeline:
                 if isinstance(resolved_mapping, tuple):
                     resolved_artifact_id = resolved_mapping[0]
                 else:
-                    resolved_artifact_id = resolved_mapping
+                    resolved_artifact_id = resolved_mapping.artifact_id
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "store.materialize.key_mapping_prefetch_failed",

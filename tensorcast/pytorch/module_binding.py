@@ -10,7 +10,7 @@ from typing import Any
 import torch
 from torch import nn
 
-import tensorcast.serving.contract as tc_contract
+import tensorcast.artifact_runtime.contract as tc_contract
 
 _RESERVED_TENSORCAST_PREFIX = "__tensorcast_meta__."
 
@@ -185,7 +185,7 @@ def align_runtime_binding_exclude_names(
         if len(missing) > 8:
             sample = f"{sample}, ..."
         raise RuntimeError(
-            "TensorCast serving artifact tensor names are missing from "
+            "TensorCast runtime artifact tensor names are missing from "
             f"the model: missing_count={len(missing)} [{sample}]"
         )
     extra_excluded = sorted(all_names - canonical)
@@ -211,7 +211,7 @@ def assert_runtime_tensors_match_expected_names(
     if len(unexpected) > 8:
         unexpected_sample = f"{unexpected_sample}, ..."
     raise RuntimeError(
-        "TensorCast serving artifact tensor set mismatch: "
+        "TensorCast runtime artifact tensor set mismatch: "
         f"missing_count={len(missing)} [{missing_sample}], "
         f"unexpected_count={len(unexpected)} [{unexpected_sample}]"
     )

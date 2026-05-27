@@ -34,6 +34,14 @@ ruff check .
 ruff format . --check
 ```
 
+The pre-push hook also runs the CI-matching package type checks through the
+project `uv` environment:
+
+```bash
+pyright ./tensorcast
+mypy ./tensorcast
+```
+
 If you modify protocol buffers, regenerate Python stubs and C++ headers:
 
 ```bash

@@ -9,7 +9,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, Literal, NoReturn
+from typing import Any, Literal, NoReturn, TypedDict
 
 from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.types import ArtifactError
@@ -187,6 +187,22 @@ class ResolvedArtifactSelection:
     authority_scope: str
     source_selection_digest: str
     diagnostics: Mapping[str, object] = field(default_factory=dict)
+
+
+class SelectionReportFields(TypedDict):
+    view_subset_hash: str
+    logical_layout_hash: str
+    selection_hash: str
+
+
+def selection_report_fields(
+    selection: ResolvedArtifactSelection,
+) -> SelectionReportFields:
+    return {
+        "view_subset_hash": selection.view_subset_hash.hex(),
+        "logical_layout_hash": selection.logical_layout_hash.hex(),
+        "selection_hash": selection.selection_hash.hex(),
+    }
 
 
 def resolve_artifact_selection(
@@ -456,7 +472,7 @@ class RealizationResourceEnvelope:
                     retryable=False,
                 )
         if (
-            target.kind in {"binding_adopted", "caller_tensors"}
+            target.kind in {"binding_owned", "binding_adopted", "caller_tensors"}
             and not target.target_layout_digest
         ):
             raise ArtifactError(
@@ -727,6 +743,8 @@ class ArtifactRealizationReport:
     materialize_sec: float | None = None
     tensor_bind_sec: float | None = None
     total_sec: float | None = None
+    runtime_attach_sec: float | None = None
+    runtime_finalize_sec: float | None = None
     source: str | None = None
     operation_id: str | None = None
     operation_backend: str | None = None
@@ -742,6 +760,9 @@ class ArtifactRealizationReport:
     execution_commit: RealizationExecutionCommitReport | None = None
     execution_diagnostics: object | None = None
     source_bound_plan_diagnostics: object | None = None
+    view_subset_hash: str = ""
+    logical_layout_hash: str = ""
+    selection_hash: str = ""
 
     def validate_for_handle(self, target_kind: RealizationTargetKind) -> None:
         if self.target_kind != target_kind:
@@ -793,6 +814,9 @@ def artifact_realization_profile_payload(
         "artifact_profile": report.artifact_profile,
         "authority_scope": report.authority_scope,
         "source_selection_digest": report.source_selection_digest,
+        "view_subset_hash": report.view_subset_hash,
+        "logical_layout_hash": report.logical_layout_hash,
+        "selection_hash": report.selection_hash,
         "target_layout_digest": report.target_layout_digest,
         "copy_plan_digest": report.copy_plan_digest,
         "operation_backend": report.operation_backend,
@@ -802,6 +826,8 @@ def artifact_realization_profile_payload(
         "materialize_sec": report.materialize_sec,
         "tensor_bind_sec": report.tensor_bind_sec,
         "total_sec": report.total_sec,
+        "runtime_attach_sec": report.runtime_attach_sec,
+        "runtime_finalize_sec": report.runtime_finalize_sec,
         "envelope_backing_kind": envelope.backing_kind,
         "envelope_export_kind": envelope.export_kind,
         "envelope_projection_kind": envelope.projection_kind,
@@ -1771,8 +1797,8 @@ def _target_member_runtime_profile_digest(
         "load_config_digest": _optional_str(
             _safe_attr(target_member, "load_config_digest")
         ),
-        "serving_build_digest": _optional_str(
-            _safe_attr(target_member, "serving_build_digest")
+        "runtime_build_digest": _optional_str(
+            _safe_attr(target_member, "runtime_build_digest")
         ),
     }
     if not any(payload.values()):
@@ -1833,7 +1859,7 @@ def _source_selection_mode(
     source: object | None,
 ) -> str:
     source_kind = _literal_value(_safe_attr(source, "source_kind"))
-    if source_kind == "serving_artifact_set":
+    if source_kind == "runtime_artifact_set":
         source_members = _source_members_by_member_id(source)
         artifact_refs = {
             artifact_ref
@@ -2029,7 +2055,7 @@ def target_set_report_for_retained_bindings(
         ready_member_count=sum(
             1
             for report in retained
-            if report.readiness in {"serving_local_ready", "serving_published_ready"}
+            if report.readiness in {"runtime_local_ready", "runtime_published_ready"}
         ),
         staged_member_count=sum(1 for report in retained if report.staged_value),
         total_reservation_bytes=sum(report.reservation_bytes for report in retained),
@@ -2518,6 +2544,7 @@ def report_for_binding_realization(
         artifact_profile=selection.artifact_profile,
         authority_scope=selection.authority_scope,
         generation_hint=selection.generation_hint,
+        **selection_report_fields(selection),
         envelope=envelope,
         target_plan=target_plan,
         strategy_plan=strategy_plan_for_execution(
@@ -2597,6 +2624,7 @@ def report_for_runtime_attachment(
         artifact_profile=selection.artifact_profile,
         authority_scope=selection.authority_scope,
         generation_hint=selection.generation_hint,
+        **selection_report_fields(selection),
         envelope=envelope,
         target_plan=target_plan,
         strategy_plan=strategy_plan_for_execution(
@@ -2711,7 +2739,7 @@ def report_for_publication(
         copy_plan_digest=target_plan.copy_plan_digest,
         artifact_id=str(artifact_id),
         view_id="",
-        artifact_profile="serving_artifact",
+        artifact_profile="runtime_artifact",
         authority_scope="daemon_publication",
         generation_hint=None,
         envelope=envelope,
@@ -2765,6 +2793,7 @@ def report_for_mounted_source(
         artifact_profile=selection.artifact_profile,
         authority_scope=selection.authority_scope,
         generation_hint=selection.generation_hint,
+        **selection_report_fields(selection),
         envelope=envelope,
         target_plan=target_plan,
         representation_admission=representation_admission_for_target(target_plan),
@@ -2808,6 +2837,7 @@ def report_for_target_set(
         artifact_profile=selection.artifact_profile,
         authority_scope=selection.authority_scope,
         generation_hint=selection.generation_hint,
+        **selection_report_fields(selection),
         envelope=envelope,
         target_plan=target_plan,
         strategy_plan=target_set_strategy_plan_for(
@@ -2950,6 +2980,7 @@ class ArtifactRealizationHandle:
         tensor_dict_value: Mapping[str, Any] | None = None,
         binding_value: Any | None = None,
         prefetch_value: Any | None = None,
+        attachment_value: Any | None = None,
         promote_fn: Callable[..., Any] | None = None,
         attach_fn: Callable[..., Any] | None = None,
         release_contract: RealizationReleaseContract | None = None,
@@ -2962,6 +2993,7 @@ class ArtifactRealizationHandle:
         self._tensor_dict_projection: TensorDictProjection | None = None
         self._binding_value = binding_value
         self._prefetch_value = prefetch_value
+        self._attachment_value = attachment_value
         self._promote_fn = promote_fn
         self._attach_fn = attach_fn
         self._release_contract = release_contract or release_contract_for(
@@ -3007,8 +3039,19 @@ class ArtifactRealizationHandle:
 
     def attach(self, *args: object, **kwargs: object) -> Any:
         if self._attach_fn is None:
-            self._unsupported("attach")
+            if args or kwargs or self._attachment_value is None:
+                self._unsupported("attach")
+            return self._attachment_value
+        if self._attachment_value is not None and not args and not kwargs:
+            return self._attachment_value
         return self._attach_fn(*args, **kwargs)
+
+    def attachment(self) -> Any:
+        if self._attachment_value is not None:
+            return self._attachment_value
+        if self._attach_fn is None:
+            self._unsupported("attach")
+        return self._attach_fn()
 
     def publish_replica(self, *args: object, **kwargs: object) -> Any:
         binding_value = self._binding_value
@@ -3050,7 +3093,7 @@ class ArtifactRealizationSpec:
     packing: str = "byte_space"
     capacity_bytes: int | None = None
     publish: bool = False
-    serving_runtime_policy: object | None = None
+    runtime_artifact_policy: object | None = None
     readiness: object | None = None
     retention: object | None = None
     verify_checksums: bool = True
@@ -3095,7 +3138,7 @@ class ArtifactRealizationSpec:
         options: object | None = None,
         capacity_bytes: int | None = None,
         publish: bool = False,
-        serving_runtime_policy: object | None = None,
+        runtime_artifact_policy: object | None = None,
     ) -> "ArtifactRealizationSpec":
         return cls(
             target_kind="binding_owned",
@@ -3105,7 +3148,7 @@ class ArtifactRealizationSpec:
             options=options,
             capacity_bytes=capacity_bytes,
             publish=publish,
-            serving_runtime_policy=serving_runtime_policy,
+            runtime_artifact_policy=runtime_artifact_policy,
         )
 
     @classmethod
@@ -3117,7 +3160,7 @@ class ArtifactRealizationSpec:
         packing: str = "byte_space",
         options: object | None = None,
         publish: bool = False,
-        serving_runtime_policy: object | None = None,
+        runtime_artifact_policy: object | None = None,
     ) -> "ArtifactRealizationSpec":
         return cls(
             target_kind="binding_adopted",
@@ -3126,7 +3169,7 @@ class ArtifactRealizationSpec:
             packing=packing,
             options=options,
             publish=publish,
-            serving_runtime_policy=serving_runtime_policy,
+            runtime_artifact_policy=runtime_artifact_policy,
         )
 
     @classmethod
@@ -3198,6 +3241,7 @@ class ArtifactRealizationSpec:
         adapter_version: str | None = None,
         runtime_abi_version: str | None = None,
         options: object | None = None,
+        runtime_artifact_policy: object | None = None,
     ) -> "ArtifactRealizationSpec":
         if not str(framework or "").strip():
             raise ArtifactError(
@@ -3214,10 +3258,11 @@ class ArtifactRealizationSpec:
             member=member,
             adapter_version=adapter_version,
             runtime_abi_version=runtime_abi_version,
+            runtime_artifact_policy=runtime_artifact_policy,
         )
 
     @classmethod
-    def publication(
+    def _publication(
         cls,
         *,
         target: object,

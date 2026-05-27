@@ -625,6 +625,7 @@ grpc::Status MaterializationController::prefetch_serving_binding(
     status->set_message(failed ? "serving binding set materialization failed" : "serving binding set is local-ready");
     status->set_progress(1.0);
     status->mutable_result()->PackFrom(set_result);
+    attach_controller_realization_plan_span_attrs(rctx, realization_plan);
     rctx.mark_success();
     return grpc::Status::OK;
   }

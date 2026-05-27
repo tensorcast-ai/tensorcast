@@ -10,7 +10,6 @@ from tensorcast.api.plan.artifact_set import (
     ArtifactSetResult,
     selection_identity_to_proto,
 )
-from tensorcast.api.store.serving_builder import RepresentationPublishSpec
 from tensorcast.engine_adapter import (
     BatchOutcome,
     BatchResult,
@@ -21,6 +20,7 @@ from tensorcast.engine_adapter import (
 from tensorcast.node_agent.executor import NodeAgentExecutor
 from tensorcast.proto.node_agent.v1 import node_agent_pb2, node_agent_pb2_grpc
 from tensorcast.proto.plan.v1 import plan_pb2
+from tensorcast.types import RepresentationPublishSpec
 
 _STATE_MAP = {
     "pending": node_agent_pb2.OPERATION_STATE_PENDING,

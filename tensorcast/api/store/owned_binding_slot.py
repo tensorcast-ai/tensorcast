@@ -52,8 +52,8 @@ from tensorcast.types import (
     ExecutionDiagnostics,
     GroupRealizationAcquireRef,
     PublicDiskSourceHandle,
+    RuntimeArtifactPolicy,
     ServerConfig,
-    ServingRuntimePolicy,
     SourceBoundCapability,
     SourceBoundPlanDiagnostics,
 )
@@ -342,7 +342,7 @@ def _build_source_execution_contract(
     if policy_mode is None and explicit_collective_group is not None:
         from tensorcast.api._config import CollectivePolicyMode
 
-        policy_mode = CollectivePolicyMode.REQUIRE_COLLECTIVE
+        policy_mode = CollectivePolicyMode.COLLECTIVE_FIRST
 
     if str(getattr(policy_mode, "value", policy_mode) or "") == "disable_collective":
         if explicit_collective_group is not None:
@@ -1262,7 +1262,7 @@ class OwnedBindingSlot:
         *,
         options: GetArtifactOptions | None = None,
         publish: bool = False,
-        serving_runtime_policy: ServingRuntimePolicy | None = None,
+        runtime_artifact_policy: RuntimeArtifactPolicy | None = None,
         wait: bool = True,
         drain_timeout_s: float | None = None,
         ctx: CallContext | None = None,
@@ -1304,7 +1304,7 @@ class OwnedBindingSlot:
                 source_policy=source_policy,
                 execution_topology=execution_topology,
                 collective_policy=collective_policy,
-                serving_runtime_policy=serving_runtime_policy,
+                runtime_artifact_policy=runtime_artifact_policy,
                 operation_id=operation_id,
                 timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
             )

@@ -38,8 +38,8 @@ from tensorcast.types import (
     HashLocation,
     IdentityMintStrategy,
     PublishedModelVersion,
+    RuntimeArtifactPolicy,
     ServerConfig,
-    ServingRuntimePolicy,
     SourceBoundCapability,
     SourceBoundPlanDiagnostics,
     VramRegionHandle,
@@ -322,7 +322,7 @@ class FakeBindingClient:
             current_value=self._make_binding_value(
                 binding_id=binding_id,
                 selection=selection,
-            )
+            ),
         )
 
     def begin_binding_update(self, **kwargs: Any) -> Any:
@@ -701,7 +701,7 @@ def test_binding_swap_forwards_first_class_execution_topology(
     assert execution_topology.source_sharing_domain == "node-a"
     assert (
         refill_call["collective_policy"]
-        == store_daemon_pb2.COLLECTIVE_POLICY_REQUIRE_COLLECTIVE
+        == store_daemon_pb2.COLLECTIVE_POLICY_COLLECTIVE_FIRST
     )
     assert "clid=same-host-tp-load" not in str(refill_call["operation_id"])
 
@@ -1101,6 +1101,42 @@ def test_binding_realize_from_accepts_rank_zero_collective_group(
         == store_daemon_pb2.COLLECTIVE_POLICY_REQUIRE_COLLECTIVE
     )
     assert "clid=same-host-tp-load" not in str(refill_call["operation_id"])
+
+
+def test_binding_realize_from_defaults_collective_group_to_collective_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
+    artifact = store.artifact(artifact_id="artifact-1")
+    layout = artifact.bind(device="cuda:0", packing="byte_space").layout
+    binding = store.create_binding(layout, ownership="daemon", device="cuda:0")
+
+    binding.realize_from(
+        artifact,
+        realization_plan=(
+            store_mod.BindingRealizationEntry(
+                op="copy",
+                source_name="alpha",
+                dst_name="alpha",
+            ),
+        ),
+        options=GetArtifactOptions(
+            execution_topology=ExecutionTopologyContext(
+                collective_group=CollectiveLoadGroup(
+                    group_id="same-host-tp-load",
+                    world_size=8,
+                    rank=0,
+                ),
+                source_locality="shared_source",
+            )
+        ),
+    )
+
+    refill_call = client.refill_calls[-1]
+    assert (
+        refill_call["collective_policy"]
+        == store_daemon_pb2.COLLECTIVE_POLICY_COLLECTIVE_FIRST
+    )
 
 
 def test_binding_realize_from_serializes_partial_const_fill_ranges(
@@ -1855,7 +1891,7 @@ def test_complete_binding_finalize_publication_from_binding_uses_current_value_c
 
     result = store.complete_binding_finalize_publication_from_binding(
         binding,
-        build_intent=store_mod.ServingBuildIntent(
+        build_intent=store_mod.RuntimeArtifactBuildIntent(
             builder_mode=store_mod.BuilderMode.BINDING_FINALIZE,
             framework_name="pytest",
             adapter_version="adapter-v1",
@@ -1865,7 +1901,7 @@ def test_complete_binding_finalize_publication_from_binding_uses_current_value_c
             source_artifact_ref="mi2:test:source",
         ),
         admission_facts=store_mod.build_binding_finalize_admission_facts(
-            support_level=store_mod.ServingSupportLevel.BUILDER_PUBLICATION_READY,
+            support_level=store_mod.RuntimeSupportLevel.BUILDER_PUBLICATION_READY,
             same_binding_fast_path_validated=True,
         ),
         contract_family="canonical_full",
@@ -2280,15 +2316,30 @@ def test_binding_swap_coerces_published_model_version_into_runtime_policy() -> N
         serving_manifest_ref=build_serving_manifest_ref("__alt_manifest__.json"),
     )
 
-    binding.swap("artifact-2", serving_runtime_policy=version)
+    binding.swap("artifact-2", runtime_artifact_policy=version)
 
     assert len(slot.swap_calls) == 1
-    assert slot.swap_calls[0]["serving_runtime_policy"] == ServingRuntimePolicy(
+    assert slot.swap_calls[0]["runtime_artifact_policy"] == RuntimeArtifactPolicy(
         require_manifest=True,
         serving_manifest_ref="tensor:__alt_manifest__.json",
         expected_representation_contract_hash="bafkrepresentation",
         expected_serving_build_digest="bafkbuilddigest",
     )
+
+
+def test_binding_swap_uses_only_runtime_artifact_policy_name() -> None:
+    slot = _FakeBindingSlot()
+    binding = Binding(slot)
+    neutral_policy = RuntimeArtifactPolicy(serving_manifest_ref="tensor:a.json")
+
+    with pytest.raises(TypeError, match="serving_runtime_policy"):
+        binding.swap(
+            "artifact-2",
+            runtime_artifact_policy=neutral_policy,
+            serving_runtime_policy=neutral_policy,
+        )
+
+    assert slot.swap_calls == []
 
 
 def test_bind_does_not_delegate_to_bind_into(monkeypatch: pytest.MonkeyPatch) -> None:

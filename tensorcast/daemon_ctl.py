@@ -75,17 +75,17 @@ from tensorcast.types import (
     LocalStableTierResult,
     Plan,
     PrefetchRetentionPolicy,
+    RealizationTarget,
+    RealizationTargetSet,
     RegionMemoryKind,
     RegisterStorage,
     RegisterTensorAlias,
     RepresentationPublishSpec,
+    RuntimeArtifactPolicy,
+    RuntimeBindingMemberRef,
+    RuntimeBindingReadiness,
     SealAssemblyResult,
     ServerConfig,
-    ServingBindingMemberRef,
-    ServingBindingReadiness,
-    ServingBindingSetTarget,
-    ServingBindingTarget,
-    ServingRuntimePolicy,
     StableDramHandshake,
     VramRegionHandle,
 )
@@ -943,7 +943,7 @@ class DaemonCtl:
         target_layout: store_daemon_pb2.TargetLayout,
         device_uuid: str,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
-        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
+        runtime_artifact_policy: "RuntimeArtifactPolicy | None" = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         pid: int | None = None,
         operation_id: str | None = None,
@@ -967,9 +967,9 @@ class DaemonCtl:
                 pid=pid_value,
             )
             request.source_policy.CopyFrom(resolved_source_policy)
-            if serving_runtime_policy is not None:
+            if runtime_artifact_policy is not None:
                 request.serving_artifact_policy.CopyFrom(
-                    serving_runtime_policy.to_proto()
+                    runtime_artifact_policy.to_proto()
                 )
             if placement is not None:
                 request.placement = placement
@@ -1017,7 +1017,7 @@ class DaemonCtl:
         copy_plan,
         dst_tensors: Mapping[str, torch.Tensor],
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
-        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
+        runtime_artifact_policy: "RuntimeArtifactPolicy | None" = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         pid: int | None = None,
         operation_id: str | None = None,
@@ -1072,9 +1072,9 @@ class DaemonCtl:
                 spec.stride.extend(int(v) for v in tensor.stride())
                 request.dst_tensors.append(spec)
             request.source_policy.CopyFrom(resolved_source_policy)
-            if serving_runtime_policy is not None:
+            if runtime_artifact_policy is not None:
                 request.serving_artifact_policy.CopyFrom(
-                    serving_runtime_policy.to_proto()
+                    runtime_artifact_policy.to_proto()
                 )
             if placement is not None:
                 request.placement = placement
@@ -1128,7 +1128,7 @@ class DaemonCtl:
         device_uuid: str,
         binding_layout_id: str,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
-        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
+        runtime_artifact_policy: "RuntimeArtifactPolicy | None" = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         copy_plan: store_daemon_pb2.CopyPlan | None = None,
         dst_specs: Iterable[store_daemon_pb2.MappedTensorSpec] | None = None,
@@ -1159,9 +1159,9 @@ class DaemonCtl:
                 pid=pid_value,
             )
             request.source_policy.CopyFrom(resolved_source_policy)
-            if serving_runtime_policy is not None:
+            if runtime_artifact_policy is not None:
                 request.serving_artifact_policy.CopyFrom(
-                    serving_runtime_policy.to_proto()
+                    runtime_artifact_policy.to_proto()
                 )
             if placement is not None:
                 request.placement = placement
@@ -1203,8 +1203,8 @@ class DaemonCtl:
         self,
         *,
         source_selection: common_pb2.ArtifactSelection,
-        target: ServingBindingTarget | ServingBindingSetTarget,
-        requested_readiness: ServingBindingReadiness,
+        target: RealizationTarget | RealizationTargetSet,
+        requested_readiness: RuntimeBindingReadiness,
         retention_policy: PrefetchRetentionPolicy | None = None,
         operation_id: str | None = None,
         group_realization: Any | None = None,
@@ -1220,15 +1220,15 @@ class DaemonCtl:
             requested_readiness=_SERVING_READINESS_TO_PROTO[requested_readiness],
         )
         request.source_selection.CopyFrom(source_selection)
-        if isinstance(target, ServingBindingTarget):
+        if isinstance(target, RealizationTarget):
             request.source.CopyFrom(target.source.to_proto())
             request.serving_binding_target.CopyFrom(target.to_proto())
-        elif isinstance(target, ServingBindingSetTarget):
+        elif isinstance(target, RealizationTargetSet):
             request.source.CopyFrom(target.source.to_proto())
             request.serving_binding_set_target.CopyFrom(target.to_proto())
         else:
             raise ValueError(
-                "target must be a ServingBindingTarget or ServingBindingSetTarget"
+                "target must be a RealizationTarget or RealizationTargetSet"
             )
         if retention_policy is not None:
             request.retention_policy.CopyFrom(retention_policy.to_proto())
@@ -1322,7 +1322,7 @@ class DaemonCtl:
         expected_serving_build_digest: str,
         expected_daemon_id: str | None = None,
         expected_daemon_session_id: str | None = None,
-        expected_member: ServingBindingMemberRef | None = None,
+        expected_member: RuntimeBindingMemberRef | None = None,
         local_serving_ref: str | None = None,
         group_realization_acquire: GroupRealizationAcquireRef | None = None,
         caller_pid: int | None = None,
@@ -1391,7 +1391,7 @@ class DaemonCtl:
         expected_device_uuid: str,
         expected_tensor_schema_hash: str,
         expected_serving_build_digest: str,
-        expected_member: ServingBindingMemberRef,
+        expected_member: RuntimeBindingMemberRef,
         expected_target_layout_hash: str | None = None,
         expected_daemon_id: str | None = None,
         expected_daemon_session_id: str | None = None,
@@ -1816,7 +1816,7 @@ class DaemonCtl:
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         execution_topology: store_daemon_pb2.SourceExecutionTopology | None = None,
         collective_policy: store_daemon_pb2.CollectivePolicy | None = None,
-        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
+        runtime_artifact_policy: "RuntimeArtifactPolicy | None" = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         operation_id: str | None = None,
         timeout_s: float = 600.0,
@@ -1842,9 +1842,9 @@ class DaemonCtl:
                 request.execution_topology.CopyFrom(execution_topology)
             if collective_policy is not None:
                 request.collective_policy = collective_policy
-            if serving_runtime_policy is not None:
+            if runtime_artifact_policy is not None:
                 request.serving_artifact_policy.CopyFrom(
-                    serving_runtime_policy.to_proto()
+                    runtime_artifact_policy.to_proto()
                 )
             if placement is not None:
                 request.placement = placement
@@ -2407,7 +2407,7 @@ class DaemonCtl:
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: Literal[True],
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
-        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
+        runtime_artifact_policy: "RuntimeArtifactPolicy | None" = None,
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
         need_view_data_hash: bool = True,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -2431,7 +2431,7 @@ class DaemonCtl:
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: Literal[False] = False,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
-        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
+        runtime_artifact_policy: "RuntimeArtifactPolicy | None" = None,
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
         need_view_data_hash: bool = True,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -2476,7 +2476,7 @@ class DaemonCtl:
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: bool = False,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
-        serving_runtime_policy: "ServingRuntimePolicy | None" = None,
+        runtime_artifact_policy: "RuntimeArtifactPolicy | None" = None,
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
         need_view_data_hash: bool = True,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -2527,9 +2527,9 @@ class DaemonCtl:
             if wait_for_shared_disk_ms:
                 request.wait_for_shared_disk_ms = int(wait_for_shared_disk_ms)
             request.source_policy.CopyFrom(resolved_source_policy)
-            if serving_runtime_policy is not None:
+            if runtime_artifact_policy is not None:
                 request.serving_artifact_policy.CopyFrom(
-                    serving_runtime_policy.to_proto()
+                    runtime_artifact_policy.to_proto()
                 )
             if export_policy is not None:
                 request.export_policy = export_policy

@@ -28,7 +28,7 @@ from tensorcast.api.store import (
     AssemblyReadinessPolicy,
     AssemblyRequirementSetRef,
     BuilderMode,
-    ServingBuildIntent,
+    RuntimeArtifactBuildIntent,
     Store,
     build_serving_manifest_ref,
 )
@@ -1043,7 +1043,7 @@ def test_complete_pure_transform_publication_publishes_serving_lineage(
 
         result = store.complete_pure_transform_publication(
             source_tensors,
-            build_intent=ServingBuildIntent(
+            build_intent=RuntimeArtifactBuildIntent(
                 builder_mode=BuilderMode.PURE_TRANSFORM,
                 framework_name="torch",
                 adapter_version="adapter-v1",
@@ -1124,7 +1124,7 @@ def test_complete_pure_transform_publication_structural_pp_publishes_serving_lin
 
         result = store.complete_pure_transform_publication(
             source_tensors,
-            build_intent=ServingBuildIntent(
+            build_intent=RuntimeArtifactBuildIntent(
                 builder_mode=BuilderMode.PURE_TRANSFORM,
                 framework_name="torch",
                 adapter_version="adapter-v1",
@@ -1196,7 +1196,7 @@ def test_complete_pure_transform_publication_serving_binding_swap(
         source_handle_v1 = store.artifact(artifact_id=source_artifact_v1)
         result_v1 = store.complete_pure_transform_publication(
             _artifact_tensor_dict(store, artifact_id=source_artifact_v1),
-            build_intent=ServingBuildIntent(
+            build_intent=RuntimeArtifactBuildIntent(
                 builder_mode=BuilderMode.PURE_TRANSFORM,
                 framework_name="torch",
                 adapter_version="adapter-v1",
@@ -1230,7 +1230,7 @@ def test_complete_pure_transform_publication_serving_binding_swap(
         source_handle_v2 = store.artifact(artifact_id=source_artifact_v2)
         result_v2 = store.complete_pure_transform_publication(
             _artifact_tensor_dict(store, artifact_id=source_artifact_v2),
-            build_intent=ServingBuildIntent(
+            build_intent=RuntimeArtifactBuildIntent(
                 builder_mode=BuilderMode.PURE_TRANSFORM,
                 framework_name="torch",
                 adapter_version="adapter-v1",
@@ -1253,7 +1253,7 @@ def test_complete_pure_transform_publication_serving_binding_swap(
         binding = store.artifact(key="models/demo/serving/swap/v1").bind(
             device="cuda:0",
             packing="byte_space",
-            serving_runtime_policy=result_v1.require_serving_runtime_policy(),
+            runtime_artifact_policy=result_v1.require_runtime_artifact_policy(),
         )
         torch.testing.assert_close(
             binding.tensors["weights"].cpu(),
@@ -1267,7 +1267,7 @@ def test_complete_pure_transform_publication_serving_binding_swap(
         )
         binding.swap(
             store.artifact(artifact_id=str(result_v2.serving_artifact_id)),
-            serving_runtime_policy=result_v2.require_serving_runtime_policy(),
+            runtime_artifact_policy=result_v2.require_runtime_artifact_policy(),
         )
         synchronize_cuda()
         torch.testing.assert_close(

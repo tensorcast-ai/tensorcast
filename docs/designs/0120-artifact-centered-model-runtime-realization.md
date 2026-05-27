@@ -4,7 +4,7 @@ title: Artifact-Centered Model Runtime Realization
 status: draft
 areas: ["sdk", "serving", "daemon", "core", "integrations", "docs", "tests"]
 created: 2026-05-23
-last_updated: 2026-05-25
+last_updated: 2026-05-26
 related_code:
   - docs/designs/0039-artifact-first-sdk.md
   - docs/designs/0078-selection-first-artifact-retrieval.md
@@ -24,15 +24,14 @@ related_code:
   - tensorcast/api/store/artifact.py
   - tensorcast/api/store/binding.py
   - tensorcast/types.py
-  - tensorcast/serving/runtime.py
-  - tensorcast/serving/config.py
-  - tensorcast/serving/policy.py
-  - tensorcast/serving/hosts.py
-  - tensorcast/serving/binding_plan.py
-  - tensorcast/serving/retained_binding.py
-  - tensorcast/serving/runtime_attachment.py
-  - tensorcast/serving/replica_publication.py
-  - tensorcast/serving/_runtime_impl/lifecycle.py
+  - tensorcast/artifact_runtime/lifecycle.py
+  - tensorcast/artifact_runtime/config.py
+  - tensorcast/artifact_runtime/policy.py
+  - tensorcast/artifact_runtime/host.py
+  - tensorcast/artifact_runtime/attachment.py
+  - tensorcast/artifact_runtime/binding/retained.py
+  - tensorcast/artifact_runtime/publication/replica.py
+  - tensorcast/artifact_runtime/recipe/
 links:
   plan: ../plans/0120-artifact-centered-model-runtime-realization.md
   dependencies:
@@ -94,7 +93,7 @@ The decision is:
   model-runtime stacks;
 - preserve the current vLLM scenario semantics, fastest compatible data path,
   retained memory-credit timing, and zero-extra-weight-residency behavior even
-  when TensorCast and vllm APIs are changed incompatibly.
+  when TensorCast and vLLM APIs are changed incompatibly.
 
 ```mermaid
 flowchart LR
@@ -156,7 +155,7 @@ The plan paired with this design owns current code status, phase tracking,
 implementation gaps, and rollout order. This design should not be read as an
 implementation snapshot.
 
-The vllm baseline remains important only as a regression contract:
+The serving-runtime baseline remains important only as a regression contract:
 
 - vLLM behavior is a regression baseline;
 - runtime attachment, retained acquire, reload, runtime view, publication, and
@@ -231,7 +230,7 @@ serialized handoff is a retained binding claim/capability for a realization
 target. It is not user-facing preload vocabulary and should not remain a
 separate serving materialization family.
 
-## vllm cleanup baseline
+## Serving runtime cleanup baseline
 
 Kept as current behavior baseline, not as an API compatibility boundary. Its
 `ServingRuntimeSession`, `RuntimeAttachment`, retained acquire, runtime view,
@@ -284,7 +283,7 @@ publication, or diagnostics.
 | `tensorcast.serving` | internal serving ABI helpers, optional private lowerings, builder/publication implementation details while they remain serving-ABI-specific | public runtime session root, public locator authority, independent retained acquire model, independent diagnostics/report model |
 | Store Daemon | binding values, leases, mounted-source attestation, local realization ownership, PID/session safety, device-local movement | framework construction/finalize hooks, durable metadata authority |
 | Global Store | durable artifact metadata, replica metadata, coordination records, publication visibility | SDK direct control path, process-local attachment state |
-| vllm `vllm.tensorcast.*` | runtime host capability construction, vLLM placement/source/collective facts, model construction/finalize hooks, reload/publication calls | TensorCast artifact selection authority, daemon lease authority, duplicate vllm session model |
+| vLLM `vllm.tensorcast.*` | runtime host capability construction, vLLM placement/source/collective facts, model construction/finalize hooks, reload/publication calls | TensorCast artifact selection authority, daemon lease authority, duplicate serving runtime session model |
 
 The intended end state is one public root and one professional framework
 boundary. If a serving-named object remains after migration, it must satisfy one
@@ -443,7 +442,7 @@ state.
 
 - acceptable as package namespace during migration;
 - acceptable in profile names such as `serving_abi_version` when the payload is
-  specifically the model-vllm ABI;
+  specifically the model-serving runtime ABI;
 - not acceptable as a second root for artifact identity, source discovery,
   P2P routing, or publication.
 
@@ -629,9 +628,9 @@ parallel TensorDict or source subsystem:
    current publication state, swap the active binding value, and project the
    reload response from the new attachment.
 
-## vllm target integration flow
+## vLLM target integration flow
 
-vllm should become a client of the artifact-runtime professional API,
+vLLM should become a client of the artifact-runtime professional API,
 not a client of a public TensorCast serving session. The expected final flow is:
 
 1. `model_loader_extra_config` is normalized into an artifact/runtime request:
@@ -659,7 +658,7 @@ not a client of a public TensorCast serving session. The expected final flow is:
    local-ready durable promotion call artifact-runtime publication actions. They
    do not call a separate serving publication authority.
 
-| vllm concern | Target TensorCast interaction | Decision logic |
+| vLLM concern | Target TensorCast interaction | Decision logic |
 | --- | --- | --- |
 | loader startup | `Artifact.realize(... model_runtime ..., runtime_host=...)` | model loading is a realization of an artifact selection |
 | placement/topology facts | `ArtifactRealizationSpec` plus runtime host admission facts | topology affects realization/admission, not artifact identity |
@@ -671,7 +670,7 @@ not a client of a public TensorCast serving session. The expected final flow is:
 | publication/shutdown | handle or attachment publication actions with active-generation CAS | publication is artifact replica lifecycle |
 | main/draft models | target-set transaction or documented sequential semantics | partial reload behavior must be explicit |
 
-At the end of migration, vllm should not import public
+At the end of migration, vLLM should not import public
 `tensorcast.serving.*` session/config/retained/publication APIs for normal
 startup, reload, memory accounting, runtime view, or shutdown. Any remaining
 serving import must be either an internal implementation dependency with no
@@ -786,7 +785,7 @@ These objects should not become the everyday user API.
 
 The following names are the preferred long-term conceptual direction. They do
 not require compatibility aliases; the implementation may rename or reshape the
-current vllm interfaces directly once the vLLM scenario matrix is
+current serving-runtime interfaces directly once the vLLM scenario matrix is
 covered. When a replacement is wired and tested, the old public name should be
 deleted or narrowed to an internal implementation name; it should not remain as a
 parallel compatibility path.
@@ -1042,7 +1041,7 @@ artifact-realization stack:
 - The final `tensorcast.serving` module is shallow: normal startup, reload,
   retained memory credit, runtime view, and shutdown/publication do not require
   public serving-session/config/retained/publication APIs.
-- vllm normal paths use the direct artifact-runtime API and runtime
+- vLLM normal paths use the direct artifact-runtime API and runtime
   host capabilities; remaining serving imports are private implementation or
   serving-ABI-specific builder paths with owners.
 - Retained pre-admission credit, mounted-source bootstrap, active-generation
@@ -1091,10 +1090,10 @@ the same migration window instead of kept as permanent compatibility aliases.
 - `docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md`
 - `docs/designs/0116-prefetch-serving-binding-target.md`
 - `docs/architecture/p2p-transfer-strategies.md`
-- `/opt/vllm/vllm/tensorcast/loader.py`
-- `/opt/vllm/vllm/tensorcast/placement.py`
-- `/opt/vllm/vllm/tensorcast/source.py`
-- `/opt/vllm/vllm/tensorcast/collective.py`
-- `/opt/vllm/vllm/tensorcast/adapter.py`
-- `/opt/vllm/vllm/model_executor/model_loader/memory_accounting.py`
-- `/opt/vllm/vllm/v1/worker/gpu_model_runner.py`
+- `vllm/tensorcast/loader.py`
+- `vllm/tensorcast/placement.py`
+- `vllm/tensorcast/source.py`
+- `vllm/tensorcast/collective.py`
+- `vllm/tensorcast/adapter.py`
+- `vllm/model_executor/model_loader/memory_accounting.py`
+- `vllm/v1/worker/gpu_model_runner.py`

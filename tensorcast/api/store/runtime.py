@@ -13,6 +13,7 @@ import uuid
 import weakref
 from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Iterator, Mapping
 
 from opentelemetry import trace
@@ -63,17 +64,19 @@ class _ForkAwareHandle:
             _log_best_effort_cleanup_failure("store_runtime.fork_handle_cleanup")
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedKeyMapping:
+    artifact_id: str | None
+    disk_path: str | None
+    generation: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class _KeyCacheEntry:
-    def __init__(
-        self,
-        *,
-        artifact_id: str | None,
-        disk_path: str | None,
-        expires_at: float,
-    ) -> None:
-        self.artifact_id = artifact_id
-        self.disk_path = disk_path
-        self.expires_at = expires_at
+    artifact_id: str | None
+    disk_path: str | None
+    generation: int | None
+    expires_at: float
 
 
 class StoreRuntimeContext:
@@ -292,6 +295,7 @@ class StoreRuntimeContext:
         *,
         artifact_id: str | None,
         disk_path: str | None = None,
+        generation: int | None = None,
         ttl_override: float | None = None,
     ) -> None:
         if not key:
@@ -304,28 +308,40 @@ class StoreRuntimeContext:
             self._key_cache[key] = _KeyCacheEntry(
                 artifact_id=artifact_id,
                 disk_path=disk_path,
+                generation=generation,
                 expires_at=expires_at,
             )
 
-    def resolve_key_mapping_cached(self, *, key: str) -> tuple[str | None, str | None]:
+    def resolve_key_mapping_cached(self, *, key: str) -> ResolvedKeyMapping:
         now = time.monotonic()
         with self._key_cache_lock:
             cached = self._key_cache.get(key)
             if cached and cached.expires_at > now:
-                return cached.artifact_id, cached.disk_path
+                return ResolvedKeyMapping(
+                    artifact_id=cached.artifact_id,
+                    disk_path=cached.disk_path,
+                    generation=cached.generation,
+                )
             if cached is not None:
                 del self._key_cache[key]
         mapping = self.ensure_client().resolve_key_mapping(key)
         resolved_id = mapping.artifact_id or None
         resolved_path = getattr(mapping, "used_disk_path", "") or None
+        raw_generation = int(getattr(mapping, "generation", 0) or 0)
+        generation = raw_generation if raw_generation > 0 else None
         ttl_override = float(mapping.cache_ttl_seconds)
         self.cache_key_mapping(
             key,
             artifact_id=resolved_id,
             disk_path=resolved_path,
+            generation=generation,
             ttl_override=ttl_override,
         )
-        return resolved_id, resolved_path
+        return ResolvedKeyMapping(
+            artifact_id=resolved_id,
+            disk_path=resolved_path,
+            generation=generation,
+        )
 
     def get_artifact_index_cached(self, artifact_id: str) -> ArtifactCacheEntry | None:
         return self._artifact_cache.get_artifact_index_cached(artifact_id)

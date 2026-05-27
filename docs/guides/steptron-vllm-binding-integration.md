@@ -241,8 +241,8 @@ TensorCast must own:
 - contributor liveness through the existing lease/guard/finalizer runtime
 - final source `seal_assembly(...)`
 - source immutable version-key publication in the current dependency-ready wave
-- optional source -> serving builder or publisher only in the successor wave
-  after typed child closeout contracts exist
+- optional source -> runtime-artifact representation builder or publisher only
+  in the successor wave after typed child closeout contracts exist
 - final serving-key or serving-manifest publication only in that successor wave
 
 `steptron` should not:

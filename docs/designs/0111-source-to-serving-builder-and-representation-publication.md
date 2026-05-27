@@ -15,7 +15,7 @@ related_code:
   - docs/internals/model-loading.md
   - tensorcast/types.py
   - tensorcast/api/store/__init__.py
-  - tensorcast/api/store/serving_builder.py
+  - tensorcast/api/store/publication_builder.py
   - tensorcast/api/store/binding.py
   - tensorcast/api/store/owned_binding_slot.py
   - proto/tensorcast/daemon/v2/store_daemon.proto

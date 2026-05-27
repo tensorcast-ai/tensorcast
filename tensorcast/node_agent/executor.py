@@ -27,7 +27,6 @@ from tensorcast.api.plan.targets import TargetSpec
 from tensorcast.api.plan.transforms import TransformSpec
 from tensorcast.api.store import Artifact, Store
 from tensorcast.api.store.runtime import StoreRuntimeContext
-from tensorcast.api.store.serving_builder import RepresentationPublishSpec
 from tensorcast.daemon_ctl import DaemonCtl, get_daemon_client
 from tensorcast.engine_adapter import (
     BatchResult,
@@ -44,8 +43,9 @@ from tensorcast.proto.plan.v1 import plan_pb2
 from tensorcast.types import (
     _SERVING_READINESS_FROM_PROTO,
     PrefetchRetentionPolicy,
-    ServingBindingSetTarget,
-    ServingBindingTarget,
+    RealizationTarget,
+    RealizationTargetSet,
+    RepresentationPublishSpec,
 )
 
 ArtifactActionResult = (
@@ -1040,7 +1040,7 @@ class NodeAgentExecutor:
                 artifact, _ = self._artifact_from_selection(selection)
                 readiness = _SERVING_READINESS_FROM_PROTO.get(
                     int(action.requested_readiness),
-                    "serving_local_ready",
+                    "runtime_local_ready",
                 )
                 retention = (
                     PrefetchRetentionPolicy.from_proto(action.retention_policy)
@@ -1048,11 +1048,9 @@ class NodeAgentExecutor:
                     else None
                 )
                 if serving_target_kind == "serving_binding_target":
-                    target = ServingBindingTarget.from_proto(
-                        action.serving_binding_target
-                    )
+                    target = RealizationTarget.from_proto(action.serving_binding_target)
                 else:
-                    target = ServingBindingSetTarget.from_proto(
+                    target = RealizationTargetSet.from_proto(
                         action.serving_binding_set_target
                     )
                 op = artifact.prefetch(

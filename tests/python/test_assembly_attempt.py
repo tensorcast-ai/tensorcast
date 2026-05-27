@@ -16,16 +16,16 @@ from tensorcast.api.store import (
     AssemblyCloseoutContract,
     AssemblyRequirementSetRef,
     PublishedModelVersion,
-    RegisteredServingPublication,
+    RegisteredRuntimeArtifactPublication,
     RepresentationPublishContract,
     RepresentationPublishSpec,
-    ServingArtifactManifest,
-    ServingBuildIntent,
+    RuntimeArtifactBuildIntent,
+    RuntimeArtifactManifest,
     Store,
     build_binding_finalize_admission_facts,
     build_representation_publish_requirements,
     build_serving_manifest_ref,
-    prepare_pure_transform_serving_registration,
+    prepare_pure_transform_runtime_registration,
 )
 from tensorcast.api.store.artifact import Artifact
 from tensorcast.api.store.common import (
@@ -44,8 +44,8 @@ from tensorcast.types import (
     AssemblyAttemptRef,
     BindingValueRef,
     BuilderMode,
-    ServingPublicationSubject,
-    ServingSupportLevel,
+    RuntimePublicationSubject,
+    RuntimeSupportLevel,
 )
 
 
@@ -192,8 +192,8 @@ def _canonical_index_bytes() -> bytes:
     return b'{"w":[0,4,[1],[1],"torch.float32",0]}'
 
 
-def _serving_build_intent() -> ServingBuildIntent:
-    return ServingBuildIntent(
+def _serving_build_intent() -> RuntimeArtifactBuildIntent:
+    return RuntimeArtifactBuildIntent(
         representation_contract_hash="bafkrepresentation",
         builder_mode=BuilderMode.PURE_TRANSFORM,
         framework_name="torch",
@@ -204,8 +204,8 @@ def _serving_build_intent() -> ServingBuildIntent:
     )
 
 
-def _binding_finalize_build_intent() -> ServingBuildIntent:
-    return ServingBuildIntent(
+def _binding_finalize_build_intent() -> RuntimeArtifactBuildIntent:
+    return RuntimeArtifactBuildIntent(
         representation_contract_hash="bafkbindingrepr",
         builder_mode=BuilderMode.BINDING_FINALIZE,
         framework_name="torch",
@@ -217,7 +217,7 @@ def _binding_finalize_build_intent() -> ServingBuildIntent:
 
 
 def _representation_publish_bundle() -> RepresentationPublishSpec:
-    manifest = ServingArtifactManifest(
+    manifest = RuntimeArtifactManifest(
         framework_name="torch",
         adapter_version="adapter-v1",
         serving_abi_version="abi-v1",
@@ -230,7 +230,7 @@ def _representation_publish_bundle() -> RepresentationPublishSpec:
         build_pipeline_version="pipeline-v1",
     )
     contract = RepresentationPublishContract(
-        subject=ServingPublicationSubject(
+        subject=RuntimePublicationSubject(
             serving_artifact_id="mi2:test:serving",
         ),
         serving_manifest_ref=build_serving_manifest_ref(),
@@ -286,7 +286,7 @@ def test_register_pure_transform_publication_registers_manifest_bearing_artifact
     store = Store("fake://daemon", runtime=runtime)
     tensors = {"w": torch.ones((1,), dtype=torch.float32)}
     build_intent = _serving_build_intent()
-    prepared = prepare_pure_transform_serving_registration(
+    prepared = prepare_pure_transform_runtime_registration(
         build_intent=build_intent,
         source_artifact=None,
         tensors=tensors,
@@ -390,7 +390,7 @@ def test_complete_pure_transform_publication_runs_register_and_closeout() -> Non
     store = Store("fake://daemon", runtime=runtime)
     tensors = {"w": torch.ones((1,), dtype=torch.float32)}
     build_intent = _serving_build_intent()
-    prepared = prepare_pure_transform_serving_registration(
+    prepared = prepare_pure_transform_runtime_registration(
         build_intent=build_intent,
         source_artifact=None,
         tensors=tensors,
@@ -457,7 +457,7 @@ def test_complete_pure_transform_publication_canonical_full_routes_source_artifa
     runtime = FakeRuntime(client)
     store = Store("fake://daemon", runtime=runtime)
     captured: dict[str, object] = {}
-    prepared = prepare_pure_transform_serving_registration(
+    prepared = prepare_pure_transform_runtime_registration(
         build_intent=_serving_build_intent(),
         source_artifact=source_artifact,
         tensors={"w": torch.ones((1,), dtype=torch.float32)},
@@ -466,13 +466,13 @@ def test_complete_pure_transform_publication_canonical_full_routes_source_artifa
     def _register(
         tensors: dict[str, torch.Tensor],
         **kwargs: object,
-    ) -> RegisteredServingPublication:
+    ) -> RegisteredRuntimeArtifactPublication:
         del tensors
         del kwargs
         bundle = _representation_publish_bundle().model_copy(
             update={"contract_family": "canonical_full"}
         )
-        return RegisteredServingPublication(
+        return RegisteredRuntimeArtifactPublication(
             registered_artifact=RegisteredArtifact(
                 artifact_id="mi2:test:serving",
                 replica=ReplicaInfo(
@@ -577,13 +577,13 @@ def test_complete_pure_transform_publication_routes_structural_view_contribution
     def _register_publication(
         tensors: dict[str, torch.Tensor],
         **kwargs: object,
-    ) -> RegisteredServingPublication:
+    ) -> RegisteredRuntimeArtifactPublication:
         del tensors
         del kwargs
         bundle = _representation_publish_bundle().model_copy(
             update={"contract_family": "pp"}
         )
-        return RegisteredServingPublication(
+        return RegisteredRuntimeArtifactPublication(
             registered_artifact=RegisteredArtifact(
                 artifact_id="mi2:test:serving",
                 replica=ReplicaInfo(
@@ -596,7 +596,7 @@ def test_complete_pure_transform_publication_routes_structural_view_contribution
                 canonical_index=canonical_index_from_bytes(_canonical_index_bytes()),
                 lease=None,
             ),
-            prepared_registration=prepare_pure_transform_serving_registration(
+            prepared_registration=prepare_pure_transform_runtime_registration(
                 build_intent=_serving_build_intent(),
                 source_artifact=source_artifact,
                 tensors={"w": torch.ones((1,), dtype=torch.float32)},
@@ -801,7 +801,7 @@ def test_start_representation_publish_attempt_provisions_binding_subject_layout_
     canonical_index = canonical_index_from_bytes(
         b'{"serving.weight":[0,4,[1],[1],"torch.float32",0]}'
     )
-    manifest = ServingArtifactManifest(
+    manifest = RuntimeArtifactManifest(
         framework_name="torch",
         adapter_version="adapter-vbinding",
         serving_abi_version="abi-vbinding",
@@ -814,7 +814,7 @@ def test_start_representation_publish_attempt_provisions_binding_subject_layout_
         build_pipeline_version="pipeline-vbinding",
     )
     contract = RepresentationPublishContract(
-        subject=ServingPublicationSubject(
+        subject=RuntimePublicationSubject(
             binding_value_ref=BindingValueRef(
                 binding_id="binding-1",
                 binding_layout_id="layout-1",
@@ -839,7 +839,7 @@ def test_start_representation_publish_attempt_provisions_binding_subject_layout_
             representation_publish_contract=contract,
         ),
         admission_facts=build_binding_finalize_admission_facts(
-            support_level=ServingSupportLevel.BUILDER_PUBLICATION_READY,
+            support_level=RuntimeSupportLevel.BUILDER_PUBLICATION_READY,
             same_binding_fast_path_validated=True,
         ),
         contract_family="canonical_full",
@@ -1291,7 +1291,7 @@ def test_representation_publish_closeout_contract_accepts_matching_typed_child()
         serving_version_key="models/demo/serving/v3",
         serving_manifest_ref=build_serving_manifest_ref(),
         representation_publish_contract=RepresentationPublishContract(
-            subject=ServingPublicationSubject(
+            subject=RuntimePublicationSubject(
                 serving_artifact_id="mi2:test:serving",
             ),
             serving_manifest_ref=build_serving_manifest_ref(),
@@ -1331,7 +1331,7 @@ def test_representation_publish_closeout_contract_rejects_outer_serving_artifact
             serving_artifact_id="mi2:test:serving",
             serving_manifest_ref=build_serving_manifest_ref(),
             representation_publish_contract=RepresentationPublishContract(
-                subject=ServingPublicationSubject(
+                subject=RuntimePublicationSubject(
                     serving_artifact_id="mi2:test:serving",
                 ),
                 serving_manifest_ref=build_serving_manifest_ref(),
@@ -1348,7 +1348,7 @@ def test_representation_publish_closeout_contract_accepts_binding_subject_child(
         kind="representation_publish",
         serving_manifest_ref=build_serving_manifest_ref(),
         representation_publish_contract=RepresentationPublishContract(
-            subject=ServingPublicationSubject(
+            subject=RuntimePublicationSubject(
                 binding_value_ref=BindingValueRef(
                     binding_id="binding-1",
                     binding_layout_id="layout-1",

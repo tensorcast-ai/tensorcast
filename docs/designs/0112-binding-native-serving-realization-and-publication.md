@@ -18,7 +18,7 @@ related_code:
   - tensorcast/api/store/binding.py
   - tensorcast/api/store/owned_binding_slot.py
   - tensorcast/api/store/realization_plan.py
-  - tensorcast/api/store/serving_builder.py
+  - tensorcast/api/store/publication_builder.py
   - tensorcast/api/store/mapped_binding.py
   - tensorcast/types.py
   - proto/tensorcast/daemon/v2/store_daemon.proto

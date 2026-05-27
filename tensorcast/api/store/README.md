@@ -45,8 +45,12 @@ managing clients manually.
   metadata-first mounted-source path for same-daemon loading. Successful calls
   return a lazy `Artifact` seeded from `ResolvePublicDiskSource` metadata,
   usually with primary `artifact_id = msa1:...`, without hashing payload bytes
-  during metadata resolution. Use `show_progress=True` or call
-  `import_from_disk(...)` explicitly when you need streamed daemon import.
+  during metadata resolution. The returned mounted-source artifact keeps the
+  daemon-attested source handle for direct
+  `Artifact.realize(ArtifactRealizationSpec.model_runtime(...),
+  runtime_host=...)` startup through framework runtime host capabilities. Use
+  `show_progress=True` or call `import_from_disk(...)` explicitly when you need
+  streamed daemon import.
 - `tensorcast.import_from_disk(path)` / `Store.import_from_disk(path)` keep the
   explicit daemon import contract via `ImportArtifactFromPath` /
   `ImportArtifactFromPathStream`. This path returns `mi2:` and remains the
@@ -162,15 +166,15 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
     `serving_manifest_ref`.
   - Phase 1 currently supports the reserved manifest-tensor carrier
     `tensor:__tensorcast_meta__.manifest_json`.
-  - `ServingArtifactManifest` now self-describes its phase-1 carrier through
+  - `RuntimeArtifactManifest` now self-describes its phase-1 carrier through
     `serving_manifest_ref`, and the typed serving-lineage models can derive a
     strict runtime gate:
     `RepresentationPublishContract.to_runtime_policy()`,
-    `ServingArtifactManifest.to_runtime_policy()`, and
-    `PublishedModelVersion.require_serving_runtime_policy()`.
+    `RuntimeArtifactManifest.to_runtime_policy()`, and
+    `PublishedModelVersion.require_runtime_artifact_policy()`.
   - The repo-owned serving-lineage carriers now also expose explicit phase-1
     build identity fields:
-    `ServingArtifactManifest.serving_build_digest_version` and
+    `RuntimeArtifactManifest.serving_build_digest_version` and
     `RepresentationPublishContract.serving_build_digest_version`.
     Runtime policy gates on `serving_manifest_ref`,
     `representation_contract_hash`, and `serving_build_digest`.
@@ -185,12 +189,12 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
     spec directly and forward it into `start_assembly_attempt(...)` through the
     typed `representation_publish_spec` daemon ingress instead of re-authoring
     the generic closeout shell at each call site.
-    When the spec carries optional `ServingAdmissionFacts`, TensorCast validates
+    When the spec carries optional `RuntimeAdmissionFacts`, TensorCast validates
     the supplied finalize classification, same-binding proof, and support level
     for consistency without inferring missing integration-private rollout state.
   - `BINDING_FINALIZE` publication is same-binding-only. Use
     `Store.complete_binding_finalize_publication_from_binding(...)` after the
-    serving binding current value has been realized, finalized, and sealed.
+    runtime binding current value has been realized, finalized, and sealed.
     The resulting spec must carry a binding-value publication subject and
     `same_binding_fast_path_validated=True`.
   - Tensor-entry `BINDING_FINALIZE` publication helpers have been removed.
@@ -257,8 +261,8 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
     `transform_register` path now also prepares the reserved manifest tensor
     before registration, so the resulting serving artifact can already carry
     `tensor:__tensorcast_meta__.manifest_json`.
-  - For steady-state serving bind or swap, pass
-    `serving_runtime_policy=...` to `artifact.bind(...)`,
+  - For steady-state runtime bind or swap, pass
+    `runtime_artifact_policy=...` to `artifact.bind(...)`,
     `artifact.bind_into(...)`, or `binding.swap(...)`.
     This keeps generic artifact load permissive while giving serving runtime an
     explicit strict gate. When the policy is present, the daemon requires a
@@ -267,12 +271,12 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
     artifact is accepted into the serving path.
     If you pass a full `RepresentationPublishSpec` instead of a plain runtime
     policy, TensorCast also requires
-    `ServingSupportLevel.RUNTIME_BIND_SWAP_READY` when caller-supplied
+    `RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY` when caller-supplied
     admission facts are present.
   - The same runtime-ready gate now also applies to serving-key activation on
     typed `representation_publish` specs: a spec carrying
     `serving_version_key` must be admitted at
-    `ServingSupportLevel.RUNTIME_BIND_SWAP_READY`.
+    `RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY`.
 - `Store.seal_assembly(assembly_id, publish_canonical=True)` seals an assembly
   into a stable MI2 identity and returns the bound descriptor.
 
@@ -399,19 +403,19 @@ binding.swap("model:v2")
   `lease_mode=NO_LEASE` so it does not create PID-bound UseLeases and does not mint IPC handle leases. Prefetch is
   supported for both GPU VRAM (`"cuda:0"`/`0`) and daemon-owned host DRAM (`"cpu"`/`"dram"`/`-1`). Handle-exporting APIs
   remain PID/lease-bound and are separate from daemon-owned warm replicas.
-- Retained serving prefetch lowers through the unified realization facade:
+- Retained realization prefetch lowers through the unified realization facade:
   `ArtifactRealizationSpec.retained_binding(...)` for one retained binding and
   `ArtifactRealizationSpec.target_set(...)` for TP/group target sets.
-  `artifact.prefetch(target=ServingBindingTarget(...))` and
-  `artifact.prefetch(target=ServingBindingSetTarget(...))` remain ergonomic
+  `artifact.prefetch(target=RealizationTarget(...))` and
+  `artifact.prefetch(target=RealizationTargetSet(...))` remain ergonomic
   wrappers, but target sets must use the target-set realization path so group
   admission, strategy, lifecycle, resource-envelope, and report state all carry
   `target_kind="target_set"`. Ordinary `device=` prefetch behavior is
-  unchanged. Serving targets require runtime-provided resolved layout/index
+  unchanged. Runtime targets require runtime-provided resolved layout/index
   metadata before daemon allocation; unresolved layouts fail closed before GPU
   memory is reserved. The daemon keeps serving prefetch behind
   `daemon_config.serving_prefetch.enabled` and returns a typed
-  `PrefetchedServingBinding` / `PrefetchedServingBindingSet` result once the
+  `PrefetchHandoff` / `PrefetchHandoffSet` result once the
   retained binding materialization path is enabled.
 - Prefetch idempotency derives a stable action fingerprint from selection identity (`artifact_id`,
   `logical_layout_hash`, `selection_hash`) and target placement (daemon + device/tier). `selection_hash` is computed via

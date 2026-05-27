@@ -30,8 +30,8 @@ from tensorcast.api.store.types import ArtifactError, StoreOptions
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import (
     BuilderMode,
-    ServingArtifactManifest,
-    ServingRuntimePolicy,
+    RuntimeArtifactManifest,
+    RuntimeArtifactPolicy,
     build_serving_manifest_ref,
 )
 
@@ -211,7 +211,7 @@ class _RuntimeStub:
         self._artifact_cache = ArtifactCache(
             daemon_endpoint="daemon", ttl_seconds=10, max_entries=8
         )
-        self._key_cache: dict[str, tuple[str | None, str | None]] = {}
+        self._key_cache: dict[str, tuple[str | None, str | None, int | None]] = {}
         self._client = client
 
     def ensure_client(self) -> _ClientStub:
@@ -228,8 +228,10 @@ class _RuntimeStub:
     ) -> None:
         self._artifact_cache.invalidate_artifact(artifact_id or "", reason=reason)
 
-    def resolve_key_mapping_cached(self, *, key: str) -> tuple[str | None, str | None]:
-        return self._key_cache.get(key, (None, None))
+    def resolve_key_mapping_cached(
+        self, *, key: str
+    ) -> tuple[str | None, str | None, int | None]:
+        return self._key_cache.get(key, (None, None, None))
 
     def cache_key_mapping(
         self,
@@ -237,10 +239,11 @@ class _RuntimeStub:
         *,
         artifact_id: str | None,
         disk_path: str | None = None,
+        generation: int | None = None,
         ttl_override=None,
     ) -> None:
         del ttl_override
-        self._key_cache[key] = (artifact_id, disk_path)
+        self._key_cache[key] = (artifact_id, disk_path, generation)
 
 
 class _PipelineStub:
@@ -718,7 +721,7 @@ def test_bind_coerces_serving_manifest_into_runtime_policy(
 
     monkeypatch.setattr(Artifact, "_bind_owned", _fake_bind_owned)
 
-    manifest = ServingArtifactManifest(
+    manifest = RuntimeArtifactManifest(
         framework_name="torch",
         adapter_version="adapter-v1",
         serving_abi_version="abi-v1",
@@ -733,12 +736,12 @@ def test_bind_coerces_serving_manifest_into_runtime_policy(
 
     result = artifact.bind(
         device="cuda:0",
-        serving_runtime_policy=manifest,
+        runtime_artifact_policy=manifest,
     )
 
     assert result is fake_binding
     assert captured["device"] == torch.device("cuda:0")
-    assert captured["serving_runtime_policy"] == ServingRuntimePolicy(
+    assert captured["runtime_artifact_policy"] == RuntimeArtifactPolicy(
         require_manifest=True,
         serving_manifest_ref="tensor:__alt_manifest__.json",
         expected_representation_contract_hash="bafkrepresentation",
@@ -746,7 +749,7 @@ def test_bind_coerces_serving_manifest_into_runtime_policy(
     )
 
 
-def test_tensor_dict_and_adopted_binding_share_source_selection_with_separate_target_digests(
+def test_tensor_dict_and_mapped_bindings_share_source_selection_with_separate_target_digests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     canonical_bytes, payload = _build_payload({"foo": torch.ones(2)})
@@ -800,6 +803,50 @@ def test_tensor_dict_and_adopted_binding_share_source_selection_with_separate_ta
             "last_source_bound_plan_diagnostics": None,
         },
     )()
+    owned_binding_value = type(
+        "_OwnedBindingValueStub",
+        (),
+        {
+            "binding_id": "owned-binding",
+            "binding_layout_id": "bl1:owned",
+            "binding_value_id": "owned-value-1",
+            "seal_generation": 1,
+            "source_artifact_id": "aid",
+            "is_artifact_backed": True,
+            "verification_state": 0,
+            "is_published": False,
+        },
+    )()
+    owned_layout = type(
+        "_OwnedLayoutStub",
+        (),
+        {
+            "binding_layout_id": "bl1:owned",
+            "target_layout": store_daemon_pb2.TargetLayout(
+                view_id="mapped:v1:owned-target"
+            ),
+            "target_index_bytes": canonical_bytes,
+            "dst_specs": (),
+        },
+    )()
+    fake_owned_binding = type(
+        "_OwnedBindingStub",
+        (),
+        {
+            "binding_id": "owned-binding",
+            "binding_layout_id": "bl1:owned",
+            "layout": owned_layout,
+            "current_value": owned_binding_value,
+            "staged_value": None,
+            "last_materialization_diagnostics": {
+                "source": "disk",
+                "total_bytes": 8,
+                "retry_reason_buckets": {},
+            },
+            "last_execution_diagnostics": None,
+            "last_source_bound_plan_diagnostics": None,
+        },
+    )()
 
     def _fake_execute_bind_into(self, target_tensors, **kwargs):
         del self
@@ -807,7 +854,16 @@ def test_tensor_dict_and_adopted_binding_share_source_selection_with_separate_ta
         captured.update(kwargs)
         return fake_binding
 
+    owned_captured: dict[str, object] = {}
+
+    def _fake_execute_bind_owned(self, device, **kwargs):
+        del self
+        owned_captured["device"] = device
+        owned_captured.update(kwargs)
+        return fake_owned_binding
+
     monkeypatch.setattr(Artifact, "_execute_bind_into", _fake_execute_bind_into)
+    monkeypatch.setattr(Artifact, "_execute_bind_owned", _fake_execute_bind_owned)
 
     tensor_handle = artifact.realize(ArtifactRealizationSpec.tensor_dict(device="cpu"))
     adopted_handle = artifact.realize(
@@ -817,29 +873,49 @@ def test_tensor_dict_and_adopted_binding_share_source_selection_with_separate_ta
             packing="byte_space",
         )
     )
+    owned_handle = artifact.realize(
+        ArtifactRealizationSpec.binding(
+            device="cuda:0",
+            mapping=copy_plan,
+            packing="byte_space",
+        )
+    )
 
     tensor_report = tensor_handle.report
     adopted_report = adopted_handle.report
+    owned_report = owned_handle.report
     assert adopted_handle.binding() is fake_binding
     assert captured["mapping"] == copy_plan
+    assert owned_handle.binding() is fake_owned_binding
+    assert owned_captured["mapping"] == copy_plan
     assert (
         adopted_report.source_selection_digest == tensor_report.source_selection_digest
     )
+    assert owned_report.source_selection_digest == tensor_report.source_selection_digest
     assert adopted_report.target_layout_digest
     assert adopted_report.copy_plan_digest
+    assert owned_report.target_layout_digest == "binding-layout:bl1:owned"
+    assert owned_report.copy_plan_digest == "mapped:v1:owned-target"
+    assert owned_report.representation_admission is not None
+    assert owned_report.representation_admission.transform_required is True
     assert adopted_report.target_layout_digest != adopted_report.source_selection_digest
     assert adopted_report.copy_plan_digest != adopted_report.target_layout_digest
+    assert owned_report.target_layout_digest != owned_report.source_selection_digest
+    assert owned_report.copy_plan_digest != owned_report.target_layout_digest
     assert str(adopted_report.copy_plan_digest).startswith("mapped:v1:")
     assert adopted_report.target_plan is not None
+    assert owned_report.target_plan is not None
     assert adopted_report.target_plan.target_layout_digest == (
         adopted_report.target_layout_digest
     )
     assert (
         adopted_report.target_plan.copy_plan_digest == adopted_report.copy_plan_digest
     )
+    assert owned_report.target_plan.copy_plan_digest == owned_report.copy_plan_digest
 
     tensor_handle.close()
     adopted_handle.close()
+    owned_handle.close()
 
 
 def test_tensor_into_materializes_subset_only():
@@ -969,6 +1045,27 @@ def test_subset_clone_handles_multiple_identifiers():
     assert clone.artifact_id == "aid"
     assert clone.key == "mapped"
     assert clone.tensor_names == ("foo",)
+
+
+def test_key_mapping_generation_flows_into_realization_selection_digest():
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    runtime.cache_key_mapping("mapped-v7", artifact_id="aid", generation=7)
+    runtime.cache_key_mapping("mapped-v8", artifact_id="aid", generation=8)
+    store = _StoreStub(runtime, _PipelineStub(payload))
+
+    selection_v7 = Artifact(
+        store_ref=_store_ref(store),
+        key="mapped-v7",
+    )._resolve_realization_selection()
+    selection_v8 = Artifact(
+        store_ref=_store_ref(store),
+        key="mapped-v8",
+    )._resolve_realization_selection()
+
+    assert selection_v7.generation_hint == 7
+    assert selection_v8.generation_hint == 8
+    assert selection_v7.source_selection_digest != selection_v8.source_selection_digest
 
 
 def test_describe_uses_cached_generation_without_fetch():
