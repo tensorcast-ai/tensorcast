@@ -245,6 +245,12 @@ class _FakePlacementHost:
         )
 
 
+class _FailingPlacementHost(_FakePlacementHost):
+    def identity_facts(self, framework_config):
+        del framework_config
+        raise RuntimeError("placement unavailable")
+
+
 class _FakeTensorSurface:
     def runtime_only_tensor_names(self, model):
         del model
@@ -891,6 +897,76 @@ def test_model_runtime_rejects_spec_context_device_mismatch():
 
     assert exc_info.value.status_code == "INVALID_ARGUMENT"
     assert "target_device facts disagree" in str(exc_info.value)
+
+
+def test_model_runtime_rejects_host_placement_failure():
+    class _Store:
+        pass
+
+    artifact = Artifact(
+        store_ref=weakref.ref(_Store()),
+        artifact_id="mi2:serving",
+    )
+    host = tc.RuntimeHostCapabilities(
+        framework=_FakeFrameworkHost(),
+        placement=_FailingPlacementHost(),
+        tensor_surface=_FakeTensorSurface(),
+    )
+
+    with pytest.raises(
+        integration_mod.ArtifactRuntimeIntegrationError,
+        match="failed to collect runtime placement facts",
+    ):
+        artifact.realize(
+            tc.ArtifactRealizationSpec.model_runtime(
+                framework="fakefw",
+                device=torch.device("cuda:0"),
+            ),
+            runtime_host=host,
+            runtime_context=RequestContext(
+                framework_config=SimpleNamespace(),
+                model_config=SimpleNamespace(model="fake-model"),
+            ),
+            runtime_resolver=object(),
+        )
+
+
+def test_model_runtime_rejects_spec_host_member_mismatch():
+    class _Store:
+        pass
+
+    artifact = Artifact(
+        store_ref=weakref.ref(_Store()),
+        artifact_id="mi2:serving",
+    )
+    host = tc.RuntimeHostCapabilities(
+        framework=_FakeFrameworkHost(),
+        placement=_FakePlacementHost(),
+        tensor_surface=_FakeTensorSurface(),
+    )
+
+    with pytest.raises(tc.ArtifactError) as exc_info:
+        artifact.realize(
+            tc.ArtifactRealizationSpec.model_runtime(
+                framework="fakefw",
+                device=torch.device("cuda:0"),
+                member=RuntimeBindingMemberRef(
+                    member_id="member-1",
+                    member_index=0,
+                    member_count=1,
+                    group_id="group-1",
+                ),
+            ),
+            runtime_host=host,
+            runtime_context=RequestContext(
+                framework_config=SimpleNamespace(),
+                model_config=SimpleNamespace(model="fake-model"),
+            ),
+            runtime_resolver=object(),
+        )
+
+    assert exc_info.value.status_code == "INVALID_ARGUMENT"
+    assert "member facts disagree" in str(exc_info.value)
 
 
 def test_model_runtime_options_and_runtime_artifact_policy_are_separate(

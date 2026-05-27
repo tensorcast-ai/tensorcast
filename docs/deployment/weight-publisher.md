@@ -13,11 +13,12 @@ weight-version workflow:
 2) Trigger an inference service to reload that `weight_version`.
 3) Optionally wait for acknowledgement and garbage-collect old versions.
 
-Current `vllm` with `load_format="tensorcast"` no longer treats
-`weight_version` or `/set_model_weight` as TensorCast serving identity. That
-runtime expects a published serving artifact and reloads through
-`POST /reload_serving_artifact` with a `selector + policy` request. Use
-`vllm/tools/tensorcast_prepare_local_dir.py` or a serving-artifact
+Current vLLM with `load_format="tensorcast"` no longer treats
+`weight_version` or `/set_model_weight` as TensorCast identity. That runtime
+expects a published runtime artifact with serving-manifest ABI metadata and
+reloads through `POST /reload_serving_artifact` with a `selector + policy`
+request. Use
+`vllm/tools/tensorcast_prepare_local_dir.py` or a runtime-artifact
 publisher to produce that request. The reload sections below apply to
 non-TensorCast or legacy `/set_model_weight` deployments.
 
@@ -158,7 +159,7 @@ For current vLLM TensorCast serving reload, the request shape is instead:
 }
 ```
 
-`WeightPublisher` does not synthesize this serving-artifact request today.
+`WeightPublisher` does not synthesize this runtime-artifact reload request today.
 
 ## Trigger Reload: Legacy Stepcast Router (Multi-endpoint)
 
@@ -193,10 +194,10 @@ publisher.publish_from_disk("/shared/tensorcast/models/demo_hf_v123", version=12
 Notes:
 - The Stepcast reload path assumes vLLM dev endpoints are enabled on each
   replica (e.g. `VLLM_SERVER_DEV_MODE=1`).
-- This path no longer pushes vLLM TensorCast loader config. Current
-  `vllm` serving-artifact runtime must be configured through
-  `tensorcast.serving.ServingConfig` and reloaded with
-  `/reload_serving_artifact`.
+- This path no longer pushes vLLM TensorCast loader config. Current vLLM
+  TensorCast runtime should be configured through the structured
+  `TensorCastRuntimeConfig` / `model_loader_extra_config` shape and reloaded
+  with `/reload_serving_artifact`.
 
 ## Retention and Garbage Collection (keep_last)
 

@@ -4,7 +4,7 @@ title: Artifact-Centered Model Runtime Realization
 status: draft
 areas: ["sdk", "serving", "daemon", "core", "integrations", "docs", "tests"]
 created: 2026-05-23
-last_updated: 2026-05-26
+last_updated: 2026-05-27
 related_code:
   - docs/designs/0039-artifact-first-sdk.md
   - docs/designs/0078-selection-first-artifact-retrieval.md
@@ -17,7 +17,6 @@ related_code:
   - docs/designs/0116-prefetch-serving-binding-target.md
   - docs/designs/0121-unified-artifact-realization-kernel.md
   - docs/plans/0120-artifact-centered-model-runtime-realization.md
-  - docs/plans/0121-unified-artifact-realization-kernel.md
   - docs/architecture/p2p-transfer-strategies.md
   - core/store/docs/device-manager.md
   - core/store/docs/device-registry.md
@@ -65,10 +64,10 @@ selection, target, strategy, representation, lifecycle, execution, and report
 spine that prevents TensorDict, binding, retained prefetch, runtime attach, and
 TP from becoming separate materialization systems.
 
-The companion plan records current implementation status and migration steps.
-This design intentionally describes the desired end state: direct artifact
-model-runtime realization is the professional framework boundary; a separate
-public serving session is not the long-term API.
+The companion plan is intentionally short and todo-only. This design describes
+the desired end state: direct artifact model-runtime realization is the
+professional framework boundary; a separate public serving session is not part
+of the target API.
 
 The decision is:
 
@@ -132,9 +131,10 @@ flowchart LR
 
 ## Non-Goals
 
-- Do not treat `tensorcast.serving` as a compatibility boundary. It is the
-  current implementation namespace and may be reshaped directly when the final
-  artifact-centered model is clearer.
+- Do not treat `tensorcast.serving` as a compatibility boundary. It is not a
+  framework-facing runtime namespace in the target state; serving-named strings
+  may remain only where they describe wire, ABI, profile, or existing endpoint
+  fields.
 - Do not collapse every runtime concern into `Artifact`. Artifact is the root,
   not a god object.
 - Do not make local-ready binding values durable or globally routable without an
@@ -151,9 +151,11 @@ flowchart LR
 
 # Relationship To The Migration Plan
 
-The plan paired with this design owns current code status, phase tracking,
-implementation gaps, and rollout order. This design should not be read as an
-implementation snapshot.
+The plan paired with this design owns only remaining todo. It should not
+preserve historical serving-session migration detail once the artifact-runtime
+replacement has landed. This design is the target-state reference; the plan is
+the small list of work still needed to keep code, tests, and framework
+integrations aligned with that target.
 
 The serving-runtime baseline remains important only as a regression contract:
 
@@ -263,36 +265,35 @@ session. A framework integration should provide host capabilities to
 `Artifact.realize(...)` and receive a completed realization handle whose
 runtime-attachment projection can be stored on the framework model object.
 
-The target design may keep implementation modules under `tensorcast.serving`
-during migration. Those modules are lowerings of the artifact-runtime model, not
-the public conceptual center.
+The target design does not require a public `tensorcast.serving` namespace.
+Serving-named identifiers are acceptable only as wire/ABI/profile vocabulary or
+as private implementation details that lower into the artifact-runtime model.
 
 # Final Module Ownership
 
-The final shape does not require the current `tensorcast.serving` package to
-disappear completely, but it does require it to become shallow. The package may
-remain as an internal implementation namespace for model-serving ABI details,
-builder recipes, and migration-local lowerings. It must not remain a public
-source of truth for artifact identity, source selection, routing, lifecycle,
-publication, or diagnostics.
+The final shape removes `tensorcast.serving` as a framework-facing source of
+truth. Internal code may still carry serving-named ABI fields such as manifest
+refs, build digests, and existing endpoint names, but public identity,
+selection, lifecycle, publication, diagnostics, and framework attachment belong
+to artifact/runtime APIs.
 
 | Area | Target responsibility | Must not own |
 | --- | --- | --- |
 | `tensorcast.api.store` / public `tensorcast` | `Artifact`, `ArtifactRealizationSpec`, `ArtifactRealizationHandle`, `ArtifactRealizationReport`, ordinary TensorDict/binding/prefetch conveniences | framework model objects, vLLM-specific placement logic, serving-session compatibility facades |
 | artifact/runtime professional API | `RuntimeHostCapabilities`, `RuntimeAttachment`, runtime view/report projections, retained realization claims, publication actions | durable artifact identity, direct Global Store access, vLLM private objects |
-| `tensorcast.serving` | internal serving ABI helpers, optional private lowerings, builder/publication implementation details while they remain serving-ABI-specific | public runtime session root, public locator authority, independent retained acquire model, independent diagnostics/report model |
+| serving-named ABI fields | manifest carrier refs, build digests, artifact-kind/profile strings, existing endpoint names | public runtime session root, public locator authority, independent retained acquire model, independent diagnostics/report model |
 | Store Daemon | binding values, leases, mounted-source attestation, local realization ownership, PID/session safety, device-local movement | framework construction/finalize hooks, durable metadata authority |
 | Global Store | durable artifact metadata, replica metadata, coordination records, publication visibility | SDK direct control path, process-local attachment state |
 | vLLM `vllm.tensorcast.*` | runtime host capability construction, vLLM placement/source/collective facts, model construction/finalize hooks, reload/publication calls | TensorCast artifact selection authority, daemon lease authority, duplicate serving runtime session model |
 
 The intended end state is one public root and one professional framework
-boundary. If a serving-named object remains after migration, it must satisfy one
-of these conditions:
+boundary. If a serving-named object remains, it must satisfy one of these
+conditions:
 
-- it is private implementation under a bounded internal module;
 - it describes a true model-serving ABI payload rather than TensorCast artifact
   semantics;
-- it is scheduled for deletion by the paired plan's deletion ledger.
+- it is an existing endpoint or wire field where renaming would create ABI
+  churn without improving ownership.
 
 # Decision Logic For Boundary Choices
 
@@ -489,8 +490,9 @@ The target rules are:
   framework attachment and not an unexecuted plan;
 - TensorDict, Binding, RuntimeAttachment, retained handoff, and publication are
   projections or actions of that handle;
-- current `tensorcast.serving.runtime` APIs may be reshaped directly toward this
-  model because source compatibility is not a goal.
+- old serving-rooted runtime APIs may be deleted or internalized directly once
+  the artifact-runtime path covers the behavior; source compatibility is not a
+  goal.
 
 Ordinary retrieval already uses this path:
 
@@ -980,16 +982,15 @@ Mitigation: migration is delete-forward. Each replacement must name the old
 entrypoints it absorbs, the guardrail tests that prove equivalent behavior, and
 the cleanup commit that removes or internalizes the old public surface.
 
-## Risk: Serving module stays deep
+## Risk: Serving-rooted API reappears
 
-If `tensorcast.serving` remains the place where public config, sessions,
-retained acquire, publication, reports, and diagnostics are all defined, the
-system will still be serving-centered even if `Artifact.realize(...)` exists.
+If public config, sessions, retained acquire, publication, reports, and
+diagnostics move back under serving-rooted names, the system will still be
+serving-centered even if `Artifact.realize(...)` exists.
 
-Mitigation: final ownership is shallow. `tensorcast.serving` may contain private
-lowerings and serving-ABI-specific builder helpers, but normal startup, reload,
-retained credit, runtime view, and publication flow through the artifact-runtime
-professional API.
+Mitigation: final ownership is artifact-rooted. Serving-named fields remain only
+for ABI/profile compatibility; normal startup, reload, retained credit, runtime
+view, and publication flow through the artifact-runtime professional API.
 
 # Design Commitments
 
@@ -1003,9 +1004,8 @@ artifact-realization stack:
    runtime host capabilities, not from a public serving session.
 3. Compatibility layers are temporary migration tools, not accepted target-state
    architecture.
-4. Serving-centered names survive only when they describe an internal module,
-   implementation detail, or model-serving ABI field more precisely than the
-   artifact/runtime vocabulary.
+4. Serving-centered names survive only when they describe wire, endpoint, or
+   model-serving ABI fields more precisely than artifact/runtime vocabulary.
 5. Execution decisions follow the boundary decision logic in this design; when
    a concept could live in multiple places, choose the owner that matches the
    durable identity, realization intent, runtime host, retained claim, or
@@ -1013,9 +1013,9 @@ artifact-realization stack:
 
 # Acceptance Criteria
 
-- A design and plan exist for the artifact-centered model-runtime direction;
-  this design defines the target state and the paired plan tracks migration from
-  current code.
+- A design and short todo-only plan exist for the artifact-centered
+  model-runtime direction; this design defines the target state and the paired
+  plan tracks only remaining work.
 - `ArtifactRealizationSpec`, `ArtifactRealizationHandle`, and
   `ArtifactRealizationReport` are public SDK symbols at the same API level as
   `Artifact`.
@@ -1038,12 +1038,12 @@ artifact-realization stack:
 - Old serving-rooted public runtime entrypoints, compatibility wrappers,
   duplicate diagnostics, and redundant tests are removed or internalized once the
   artifact-centered replacement covers the behavior.
-- The final `tensorcast.serving` module is shallow: normal startup, reload,
-  retained memory credit, runtime view, and shutdown/publication do not require
-  public serving-session/config/retained/publication APIs.
-- vLLM normal paths use the direct artifact-runtime API and runtime
-  host capabilities; remaining serving imports are private implementation or
-  serving-ABI-specific builder paths with owners.
+- Normal startup, reload, retained memory credit, runtime view, and
+  shutdown/publication do not require public
+  serving-session/config/retained/publication APIs.
+- vLLM normal paths use the direct artifact-runtime API and runtime host
+  capabilities; remaining serving-named references are wire, endpoint, or
+  serving-ABI-specific fields with owners.
 - Retained pre-admission credit, mounted-source bootstrap, active-generation
   publication, live EP/EPLB reload checks, and main/draft reload semantics are
   covered as vLLM migration constraints.

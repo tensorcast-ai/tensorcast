@@ -158,8 +158,8 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
   - `representation_publish` attempts now require a typed
     `RepresentationPublishContract` child contract on
     `AssemblyCloseoutContract`.
-  - When the serving artifact exists, the manifest carrier is readable, and the
-    serving manifest agrees with the typed child contract, the returned
+  - When the runtime artifact exists, the serving-manifest ABI carrier is
+    readable, and the manifest agrees with the typed child contract, the returned
     `PublishedModelVersion` also carries:
     `serving_artifact_id`, `serving_descriptor`, `serving_version_key`,
     `representation_contract_hash`, `serving_build_digest`, and
@@ -167,18 +167,18 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
   - Phase 1 currently supports the reserved manifest-tensor carrier
     `tensor:__tensorcast_meta__.manifest_json`.
   - `RuntimeArtifactManifest` now self-describes its phase-1 carrier through
-    `serving_manifest_ref`, and the typed serving-lineage models can derive a
+    `serving_manifest_ref`, and the typed runtime-lineage models can derive a
     strict runtime gate:
     `RepresentationPublishContract.to_runtime_policy()`,
     `RuntimeArtifactManifest.to_runtime_policy()`, and
     `PublishedModelVersion.require_runtime_artifact_policy()`.
-  - The repo-owned serving-lineage carriers now also expose explicit phase-1
+  - The repo-owned runtime-lineage carriers now also expose explicit phase-1
     build identity fields:
     `RuntimeArtifactManifest.serving_build_digest_version` and
     `RepresentationPublishContract.serving_build_digest_version`.
     Runtime policy gates on `serving_manifest_ref`,
     `representation_contract_hash`, and `serving_build_digest`.
-  - For integrations that already have a transformed serving artifact in hand,
+  - For integrations that already have a transformed runtime artifact in hand,
     `build_pure_transform_publication_bundle_from_registered_artifact(...)`
     assembles a typed `RepresentationPublishSpec` containing the repo-owned
     phase-1 serving manifest bytes,
@@ -212,7 +212,7 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
     artifact-layout attachment query path.
   - If `layout_id` is omitted for the representation-publish helpers, TensorCast
     now tries to infer a unique attached layout from the bundle's source or
-    serving artifact lineage. `requirements` still stay explicit and are not
+    runtime artifact lineage. `requirements` still stay explicit and are not
     re-derived from layout metadata.
   - For the current single-rank canonical publish shape, use
     `Store.start_canonical_representation_publish_attempt(...)` or
@@ -239,7 +239,7 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
   - For offline or pipeline-style `PURE_TRANSFORM` builders that already have
     finalized tensors in memory, use
     `Store.register_pure_transform_publication(...)` to inject the reserved
-    manifest tensor and register a durable serving artifact plus typed
+    manifest tensor and register a durable runtime artifact plus typed
     publication bundle, or
     `Store.complete_pure_transform_publication(...)` to run the same
     repo-owned register + `representation_publish` closeout path in one call.
@@ -255,20 +255,20 @@ Design and execution details: `../../../docs/designs/0077-unified-reference-only
     `build_pure_transform_transform_spec(...)`. These helpers now attach typed
     publish intent on `TransformSpec.publication_spec`.
     `representation_contract_hash` can still be provided explicitly, but the
-    repo-owned `PURE_TRANSFORM` path can auto-derive it from source and serving
+    repo-owned `PURE_TRANSFORM` path can auto-derive it from source and runtime
     canonical indexes when the source artifact metadata is available. The
     default identity
     `transform_register` path now also prepares the reserved manifest tensor
-    before registration, so the resulting serving artifact can already carry
+    before registration, so the resulting runtime artifact can already carry
     `tensor:__tensorcast_meta__.manifest_json`.
   - For steady-state runtime bind or swap, pass
     `runtime_artifact_policy=...` to `artifact.bind(...)`,
     `artifact.bind_into(...)`, or `binding.swap(...)`.
-    This keeps generic artifact load permissive while giving serving runtime an
-    explicit strict gate. When the policy is present, the daemon requires a
-    serving manifest and validates `serving_manifest_ref`,
+    This keeps generic artifact load permissive while giving model-runtime
+    consumers an explicit strict gate. When the policy is present, the daemon
+    requires a serving-manifest ABI carrier and validates `serving_manifest_ref`,
     `representation_contract_hash`, and `serving_build_digest` before the
-    artifact is accepted into the serving path.
+    artifact is accepted into the runtime bind/swap path.
     If you pass a full `RepresentationPublishSpec` instead of a plain runtime
     policy, TensorCast also requires
     `RuntimeSupportLevel.RUNTIME_BIND_SWAP_READY` when caller-supplied
@@ -302,14 +302,14 @@ Canonical binding design: `../../../docs/designs/0084-binding-unified-model-and-
 - `Store.create_binding(layout, ownership=\"daemon\", device=\"cuda:0\")` creates a
   layout-seeded binding before any artifact is installed. The binding starts with
   `current_value is None`.
-- Builder-side serving realization may use that same layout-seeded binding as the
-  host of the future serving representation: attach framework tensor views onto
+- Builder-side runtime realization may use that same layout-seeded binding as the
+  host of the future runtime representation: attach framework tensor views onto
   the binding-backed storage, call `binding.realize_from(...)` to execute the
   source-bound load and open one explicit mutable update window, perform the
   builder-owned finalize work inside that returned `BindingUpdateEpoch`, then
   `seal_current(...)` and route the sealed value through `representation_publish`
   closeout. In that shape, realization is execution-only, the binding remains
-  unsealed until `seal_current(...)`, and the serving artifact identity still
+  unsealed until `seal_current(...)`, and the runtime artifact identity still
   arrives only after closeout.
 - `binding.publish_replica(ctx=...)` publishes the current bound layout without
   performing a swap. Use this when bind/swap should stay `publish=False` but you
@@ -318,8 +318,8 @@ Canonical binding design: `../../../docs/designs/0084-binding-unified-model-and-
   `Operation[T]`, so callers can attach, wait, and inspect status through the
   unified public continuation surface.
 - This publish path is for ordinary artifact-backed replica routing only. It is
-  not the source-to-serving `representation_publish` closeout path for new
-  serving-artifact lineage.
+  not the runtime-representation `representation_publish` closeout path for new
+  runtime artifact lineage.
 - `binding.current_value` is the authoritative sealed value handle for the local
   binding. `binding.artifact_id` / `binding.selection` are convenience mirrors
   and become `None` when the current value is absent or local-only.

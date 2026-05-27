@@ -4703,8 +4703,12 @@ class ArtifactRuntimeIntegration:
         if self.host is not None:
             try:
                 placement = self._host_runtime_placement(framework_config)
-            except Exception:
-                placement = None
+            except Exception as exc:
+                raise ArtifactRuntimeIntegrationError(
+                    "ArtifactRuntimeIntegration failed to collect runtime "
+                    "placement facts from host; model_runtime realization "
+                    "cannot safely continue without topology/member facts"
+                ) from exc
         return FrameworkIntegrationContext(
             framework_name=str(identity.framework_name),
             framework_version=str(identity.framework_version),
