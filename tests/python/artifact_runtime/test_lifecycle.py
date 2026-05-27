@@ -15,8 +15,13 @@ from torch import nn
 import tensorcast.artifact_runtime.contract as contract_mod
 import tensorcast.artifact_runtime.lifecycle as integration_mod
 import tensorcast.artifact_runtime.recipe.local_ready as local_ready_mod
+import tensorcast.artifact_runtime.runtime_binding_lifecycle as binding_lifecycle_mod
 import tensorcast.artifact_runtime.source_runtime as source_runtime_mod
 from tensorcast.artifact_runtime.admin import AdminLocalSourceBootstrap
+from tensorcast.artifact_runtime.binding.retained import (
+    restore_prepared_local_ready_binding,
+    restore_retained_binding,
+)
 from tensorcast.artifact_runtime.config import TensorCastRuntimeConfig
 from tensorcast.artifact_runtime.contract import logical_topology_json
 from tensorcast.artifact_runtime.diagnostics import (
@@ -93,12 +98,8 @@ from tensorcast.artifact_runtime.lifecycle import (
     _LocalReadyFinalize,
     _RetainedBindingAcquire,
     _RuntimeReload,
-    bind_runtime_artifact,
     build_local_ready_prepared_artifact,
-    is_runtime_binding_swap_capable,
     local_ready_current_value_summary_fields,
-    restore_prepared_local_ready_binding,
-    restore_retained_binding,
     runtime_binding_state_from_runtime_view,
     runtime_placement_from_framework_facts,
     source_selection_projection_from_artifact_realization_report,
@@ -106,7 +107,6 @@ from tensorcast.artifact_runtime.lifecycle import (
     source_selection_projection_from_materialization_diagnostics,
     source_subject_broadcast_payload,
     source_subject_from_broadcast_payload,
-    swap_runtime_artifact,
 )
 from tensorcast.artifact_runtime.lifecycle import (
     BindingValueRef as IntegrationBindingValueRef,
@@ -1636,9 +1636,13 @@ def test_binding_layout_diagnostics_are_core_owned():
 
 
 def test_runtime_binding_swap_capability_is_core_owned():
-    assert is_runtime_binding_swap_capable(SimpleNamespace(swap=lambda _: None))
-    assert is_runtime_binding_swap_capable(SimpleNamespace(swap_capable=True))
-    assert not is_runtime_binding_swap_capable(SimpleNamespace())
+    assert binding_lifecycle_mod.is_runtime_binding_swap_capable(
+        SimpleNamespace(swap=lambda _: None)
+    )
+    assert binding_lifecycle_mod.is_runtime_binding_swap_capable(
+        SimpleNamespace(swap_capable=True)
+    )
+    assert not binding_lifecycle_mod.is_runtime_binding_swap_capable(SimpleNamespace())
 
 
 def test_local_ready_current_value_summary_is_core_owned():
@@ -3048,7 +3052,9 @@ def test_serving_integration_load_prepared_local_ready_uses_restore(monkeypatch)
         yield restored
 
     monkeypatch.setattr(
-        integration_mod, "restore_prepared_local_ready_binding", fake_restore_prepared
+        binding_lifecycle_mod,
+        "restore_prepared_local_ready_binding",
+        fake_restore_prepared,
     )
     resolved = SimpleNamespace(
         artifact=_Artifact(),
@@ -4297,7 +4303,7 @@ class _Runtime:
 
 def test_bind_and_swap_return_attach_ready_results():
     resolved = SimpleNamespace(artifact=_Artifact(), tensor_names=("w",))
-    result = bind_runtime_artifact(
+    result = binding_lifecycle_mod.bind_runtime_artifact(
         resolved_artifact=resolved,
         tensor_names=("w",),
         device=torch.device("cuda:0"),
@@ -4315,7 +4321,7 @@ def test_bind_and_swap_return_attach_ready_results():
 
     binding = _SwapBinding()
     binding.tensors[SERVING_MANIFEST_TENSOR_NAME] = torch.ones((1,), dtype=torch.uint8)
-    swap_result = swap_runtime_artifact(
+    swap_result = binding_lifecycle_mod.swap_runtime_artifact(
         binding=binding,
         resolved_artifact=resolved,
         runtime_artifact_policy="policy",

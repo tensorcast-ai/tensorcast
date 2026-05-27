@@ -10,6 +10,7 @@ import torch
 import tensorcast as tc
 import tensorcast.artifact_runtime.lifecycle as integration_mod
 import tensorcast.artifact_runtime.recipe.local_ready as local_ready_mod
+import tensorcast.artifact_runtime.runtime_binding_lifecycle as binding_lifecycle_mod
 from tensorcast.api.store.artifact import Artifact
 from tensorcast.artifact_runtime.admin import AdminLocalSourceBootstrap
 from tensorcast.artifact_runtime.host import (
@@ -509,7 +510,7 @@ def test_fake_second_framework_uses_host_intent_lifecycle(monkeypatch):
         yield restored
 
     monkeypatch.setattr(
-        integration_mod, "restore_retained_binding", fake_restore_retained
+        binding_lifecycle_mod, "restore_retained_binding", fake_restore_retained
     )
     retained_attachment = ArtifactRuntimeIntegration(host=host).start(
         RetainedBindingAcquire(authority=_retained_authority()),
@@ -1118,7 +1119,7 @@ def test_artifact_realize_model_runtime_uses_local_ready_restore(monkeypatch):
         yield restored
 
     monkeypatch.setattr(
-        integration_mod,
+        binding_lifecycle_mod,
         "restore_prepared_local_ready_binding",
         fake_restore_prepared,
     )

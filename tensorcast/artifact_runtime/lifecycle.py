@@ -9,7 +9,6 @@ low-level helpers out of the framework-facing host/runtime modules.
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, NoReturn, cast
@@ -17,7 +16,6 @@ from typing import Any, NoReturn, cast
 import torch
 
 import tensorcast as tc
-import tensorcast.artifact_runtime.binding.execution as tc_binding_runtime
 import tensorcast.artifact_runtime.config as tc_runtime_config
 import tensorcast.artifact_runtime.contract as tc_contract
 import tensorcast.artifact_runtime.diagnostics as tc_diagnostics
@@ -27,6 +25,7 @@ import tensorcast.artifact_runtime.local_ready_contracts as tc_local_ready_contr
 import tensorcast.artifact_runtime.publication.replica as tc_replica_publication
 import tensorcast.artifact_runtime.recipe.local_ready as tc_local_ready
 import tensorcast.artifact_runtime.request_facts as tc_request_facts
+import tensorcast.artifact_runtime.runtime_binding_lifecycle as tc_runtime_binding_lifecycle
 import tensorcast.artifact_runtime.source as tc_source_catalog
 import tensorcast.artifact_runtime.source_runtime as tc_source_runtime
 from tensorcast.api.store.realization_kernel import (
@@ -78,14 +77,6 @@ from tensorcast.artifact_runtime.attachment_materialization import (
 )
 from tensorcast.artifact_runtime.attachment_materialization import (
     project_model_runtime_attachment as _project_model_runtime_attachment,
-)
-from tensorcast.artifact_runtime.attachment_materialization import (
-    runtime_attachment_realization_handle as _runtime_attachment_realization_handle,
-)
-from tensorcast.artifact_runtime.binding.retained import (
-    restore_prepared_local_ready_binding,
-    restore_retained_binding,
-    runtime_restore_rejection_reason,
 )
 from tensorcast.artifact_runtime.dto import (
     FrameworkIntegrationContext,
@@ -175,12 +166,6 @@ from tensorcast.artifact_runtime.policy import (
 )
 from tensorcast.artifact_runtime.realization_reports import (
     runtime_attachment_report_for_artifact_id as _runtime_attachment_report_for_artifact_id,
-)
-from tensorcast.artifact_runtime.realization_reports import (
-    runtime_attachment_report_for_resolved as _runtime_attachment_report_for_resolved,
-)
-from tensorcast.artifact_runtime.realization_reports import (
-    runtime_attachment_report_for_retained as _runtime_attachment_report_for_retained,
 )
 from tensorcast.artifact_runtime.recipe.build import (
     RecipeBuildSession,
@@ -331,12 +316,8 @@ __all__ = [
     "_LocalReadyFinalize",
     "_RetainedBindingAcquire",
     "_RuntimeReload",
-    "bind_runtime_artifact",
     "build_local_ready_prepared_artifact",
-    "is_runtime_binding_swap_capable",
     "local_ready_current_value_summary_fields",
-    "restore_prepared_local_ready_binding",
-    "restore_retained_binding",
     "runtime_binding_state_from_runtime_view",
     "runtime_placement_from_framework_facts",
     "source_selection_projection_from_artifact_realization_report",
@@ -344,7 +325,6 @@ __all__ = [
     "source_selection_projection_from_materialization_diagnostics",
     "source_subject_broadcast_payload",
     "source_subject_from_broadcast_payload",
-    "swap_runtime_artifact",
 ]
 
 
@@ -381,13 +361,6 @@ def _framework_payload_mapping(payload: object | None) -> dict[str, object] | No
     if not isinstance(payload, Mapping):
         return None
     return {str(key): value for key, value in payload.items()}
-
-
-def is_runtime_binding_swap_capable(binding: Any) -> bool:
-    return bool(
-        getattr(binding, "swap_capable", False)
-        or callable(getattr(binding, "swap", None))
-    )
 
 
 @dataclass(frozen=True)
@@ -1157,413 +1130,26 @@ class ArtifactRuntimeIntegration:
     def _load_existing_runtime_artifact(
         self, request: _DirectRuntimeLoad
     ) -> RuntimeLoadResult:
-        target_device = tc_framework_bridge.require_target_device(request.target_device)
-        context = self._framework_context(
-            request.framework_config,
-            request.model_config,
-        )
-        preflight = self._preflight_runtime_artifact(
-            resolved_artifact=request.resolved_artifact,
-            artifact_ref=request.artifact_ref,
-            artifact_locator=request.artifact_locator,
-            expected_tensor_schema_hash=None,
-            policy=request.policy,
-            placement=context.placement,
-        )
-        resolved = preflight.resolved_artifact
-        policy = preflight.runtime_artifact_policy
-        model = request.model
-        if model is None:
-            tc_framework_bridge.prepare_model_construction(
-                self.host,
-                request.framework_config,
-                request.model_config,
-            )
-            model = tc_framework_bridge.build_meta_model(
-                self.host,
-                request.framework_config,
-                request.model_config,
-            )
-        tc_framework_bridge.assert_model_ready_for_runtime_binding(
-            self.host,
-            model,
-            context="TensorCast direct runtime artifact startup",
-        )
-        tc_framework_bridge.align_runtime_tensor_names(
-            self.host,
-            model,
-            getattr(resolved, "tensor_names", ()),
-        )
-        current_tensors = tc_framework_bridge.collect_runtime_binding_tensors(
-            self.host,
-            model,
-            remove_duplicate=False,
-        )
-        tc_framework_bridge.assert_tensor_names_match_expected(
-            current_tensors,
-            getattr(resolved, "tensor_names", ()),
-        )
-        tensor_schema_hash = tc_framework_bridge.compute_runtime_tensor_schema_hash(
-            self.host,
-            current_tensors,
-            remove_duplicate=False,
-        )
-        preflight = self._preflight_runtime_artifact(
-            resolved_artifact=resolved,
-            artifact_ref=request.artifact_ref,
-            artifact_locator=request.artifact_locator,
-            expected_tensor_schema_hash=tensor_schema_hash,
-            policy=policy,
-            placement=context.placement,
-        )
-        resolved = preflight.resolved_artifact
-        policy = preflight.runtime_artifact_policy
-        manifest = getattr(resolved, "manifest", None)
-        local_serving_ref = getattr(manifest, "local_serving_ref", None)
-        if local_serving_ref:
-            expected_member = request.expected_member
-            if expected_member is None and context.placement is not None:
-                expected_member = context.placement.member
-            if expected_member is None:
-                raise RestoreBindingError(
-                    "ArtifactRuntimeIntegration._load_existing_runtime_artifact prepared "
-                    "local-ready restore requires expected_member"
-                )
-            with restore_prepared_local_ready_binding(
-                resolved_artifact=resolved,
-                target_device=target_device,
-                expected_member=expected_member,
-                expected_tensor_schema_hash=tensor_schema_hash,
-                expected_serving_build_digest=getattr(
-                    manifest, "serving_build_digest", None
-                ),
-                caller_pid=os.getpid(),
-                timeout_s=request.timeout_s,
-            ) as restored:
-                binding_result = RuntimeBindingResult.from_binding(restored)
-                authority = getattr(restored, "authority", None)
-                if authority is None:
-                    artifact_report = _runtime_attachment_report_for_artifact_id(
-                        artifact_id=str(getattr(resolved, "artifact_ref", "")),
-                        tensors=binding_result.tensors,
-                        binding_handle=restored,
-                        target_device=target_device,
-                        tensor_schema_hash=tensor_schema_hash,
-                        artifact_profile="retained_binding",
-                        authority_scope="daemon_retained_runtime_attachment",
-                        source_selection=request.source_selection,
-                        retained=True,
-                        reservation_bytes=int(restored.reservation_bytes),
-                    )
-                else:
-                    artifact_report = _runtime_attachment_report_for_retained(
-                        authority=authority,
-                        tensors=binding_result.tensors,
-                        binding_handle=restored,
-                        target_device=target_device,
-                        tensor_schema_hash=tensor_schema_hash,
-                        reservation_bytes=restored.reservation_bytes,
-                        source_selection=request.source_selection,
-                    )
-                state_seed = self._state_seed(
-                    resolved,
-                    tensor_schema_hash=tensor_schema_hash,
-                    execution_diagnostics=binding_result.execution_diagnostics,
-                    materialization_diagnostics=(
-                        binding_result.materialization_diagnostics
-                    ),
-                    binding_handle=restored,
-                    artifact_realization_report=artifact_report,
-                    readiness="runtime_local_ready",
-                )
-                runtime_state = self._materializer().attach_and_finalize(
-                    model=model,
-                    tensors=binding_result.tensors,
-                    binding_handle=restored,
-                    context=context,
-                    state_seed=state_seed,
-                    replace_meta_params=True,
-                    target_device=target_device,
-                    model_config=request.model_config,
-                    model_runtime_spec=request.model_runtime_spec,
-                )
-        else:
-            materialization = self._load_materialization_options(
-                request,
-                resolved,
-            )
-            binding_result = bind_runtime_artifact(
-                resolved_artifact=resolved,
-                tensor_names=tuple(current_tensors.keys()),
-                device=target_device,
-                runtime_artifact_policy=policy,
-                options=materialization,
-            )
-            artifact_report = _runtime_attachment_report_for_resolved(
-                resolved=resolved,
-                tensors=binding_result.tensors,
-                binding_handle=binding_result.binding,
-                target_device=target_device,
-                tensor_schema_hash=tensor_schema_hash,
-                source_selection=request.source_selection,
-                execution_diagnostics=binding_result.execution_diagnostics,
-                materialization_diagnostics=binding_result.materialization_diagnostics,
-            )
-            state_seed = self._state_seed(
-                resolved,
-                tensor_schema_hash=tensor_schema_hash,
-                execution_diagnostics=binding_result.execution_diagnostics,
-                materialization_diagnostics=binding_result.materialization_diagnostics,
-                binding_handle=binding_result.binding,
-                artifact_realization_report=artifact_report,
-            )
-            runtime_state = self._materializer().attach_and_finalize(
-                model=model,
-                tensors=binding_result.tensors,
-                binding_handle=binding_result.binding,
-                context=context,
-                state_seed=state_seed,
-                replace_meta_params=True,
-                target_device=target_device,
-                model_config=request.model_config,
-                model_runtime_spec=request.model_runtime_spec,
-            )
-        return RuntimeLoadResult(
-            model=model,
-            runtime_state=runtime_state,
-            runtime_view=runtime_state.runtime_view,
-            resolved_artifact=resolved,
-            binding_result=binding_result,
+        return tc_runtime_binding_lifecycle.load_existing_runtime_artifact(
+            self,
+            request,
         )
 
     def _reload_existing_runtime_artifact(
         self, request: _RuntimeReload
     ) -> RuntimeReloadResult:
-        target_device = (
-            torch.device(request.target_device)
-            if request.target_device is not None
-            else None
-        )
-        binding = getattr(request.current_state, "binding", None)
-        if binding is None:
-            raise ArtifactRuntimeIntegrationError(
-                "ArtifactRuntimeIntegration._reload_existing_runtime_artifact requires current_state.binding"
-            )
-        if not is_runtime_binding_swap_capable(binding):
-            raise ArtifactRuntimeIntegrationError(
-                "ArtifactRuntimeIntegration._reload_existing_runtime_artifact requires a "
-                "swap-capable runtime binding"
-            )
-        current_view = getattr(request.current_state, "runtime_view", None)
-        expected_tensor_schema_hash = getattr(current_view, "tensor_schema_hash", None)
-        runtime_tensors = None
-        if request.model is not None:
-            runtime_tensors = tc_framework_bridge.collect_runtime_binding_tensors(
-                self.host,
-                request.model,
-                remove_duplicate=False,
-            )
-            expected_tensor_schema_hash = (
-                tc_framework_bridge.compute_runtime_tensor_schema_hash(
-                    self.host,
-                    runtime_tensors,
-                    remove_duplicate=False,
-                )
-            )
-            if target_device is None:
-                for tensor in runtime_tensors.values():
-                    target_device = torch.device(tensor.device)
-                    break
-        target_device = tc_framework_bridge.require_target_device(target_device)
-        context = None
-        if (
-            request.model is not None
-            or _artifact_locator_kind(request.artifact_locator) == "ranked_version_key"
-        ):
-            context = self._framework_context(
-                request.framework_config,
-                request.model_config,
-            )
-        placement = None if context is None else context.placement
-        preflight = self._preflight_runtime_artifact(
-            resolved_artifact=request.resolved_artifact,
-            artifact_ref=request.artifact_ref,
-            artifact_locator=request.artifact_locator,
-            expected_tensor_schema_hash=expected_tensor_schema_hash,
-            policy=request.policy,
-            placement=placement,
-        )
-        resolved = preflight.resolved_artifact
-        policy = preflight.runtime_artifact_policy
-        materialization = self._reload_materialization_options(
+        return tc_runtime_binding_lifecycle.reload_existing_runtime_artifact(
+            self,
             request,
-            resolved,
-        )
-        binding_result = swap_runtime_artifact(
-            binding=binding,
-            resolved_artifact=resolved,
-            tensor_names=(
-                None if runtime_tensors is None else tuple(runtime_tensors.keys())
-            ),
-            runtime_artifact_policy=policy,
-            options=materialization,
-        )
-        artifact_report = _runtime_attachment_report_for_resolved(
-            resolved=resolved,
-            tensors=binding_result.tensors,
-            binding_handle=binding_result.binding,
-            target_device=target_device,
-            tensor_schema_hash=str(expected_tensor_schema_hash or ""),
-            execution_diagnostics=binding_result.execution_diagnostics,
-            materialization_diagnostics=binding_result.materialization_diagnostics,
-        )
-        state_seed = self._state_seed(
-            resolved,
-            tensor_schema_hash=str(expected_tensor_schema_hash or ""),
-            execution_diagnostics=binding_result.execution_diagnostics,
-            materialization_diagnostics=binding_result.materialization_diagnostics,
-            binding_handle=binding_result.binding,
-            artifact_realization_report=artifact_report,
-        )
-        if request.model is not None:
-            context = context or self._framework_context(
-                request.framework_config,
-                request.model_config,
-            )
-            runtime_state = self._materializer().attach_and_finalize(
-                model=request.model,
-                tensors=binding_result.tensors,
-                binding_handle=binding_result.binding,
-                context=context,
-                state_seed=state_seed,
-                replace_meta_params=False,
-                target_device=target_device,
-                model_config=request.model_config,
-                run_process_after_load=False,
-            )
-        else:
-            realization_handle = _runtime_attachment_realization_handle(
-                report=artifact_report,
-                binding_handle=binding_result.binding,
-                owner=(
-                    getattr(request.current_state, "ownership_handle", None)
-                    or binding_result.binding
-                ),
-            )
-            runtime_state = RuntimeBindingState(
-                binding=binding_result.binding,
-                artifact_ref=state_seed.artifact_ref,
-                runtime_view=state_seed.runtime_view(),
-                ownership_handle=getattr(
-                    request.current_state, "ownership_handle", None
-                ),
-                release_contract=None
-                if realization_handle is None
-                else realization_handle.release_contract,
-                realization_handle=realization_handle,
-            )
-        return RuntimeReloadResult(
-            runtime_state=runtime_state,
-            runtime_view=runtime_state.runtime_view,
-            resolved_artifact=resolved,
-            binding_result=binding_result,
         )
 
     def _restore_retained_for_intent(
         self, request: _RetainedBindingAcquire
     ) -> RetainedBindingResult:
-        target_device = tc_framework_bridge.require_target_device(request.target_device)
-        authority = request.authority
-        if authority is None:
-            raise RestoreBindingError(
-                "ArtifactRuntimeIntegration._restore_retained_for_intent requires "
-                "authority"
-            )
-        rejection_reason = runtime_restore_rejection_reason(authority)
-        if rejection_reason is not None:
-            raise RestoreBindingError(rejection_reason)
-        model = tc_framework_bridge.build_meta_model(
-            self.host,
-            request.framework_config,
-            request.model_config,
+        return tc_runtime_binding_lifecycle.restore_retained_for_intent(
+            self,
+            request,
         )
-        try:
-            with restore_retained_binding(
-                authority=authority,
-                target_device=target_device,
-                expected_member=request.expected_member,
-                caller_pid=os.getpid(),
-                timeout_s=request.timeout_s,
-                runtime=request.runtime,
-                client=request.client,
-                restore_fn=request.restore_fn,
-            ) as restored:
-                expected = getattr(authority, "expected", None)
-                expected_tensor_schema_hash = getattr(
-                    expected, "tensor_schema_hash", None
-                )
-                artifact_report = _runtime_attachment_report_for_retained(
-                    authority=authority,
-                    tensors=restored.tensors,
-                    binding_handle=restored,
-                    target_device=target_device,
-                    tensor_schema_hash=str(expected_tensor_schema_hash or ""),
-                    reservation_bytes=restored.reservation_bytes,
-                )
-                state_seed = RuntimeStateSeed(
-                    artifact_ref=(
-                        getattr(authority, "serving_artifact_id", None)
-                        or getattr(authority, "local_serving_ref", None)
-                        or ""
-                    ),
-                    serving_artifact_ref=getattr(
-                        authority, "serving_artifact_id", None
-                    ),
-                    tensor_schema_hash=str(expected_tensor_schema_hash or ""),
-                    binding_value_ref=restored.binding_value_ref,
-                    local_serving_ref=getattr(authority, "local_serving_ref", None),
-                    readiness=str(
-                        getattr(authority, "readiness", "") or "runtime_local_ready"
-                    ),
-                    diagnostics={
-                        "reservation_bytes": int(restored.reservation_bytes),
-                        "verification_state": str(
-                            getattr(authority, "verification_state", "") or ""
-                        ),
-                        "artifact_realization_report": (
-                            artifact_realization_report_to_dict(artifact_report)
-                        ),
-                    },
-                    realization_report=artifact_report,
-                )
-                runtime_state = self._materializer().attach_and_finalize(
-                    model=model,
-                    tensors=restored.tensors,
-                    binding_handle=restored,
-                    context=self._framework_context(
-                        request.framework_config,
-                        request.model_config,
-                    ),
-                    state_seed=state_seed,
-                    replace_meta_params=True,
-                    target_device=target_device,
-                    model_config=request.model_config,
-                    run_process_after_load=False,
-                    expected_tensor_schema_hash=expected_tensor_schema_hash,
-                    model_runtime_spec=request.model_runtime_spec,
-                )
-                return RetainedBindingResult(
-                    model=model,
-                    runtime_state=runtime_state,
-                    runtime_view=runtime_state.runtime_view,
-                    restored=restored,
-                )
-        except (AttachFinalizeError, OwnershipTransferError, SchemaMismatchError):
-            raise
-        except Exception as exc:
-            raise RestoreBindingError(
-                "TensorCast retained binding acquire failed"
-            ) from exc
 
     def _prepare_local_source_bootstrap(
         self, request: _LocalReadyBootstrap
@@ -2914,49 +2500,3 @@ class ArtifactRuntimeSession:
                 "TensorCast runtime artifact reload requires a durable runtime "
                 "artifact locator, not a local source selector"
             )
-
-
-def bind_runtime_artifact(
-    *,
-    resolved_artifact: ResolvedRuntimeArtifact,
-    tensor_names: Sequence[str],
-    device: Any,
-    runtime_artifact_policy: Any | None,
-    options: Any | None,
-) -> RuntimeBindingResult:
-    """Bind a durable runtime artifact and return an attach-ready result."""
-
-    binding = tc_binding_runtime.bind_runtime_artifact(
-        resolved_artifact=resolved_artifact,
-        tensor_names=tuple(tensor_names),
-        device=device,
-        runtime_artifact_policy=runtime_artifact_policy,
-        options=options,
-    )
-    return RuntimeBindingResult.from_binding(binding)
-
-
-def swap_runtime_artifact(
-    *,
-    binding: Any,
-    resolved_artifact: ResolvedRuntimeArtifact,
-    tensor_names: Sequence[str] | None = None,
-    runtime_artifact_policy: Any | None,
-    options: Any | None,
-) -> RuntimeBindingResult:
-    """Swap an existing runtime binding to another runtime artifact."""
-
-    operation_result = tc_binding_runtime.swap_runtime_artifact(
-        binding=binding,
-        resolved_artifact=resolved_artifact,
-        tensor_names=tensor_names,
-        runtime_artifact_policy=runtime_artifact_policy,
-        options=options,
-    )
-    result_binding = operation_result if operation_result is not None else binding
-    if not hasattr(result_binding, "tensors"):
-        result_binding = binding
-    return RuntimeBindingResult.from_binding(
-        result_binding,
-        operation_result=operation_result,
-    )
