@@ -23,6 +23,7 @@ from tensorcast.artifact_runtime.diagnostics import (
     binding_layout_profile_fields,
     binding_layout_tensor_count,
 )
+from tensorcast.artifact_runtime.dto import PreparedRuntimeArtifact
 from tensorcast.artifact_runtime.lifecycle import (
     PLACEMENT_ADMISSION_FACTS_SCHEMA_VERSION,
     PLACEMENT_IDENTITY_FACTS_SCHEMA_VERSION,
@@ -1375,7 +1376,7 @@ def test_local_source_bootstrap_start_derives_request_from_host(monkeypatch):
             model=model,
             runtime_state=runtime_state,
             runtime_view=runtime_view,
-            prepared=integration_mod.PreparedRuntimeArtifact(
+            prepared=PreparedRuntimeArtifact(
                 source_artifact_ref="mi2:source",
                 serving_manifest_ref="manifest-ref",
                 representation_contract_hash="repr",
