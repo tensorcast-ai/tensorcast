@@ -12,7 +12,6 @@ import logging
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from types import SimpleNamespace
 from typing import Any, NoReturn, cast
 
 import torch
@@ -22,6 +21,7 @@ import tensorcast.artifact_runtime.binding.execution as tc_binding_runtime
 import tensorcast.artifact_runtime.config as tc_runtime_config
 import tensorcast.artifact_runtime.contract as tc_contract
 import tensorcast.artifact_runtime.diagnostics as tc_diagnostics
+import tensorcast.artifact_runtime.framework_bridge as tc_framework_bridge
 import tensorcast.artifact_runtime.intent as tc_runtime_intent
 import tensorcast.artifact_runtime.publication.replica as tc_replica_publication
 import tensorcast.artifact_runtime.readiness as tc_readiness
@@ -127,11 +127,13 @@ from tensorcast.artifact_runtime.execution_context import (
 from tensorcast.artifact_runtime.execution_context import (
     host_materialization_request as _host_materialization_request,
 )
+from tensorcast.artifact_runtime.execution_context import (
+    request_materialization_options as _request_materialization_options,
+)
 from tensorcast.artifact_runtime.host import (
     AdmissionDecision,
     AdmissionRequest,
     DefaultAdmissionPolicy,
-    FrameworkHost,
     FrameworkIdentity,
     IntegrationHost,
     MaterializationExecutionFacts,
@@ -145,7 +147,6 @@ from tensorcast.artifact_runtime.host import (
     SourceHost,
     SourceSelector,
     SourceSubjectCoordinator,
-    TensorSurfaceHost,
     TorchTensorHost,
     runtime_placement_from_framework_facts,
 )
@@ -443,7 +444,6 @@ class _LocalReadyBootstrap:
 
     source_selector: SourceSelector | Any | None = None
     bootstrap: Any | None = None
-    materialization: Any | None = None
     configured_collective_policy: Any | None = None
     source_bound_contract_state: Any | None = None
     source_bound_contract_path: str | None = None
@@ -1449,7 +1449,7 @@ class ArtifactRuntimeIntegration:
     def _load_existing_runtime_artifact(
         self, request: _DirectRuntimeLoad
     ) -> RuntimeLoadResult:
-        target_device = self._require_target_device(request.target_device)
+        target_device = tc_framework_bridge.require_target_device(request.target_device)
         context = self._framework_context(
             request.framework_config,
             request.model_config,
@@ -1466,31 +1466,37 @@ class ArtifactRuntimeIntegration:
         policy = preflight.runtime_artifact_policy
         model = request.model
         if model is None:
-            self._prepare_model_construction(
+            tc_framework_bridge.prepare_model_construction(
+                self.host,
                 request.framework_config,
                 request.model_config,
             )
-            model = self._build_meta_model(
+            model = tc_framework_bridge.build_meta_model(
+                self.host,
                 request.framework_config,
                 request.model_config,
             )
-        self._assert_model_ready_for_runtime_binding(
+        tc_framework_bridge.assert_model_ready_for_runtime_binding(
+            self.host,
             model,
             context="TensorCast direct runtime artifact startup",
         )
-        self._align_runtime_tensor_names(
+        tc_framework_bridge.align_runtime_tensor_names(
+            self.host,
             model,
             getattr(resolved, "tensor_names", ()),
         )
-        current_tensors = self._collect_runtime_binding_tensors(
+        current_tensors = tc_framework_bridge.collect_runtime_binding_tensors(
+            self.host,
             model,
             remove_duplicate=False,
         )
-        self._assert_tensor_names_match_expected(
+        tc_framework_bridge.assert_tensor_names_match_expected(
             current_tensors,
             getattr(resolved, "tensor_names", ()),
         )
-        tensor_schema_hash = self._compute_runtime_tensor_schema_hash(
+        tensor_schema_hash = tc_framework_bridge.compute_runtime_tensor_schema_hash(
+            self.host,
             current_tensors,
             remove_duplicate=False,
         )
@@ -1644,19 +1650,23 @@ class ArtifactRuntimeIntegration:
         expected_tensor_schema_hash = getattr(current_view, "tensor_schema_hash", None)
         runtime_tensors = None
         if request.model is not None:
-            runtime_tensors = self._collect_runtime_binding_tensors(
+            runtime_tensors = tc_framework_bridge.collect_runtime_binding_tensors(
+                self.host,
                 request.model,
                 remove_duplicate=False,
             )
-            expected_tensor_schema_hash = self._compute_runtime_tensor_schema_hash(
-                runtime_tensors,
-                remove_duplicate=False,
+            expected_tensor_schema_hash = (
+                tc_framework_bridge.compute_runtime_tensor_schema_hash(
+                    self.host,
+                    runtime_tensors,
+                    remove_duplicate=False,
+                )
             )
             if target_device is None:
                 for tensor in runtime_tensors.values():
                     target_device = torch.device(tensor.device)
                     break
-        target_device = self._require_target_device(target_device)
+        target_device = tc_framework_bridge.require_target_device(target_device)
         context = None
         if (
             request.model is not None
@@ -1754,7 +1764,7 @@ class ArtifactRuntimeIntegration:
     def _restore_retained_for_intent(
         self, request: _RetainedBindingAcquire
     ) -> RetainedBindingResult:
-        target_device = self._require_target_device(request.target_device)
+        target_device = tc_framework_bridge.require_target_device(request.target_device)
         authority = request.authority
         if authority is None:
             raise RestoreBindingError(
@@ -1764,7 +1774,8 @@ class ArtifactRuntimeIntegration:
         rejection_reason = runtime_restore_rejection_reason(authority)
         if rejection_reason is not None:
             raise RestoreBindingError(rejection_reason)
-        model = self._build_meta_model(
+        model = tc_framework_bridge.build_meta_model(
+            self.host,
             request.framework_config,
             request.model_config,
         )
@@ -1870,8 +1881,8 @@ class ArtifactRuntimeIntegration:
                     "ArtifactRuntimeIntegration.start(LocalSourceBootstrap) requires "
                     "model_config to build a framework model"
                 )
-            model = self._build_meta_model(
-                request.framework_config, request.model_config
+            model = tc_framework_bridge.build_meta_model(
+                self.host, request.framework_config, request.model_config
             )
         manifest_bytes = request.manifest_bytes
         serving_manifest_ref = request.serving_manifest_ref
@@ -1927,15 +1938,18 @@ class ArtifactRuntimeIntegration:
             serving_build_digest = carrier.serving_build_digest
         options = request.options
         if model is not None:
-            self._assert_model_ready_for_runtime_binding(
+            tc_framework_bridge.assert_model_ready_for_runtime_binding(
+                self.host,
                 model,
                 context="TensorCast local-ready binding realization",
             )
-            self._align_runtime_tensor_names(
+            tc_framework_bridge.align_runtime_tensor_names(
+                self.host,
                 model,
                 self.local_ready_materialized_tensor_names(request.recipe),
             )
-            canonical_tensors = self._collect_runtime_binding_tensors(
+            canonical_tensors = tc_framework_bridge.collect_runtime_binding_tensors(
+                self.host,
                 model,
                 remove_duplicate=False,
             )
@@ -2267,7 +2281,8 @@ class ArtifactRuntimeIntegration:
             framework_config=request.framework_config,
             source_catalog=source_catalog,
             framework_adapter=adapter,
-            build_meta_model=lambda: self._build_meta_model(
+            build_meta_model=lambda: tc_framework_bridge.build_meta_model(
+                self.host,
                 request.framework_config,
                 request.model_config,
             ),
@@ -2307,41 +2322,25 @@ class ArtifactRuntimeIntegration:
         self,
         request: _LocalReadyBootstrap,
     ) -> Any | None:
-        execution_facts = self._request_execution_facts(request)
-        if (
-            request.configured_collective_policy is None
-            or request.source_bound_contract_state is None
-            or not request.source_bound_contract_path
-            or execution_facts is None
-        ):
-            if request.require_materialization_options:
-                raise ArtifactRuntimeIntegrationError(
-                    "ArtifactRuntimeIntegration.start(LocalSourceBootstrap) requires "
-                    "materialization execution context"
-                )
-            return None
-        if request.require_materialization_options and not getattr(
-            request.source_bound_contract_state,
-            "source_bound_contract_ready",
-            False,
-        ):
-            raise ArtifactRuntimeIntegrationError(
-                "ArtifactRuntimeIntegration.start(LocalSourceBootstrap) requires "
-                "ready source-bound contract state"
-            )
         identity = self.local_ready_materialization_identity(request.recipe)
-        options, _profile = self.build_materialization_options(
+        return _request_materialization_options(
+            explicit_options=request.options,
+            request=request,
             artifact_ref=identity.source_artifact_ref,
-            operation_scope=request.operation_scope,
-            configured_policy=request.configured_collective_policy,
-            source_bound_contract_state=request.source_bound_contract_state,
-            source_bound_contract_path=request.source_bound_contract_path,
-            execution_facts=execution_facts,
             contract_identity=(
                 request.contract_identity or identity.source_metadata_fingerprint
             ),
+            execution_facts=self._request_execution_facts(request),
+            build_options=self.build_materialization_options,
+            missing_context_message=(
+                "ArtifactRuntimeIntegration.start(LocalSourceBootstrap) requires "
+                "materialization execution context"
+            ),
+            not_ready_message=(
+                "ArtifactRuntimeIntegration.start(LocalSourceBootstrap) requires "
+                "ready source-bound contract state"
+            ),
         )
-        return options
 
     def _request_execution_facts(self, request: Any) -> Mapping[str, Any] | None:
         execution_facts = getattr(request, "execution_facts", None)
@@ -2382,7 +2381,7 @@ class ArtifactRuntimeIntegration:
     def _finalize_local_ready_runtime(
         self, request: _LocalReadyFinalize
     ) -> LocalReadyRuntimeResult:
-        target_device = self._require_target_device(request.target_device)
+        target_device = tc_framework_bridge.require_target_device(request.target_device)
         if request.recipe is None:
             raise ArtifactRuntimeIntegrationError(
                 "ArtifactRuntimeIntegration._finalize_local_ready_runtime requires recipe"
@@ -2450,7 +2449,8 @@ class ArtifactRuntimeIntegration:
                 run_post_bind_finalize=bool(request.run_post_bind_finalize),
                 semantic_validation_spec=semantic_validation_spec,
             )
-            tensors = self._collect_runtime_binding_tensors(
+            tensors = tc_framework_bridge.collect_runtime_binding_tensors(
+                self.host,
                 request.model,
                 remove_duplicate=False,
             )
@@ -2735,13 +2735,21 @@ class ArtifactRuntimeIntegration:
             topology_ref=topology_ref,
             member_ref=member_ref,
             framework_name=framework_name
-            or self._framework_identity(model_config).framework_name,
+            or tc_framework_bridge.framework_identity(
+                self.host, model_config
+            ).framework_name,
             framework_version=framework_version
-            or self._framework_identity(model_config).framework_version,
+            or tc_framework_bridge.framework_identity(
+                self.host, model_config
+            ).framework_version,
             adapter_version=adapter_version
-            or self._framework_identity(model_config).adapter_version,
+            or tc_framework_bridge.framework_identity(
+                self.host, model_config
+            ).adapter_version,
             serving_abi_version=serving_abi_version
-            or self._framework_identity(model_config).serving_abi_version,
+            or tc_framework_bridge.framework_identity(
+                self.host, model_config
+            ).serving_abi_version,
             source_identity=source_identity,
         )
 
@@ -3065,187 +3073,33 @@ class ArtifactRuntimeIntegration:
     ) -> SourceSubject:
         return source_subject_from_broadcast_payload(payload)
 
-    def _framework_host(self) -> FrameworkHost:
-        if self.host is not None:
-            return self.host.framework
-        raise _capability_missing(
-            "ArtifactRuntimeIntegration requires IntegrationHost.framework",
-            level="level1-runtime",
-            capability="framework",
-            operation="framework_host",
-            required_methods=(
-                "identity",
-                "build_runtime_model",
-                "assert_model_ready_for_runtime_binding",
-            ),
-            next_action=(
-                "Construct ArtifactRuntimeSession with IntegrationHost.framework."
-            ),
-        )
-
-    def _framework_identity(
-        self,
-        model_config: Any | None,
-    ) -> FrameworkIdentity:
-        return self._framework_host().identity(model_config)
-
-    def _build_meta_model(
-        self,
-        framework_config: Any | None,
-        model_config: Any | None,
-    ) -> object:
-        return self._framework_host().build_meta_model(
-            framework_config,
-            model_config,
-        )
-
-    def _surface(self) -> TensorSurfaceHost:
-        if self.host is not None:
-            if self.host.tensor_surface is None:
-                raise _capability_missing(
-                    "IntegrationHost requires TensorSurfaceHost for runtime "
-                    "tensor operations",
-                    level="level1-runtime",
-                    capability="tensor_surface",
-                    operation="runtime_tensor_surface",
-                    required_methods=(
-                        "attach_bound_tensors",
-                        "collect_runtime_tensors",
-                        "compute_runtime_tensor_schema_hash",
-                    ),
-                    next_action=(
-                        "Pass IntegrationHost(tensor_surface=...) or use "
-                        "TorchTensorHost for PyTorch module carriers."
-                    ),
-                )
-            return self.host.tensor_surface
-        raise _capability_missing(
-            "ArtifactRuntimeIntegration requires IntegrationHost.tensor_surface",
-            level="level1-runtime",
-            capability="tensor_surface",
-            operation="runtime_tensor_surface",
-            required_methods=(
-                "attach_bound_tensors",
-                "collect_runtime_tensors",
-                "compute_runtime_tensor_schema_hash",
-            ),
-            next_action=(
-                "Construct ArtifactRuntimeSession with IntegrationHost.tensor_surface."
-            ),
-        )
-
-    @staticmethod
-    def _require_target_device(target_device: Any | None) -> torch.device:
-        if target_device is None:
-            raise ArtifactRuntimeIntegrationError(
-                "ArtifactRuntimeIntegration request requires target_device"
-            )
-        return torch.device(target_device)
-
-    def _prepare_model_construction(
-        self,
-        framework_config: Any | None,
-        model_config: Any | None,
-    ) -> None:
-        host = self._framework_host()
-        prepare = getattr(host, "prepare_model_construction", None)
-        if callable(prepare):
-            prepare(framework_config, model_config)
-
-    def _assert_model_ready_for_runtime_binding(
-        self,
-        model: Any,
-        *,
-        context: str,
-    ) -> None:
-        host = self._framework_host()
-        check = getattr(host, "assert_model_ready_for_runtime_binding", None)
-        if callable(check):
-            check(model, context=context)
-
-    def _align_runtime_tensor_names(
-        self,
-        model: Any,
-        expected_names: Sequence[str],
-    ) -> int:
-        return int(
-            self._surface().align_runtime_tensor_names(model, expected_names) or 0
-        )
-
-    def _collect_runtime_binding_tensors(
-        self,
-        model: Any,
-        *,
-        remove_duplicate: bool,
-    ) -> Mapping[str, Any]:
-        return self._surface().collect_runtime_tensors(
-            model,
-            remove_duplicate=remove_duplicate,
-        )
-
-    def _compute_runtime_tensor_schema_hash(
-        self,
-        tensors: Mapping[str, Any],
-        *,
-        remove_duplicate: bool,
-    ) -> str:
-        return self._surface().compute_runtime_tensor_schema_hash(
-            tensors,
-            remove_duplicate=remove_duplicate,
-        )
-
     def runtime_only_tensor_names(self, model: object) -> tuple[str, ...]:
-        return self._surface().runtime_only_tensor_names(model)
+        return tc_framework_bridge.runtime_only_tensor_names(self.host, model)
 
     def support_level(
         self,
         model: object,
         model_config: object,
     ) -> RuntimeSupportLevel:
-        host = self._framework_host()
-        support_level = getattr(host, "support_level", None)
-        if callable(support_level):
-            return tc_readiness.coerce_runtime_support_level(
-                support_level(model, model_config),
-                default=RuntimeSupportLevel.BLOCKED,
-            )
-        return RuntimeSupportLevel.BLOCKED
+        return tc_framework_bridge.support_level(self.host, model, model_config)
 
     def process_after_load_class(
         self,
         model: object,
         model_config: object,
     ) -> FinalizeClass:
-        host = self._framework_host()
-        process_after_load = getattr(host, "process_after_load_class", None)
-        if callable(process_after_load):
-            return tc_readiness.coerce_finalize_class(
-                process_after_load(model, model_config),
-                default=FinalizeClass.UNKNOWN_BLOCKED,
-            )
-        finalize_policy = getattr(host, "finalize_policy", None)
-        if callable(finalize_policy):
-            finalize_policy(model, model_config)
-            return FinalizeClass.RUNTIME_ONLY
-        return FinalizeClass.UNKNOWN_BLOCKED
+        return tc_framework_bridge.process_after_load_class(
+            self.host, model, model_config
+        )
 
     def post_bind_finalize_class(
         self,
         model: object,
         model_config: object,
     ) -> FinalizeClass:
-        host = self._framework_host()
-        post_bind_finalize = getattr(host, "post_bind_finalize_class", None)
-        if callable(post_bind_finalize):
-            return tc_readiness.coerce_finalize_class(
-                post_bind_finalize(model, model_config),
-                default=FinalizeClass.RUNTIME_ONLY,
-            )
-        finalize_policy = getattr(host, "finalize_policy", None)
-        if callable(finalize_policy):
-            finalize_policy(model, model_config)
-            return FinalizeClass.RUNTIME_ONLY
-        return FinalizeClass.RUNTIME_ONLY
+        return tc_framework_bridge.post_bind_finalize_class(
+            self.host, model, model_config
+        )
 
     def trace_model_load(
         self,
@@ -3255,29 +3109,12 @@ class ArtifactRuntimeIntegration:
         *,
         debug_dump_trace: bool = False,
     ) -> TracePlan:
-        host = self._framework_host()
-        trace = getattr(host, "trace_model_load", None)
-        if not callable(trace):
-            raise _capability_missing(
-                "ArtifactRuntimeIntegration host requires RecipeTraceHost."
-                "trace_model_load on recipe cache miss",
-                level="level2-local-bootstrap",
-                capability="recipe_trace",
-                operation="local_bootstrap.trace_model_load",
-                required_methods=("trace_model_load",),
-                next_action=(
-                    "Implement RecipeTraceHost.trace_model_load or precompute "
-                    "a recipe through the admin/offline builder path."
-                ),
-            )
-        return cast(
-            TracePlan,
-            trace(
-                model,
-                ordered_names,
-                meta_by_name,
-                debug_dump_trace=debug_dump_trace,
-            ),
+        return tc_framework_bridge.trace_model_load(
+            self.host,
+            model,
+            ordered_names,
+            meta_by_name,
+            debug_dump_trace=debug_dump_trace,
         )
 
     def cleanup_after_recipe_build(
@@ -3287,75 +3124,30 @@ class ArtifactRuntimeIntegration:
         *,
         framework_config: object | None = None,
     ) -> None:
-        host = self._framework_host()
-        cleanup = getattr(host, "cleanup_after_recipe_build", None)
-        if callable(cleanup):
-            cleanup(
-                model,
-                model_config,
-                framework_config=framework_config,
-            )
-
-    def semantic_probes(self, model: object, model_config: object) -> object:
-        host = self._framework_host()
-        semantic_probes = getattr(host, "semantic_probes", None)
-        if callable(semantic_probes):
-            return semantic_probes(model, model_config)
-        return None
-
-    def native_load_weights(self, model: object, weights: object) -> None:
-        host = self._framework_host()
-        native_load = getattr(host, "native_load_weights", None)
-        if not callable(native_load):
-            raise _capability_missing(
-                "ArtifactRuntimeIntegration host requires NativeLoadHost for native "
-                "checkpoint/source loading",
-                level="level2-local-bootstrap",
-                capability="native_load",
-                operation="local_bootstrap.native_load_weights",
-                required_methods=("native_load_weights",),
-                next_action=(
-                    "Implement NativeLoadHost.native_load_weights for source "
-                    "bootstrap cache misses."
-                ),
-            )
-        native_load(model, weights)
-
-    def _recipe_framework_adapter(self, model_config: Any | None) -> Any:
-        identity = self._framework_identity(model_config)
-        return SimpleNamespace(
-            framework_name=lambda: str(identity.framework_name),
-            framework_version=lambda: str(identity.framework_version),
-            adapter_version=lambda: str(identity.adapter_version),
-            serving_abi_version=lambda _model_config=None: str(
-                identity.serving_abi_version
-            ),
-            support_level=self.support_level,
-            runtime_only_tensor_names=self.runtime_only_tensor_names,
-            process_after_load_class=self.process_after_load_class,
-            post_bind_finalize_class=self.post_bind_finalize_class,
-            trace_model_load=self.trace_model_load,
-            cleanup_after_recipe_build=self.cleanup_after_recipe_build,
-            semantic_probes=self.semantic_probes,
-            native_load_weights=self.native_load_weights,
+        tc_framework_bridge.cleanup_after_recipe_build(
+            self.host,
+            model,
+            model_config,
+            framework_config=framework_config,
         )
 
-    @staticmethod
-    def _assert_tensor_names_match_expected(
-        tensors: Mapping[str, Any],
-        expected_names: Sequence[str],
-    ) -> None:
-        expected = {str(name) for name in expected_names}
-        if not expected:
-            return
-        actual = {str(name) for name in tensors}
-        missing = sorted(expected - actual)
-        unexpected = sorted(actual - expected)
-        if not missing and not unexpected:
-            return
-        raise SchemaMismatchError(
-            "TensorCast runtime tensor set does not match runtime artifact: "
-            f"missing_count={len(missing)}, unexpected_count={len(unexpected)}"
+    def semantic_probes(self, model: object, model_config: object) -> object:
+        return tc_framework_bridge.semantic_probes(self.host, model, model_config)
+
+    def native_load_weights(self, model: object, weights: object) -> None:
+        tc_framework_bridge.native_load_weights(self.host, model, weights)
+
+    def _recipe_framework_adapter(self, model_config: Any | None) -> Any:
+        return tc_framework_bridge.recipe_framework_adapter(
+            identity=tc_framework_bridge.framework_identity(self.host, model_config),
+            support_level_fn=self.support_level,
+            runtime_only_tensor_names_fn=self.runtime_only_tensor_names,
+            process_after_load_class_fn=self.process_after_load_class,
+            post_bind_finalize_class_fn=self.post_bind_finalize_class,
+            trace_model_load_fn=self.trace_model_load,
+            cleanup_after_recipe_build_fn=self.cleanup_after_recipe_build,
+            semantic_probes_fn=self.semantic_probes,
+            native_load_weights_fn=self.native_load_weights,
         )
 
     def _load_materialization_options(
@@ -3363,89 +3155,49 @@ class ArtifactRuntimeIntegration:
         request: _DirectRuntimeLoad,
         resolved: Any,
     ) -> Any | None:
-        if request.materialization is not None:
-            return request.materialization
-        execution_facts = self._request_execution_facts(request)
-        if (
-            request.configured_collective_policy is None
-            or request.source_bound_contract_state is None
-            or not request.source_bound_contract_path
-            or execution_facts is None
-        ):
-            if request.require_materialization_options:
-                raise ArtifactRuntimeIntegrationError(
-                    "ArtifactRuntimeIntegration._load_existing_runtime_artifact requires "
-                    "materialization execution context for direct bind"
-                )
-            return None
-        if request.require_materialization_options and not getattr(
-            request.source_bound_contract_state,
-            "source_bound_contract_ready",
-            False,
-        ):
-            raise ArtifactRuntimeIntegrationError(
-                "ArtifactRuntimeIntegration._load_existing_runtime_artifact requires ready "
-                "source-bound contract state for direct bind"
-            )
         manifest = getattr(resolved, "manifest", None)
-        options, _profile = self.build_materialization_options(
+        return _request_materialization_options(
+            explicit_options=request.materialization,
+            request=request,
             artifact_ref=str(getattr(resolved, "artifact_ref", "") or ""),
-            operation_scope=request.operation_scope,
-            configured_policy=request.configured_collective_policy,
-            source_bound_contract_state=request.source_bound_contract_state,
-            source_bound_contract_path=request.source_bound_contract_path,
-            execution_facts=execution_facts,
             contract_identity=getattr(manifest, "representation_contract_hash", None),
+            execution_facts=self._request_execution_facts(request),
+            build_options=self.build_materialization_options,
+            missing_context_message=(
+                "ArtifactRuntimeIntegration._load_existing_runtime_artifact requires "
+                "materialization execution context for direct bind"
+            ),
+            not_ready_message=(
+                "ArtifactRuntimeIntegration._load_existing_runtime_artifact requires "
+                "ready source-bound contract state for direct bind"
+            ),
         )
-        return options
 
     def _reload_materialization_options(
         self,
         request: _RuntimeReload,
         resolved: Any,
     ) -> Any | None:
-        if request.materialization is not None:
-            return request.materialization
-        execution_facts = self._request_execution_facts(request)
-        if (
-            request.configured_collective_policy is None
-            or request.source_bound_contract_state is None
-            or not request.source_bound_contract_path
-            or execution_facts is None
-        ):
-            if request.require_materialization_options:
-                raise ArtifactRuntimeIntegrationError(
-                    "ArtifactRuntimeIntegration._reload_existing_runtime_artifact requires "
-                    "materialization execution context for swap"
-                )
-            return None
-        if request.require_materialization_options and not getattr(
-            request.source_bound_contract_state,
-            "source_bound_contract_ready",
-            False,
-        ):
-            raise ArtifactRuntimeIntegrationError(
-                "ArtifactRuntimeIntegration._reload_existing_runtime_artifact requires ready "
-                "source-bound contract state for swap"
-            )
         manifest = getattr(resolved, "manifest", None)
-        options, _profile = self.build_materialization_options(
+        return _request_materialization_options(
+            explicit_options=request.materialization,
+            request=request,
             artifact_ref=str(getattr(resolved, "artifact_ref", "") or ""),
-            operation_scope=request.operation_scope,
-            configured_policy=request.configured_collective_policy,
-            source_bound_contract_state=request.source_bound_contract_state,
-            source_bound_contract_path=request.source_bound_contract_path,
-            execution_facts=execution_facts,
             contract_identity=(
                 request.contract_identity
-                or getattr(
-                    manifest,
-                    "representation_contract_hash",
-                    None,
-                )
+                or getattr(manifest, "representation_contract_hash", None)
+            ),
+            execution_facts=self._request_execution_facts(request),
+            build_options=self.build_materialization_options,
+            missing_context_message=(
+                "ArtifactRuntimeIntegration._reload_existing_runtime_artifact requires "
+                "materialization execution context for swap"
+            ),
+            not_ready_message=(
+                "ArtifactRuntimeIntegration._reload_existing_runtime_artifact requires "
+                "ready source-bound contract state for swap"
             ),
         )
-        return options
 
     def _resolved_artifact(
         self,
@@ -3492,7 +3244,7 @@ class ArtifactRuntimeIntegration:
         framework_config: Any | None,
         model_config: Any | None,
     ) -> FrameworkIntegrationContext:
-        identity = self._framework_identity(model_config)
+        identity = tc_framework_bridge.framework_identity(self.host, model_config)
         placement = None
         if self.host is not None:
             try:

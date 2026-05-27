@@ -19,6 +19,7 @@ from tensorcast.artifact_runtime.contract import (
     SOURCE_BOUND_CONTRACT_PATH_COLLECTIVE_FIRST_V4,
     source_bound_contract_profile_fields,
 )
+from tensorcast.artifact_runtime.errors import ArtifactRuntimeIntegrationError
 from tensorcast.artifact_runtime.host import (
     MaterializationExecutionFacts,
     MaterializationPolicy,
@@ -142,6 +143,55 @@ def build_materialization_options(
     )
 
 
+def request_materialization_options(
+    *,
+    explicit_options: Any | None,
+    request: Any,
+    artifact_ref: str,
+    contract_identity: str | None,
+    execution_facts: Mapping[str, Any] | None,
+    build_options: Callable[..., tuple[Any, dict[str, object]]],
+    missing_context_message: str,
+    not_ready_message: str,
+) -> Any | None:
+    if explicit_options is not None:
+        return explicit_options
+    configured_collective_policy = getattr(
+        request, "configured_collective_policy", None
+    )
+    source_bound_contract_state = getattr(request, "source_bound_contract_state", None)
+    source_bound_contract_path = getattr(request, "source_bound_contract_path", None)
+    require_materialization_options = bool(
+        getattr(request, "require_materialization_options", False)
+    )
+    if (
+        configured_collective_policy is None
+        or source_bound_contract_state is None
+        or not source_bound_contract_path
+        or execution_facts is None
+    ):
+        if require_materialization_options:
+            raise ArtifactRuntimeIntegrationError(missing_context_message)
+        return None
+    if require_materialization_options and not getattr(
+        source_bound_contract_state,
+        "source_bound_contract_ready",
+        False,
+    ):
+        raise ArtifactRuntimeIntegrationError(not_ready_message)
+
+    options, _profile = build_options(
+        artifact_ref=artifact_ref,
+        operation_scope=str(getattr(request, "operation_scope", "") or ""),
+        configured_policy=configured_collective_policy,
+        source_bound_contract_state=source_bound_contract_state,
+        source_bound_contract_path=str(source_bound_contract_path),
+        execution_facts=execution_facts,
+        contract_identity=contract_identity,
+    )
+    return options
+
+
 __all__ = [
     "HostMaterializationRequest",
     "build_collective_group_id",
@@ -149,4 +199,5 @@ __all__ = [
     "collective_policy_value",
     "execution_facts_payload",
     "host_materialization_request",
+    "request_materialization_options",
 ]
