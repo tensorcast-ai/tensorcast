@@ -15,6 +15,7 @@ from torch import nn
 import tensorcast.artifact_runtime.contract as contract_mod
 import tensorcast.artifact_runtime.lifecycle as integration_mod
 import tensorcast.artifact_runtime.recipe.local_ready as local_ready_mod
+import tensorcast.artifact_runtime.source_runtime as source_runtime_mod
 from tensorcast.artifact_runtime.admin import AdminLocalSourceBootstrap
 from tensorcast.artifact_runtime.config import TensorCastRuntimeConfig
 from tensorcast.artifact_runtime.contract import logical_topology_json
@@ -1127,12 +1128,13 @@ def test_local_bootstrap_requires_host_source_catalog_provider():
     with pytest.raises(
         CapabilityMissingError, match="IntegrationHost.source_catalog"
     ) as exc_info:
-        service._local_ready_source_catalog(
+        source_runtime_mod.local_ready_source_catalog(
             _LocalReadyBootstrap(
                 source_selector=SourceSelector.local_path("/tmp/model"),
                 source_subject=source_subject,
                 model_config=object(),
             ),
+            host=service.host,
             source_subject=source_subject,
             source_artifact_ref="mi2:source",
         )
@@ -1163,12 +1165,13 @@ def test_source_catalog_provider_uses_integration_host():
         subject=object(),
     )
 
-    catalog = service._local_ready_source_catalog(
+    catalog = source_runtime_mod.local_ready_source_catalog(
         _LocalReadyBootstrap(
             source_selector=SourceSelector.local_path("/tmp/model"),
             source_subject=source_subject,
             model_config=object(),
         ),
+        host=service.host,
         source_subject=source_subject,
         source_artifact_ref="mi2:source",
     )
@@ -1211,12 +1214,13 @@ def test_source_catalog_provider_must_return_matching_source_artifact_ref(
     )
 
     with pytest.raises(ArtifactRuntimeIntegrationError, match=expected):
-        service._local_ready_source_catalog(
+        source_runtime_mod.local_ready_source_catalog(
             _LocalReadyBootstrap(
                 source_selector=SourceSelector.local_path("/tmp/model"),
                 source_subject=source_subject,
                 model_config=object(),
             ),
+            host=service.host,
             source_subject=source_subject,
             source_artifact_ref="mi2:source",
         )
@@ -1287,7 +1291,7 @@ def test_recipe_cache_policy_builds_model_adjacent_cache_config(tmp_path):
         }
     )
 
-    config = ArtifactRuntimeIntegration._local_ready_recipe_cache_config(
+    config = source_runtime_mod.local_ready_recipe_cache_config(
         _LocalReadyBootstrap(cache_config=policy),
         source_catalog=source_catalog,
     )
@@ -3184,9 +3188,8 @@ def test_source_subject_broadcast_round_trips_non_public_subjects():
         "metadata_fingerprint": "meta",
     }
 
-    integration = ArtifactRuntimeIntegration()
-    payload = integration.source_subject_broadcast_payload(subject)
-    assert integration.source_subject_from_broadcast_payload(payload) == restored
+    payload = source_runtime_mod.source_subject_broadcast_payload(subject)
+    assert source_runtime_mod.source_subject_from_broadcast_payload(payload) == restored
 
 
 def test_serving_integration_resolve_source_subject_uses_coordinator(monkeypatch):

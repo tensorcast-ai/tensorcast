@@ -23,12 +23,12 @@ import tensorcast.artifact_runtime.contract as tc_contract
 import tensorcast.artifact_runtime.diagnostics as tc_diagnostics
 import tensorcast.artifact_runtime.framework_bridge as tc_framework_bridge
 import tensorcast.artifact_runtime.intent as tc_runtime_intent
+import tensorcast.artifact_runtime.local_ready_contracts as tc_local_ready_contracts
 import tensorcast.artifact_runtime.publication.replica as tc_replica_publication
-import tensorcast.artifact_runtime.readiness as tc_readiness
 import tensorcast.artifact_runtime.recipe.local_ready as tc_local_ready
-import tensorcast.artifact_runtime.recipe.tensor_schema as tc_tensor_schema
 import tensorcast.artifact_runtime.request_facts as tc_request_facts
 import tensorcast.artifact_runtime.source as tc_source_catalog
+import tensorcast.artifact_runtime.source_runtime as tc_source_runtime
 from tensorcast.api.store.realization_kernel import (
     ArtifactRealizationReport,
     ArtifactRealizationSpec,
@@ -83,7 +83,6 @@ from tensorcast.artifact_runtime.attachment_materialization import (
     runtime_attachment_realization_handle as _runtime_attachment_realization_handle,
 )
 from tensorcast.artifact_runtime.binding.retained import (
-    RestoredRetainedBinding,
     restore_prepared_local_ready_binding,
     restore_retained_binding,
     runtime_restore_rejection_reason,
@@ -107,7 +106,6 @@ from tensorcast.artifact_runtime.errors import (
     RestoreBindingError,
     SchemaMismatchError,
     SourceProviderError,
-    SourceSubjectError,
 )
 from tensorcast.artifact_runtime.errors import (
     capability_missing as _capability_missing,
@@ -146,9 +144,20 @@ from tensorcast.artifact_runtime.host import (
     SourceDownloadPolicy,
     SourceHost,
     SourceSelector,
-    SourceSubjectCoordinator,
     TorchTensorHost,
     runtime_placement_from_framework_facts,
+)
+from tensorcast.artifact_runtime.lifecycle_requests import (
+    RetainedBindingResult,
+    RuntimeBindingResult,
+    RuntimeLoadResult,
+    RuntimeReloadResult,
+    _binding_tensors,
+    _DirectRuntimeLoad,
+    _LocalReadyBootstrap,
+    _LocalReadyFinalize,
+    _RetainedBindingAcquire,
+    _RuntimeReload,
 )
 from tensorcast.artifact_runtime.local_ready_projection import (
     LocalReadyBindingContract,
@@ -174,11 +183,9 @@ from tensorcast.artifact_runtime.realization_reports import (
     runtime_attachment_report_for_retained as _runtime_attachment_report_for_retained,
 )
 from tensorcast.artifact_runtime.recipe.build import (
-    RecipeBuildCacheConfig,
     RecipeBuildSession,
     RecipeBuildSessionRequest,
     RuntimeBindingPlan,
-    recipe_build_cache_config_from_policy,
 )
 from tensorcast.artifact_runtime.recipe.build import (
     build_recipe_session as build_recipe_session_from_request,
@@ -190,7 +197,6 @@ from tensorcast.artifact_runtime.recipe.compiler import (
 from tensorcast.artifact_runtime.recipe.trace_ir import TracePlan
 from tensorcast.artifact_runtime.source import (
     SourceSubject,
-    is_public_disk_source_subject,
     resolve_source_subject,
     source_subject_broadcast_payload,
     source_subject_from_broadcast_payload,
@@ -349,227 +355,6 @@ LocalSourceBootstrap = tc_runtime_intent.LocalSourceBootstrap
 RetainedBindingAcquire = tc_runtime_intent.RetainedBindingAcquire
 RequestContext = tc_runtime_intent.RequestContext
 build_collective_group_id = _build_collective_group_id
-
-
-@dataclass(frozen=True)
-class _DirectRuntimeLoad:
-    artifact_locator: Any | None = None
-    policy: Any | None = None
-    materialization: Any | None = None
-    configured_collective_policy: Any | None = None
-    source_bound_contract_state: Any | None = None
-    source_bound_contract_path: str | None = None
-    execution_facts: Mapping[str, Any] | None = None
-    operation_scope: str = "startup.direct_runtime_artifact.bind"
-    require_materialization_options: bool = False
-    framework_config: Any | None = None
-    model_config: Any | None = None
-    target_device: Any | None = None
-    expected_member: Any | None = None
-    timeout_s: float | None = 30.0
-    artifact_ref: str | None = None
-    source_selection: ResolvedArtifactSelection | None = None
-    resolved_artifact: ResolvedRuntimeArtifact | None = None
-    model: Any | None = None
-    model_runtime_spec: ArtifactRealizationSpec | None = None
-
-
-@dataclass(frozen=True)
-class RuntimeLoadResult:
-    model: Any | None = None
-    runtime_state: RuntimeBindingState | None = None
-    runtime_view: RuntimeBindingView | None = None
-    resolved_artifact: ResolvedRuntimeArtifact | None = None
-    binding_result: RuntimeBindingResult | None = None
-
-
-@dataclass(frozen=True)
-class _RuntimeReload:
-    current_state: RuntimeBindingState | Any
-    artifact_locator: Any | None = None
-    policy: Any | None = None
-    materialization: Any | None = None
-    configured_collective_policy: Any | None = None
-    source_bound_contract_state: Any | None = None
-    source_bound_contract_path: str | None = None
-    execution_facts: Mapping[str, Any] | None = None
-    operation_scope: str = "runtime_binding.swap"
-    contract_identity: str | None = None
-    require_materialization_options: bool = False
-    framework_config: Any | None = None
-    model_config: Any | None = None
-    target_device: Any | None = None
-    artifact_ref: str | None = None
-    resolved_artifact: ResolvedRuntimeArtifact | None = None
-    model: Any | None = None
-
-
-@dataclass(frozen=True)
-class RuntimeReloadResult:
-    runtime_state: RuntimeBindingState | None = None
-    runtime_view: RuntimeBindingView | None = None
-    resolved_artifact: ResolvedRuntimeArtifact | None = None
-    binding_result: RuntimeBindingResult | None = None
-
-
-@dataclass(frozen=True)
-class _RetainedBindingAcquire:
-    authority: ParsedRetainedRealizationAuthority | None = None
-    framework_config: Any | None = None
-    model_config: Any | None = None
-    target_device: Any | None = None
-    expected_member: Any | None = None
-    runtime: Any | None = None
-    client: Any | None = None
-    restore_fn: Any | None = None
-    timeout_s: float | None = 30.0
-    model_runtime_spec: ArtifactRealizationSpec | None = None
-
-
-@dataclass(frozen=True)
-class RetainedBindingResult:
-    model: Any | None = None
-    runtime_state: RuntimeBindingState | None = None
-    runtime_view: RuntimeBindingView | None = None
-    restored: RestoredRetainedBinding | None = None
-
-
-@dataclass(frozen=True)
-class _LocalReadyBootstrap:
-    """Internal lowering payload for ``LocalSourceBootstrap``.
-
-    This is deliberately private: framework integrations enter through
-    ``ArtifactRuntimeIntegration.start(LocalSourceBootstrap, context)`` and host facts.
-    """
-
-    source_selector: SourceSelector | Any | None = None
-    bootstrap: Any | None = None
-    configured_collective_policy: Any | None = None
-    source_bound_contract_state: Any | None = None
-    source_bound_contract_path: str | None = None
-    execution_facts: Mapping[str, Any] | None = None
-    operation_scope: str = "bootstrap.same_binding_fast_path.tensorcast_realize"
-    contract_identity: str | None = None
-    require_materialization_options: bool = False
-    framework_config: Any | None = None
-    model_config: Any | None = None
-    target_device: Any | None = None
-    source_subject_coordinator: Any | None = None
-    recipe: Any | None = None
-    source_catalog: Any | None = None
-    source_catalog_config: Any | None = None
-    cache_config: Any | None = None
-    cache_config_factory: Any | None = None
-    source_subject: Any | None = None
-    placement: Any | None = None
-    source_artifact_ref: str | None = None
-    source_selection: ResolvedArtifactSelection | None = None
-    serving_manifest_ref: str | None = None
-    representation_contract_hash: str | None = None
-    serving_build_digest: str | None = None
-    model: Any | None = None
-    manifest_tensor_name: str | None = None
-    manifest_bytes: bytes | None = None
-    build_recipe_from_framework_context: bool = False
-    build_model_from_framework_context: bool = False
-    build_manifest_carrier_from_framework_context: bool = False
-    run_binding_finalize_hooks_when_required: bool = False
-    options: Any | None = None
-    binding_factory: Any | None = None
-    family: str = ""
-    tp_rank: int = 0
-    tp_world_size: int = 1
-    replace_meta_params: bool = True
-    run_process_after_load: bool = False
-    run_post_bind_finalize: bool = True
-    run_semantic_validation: bool = False
-    semantic_validation_spec: Any | None = None
-    validate_representation_contract_hash: bool = False
-    runtime_binding_schema_version: int | None = None
-    serving_artifact_schema_version: int | None = None
-    framework_name: str | None = None
-    framework_version: str | None = None
-    adapter_version: str | None = None
-    serving_abi_version: str | None = None
-    model_runtime_spec: ArtifactRealizationSpec | None = None
-
-
-@dataclass(frozen=True)
-class _LocalReadyFinalize:
-    """Internal payload for local-ready attach/finalize state construction."""
-
-    model: Any
-    recipe: Any
-    binding: Any
-    update_epoch: Any
-    source_artifact_ref: str
-    serving_manifest_ref: str
-    representation_contract_hash: str
-    serving_build_digest: str
-    manifest_tensor_name: str
-    source_bound_contract_state: Any
-    source_bound_contract_path: str
-    target_device: Any
-    source_selection: ResolvedArtifactSelection | None = None
-    manifest_bytes: bytes | None = None
-    framework_config: Any | None = None
-    model_config: Any | None = None
-    placement: Any | None = None
-    family: str = ""
-    tp_rank: int = 0
-    tp_world_size: int = 1
-    replace_meta_params: bool = True
-    run_process_after_load: bool = False
-    run_post_bind_finalize: bool = True
-    run_semantic_validation: bool = False
-    semantic_validation_spec: Any | None = None
-    validate_representation_contract_hash: bool = False
-    runtime_binding_schema_version: int | None = None
-    serving_artifact_schema_version: int | None = None
-    framework_name: str | None = None
-    framework_version: str | None = None
-    adapter_version: str | None = None
-    serving_abi_version: str | None = None
-    model_runtime_spec: ArtifactRealizationSpec | None = None
-
-
-def _binding_tensors(binding: Any) -> Mapping[str, torch.Tensor]:
-    tensors = getattr(binding, "tensors", {})
-    if tensors is None:
-        return {}
-    return dict(tensors)
-
-
-@dataclass(frozen=True)
-class RuntimeBindingResult:
-    """Attach-ready result from a runtime bind or swap operation."""
-
-    binding: Any
-    tensors: Mapping[str, torch.Tensor]
-    binding_layout_id: str | None = None
-    operation_result: Any | None = None
-    execution_diagnostics: Any | None = None
-    materialization_diagnostics: Any | None = None
-
-    @classmethod
-    def from_binding(
-        cls,
-        binding: Any,
-        *,
-        operation_result: Any | None = None,
-    ) -> RuntimeBindingResult:
-        return cls(
-            binding=binding,
-            tensors=_binding_tensors(binding),
-            binding_layout_id=getattr(binding, "binding_layout_id", None),
-            operation_result=operation_result,
-            execution_diagnostics=getattr(binding, "last_execution_diagnostics", None),
-            materialization_diagnostics=getattr(
-                binding,
-                "last_materialization_diagnostics",
-                None,
-            ),
-        )
 
 
 def _optional_str(value: Any) -> str | None:
@@ -944,12 +729,12 @@ class ArtifactRuntimeIntegration:
                 "mounted-source model_runtime realization requires an msa1 "
                 "mounted-source artifact"
             )
-        subject = self._source_subject_for_mounted_source(
+        subject = tc_source_runtime.source_subject_for_mounted_source(
             source_artifact_ref=source_artifact_ref,
             source_subject=source_subject,
         )
-        resolved_selector = source_selector or self._source_selector_for_subject(
-            subject
+        resolved_selector = (
+            source_selector or tc_source_runtime.source_selector_for_subject(subject)
         )
         intent = LocalSourceBootstrap(
             source_selector=resolved_selector,
@@ -1203,18 +988,20 @@ class ArtifactRuntimeIntegration:
         model = getattr(intent, "model", None)
         coordinator = getattr(intent, "coordinator", None)
         if coordinator is None:
-            coordinator = self._host_source_subject_coordinator(
-                context.framework_config
+            coordinator = tc_source_runtime.host_source_subject_coordinator(
+                self.host, context.framework_config
             )
         source_catalog_config = getattr(intent, "source_catalog_config", None)
         if source_catalog_config is None:
-            source_catalog_config = self._host_source_catalog_config(
+            source_catalog_config = tc_source_runtime.host_source_catalog_config(
+                self.host,
                 context.framework_config,
                 context.model_config,
             )
         cache_config = intent.cache_policy
         if cache_config is None:
-            cache_config = self._host_recipe_cache_policy(
+            cache_config = tc_source_runtime.host_recipe_cache_policy(
+                self.host,
                 context.framework_config,
                 context.model_config,
             )
@@ -1274,85 +1061,6 @@ class ArtifactRuntimeIntegration:
             ),
             model_runtime_spec=model_runtime_spec,
         )
-
-    @staticmethod
-    def _source_subject_for_mounted_source(
-        *,
-        source_artifact_ref: str,
-        source_subject: Any,
-    ) -> SourceSubject:
-        if isinstance(source_subject, SourceSubject):
-            subject_ref = tc_source_catalog.resolve_source_artifact_ref(
-                source_subject.artifact_ref
-            )
-            if subject_ref != source_artifact_ref:
-                raise ArtifactRuntimeIntegrationError(
-                    "mounted-source subject artifact_ref does not match "
-                    "realization artifact_ref"
-                )
-            return source_subject
-        subject_artifact_ref = str(getattr(source_subject, "artifact_id", "") or "")
-        if subject_artifact_ref and subject_artifact_ref != source_artifact_ref:
-            raise ArtifactRuntimeIntegrationError(
-                "mounted-source handle artifact_id does not match realization "
-                "artifact_ref"
-            )
-        source_kind = (
-            "public_disk" if is_public_disk_source_subject(source_subject) else "opaque"
-        )
-        return SourceSubject(
-            artifact_ref=source_artifact_ref,
-            subject=source_subject,
-            source_kind=source_kind,
-        )
-
-    @staticmethod
-    def _source_selector_for_subject(subject: SourceSubject) -> SourceSelector:
-        source_path = getattr(subject.subject, "path", None)
-        if source_path is None or not str(source_path).strip():
-            raise ArtifactRuntimeIntegrationError(
-                "mounted-source model_runtime realization requires a source "
-                "selector or a source subject with a path"
-            )
-        return SourceSelector.local_path(str(source_path))
-
-    def _host_source_subject_coordinator(
-        self,
-        framework_config: object | None,
-    ) -> SourceSubjectCoordinator | None:
-        if self.host is None or self.host.collective is None:
-            return None
-        return self.host.collective.source_subject_coordinator(framework_config)
-
-    def _host_source_catalog_config(
-        self,
-        framework_config: Any | None,
-        model_config: Any | None,
-    ) -> Any | None:
-        if self.host is None or self.host.source is None:
-            return None
-        return self.host.source.source_catalog_config(
-            framework_config,
-            model_config,
-        )
-
-    def _host_recipe_cache_policy(
-        self,
-        framework_config: Any | None,
-        model_config: Any | None,
-    ) -> RecipeCachePolicy | None:
-        if self.host is None or self.host.source is None:
-            return None
-        policy = self.host.source.recipe_cache_policy(
-            framework_config,
-            model_config,
-        )
-        if policy is not None and not isinstance(policy, RecipeCachePolicy):
-            raise ArtifactRuntimeIntegrationError(
-                "IntegrationHost.source.recipe_cache_policy must return "
-                "RecipeCachePolicy or None"
-            )
-        return policy
 
     def _run_local_ready_barrier(self, context: RequestContext) -> None:
         if self.host is None or self.host.collective is None:
@@ -2087,12 +1795,13 @@ class ArtifactRuntimeIntegration:
                 request.framework_config,
                 request.model_config,
             ).placement
-        source_catalog = self._local_ready_source_catalog(
+        source_catalog = tc_source_runtime.local_ready_source_catalog(
             request,
+            host=self.host,
             source_subject=source_subject_record,
             source_artifact_ref=str(source_artifact_ref),
         )
-        cache_config = self._local_ready_recipe_cache_config(
+        cache_config = tc_source_runtime.local_ready_recipe_cache_config(
             request,
             source_catalog=source_catalog,
         )
@@ -2131,125 +1840,6 @@ class ArtifactRuntimeIntegration:
             verify_checksums=verify_checksums,
             coordinator=request.source_subject_coordinator,
         )
-
-    def _local_ready_source_catalog(
-        self,
-        request: _LocalReadyBootstrap,
-        *,
-        source_subject: Any,
-        source_artifact_ref: str,
-    ) -> Any:
-        try:
-            expected_source_ref = tc_source_catalog.resolve_source_artifact_ref(
-                source_artifact_ref
-            )
-        except ValueError as exc:
-            raise ArtifactRuntimeIntegrationError(
-                "ArtifactRuntimeIntegration.start(LocalSourceBootstrap) requires "
-                "a real source artifact identity"
-            ) from exc
-        if request.source_catalog is not None:
-            self._validate_source_catalog_artifact_ref(
-                request.source_catalog,
-                expected_source_artifact_ref=expected_source_ref,
-            )
-            return request.source_catalog
-        if self.host is not None and self.host.source_catalog is not None:
-            if not isinstance(request.source_selector, SourceSelector):
-                raise ArtifactRuntimeIntegrationError(
-                    "IntegrationHost.source_catalog requires a core SourceSelector"
-                )
-            if request.model_config is None:
-                raise ArtifactRuntimeIntegrationError(
-                    "IntegrationHost.source_catalog requires model_config"
-                )
-            source_catalog = self.host.source_catalog.build_catalog(
-                SourceCatalogRequest(
-                    source_subject=source_subject,
-                    source_selector=request.source_selector,
-                    source_artifact_ref=expected_source_ref,
-                    framework_identity=self.host.framework.identity(
-                        request.model_config
-                    ),
-                    framework_config=request.framework_config,
-                    model_config=request.model_config,
-                    download_policy=(
-                        request.source_catalog_config
-                        if isinstance(
-                            request.source_catalog_config, SourceDownloadPolicy
-                        )
-                        else None
-                    ),
-                    cache_policy=(
-                        request.cache_config
-                        if isinstance(request.cache_config, RecipeCachePolicy)
-                        else None
-                    ),
-                    source_catalog_config=request.source_catalog_config,
-                )
-            )
-            self._validate_source_catalog_artifact_ref(
-                source_catalog,
-                expected_source_artifact_ref=expected_source_ref,
-            )
-            return source_catalog
-        raise _capability_missing(
-            "ArtifactRuntimeIntegration.start(LocalSourceBootstrap) requires "
-            "IntegrationHost.source_catalog when recipe is not supplied",
-            level="level2-local-bootstrap",
-            capability="source_catalog",
-            operation="local_bootstrap.source_catalog",
-            required_methods=("build_catalog",),
-            next_action=(
-                "Add IntegrationHost(source_catalog=...) or provide a prepared "
-                "recipe through the admin/offline bootstrap path."
-            ),
-        )
-
-    @staticmethod
-    def _validate_source_catalog_artifact_ref(
-        source_catalog: Any,
-        *,
-        expected_source_artifact_ref: str,
-    ) -> None:
-        catalog_artifact_ref = getattr(source_catalog, "source_artifact_ref", None)
-        if catalog_artifact_ref is None:
-            raise ArtifactRuntimeIntegrationError(
-                "SourceCatalogProvider returned a catalog without a real "
-                "source_artifact_ref"
-            )
-        try:
-            catalog_source_ref = tc_source_catalog.resolve_source_artifact_ref(
-                str(catalog_artifact_ref)
-            )
-        except ValueError as exc:
-            raise ArtifactRuntimeIntegrationError(
-                "SourceCatalogProvider returned a catalog without a real "
-                "source_artifact_ref"
-            ) from exc
-        if catalog_source_ref != expected_source_artifact_ref:
-            raise ArtifactRuntimeIntegrationError(
-                "SourceCatalogProvider returned source_artifact_ref "
-                f"{catalog_source_ref!r}, expected {expected_source_artifact_ref!r}"
-            )
-
-    @staticmethod
-    def _local_ready_recipe_cache_config(
-        request: _LocalReadyBootstrap,
-        *,
-        source_catalog: Any,
-    ) -> Any:
-        cache_config_factory = request.cache_config_factory
-        if callable(cache_config_factory):
-            return cache_config_factory(source_catalog=source_catalog)
-        if isinstance(request.cache_config, RecipeCachePolicy):
-            return recipe_build_cache_config_from_policy(
-                request.cache_config,
-                source_catalog=source_catalog,
-            )
-        if request.cache_config is not None:
-            return request.cache_config
-        return RecipeBuildCacheConfig()
 
     def _build_local_ready_recipe_from_framework_context(
         self,
@@ -2533,58 +2123,19 @@ class ArtifactRuntimeIntegration:
         *,
         semantic_validation_spec: Any | None,
     ) -> None:
-        if not self.local_ready_requires_binding_finalize(request.recipe):
-            return
-        if not request.run_process_after_load:
-            raise ArtifactRuntimeIntegrationError(
-                "TensorCast representation-changing local-ready finalize "
-                "requires process_after_load execution"
-            )
-        if not request.run_semantic_validation:
-            raise ArtifactRuntimeIntegrationError(
-                "TensorCast representation-changing local-ready finalize "
-                "requires explicit semantic validation"
-            )
-        if (
-            semantic_validation_spec is None
-            or getattr(semantic_validation_spec, "kind", "none") == "none"
-        ):
-            raise ArtifactRuntimeIntegrationError(
-                "TensorCast representation-changing local-ready finalize "
-                "requires an explicit semantic validation spec"
-            )
-        if not request.validate_representation_contract_hash:
-            raise ArtifactRuntimeIntegrationError(
-                "TensorCast representation-changing local-ready finalize "
-                "requires representation contract validation"
-            )
-        if (
-            request.source_bound_contract_state is None
-            or not request.source_bound_contract_path
-        ):
-            raise ArtifactRuntimeIntegrationError(
-                "TensorCast representation-changing local-ready finalize "
-                "requires same-binding contract proof"
-            )
-        if not getattr(
-            request.source_bound_contract_state,
-            "source_bound_contract_ready",
-            False,
-        ):
-            raise ArtifactRuntimeIntegrationError(
-                "TensorCast representation-changing local-ready finalize "
-                "requires ready same-binding contract proof"
-            )
+        tc_local_ready_contracts.assert_finalize_admitted(
+            request,
+            semantic_validation_spec=semantic_validation_spec,
+            requires_binding_finalize=self.local_ready_requires_binding_finalize(
+                request.recipe
+            ),
+        )
 
     @staticmethod
     def _local_ready_semantic_validation_spec(
         request: _LocalReadyFinalize,
     ) -> Any | None:
-        if request.semantic_validation_spec is not None:
-            return request.semantic_validation_spec
-        if not request.run_semantic_validation:
-            return None
-        return getattr(request.recipe, "semantic_validation_spec", None)
+        return tc_local_ready_contracts.semantic_validation_spec(request)
 
     def _validate_local_ready_representation_contract_hash(
         self,
@@ -2592,47 +2143,10 @@ class ArtifactRuntimeIntegration:
         *,
         tensor_schema_hash: str,
     ) -> None:
-        if not request.validate_representation_contract_hash:
-            return
-        if request.model_config is None:
-            raise ArtifactRuntimeIntegrationError(
-                "ArtifactRuntimeIntegration local-ready representation validation "
-                "requires model_config"
-            )
-        if request.placement is None:
-            raise ArtifactRuntimeIntegrationError(
-                "ArtifactRuntimeIntegration local-ready representation validation "
-                "requires placement"
-            )
-        if request.runtime_binding_schema_version is None:
-            raise ArtifactRuntimeIntegrationError(
-                "ArtifactRuntimeIntegration local-ready representation validation "
-                "requires runtime_binding_schema_version"
-            )
-        if request.serving_artifact_schema_version is None:
-            raise ArtifactRuntimeIntegrationError(
-                "ArtifactRuntimeIntegration local-ready representation validation "
-                "requires serving_artifact_schema_version"
-            )
-        actual = self.local_ready_representation_contract_hash(
+        tc_local_ready_contracts.validate_representation_contract_hash(
+            request,
             tensor_schema_hash=tensor_schema_hash,
-            model_config=request.model_config,
-            placement=request.placement,
-            runtime_binding_schema_version=int(request.runtime_binding_schema_version),
-            serving_artifact_schema_version=int(
-                request.serving_artifact_schema_version
-            ),
-            framework_name=request.framework_name,
-            framework_version=request.framework_version,
-            adapter_version=request.adapter_version,
-            serving_abi_version=request.serving_abi_version,
-        )
-        expected = str(request.representation_contract_hash)
-        if actual == expected:
-            return
-        raise ManifestMismatchError(
-            "TensorCast local-ready manifest contract hash drifted after "
-            f"finalize: expected={expected}, actual={actual}"
+            contract_hash_fn=self.local_ready_representation_contract_hash,
         )
 
     def build_local_ready_manifest_carrier(
@@ -2644,8 +2158,8 @@ class ArtifactRuntimeIntegration:
         logical_topology_json_payload: str | None = None,
         topology_admission_digest: str | None = None,
     ) -> tuple[str, bytes]:
-        return tc_local_ready.prepare_same_binding_manifest_carrier(
-            recipe,
+        return tc_local_ready_contracts.build_manifest_carrier(
+            recipe=recipe,
             manifest_tensor_name=manifest_tensor_name,
             representation_contract_hash=representation_contract_hash,
             logical_topology_json_payload=logical_topology_json_payload,
@@ -2661,30 +2175,12 @@ class ArtifactRuntimeIntegration:
         topology: Any | None = None,
         framework_payload: Mapping[str, Any] | None = None,
     ) -> tuple[str, bytes]:
-        base_canonical_index = tc_local_ready.canonical_index_from_recipe(recipe)
-        tensor_schema_hash = tc_contract.compute_canonical_runtime_tensor_schema_hash(
-            base_canonical_index,
-            manifest_tensor_name=manifest_tensor_name,
-        )
-        representation_contract_hash = representation_contract_hash_factory(
-            tensor_schema_hash
-        )
-        logical_topology_json_payload = (
-            tc_local_ready.logical_topology_json_from_recipe(
-                recipe,
-                topology=topology,
-                framework_payload=dict(framework_payload or {}),
-            )
-        )
-        topology_admission_digest = _optional_text(
-            getattr(topology, "schema_topology_digest", None)
-        )
-        return self.build_local_ready_manifest_carrier(
+        return tc_local_ready_contracts.build_manifest_carrier_from_contract(
             recipe=recipe,
             manifest_tensor_name=manifest_tensor_name,
-            representation_contract_hash=representation_contract_hash,
-            logical_topology_json_payload=logical_topology_json_payload,
-            topology_admission_digest=topology_admission_digest,
+            representation_contract_hash_factory=representation_contract_hash_factory,
+            topology=topology,
+            framework_payload=framework_payload,
         )
 
     def local_ready_representation_contract_hash(
@@ -2700,57 +2196,30 @@ class ArtifactRuntimeIntegration:
         adapter_version: str | None = None,
         serving_abi_version: str | None = None,
     ) -> str:
-        compute_hash = getattr(model_config, "compute_hash", None)
-        model_hash = (
-            compute_hash()
-            if callable(compute_hash)
-            else getattr(model_config, "model", "unknown")
-        )
-        model_name = str(getattr(model_config, "model", "unknown"))
-        placement_identity = getattr(placement, "identity_payload", None)
-        if placement_identity is None:
-            stable_identity_payload = getattr(
-                placement, "stable_identity_payload", None
-            )
-            if callable(stable_identity_payload):
-                placement_identity = stable_identity_payload()
-            else:
-                placement_identity = {}
-        source_identity = {
-            "model_hash": model_hash,
-            "model_name": model_name,
-            "runtime_binding_schema_version": int(runtime_binding_schema_version),
-            "serving_artifact_schema_version": int(serving_artifact_schema_version),
-            "placement": placement_identity,
-        }
-        topology_ref = getattr(placement, "topology", None)
-        member_ref = getattr(placement, "member", None)
-        if topology_ref is None or member_ref is None:
-            raise ArtifactRuntimeIntegrationError(
-                "TensorCast local-ready manifest carrier requires placement "
-                "topology and member identity"
-            )
-        return tc_contract.compute_runtime_representation_contract_hash(
-            tensor_schema_hash=str(tensor_schema_hash or ""),
-            topology_ref=topology_ref,
-            member_ref=member_ref,
-            framework_name=framework_name
-            or tc_framework_bridge.framework_identity(
-                self.host, model_config
-            ).framework_name,
-            framework_version=framework_version
-            or tc_framework_bridge.framework_identity(
-                self.host, model_config
-            ).framework_version,
-            adapter_version=adapter_version
-            or tc_framework_bridge.framework_identity(
-                self.host, model_config
-            ).adapter_version,
-            serving_abi_version=serving_abi_version
-            or tc_framework_bridge.framework_identity(
-                self.host, model_config
-            ).serving_abi_version,
-            source_identity=source_identity,
+        identity = None
+        if not (
+            framework_name
+            and framework_version
+            and adapter_version
+            and serving_abi_version
+        ):
+            identity = tc_framework_bridge.framework_identity(self.host, model_config)
+        return tc_local_ready_contracts.representation_contract_hash(
+            tensor_schema_hash=tensor_schema_hash,
+            model_config=model_config,
+            placement=placement,
+            runtime_binding_schema_version=runtime_binding_schema_version,
+            serving_artifact_schema_version=serving_artifact_schema_version,
+            framework_identity=FrameworkIdentity(
+                framework_name=framework_name
+                or getattr(identity, "framework_name", ""),
+                framework_version=framework_version
+                or getattr(identity, "framework_version", ""),
+                adapter_version=adapter_version
+                or getattr(identity, "adapter_version", ""),
+                serving_abi_version=serving_abi_version
+                or getattr(identity, "serving_abi_version", ""),
+            ),
         )
 
     def build_local_ready_manifest_carrier_from_framework_context(
@@ -2767,10 +2236,11 @@ class ArtifactRuntimeIntegration:
         adapter_version: str | None = None,
         serving_abi_version: str | None = None,
     ) -> tuple[str, bytes]:
-        return self.build_local_ready_manifest_carrier_from_contract(
+        return tc_local_ready_contracts.build_manifest_carrier_from_framework_context(
             recipe=recipe,
             manifest_tensor_name=manifest_tensor_name,
-            representation_contract_hash_factory=lambda tensor_schema_hash: (
+            placement=placement,
+            contract_hash_fn=lambda tensor_schema_hash: (
                 self.local_ready_representation_contract_hash(
                     tensor_schema_hash=tensor_schema_hash,
                     model_config=model_config,
@@ -2783,8 +2253,6 @@ class ArtifactRuntimeIntegration:
                     serving_abi_version=serving_abi_version,
                 )
             ),
-            topology=getattr(placement, "topology", None),
-            framework_payload=getattr(placement, "framework_payload", {}),
         )
 
     def prepare_local_ready_manifest_carrier_from_framework_context(
@@ -2801,26 +2269,19 @@ class ArtifactRuntimeIntegration:
         adapter_version: str | None = None,
         serving_abi_version: str | None = None,
     ) -> LocalReadyManifestCarrierResult:
-        representation_contract_hash, manifest_bytes = (
-            self.build_local_ready_manifest_carrier_from_framework_context(
-                recipe=recipe,
-                manifest_tensor_name=manifest_tensor_name,
-                model_config=model_config,
-                placement=placement,
-                runtime_binding_schema_version=runtime_binding_schema_version,
-                serving_artifact_schema_version=serving_artifact_schema_version,
-                framework_name=framework_name,
-                framework_version=framework_version,
-                adapter_version=adapter_version,
-                serving_abi_version=serving_abi_version,
-            )
-        )
-        manifest = RuntimeArtifactManifest.from_bytes(manifest_bytes)
-        return LocalReadyManifestCarrierResult(
-            representation_contract_hash=representation_contract_hash,
-            manifest_bytes=manifest_bytes,
-            serving_manifest_ref=manifest.serving_manifest_ref,
-            serving_build_digest=manifest.serving_build_digest,
+        return tc_local_ready_contracts.prepare_manifest_carrier_from_framework_context(
+            build_fn=self.build_local_ready_manifest_carrier_from_framework_context,
+            manifest_from_bytes=RuntimeArtifactManifest.from_bytes,
+            recipe=recipe,
+            manifest_tensor_name=manifest_tensor_name,
+            model_config=model_config,
+            placement=placement,
+            runtime_binding_schema_version=runtime_binding_schema_version,
+            serving_artifact_schema_version=serving_artifact_schema_version,
+            framework_name=framework_name,
+            framework_version=framework_version,
+            adapter_version=adapter_version,
+            serving_abi_version=serving_abi_version,
         )
 
     def local_ready_tensor_schema_hash(
@@ -2830,8 +2291,8 @@ class ArtifactRuntimeIntegration:
         manifest_tensor_name: str,
         manifest_bytes: bytes | None = None,
     ) -> str:
-        return tc_local_ready.compute_runtime_binding_tensor_schema_hash(
-            recipe,
+        return tc_local_ready_contracts.tensor_schema_hash(
+            recipe=recipe,
             manifest_tensor_name=manifest_tensor_name,
             manifest_bytes=manifest_bytes,
         )
@@ -2840,10 +2301,7 @@ class ArtifactRuntimeIntegration:
         self,
         recipe: Any,
     ) -> tuple[str, ...]:
-        return tuple(
-            str(entry.name)
-            for entry in tc_local_ready.materialized_tensor_schema(recipe)
-        )
+        return tc_local_ready_contracts.materialized_tensor_names(recipe)
 
     def _assert_local_ready_binding_tensor_set(
         self,
@@ -2852,22 +2310,11 @@ class ArtifactRuntimeIntegration:
         binding: Any,
         manifest_tensor_name: str,
     ) -> None:
-        expected_names = tuple(
-            sorted(self.local_ready_materialized_tensor_names(recipe))
-        )
-        actual_names = tuple(
-            sorted(
-                str(name)
-                for name in _binding_tensors(binding)
-                if str(name) != manifest_tensor_name
-            )
-        )
-        if actual_names == expected_names:
-            return
-        raise SchemaMismatchError(
-            "TensorCast local-ready binding tensor set does not match recipe "
-            "schema: "
-            f"expected={list(expected_names)}, actual={list(actual_names)}"
+        tc_local_ready_contracts.assert_binding_tensor_set(
+            recipe=recipe,
+            binding=binding,
+            manifest_tensor_name=manifest_tensor_name,
+            binding_tensors_fn=_binding_tensors,
         )
 
     def build_local_ready_binding_contract(
@@ -2880,67 +2327,26 @@ class ArtifactRuntimeIntegration:
         representation_contract_hash_factory: Any,
         manifest_bytes: bytes | None = None,
     ) -> LocalReadyBindingContract:
-        realization_plan_proto = bytes(
-            getattr(recipe, "realization_plan_proto", b"") or b""
-        )
-        realization_entry_count = tc_local_ready.compiled_recipe_realization_plan_count(
-            recipe
-        )
-        if realization_entry_count <= 0:
-            raise ArtifactRuntimeIntegrationError(
-                "TensorCast local-ready binding contract requires a compiled "
-                "recipe with a pre-lowered BindingRealizationPlan"
-            )
-        if not realization_plan_proto:
-            raise ArtifactRuntimeIntegrationError(
-                "TensorCast local-ready binding contract requires compiled "
-                "recipe realization_plan_proto; regenerate the compiled recipe cache"
-            )
-        tc_tensor_schema.validate_tensor_schema_against_tensors(
-            recipe.tensor_schema,
-            canonical_tensors,
-        )
-        tensor_schema_hash = self.local_ready_tensor_schema_hash(
+        return tc_local_ready_contracts.build_binding_contract(
             recipe=recipe,
+            canonical_tensors=canonical_tensors,
+            runtime_only_tensor_names=runtime_only_tensor_names,
             manifest_tensor_name=manifest_tensor_name,
+            representation_contract_hash_factory=representation_contract_hash_factory,
             manifest_bytes=manifest_bytes,
-        )
-        return LocalReadyBindingContract(
-            excluded_names=tuple(
-                sorted(str(name) for name in runtime_only_tensor_names)
-            ),
-            canonical_tensor_names=tuple(
-                sorted(str(name) for name in canonical_tensors)
-            ),
-            tensor_schema_hash=tensor_schema_hash,
-            representation_contract_hash=representation_contract_hash_factory(
-                tensor_schema_hash
-            ),
-            mapped_copy_plan=(),
-            realization_plan_proto=realization_plan_proto,
-            realization_entry_count=realization_entry_count,
-            fallback_copy_plan=tuple(recipe.realization_fallback_plan),
         )
 
     def local_ready_recipe_summary_fields(self, recipe: Any) -> dict[str, int]:
-        return RecipeBuildSession.recipe_summary_fields(recipe)
+        return tc_local_ready_contracts.recipe_summary_fields(recipe)
 
     def local_ready_materialization_identity(
         self,
         recipe: Any,
     ) -> LocalReadyMaterializationIdentity:
-        return LocalReadyMaterializationIdentity(
-            source_artifact_ref=str(recipe.source_artifact_ref),
-            source_metadata_fingerprint=str(recipe.source_metadata_fingerprint),
-        )
+        return tc_local_ready_contracts.materialization_identity(recipe)
 
     def local_ready_requires_binding_finalize(self, recipe: Any) -> bool:
-        runtime_facts = getattr(recipe, "runtime_facts", None)
-        process_after_load_class = tc_readiness.coerce_finalize_class(
-            getattr(runtime_facts, "process_after_load_class", None),
-            default=FinalizeClass.RUNTIME_ONLY,
-        )
-        return process_after_load_class == FinalizeClass.REPRESENTATION_CHANGING
+        return tc_local_ready_contracts.requires_binding_finalize(recipe)
 
     def validate_local_ready_tensor_schema(
         self,
@@ -2948,9 +2354,7 @@ class ArtifactRuntimeIntegration:
         recipe: Any,
         tensors: Mapping[str, Any],
     ) -> None:
-        tc_tensor_schema.validate_tensor_schema_against_tensors(
-            recipe.tensor_schema, tensors
-        )
+        tc_local_ready_contracts.validate_tensor_schema(recipe=recipe, tensors=tensors)
 
     def freeze_local_ready(
         self,
@@ -2959,7 +2363,7 @@ class ArtifactRuntimeIntegration:
         update_epoch: Any,
         source_artifact_ref: str,
     ) -> Any:
-        return tc_local_ready.freeze_local_ready_binding(
+        return tc_local_ready_contracts.freeze_binding(
             binding=binding,
             update_epoch=update_epoch,
             source_artifact_ref=source_artifact_ref,
@@ -3014,64 +2418,12 @@ class ArtifactRuntimeIntegration:
         verify_checksums: bool,
         coordinator: Any | None = None,
     ) -> SourceSubject:
-        if isinstance(path, SourceSelector):
-            if path.kind != "local_path":
-                raise SourceSubjectError(
-                    f"Unsupported TensorCast source selector kind: {path.kind}"
-                )
-            path = str(path.value)
-        if coordinator is not None:
-            should_coordinate = getattr(coordinator, "should_coordinate", None)
-            if not callable(should_coordinate) or bool(should_coordinate()):
-                return self._resolve_source_subject_with_coordinator(
-                    path,
-                    verify_checksums=verify_checksums,
-                    coordinator=coordinator,
-                )
-        return resolve_source_subject(path, verify_checksums=verify_checksums)
-
-    def _resolve_source_subject_with_coordinator(
-        self,
-        path: str,
-        *,
-        verify_checksums: bool,
-        coordinator: Any,
-    ) -> SourceSubject:
-        source_rank = int(getattr(coordinator, "source_rank", 0) or 0)
-        is_source_rank = getattr(coordinator, "is_source_rank", None)
-        resolve_locally = bool(is_source_rank()) if callable(is_source_rank) else True
-        subject = (
-            resolve_source_subject(path, verify_checksums=verify_checksums)
-            if resolve_locally
-            else None
+        return tc_source_runtime.resolve_source_subject_request(
+            path,
+            verify_checksums=verify_checksums,
+            coordinator=coordinator,
+            resolve_fn=resolve_source_subject,
         )
-        payload = None if subject is None else source_subject_broadcast_payload(subject)
-        broadcast = getattr(coordinator, "broadcast_object", None)
-        if not callable(broadcast):
-            raise SourceSubjectError(
-                "TensorCast source subject coordinator must provide "
-                "broadcast_object(payload, src)"
-            )
-        payload = broadcast(payload, src=source_rank)
-        if payload is None:
-            raise SourceSubjectError(
-                "TensorCast source subject coordinator returned no payload"
-            )
-        if not isinstance(payload, Mapping):
-            raise SourceSubjectError(
-                "TensorCast source subject coordinator must broadcast a mapping payload"
-            )
-        return source_subject_from_broadcast_payload(payload)
-
-    def source_subject_broadcast_payload(
-        self, subject: SourceSubject
-    ) -> dict[str, Any]:
-        return source_subject_broadcast_payload(subject)
-
-    def source_subject_from_broadcast_payload(
-        self, payload: Mapping[str, Any]
-    ) -> SourceSubject:
-        return source_subject_from_broadcast_payload(payload)
 
     def runtime_only_tensor_names(self, model: object) -> tuple[str, ...]:
         return tc_framework_bridge.runtime_only_tensor_names(self.host, model)
