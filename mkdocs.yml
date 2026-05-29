@@ -6,7 +6,7 @@ copyright: Copyright &copy; 2025-2026 TensorCast Team
 
 theme:
   name: material
-  logo: assets/logo.png
+  logo: assets/images/logo.png
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
