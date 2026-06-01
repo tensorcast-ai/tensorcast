@@ -1,1 +1,10 @@
-__cuda_version__: "12.8"
+# CUDA version declaration (optional).
+#
+# When set, setup.py validates that this matches the installed torch's
+# torch.version.cuda — a mismatch fails the build (declared vs. actual skew
+# would silently invalidate the runtime ABI check in tensorcast/__init__.py).
+#
+# When left blank/null (the default), torch.version.cuda is treated as the
+# sole source of truth. Set CU_VERSION=cuXXX in the environment for a
+# one-shot override that does NOT touch this file.
+__cuda_version__:

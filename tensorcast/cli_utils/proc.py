@@ -22,8 +22,17 @@ from .errors import ServiceError
 
 _COMPAT_LIBRARY_PATH_CANDIDATES: tuple[Path, ...] = (
     Path("/data/cuda/compat"),
+    Path("/data/cuda/cuda-13.0/lib64"),
     Path("/data/cuda/cuda-12.8/lib64"),
 )
+
+
+def _env_cuda_runtime_dirs() -> list[Path]:
+    """Honor TENSORCAST_CUDA_RUNTIME_DIR (colon-separated) as the highest-priority hint."""
+    raw = os.environ.get("TENSORCAST_CUDA_RUNTIME_DIR")
+    if not raw:
+        return []
+    return [Path(part) for part in raw.split(":") if part]
 
 
 def _discover_daemon_library_paths() -> list[Path]:
@@ -35,9 +44,10 @@ def _discover_daemon_library_paths() -> list[Path]:
     directories for ``LD_LIBRARY_PATH`` augmentation.
     """
 
-    paths: list[Path] = [
+    paths: list[Path] = [p for p in _env_cuda_runtime_dirs() if p.is_dir()]
+    paths.extend(
         candidate for candidate in _COMPAT_LIBRARY_PATH_CANDIDATES if candidate.is_dir()
-    ]
+    )
 
     package_root = Path(__file__).resolve().parents[1]
     package_lib = package_root / "lib"

@@ -78,24 +78,26 @@ if _os.environ.get("TENSORCAST_SKIP_TORCH_ABI_CHECK") != "1":
     else:
         _runtime_cuda = _torch.version.cuda
         if _runtime_cuda is None:
+            _cuda_tag = f"cu{_build_cuda.replace('.', '')}"
             raise ImportError(
                 "tensorcast was built with CUDA support (CUDA "
                 f"{_build_cuda}), but the installed torch does not report a CUDA "
                 "version. Ensure you installed torch from a CUDA-enabled index, e.g. "
                 "pip install torch==2.11.0 --index-url "
-                "https://download.pytorch.org/whl/cu128"
+                f"https://download.pytorch.org/whl/{_cuda_tag}"
             )
         # Compare major.minor (ignore patch level differences)
         _build_cuda_mm = ".".join(_build_cuda.split(".")[:2])
         _runtime_cuda_mm = ".".join(_runtime_cuda.split(".")[:2])
         if _build_cuda_mm != _runtime_cuda_mm:
+            _cuda_tag = f"cu{_build_cuda.replace('.', '')}"
             raise ImportError(
                 f"tensorcast was built against CUDA {_build_cuda}, but the "
                 f"installed torch uses CUDA {_runtime_cuda}. "
                 "The NVIDIA driver may be too old, or torch was installed from the "
                 "wrong index. Fix: reinstall torch from the correct CUDA index, e.g. "
                 f"pip install torch==2.11.0 --index-url "
-                f"https://download.pytorch.org/whl/cu128 . "
+                f"https://download.pytorch.org/whl/{_cuda_tag} . "
                 "To override at your own risk: TENSORCAST_SKIP_TORCH_ABI_CHECK=1."
             )
 

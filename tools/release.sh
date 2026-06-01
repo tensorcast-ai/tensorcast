@@ -33,7 +33,10 @@ esac
 
 # ---- defaults --------------------------------------------------------------
 DEFAULT_TORCH="2.11.0"
-DEFAULT_CUDA="cu128"
+# Source-of-truth for the CUDA index tag. Override at the call site with
+#   TENSORCAST_CUDA=cu130 tools/release.sh build
+# or pass --cuda-version explicitly. Default stays cu128 for backwards compat.
+DEFAULT_CUDA="${TENSORCAST_CUDA:-cu128}"
 DOCKER_IMAGE="${TENSORCAST_RELEASE_IMAGE:-quay.io/pypa/manylinux_2_28_x86_64}"
 
 usage() {
@@ -168,6 +171,9 @@ cmd_build() {
         export UV_EXTRA_INDEX_URL="https://pypi.org/simple"
         export PIP_INDEX_URL="${UV_INDEX_URL}"
         export PIP_EXTRA_INDEX_URL="${UV_EXTRA_INDEX_URL}"
+        # Forward to setup.py so _version.py / __cuda_version__ match the build.
+        # Without this, setup.py falls back to dev_dep_versions.yml's static value.
+        export CU_VERSION="${cuda_version}"
     fi
 
     # Patch pyproject.toml in place if torch version differs from default;

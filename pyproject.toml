@@ -281,8 +281,8 @@ default = true
 name = "pypi-public"
 url = "https://pypi.org/simple"
 
-[tool.uv.sources]
-torch = { index = "pytorch" }
+# [tool.uv.sources]
+# torch = { index = "pytorch" }
 
 [[tool.uv.index]]
 name = "pytorch"

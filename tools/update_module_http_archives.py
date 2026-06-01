@@ -11,22 +11,23 @@ import re
 import sys
 
 
-PACKAGE_MAP = {
-    "cudnn": "nvidia-cudnn-cu12",
-    "nccl": "nvidia-nccl-cu12",
-    "libtorch": "torch",
-    "cusparselt": "nvidia-cusparselt-cu12",
-    "cupti": "nvidia-cuda-cupti-cu12",
-    "cublas": "nvidia-cublas-cu12",
-    "cufft": "nvidia-cufft-cu12",
-    "cudart": "nvidia-cuda-runtime-cu12",
-    "curand": "nvidia-curand-cu12",
-    "cusparse": "nvidia-cusparse-cu12",
-    "cusolver": "nvidia-cusolver-cu12",
-    "nvjitlink": "nvidia-nvjitlink-cu12",
-    "nvrtc": "nvidia-cuda-nvrtc-cu12",
-    "nvtx": "nvidia-nvtx-cu12",
-    "triton": "triton",
+PACKAGE_MAP: dict[str, tuple[str, ...]] = {
+    "cudnn":      ("nvidia-cudnn-cu13", "nvidia-cudnn-cu12"),
+    "nccl":       ("nvidia-nccl-cu13", "nvidia-nccl-cu12"),
+    "cusparselt": ("nvidia-cusparselt-cu13", "nvidia-cusparselt-cu12"),
+    # CUDA 13 dropped the -cu12 suffix on the core libs; cu12 lockfile still uses it.
+    "cupti":      ("nvidia-cuda-cupti", "nvidia-cuda-cupti-cu12"),
+    "cublas":     ("nvidia-cublas", "nvidia-cublas-cu12"),
+    "cufft":      ("nvidia-cufft", "nvidia-cufft-cu12"),
+    "cudart":     ("nvidia-cuda-runtime", "nvidia-cuda-runtime-cu12"),
+    "curand":     ("nvidia-curand", "nvidia-curand-cu12"),
+    "cusparse":   ("nvidia-cusparse", "nvidia-cusparse-cu12"),
+    "cusolver":   ("nvidia-cusolver", "nvidia-cusolver-cu12"),
+    "nvjitlink":  ("nvidia-nvjitlink", "nvidia-nvjitlink-cu12"),
+    "nvrtc":      ("nvidia-cuda-nvrtc", "nvidia-cuda-nvrtc-cu12"),
+    "nvtx":       ("nvidia-nvtx", "nvidia-nvtx-cu12"),
+    "libtorch":   ("torch",),
+    "triton":     ("triton",),
 }
 
 PYPI_PREFIX = "https://files.pythonhosted.org/packages/"
@@ -214,10 +215,16 @@ def build_updates(
     arch: str,
 ) -> dict[str, ArchiveUpdate]:
     updates: dict[str, ArchiveUpdate] = {}
-    for module_name, package_name in PACKAGE_MAP.items():
-        wheels = wheels_by_package.get(package_name, [])
+    for module_name, candidates in PACKAGE_MAP.items():
+        wheels: list[Wheel] = []
+        for package_name in candidates:
+            wheels = wheels_by_package.get(package_name, [])
+            if wheels:
+                break
         if not wheels:
-            raise ValueError(f"Missing wheel entries for package: {package_name}")
+            raise ValueError(
+                f"None of {candidates} have wheel entries in uv.lock for module: {module_name}"
+            )
         wheel = select_wheel(wheels, python_tag, arch)
         integrity = sri_from_sha256_hex(wheel.sha256_hex)
         urls = build_urls(wheel.url)
@@ -282,7 +289,10 @@ def main() -> int:
     args = parse_args()
     lock_path = Path(args.lockfile)
     module_path = Path(args.module)
-    wheels_by_package = parse_uv_lock(lock_path, set(PACKAGE_MAP.values()))
+    wheels_by_package = parse_uv_lock(
+        lock_path,
+        {pkg for candidates in PACKAGE_MAP.values() for pkg in candidates},
+    )
     updates = build_updates(wheels_by_package, args.python_tag, args.arch)
     apply_updates(module_path, updates, args.verify_module, args.dry_run)
     return 0

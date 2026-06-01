@@ -74,16 +74,58 @@ def get_base_version() -> str:
 
 
 def load_dep_info():
-    global __cuda_version__
-    with open("dev_dep_versions.yml", "r") as stream:
-        versions = yaml.safe_load(stream)
-        if (gpu_arch_version := os.environ.get("CU_VERSION")) is not None:
-            __cuda_version__ = (
-                (gpu_arch_version[2:])[:-1] + "." + (gpu_arch_version[2:])[-1:]
-            )
-        else:
-            __cuda_version__ = versions["__cuda_version__"]
+    """Determine the CUDA major.minor this build targets.
 
+    Ground truth is ``torch.version.cuda`` — that's the CUDA the wheel will
+    actually link against. ``CU_VERSION`` env and ``dev_dep_versions.yml``
+    are *intent declarations*: if set, they MUST match the installed torch,
+    otherwise the build fails loudly. This prevents the silent skew where
+    ``_version.py`` claims one CUDA major while the compiled bits use another,
+    which would then either bypass or wrongly trip the runtime ABI check in
+    ``tensorcast/__init__.py``.
+    """
+    global __cuda_version__
+
+    torch_cuda = torch.version.cuda  # e.g. "12.8", "13.0", or None for CPU build
+    if not torch_cuda:
+        raise RuntimeError(
+            "tensorcast build requires a CUDA-enabled torch, but "
+            "torch.version.cuda is None. Install torch from a CUDA index, e.g. "
+            "pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128"
+        )
+
+    declared: str | None = None
+    declared_source: str | None = None
+
+    if (env_cu := os.environ.get("CU_VERSION")) is not None:
+        # CU_VERSION format: "cuXXX" -> "X.Y"
+        digits = env_cu[2:]
+        declared = f"{digits[:-1]}.{digits[-1:]}"
+        declared_source = f"CU_VERSION={env_cu}"
+    else:
+        try:
+            with open("dev_dep_versions.yml", "r") as stream:
+                versions = yaml.safe_load(stream) or {}
+        except FileNotFoundError:
+            versions = {}
+        yml_cu = versions.get("__cuda_version__")
+        if yml_cu:
+            declared = str(yml_cu)
+            declared_source = "dev_dep_versions.yml:__cuda_version__"
+
+    if declared is not None and declared != torch_cuda:
+        raise RuntimeError(
+            f"Declared CUDA version mismatch:\n"
+            f"  declared ({declared_source}): {declared}\n"
+            f"  installed torch.version.cuda: {torch_cuda}\n"
+            f"The wheel would link against CUDA {torch_cuda}, but the declaration "
+            f"says CUDA {declared}. Either update the declaration to match, or "
+            f"reinstall torch from the matching CUDA index (e.g. "
+            f"pip install torch==2.11.0 --index-url "
+            f"https://download.pytorch.org/whl/cu{torch_cuda.replace('.', '')})."
+        )
+
+    __cuda_version__ = torch_cuda
 
 # Validate torch versions early in setup.py
 def validate_build_environment():

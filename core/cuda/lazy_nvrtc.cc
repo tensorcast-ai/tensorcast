@@ -10,7 +10,7 @@
 namespace tensorcast::cuda {
 namespace {
 
-constexpr std::array<const char*, 2> kNvrtcLibraryNames = {"libnvrtc.so.12", "libnvrtc.so"};
+constexpr std::array<const char*, 3> kNvrtcLibraryNames = {"libnvrtc.so.13", "libnvrtc.so.12", "libnvrtc.so"};
 
 } // namespace
 
@@ -45,7 +45,7 @@ absl::Status LazyNvrtc::open_library() {
     absl::StrAppend(&errors, lib_or.status().message());
   }
   return absl::UnavailableError(
-      absl::StrCat("Failed to load NVRTC library (tried libnvrtc.so.12, libnvrtc.so): ", errors));
+      absl::StrCat("Failed to load NVRTC library (tried libnvrtc.so.13, libnvrtc.so.12, libnvrtc.so): ", errors));
 }
 
 #define TENSORCAST_DEFINE_NVRTC_ACCESSOR(name)          \
