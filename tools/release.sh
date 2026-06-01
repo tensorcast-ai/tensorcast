@@ -17,7 +17,7 @@
 #       Upload manylinux wheels in dist/ to production PyPI (with confirmation).
 #
 # Legacy passthrough: status / sync-venv / update-pyproject / cache forward to
-# tools/manage_torch_version.py (kept for backwards compat).
+# tools/torch_version_manager.py (kept for backwards compat).
 set -euo pipefail
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -26,7 +26,7 @@ PROJECT_ROOT="$( dirname "${SCRIPT_DIR}" )"
 # ---- legacy management subcommands (forwarded as-is) -----------------------
 case "${1:-}" in
     status|sync-venv|update-pyproject|cache)
-        python "${SCRIPT_DIR}/manage_torch_version.py" "$@"
+        python "${SCRIPT_DIR}/torch_version_manager.py" "$@"
         exit $?
         ;;
 esac
@@ -53,7 +53,7 @@ COMMANDS
   publish-test            Upload manylinux wheels to TestPyPI.
   publish                 Upload manylinux wheels to PyPI (asks for confirmation).
   status | sync-venv | update-pyproject | cache
-                          Forwarded to tools/manage_torch_version.py (legacy).
+                          Forwarded to tools/torch_version_manager.py (legacy).
 
 build OPTIONS
   --torch-version X.Y.Z   Pin torch version            (default ${DEFAULT_TORCH})
