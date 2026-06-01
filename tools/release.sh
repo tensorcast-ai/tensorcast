@@ -176,15 +176,39 @@ cmd_build() {
         export CU_VERSION="${cuda_version}"
     fi
 
-    # Patch pyproject.toml in place if torch version differs from default;
-    # restore on exit. Skipped when running the default matrix.
+    # Patch pyproject.toml in place as needed; restore on exit. We may need to
+    # patch:
+    #   - the `torch==X.Y.Z` pin (when --torch-version differs from default)
+    #   - the pytorch index URL `url = "https://download.pytorch.org/whl/cuNNN"`
+    #     (whenever pyproject has an active pin — UV_INDEX_URL env override does
+    #     NOT affect explicit named indexes like [tool.uv.sources]+pytorch, so
+    #     without this patch `uv sync` would silently fetch torch from the
+    #     pinned cuNNN regardless of --cuda-version, then setup.py's
+    #     declared-vs-actual CUDA check would fail the build.)
     local restore_pyproject=0
+    local need_patch_torch=0
+    local need_patch_cuda=0
     if [[ "${torch_version}" != "${DEFAULT_TORCH}" ]]; then
+        need_patch_torch=1
+    fi
+    if grep -qE '^[[:space:]]*url[[:space:]]*=[[:space:]]*"https://download\.pytorch\.org/whl/cu[0-9]+"' pyproject.toml; then
+        need_patch_cuda=1
+    fi
+
+    if [[ ${need_patch_torch} -eq 1 || ${need_patch_cuda} -eq 1 ]]; then
         cp pyproject.toml pyproject.toml.bak
         restore_pyproject=1
-        echo "==> Patching pyproject.toml to torch==${torch_version}"
-        uv run --no-project python "${SCRIPT_DIR}/update_torch_version.py" "${torch_version}"
         trap '[[ ${restore_pyproject} -eq 1 ]] && mv pyproject.toml.bak pyproject.toml' EXIT
+    fi
+
+    if [[ ${need_patch_torch} -eq 1 ]]; then
+        echo "==> Patching pyproject.toml: torch==${torch_version}"
+        uv run --no-project python "${SCRIPT_DIR}/torch_version_manager.py" update-pyproject "${torch_version}"
+    fi
+
+    if [[ ${need_patch_cuda} -eq 1 ]]; then
+        echo "==> Patching pyproject.toml: pytorch index URL -> ${cuda_version}"
+        sed -i -E 's|^([[:space:]]*url[[:space:]]*=[[:space:]]*")https://download\.pytorch\.org/whl/cu[0-9]+(".*)$|\1https://download.pytorch.org/whl/'"${cuda_version}"'\2|' pyproject.toml
     fi
 
     # Try to restore a cached uv.lock for this matrix if available.

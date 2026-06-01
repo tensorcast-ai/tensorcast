@@ -884,8 +884,12 @@ def find_cuda_runtime_lib_dir():
 
     Order of precedence:
     1. CUDA_RUNTIME_LIB_DIR env var if it points to an existing dir
-    2. nvidia.cuda_runtime Python package's bundled lib dir
-    3. Best-effort scan of sys.path for nvidia/cuda_runtime/lib
+    2. nvidia.cuda_runtime Python package's bundled lib dir (cu12 layout)
+    3. Best-effort scan of sys.path for nvidia/{cu13,cuda_runtime}/lib
+
+    cu13 wheels collapse all core CUDA libs under nvidia/cu13/{lib,include}/;
+    cu12 wheels keep the per-library nvidia/<libname>/{lib,include}/ layout.
+    Try cu13 first since that's what current torch+cu130 ships.
     """
     if (env_dir := os.environ.get("CUDA_RUNTIME_LIB_DIR")) is not None:
         candidate = Path(env_dir)
@@ -893,19 +897,22 @@ def find_cuda_runtime_lib_dir():
             return str(candidate)
 
     try:
-        # Use the installed Python package
+        # cu12 path: nvidia.cuda_runtime is a real package with __init__.py.
         import nvidia.cuda_runtime as nvidia_cuda_runtime  # type: ignore
 
         pkg_lib = Path(nvidia_cuda_runtime.__file__).parent / "lib"
-        if pkg_lib.is_dir():
+        if pkg_lib.is_dir() and any(pkg_lib.glob("libcudart.so*")):
             return str(pkg_lib)
     except Exception:
         pass
 
+    # cu13 path: nvidia/cu13/ is just a data dir without __init__.py, so we can't
+    # import it. Walk sys.path instead.
     for base in sys.path:
-        candidate = Path(base) / "nvidia" / "cuda_runtime" / "lib"
-        if candidate.is_dir():
-            return str(candidate)
+        for subdir in ("cu13", "cuda_runtime"):
+            candidate = Path(base) / "nvidia" / subdir / "lib"
+            if candidate.is_dir() and any(candidate.glob("libcudart.so*")):
+                return str(candidate)
 
     return None
 
@@ -933,7 +940,10 @@ def find_cuda_include_dirs() -> list[str]:
 
     for base in sys.path:
         candidates.append(Path(base) / "triton" / "backends" / "nvidia" / "include")
+        # cu12 layout (nvidia/cuda_runtime/include/) and cu13 layout
+        # (nvidia/cu13/include/, shared umbrella across all core CUDA libs).
         candidates.append(Path(base) / "nvidia" / "cuda_runtime" / "include")
+        candidates.append(Path(base) / "nvidia" / "cu13" / "include")
 
     include_dirs: list[str] = []
     seen: set[str] = set()

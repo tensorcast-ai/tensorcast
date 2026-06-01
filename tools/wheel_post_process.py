@@ -42,7 +42,11 @@ from pathlib import Path
 # Inside a venv's site-packages, the relevant siblings are:
 #   site-packages/tensorcast/...                <- our package
 #   site-packages/torch/lib/libtorch_cpu.so     <- pip install torch
-#   site-packages/nvidia/cuda_runtime/lib/...   <- pip install nvidia-cuda-runtime-cu12
+#   site-packages/nvidia/cu13/lib/...           <- cu13 wheels (collapsed umbrella)
+#   site-packages/nvidia/cuda_runtime/lib/...   <- cu12 wheels (per-lib layout)
+#
+# We include BOTH layouts in the rpath — each install will only populate one,
+# the other directory simply won't exist at runtime, which is harmless.
 #
 # From `site-packages/tensorcast/_C.so`:
 #   $ORIGIN/..              -> site-packages/
@@ -54,6 +58,9 @@ from pathlib import Path
 
 _RPATH_PARTS_FROM_PACKAGE_ROOT = [
     "torch/lib",
+    # cu13 umbrella (one dir for all core CUDA libs).
+    "nvidia/cu13/lib",
+    # cu12 per-library paths (each NVIDIA wheel ships its own subdir).
     "nvidia/cuda_runtime/lib",
     "nvidia/cudnn/lib",
     "nvidia/cublas/lib",
@@ -93,6 +100,10 @@ RPATH_LIB = _rpath(levels_up=2)
 
 # Libraries we exclude from auditwheel — they belong to the user's torch /
 # nvidia / driver install, not ours.
+#
+# Both cu12 and cu13 SONAMEs are listed because each install ships only one;
+# auditwheel's match is per-filename, so listing the other major version's
+# SONAME is harmless when that file isn't present.
 AUDITWHEEL_EXCLUDES = [
     "libtorch.so",
     "libtorch_cpu.so",
@@ -101,22 +112,41 @@ AUDITWHEEL_EXCLUDES = [
     "libtorch_global_deps.so",
     "libc10.so",
     "libc10_cuda.so",
+    # cudart: cu12 -> .so.12, cu13 -> .so.13
     "libcudart.so.12",
+    "libcudart.so.13",
+    # cudnn: cu13 keeps .so.9
     "libcudnn.so.9",
+    # cublas / cublasLt: cu12 -> .so.12, cu13 -> .so.13
     "libcublas.so.12",
+    "libcublas.so.13",
     "libcublasLt.so.12",
+    "libcublasLt.so.13",
     "libnccl.so.2",
+    # cupti: cu12 -> .so.12, cu13 -> .so.13
     "libcupti.so.12",
+    "libcupti.so.13",
     "libcuda.so.1",
     "libcufile.so.0",
     "libcurand.so.10",
+    # cusparse: SONAME stable at .so.12 across cu12/cu13
     "libcusparse.so.12",
     "libcusparseLt.so.0",
+    # cusolver: cu12 -> .so.11, cu13 -> .so.12
     "libcusolver.so.11",
+    "libcusolver.so.12",
+    # cufft: cu12 -> .so.11, cu13 -> .so.12
     "libcufft.so.11",
+    "libcufft.so.12",
+    # nvJitLink: cu12 -> .so.12, cu13 -> .so.13
     "libnvJitLink.so.12",
+    "libnvJitLink.so.13",
+    # nvrtc: cu12 -> .so.12, cu13 -> .so.13
     "libnvrtc.so.12",
+    "libnvrtc.so.13",
+    # nvtx: file renamed in cu13 (libnvToolsExt.so.1 -> libnvtx3interop.so.1)
     "libnvToolsExt.so.1",
+    "libnvtx3interop.so.1",
     "libnvidia-ml.so.1",
     "libtorch_nvshmem.so",
     "libnvshmem_host.so.3",
