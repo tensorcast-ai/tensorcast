@@ -1,7 +1,7 @@
 [build-system]
 # Note: The torch version here is the default. When building releases,
 # use tools/release.sh with --torch-version to specify different versions
-requires = ["setuptools>=68.0.0", "pyyaml", "torch==2.11.0", "toml"]
+requires = ["setuptools>=68.0.0", "pyyaml", "torch==2.12.0", "toml"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -29,7 +29,7 @@ dependencies = [
     "pytz>=2025.2",
     "prometheus-client>=0.21.1",
     "py-grpc-prometheus>=0.8.0",
-    "torch==2.11.0",
+    "torch==2.12.0",
     "protobuf==6.31.1",
     # OpenTelemetry is a required dependency. No automatic downgrade.
     "opentelemetry-api>=1.36.0",
