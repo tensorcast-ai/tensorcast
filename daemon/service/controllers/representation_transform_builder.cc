@@ -215,7 +215,7 @@ absl::Status validate_and_build_segments(
     RangeSpec dst_range,
     absl::flat_hash_map<std::string, int32_t>& dst_dim_by_name,
     absl::flat_hash_map<std::string, std::vector<std::tuple<int64_t, int64_t, int>>>& dst_intervals,
-    std::vector<tensorcast::store::loader::ByteRangeSegment>& out_segments,
+    std::vector<tensorcast::store::loader::ByteRangeSegment>* out_segments,
     uint64_t& total_bytes_copied) {
   auto elem_or = dtype_element_size(src_entry.dtype);
   if (!elem_or.ok()) {
@@ -421,14 +421,17 @@ absl::Status validate_and_build_segments(
     const uint64_t length_elems = static_cast<uint64_t>(src_range.end - src_range.start) * row_elems;
     const uint64_t src_offset_elems = static_cast<uint64_t>(src_range.start) * src_stride[0];
     const uint64_t dst_offset_elems = static_cast<uint64_t>(dst_range.start) * dst_stride[0];
-    tensorcast::store::loader::ByteRangeSegment seg;
-    seg.kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData;
-    seg.src_offset = src_base_offset + src_offset_elems * src_elem_size;
-    seg.dst_offset = dst_base_offset_bytes + dst_offset_elems * dst_spec.element_size;
-    seg.length = length_elems * src_elem_size;
-    seg.source_index = 0;
-    out_segments.push_back(seg);
-    total_bytes_copied += seg.length;
+    const uint64_t length_bytes = length_elems * src_elem_size;
+    if (out_segments != nullptr) {
+      tensorcast::store::loader::ByteRangeSegment seg;
+      seg.kind = tensorcast::store::loader::ByteRangeSegment::Kind::kData;
+      seg.src_offset = src_base_offset + src_offset_elems * src_elem_size;
+      seg.dst_offset = dst_base_offset_bytes + dst_offset_elems * dst_spec.element_size;
+      seg.length = length_bytes;
+      seg.source_index = 0;
+      out_segments->push_back(seg);
+    }
+    total_bytes_copied += length_bytes;
     return absl::OkStatus();
   }
 
@@ -438,6 +441,10 @@ absl::Status validate_and_build_segments(
     }
     const uint64_t length_elems = static_cast<uint64_t>(src_range.end - src_range.start) * row_elems;
     const int64_t outer = src_shape.front();
+    if (out_segments == nullptr) {
+      total_bytes_copied += length_elems * static_cast<uint64_t>(outer) * src_elem_size;
+      return absl::OkStatus();
+    }
     for (int64_t row = 0; row < outer; ++row) {
       const uint64_t src_offset_elems =
           static_cast<uint64_t>(row) * src_stride[0] + static_cast<uint64_t>(src_range.start) * src_stride[1];
@@ -449,7 +456,7 @@ absl::Status validate_and_build_segments(
       seg.dst_offset = dst_base_offset_bytes + dst_offset_elems * dst_spec.element_size;
       seg.length = length_elems * src_elem_size;
       seg.source_index = 0;
-      out_segments.push_back(seg);
+      out_segments->push_back(seg);
       total_bytes_copied += seg.length;
     }
     return absl::OkStatus();
@@ -583,18 +590,23 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
     const absl::flat_hash_map<std::string, ViewNarrowSpec>& view_narrows,
     const tensorcast::common::v1::ByteSpaceRef& source_byte_space,
     std::string_view representation_family,
-    bool compute_identity_hashes) {
+    BuildRepresentationTransformOptions options) {
   const auto total_begin = ProfileClock::now();
   BuildRepresentationTransformResult result;
   result.generic_fallback_map.total_bytes = 0;
   result.generic_fallback_map.num_sources = 1;
   result.collective_lowered_map.total_bytes = 0;
   result.collective_lowered_map.num_sources = 1;
+  const bool build_byte_range_maps = options.build_byte_range_maps;
 
   std::vector<tensorcast::store::loader::ByteRangeSegment> mapped_segments;
-  mapped_segments.reserve(copy_plan.entries_size());
+  if (build_byte_range_maps) {
+    mapped_segments.reserve(copy_plan.entries_size());
+  }
   absl::flat_hash_map<std::string, std::vector<tensorcast::store::loader::ByteRangeSegment>> mapped_segments_by_dst;
-  mapped_segments_by_dst.reserve(copy_plan.entries_size());
+  if (build_byte_range_maps) {
+    mapped_segments_by_dst.reserve(copy_plan.entries_size());
+  }
   absl::flat_hash_map<std::string, std::vector<CandidateEntry>> candidate_entries_by_dst;
   candidate_entries_by_dst.reserve(copy_plan.entries_size());
 
@@ -644,14 +656,16 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
         dst_range,
         dst_dim_by_name,
         dst_intervals,
-        mapped_segments,
+        build_byte_range_maps ? &mapped_segments : nullptr,
         result.total_bytes_copied);
     if (!status.ok()) {
       return status;
     }
-    auto& dst_segments = mapped_segments_by_dst[entry.dst_name()];
-    for (size_t segment_index = mapped_segments_begin; segment_index < mapped_segments.size(); ++segment_index) {
-      dst_segments.push_back(mapped_segments[segment_index]);
+    if (build_byte_range_maps) {
+      auto& dst_segments = mapped_segments_by_dst[entry.dst_name()];
+      for (size_t segment_index = mapped_segments_begin; segment_index < mapped_segments.size(); ++segment_index) {
+        dst_segments.push_back(mapped_segments[segment_index]);
+      }
     }
 
     candidate_entries_by_dst[entry.dst_name()].push_back(
@@ -807,9 +821,11 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
 
     result.transform_contract.tensor_bindings.push_back(std::move(binding));
   }
-  result.generic_fallback_map.segments = flatten_segments_by_dst_order(mapped_segments_by_dst, dst_base_offsets);
-  result.collective_lowered_map.segments =
-      flatten_segments_by_dst_order(mapped_segments_by_dst, dst_base_offsets, &collective_dst_names);
+  if (build_byte_range_maps) {
+    result.generic_fallback_map.segments = flatten_segments_by_dst_order(mapped_segments_by_dst, dst_base_offsets);
+    result.collective_lowered_map.segments =
+        flatten_segments_by_dst_order(mapped_segments_by_dst, dst_base_offsets, &collective_dst_names);
+  }
   const auto build_bindings_end = ProfileClock::now();
 
   const auto normalize_begin = ProfileClock::now();
@@ -817,7 +833,7 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
       tensorcast::store::materialization::contracts::normalize_representation_transform_contract(
           std::move(result.transform_contract),
           tensorcast::store::materialization::contracts::NormalizeRepresentationTransformContractOptions{
-              .compute_identity_hashes = compute_identity_hashes,
+              .compute_identity_hashes = options.compute_identity_hashes,
           });
   if (!normalized_contract_or.ok()) {
     return normalized_contract_or.status();
@@ -830,14 +846,40 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
             << " validate_intervals_sec=" << seconds_between(validate_intervals_begin, validate_intervals_end)
             << " build_bindings_sec=" << seconds_between(build_bindings_begin, build_bindings_end)
             << " normalize_sec=" << seconds_between(normalize_begin, normalize_end)
-            << " compute_identity_hashes=" << (compute_identity_hashes ? 1 : 0)
-            << " entries=" << copy_plan.entries_size() << " dst_interval_groups=" << dst_intervals.size()
+            << " compute_identity_hashes=" << (options.compute_identity_hashes ? 1 : 0)
+            << " build_byte_range_maps=" << (build_byte_range_maps ? 1 : 0) << " entries=" << copy_plan.entries_size()
+            << " dst_interval_groups=" << dst_intervals.size()
             << " candidate_dst_count=" << candidate_entries_by_dst.size() << " mapped_segments=" << mapped_segment_count
             << " collective_segments=" << result.collective_lowered_map.segments.size()
             << " fallback_segments=" << result.generic_fallback_map.segments.size()
             << " tensor_bindings=" << result.transform_contract.tensor_bindings.size()
             << " total_bytes_copied=" << result.total_bytes_copied;
   return result;
+}
+
+absl::StatusOr<BuildRepresentationTransformResult> build_representation_transform_contract(
+    const v2::CopyPlan& copy_plan,
+    const materialization_layout::CanonicalIndexTable& source_table,
+    const materialization_layout::CanonicalIndexTable& canonical_source_table,
+    const absl::flat_hash_map<std::string, TensorLayoutSpec>& dst_specs,
+    const absl::flat_hash_map<std::string, uint64_t>& dst_base_offsets,
+    const absl::flat_hash_map<std::string, ViewNarrowSpec>& view_narrows,
+    const tensorcast::common::v1::ByteSpaceRef& source_byte_space,
+    std::string_view representation_family,
+    bool compute_identity_hashes) {
+  return build_representation_transform_contract(
+      copy_plan,
+      source_table,
+      canonical_source_table,
+      dst_specs,
+      dst_base_offsets,
+      view_narrows,
+      source_byte_space,
+      representation_family,
+      BuildRepresentationTransformOptions{
+          .compute_identity_hashes = compute_identity_hashes,
+          .build_byte_range_maps = true,
+      });
 }
 
 namespace {
@@ -854,6 +896,17 @@ struct ByteSpan {
   uint64_t offset{0};
   uint64_t length{0};
 };
+
+bool realization_entry_requires_manual_destination(const v2::BindingRealizationEntry& entry) {
+  if (entry.op_kind() != v2::BINDING_REALIZATION_OP_KIND_COPY) {
+    return true;
+  }
+  if (entry.source_ranges_size() > 1 || entry.dst_ranges_size() > 1) {
+    return true;
+  }
+  return entry.source_ranges_size() == 1 && entry.dst_ranges_size() == 1 &&
+      entry.source_ranges(0).dim() != entry.dst_ranges(0).dim();
+}
 
 absl::StatusOr<TensorCoordinateSpec> build_coordinate_from_ranges(
     std::string_view entry_kind,
@@ -1025,6 +1078,39 @@ absl::StatusOr<std::vector<ByteSpan>> build_tensor_byte_spans(
     merged.push_back(span);
   }
   return merged;
+}
+
+absl::StatusOr<uint64_t> coordinate_selected_bytes(
+    const RepresentationTensorSpec& spec,
+    const TensorCoordinateSpec& coordinate) {
+  if (spec.element_size == 0 && spec.logical_length == 0) {
+    return absl::InvalidArgumentError("tensor requires non-zero element_size or logical_length");
+  }
+  const uint64_t element_bytes = spec.element_size == 0 ? spec.logical_length : spec.element_size;
+  if (coordinate.selects_scalar) {
+    return element_bytes;
+  }
+  if (spec.shape.empty() || coordinate.axes.empty()) {
+    return spec.logical_length;
+  }
+  std::vector<int64_t> selected_shape = spec.shape;
+  for (const auto& axis : coordinate.axes) {
+    if (axis.dim < 0 || axis.dim >= static_cast<int32_t>(selected_shape.size())) {
+      return absl::InvalidArgumentError("coordinate axis out of range");
+    }
+    if (axis.start < 0 || axis.end <= axis.start || axis.end > spec.shape[static_cast<size_t>(axis.dim)]) {
+      return absl::InvalidArgumentError("coordinate axis range is invalid");
+    }
+    selected_shape[static_cast<size_t>(axis.dim)] = axis.end - axis.start;
+  }
+  auto element_count_or = product_dims(absl::MakeSpan(selected_shape));
+  if (!element_count_or.ok()) {
+    return element_count_or.status();
+  }
+  if (*element_count_or > std::numeric_limits<uint64_t>::max() / element_bytes) {
+    return absl::OutOfRangeError("coordinate byte size overflow");
+  }
+  return *element_count_or * element_bytes;
 }
 
 absl::StatusOr<std::vector<tensorcast::store::loader::ByteRangeSegment>> build_copy_segments_from_coordinates(
@@ -1227,13 +1313,14 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
     const absl::flat_hash_map<std::string, ViewNarrowSpec>& view_narrows,
     const tensorcast::common::v1::ByteSpaceRef& source_byte_space,
     std::string_view representation_family,
-    bool compute_identity_hashes) {
+    BuildRepresentationTransformOptions options) {
   const auto total_begin = ProfileClock::now();
   BuildRepresentationTransformResult result;
   result.generic_fallback_map.total_bytes = 0;
   result.generic_fallback_map.num_sources = 1;
   result.collective_lowered_map.total_bytes = 0;
   result.collective_lowered_map.num_sources = 1;
+  const bool build_byte_range_maps = options.build_byte_range_maps;
   result.transform_contract.source_byte_space = source_byte_space;
   result.transform_contract.target_representation.family = std::string(representation_family);
   result.transform_contract.target_representation.realization_kind = RealizationKind::kEphemeralIntoTarget;
@@ -1247,8 +1334,7 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
 
   const auto manual_scan_begin = ProfileClock::now();
   for (const auto& entry : realization_plan.entries()) {
-    if (entry.op_kind() != v2::BINDING_REALIZATION_OP_KIND_COPY || entry.source_ranges_size() > 1 ||
-        entry.dst_ranges_size() > 1) {
+    if (realization_entry_requires_manual_destination(entry)) {
       manual_dst_names.insert(entry.dst_name());
     }
   }
@@ -1432,7 +1518,10 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
         view_narrows,
         source_byte_space,
         representation_family,
-        /*compute_identity_hashes=*/false);
+        BuildRepresentationTransformOptions{
+            .compute_identity_hashes = false,
+            .build_byte_range_maps = build_byte_range_maps,
+        });
     if (!copy_result_or.ok()) {
       return copy_result_or.status();
     }
@@ -1487,19 +1576,27 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
           return absl::InvalidArgumentError(
               std::format("realization entry references unknown source tensor '{}'", entry.proto->source_name()));
         }
-        auto segments_or = build_copy_segments_from_coordinates(
-            to_source_tensor_spec(entry.proto->source_name(), source_it->second),
-            entry.source_coordinate,
-            full_dst_spec,
-            entry.destination_coordinate);
-        if (!segments_or.ok()) {
-          return segments_or.status();
-        }
         uint64_t copied_bytes = 0;
-        auto& dst_segments = manual_segments_by_dst[dst_name];
-        for (const auto& segment : *segments_or) {
-          copied_bytes += segment.length;
-          dst_segments.push_back(segment);
+        if (build_byte_range_maps) {
+          auto segments_or = build_copy_segments_from_coordinates(
+              to_source_tensor_spec(entry.proto->source_name(), source_it->second),
+              entry.source_coordinate,
+              full_dst_spec,
+              entry.destination_coordinate);
+          if (!segments_or.ok()) {
+            return segments_or.status();
+          }
+          auto& dst_segments = manual_segments_by_dst[dst_name];
+          for (const auto& segment : *segments_or) {
+            copied_bytes += segment.length;
+            dst_segments.push_back(segment);
+          }
+        } else {
+          auto copied_bytes_or = coordinate_selected_bytes(full_dst_spec, entry.destination_coordinate);
+          if (!copied_bytes_or.ok()) {
+            return copied_bytes_or.status();
+          }
+          copied_bytes = *copied_bytes_or;
         }
         result.total_bytes_copied += copied_bytes;
         result.lowering_stats.collective_candidates += 1;
@@ -1507,14 +1604,16 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
       }
     }
   }
-  tensorcast::store::loader::ByteRangeMap manual_data_map;
-  manual_data_map.total_bytes = result.generic_fallback_map.total_bytes;
-  manual_data_map.num_sources = 1;
-  manual_data_map.segments = flatten_segments_by_dst_order(manual_segments_by_dst, dst_base_offsets);
-  result.collective_lowered_map =
-      merge_ordered_byte_range_maps(std::move(result.collective_lowered_map), manual_data_map);
-  result.generic_fallback_map =
-      merge_ordered_byte_range_maps(std::move(result.generic_fallback_map), std::move(manual_data_map));
+  if (build_byte_range_maps) {
+    tensorcast::store::loader::ByteRangeMap manual_data_map;
+    manual_data_map.total_bytes = result.generic_fallback_map.total_bytes;
+    manual_data_map.num_sources = 1;
+    manual_data_map.segments = flatten_segments_by_dst_order(manual_segments_by_dst, dst_base_offsets);
+    result.collective_lowered_map =
+        merge_ordered_byte_range_maps(std::move(result.collective_lowered_map), manual_data_map);
+    result.generic_fallback_map =
+        merge_ordered_byte_range_maps(std::move(result.generic_fallback_map), std::move(manual_data_map));
+  }
   const auto manual_bindings_end = ProfileClock::now();
 
   const auto normalize_begin = ProfileClock::now();
@@ -1522,7 +1621,7 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
       tensorcast::store::materialization::contracts::normalize_representation_transform_contract(
           std::move(result.transform_contract),
           tensorcast::store::materialization::contracts::NormalizeRepresentationTransformContractOptions{
-              .compute_identity_hashes = compute_identity_hashes,
+              .compute_identity_hashes = options.compute_identity_hashes,
           });
   if (!normalized_contract_or.ok()) {
     return normalized_contract_or.status();
@@ -1536,7 +1635,8 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
             << " copy_contract_sec=" << seconds_between(copy_contract_begin, copy_contract_end)
             << " manual_bindings_sec=" << seconds_between(manual_bindings_begin, manual_bindings_end)
             << " final_normalize_sec=" << seconds_between(normalize_begin, normalize_end)
-            << " compute_identity_hashes=" << (compute_identity_hashes ? 1 : 0)
+            << " compute_identity_hashes=" << (options.compute_identity_hashes ? 1 : 0)
+            << " build_byte_range_maps=" << (build_byte_range_maps ? 1 : 0)
             << " entries=" << realization_plan.entries_size() << " copy_plan_entries=" << copy_plan.entries_size()
             << " manual_dst_count=" << manual_entries_by_dst.size() << " manual_entry_count=" << manual_entry_count
             << " tensor_bindings=" << result.transform_contract.tensor_bindings.size()
@@ -1544,6 +1644,31 @@ absl::StatusOr<BuildRepresentationTransformResult> build_representation_transfor
             << " fallback_segments=" << result.generic_fallback_map.segments.size()
             << " total_bytes_copied=" << result.total_bytes_copied;
   return result;
+}
+
+absl::StatusOr<BuildRepresentationTransformResult> build_representation_transform_contract(
+    const v2::BindingRealizationPlan& realization_plan,
+    const materialization_layout::CanonicalIndexTable& source_table,
+    const materialization_layout::CanonicalIndexTable& canonical_source_table,
+    const absl::flat_hash_map<std::string, TensorLayoutSpec>& dst_specs,
+    const absl::flat_hash_map<std::string, uint64_t>& dst_base_offsets,
+    const absl::flat_hash_map<std::string, ViewNarrowSpec>& view_narrows,
+    const tensorcast::common::v1::ByteSpaceRef& source_byte_space,
+    std::string_view representation_family,
+    bool compute_identity_hashes) {
+  return build_representation_transform_contract(
+      realization_plan,
+      source_table,
+      canonical_source_table,
+      dst_specs,
+      dst_base_offsets,
+      view_narrows,
+      source_byte_space,
+      representation_family,
+      BuildRepresentationTransformOptions{
+          .compute_identity_hashes = compute_identity_hashes,
+          .build_byte_range_maps = true,
+      });
 }
 
 } // namespace tensorcast::daemon::representation_transform_builder

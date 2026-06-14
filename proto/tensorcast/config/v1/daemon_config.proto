@@ -108,6 +108,13 @@ message Engine {
     MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_VERBOSE = 3;
   }
 
+  enum MaterializationStrategyLocalMappedSafetensorsIoMode {
+    MATERIALIZATION_STRATEGY_LOCAL_MAPPED_SAFETENSORS_IO_MODE_UNSPECIFIED = 0;
+    MATERIALIZATION_STRATEGY_LOCAL_MAPPED_SAFETENSORS_IO_MODE_AUTO_BY_FILESYSTEM = 1;
+    MATERIALIZATION_STRATEGY_LOCAL_MAPPED_SAFETENSORS_IO_MODE_BUFFERED = 2;
+    MATERIALIZATION_STRATEGY_LOCAL_MAPPED_SAFETENSORS_IO_MODE_DIRECT_ALIGNED_EDGES = 3;
+  }
+
   reserved 1, 2, 4, 5;
   reserved "mem_pool_size_bytes", "tx_slice_bytes", "streaming_buffer_max_concurrent_sessions", "pinned_allocation_timeout";
   // Renamed: cpu_chunk_size_bytes -> artifact_chunk_bytes (field number unchanged)
@@ -188,6 +195,7 @@ message Engine {
     uint32 owner_file_collective_planner_cache_entries = 26;
     uint64 direct_write_batch_bytes = 27;
     uint32 direct_write_batch_ops = 28;
+    MaterializationStrategyLocalMappedSafetensorsIoMode local_mapped_safetensors_io_mode = 29;
   }
   MaterializationStrategy materialization_strategy = 14;
 

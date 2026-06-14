@@ -188,6 +188,8 @@ absl::StatusOr<SourceBoundStrategyPlan> build_source_bound_execution_strategy_pl
     }
     if (lowering_artifacts->executor_generic_data_map.has_value()) {
       strategy_plan.lane_plan.generic_backend_map = *lowering_artifacts->executor_generic_data_map;
+      strategy_plan.lane_plan.generic_backend_map_coverage_only =
+          lowering_artifacts->executor_generic_data_map_coverage_only;
     }
   }
 
@@ -355,6 +357,23 @@ absl::StatusOr<SourceBoundStrategyPlan> build_source_bound_execution_strategy_pl
   strategy_plan.lane_plan.selection_reason = strategy_plan.summary.execution_plan_kind;
   strategy_plan.lane_plan.local_mapped_typed_selected = typed_work_prefers_local_mapped &&
       local_mapped_typed_available && strategy_plan.lane_plan.mode != SourceBoundExecutionMode::kRejected;
+  const bool coverage_only_can_use_local_mapped = local_mapped_typed_available &&
+      strategy_plan.lane_plan.mode != SourceBoundExecutionMode::kRejected &&
+      (strategy_plan.lane_plan.local_mapped_typed_selected ||
+       strategy_config.executor_preference == ExecutorPreference::kTensorAwareLocal ||
+       strategy_plan.lane_plan.mode == SourceBoundExecutionMode::kLocalMappedTyped);
+  if (strategy_plan.lane_plan.generic_backend_map_coverage_only && !coverage_only_can_use_local_mapped) {
+    const uint64_t coverage_only_bytes = byte_range_map_covered_bytes(strategy_plan.lane_plan.generic_backend_map);
+    add_reject_reason_bytes(
+        &strategy_plan.summary.planner_reject_reason_buckets,
+        "coverage_only_map_requires_local_mapped",
+        coverage_only_bytes);
+    strategy_plan.lane_plan.mode = SourceBoundExecutionMode::kRejected;
+    strategy_plan.summary.execution_plan_kind =
+        std::string(source_bound_execution_mode_name(strategy_plan.lane_plan.mode));
+    strategy_plan.lane_plan.selection_reason = strategy_plan.summary.execution_plan_kind;
+    strategy_plan.lane_plan.local_mapped_typed_selected = false;
+  }
   if (typed_work_prefers_local_mapped && local_mapped_typed_available &&
       strategy_plan.lane_plan.mode != SourceBoundExecutionMode::kRejected &&
       strategy_plan.lane_plan.mode != SourceBoundExecutionMode::kLocalMappedTyped) {

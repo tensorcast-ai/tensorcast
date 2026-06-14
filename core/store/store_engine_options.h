@@ -159,6 +159,7 @@ struct StoreEngineOptions {
     bool enable_mapped_multirange_concat_jobs{true};
     bool sync_after_single_range_concat_job{false};
     bool use_dedicated_single_range_concat_stream{false};
+    bool enable_packed_rect2d_row_reads{false};
     ExecutorPreference executor_preference{ExecutorPreference::kAuto};
     DiagnosticsVerbosity diagnostics_verbosity{DiagnosticsVerbosity::kBasic};
     uint64_t direct_write_batch_bytes{0};

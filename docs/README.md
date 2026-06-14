@@ -28,6 +28,8 @@ Understand how TensorCast works:
 - **[Prefetch Serving Binding Target And Retained GPU Residency](designs/0116-prefetch-serving-binding-target.md)** - Superseded serving-target design retained as the residency, reservation, and worker acquire semantics record
 - **[Artifact-Centered Model Runtime Realization](designs/0120-artifact-centered-model-runtime-realization.md)** - Target model that unifies TensorDict, binding, prefetch, runtime attachment, publication, and TP under artifact realization
 - **[Unified Artifact Realization Kernel](designs/0121-unified-artifact-realization-kernel.md)** - Shared realization kernel for selection, target, strategy, representation, lifecycle, execution, and reports
+- **[TP Source-Window Collective Realization](designs/0122-tp-source-window-collective-realization.md)** - TensorCast-native TP source-window collective executor design for InstantTensor-class cold-start performance inside artifact realization
+- **[Source-Window Collective Feasibility Validation](plans/0122-01-source-window-collective-feasibility-validation.md)** - Pre-implementation metadata and rank-striped IO validation for the TP source-window collective executor
 - **[Assembly Attempt Seal Remediation Handoff Plan](plans/0105-01-assembly-attempt-cut-driven-seal-remediation-handoff.md)** - Ordered execution handoff for finishing cut-driven seal, contract-family enforcement, and validation closure
 - **[Daemon-Served Directory and Target Resolution](designs/0106-daemon-served-directory-and-target-resolution.md)** - Stable worker or instance identity, bounded-staleness directory reads, and NodeAgentDirectory contract
 - **[High Availability Design](architecture/high-availability-design.md)** - HA architecture deep-dive

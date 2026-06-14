@@ -953,6 +953,21 @@ int main(int argc, char** argv) {
             store::StoreEngineOptions::MaterializationStrategyConfig::DiagnosticsVerbosity::kBasic;
         break;
     }
+    using EngineConfig = tensorcast::config::v1::Engine;
+    using RuntimeIoMode = store::StoreEngineOptions::MaterializationStrategyConfig::LocalMappedSafetensorsIoMode;
+    switch (ms.local_mapped_safetensors_io_mode()) {
+      case EngineConfig::MATERIALIZATION_STRATEGY_LOCAL_MAPPED_SAFETENSORS_IO_MODE_BUFFERED:
+        strategy.local_mapped_safetensors_io_mode = RuntimeIoMode::kBuffered;
+        break;
+      case EngineConfig::MATERIALIZATION_STRATEGY_LOCAL_MAPPED_SAFETENSORS_IO_MODE_DIRECT_ALIGNED_EDGES:
+        strategy.local_mapped_safetensors_io_mode = RuntimeIoMode::kDirectAlignedEdges;
+        break;
+      case EngineConfig::MATERIALIZATION_STRATEGY_LOCAL_MAPPED_SAFETENSORS_IO_MODE_AUTO_BY_FILESYSTEM:
+      case EngineConfig::MATERIALIZATION_STRATEGY_LOCAL_MAPPED_SAFETENSORS_IO_MODE_UNSPECIFIED:
+      default:
+        strategy.local_mapped_safetensors_io_mode = RuntimeIoMode::kAutoByFilesystem;
+        break;
+    }
   }
 
   if (cfg.engine().has_progressive_replication()) {
@@ -1572,7 +1587,9 @@ int main(int argc, char** argv) {
   app_opts.worker_lifecycle = lifecycle_opts;
   app_opts.global_store_client = shared_global_store_client;
   app_opts.startup_coordinator = std::make_shared<daemon::StartupCoordinator>();
-  app_opts.deferred_startup_work = [pma, fake_cuda_backend, detected_gpu_count]() -> absl::Status {
+  const bool owner_file_collective_prewarm_enabled = opts.materialization_strategy.enable_owner_file_collective;
+  app_opts.deferred_startup_work =
+      [pma, fake_cuda_backend, detected_gpu_count, owner_file_collective_prewarm_enabled]() -> absl::Status {
     const absl::Status register_status = pma->register_all_pools();
     if (!register_status.ok()) {
       return absl::Status(
@@ -1589,7 +1606,7 @@ int main(int argc, char** argv) {
             absl::StrCat("GPU hash NVRTC prewarm failed during deferred startup: ", gpu_hash_prewarm.message()));
       }
       LOG(INFO) << "GPU hash NVRTC prewarm complete for detected_gpu_count=" << detected_gpu_count;
-      if (detected_gpu_count > 1) {
+      if (owner_file_collective_prewarm_enabled && detected_gpu_count > 1) {
         std::vector<int> clique_devices;
         clique_devices.reserve(static_cast<size_t>(detected_gpu_count));
         for (int device_id = 0; device_id < detected_gpu_count; ++device_id) {
@@ -1601,6 +1618,8 @@ int main(int argc, char** argv) {
               clique_prewarm.code(),
               absl::StrCat("collective clique prewarm failed during deferred startup: ", clique_prewarm.message()));
         }
+      } else if (!owner_file_collective_prewarm_enabled && detected_gpu_count > 1) {
+        LOG(INFO) << "Skipping collective clique prewarm because owner-file collective is disabled";
       }
     }
     return absl::OkStatus();

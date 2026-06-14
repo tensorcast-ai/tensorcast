@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <format>
 #include <optional>
 #include <string>
 #include <utility>
@@ -202,6 +203,70 @@ TEST_CASE("binding realization copy ranges convert without descriptor mismatch",
 }
 
 TEST_CASE(
+    "binding realization byte maps preserve executable physical source offsets",
+    "[materialization_target_plan]") {
+  const std::string canonical_index_json = R"({"alpha":[0,8,[4],[1],"torch.float16",0]})";
+  const std::string source_index_json = R"({"alpha":[32,8,[4],[1],"torch.float16",0]})";
+  auto source_table_or = parse_canonical_index(source_index_json);
+  REQUIRE(source_table_or.ok());
+  auto canonical_source_table_or = parse_canonical_index(canonical_index_json);
+  REQUIRE(canonical_source_table_or.ok());
+
+  absl::flat_hash_map<std::string, TensorLayoutSpec> dst_specs;
+  dst_specs.emplace("alpha", make_layout_spec(8, {4}, {1}));
+  absl::flat_hash_map<std::string, uint64_t> dst_base_offsets;
+  dst_base_offsets.emplace("alpha", 0);
+  absl::flat_hash_map<std::string, representation_layout::ViewNarrowSpec> view_narrows;
+
+  v2::BindingRealizationPlan realization_plan;
+  realization_plan.set_version(1);
+  auto* entry = realization_plan.add_entries();
+  entry->set_op_kind(v2::BINDING_REALIZATION_OP_KIND_COPY);
+  entry->set_source_name("alpha");
+  entry->set_dst_name("alpha");
+
+  auto result_or = representation_transform_builder::build_representation_transform_contract(
+      realization_plan,
+      *source_table_or,
+      *canonical_source_table_or,
+      dst_specs,
+      dst_base_offsets,
+      view_narrows,
+      canonical_byte_space(),
+      "local_seal_then_promote",
+      representation_transform_builder::BuildRepresentationTransformOptions{
+          .compute_identity_hashes = false,
+          .build_byte_range_maps = true,
+      });
+  REQUIRE(result_or.ok());
+  REQUIRE(result_or->generic_fallback_map.segments.size() == 1);
+  CHECK(result_or->generic_fallback_map.segments.front().dst_offset == 0);
+  CHECK(result_or->generic_fallback_map.segments.front().src_offset == 32);
+  CHECK(result_or->generic_fallback_map.segments.front().length == 8);
+
+  MappedTargetMaterializationPlan mapped_plan;
+  mapped_plan.representation = *result_or;
+  mapped_plan.canonical_index_json = canonical_index_json;
+  mapped_plan.logical_total_size = 8;
+
+  store::loading::IntoTargetLayout target_layout;
+  target_layout.total_size = 8;
+  auto prepared_or = build_resolved_mapped_materialization_plan(
+      "artifact",
+      /*generation=*/15,
+      target_layout,
+      mapped_plan,
+      std::nullopt,
+      std::optional<std::string_view>(source_index_json));
+  REQUIRE(prepared_or.ok());
+  REQUIRE(prepared_or->lowering_artifacts.has_value());
+  REQUIRE(prepared_or->lowering_artifacts->executor_generic_data_map.has_value());
+  CHECK_FALSE(prepared_or->lowering_artifacts->executor_generic_data_map_coverage_only);
+  REQUIRE(prepared_or->lowering_artifacts->executor_generic_data_map->segments.size() == 1);
+  CHECK(prepared_or->lowering_artifacts->executor_generic_data_map->segments.front().src_offset == 32);
+}
+
+TEST_CASE(
     "binding realization multi-axis copy ranges preserve semantic bindings and byte segments",
     "[materialization_target_plan]") {
   const std::string index_json =
@@ -272,6 +337,65 @@ TEST_CASE(
   CHECK(result_or->generic_fallback_map.segments.size() == 4);
   CHECK(result_or->generic_fallback_map.segments.front().length == 8);
   CHECK(result_or->total_bytes_copied == 32);
+}
+
+TEST_CASE(
+    "binding realization single-range copies can map source and destination axes differently",
+    "[materialization_target_plan]") {
+  const std::string index_json = R"({
+    "down0":[0,16,[4,2],[2,1],"torch.float16",0],
+    "down1":[16,16,[4,2],[2,1],"torch.float16",0],
+    "down2":[32,16,[4,2],[2,1],"torch.float16",0]
+  })";
+  auto source_table_or = parse_canonical_index(index_json);
+  REQUIRE(source_table_or.ok());
+  auto canonical_source_table_or = parse_canonical_index(index_json);
+  REQUIRE(canonical_source_table_or.ok());
+
+  absl::flat_hash_map<std::string, TensorLayoutSpec> dst_specs;
+  dst_specs.emplace("packed", make_layout_spec(48, {3, 4, 2}, {8, 2, 1}));
+  absl::flat_hash_map<std::string, uint64_t> dst_base_offsets;
+  dst_base_offsets.emplace("packed", 0);
+  absl::flat_hash_map<std::string, representation_layout::ViewNarrowSpec> view_narrows;
+
+  v2::BindingRealizationPlan realization_plan;
+  realization_plan.set_version(1);
+  for (int expert = 0; expert < 3; ++expert) {
+    auto* entry = realization_plan.add_entries();
+    entry->set_op_kind(v2::BINDING_REALIZATION_OP_KIND_COPY);
+    entry->set_source_name(std::format("down{}", expert));
+    entry->set_dst_name("packed");
+    auto* src_range = entry->add_source_ranges();
+    src_range->set_dim(1);
+    src_range->set_start(0);
+    src_range->set_end(2);
+    auto* dst_range = entry->add_dst_ranges();
+    dst_range->set_dim(0);
+    dst_range->set_start(expert);
+    dst_range->set_end(expert + 1);
+  }
+
+  auto result_or = representation_transform_builder::build_representation_transform_contract(
+      realization_plan,
+      *source_table_or,
+      *canonical_source_table_or,
+      dst_specs,
+      dst_base_offsets,
+      view_narrows,
+      canonical_byte_space(),
+      "local_seal_then_promote");
+  REQUIRE(result_or.ok());
+  CHECK(result_or->transform_contract.tensor_bindings.size() == 3);
+  CHECK(result_or->generic_fallback_map.segments.size() == 3);
+  CHECK(covered_bytes(result_or->generic_fallback_map) == 48);
+  CHECK(result_or->total_bytes_copied == 48);
+
+  const auto& binding = result_or->transform_contract.tensor_bindings.front();
+  REQUIRE(binding.sources.size() == 1);
+  REQUIRE(binding.sources.front().source_range.axes.size() == 1);
+  REQUIRE(binding.sources.front().destination_range.axes.size() == 1);
+  CHECK(binding.sources.front().source_range.axes.front().dim == 1);
+  CHECK(binding.sources.front().destination_range.axes.front().dim == 0);
 }
 
 TEST_CASE(
@@ -478,6 +602,63 @@ TEST_CASE("copy-plan collective map only keeps source-overlap tensors", "[materi
   REQUIRE(strategy_plan_or->summary.planner_reject_reason_buckets.contains("typed_work_without_source_overlap"));
   CHECK(strategy_plan_or->summary.planner_reject_reason_buckets.at("typed_work_without_source_overlap") == 8);
   CHECK_FALSE(strategy_plan_or->summary.planner_reject_reason_buckets.contains("generic_backend_coverage_unproven"));
+
+  MappedTargetMaterializationPlan compact_mapped_plan = mapped_plan;
+  compact_mapped_plan.representation.collective_lowered_map = ByteRangeMap{};
+  compact_mapped_plan.representation.generic_fallback_map = ByteRangeMap{};
+  auto compact_prepared_or = build_resolved_mapped_materialization_plan(
+      "artifact",
+      /*generation=*/14,
+      target_layout,
+      compact_mapped_plan,
+      std::nullopt,
+      std::optional<std::string_view>(source_index_json));
+  REQUIRE(compact_prepared_or.ok());
+  REQUIRE(compact_prepared_or->lowering_artifacts.has_value());
+  REQUIRE(compact_prepared_or->lowering_artifacts->collective_data_map.has_value());
+  CHECK(covered_bytes(*compact_prepared_or->lowering_artifacts->collective_data_map) == 8);
+  REQUIRE(compact_prepared_or->lowering_artifacts->executor_generic_data_map.has_value());
+  CHECK(covered_bytes(*compact_prepared_or->lowering_artifacts->executor_generic_data_map) == 16);
+  CHECK(compact_prepared_or->lowering_artifacts->executor_generic_data_map_coverage_only);
+
+  auto compact_strategy_plan_or = store::runtime::ingestion::strategy::build_source_bound_execution_strategy_plan(
+      compact_prepared_or->resolved_plan,
+      compact_prepared_or->lowering_artifacts,
+      store::runtime::ingestion::strategy::SourceBoundPolicy::kCollectiveFirst,
+      strategy_config,
+      topology,
+      safetensors_disk_source());
+  REQUIRE(compact_strategy_plan_or.ok());
+  CHECK(
+      compact_strategy_plan_or->lane_plan.mode ==
+      store::runtime::ingestion::strategy::SourceBoundExecutionMode::kCollectiveFirstMixed);
+  CHECK(compact_strategy_plan_or->summary.planned_collective_candidate_bytes == 8);
+  CHECK(compact_strategy_plan_or->summary.planned_non_admitted_typed_bytes == 8);
+  CHECK(compact_strategy_plan_or->summary.planned_collective_admitted_bytes == 8);
+  CHECK(covered_bytes(compact_strategy_plan_or->lane_plan.collective_lane_map) == 8);
+  CHECK_FALSE(
+      compact_strategy_plan_or->summary.planner_reject_reason_buckets.contains("collective_lane_coverage_unproven"));
+  CHECK_FALSE(
+      compact_strategy_plan_or->summary.planner_reject_reason_buckets.contains("generic_backend_coverage_unproven"));
+
+  auto no_local_mapped_strategy = strategy_config;
+  no_local_mapped_strategy.enable_tensor_aware_mapped_executor = false;
+  auto rejected_compact_strategy_or = store::runtime::ingestion::strategy::build_source_bound_execution_strategy_plan(
+      compact_prepared_or->resolved_plan,
+      compact_prepared_or->lowering_artifacts,
+      store::runtime::ingestion::strategy::SourceBoundPolicy::kCollectiveFirst,
+      no_local_mapped_strategy,
+      topology,
+      safetensors_disk_source());
+  REQUIRE(rejected_compact_strategy_or.ok());
+  CHECK(
+      rejected_compact_strategy_or->lane_plan.mode ==
+      store::runtime::ingestion::strategy::SourceBoundExecutionMode::kRejected);
+  REQUIRE(rejected_compact_strategy_or->summary.planner_reject_reason_buckets.contains(
+      "coverage_only_map_requires_local_mapped"));
+  CHECK(
+      rejected_compact_strategy_or->summary.planner_reject_reason_buckets.at(
+          "coverage_only_map_requires_local_mapped") == 16);
 }
 
 TEST_CASE("copy-plan collective lowering map admits source-only dim1 shard copies", "[materialization_target_plan]") {

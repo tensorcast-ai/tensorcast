@@ -1679,7 +1679,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "MaterializationFacade AUTO prefers owner-file collective for explicit shared source",
+    "MaterializationFacade AUTO prefers local batched even for explicit shared source",
     "[materialization_facade][strategy_plan]") {
   SKIP_IF_NO_CUDA();
 
@@ -1704,11 +1704,48 @@ TEST_CASE(
 
   REQUIRE(
       plan_or->executor ==
-      tensorcast::store::runtime::ingestion::strategy::ExecutionStrategyExecutor::kOwnerFileCollective);
-  REQUIRE(plan_or->selection_reason == "auto_prefers_owner_file_collective_shared_source");
+      tensorcast::store::runtime::ingestion::strategy::ExecutionStrategyExecutor::kTensorBatchedLocal);
+  REQUIRE(plan_or->selection_reason == "auto_prefers_local_batched");
   REQUIRE(plan_or->candidates.size() == 3);
   REQUIRE(plan_or->candidates[2].eligible == true);
   REQUIRE(plan_or->candidates[2].reason == "eligible");
+
+  harness.shutdown();
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(artifact_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade explicit owner-file preference selects collective for shared source",
+    "[materialization_facade][strategy_plan]") {
+  SKIP_IF_NO_CUDA();
+
+  auto artifact_root = make_temp_dir("materialization_facade_strategy_explicit_collective");
+  create_safetensors_file(
+      artifact_root / "weights.safetensors",
+      "{\"tensor\":{\"dtype\":\"U8\",\"shape\":[64],\"data_offsets\":[0,64]}}",
+      std::vector<unsigned char>(64, 17));
+
+  auto opts = MakeOptions(artifact_root);
+  opts.materialization_strategy.enable_local_batched_disk_load = true;
+  opts.materialization_strategy.enable_owner_file_collective = true;
+  opts.materialization_strategy.executor_preference =
+      tensorcast::store::StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference::kOwnerFileCollective;
+  opts.materialization_strategy.owner_file_collective_min_dedup_saving_bytes = 1;
+
+  FacadeHarness harness(opts);
+  harness.initialize();
+
+  auto ctx = make_strategy_context(
+      harness, artifact_root, loading::SourceLocalityHint::kSharedSource, std::string("shared-fs:test"));
+  auto plan_or = harness.facade->build_ordinary_disk_execution_strategy_plan_for_testing(ctx);
+  REQUIRE(plan_or.ok());
+
+  REQUIRE(
+      plan_or->executor ==
+      tensorcast::store::runtime::ingestion::strategy::ExecutionStrategyExecutor::kOwnerFileCollective);
+  REQUIRE(plan_or->selection_reason == "executor_preference_owner_file_collective");
 
   harness.shutdown();
   tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();

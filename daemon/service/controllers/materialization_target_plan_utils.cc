@@ -244,6 +244,112 @@ uint64_t byte_range_map_covered_bytes(const store::loader::ByteRangeMap& map) {
   return total;
 }
 
+bool is_data_representation_work_item(store::materialization::contracts::RepresentationWorkItemKind kind) {
+  using RepresentationWorkItemKind = store::materialization::contracts::RepresentationWorkItemKind;
+  switch (kind) {
+    case RepresentationWorkItemKind::kTensorCopy:
+    case RepresentationWorkItemKind::kConcatAssemble:
+    case RepresentationWorkItemKind::kExpertDim0Concat:
+      return true;
+    case RepresentationWorkItemKind::kResidualByteRange:
+    case RepresentationWorkItemKind::kScalarBroadcastFill:
+    case RepresentationWorkItemKind::kConstFill:
+    case RepresentationWorkItemKind::kPadFill:
+      return false;
+  }
+  return false;
+}
+
+void append_coverage_data_segment(store::loader::ByteRangeMap* map, uint64_t dst_offset, uint64_t length) {
+  if (map == nullptr || length == 0) {
+    return;
+  }
+  map->segments.push_back(
+      store::loader::ByteRangeSegment{
+          .kind = store::loader::ByteRangeSegment::Kind::kData,
+          .dst_offset = dst_offset,
+          .length = length,
+          .src_offset = dst_offset,
+          .source_index = 0,
+      });
+}
+
+absl::Status sort_and_merge_coverage_data_segments(store::loader::ByteRangeMap* map) {
+  if (map == nullptr || map->segments.empty()) {
+    return absl::OkStatus();
+  }
+  std::sort(map->segments.begin(), map->segments.end(), [](const auto& lhs, const auto& rhs) {
+    if (lhs.dst_offset != rhs.dst_offset) {
+      return lhs.dst_offset < rhs.dst_offset;
+    }
+    return lhs.length < rhs.length;
+  });
+  std::vector<store::loader::ByteRangeSegment> merged;
+  merged.reserve(map->segments.size());
+  for (const auto& segment : map->segments) {
+    if (segment.length == 0) {
+      continue;
+    }
+    if (!merged.empty()) {
+      auto& previous = merged.back();
+      const uint64_t previous_end = previous.dst_offset + previous.length;
+      if (segment.dst_offset < previous_end) {
+        return absl::InvalidArgumentError("compact coverage map contains overlapping data ranges");
+      }
+      if (segment.dst_offset == previous_end) {
+        previous.length += segment.length;
+        continue;
+      }
+    }
+    merged.push_back(segment);
+  }
+  map->segments = std::move(merged);
+  return absl::OkStatus();
+}
+
+template <typename IncludeItem>
+absl::StatusOr<store::loader::ByteRangeMap> build_compact_data_coverage_map_from_work_plan(
+    const store::materialization::contracts::RepresentationWorkPlan& work_plan,
+    uint64_t total_bytes,
+    IncludeItem include_item) {
+  store::loader::ByteRangeMap map;
+  map.total_bytes = total_bytes;
+  map.num_sources = 1;
+  for (const auto& item : work_plan.items) {
+    if (!include_item(item) || item.committed_bytes == 0) {
+      continue;
+    }
+    if (item.committed_bytes == item.dst_spec.logical_length) {
+      append_coverage_data_segment(&map, item.dst_spec.logical_offset, item.dst_spec.logical_length);
+      continue;
+    }
+    for (const auto& source : item.sources) {
+      auto spans_or = store::materialization::contracts::build_coordinate_byte_spans(
+          item.dst_spec, source.fragment.destination_range);
+      if (!spans_or.ok()) {
+        return spans_or.status();
+      }
+      for (const auto& span : *spans_or) {
+        append_coverage_data_segment(&map, span.offset, span.length);
+      }
+    }
+  }
+  auto status = sort_and_merge_coverage_data_segments(&map);
+  if (!status.ok()) {
+    return status;
+  }
+  return map;
+}
+
+absl::StatusOr<store::loader::ByteRangeMap> build_compact_data_coverage_map_from_work_plan(
+    const store::materialization::contracts::RepresentationWorkPlan& work_plan,
+    uint64_t total_bytes) {
+  return build_compact_data_coverage_map_from_work_plan(
+      work_plan, total_bytes, [](const store::materialization::contracts::RepresentationWorkItem& item) {
+        return is_data_representation_work_item(item.kind);
+      });
+}
+
 bool work_item_has_collective_source_overlap(const store::materialization::contracts::RepresentationWorkItem& item) {
   using RepresentationWorkItemKind = store::materialization::contracts::RepresentationWorkItemKind;
   return item.kind == RepresentationWorkItemKind::kTensorCopy &&
@@ -1436,7 +1542,10 @@ Status build_binding_realization_materialization_plan(
       build_source_byte_space(
           resolved_view_id.has_value() ? std::optional<std::string_view>(*resolved_view_id) : std::nullopt),
       "local_seal_then_promote",
-      /*compute_identity_hashes=*/false);
+      representation_transform_builder::BuildRepresentationTransformOptions{
+          .compute_identity_hashes = false,
+          .build_byte_range_maps = true,
+      });
   if (!representation_or.ok()) {
     record_error(record_result, "mapping_invalid");
     return to_grpc_status(representation_or.status());
@@ -1507,6 +1616,12 @@ build_resolved_mapped_materialization_plan(
   double merge_executor_sec = 0.0;
   bool generic_reused_collective_map = false;
   bool executor_merge_skipped = false;
+  bool compact_coverage_map_used = false;
+  uint64_t compact_coverage_data_bytes = 0;
+  size_t compact_coverage_segments = 0;
+  bool compact_collective_coverage_map_used = false;
+  uint64_t compact_collective_coverage_data_bytes = 0;
+  size_t compact_collective_coverage_segments = 0;
   uint64_t collective_candidate_data_bytes = 0;
 
   using PreparedExecutionPlan = store::runtime::ingestion::strategy::PreparedSourceBoundExecutionPlan;
@@ -1570,70 +1685,103 @@ build_resolved_mapped_materialization_plan(
       return work_plan_or.status();
     }
     resolved_plan.representation_work_plan = std::move(*work_plan_or);
-    const auto filter_collective_candidate_start = std::chrono::steady_clock::now();
-    auto collective_candidate_data_map_or =
-        filter_byte_range_map(collective_candidate_map, store::loader::ByteRangeSegment::Kind::kData);
-    filter_collective_candidate_sec = elapsed_sec(filter_collective_candidate_start, std::chrono::steady_clock::now());
-    if (!collective_candidate_data_map_or.ok()) {
-      return collective_candidate_data_map_or.status();
-    }
-    if (!collective_candidate_data_map_or->segments.empty()) {
-      collective_candidate_data_bytes = byte_range_map_covered_bytes(*collective_candidate_data_map_or);
-      const auto collective_ranges_start = std::chrono::steady_clock::now();
-      auto collective_dst_ranges_or = build_collective_dst_ranges(*resolved_plan.representation_work_plan);
-      collective_ranges_sec = elapsed_sec(collective_ranges_start, std::chrono::steady_clock::now());
-      if (!collective_dst_ranges_or.ok()) {
-        return collective_dst_ranges_or.status();
+    const bool byte_range_maps_omitted = collective_candidate_map.segments.empty() &&
+        generic_fallback_map.segments.empty() && mapped_plan.representation.total_bytes_copied > 0;
+    if (byte_range_maps_omitted && resolved_plan.representation_work_plan->residual_fallback_map.segments.empty()) {
+      const uint64_t coverage_total_bytes =
+          target_layout.total_size > 0 ? target_layout.total_size : mapped_plan.logical_total_size;
+      auto compact_map_or =
+          build_compact_data_coverage_map_from_work_plan(*resolved_plan.representation_work_plan, coverage_total_bytes);
+      if (!compact_map_or.ok()) {
+        return compact_map_or.status();
       }
-      const auto filter_collective_start = std::chrono::steady_clock::now();
-      auto collective_data_map_or =
-          filter_data_map_to_dst_ranges(*collective_candidate_data_map_or, *collective_dst_ranges_or);
-      filter_collective_sec = elapsed_sec(filter_collective_start, std::chrono::steady_clock::now());
-      if (!collective_data_map_or.ok()) {
-        return collective_data_map_or.status();
+      auto compact_collective_map_or = build_compact_data_coverage_map_from_work_plan(
+          *resolved_plan.representation_work_plan, coverage_total_bytes, work_item_has_collective_source_overlap);
+      if (!compact_collective_map_or.ok()) {
+        return compact_collective_map_or.status();
       }
-      if (!collective_data_map_or->segments.empty()) {
-        prepared_execution.lowering_artifacts->collective_data_map = *collective_data_map_or;
+      if (!compact_collective_map_or->segments.empty()) {
+        compact_collective_coverage_map_used = true;
+        compact_collective_coverage_segments = compact_collective_map_or->segments.size();
+        compact_collective_coverage_data_bytes = byte_range_map_covered_bytes(*compact_collective_map_or);
+        collective_candidate_data_bytes = compact_collective_coverage_data_bytes;
+        prepared_execution.lowering_artifacts->collective_data_map = *compact_collective_map_or;
       }
-    }
-    store::loader::ByteRangeMap collective_candidate_data_map;
-    if (!collective_candidate_data_map_or->segments.empty()) {
-      collective_candidate_data_map = *collective_candidate_data_map_or;
-    }
-    store::loader::ByteRangeMap generic_data_map;
-    if (!collective_candidate_data_map.segments.empty() &&
-        collective_candidate_data_bytes >= mapped_plan.representation.total_bytes_copied) {
-      generic_data_map = collective_candidate_data_map;
-      generic_reused_collective_map = true;
+      if (!compact_map_or->segments.empty()) {
+        compact_coverage_map_used = true;
+        compact_coverage_segments = compact_map_or->segments.size();
+        compact_coverage_data_bytes = byte_range_map_covered_bytes(*compact_map_or);
+        prepared_execution.lowering_artifacts->executor_generic_data_map = *compact_map_or;
+        prepared_execution.lowering_artifacts->executor_generic_data_map_coverage_only = true;
+        executor_merge_skipped = true;
+      }
     } else {
-      const auto filter_generic_start = std::chrono::steady_clock::now();
-      auto generic_data_map_or =
-          filter_byte_range_map(generic_fallback_map, store::loader::ByteRangeSegment::Kind::kData);
-      filter_generic_sec = elapsed_sec(filter_generic_start, std::chrono::steady_clock::now());
-      if (!generic_data_map_or.ok()) {
-        return generic_data_map_or.status();
+      const auto filter_collective_candidate_start = std::chrono::steady_clock::now();
+      auto collective_candidate_data_map_or =
+          filter_byte_range_map(collective_candidate_map, store::loader::ByteRangeSegment::Kind::kData);
+      filter_collective_candidate_sec =
+          elapsed_sec(filter_collective_candidate_start, std::chrono::steady_clock::now());
+      if (!collective_candidate_data_map_or.ok()) {
+        return collective_candidate_data_map_or.status();
       }
-      if (!generic_data_map_or->segments.empty()) {
-        generic_data_map = *generic_data_map_or;
-      } else if (!collective_candidate_data_map.segments.empty()) {
+      if (!collective_candidate_data_map_or->segments.empty()) {
+        collective_candidate_data_bytes = byte_range_map_covered_bytes(*collective_candidate_data_map_or);
+        const auto collective_ranges_start = std::chrono::steady_clock::now();
+        auto collective_dst_ranges_or = build_collective_dst_ranges(*resolved_plan.representation_work_plan);
+        collective_ranges_sec = elapsed_sec(collective_ranges_start, std::chrono::steady_clock::now());
+        if (!collective_dst_ranges_or.ok()) {
+          return collective_dst_ranges_or.status();
+        }
+        const auto filter_collective_start = std::chrono::steady_clock::now();
+        auto collective_data_map_or =
+            filter_data_map_to_dst_ranges(*collective_candidate_data_map_or, *collective_dst_ranges_or);
+        filter_collective_sec = elapsed_sec(filter_collective_start, std::chrono::steady_clock::now());
+        if (!collective_data_map_or.ok()) {
+          return collective_data_map_or.status();
+        }
+        if (!collective_data_map_or->segments.empty()) {
+          prepared_execution.lowering_artifacts->collective_data_map = *collective_data_map_or;
+        }
+      }
+      store::loader::ByteRangeMap collective_candidate_data_map;
+      if (!collective_candidate_data_map_or->segments.empty()) {
+        collective_candidate_data_map = *collective_candidate_data_map_or;
+      }
+      store::loader::ByteRangeMap generic_data_map;
+      if (!collective_candidate_data_map.segments.empty() &&
+          collective_candidate_data_bytes >= mapped_plan.representation.total_bytes_copied) {
         generic_data_map = collective_candidate_data_map;
+        generic_reused_collective_map = true;
+      } else {
+        const auto filter_generic_start = std::chrono::steady_clock::now();
+        auto generic_data_map_or =
+            filter_byte_range_map(generic_fallback_map, store::loader::ByteRangeSegment::Kind::kData);
+        filter_generic_sec = elapsed_sec(filter_generic_start, std::chrono::steady_clock::now());
+        if (!generic_data_map_or.ok()) {
+          return generic_data_map_or.status();
+        }
+        if (!generic_data_map_or->segments.empty()) {
+          generic_data_map = *generic_data_map_or;
+        } else if (!collective_candidate_data_map.segments.empty()) {
+          generic_data_map = collective_candidate_data_map;
+        }
       }
-    }
-    if (resolved_plan.representation_work_plan->residual_fallback_map.segments.empty()) {
-      executor_merge_skipped = true;
-      if (!generic_data_map.segments.empty()) {
-        prepared_execution.lowering_artifacts->executor_generic_data_map = generic_data_map;
-      }
-    } else {
-      const auto merge_executor_start = std::chrono::steady_clock::now();
-      auto executor_map_or =
-          merge_byte_range_maps(generic_data_map, resolved_plan.representation_work_plan->residual_fallback_map);
-      merge_executor_sec = elapsed_sec(merge_executor_start, std::chrono::steady_clock::now());
-      if (!executor_map_or.ok()) {
-        return executor_map_or.status();
-      }
-      if (!executor_map_or->segments.empty()) {
-        prepared_execution.lowering_artifacts->executor_generic_data_map = *executor_map_or;
+      if (resolved_plan.representation_work_plan->residual_fallback_map.segments.empty()) {
+        executor_merge_skipped = true;
+        if (!generic_data_map.segments.empty()) {
+          prepared_execution.lowering_artifacts->executor_generic_data_map = generic_data_map;
+        }
+      } else {
+        const auto merge_executor_start = std::chrono::steady_clock::now();
+        auto executor_map_or =
+            merge_byte_range_maps(generic_data_map, resolved_plan.representation_work_plan->residual_fallback_map);
+        merge_executor_sec = elapsed_sec(merge_executor_start, std::chrono::steady_clock::now());
+        if (!executor_map_or.ok()) {
+          return executor_map_or.status();
+        }
+        if (!executor_map_or->segments.empty()) {
+          prepared_execution.lowering_artifacts->executor_generic_data_map = *executor_map_or;
+        }
       }
     }
   }
@@ -1658,6 +1806,12 @@ build_resolved_mapped_materialization_plan(
             << " total_bytes_copied=" << mapped_plan.representation.total_bytes_copied
             << " generic_reused_collective_map=" << (generic_reused_collective_map ? 1 : 0)
             << " executor_merge_skipped=" << (executor_merge_skipped ? 1 : 0)
+            << " compact_coverage_map_used=" << (compact_coverage_map_used ? 1 : 0)
+            << " compact_coverage_segments=" << compact_coverage_segments
+            << " compact_coverage_data_bytes=" << compact_coverage_data_bytes
+            << " compact_collective_coverage_map_used=" << (compact_collective_coverage_map_used ? 1 : 0)
+            << " compact_collective_coverage_segments=" << compact_collective_coverage_segments
+            << " compact_collective_coverage_data_bytes=" << compact_collective_coverage_data_bytes
             << " total_sec=" << elapsed_sec(profile_start, done);
   return prepared_execution;
 }

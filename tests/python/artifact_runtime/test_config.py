@@ -8,6 +8,7 @@ import pytest
 
 import tensorcast.artifact_runtime.dto as serving_dto
 from tensorcast.artifact_runtime.config import (
+    MaterializationSettings,
     RetainedBindingAcquireSettings,
     RuntimeArtifactBindStartPlan,
     RuntimeRetainedRealizationStartPlan,
@@ -136,6 +137,32 @@ def test_runtime_config_parses_nested_schema_defaults() -> None:
     assert config.bootstrap.mode == "required"
     assert config.bootstrap.verify_source_checksums is False
     assert config.materialization.collective_policy_value() == "require_collective"
+
+
+def test_materialization_auto_defaults_to_local_first_policy() -> None:
+    config = TensorCastRuntimeConfig.from_mapping({})
+
+    assert config.materialization.collective == "auto"
+    assert config.materialization.collective_policy_value() == "disable_collective"
+
+
+@pytest.mark.parametrize(
+    ("collective", "expected_policy"),
+    [
+        ("collective_first", "collective_first"),
+        ("required", "require_collective"),
+        ("require_collective", "require_collective"),
+        ("disabled", "disable_collective"),
+        ("disable_collective", "disable_collective"),
+    ],
+)
+def test_materialization_collective_policy_values(
+    collective: str,
+    expected_policy: str,
+) -> None:
+    settings = MaterializationSettings(collective=collective)
+
+    assert settings.collective_policy_value() == expected_policy
 
 
 def test_runtime_config_rejects_removed_serving_section() -> None:

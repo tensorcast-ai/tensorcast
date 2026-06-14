@@ -488,6 +488,7 @@ struct LocalMappedTensorTask {
   enum class Kind : std::uint8_t {
     kContiguous = 0,
     kRect2D = 1,
+    kRect2DPacked = 2,
   };
 
   Kind kind{Kind::kContiguous};
@@ -497,6 +498,7 @@ struct LocalMappedTensorTask {
   uint64_t dst_bytes{0};
   uint64_t src_col_offset_bytes{0};
   uint64_t src_pitch_bytes{0};
+  uint64_t source_row_stride_bytes{0};
   uint64_t dst_pitch_bytes{0};
   uint64_t rows{0};
 };
@@ -1923,18 +1925,18 @@ absl::StatusOr<LocalMappedSafetensorsAutoIoDecision> choose_auto_local_mapped_sa
       };
     }
     return LocalMappedSafetensorsAutoIoDecision{
-        .use_direct_aligned_edges = true,
+        .use_direct_aligned_edges = false,
         .page_cache_residency_ratio = page_cache_residency,
         .buffered_probe_bytes = probe.bytes,
         .buffered_probe_sec = probe.sec,
         .buffered_probe_gib_per_sec = probe.gib_per_sec,
-        .reason = "page_cache_resident_probe_slow",
+        .reason = "page_cache_resident_probe_slow_buffered_default",
     };
   }
   return LocalMappedSafetensorsAutoIoDecision{
-      .use_direct_aligned_edges = true,
+      .use_direct_aligned_edges = false,
       .page_cache_residency_ratio = page_cache_residency,
-      .reason = "page_cache_cold_or_partial",
+      .reason = "page_cache_cold_or_partial_buffered_default",
   };
 }
 
@@ -2501,15 +2503,20 @@ bool byte_range_is_fully_covered(const std::vector<ByteRange>& ranges, uint64_t 
   if (end <= begin) {
     return true;
   }
+  auto it = std::upper_bound(
+      ranges.begin(), ranges.end(), begin, [](uint64_t value, const ByteRange& range) { return value < range.begin; });
+  if (it != ranges.begin()) {
+    --it;
+  }
   uint64_t cursor = begin;
-  for (const auto& range : ranges) {
-    if (range.end <= cursor) {
+  for (; it != ranges.end(); ++it) {
+    if (it->end <= cursor) {
       continue;
     }
-    if (range.begin > cursor) {
+    if (it->begin > cursor) {
       return false;
     }
-    cursor = std::max<uint64_t>(cursor, range.end);
+    cursor = std::max<uint64_t>(cursor, it->end);
     if (cursor >= end) {
       return true;
     }
@@ -2521,13 +2528,15 @@ bool byte_range_overlaps_any(const std::vector<ByteRange>& ranges, uint64_t begi
   if (end <= begin) {
     return false;
   }
-  for (const auto& range : ranges) {
-    if (range.end <= begin) {
-      continue;
+  auto it = std::upper_bound(
+      ranges.begin(), ranges.end(), begin, [](uint64_t value, const ByteRange& range) { return value < range.begin; });
+  if (it != ranges.begin()) {
+    const auto& previous = *(it - 1);
+    if (previous.end > begin) {
+      return true;
     }
-    if (range.begin >= end) {
-      return false;
-    }
+  }
+  if (it != ranges.end() && it->begin < end) {
     return true;
   }
   return false;
@@ -2956,6 +2965,31 @@ void append_destination_spans_as_ranges(absl::Span<const TensorByteSpan> spans, 
   }
 }
 
+void insert_byte_range_sorted_merged(ByteRange incoming, std::vector<ByteRange>* ranges) {
+  if (ranges == nullptr || incoming.end <= incoming.begin) {
+    return;
+  }
+  auto it =
+      std::lower_bound(ranges->begin(), ranges->end(), incoming.begin, [](const ByteRange& range, uint64_t value) {
+        return range.end < value;
+      });
+  while (it != ranges->end() && it->begin <= incoming.end) {
+    incoming.begin = std::min(incoming.begin, it->begin);
+    incoming.end = std::max(incoming.end, it->end);
+    it = ranges->erase(it);
+  }
+  ranges->insert(it, incoming);
+}
+
+void insert_destination_spans_as_sorted_ranges(absl::Span<const TensorByteSpan> spans, std::vector<ByteRange>* ranges) {
+  for (const auto& span : spans) {
+    if (span.length == 0) {
+      continue;
+    }
+    insert_byte_range_sorted_merged(ByteRange{.begin = span.offset, .end = span.offset + span.length}, ranges);
+  }
+}
+
 uint64_t tensor_byte_span_total_bytes(absl::Span<const TensorByteSpan> spans) {
   uint64_t total = 0;
   for (const auto& span : spans) {
@@ -3113,6 +3147,79 @@ absl::StatusOr<MappedTensorJobRuntime> build_local_partial_replicated_tensor_job
           .dst_offset = dst_spans.front().offset - item.dst_spec.logical_offset,
           .dst_size_bytes = dst_spans.front().length,
           .kind = RankTensorSlice::Kind::kFull,
+      });
+  runtime_job.destinations.push_back(
+      ParsedParticipant{
+          .rank = participant.rank,
+          .device_id = participant.device_id,
+          .gpu_ptr = *dst_ptr_or,
+      });
+  return runtime_job;
+}
+
+absl::StatusOr<MappedTensorJobRuntime> build_local_partial_dim1_compact_tensor_job(
+    const ParsedMappedParticipant& participant,
+    const RepresentationWorkItem& item,
+    absl::Span<const TensorByteSpan> dst_spans) {
+  if (dst_spans.size() != 1 || item.sources.size() != 1) {
+    return absl::InvalidArgumentError("local partial dim1 compact tensor job requires one compact destination span");
+  }
+  const auto& fragment = item.sources.front().fragment;
+  if (fragment.source_spec.shape.size() != 2 ||
+      !is_row_major_contiguous(fragment.source_spec.shape, fragment.source_spec.stride) ||
+      !is_row_major_contiguous(item.dst_spec.shape, item.dst_spec.stride)) {
+    return absl::InvalidArgumentError(
+        "local partial dim1 compact tensor job requires contiguous 2D source and contiguous destination");
+  }
+  if (fragment.source_spec.element_size == 0 || fragment.source_spec.element_size != item.dst_spec.element_size ||
+      fragment.source_spec.dtype != item.dst_spec.dtype) {
+    return absl::InvalidArgumentError("local partial dim1 compact tensor job has incompatible dtypes");
+  }
+
+  auto src_rows_or = coordinate_axis_range_or_full(fragment.source_range, fragment.source_spec, /*dim=*/0, "source");
+  if (!src_rows_or.ok()) {
+    return src_rows_or.status();
+  }
+  auto src_cols_or = coordinate_axis_range_or_full(fragment.source_range, fragment.source_spec, /*dim=*/1, "source");
+  if (!src_cols_or.ok()) {
+    return src_cols_or.status();
+  }
+  const uint64_t row_count = static_cast<uint64_t>(src_rows_or->end - src_rows_or->start);
+  const uint64_t col_count = static_cast<uint64_t>(src_cols_or->end - src_cols_or->start);
+  if (row_count == 0 || col_count == 0) {
+    return absl::InvalidArgumentError("local partial dim1 compact tensor job requires a non-empty source slice");
+  }
+  auto selected_elements_or = checked_mul_u64(row_count, col_count, "local partial dim1 compact selected elements");
+  if (!selected_elements_or.ok()) {
+    return selected_elements_or.status();
+  }
+  auto selected_bytes_or =
+      checked_mul_u64(*selected_elements_or, fragment.source_spec.element_size, "local partial dim1 compact bytes");
+  if (!selected_bytes_or.ok()) {
+    return selected_bytes_or.status();
+  }
+  if (*selected_bytes_or == 0 || dst_spans.front().length != *selected_bytes_or) {
+    return absl::InvalidArgumentError("local partial dim1 compact tensor job source/destination byte sizes differ");
+  }
+  auto dst_ptr_or = find_mapped_destination_base_ptr(participant, item.dst_spec);
+  if (!dst_ptr_or.ok()) {
+    return dst_ptr_or.status();
+  }
+
+  MappedTensorJobRuntime runtime_job;
+  runtime_job.job.name = item.dst_name;
+  runtime_job.job.source = tensor_meta_from_spec(fragment.source_spec);
+  runtime_job.job.distribution = TensorJob::Distribution::kDim1Partitioned;
+  runtime_job.job.slices.push_back(
+      RankTensorSlice{
+          .dst_offset = dst_spans.front().offset - item.dst_spec.logical_offset,
+          .dst_size_bytes = dst_spans.front().length,
+          .dst_row_stride_bytes = 0,
+          .kind = RankTensorSlice::Kind::kRect2D,
+          .row_start = static_cast<uint64_t>(src_rows_or->start),
+          .row_count = row_count,
+          .src_col_start = static_cast<uint64_t>(src_cols_or->start),
+          .col_count = col_count,
       });
   runtime_job.destinations.push_back(
       ParsedParticipant{
@@ -3374,6 +3481,17 @@ absl::StatusOr<MappedTensorJobBuildResult> build_local_mapped_partial_tensor_job
       if (runtime_job_or.ok()) {
         accepted_kind = AcceptedKind::kDim1;
       }
+    } else if (item.partition_kind == WorkPartitionKind::kUnknown) {
+      runtime_job_or = build_local_partial_replicated_tensor_job(participant, item, absl::MakeSpan(dst_spans));
+      if (runtime_job_or.ok()) {
+        accepted_kind = AcceptedKind::kReplicated;
+      }
+      if (!runtime_job_or.ok() && absl::IsInvalidArgument(runtime_job_or.status())) {
+        runtime_job_or = build_local_partial_dim1_compact_tensor_job(participant, item, absl::MakeSpan(dst_spans));
+        if (runtime_job_or.ok()) {
+          accepted_kind = AcceptedKind::kRect2D;
+        }
+      }
     }
     if (!runtime_job_or.ok() &&
         (absl::IsInvalidArgument(runtime_job_or.status()) || absl::IsUnimplemented(runtime_job_or.status()))) {
@@ -3409,8 +3527,7 @@ absl::StatusOr<MappedTensorJobBuildResult> build_local_mapped_partial_tensor_job
     }
     accepted_bytes += runtime_job_or->job.slices.front().dst_size_bytes;
     append_destination_spans_as_ranges(absl::MakeSpan(dst_spans), &result.handled_dst_ranges_by_rank.front());
-    append_destination_spans_as_ranges(absl::MakeSpan(dst_spans), &handled_ranges);
-    merge_byte_ranges(&handled_ranges);
+    insert_destination_spans_as_sorted_ranges(absl::MakeSpan(dst_spans), &handled_ranges);
     result.jobs.push_back(std::move(*runtime_job_or));
   }
 
@@ -6795,6 +6912,20 @@ absl::StatusOr<uint64_t> local_mapped_2d_row_bytes(const TensorMeta& source, std
   return checked_mul_u64(static_cast<uint64_t>(source.shape[1]), source.elem_size, absl::StrCat(role, " row bytes"));
 }
 
+bool local_mapped_rect2d_uses_packed_rows(uint64_t row_bytes, uint64_t col_bytes, bool enable_packed_rect2d_row_reads) {
+  return enable_packed_rect2d_row_reads && col_bytes < row_bytes;
+}
+
+uint64_t local_mapped_rect2d_host_row_bytes(
+    uint64_t row_bytes,
+    uint64_t col_bytes,
+    bool enable_packed_rect2d_row_reads) {
+  if (local_mapped_rect2d_uses_packed_rows(row_bytes, col_bytes, enable_packed_rect2d_row_reads)) {
+    return col_bytes;
+  }
+  return row_bytes;
+}
+
 absl::Status validate_local_mapped_dim0_tensor_job_admission(
     const MappedTensorJobRuntime& job,
     int device_id,
@@ -6838,7 +6969,8 @@ absl::Status validate_local_mapped_dim1_tensor_job_admission(
 absl::Status validate_local_mapped_rect2d_tensor_job_admission(
     const MappedTensorJobRuntime& job,
     int device_id,
-    size_t host_buffer_bytes) {
+    size_t host_buffer_bytes,
+    bool enable_packed_rect2d_row_reads) {
   if (host_buffer_bytes == 0) {
     return absl::InvalidArgumentError("local mapped rect2d tensor executor requires a non-empty host buffer");
   }
@@ -6869,7 +7001,9 @@ absl::Status validate_local_mapped_rect2d_tensor_job_admission(
   if (*expected_dst_bytes_or != slice.dst_size_bytes) {
     return absl::InvalidArgumentError("local mapped rect2d tensor job destination byte size mismatch");
   }
-  if (*row_bytes_or > host_buffer_bytes) {
+  const uint64_t host_row_bytes =
+      local_mapped_rect2d_host_row_bytes(*row_bytes_or, *col_bytes_or, enable_packed_rect2d_row_reads);
+  if (host_row_bytes > host_buffer_bytes) {
     return absl::FailedPreconditionError("local mapped rect2d tensor row exceeds pinned buffer size");
   }
   return absl::OkStatus();
@@ -6878,14 +7012,16 @@ absl::Status validate_local_mapped_rect2d_tensor_job_admission(
 absl::Status validate_local_mapped_tensor_jobs_admission(
     const std::vector<MappedTensorJobRuntime>& jobs,
     int device_id,
-    size_t host_buffer_bytes) {
+    size_t host_buffer_bytes,
+    bool enable_packed_rect2d_row_reads) {
   for (const auto& job : jobs) {
     if (job.job.slices.size() != 1) {
       return absl::InvalidArgumentError("local mapped tensor admission requires one slice");
     }
     const auto& slice = job.job.slices.front();
     if (slice.kind == RankTensorSlice::Kind::kRect2D) {
-      TC_RETURN_IF_ERROR(validate_local_mapped_rect2d_tensor_job_admission(job, device_id, host_buffer_bytes));
+      TC_RETURN_IF_ERROR(validate_local_mapped_rect2d_tensor_job_admission(
+          job, device_id, host_buffer_bytes, enable_packed_rect2d_row_reads));
       continue;
     }
     switch (job.job.distribution) {
@@ -6988,7 +7124,8 @@ absl::Status append_local_mapped_tensor_task(LocalMappedTensorTask task, std::ve
         return absl::InvalidArgumentError("local mapped contiguous tensor task size mismatch");
       }
       break;
-    case LocalMappedTensorTask::Kind::kRect2D: {
+    case LocalMappedTensorTask::Kind::kRect2D:
+    case LocalMappedTensorTask::Kind::kRect2DPacked: {
       if (task.rows == 0 || task.src_pitch_bytes == 0 || task.dst_pitch_bytes == 0) {
         return absl::InvalidArgumentError("local mapped rect2d tensor task has invalid pitch geometry");
       }
@@ -7012,11 +7149,57 @@ absl::Status append_local_mapped_tensor_task(LocalMappedTensorTask task, std::ve
       if (*src_end_or > task.src_pitch_bytes || task.dst_pitch_bytes < width_bytes) {
         return absl::InvalidArgumentError("local mapped rect2d tensor task has invalid source or destination pitch");
       }
+      if (task.kind == LocalMappedTensorTask::Kind::kRect2DPacked && task.source_row_stride_bytes < width_bytes) {
+        return absl::InvalidArgumentError("local mapped packed rect2d tensor task has invalid source row stride");
+      }
       break;
     }
   }
   tasks->push_back(task);
   return absl::OkStatus();
+}
+
+absl::StatusOr<size_t> read_local_mapped_tensor_task_into_buffer(
+    loader::SeekableSource& source,
+    const LocalMappedTensorTask& task,
+    char* host_ptr) {
+  if (host_ptr == nullptr) {
+    return absl::InvalidArgumentError("local mapped tensor task read got a null host buffer");
+  }
+  if (task.read_bytes > std::numeric_limits<size_t>::max()) {
+    return absl::OutOfRangeError("local mapped tensor task exceeds host size_t limit");
+  }
+  if (task.kind != LocalMappedTensorTask::Kind::kRect2DPacked) {
+    return source.read_at(task.source_offset, host_ptr, static_cast<size_t>(task.read_bytes));
+  }
+  if (task.rows == 0 || task.src_pitch_bytes == 0 || task.source_row_stride_bytes == 0 ||
+      task.read_bytes != task.rows * task.src_pitch_bytes) {
+    return absl::InvalidArgumentError("local mapped packed rect2d tensor task has invalid read geometry");
+  }
+  size_t total = 0;
+  for (uint64_t row = 0; row < task.rows; ++row) {
+    auto row_source_delta_or = checked_mul_u64(row, task.source_row_stride_bytes, "packed rect2d source row delta");
+    if (!row_source_delta_or.ok()) {
+      return row_source_delta_or.status();
+    }
+    auto source_offset_or =
+        checked_add_u64(task.source_offset, *row_source_delta_or, "packed rect2d source row offset");
+    if (!source_offset_or.ok()) {
+      return source_offset_or.status();
+    }
+    char* row_ptr = host_ptr + row * task.src_pitch_bytes;
+    auto got_or = source.read_at(*source_offset_or, row_ptr, static_cast<size_t>(task.src_pitch_bytes));
+    if (!got_or.ok()) {
+      return got_or.status();
+    }
+    if (*got_or != static_cast<size_t>(task.src_pitch_bytes)) {
+      return absl::OutOfRangeError(
+          absl::StrCat(
+              "short read in local mapped packed rect2d tensor task: got=", *got_or, " want=", task.src_pitch_bytes));
+    }
+    total += *got_or;
+  }
+  return total;
 }
 
 absl::Status append_local_mapped_replicated_tensor_tasks(
@@ -7219,6 +7402,7 @@ absl::Status append_local_mapped_dim1_tensor_tasks(
 absl::Status append_local_mapped_rect2d_tensor_tasks(
     const MappedTensorJobRuntime& job,
     size_t host_buffer_bytes,
+    bool enable_packed_rect2d_row_reads,
     LocalMappedTensorTaskBuildResult* result) {
   if (job.destinations.size() != 1 || job.job.slices.size() != 1) {
     return absl::InvalidArgumentError("local mapped rect2d tensor job requires exactly one destination");
@@ -7262,18 +7446,21 @@ absl::Status append_local_mapped_rect2d_tensor_tasks(
   if (*expected_dst_bytes_or != slice.dst_size_bytes) {
     return absl::InvalidArgumentError("local mapped rect2d tensor job destination byte size mismatch");
   }
-  if (row_bytes > host_buffer_bytes) {
+  const bool use_packed_rows =
+      local_mapped_rect2d_uses_packed_rows(row_bytes, col_bytes, enable_packed_rect2d_row_reads);
+  const uint64_t host_row_bytes = use_packed_rows ? col_bytes : row_bytes;
+  if (host_row_bytes > host_buffer_bytes) {
     return absl::ResourceExhaustedError("local mapped rect2d tensor row exceeds pinned buffer size");
   }
 
   const uint64_t src_col_bytes = slice.src_col_start * job.job.source.elem_size;
   const uint64_t dst_pitch_bytes = slice.dst_row_stride_bytes == 0 ? col_bytes : slice.dst_row_stride_bytes;
-  const uint64_t rows_per_chunk = std::max<uint64_t>(1, static_cast<uint64_t>(host_buffer_bytes) / row_bytes);
+  const uint64_t rows_per_chunk = std::max<uint64_t>(1, static_cast<uint64_t>(host_buffer_bytes) / host_row_bytes);
   auto* dst_base = static_cast<std::uint8_t*>(job.destinations.front().gpu_ptr) + slice.dst_offset;
 
   for (uint64_t row = 0; row < slice.row_count; row += rows_per_chunk) {
     const uint64_t chunk_rows = std::min<uint64_t>(rows_per_chunk, slice.row_count - row);
-    auto chunk_bytes_or = checked_mul_u64(chunk_rows, row_bytes, "local mapped rect2d tensor task read bytes");
+    auto chunk_bytes_or = checked_mul_u64(chunk_rows, host_row_bytes, "local mapped rect2d tensor task read bytes");
     if (!chunk_bytes_or.ok()) {
       return chunk_bytes_or.status();
     }
@@ -7288,6 +7475,10 @@ absl::Status append_local_mapped_rect2d_tensor_tasks(
     }
     auto task_source_or =
         checked_add_u64(*source_base_offset_or, *source_row_offset_or, "local mapped rect2d tensor task source offset");
+    if (task_source_or.ok() && use_packed_rows) {
+      task_source_or =
+          checked_add_u64(*task_source_or, src_col_bytes, "local mapped packed rect2d tensor task source offset");
+    }
     if (!task_source_or.ok()) {
       return task_source_or.status();
     }
@@ -7302,20 +7493,22 @@ absl::Status append_local_mapped_rect2d_tensor_tasks(
     }
     TC_RETURN_IF_ERROR(append_local_mapped_tensor_task(
         LocalMappedTensorTask{
-            .kind = LocalMappedTensorTask::Kind::kRect2D,
+            .kind = use_packed_rows ? LocalMappedTensorTask::Kind::kRect2DPacked : LocalMappedTensorTask::Kind::kRect2D,
             .source_offset = *task_source_or,
             .read_bytes = *chunk_bytes_or,
             .dst_ptr = dst_base + *dst_row_offset_or,
             .dst_bytes = *dst_bytes_or,
-            .src_col_offset_bytes = src_col_bytes,
-            .src_pitch_bytes = row_bytes,
+            .src_col_offset_bytes = use_packed_rows ? 0 : src_col_bytes,
+            .src_pitch_bytes = host_row_bytes,
+            .source_row_stride_bytes = row_bytes,
             .dst_pitch_bytes = dst_pitch_bytes,
             .rows = chunk_rows,
         },
         &result->tasks));
   }
 
-  auto full_read_bytes_or = checked_mul_u64(slice.row_count, row_bytes, "local mapped rect2d tensor total read bytes");
+  auto full_read_bytes_or =
+      checked_mul_u64(slice.row_count, host_row_bytes, "local mapped rect2d tensor total read bytes");
   if (!full_read_bytes_or.ok()) {
     return full_read_bytes_or.status();
   }
@@ -7328,7 +7521,8 @@ absl::Status append_local_mapped_rect2d_tensor_tasks(
 absl::StatusOr<LocalMappedTensorTaskBuildResult> build_local_mapped_tensor_tasks(
     const std::vector<MappedTensorJobRuntime>& jobs,
     int device_id,
-    size_t host_buffer_bytes) {
+    size_t host_buffer_bytes,
+    bool enable_packed_rect2d_row_reads) {
   LocalMappedTensorTaskBuildResult result;
   for (const auto& job : jobs) {
     if (job.destinations.size() != 1 || job.job.slices.size() != 1) {
@@ -7340,7 +7534,8 @@ absl::StatusOr<LocalMappedTensorTaskBuildResult> build_local_mapped_tensor_tasks
     }
     const auto& slice = job.job.slices.front();
     if (slice.kind == RankTensorSlice::Kind::kRect2D) {
-      TC_RETURN_IF_ERROR(append_local_mapped_rect2d_tensor_tasks(job, host_buffer_bytes, &result));
+      TC_RETURN_IF_ERROR(
+          append_local_mapped_rect2d_tensor_tasks(job, host_buffer_bytes, enable_packed_rect2d_row_reads, &result));
       continue;
     }
     switch (job.job.distribution) {
@@ -7380,7 +7575,8 @@ absl::Status execute_local_mapped_tensor_task_copy(
               task.dst_ptr, host_data, static_cast<size_t>(task.dst_bytes), cudaMemcpyHostToDevice, stream));
       TC_RETURN_IF_ERROR(tensorcast::cuda::stream_synchronize(stream));
       return absl::OkStatus();
-    case LocalMappedTensorTask::Kind::kRect2D: {
+    case LocalMappedTensorTask::Kind::kRect2D:
+    case LocalMappedTensorTask::Kind::kRect2DPacked: {
       if (task.rows == 0 || task.dst_bytes % task.rows != 0) {
         return absl::InvalidArgumentError("local mapped rect2d tensor task has invalid row geometry");
       }
@@ -7415,6 +7611,7 @@ absl::StatusOr<LocalMappedTensorExecutionStats> execute_local_mapped_tensor_jobs
     std::chrono::milliseconds pinned_timeout,
     size_t host_buffer_bytes,
     size_t streaming_buffer_chunks,
+    bool enable_packed_rect2d_row_reads,
     const std::string& artifact_id) {
   LocalMappedTensorExecutionStats stats;
   const auto total_start = std::chrono::steady_clock::now();
@@ -7426,7 +7623,8 @@ absl::StatusOr<LocalMappedTensorExecutionStats> execute_local_mapped_tensor_jobs
   }
 
   const auto task_build_start = std::chrono::steady_clock::now();
-  auto task_build_or = build_local_mapped_tensor_tasks(jobs, device_id, host_buffer_bytes);
+  auto task_build_or =
+      build_local_mapped_tensor_tasks(jobs, device_id, host_buffer_bytes, enable_packed_rect2d_row_reads);
   if (!task_build_or.ok()) {
     return task_build_or.status();
   }
@@ -7505,24 +7703,25 @@ absl::StatusOr<LocalMappedTensorExecutionStats> execute_local_mapped_tensor_jobs
           record_failure(absl::InternalError("local mapped tensor streaming got a null pinned chunk"));
           break;
         }
-        const size_t bytes = static_cast<size_t>(task.read_bytes);
         const auto read_start = std::chrono::steady_clock::now();
-        auto got_or = source.read_at(task.source_offset, host_ptr, bytes);
+        auto got_or = read_local_mapped_tensor_task_into_buffer(source, task, host_ptr);
         producer_read_ns.fetch_add(elapsed_ns_since(read_start), std::memory_order_relaxed);
         if (!got_or.ok()) {
           (void)session_spb->abort_producer_slot(slot_id);
           record_failure(got_or.status());
           break;
         }
-        if (*got_or != bytes) {
+        if (*got_or != static_cast<size_t>(task.read_bytes)) {
           (void)session_spb->abort_producer_slot(slot_id);
           record_failure(
               absl::OutOfRangeError(
-                  absl::StrCat("short read in local mapped tensor streaming: got=", *got_or, " want=", bytes)));
+                  absl::StrCat(
+                      "short read in local mapped tensor streaming: got=", *got_or, " want=", task.read_bytes)));
           break;
         }
         const auto mark_ready_start = std::chrono::steady_clock::now();
-        const absl::Status ready_status = session_spb->mark_chunk_ready(slot_id, task_index, bytes);
+        const absl::Status ready_status =
+            session_spb->mark_chunk_ready(slot_id, task_index, static_cast<size_t>(task.read_bytes));
         producer_mark_ready_ns.fetch_add(elapsed_ns_since(mark_ready_start), std::memory_order_relaxed);
         if (!ready_status.ok()) {
           (void)session_spb->abort_producer_slot(slot_id);
@@ -7530,7 +7729,7 @@ absl::StatusOr<LocalMappedTensorExecutionStats> execute_local_mapped_tensor_jobs
           break;
         }
         producer_tasks.fetch_add(1, std::memory_order_relaxed);
-        producer_bytes.fetch_add(static_cast<uint64_t>(bytes), std::memory_order_relaxed);
+        producer_bytes.fetch_add(task.read_bytes, std::memory_order_relaxed);
       }
       if (producers_remaining->fetch_sub(1, std::memory_order_acq_rel) == 1) {
         session_spb->signal_production_complete();
@@ -7764,7 +7963,16 @@ absl::StatusOr<LocalMappedSourceOrderedExecutionStats> execute_local_mapped_sour
         }
         const size_t bytes = static_cast<size_t>(task.read_bytes);
         const auto read_start = std::chrono::steady_clock::now();
-        auto got_or = source.read_at(task.source_offset, host_ptr, bytes);
+        absl::StatusOr<size_t> got_or;
+        if (task.kind == SourceOrderedTask::Kind::kTensor) {
+          if (task.index >= tensor_task_build.tasks.size()) {
+            got_or = absl::InternalError("local mapped source-ordered tensor task index out of range");
+          } else {
+            got_or = read_local_mapped_tensor_task_into_buffer(source, tensor_task_build.tasks[task.index], host_ptr);
+          }
+        } else {
+          got_or = source.read_at(task.source_offset, host_ptr, bytes);
+        }
         producer_read_ns.fetch_add(elapsed_ns_since(read_start), std::memory_order_relaxed);
         if (!got_or.ok()) {
           (void)session_spb->abort_producer_slot(slot_id);
@@ -7978,14 +8186,18 @@ absl::StatusOr<LocalMappedTargetExecutionResult> execute_local_mapped_target(
   }
 
   MappedTensorJobBuildResult partial_tensor_job_build;
+  double partial_tensor_build_sec = 0.0;
   {
     absl::Span<const ByteRange> initially_handled = initially_handled_dst_ranges_by_rank.empty()
         ? absl::Span<const ByteRange>()
         : absl::MakeSpan(initially_handled_dst_ranges_by_rank.front());
+    const auto partial_tensor_build_start = std::chrono::steady_clock::now();
     auto partial_tensor_job_build_or = build_local_mapped_partial_tensor_jobs(participant, initially_handled);
     if (!partial_tensor_job_build_or.ok()) {
       return partial_tensor_job_build_or.status();
     }
+    partial_tensor_build_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - partial_tensor_build_start).count();
     partial_tensor_job_build = std::move(*partial_tensor_job_build_or);
   }
 
@@ -8032,8 +8244,8 @@ absl::StatusOr<LocalMappedTargetExecutionResult> execute_local_mapped_target(
         "local mapped target produced generic residual but mixed execution is disabled");
   }
 
-  TC_RETURN_IF_ERROR(
-      validate_local_mapped_tensor_jobs_admission(local_tensor_jobs, participant.device_id, chunk_bytes));
+  TC_RETURN_IF_ERROR(validate_local_mapped_tensor_jobs_admission(
+      local_tensor_jobs, participant.device_id, chunk_bytes, options.strategy_config.enable_packed_rect2d_row_reads));
   TC_RETURN_IF_ERROR(validate_local_mapped_concat_jobs_admission(concat_job_build.jobs, chunk_bytes));
 
   const size_t streaming_buffer_chunks = std::max<size_t>(1, options.streaming_buffer_chunks);
@@ -8044,7 +8256,8 @@ absl::StatusOr<LocalMappedTargetExecutionResult> execute_local_mapped_target(
   if (allow_source_ordered_for_mapped(options.strategy_config) && !local_tensor_jobs.empty() &&
       !concat_job_build.jobs.empty()) {
     const auto tensor_task_build_start = std::chrono::steady_clock::now();
-    auto tensor_task_build_or = build_local_mapped_tensor_tasks(local_tensor_jobs, participant.device_id, chunk_bytes);
+    auto tensor_task_build_or = build_local_mapped_tensor_tasks(
+        local_tensor_jobs, participant.device_id, chunk_bytes, options.strategy_config.enable_packed_rect2d_row_reads);
     if (!tensor_task_build_or.ok()) {
       return tensor_task_build_or.status();
     }
@@ -8093,6 +8306,7 @@ absl::StatusOr<LocalMappedTargetExecutionResult> execute_local_mapped_target(
         pinned_timeout,
         chunk_bytes,
         streaming_buffer_chunks,
+        options.strategy_config.enable_packed_rect2d_row_reads,
         participant.artifact_id);
     if (!tensor_stats_or.ok()) {
       return tensor_stats_or.status();
@@ -8128,6 +8342,7 @@ absl::StatusOr<LocalMappedTargetExecutionResult> execute_local_mapped_target(
             << " tensor_dim0_jobs=" << tensor_stats.dim0_jobs << " tensor_dim1_jobs=" << tensor_stats.dim1_jobs
             << " tensor_rect2d_jobs=" << tensor_stats.rect2d_jobs << " tensor_read_bytes=" << tensor_stats.read_bytes
             << " tensor_dst_bytes=" << tensor_stats.dst_bytes << " tensor_job_build=" << tensor_build_sec << "s"
+            << " partial_tensor_job_build=" << partial_tensor_build_sec << "s"
             << " tensor_job_exec=" << tensor_stats.exec_sec << "s"
             << " tensor_streaming_tasks=" << tensor_stats.tasks << " concat_jobs=" << concat_job_build.jobs.size()
             << " concat_job_source_bytes=" << concat_job_build.handled_source_bytes

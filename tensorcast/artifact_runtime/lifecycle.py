@@ -1248,7 +1248,7 @@ def _artifact_locator_kind(artifact_locator: object) -> str:
 def _collective_policy_value(policy: MaterializationPolicy) -> str:
     collective = str(policy.fields.get("collective", "auto") or "auto")
     return {
-        "auto": "collective_first",
+        "auto": "disable_collective",
         "required": "require_collective",
         "disabled": "disable_collective",
         "collective_first": "collective_first",

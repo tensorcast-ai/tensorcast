@@ -28,7 +28,7 @@ engine:
     enable_local_batched_disk_load: true
     enable_tensor_aware_mapped_executor: true
     allow_mixed_execution: true
-    enable_owner_file_collective: true
+    enable_owner_file_collective: false
     executor_preference: MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO
   cpu_shared_memory:
     enabled: true

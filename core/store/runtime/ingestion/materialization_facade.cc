@@ -3374,10 +3374,7 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
       break;
     case StrategyConfig::ExecutorPreference::kAuto:
     default:
-      if (collective_eligible && shared_source_proven) {
-        plan.executor = strategy::ExecutionStrategyExecutor::kOwnerFileCollective;
-        plan.selection_reason = "auto_prefers_owner_file_collective_shared_source";
-      } else if (auto_prefers_local) {
+      if (auto_prefers_local) {
         plan.executor = strategy::ExecutionStrategyExecutor::kTensorBatchedLocal;
         plan.selection_reason = "auto_prefers_local_batched";
       } else if (collective_eligible) {
@@ -4468,6 +4465,10 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
          local_mapped_required_by_plan);
     const uint64_t planned_generic_after_local_mapped =
         planned_generic_backend_bytes_after_local_mapped(source_bound_strategy->summary);
+    if (source_bound_lane_plan.generic_backend_map_coverage_only && !local_mapped_selected) {
+      return absl::FailedPreconditionError(
+          "materialize_mapped_into_target coverage-only data map requires tensor-aware local mapped execution");
+    }
     const auto setup_done = std::chrono::steady_clock::now();
     LOG(INFO) << "tc_profile materialize_mapped_into_target source_setup"
               << " artifact_id=" << request_hints.artifact_id << " target_device=" << target_device.ordinal
@@ -4480,6 +4481,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               << " effective_local_typed_bytes=" << effective_local_typed_bytes
               << " source_bound_plan_uses_local_mapped=" << source_bound_plan_uses_local_mapped
               << " local_mapped_selected=" << local_mapped_selected
+              << " generic_map_coverage_only=" << (source_bound_lane_plan.generic_backend_map_coverage_only ? 1 : 0)
               << " collective_eligible=" << source_binding.collective_eligible
               << " init_sec=" << std::chrono::duration<double>(init_done - source_total_start).count()
               << " open_sec=" << std::chrono::duration<double>(source_open_done - init_done).count()
@@ -4578,6 +4580,11 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                 local_mapped_bytes = local_result.handled_bytes;
                 generic_backend_data_map = std::move(local_result.residual_data_map);
                 generic_backend_bytes = byte_range_map_covered_bytes(generic_backend_data_map);
+                if (source_bound_lane_plan.generic_backend_map_coverage_only && generic_backend_bytes > 0) {
+                  return absl::FailedPreconditionError(
+                      "materialize_mapped_into_target coverage-only local mapped continuation produced generic "
+                      "residual bytes");
+                }
                 if (generic_backend_bytes > planned_generic_after_local_mapped) {
                   return absl::FailedPreconditionError(
                       absl::StrCat(
@@ -4770,6 +4777,11 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
             const uint64_t local_mapped_bytes = local_result.handled_bytes;
             const loader::ByteRangeMap local_residual_data_map = std::move(local_result.residual_data_map);
             const uint64_t generic_backend_bytes = byte_range_map_covered_bytes(local_residual_data_map);
+            if (source_bound_lane_plan.generic_backend_map_coverage_only && generic_backend_bytes > 0) {
+              return absl::FailedPreconditionError(
+                  "materialize_mapped_into_target coverage-only local mapped execution produced generic residual "
+                  "bytes");
+            }
             if (generic_backend_bytes > planned_generic_after_local_mapped) {
               return absl::FailedPreconditionError(
                   absl::StrCat(

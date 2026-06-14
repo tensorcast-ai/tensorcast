@@ -117,6 +117,7 @@ struct ResolvedMaterializationPlan {
 
 struct SourceBoundLoweringArtifacts {
   std::optional<loader::ByteRangeMap> executor_generic_data_map;
+  bool executor_generic_data_map_coverage_only{false};
   std::optional<loader::ByteRangeMap> collective_data_map;
   SourceBoundLoweringStats lowering_stats;
 };
@@ -125,6 +126,7 @@ struct SourceBoundLanePlan {
   SourceBoundExecutionMode mode{SourceBoundExecutionMode::kGenericOnly};
   loader::ByteRangeMap collective_lane_map;
   loader::ByteRangeMap generic_backend_map;
+  bool generic_backend_map_coverage_only{false};
   loader::ByteRangeMap true_residual_map;
   uint64_t local_typed_bytes{0};
   uint64_t local_pad_bytes{0};

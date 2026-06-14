@@ -198,6 +198,33 @@ def test_materialization_execution_context_builds_collective_options() -> None:
     assert profile["source_locality"] == "shared_source"
 
 
+def test_materialization_execution_context_respects_disabled_collective_policy() -> (
+    None
+):
+    options, profile = build_materialization_execution_context(
+        artifact_ref="mi2:test:serving",
+        operation_scope="startup.bind",
+        configured_policy=CollectivePolicy.DISABLE_COLLECTIVE,
+        tp_rank=1,
+        tp_world_size=2,
+        same_node_tp=True,
+        tp_ranks=(0, 1),
+        collective_world_size=2,
+        collective_rank=1,
+        source_bound_contract_profile_fields={},
+        build_group_id=lambda **_kwargs: "group-1",
+    )
+
+    assert options.execution_topology.collective_group is None
+    assert (
+        options.execution_topology.collective_policy
+        is CollectivePolicyMode.DISABLE_COLLECTIVE
+    )
+    assert profile["collective_requested"] is False
+    assert profile["collective_reason"] == "collective_disabled"
+    assert profile["source_locality"] == "shared_source"
+
+
 def test_materialization_execution_context_disables_collective_when_unavailable() -> (
     None
 ):
