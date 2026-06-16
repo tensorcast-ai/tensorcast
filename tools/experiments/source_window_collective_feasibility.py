@@ -9,7 +9,7 @@ questions before changing the production loader:
 
 1. Does a source-window collective plan remove the current local-mapped read
    amplification on the target models?
-2. Can rank-striped source reads reach InstantTensor-class read throughput
+2. Can rank-striped source reads reach target cold-start read throughput
    before adding TensorCast scatter and NCCL work?
 
 The default mode is metadata-only. Use --io-smoke to actually read files.

@@ -4,9 +4,8 @@ title: TP Source-Window Collective Realization
 status: draft
 areas: ["core", "daemon", "sdk", "integrations", "docs", "tests", "benchmarks"]
 created: 2026-06-15
-last_updated: 2026-06-16
+last_updated: 2026-06-17
 related_code:
-  - docs/plans/0122-01-source-window-collective-feasibility-validation.md
   - docs/designs/0108-tensor-aware-materialization-strategy-plane.md
   - docs/designs/0109-batched-owner-file-collective-executor.md
   - docs/designs/0110-artifact-representation-contract-and-transform-unification.md
@@ -24,8 +23,6 @@ related_code:
   - daemon/service/controllers/materialization_target_plan_utils.cc
   - proto/tensorcast/config/v1/daemon_config.proto
 links:
-  plan: ../plans/0122-tp-source-window-collective-realization.md
-  feasibility: ../plans/0122-01-source-window-collective-feasibility-validation.md
   dependencies:
     - ./0108-tensor-aware-materialization-strategy-plane.md
     - ./0109-batched-owner-file-collective-executor.md
@@ -40,9 +37,8 @@ links:
 
 Define a TensorCast-native TP source-window collective realization strategy.
 
-The goal is to make TensorCast match the loading shape that wins in
-InstantTensor-style systems while preserving TensorCast's artifact-centered
-architecture:
+The goal is to make TensorCast match the source-window-first loading shape
+while preserving TensorCast's artifact-centered architecture:
 
 - source identity, views, target layout, and runtime representation semantics
   remain TensorCast artifact realization facts;
@@ -67,13 +63,13 @@ artifact realization model.
 # Problem Statement
 
 Recent Qwen3 TP=8 measurements show that the current TensorCast loader is
-functionally correct but not competitive with InstantTensor.
+functionally correct but not yet within the target cold-start envelope.
 
 Observed with daemon startup excluded:
 
 | Model | Loader | Storage | Weight load | LOAD_DONE |
 | --- | ---: | ---: | ---: | ---: |
-| Qwen3-30B-A3B-Instruct-2507 | InstantTensor | SSD cold | 10.43s | 33.06s |
+| Qwen3-30B-A3B-Instruct-2507 | Source-window-first baseline | SSD cold | 10.43s | 33.06s |
 | Qwen3-30B-A3B-Instruct-2507 | TensorCast | SSD cold | 26.20s | 58.98s |
 | Qwen3-30B-A3B-Instruct-2507 | TensorCast source-window strict/direct | SSD cold | 23.40s | 55.43s |
 | Qwen3-30B-A3B-Instruct-2507 | TensorCast source-window strict/direct read-ahead | SSD cold | 21.27s | 52.81s |
@@ -120,7 +116,7 @@ Observed with daemon startup excluded:
 | Qwen3-30B-A3B-Instruct-2507 | TensorCast typed config ConsumerRouted, same-daemon load 2 | JFS cold | 7.44s | 31.86s |
 | Qwen3-30B-A3B-Instruct-2507 | TensorCast typed config ConsumerRouted buffered, load 1 | tmpfs resident | 7.62s | 42.67s |
 | Qwen3-30B-A3B-Instruct-2507 | TensorCast typed config ConsumerRouted buffered, same-daemon load 2 | tmpfs resident | 4.28s | 28.07s |
-| Qwen3-235B-A22B-Instruct-2507 | InstantTensor | SSD cold | 70.69s | 105.86s |
+| Qwen3-235B-A22B-Instruct-2507 | Source-window-first baseline | SSD cold | 70.69s | 105.86s |
 | Qwen3-235B-A22B-Instruct-2507 | TensorCast | SSD cold | 151.59s | 186.97s |
 | Qwen3-235B-A22B-Instruct-2507 | TensorCast source-window strict/direct | SSD cold | 121.38s | 154.28s |
 | Qwen3-235B-A22B-Instruct-2507 | TensorCast source-window strict/direct read-ahead | SSD cold | 115.08s | 146.93s |
@@ -260,7 +256,7 @@ The current path is target-slice first:
 4. cross-rank source-window dedup does not occur for this workload;
 5. owner-file collective admits almost no useful replicated payload.
 
-InstantTensor's winning shape is source-window first:
+The target loading shape is source-window-first:
 
 1. build a source-offset-ordered chunk stream from safetensors tensor offsets;
 2. split each chunk across the TP group;
@@ -481,7 +477,7 @@ Current implementation evidence:
   `canonical_index_table_preparsed=1` and reduced `prepare_plan_sec` max to
   `0.906s`, but the builder still waited `0.23-0.28s` on the future and the
   fair 30B SSD cold run regressed to `17.62s`/`50.69s`. This is evidence that
-  further per-rank preparse does not reach the InstantTensor-class target; the
+  further per-rank preparse does not reach the target cold-start envelope; the
   control-plane design should instead construct a group-level artifact
   realization plan once and derive per-rank member views from it.
 - A rank-local mapped-plan and execution-template cache singleflight experiment
@@ -509,7 +505,7 @@ Current implementation evidence:
   and 235B runs, but not faster: 30B measured `17.81s`/`50.62s`, and 235B
   measured `89.37s`/`122.39s` with the wait moving into `scatter_sync`. The
   code was reverted; the all-gather synchronization is not the remaining
-  InstantTensor gap.
+  remaining cold-start gap.
 - A borrowed planner member-input experiment was measured and reverted. It
   reduced `plan_sec` but regressed the vLLM-visible run to `23.30s` max-rank
   weight load, so the retained optimization avoids runtime participant copies
@@ -744,7 +740,7 @@ The executor may select among:
   owns that route.
 
 The first performance implementation may use rank-striped full-window
-all-gather because it is the closest InstantTensor-equivalent shape and easiest
+all-gather because it is the closest source-window-equivalent shape and easiest
 to validate. Each TP rank reads its stripe first; the collective assembles the
 bounded window for scatter. This is not the end-state abstraction. The plan
 must retain enough consumer-span information to replace full-window all-gather
@@ -768,7 +764,7 @@ Distribution modes:
 The cost model decides per executor run and may later decide per window. It
 must account for peer bytes, peer waste, pack/scatter operation count, and
 minimum absolute saving. TensorCast should use its source and target layout
-knowledge to beat the InstantTensor-equivalent all-gather shape when routed
+knowledge to beat the source-window-equivalent all-gather shape when routed
 distribution is clearly cheaper, but should stay on all-gather when routed only
 creates small fragmented transfers.
 
@@ -1085,14 +1081,14 @@ The executor is accepted only if it changes the measured shape.
 For the Qwen3 TP=8 SSD-cold benchmarks:
 
 - 30B target:
-  - TensorCast weight load should move from `26.20s` toward InstantTensor's
-    `10.43s`;
+  - TensorCast weight load should move from `26.20s` toward the
+    `10.43s` source-window-first target;
   - source read amplification should drop from `3.34x` to no more than `1.2x`
     for the source-window lane;
   - `LOAD_DONE` should improve materially, not only the isolated executor time.
 - 235B target:
-  - TensorCast weight load should move from `151.59s` toward InstantTensor's
-    `70.69s`;
+  - TensorCast weight load should move from `151.59s` toward the
+    `70.69s` source-window-first target;
   - source read amplification should drop from `3.38x` to no more than `1.2x`
     for the source-window lane.
 
@@ -1101,8 +1097,8 @@ not the final throughput target. 30B moves from `26.20s` to a best measured
 `14.69s` weight-load log with prepared full-window after the direct-to-pinned,
 copy-elision, plan-hash, window-builder, multi-slot read-ahead, data-only
 coverage-proof, source-catalog fast paths, and prepared local-ready reuse. This
-does not mean the end-to-end path matches InstantTensor: the prepared run still
-has `LOAD_DONE=48.59s` because `prime_model_load()` spends about `3.14s`
+does not mean the end-to-end path reaches the target envelope: the prepared
+run still has `LOAD_DONE=48.59s` because `prime_model_load()` spends about `3.14s`
 preparing source/recipe facts before the weight-load log. The target-storage
 fast-path rerun measured `16.83s`/`49.61s`; it confirms planner-proven target
 layout facts are used consistently at runtime, but it does not change the
@@ -1188,7 +1184,7 @@ Treat optimization work in three buckets:
    implementation reduced peer traffic and improved 30B `LOAD_DONE`, but exposed
    GPU pack/scatter issue count as the next limiter. These are the remaining
    places where TensorCast can use complete source and target layout knowledge
-   to beat or match the InstantTensor-style shape without adding a vLLM-private
+   to beat or match the source-window-first shape without adding a vLLM-private
    loader. The latest prepared-key component diagnostic sharpens this boundary:
    target layout template and target index are already group-common for Qwen3
    TP=8, while `BindingRealizationPlan` remains rank-specific. The group-level
@@ -1243,7 +1239,7 @@ Treat optimization work in three buckets:
    `14.69s` max rank weight-load and `48.59s` `LOAD_DONE` for prepared
    full-window, with `3.14s` average prime recipe/source preparation still in
    `LOAD_DONE`. This proves the lifecycle shape is useful, but it is not an
-   InstantTensor-class fix by itself.
+   target cold-start fix by itself.
 4. Fast primitive, still expensive production shape: a TP=8 H800 microbench now
    validates the raw source-window primitive. A 512MiB BF16 rank-striped
    full-window `ncclAllGather` completes in about `0.0033s`; adding one coarse
@@ -1290,9 +1286,9 @@ that exploit complete artifact/source/target layout facts, but should not
 delete artifact lifecycle semantics or invent a vLLM-owned source path to save
 sub-second control costs.
 
-InstantTensor comparison update:
+Source-window reference comparison update:
 
-- InstantTensor's measured SSD run uses `URING`, `chunk_size=8MiB`,
+- The reference source-window SSD run uses `URING`, `chunk_size=8MiB`,
   `io_depth=64`, and a chunk pipeline that rank-stripes disk reads, performs
   H2D, runs `ncclAllGather`, and exposes contiguous tensor views from a
   ring-buffer layout. With default `copy=True`, vLLM still receives owning
@@ -1307,8 +1303,8 @@ InstantTensor comparison update:
 - Prepared local-ready already moves about `3.14s` of source/recipe work
   before the weight-load log and improves the 30B best log value to `14.69s`,
   but `LOAD_DONE` remains `48.59s`. Further clearing rank-local control-plane
-  work is useful, but it is not enough to reach InstantTensor end-to-end. The
-  data-plane/layout shape must also change.
+  work is useful, but it is not enough to reach the target end-to-end
+  envelope. The data-plane/layout shape must also change.
 
 Real recipe/trace validation update:
 
@@ -1460,15 +1456,15 @@ gate passes, the next production work should prioritize group-level prepared
 realization/control and ConsumerRouted/HybridWindow variants that reduce
 full-window peer waste without increasing pack/scatter operation density.
 
-The InstantTensor source comparison reinforces this boundary. InstantTensor's
-loader is a thin C++ ring pipeline over safetensors offsets: Python reads
+The source-window reference comparison reinforces this boundary. The target
+method is a thin C++ ring pipeline over safetensors offsets: Python reads
 metadata and warms NCCL, while C++ overlaps file read, `cudaMemcpyAsync`, and
 NCCL all-gather with aligned chunks, CUDA-registered host buffers, optional
 cuFile direct-to-device reads, and non-blocking streams. It returns DLPack views
 into the loader buffer and does not pay TensorCast's daemon artifact,
 attestation, source catalog, recipe, target layout, group admission, or
 publication lifecycle on the critical path. TensorCast should not add a
-vLLM-private InstantTensor-like bypass; it should express the comparable
+vLLM-private source-window bypass; it should express the comparable
 prepared state through stronger artifact/source/catalog/recipe/group-plan
 semantics and then run a source-window data path with lower peer waste.
 
@@ -1503,7 +1499,7 @@ becoming a broader default.
 
 Correctness acceptance:
 
-- deterministic generation output must match default and InstantTensor for the
+- deterministic generation output must match default loader baseline for the
   30B prompt already used in the benchmark;
 - 235B TensorCast must produce coherent generation after the new executor;
 - tensor parity tests must cover full, dim0, dim1, rect2d, concat, pad, and
@@ -1737,7 +1733,7 @@ The design stance remains conservative:
 
 - Keep this path default-off until it proves stable across SSD/JFS/tmpfs and
   235B, with generation correctness checks.
-- Do not treat generic SM copy kernels as an InstantTensor-equivalent primitive.
+- Do not treat generic SM copy kernels as a source-window-equivalent primitive.
   The expected 30B gain is only about `0.5-0.8s` on the current full-window
   plan, while the remaining TensorCast gap is dominated by lifecycle/control
   cost and full-window transfer waste.
@@ -1800,7 +1796,7 @@ and `posix_fadvise(DONTNEED)` before both loads. Run root:
 
 This shows that TensorCast can hide nearly all source-window group-plan and
 compiled-program construction when the same daemon/cache lifecycle is reused.
-The second load is close to the InstantTensor SSD sample (`10.43s` weight,
+The second load is close to the target SSD sample (`10.43s` weight,
 `33.06s` `LOAD_DONE`) while still going through TensorCast artifact identity,
 prepared realization facts, strict group admission, and target-relative
 programs. The remaining first-load gap is therefore lifecycle placement and the
@@ -1831,9 +1827,9 @@ Design implications:
   routed/hybrid distribution that avoids full-window peer waste without adding
   more pack/scatter work than it removes.
 - The `LOAD_DONE` target depends on vLLM fixed startup. TensorCast can only
-  reach an InstantTensor-class `33-38s` end-to-end result if TensorCast-specific
+  reach a target cold-start `33-38s` end-to-end result if TensorCast-specific
   prime/realize work is hidden or amortized and the remaining vLLM tail is
-  comparable to the default/InstantTensor runs.
+  comparable to the default/reference runs.
 
 ## 2026-06-16 ConsumerRouted Pack/Scatter Design Update
 
