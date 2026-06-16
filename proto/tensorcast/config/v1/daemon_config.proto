@@ -99,6 +99,7 @@ message Engine {
     MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_GENERIC_BYTE_RANGE = 2;
     MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_TENSOR_AWARE_LOCAL = 3;
     MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_OWNER_FILE_COLLECTIVE = 4;
+    MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_SOURCE_WINDOW_COLLECTIVE = 5;
   }
 
   enum MaterializationStrategyDiagnosticsVerbosity {
@@ -113,6 +114,22 @@ message Engine {
     MATERIALIZATION_STRATEGY_LOCAL_MAPPED_SAFETENSORS_IO_MODE_AUTO_BY_FILESYSTEM = 1;
     MATERIALIZATION_STRATEGY_LOCAL_MAPPED_SAFETENSORS_IO_MODE_BUFFERED = 2;
     MATERIALIZATION_STRATEGY_LOCAL_MAPPED_SAFETENSORS_IO_MODE_DIRECT_ALIGNED_EDGES = 3;
+  }
+
+  enum MaterializationStrategySourceWindowCollectiveSelectionMode {
+    MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_UNSPECIFIED = 0;
+    MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_DRY_RUN = 1;
+    MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_AUTO = 2;
+    MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_STRICT = 3;
+  }
+
+  enum MaterializationStrategySourceWindowCollectiveDistributionMode {
+    MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_DISTRIBUTION_MODE_UNSPECIFIED = 0;
+    MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_DISTRIBUTION_MODE_AUTO = 1;
+    MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_DISTRIBUTION_MODE_FULL_WINDOW_ALL_GATHER = 2;
+    MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_DISTRIBUTION_MODE_CONSUMER_ROUTED = 3;
+    MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_DISTRIBUTION_MODE_HYBRID_WINDOW = 4;
+    MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_DISTRIBUTION_MODE_LOCAL_ONLY = 5;
   }
 
   reserved 1, 2, 4, 5;
@@ -196,6 +213,24 @@ message Engine {
     uint64 direct_write_batch_bytes = 27;
     uint32 direct_write_batch_ops = 28;
     MaterializationStrategyLocalMappedSafetensorsIoMode local_mapped_safetensors_io_mode = 29;
+    optional bool enable_source_window_collective = 30;
+    MaterializationStrategySourceWindowCollectiveSelectionMode source_window_collective_selection_mode = 31;
+    uint64 source_window_collective_window_bytes = 32;
+    uint64 source_window_collective_max_gap_bytes = 33;
+    uint32 source_window_collective_max_window_amplification_x1000 = 34;
+    uint32 source_window_collective_max_plan_read_amplification_x1000 = 35;
+    uint32 source_window_collective_max_scatter_ops_per_window = 36;
+    uint64 source_window_collective_peak_bytes_budget = 37;
+    uint64 source_window_collective_min_rank_read_saving_bytes = 38;
+    uint32 source_window_collective_max_peer_to_read_ratio_x1000 = 39;
+    MaterializationStrategySourceWindowCollectiveDistributionMode source_window_collective_distribution_mode = 40;
+    optional bool source_window_collective_allow_mixed_residual = 41;
+    uint64 source_window_collective_min_routed_peer_saving_bytes = 42;
+    optional bool enable_source_window_plan_cache = 43;
+    optional bool enable_source_window_batched_scatter_kernel = 44;
+    optional bool enable_source_window_compiled_routed_program = 45;
+    uint32 source_window_compiled_program_build_threads = 46;
+    optional bool enable_source_window_scatter_cuda_graph = 47;
   }
   MaterializationStrategy materialization_strategy = 14;
 

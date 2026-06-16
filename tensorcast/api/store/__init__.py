@@ -3365,6 +3365,48 @@ class Store:
             source_subject=source,
         )
 
+    def from_resolved_public_disk_source(
+        self,
+        source: PublicDiskSourceHandle,
+        *,
+        expected_path: str | None = None,
+        expected_verify_checksums: bool | None = None,
+    ) -> Artifact:
+        if not isinstance(source, PublicDiskSourceHandle):
+            raise TypeError(
+                "from_resolved_public_disk_source requires PublicDiskSourceHandle"
+            )
+        if expected_path is not None and os.fspath(expected_path) != str(source.path):
+            raise ArtifactError(
+                "resolved public disk source path does not match expected path: "
+                f"{source.path!r} != {os.fspath(expected_path)!r}",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if expected_verify_checksums is not None and bool(
+            expected_verify_checksums
+        ) != bool(source.verify_checksums):
+            raise ArtifactError(
+                "resolved public disk source checksum policy does not match "
+                "expected policy",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        generation_value: int | None = (
+            int(source.generation) if source.generation else None
+        )
+        return self._artifact_from_disk_metadata(
+            disk_path=str(source.path),
+            artifact_id=source.artifact_id,
+            canonical_index_bytes=bytes(source.canonical_index_bytes),
+            generation=generation_value,
+            key=None,
+            event_name="store.from_resolved_public_disk_source.summary",
+            resolution_mode="prepared_attested_mounted_source",
+            trusted_content_artifact_id=source.trusted_content_artifact_id,
+            source_subject=source,
+        )
+
     def resolve_public_disk_source(
         self,
         path: str,
@@ -4538,6 +4580,19 @@ def from_disk(
     )
 
 
+def from_resolved_public_disk_source(
+    source: PublicDiskSourceHandle,
+    *,
+    expected_path: str | None = None,
+    expected_verify_checksums: bool | None = None,
+) -> Artifact:
+    return _coerce_store().from_resolved_public_disk_source(
+        source,
+        expected_path=expected_path,
+        expected_verify_checksums=expected_verify_checksums,
+    )
+
+
 def import_from_disk(
     path: str,
     *,
@@ -4812,6 +4867,7 @@ __all__ = [
     "envelope_for_retained_binding",
     "envelope_for_retained_replica",
     "from_disk",
+    "from_resolved_public_disk_source",
     "import_from_disk",
     "promote_mounted_source",
     "realize_into_binding",

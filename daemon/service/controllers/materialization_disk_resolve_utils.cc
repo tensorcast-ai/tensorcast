@@ -473,12 +473,21 @@ absl::StatusOr<MountedSourceMetadata> build_mounted_source_metadata(const std::f
   return build_mounted_source_metadata_from_context(normalized_path, *context_or);
 }
 
+absl::StatusOr<MountedSourceMetadata> build_cached_mounted_source_metadata(
+    const std::filesystem::path& normalized_path) {
+  auto context_or = store::loader::get_disk_artifact_context(normalized_path);
+  if (!context_or.ok()) {
+    return normalize_disk_context_status(context_or.status(), normalized_path.string());
+  }
+  return build_mounted_source_metadata_from_context(normalized_path, *context_or);
+}
+
 absl::StatusOr<ResolveMountedSourceResult> resolve_mounted_source_artifact(
     const std::filesystem::path& normalized_path,
     bool verify_checksums,
     std::string_view daemon_session_token,
     const MountedSourceAttestationPolicy& policy) {
-  auto metadata_or = build_mounted_source_metadata(normalized_path);
+  auto metadata_or = build_cached_mounted_source_metadata(normalized_path);
   if (!metadata_or.ok()) {
     return metadata_or.status();
   }

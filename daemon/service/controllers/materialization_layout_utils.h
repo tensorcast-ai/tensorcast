@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -36,6 +37,14 @@ struct TargetOffsetEntry {
 };
 
 absl::StatusOr<CanonicalIndexTable> parse_canonical_index(std::string_view index_json);
+
+absl::StatusOr<std::shared_ptr<const CanonicalIndexTable>> parse_canonical_index_shared(std::string_view index_json);
+
+// Uses an externally validated identity key for cache lookup instead of hashing
+// the full index JSON. The key must uniquely name the exact index bytes.
+absl::StatusOr<std::shared_ptr<const CanonicalIndexTable>> parse_canonical_index_shared_with_identity(
+    std::string_view index_json,
+    std::string_view identity_key);
 
 absl::StatusOr<uint64_t> dtype_element_size(std::string_view dtype);
 

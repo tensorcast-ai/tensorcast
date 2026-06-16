@@ -149,6 +149,10 @@ from tensorcast.artifact_runtime.view import (
     source_selection_projection_from_execution_diagnostics,
     source_selection_projection_from_materialization_diagnostics,
 )
+from tensorcast.profile_utils import (
+    emit_tensorcast_profile_event,
+    tensorcast_profile_stage,
+)
 from tensorcast.retained_realization_authority import (
     ParsedRetainedRealizationAuthority,
 )
@@ -225,6 +229,7 @@ __all__ = [
     "LocalReadyBindingContract",
     "LocalReadyManifestCarrierResult",
     "LocalReadyMaterializationIdentity",
+    "LocalReadyPreparationResult",
     "LocalSourceBootstrap",
     "ManifestMismatchError",
     "MaterializationExecutionFacts",
@@ -799,6 +804,21 @@ class LocalReadyRuntimeResult:
 
 
 @dataclass(frozen=True)
+class LocalReadyPreparationResult:
+    """Prepared local-ready recipe state without target materialization."""
+
+    recipe: Any
+    source_subject: Any
+    source_artifact_ref: str
+    source_catalog: Any | None = None
+    cache_config: Any | None = None
+    placement: Any | None = None
+    family: str = ""
+    tp_rank: int = 0
+    tp_world_size: int = 1
+
+
+@dataclass(frozen=True)
 class LocalReadyBindingContract:
     excluded_names: tuple[str, ...]
     canonical_tensor_names: tuple[str, ...]
@@ -893,6 +913,7 @@ def _runtime_attachment_report_for_resolved(
     source_selection: ResolvedArtifactSelection | None = None,
     execution_diagnostics: Any | None = None,
     materialization_diagnostics: Any | None = None,
+    options: Any | None = None,
 ) -> ArtifactRealizationReport:
     binding_layout_id = _optional_text(
         getattr(binding_handle, "binding_layout_id", None)
@@ -926,6 +947,7 @@ def _runtime_attachment_report_for_resolved(
         materialization_diagnostics=materialization_diagnostics,
         execution_diagnostics=execution_diagnostics,
         risk_labels=("binding_lifecycle",),
+        options=options,
     )
 
 
@@ -992,6 +1014,7 @@ def _runtime_attachment_report_for_artifact_id(
     source_selection: ResolvedArtifactSelection | None = None,
     retained: bool = False,
     reservation_bytes: int = 0,
+    options: Any | None = None,
 ) -> ArtifactRealizationReport:
     binding_layout_id = _optional_text(
         getattr(binding_handle, "binding_layout_id", None)
@@ -1024,6 +1047,7 @@ def _runtime_attachment_report_for_artifact_id(
         envelope=envelope,
         binding_handle=binding_handle,
         risk_labels=(artifact_profile,),
+        options=options,
     )
 
 
@@ -1768,6 +1792,47 @@ class ArtifactRuntimeIntegration:
             f"Unsupported TensorCast runtime intent: {type(intent).__name__}"
         )
 
+    def prepare_local_ready_recipe(
+        self,
+        intent: LocalSourceBootstrap,
+        context: RequestContext,
+    ) -> LocalReadyPreparationResult:
+        """Prepare local-ready recipe/source metadata without materializing target tensors."""
+
+        if not isinstance(intent, LocalSourceBootstrap):
+            raise ArtifactRuntimeIntegrationError(
+                "ArtifactRuntimeIntegration.prepare_local_ready_recipe requires "
+                "LocalSourceBootstrap"
+            )
+        decision = self._admit_intent(intent, context)
+        request = self._local_source_bootstrap_request(
+            intent,
+            context,
+            decision=decision,
+        )
+        if (
+            request.recipe is None or request.source_subject is None
+        ) and request.build_recipe_from_framework_context:
+            request = self._local_ready_prepare_with_built_recipe(request)
+        if request.recipe is None or request.source_subject is None:
+            self._lifecycle_not_implemented("prepare_local_ready_recipe", "P5")
+        self._validate_prepared_local_ready_request_identity(request)
+        identity = self.local_ready_materialization_identity(request.recipe)
+        source_subject = getattr(
+            request.source_subject, "subject", request.source_subject
+        )
+        return LocalReadyPreparationResult(
+            recipe=request.recipe,
+            source_subject=source_subject,
+            source_artifact_ref=identity.source_artifact_ref,
+            source_catalog=request.source_catalog,
+            cache_config=request.cache_config,
+            placement=request.placement,
+            family=request.family,
+            tp_rank=int(request.tp_rank),
+            tp_world_size=int(request.tp_world_size),
+        )
+
     def _retained_expected_member(
         self,
         authority: ParsedRetainedRealizationAuthority,
@@ -1921,6 +1986,7 @@ class ArtifactRuntimeIntegration:
         source_selector: SourceSelector | None = None,
         bootstrap_policy: Any | None = None,
         materialization: Any | None = None,
+        prepared_local_ready: LocalReadyPreparationResult | None = None,
     ) -> RuntimeAttachment:
         """Realize a daemon-attested mounted source as a model runtime."""
 
@@ -1966,12 +2032,26 @@ class ArtifactRuntimeIntegration:
             decision=decision,
             model_runtime_spec=spec,
         )
+        if prepared_local_ready is not None:
+            request = replace(
+                request,
+                recipe=prepared_local_ready.recipe,
+                source_catalog=prepared_local_ready.source_catalog,
+                cache_config=prepared_local_ready.cache_config,
+                source_subject=prepared_local_ready.source_subject,
+                placement=prepared_local_ready.placement or request.placement,
+                build_recipe_from_framework_context=False,
+            )
         if materialization is not None:
             request = replace(request, options=materialization)
         local_ready_result = self._prepare_local_source_bootstrap(
             replace(
                 request,
-                source_subject=subject,
+                source_subject=(
+                    request.source_subject
+                    if prepared_local_ready is not None
+                    else subject
+                ),
                 source_artifact_ref=source_artifact_ref,
                 source_selection=source_selection,
             )
@@ -2234,6 +2314,7 @@ class ArtifactRuntimeIntegration:
             recipe=recipe,
             source_subject=getattr(intent, "source_subject", None),
             source_artifact_ref=getattr(intent, "source_artifact_ref", None),
+            source_catalog=getattr(intent, "source_catalog", None),
             source_catalog_config=source_catalog_config,
             cache_config_factory=getattr(intent, "cache_config_factory", None),
             framework_config=context.framework_config,
@@ -2606,6 +2687,7 @@ class ArtifactRuntimeIntegration:
                 source_selection=request.source_selection,
                 execution_diagnostics=binding_result.execution_diagnostics,
                 materialization_diagnostics=binding_result.materialization_diagnostics,
+                options=materialization,
             )
             state_seed = self._state_seed(
                 resolved,
@@ -2710,6 +2792,7 @@ class ArtifactRuntimeIntegration:
             tensor_schema_hash=str(expected_tensor_schema_hash or ""),
             execution_diagnostics=binding_result.execution_diagnostics,
             materialization_diagnostics=binding_result.materialization_diagnostics,
+            options=materialization,
         )
         state_seed = self._state_seed(
             resolved,
@@ -2867,6 +2950,7 @@ class ArtifactRuntimeIntegration:
             request = self._local_ready_prepare_with_built_recipe(request)
         if request.recipe is None or request.source_subject is None:
             self._lifecycle_not_implemented("_prepare_local_source_bootstrap", "P5")
+        self._validate_prepared_local_ready_request_identity(request)
         if request.target_device is None:
             raise ArtifactRuntimeIntegrationError(
                 "ArtifactRuntimeIntegration.start(LocalSourceBootstrap) requires target_device"
@@ -2939,42 +3023,67 @@ class ArtifactRuntimeIntegration:
             serving_build_digest = carrier.serving_build_digest
         options = request.options
         if model is not None:
-            self._assert_model_ready_for_runtime_binding(
-                model,
-                context="TensorCast local-ready binding realization",
-            )
-            self._align_runtime_tensor_names(
-                model,
-                self.local_ready_materialized_tensor_names(request.recipe),
-            )
-            canonical_tensors = self._collect_runtime_binding_tensors(
-                model,
-                remove_duplicate=False,
-            )
-            runtime_only_names = self.runtime_only_tensor_names(model)
-            contract = self.build_local_ready_binding_contract(
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "local_ready.bootstrap.contract_preflight",
+                logger=_LOGGER,
+                device=request.target_device,
+                extra={
+                    "family": request.family,
+                    "tp_rank": int(request.tp_rank),
+                    "tp_world_size": int(request.tp_world_size),
+                },
+            ) as profile:
+                self._assert_model_ready_for_runtime_binding(
+                    model,
+                    context="TensorCast local-ready binding realization",
+                )
+                self._align_runtime_tensor_names(
+                    model,
+                    self.local_ready_materialized_tensor_names(request.recipe),
+                )
+                canonical_tensors = self._collect_runtime_binding_tensors(
+                    model,
+                    remove_duplicate=False,
+                )
+                runtime_only_names = self.runtime_only_tensor_names(model)
+                contract = self.build_local_ready_binding_contract(
+                    recipe=request.recipe,
+                    canonical_tensors=canonical_tensors,
+                    runtime_only_tensor_names=runtime_only_names,
+                    manifest_tensor_name=str(request.manifest_tensor_name),
+                    manifest_bytes=manifest_bytes,
+                    representation_contract_hash_factory=lambda tensor_schema_hash: "",
+                )
+                self._assert_local_ready_contract_realizable(
+                    contract,
+                    context="TensorCast local-ready binding realization",
+                )
+                if options is None:
+                    options = self._local_ready_materialization_options(request)
+                if profile is not None:
+                    profile["canonical_tensor_count"] = len(canonical_tensors)
+                    profile["runtime_only_tensor_count"] = len(runtime_only_names)
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "local_ready.bootstrap.realize_binding",
+            logger=_LOGGER,
+            device=request.target_device,
+            extra={
+                "family": request.family,
+                "tp_rank": int(request.tp_rank),
+                "tp_world_size": int(request.tp_world_size),
+            },
+        ):
+            realization = tc_local_ready.realize_local_ready_binding_from_source(
                 recipe=request.recipe,
-                canonical_tensors=canonical_tensors,
-                runtime_only_tensor_names=runtime_only_names,
+                source_subject=request.source_subject,
+                target_device=torch.device(request.target_device),
                 manifest_tensor_name=str(request.manifest_tensor_name),
                 manifest_bytes=manifest_bytes,
-                representation_contract_hash_factory=lambda tensor_schema_hash: "",
+                options=options,
+                binding_factory=request.binding_factory,
             )
-            self._assert_local_ready_contract_realizable(
-                contract,
-                context="TensorCast local-ready binding realization",
-            )
-            if options is None:
-                options = self._local_ready_materialization_options(request)
-        realization = tc_local_ready.realize_local_ready_binding_from_source(
-            recipe=request.recipe,
-            source_subject=request.source_subject,
-            target_device=torch.device(request.target_device),
-            manifest_tensor_name=str(request.manifest_tensor_name),
-            manifest_bytes=manifest_bytes,
-            options=options,
-            binding_factory=request.binding_factory,
-        )
         realized = LocalReadyRuntimeResult(
             recipe=request.recipe,
             binding=realization.binding,
@@ -2998,43 +3107,56 @@ class ArtifactRuntimeIntegration:
             ):
                 run_process_after_load = True
                 run_semantic_validation = True
-            finalized = self._finalize_local_ready_runtime(
-                _LocalReadyFinalize(
-                    model=model,
-                    recipe=request.recipe,
-                    binding=realization.binding,
-                    update_epoch=realization.update_epoch,
-                    source_artifact_ref=str(request.source_artifact_ref),
-                    source_selection=request.source_selection,
-                    serving_manifest_ref=str(serving_manifest_ref),
-                    representation_contract_hash=str(representation_contract_hash),
-                    serving_build_digest=str(serving_build_digest),
-                    manifest_tensor_name=str(request.manifest_tensor_name),
-                    source_bound_contract_state=request.source_bound_contract_state,
-                    source_bound_contract_path=str(request.source_bound_contract_path),
-                    target_device=request.target_device,
-                    manifest_bytes=manifest_bytes,
-                    framework_config=request.framework_config,
-                    model_config=request.model_config,
-                    placement=request.placement,
-                    family=request.family,
-                    tp_rank=request.tp_rank,
-                    tp_world_size=request.tp_world_size,
-                    replace_meta_params=request.replace_meta_params,
-                    run_process_after_load=run_process_after_load,
-                    run_post_bind_finalize=request.run_post_bind_finalize,
-                    run_semantic_validation=run_semantic_validation,
-                    semantic_validation_spec=request.semantic_validation_spec,
-                    validate_representation_contract_hash=request.validate_representation_contract_hash,
-                    runtime_binding_schema_version=request.runtime_binding_schema_version,
-                    serving_artifact_schema_version=request.serving_artifact_schema_version,
-                    framework_name=request.framework_name,
-                    framework_version=request.framework_version,
-                    adapter_version=request.adapter_version,
-                    serving_abi_version=request.serving_abi_version,
-                    model_runtime_spec=request.model_runtime_spec,
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "local_ready.bootstrap.finalize_runtime",
+                logger=_LOGGER,
+                device=request.target_device,
+                extra={
+                    "family": request.family,
+                    "tp_rank": int(request.tp_rank),
+                    "tp_world_size": int(request.tp_world_size),
+                },
+            ):
+                finalized = self._finalize_local_ready_runtime(
+                    _LocalReadyFinalize(
+                        model=model,
+                        recipe=request.recipe,
+                        binding=realization.binding,
+                        update_epoch=realization.update_epoch,
+                        source_artifact_ref=str(request.source_artifact_ref),
+                        source_selection=request.source_selection,
+                        serving_manifest_ref=str(serving_manifest_ref),
+                        representation_contract_hash=str(representation_contract_hash),
+                        serving_build_digest=str(serving_build_digest),
+                        manifest_tensor_name=str(request.manifest_tensor_name),
+                        source_bound_contract_state=request.source_bound_contract_state,
+                        source_bound_contract_path=str(
+                            request.source_bound_contract_path
+                        ),
+                        target_device=request.target_device,
+                        manifest_bytes=manifest_bytes,
+                        framework_config=request.framework_config,
+                        model_config=request.model_config,
+                        placement=request.placement,
+                        family=request.family,
+                        tp_rank=request.tp_rank,
+                        tp_world_size=request.tp_world_size,
+                        replace_meta_params=request.replace_meta_params,
+                        run_process_after_load=run_process_after_load,
+                        run_post_bind_finalize=request.run_post_bind_finalize,
+                        run_semantic_validation=run_semantic_validation,
+                        semantic_validation_spec=request.semantic_validation_spec,
+                        validate_representation_contract_hash=request.validate_representation_contract_hash,
+                        runtime_binding_schema_version=request.runtime_binding_schema_version,
+                        serving_artifact_schema_version=request.serving_artifact_schema_version,
+                        framework_name=request.framework_name,
+                        framework_version=request.framework_version,
+                        adapter_version=request.adapter_version,
+                        serving_abi_version=request.serving_abi_version,
+                        model_runtime_spec=request.model_runtime_spec,
+                    )
                 )
-            )
             return LocalReadyRuntimeResult(
                 model=finalized.model,
                 runtime_state=finalized.runtime_state,
@@ -3056,9 +3178,28 @@ class ArtifactRuntimeIntegration:
         self,
         request: _LocalReadyBootstrap,
     ) -> _LocalReadyBootstrap:
+        profile_extra = {
+            "family": request.family,
+            "target_device": str(request.target_device),
+            "tp_rank": int(request.tp_rank),
+            "tp_world_size": int(request.tp_world_size),
+        }
         source_subject_record = request.source_subject
         if source_subject_record is None:
-            source_subject_record = self._resolve_local_ready_source_subject(request)
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "local_ready.prepare.resolve_source_subject",
+                logger=_LOGGER,
+                device=request.target_device,
+                extra=profile_extra,
+            ) as profile:
+                source_subject_record = self._resolve_local_ready_source_subject(
+                    request
+                )
+                if profile is not None:
+                    profile["source_subject_type"] = type(
+                        source_subject_record
+                    ).__name__
         source_artifact_ref = request.source_artifact_ref or getattr(
             source_subject_record, "artifact_ref", None
         )
@@ -3067,41 +3208,92 @@ class ArtifactRuntimeIntegration:
                 "ArtifactRuntimeIntegration.start(LocalSourceBootstrap) could not "
                 "derive source_artifact_ref from source subject"
             )
-        try:
-            source_artifact_ref = tc_source_catalog.resolve_source_artifact_ref(
-                source_artifact_ref
-            )
-        except ValueError as exc:
-            raise ArtifactRuntimeIntegrationError(
-                "ArtifactRuntimeIntegration.start(LocalSourceBootstrap) requires "
-                "a real source artifact identity"
-            ) from exc
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "local_ready.prepare.resolve_source_artifact_ref",
+            logger=_LOGGER,
+            device=request.target_device,
+            extra=profile_extra,
+        ) as profile:
+            try:
+                source_artifact_ref = tc_source_catalog.resolve_source_artifact_ref(
+                    source_artifact_ref
+                )
+            except ValueError as exc:
+                raise ArtifactRuntimeIntegrationError(
+                    "ArtifactRuntimeIntegration.start(LocalSourceBootstrap) requires "
+                    "a real source artifact identity"
+                ) from exc
+            if profile is not None:
+                profile["source_artifact_ref_kind"] = getattr(
+                    source_artifact_ref, "kind", ""
+                )
         source_realization_subject = getattr(
             source_subject_record, "subject", source_subject_record
         )
         placement = request.placement
         if placement is None and self.host is not None:
-            placement = self._framework_context(
-                request.framework_config,
-                request.model_config,
-            ).placement
-        source_catalog = self._local_ready_source_catalog(
-            request,
-            source_subject=source_subject_record,
-            source_artifact_ref=str(source_artifact_ref),
-        )
-        cache_config = self._local_ready_recipe_cache_config(
-            request,
-            source_catalog=source_catalog,
-        )
-        recipe = self._build_local_ready_recipe_from_framework_context(
-            request,
-            source_subject=source_subject_record,
-            source_artifact_ref=str(source_artifact_ref),
-            source_catalog=source_catalog,
-            cache_config=cache_config,
-            placement=placement,
-        )
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "local_ready.prepare.framework_placement",
+                logger=_LOGGER,
+                device=request.target_device,
+                extra=profile_extra,
+            ):
+                placement = self._framework_context(
+                    request.framework_config,
+                    request.model_config,
+                ).placement
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "local_ready.prepare.build_source_catalog",
+            logger=_LOGGER,
+            device=request.target_device,
+            extra=profile_extra,
+        ) as profile:
+            source_catalog = self._local_ready_source_catalog(
+                request,
+                source_subject=source_subject_record,
+                source_artifact_ref=str(source_artifact_ref),
+            )
+            if profile is not None:
+                ordered_names = getattr(source_catalog, "ordered_names", ())
+                profile["source_tensor_count"] = len(ordered_names)
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "local_ready.prepare.recipe_cache_config",
+            logger=_LOGGER,
+            device=request.target_device,
+            extra=profile_extra,
+        ) as profile:
+            cache_config = self._local_ready_recipe_cache_config(
+                request,
+                source_catalog=source_catalog,
+            )
+            if profile is not None:
+                profile["cache_config_type"] = type(cache_config).__name__
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "local_ready.prepare.build_recipe",
+            logger=_LOGGER,
+            device=request.target_device,
+            extra=profile_extra,
+        ) as profile:
+            recipe = self._build_local_ready_recipe_from_framework_context(
+                request,
+                source_subject=source_subject_record,
+                source_artifact_ref=str(source_artifact_ref),
+                source_catalog=source_catalog,
+                cache_config=cache_config,
+                placement=placement,
+            )
+            if profile is not None:
+                profile["tensor_schema_count"] = len(
+                    getattr(recipe, "tensor_schema", ())
+                )
+                profile["realization_fallback_count"] = len(
+                    getattr(recipe, "realization_fallback_plan", ())
+                )
         return replace(
             request,
             recipe=recipe,
@@ -3290,9 +3482,24 @@ class ArtifactRuntimeIntegration:
             debug_extra={
                 "source_artifact_ref": source_artifact_ref,
             },
-            profile_sink=self.profile_sink,
+            profile_sink=self._recipe_profile_sink(),
         )
         return result.recipe
+
+    def _recipe_profile_sink(self) -> Any | None:
+        if callable(self.profile_sink):
+            return self.profile_sink
+
+        def sink(payload: dict[str, Any]) -> None:
+            stage = str(payload.get("stage") or "recipe.event")
+            emit_tensorcast_profile_event(
+                "tensorcast",
+                stage,
+                payload=payload,
+                logger=_LOGGER,
+            )
+
+        return sink
 
     @staticmethod
     def _local_ready_prepare_has_finalize_fields(
@@ -3314,6 +3521,75 @@ class ArtifactRuntimeIntegration:
                 request.source_bound_contract_path,
             )
         )
+
+    def _validate_prepared_local_ready_request_identity(
+        self,
+        request: _LocalReadyBootstrap,
+    ) -> None:
+        if request.recipe is None:
+            return
+        try:
+            recipe_identity = self.local_ready_materialization_identity(request.recipe)
+            recipe_source_ref = tc_source_catalog.resolve_source_artifact_ref(
+                recipe_identity.source_artifact_ref
+            )
+        except (AttributeError, ValueError) as exc:
+            raise ArtifactRuntimeIntegrationError(
+                "TensorCast local-ready prepared recipe requires a real "
+                "source artifact identity"
+            ) from exc
+
+        expected_source_ref = request.source_artifact_ref
+        if expected_source_ref:
+            try:
+                expected_source_ref = tc_source_catalog.resolve_source_artifact_ref(
+                    expected_source_ref
+                )
+            except ValueError as exc:
+                raise ArtifactRuntimeIntegrationError(
+                    "ArtifactRuntimeIntegration.start(LocalSourceBootstrap) "
+                    "requires a real source artifact identity"
+                ) from exc
+            if recipe_source_ref != expected_source_ref:
+                raise ArtifactRuntimeIntegrationError(
+                    "TensorCast local-ready prepared recipe source_artifact_ref "
+                    f"{recipe_source_ref!r} does not match request "
+                    f"source_artifact_ref {expected_source_ref!r}"
+                )
+
+        source_subject_ref = getattr(request.source_subject, "artifact_ref", None)
+        if source_subject_ref:
+            try:
+                source_subject_ref = tc_source_catalog.resolve_source_artifact_ref(
+                    source_subject_ref
+                )
+            except ValueError as exc:
+                raise ArtifactRuntimeIntegrationError(
+                    "TensorCast local-ready source subject requires a real "
+                    "source artifact identity"
+                ) from exc
+            if recipe_source_ref != source_subject_ref:
+                raise ArtifactRuntimeIntegrationError(
+                    "TensorCast local-ready prepared recipe source_artifact_ref "
+                    f"{recipe_source_ref!r} does not match source subject "
+                    f"artifact_ref {source_subject_ref!r}"
+                )
+
+        if request.source_catalog is not None:
+            self._validate_source_catalog_artifact_ref(
+                request.source_catalog,
+                expected_source_artifact_ref=recipe_source_ref,
+            )
+            catalog_fingerprint = getattr(
+                request.source_catalog, "metadata_fingerprint", None
+            )
+            if catalog_fingerprint is not None and str(catalog_fingerprint) != str(
+                recipe_identity.source_metadata_fingerprint
+            ):
+                raise ArtifactRuntimeIntegrationError(
+                    "TensorCast local-ready prepared recipe source metadata "
+                    "fingerprint does not match prepared source catalog"
+                )
 
     def _local_ready_materialization_options(
         self,
@@ -3416,65 +3692,105 @@ class ArtifactRuntimeIntegration:
                 "ArtifactRuntimeIntegration._finalize_local_ready_runtime requires manifest_tensor_name"
             )
         try:
-            framework_context = self._framework_context(
-                request.framework_config,
-                request.model_config,
-            )
-            self._assert_local_ready_binding_tensor_set(
-                recipe=request.recipe,
-                binding=request.binding,
-                manifest_tensor_name=str(request.manifest_tensor_name),
-            )
-            tensor_schema_hash = self.local_ready_tensor_schema_hash(
-                recipe=request.recipe,
-                manifest_tensor_name=str(request.manifest_tensor_name),
-                manifest_bytes=request.manifest_bytes,
-            )
-            self._validate_local_ready_representation_contract_hash(
-                request,
-                tensor_schema_hash=tensor_schema_hash,
-            )
-            semantic_validation_spec = self._local_ready_semantic_validation_spec(
-                request
-            )
-            self._assert_local_ready_finalize_admitted(
-                request,
-                semantic_validation_spec=semantic_validation_spec,
-            )
-            self._materializer().attach_and_finalize(
-                model=request.model,
-                tensors=_binding_tensors(request.binding),
-                binding_handle=request.binding,
-                context=framework_context,
-                state_seed=RuntimeStateSeed(
-                    artifact_ref=str(request.source_artifact_ref),
-                    source_artifact_ref=str(request.source_artifact_ref),
-                    representation_contract_hash=str(
-                        request.representation_contract_hash
-                    ),
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "local_ready.finalize.preflight",
+                logger=_LOGGER,
+                device=target_device,
+                extra={
+                    "family": request.family,
+                    "tp_rank": int(request.tp_rank),
+                    "tp_world_size": int(request.tp_world_size),
+                },
+            ) as profile:
+                framework_context = self._framework_context(
+                    request.framework_config,
+                    request.model_config,
+                )
+                self._assert_local_ready_binding_tensor_set(
+                    recipe=request.recipe,
+                    binding=request.binding,
+                    manifest_tensor_name=str(request.manifest_tensor_name),
+                )
+                tensor_schema_hash = self.local_ready_tensor_schema_hash(
+                    recipe=request.recipe,
+                    manifest_tensor_name=str(request.manifest_tensor_name),
+                    manifest_bytes=request.manifest_bytes,
+                )
+                self._validate_local_ready_representation_contract_hash(
+                    request,
                     tensor_schema_hash=tensor_schema_hash,
-                    readiness="runtime_local_ready",
-                ),
-                replace_meta_params=bool(request.replace_meta_params),
-                target_device=target_device,
-                model_config=request.model_config,
-                run_process_after_load=bool(request.run_process_after_load),
-                run_post_bind_finalize=bool(request.run_post_bind_finalize),
-                semantic_validation_spec=semantic_validation_spec,
-            )
-            tensors = self._collect_runtime_binding_tensors(
-                request.model,
-                remove_duplicate=False,
-            )
-            self.validate_local_ready_tensor_schema(
-                recipe=request.recipe,
-                tensors=tensors,
-            )
-            current_value = self.freeze_local_ready(
-                binding=request.binding,
-                update_epoch=request.update_epoch,
-                source_artifact_ref=str(request.source_artifact_ref),
-            )
+                )
+                semantic_validation_spec = self._local_ready_semantic_validation_spec(
+                    request
+                )
+                self._assert_local_ready_finalize_admitted(
+                    request,
+                    semantic_validation_spec=semantic_validation_spec,
+                )
+                if profile is not None:
+                    profile["tensor_schema_hash"] = tensor_schema_hash
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "local_ready.finalize.attach_and_finalize",
+                logger=_LOGGER,
+                device=target_device,
+                extra={
+                    "family": request.family,
+                    "tp_rank": int(request.tp_rank),
+                    "tp_world_size": int(request.tp_world_size),
+                    "run_process_after_load": bool(request.run_process_after_load),
+                    "run_post_bind_finalize": bool(request.run_post_bind_finalize),
+                    "run_semantic_validation": bool(request.run_semantic_validation),
+                },
+            ):
+                self._materializer().attach_and_finalize(
+                    model=request.model,
+                    tensors=_binding_tensors(request.binding),
+                    binding_handle=request.binding,
+                    context=framework_context,
+                    state_seed=RuntimeStateSeed(
+                        artifact_ref=str(request.source_artifact_ref),
+                        source_artifact_ref=str(request.source_artifact_ref),
+                        representation_contract_hash=str(
+                            request.representation_contract_hash
+                        ),
+                        tensor_schema_hash=tensor_schema_hash,
+                        readiness="runtime_local_ready",
+                    ),
+                    replace_meta_params=bool(request.replace_meta_params),
+                    target_device=target_device,
+                    model_config=request.model_config,
+                    run_process_after_load=bool(request.run_process_after_load),
+                    run_post_bind_finalize=bool(request.run_post_bind_finalize),
+                    semantic_validation_spec=semantic_validation_spec,
+                )
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "local_ready.finalize.validate_and_freeze",
+                logger=_LOGGER,
+                device=target_device,
+                extra={
+                    "family": request.family,
+                    "tp_rank": int(request.tp_rank),
+                    "tp_world_size": int(request.tp_world_size),
+                },
+            ) as profile:
+                tensors = self._collect_runtime_binding_tensors(
+                    request.model,
+                    remove_duplicate=False,
+                )
+                self.validate_local_ready_tensor_schema(
+                    recipe=request.recipe,
+                    tensors=tensors,
+                )
+                current_value = self.freeze_local_ready(
+                    binding=request.binding,
+                    update_epoch=request.update_epoch,
+                    source_artifact_ref=str(request.source_artifact_ref),
+                )
+                if profile is not None:
+                    profile["runtime_tensor_count"] = len(tensors)
             source_ref = str(request.source_artifact_ref)
             artifact_profile = (
                 "mounted_source"
@@ -3486,43 +3802,57 @@ class ArtifactRuntimeIntegration:
                 if source_ref.startswith("msa1:")
                 else "daemon_mediated_local_ready_runtime_attachment"
             )
-            artifact_report = _runtime_attachment_report_for_artifact_id(
-                artifact_id=source_ref,
-                tensors=_binding_tensors(request.binding),
-                binding_handle=request.binding,
-                target_device=target_device,
-                tensor_schema_hash=tensor_schema_hash,
-                artifact_profile=artifact_profile,
-                authority_scope=authority_scope,
-                source_selection=request.source_selection,
-            )
-            prepared = build_local_ready_prepared_artifact(
-                source_artifact_ref=str(request.source_artifact_ref),
-                serving_manifest_ref=str(request.serving_manifest_ref),
-                representation_contract_hash=str(request.representation_contract_hash),
-                serving_build_digest=str(request.serving_build_digest),
-                tensor_schema_hash=tensor_schema_hash,
-                current_value=current_value,
-                binding=request.binding,
-                family=str(request.family),
-                tp_rank=int(request.tp_rank),
-                tp_world_size=int(request.tp_world_size),
-                source_bound_contract_state=request.source_bound_contract_state,
-                source_bound_contract_path=str(request.source_bound_contract_path),
-                artifact_realization_report=artifact_report,
-                model_runtime_spec=(
-                    _model_runtime_spec_with_context_defaults(
-                        spec=request.model_runtime_spec,
-                        context=framework_context,
-                        target_device=target_device,
-                    )
-                    if request.model_runtime_spec is not None
-                    else _model_runtime_spec_for_context(
-                        context=framework_context,
-                        target_device=target_device,
-                    )
-                ),
-            )
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "local_ready.finalize.build_runtime_view",
+                logger=_LOGGER,
+                device=target_device,
+                extra={
+                    "family": request.family,
+                    "tp_rank": int(request.tp_rank),
+                    "tp_world_size": int(request.tp_world_size),
+                    "artifact_profile": artifact_profile,
+                },
+            ):
+                artifact_report = _runtime_attachment_report_for_artifact_id(
+                    artifact_id=source_ref,
+                    tensors=_binding_tensors(request.binding),
+                    binding_handle=request.binding,
+                    target_device=target_device,
+                    tensor_schema_hash=tensor_schema_hash,
+                    artifact_profile=artifact_profile,
+                    authority_scope=authority_scope,
+                    source_selection=request.source_selection,
+                )
+                prepared = build_local_ready_prepared_artifact(
+                    source_artifact_ref=str(request.source_artifact_ref),
+                    serving_manifest_ref=str(request.serving_manifest_ref),
+                    representation_contract_hash=str(
+                        request.representation_contract_hash
+                    ),
+                    serving_build_digest=str(request.serving_build_digest),
+                    tensor_schema_hash=tensor_schema_hash,
+                    current_value=current_value,
+                    binding=request.binding,
+                    family=str(request.family),
+                    tp_rank=int(request.tp_rank),
+                    tp_world_size=int(request.tp_world_size),
+                    source_bound_contract_state=request.source_bound_contract_state,
+                    source_bound_contract_path=str(request.source_bound_contract_path),
+                    artifact_realization_report=artifact_report,
+                    model_runtime_spec=(
+                        _model_runtime_spec_with_context_defaults(
+                            spec=request.model_runtime_spec,
+                            context=framework_context,
+                            target_device=target_device,
+                        )
+                        if request.model_runtime_spec is not None
+                        else _model_runtime_spec_for_context(
+                            context=framework_context,
+                            target_device=target_device,
+                        )
+                    ),
+                )
             return LocalReadyRuntimeResult(
                 model=request.model,
                 runtime_state=prepared.runtime_state,

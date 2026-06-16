@@ -18,6 +18,7 @@ namespace tensorcast::daemon::materialization_target_plan {
 namespace {
 
 using materialization_layout::parse_canonical_index;
+using materialization_layout::parse_canonical_index_shared;
 using representation_layout::TensorLayoutSpec;
 using tensorcast::store::loader::ByteRangeMap;
 using tensorcast::store::loader::ByteRangeSegment;
@@ -151,6 +152,25 @@ TEST_CASE(
   REQUIRE(resolved_plan_or->resolved_plan.representation_work_plan->items.front().sources.size() == 1);
   CHECK(
       resolved_plan_or->resolved_plan.representation_work_plan->items.front()
+          .sources.front()
+          .fragment.source_spec.logical_offset == 32);
+
+  auto physical_source_table_or = parse_canonical_index_shared(physical_source_index_json);
+  REQUIRE(physical_source_table_or.ok());
+  auto preparsed_plan_or = build_resolved_mapped_materialization_plan(
+      "artifact",
+      /*generation=*/7,
+      target_layout,
+      mapped_plan,
+      std::nullopt,
+      std::optional<std::string_view>("{not-json"),
+      *physical_source_table_or);
+  REQUIRE(preparsed_plan_or.ok());
+  REQUIRE(preparsed_plan_or->resolved_plan.representation_work_plan.has_value());
+  REQUIRE(preparsed_plan_or->resolved_plan.representation_work_plan->items.size() == 1);
+  REQUIRE(preparsed_plan_or->resolved_plan.representation_work_plan->items.front().sources.size() == 1);
+  CHECK(
+      preparsed_plan_or->resolved_plan.representation_work_plan->items.front()
           .sources.front()
           .fragment.source_spec.logical_offset == 32);
 }
@@ -640,6 +660,58 @@ TEST_CASE("copy-plan collective map only keeps source-overlap tensors", "[materi
       compact_strategy_plan_or->summary.planner_reject_reason_buckets.contains("collective_lane_coverage_unproven"));
   CHECK_FALSE(
       compact_strategy_plan_or->summary.planner_reject_reason_buckets.contains("generic_backend_coverage_unproven"));
+
+  MappedTargetMaterializationPlan source_window_compact_mapped_plan = compact_mapped_plan;
+  source_window_compact_mapped_plan.logical_total_size = 20;
+  store::loading::IntoTargetLayout source_window_target_layout;
+  source_window_target_layout.total_size = 20;
+  auto source_window_proof_prepared_or = build_resolved_mapped_materialization_plan(
+      "artifact",
+      /*generation=*/15,
+      source_window_target_layout,
+      source_window_compact_mapped_plan,
+      std::nullopt,
+      std::optional<std::string_view>(source_index_json),
+      nullptr,
+      ResolvedMappedMaterializationPlanOptions{
+          .source_window_strict_coverage_proof_only = true,
+      });
+  REQUIRE(source_window_proof_prepared_or.ok());
+  REQUIRE(source_window_proof_prepared_or->lowering_artifacts.has_value());
+  CHECK_FALSE(source_window_proof_prepared_or->lowering_artifacts->collective_data_map.has_value());
+  REQUIRE(source_window_proof_prepared_or->lowering_artifacts->executor_generic_data_map.has_value());
+  CHECK(source_window_proof_prepared_or->lowering_artifacts->executor_generic_data_map->segments.size() == 1);
+  CHECK(source_window_proof_prepared_or->lowering_artifacts->executor_generic_data_map->total_bytes == 20);
+  CHECK(covered_bytes(*source_window_proof_prepared_or->lowering_artifacts->executor_generic_data_map) == 16);
+  CHECK(source_window_proof_prepared_or->lowering_artifacts->executor_generic_data_map_coverage_only);
+
+  std::array<uint8_t, 20> source_window_target_storage{};
+  source_window_proof_prepared_or->resolved_plan.target_layout.storages.push_back(
+      store::loading::IntoTargetStorage{
+          .base_ptr = gsl::not_null<void*>{source_window_target_storage.data()},
+          .length = source_window_target_storage.size(),
+      });
+  auto strict_source_window_strategy = strategy_config;
+  strict_source_window_strategy.enable_source_window_collective = true;
+  strict_source_window_strategy.source_window_collective_selection_mode =
+      store::StoreEngineOptions::MaterializationStrategyConfig::SourceWindowCollectiveSelectionMode::kStrict;
+  auto source_window_strategy_plan_or = store::runtime::ingestion::strategy::build_source_bound_execution_strategy_plan(
+      source_window_proof_prepared_or->resolved_plan,
+      source_window_proof_prepared_or->lowering_artifacts,
+      store::runtime::ingestion::strategy::SourceBoundPolicy::kRequirePureCollective,
+      strict_source_window_strategy,
+      topology,
+      safetensors_disk_source());
+  REQUIRE(source_window_strategy_plan_or.ok());
+  CHECK(
+      source_window_strategy_plan_or->lane_plan.mode ==
+      store::runtime::ingestion::strategy::SourceBoundExecutionMode::kSourceWindowCollectiveMixed);
+  CHECK(
+      source_window_strategy_plan_or->lane_plan.collective_executor ==
+      store::runtime::ingestion::strategy::SourceBoundCollectiveExecutor::kSourceWindow);
+  CHECK(source_window_strategy_plan_or->lane_plan.collective_lane_map.segments.empty());
+  CHECK_FALSE(source_window_strategy_plan_or->summary.planner_reject_reason_buckets.contains(
+      "generic_backend_coverage_unproven"));
 
   auto no_local_mapped_strategy = strategy_config;
   no_local_mapped_strategy.enable_tensor_aware_mapped_executor = false;

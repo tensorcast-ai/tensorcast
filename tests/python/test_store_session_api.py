@@ -1049,6 +1049,44 @@ def test_from_disk_function_delegates_to_session(
     assert session.kwargs["verify_checksums"] is True
 
 
+def test_from_resolved_public_disk_source_function_delegates_to_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyStore:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] | None = None
+            self.result = object()
+
+        def from_resolved_public_disk_source(
+            self,
+            source: object,
+            *,
+            expected_path: str | None = None,
+            expected_verify_checksums: bool | None = None,
+        ):
+            self.kwargs = {
+                "source": source,
+                "expected_path": expected_path,
+                "expected_verify_checksums": expected_verify_checksums,
+            }
+            return self.result
+
+    source = object()
+    session = DummyStore()
+    monkeypatch.setattr(store_mod, "store", lambda: session)
+    result = store_mod.from_resolved_public_disk_source(
+        source,
+        expected_path="/tmp/data",
+        expected_verify_checksums=False,
+    )
+
+    assert result is session.result
+    assert session.kwargs is not None
+    assert session.kwargs["source"] is source
+    assert session.kwargs["expected_path"] == "/tmp/data"
+    assert session.kwargs["expected_verify_checksums"] is False
+
+
 def test_import_from_disk_function_delegates_to_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

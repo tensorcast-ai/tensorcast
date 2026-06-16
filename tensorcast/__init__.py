@@ -484,6 +484,10 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     ),
     "deregister_artifact": ("tensorcast.api.store", "deregister_artifact"),
     "from_disk": ("tensorcast.api.store", "from_disk"),
+    "from_resolved_public_disk_source": (
+        "tensorcast.api.store",
+        "from_resolved_public_disk_source",
+    ),
     "import_from_disk": ("tensorcast.api.store", "import_from_disk"),
     "promote_mounted_source": ("tensorcast.api.store", "promote_mounted_source"),
     "realize_into_binding": ("tensorcast.api.store", "realize_into_binding"),
@@ -866,6 +870,7 @@ __all__ = [
     "normalize_binding_realization_plan",
     "plan",
     "from_disk",
+    "from_resolved_public_disk_source",
     "import_from_disk",
     "promote_mounted_source",
     "realize_into_binding",

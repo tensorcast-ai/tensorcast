@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <cstring>
 #include <fstream>
 #include <numeric>
@@ -77,25 +78,32 @@ absl::StatusOr<std::string> artifact_directory_cache_fingerprint(const std::file
       return absl::ErrnoToStatus(
           ec.value(), absl::StrCat("Failed to enumerate artifact directory '", artifact_path.string(), "'"));
     }
-    if (!entry.is_regular_file(ec)) {
-      if (ec) {
-        return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat '", entry.path().string(), "'"));
-      }
+    struct stat st{};
+    if (::stat(entry.path().c_str(), &st) != 0) {
+      return absl::ErrnoToStatus(errno, absl::StrCat("Failed to stat '", entry.path().string(), "'"));
+    }
+    if (!S_ISREG(st.st_mode)) {
       continue;
     }
     const std::string filename = entry.path().filename().string();
     if (!is_cache_relevant_file(filename)) {
       continue;
     }
-    const uint64_t size = entry.file_size(ec);
-    if (ec) {
-      return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat size for '", entry.path().string(), "'"));
-    }
-    const auto mtime = entry.last_write_time(ec);
-    if (ec) {
-      return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat mtime for '", entry.path().string(), "'"));
-    }
-    entries.push_back(absl::StrCat(filename, ":", size, ":", mtime.time_since_epoch().count()));
+#if defined(__linux__)
+    const int64_t mtime_ns =
+        static_cast<int64_t>(st.st_mtim.tv_sec) * 1000000000LL + static_cast<int64_t>(st.st_mtim.tv_nsec);
+#else
+    const int64_t mtime_ns = static_cast<int64_t>(st.st_mtime) * 1000000000LL;
+#endif
+    entries.push_back(
+        absl::StrCat(
+            filename,
+            ":inode=",
+            static_cast<uint64_t>(st.st_ino),
+            ":size=",
+            static_cast<uint64_t>(st.st_size),
+            ":mtime_ns=",
+            mtime_ns));
   }
   std::ranges::sort(entries);
   return absl::StrJoin(entries, "|");

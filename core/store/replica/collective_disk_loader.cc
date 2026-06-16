@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -20,10 +21,12 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -40,6 +43,7 @@
 #include "absl/synchronization/blocking_counter.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
+#include "core/common/artifact_hash.h"
 #include "core/common/async_runtime.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/cuda/cuda_api.h"
@@ -50,6 +54,8 @@
 #include "core/store/materialization/dataplane/sinks/gpu_memory_sink.h"
 #include "core/store/materialization/dataplane/sinks/target_layout_gpu_sink.h"
 #include "core/store/materialization/dataplane/sources/multi_safetensors_source.h"
+#include "core/store/replica/source_window_batched_scatter_kernel.h"
+#include "core/store/replica/source_window_collective_plan.h"
 #include "nlohmann/json.hpp"
 
 namespace tensorcast::store::replica {
@@ -79,7 +85,6 @@ constexpr std::chrono::milliseconds kGroupAssembleTimeout{15000};
 // synchronize_all() barriers. 8192 materially reduces barrier count while
 // remaining a bounded batch size.
 constexpr size_t kMaxMappedPeerPairsPerNcclGroup = 8192;
-
 using StrategyConfig = StoreEngineOptions::MaterializationStrategyConfig;
 using RepresentationWorkItem = materialization::contracts::RepresentationWorkItem;
 using RepresentationWorkItemKind = materialization::contracts::RepresentationWorkItemKind;
@@ -90,9 +95,146 @@ using RepresentationTensorSpec = materialization::contracts::RepresentationTenso
 using TensorByteSpan = materialization::contracts::TensorByteSpan;
 using RepresentationTransformContract = materialization::contracts::RepresentationTransformContract;
 using SourceFragment = materialization::contracts::SourceFragment;
+using FillRule = materialization::contracts::FillRule;
 using TensorAxisRange = materialization::contracts::TensorAxisRange;
 using TensorCoordinateSpec = materialization::contracts::TensorCoordinateSpec;
 using WorkPartitionKind = materialization::contracts::WorkPartitionKind;
+
+size_t compiled_routed_program_build_thread_count(size_t chunk_count, uint32_t configured_thread_count) {
+  if (chunk_count < 2) {
+    return 1;
+  }
+  if (configured_thread_count > 0) {
+    if (configured_thread_count <= 1) {
+      return 1;
+    }
+    return std::min<size_t>(static_cast<size_t>(configured_thread_count), chunk_count);
+  }
+  if (chunk_count < 256) {
+    return 1;
+  }
+  const size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
+  return std::min<size_t>({chunk_count, size_t{16}, std::max<size_t>(2, hw / 4)});
+}
+
+struct SourceWindowRuntimeScatterGraph {
+  int device_id{-1};
+  cudaGraph_t graph{nullptr};
+  cudaGraphExec_t exec{nullptr};
+};
+
+void destroy_source_window_runtime_scatter_graph(SourceWindowRuntimeScatterGraph* graph) {
+  if (graph == nullptr) {
+    return;
+  }
+  if (graph->device_id >= 0) {
+    const absl::Status set_device_status = tensorcast::cuda::set_device(graph->device_id);
+    if (!set_device_status.ok()) {
+      LOG(WARNING) << "source-window scatter cuda graph set_device failed during cleanup: " << set_device_status;
+    }
+  }
+  if (graph->exec != nullptr) {
+    const absl::Status destroy_status =
+        tensorcast::cuda::cuda_as_status(cudaGraphExecDestroy(graph->exec), "cudaGraphExecDestroy");
+    if (!destroy_status.ok()) {
+      LOG(WARNING) << "source-window scatter cuda graph exec destroy failed: " << destroy_status;
+    }
+    graph->exec = nullptr;
+  }
+  if (graph->graph != nullptr) {
+    const absl::Status destroy_status =
+        tensorcast::cuda::cuda_as_status(cudaGraphDestroy(graph->graph), "cudaGraphDestroy");
+    if (!destroy_status.ok()) {
+      LOG(WARNING) << "source-window scatter cuda graph destroy failed: " << destroy_status;
+    }
+    graph->graph = nullptr;
+  }
+}
+
+void destroy_source_window_runtime_scatter_graphs(std::vector<SourceWindowRuntimeScatterGraph>* graphs) {
+  if (graphs == nullptr) {
+    return;
+  }
+  for (auto& graph : *graphs) {
+    destroy_source_window_runtime_scatter_graph(&graph);
+  }
+  graphs->clear();
+}
+
+absl::StatusOr<SourceWindowRuntimeScatterGraph> build_source_window_runtime_scatter_graph(
+    absl::Span<const SourceWindowBatchedScatterDescriptor> descriptors,
+    int device_id) {
+  if (descriptors.empty()) {
+    return absl::InvalidArgumentError("source-window scatter cuda graph requires descriptors");
+  }
+  SourceWindowRuntimeScatterGraph result{.device_id = device_id};
+  TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(device_id));
+  absl::Status status = tensorcast::cuda::cuda_as_status(
+      cudaGraphCreate(&result.graph, 0), "cudaGraphCreate(source-window scatter cuda graph)");
+  if (!status.ok()) {
+    return status;
+  }
+  for (const auto& desc : descriptors) {
+    auto* dst_ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(desc.dst_ptr));
+    auto* src_ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(desc.src_ptr));
+    cudaGraphNode_t node = nullptr;
+    if (desc.row_count > 1) {
+      cudaMemcpy3DParms params{};
+      params.srcPtr = make_cudaPitchedPtr(
+          src_ptr,
+          static_cast<size_t>(desc.source_stride_bytes),
+          static_cast<size_t>(desc.row_bytes),
+          static_cast<size_t>(desc.row_count));
+      params.dstPtr = make_cudaPitchedPtr(
+          dst_ptr,
+          static_cast<size_t>(desc.target_stride_bytes),
+          static_cast<size_t>(desc.row_bytes),
+          static_cast<size_t>(desc.row_count));
+      params.extent = make_cudaExtent(
+          static_cast<size_t>(desc.row_bytes), static_cast<size_t>(desc.row_count), static_cast<size_t>(1));
+      params.kind = cudaMemcpyDeviceToDevice;
+      status = tensorcast::cuda::cuda_as_status(
+          cudaGraphAddMemcpyNode(&node, result.graph, nullptr, 0, &params),
+          "cudaGraphAddMemcpyNode(source-window scatter cuda graph)");
+    } else {
+      status = tensorcast::cuda::cuda_as_status(
+          cudaGraphAddMemcpyNode1D(
+              &node,
+              result.graph,
+              nullptr,
+              0,
+              dst_ptr,
+              src_ptr,
+              static_cast<size_t>(desc.row_bytes),
+              cudaMemcpyDeviceToDevice),
+          "cudaGraphAddMemcpyNode1D(source-window scatter cuda graph)");
+    }
+    if (!status.ok()) {
+      destroy_source_window_runtime_scatter_graph(&result);
+      return status;
+    }
+  }
+  status = tensorcast::cuda::cuda_as_status(
+      cudaGraphInstantiate(&result.exec, result.graph, nullptr, nullptr, 0),
+      "cudaGraphInstantiate(source-window scatter cuda graph)");
+  if (!status.ok()) {
+    destroy_source_window_runtime_scatter_graph(&result);
+    return status;
+  }
+  return result;
+}
+
+absl::Status source_window_runtime_scatter_graph_node_count(cudaGraph_t graph, uint64_t* node_count) {
+  if (node_count == nullptr) {
+    return absl::InvalidArgumentError("source-window scatter cuda graph node_count output is null");
+  }
+  size_t graph_node_count = 0;
+  TC_RETURN_IF_ERROR(
+      tensorcast::cuda::cuda_as_status(
+          cudaGraphGetNodes(graph, nullptr, &graph_node_count), "cudaGraphGetNodes(source-window scatter cuda graph)"));
+  *node_count = static_cast<uint64_t>(graph_node_count);
+  return absl::OkStatus();
+}
 
 bool enable_mapped_tensor_job_fast_path(const StrategyConfig& strategy) {
   return strategy.enable_tensor_aware_mapped_executor && strategy.allow_mixed_execution;
@@ -134,8 +276,12 @@ bool enable_local_batched_disk_load(const StrategyConfig& strategy) {
   return strategy.enable_local_batched_disk_load;
 }
 
-bool verbose_mapped_concat_diagnostics(const StrategyConfig& strategy) {
+bool verbose_materialization_strategy_diagnostics(const StrategyConfig& strategy) {
   return strategy.diagnostics_verbosity == StrategyConfig::DiagnosticsVerbosity::kVerbose;
+}
+
+bool verbose_mapped_concat_diagnostics(const StrategyConfig& strategy) {
+  return verbose_materialization_strategy_diagnostics(strategy);
 }
 
 bool sync_after_single_range_concat_job(const StrategyConfig& strategy) {
@@ -274,6 +420,12 @@ class NcclClique {
     return nccl_status(
         ncclBroadcast(send, recv, bytes, ncclUint8, root_rank, ranks_[static_cast<size_t>(rank)].comm, stream(rank)),
         "ncclBroadcast");
+  }
+
+  absl::Status all_gather_u8(int rank, const void* send, void* recv, size_t bytes) {
+    return nccl_status(
+        ncclAllGather(send, recv, bytes, ncclUint8, ranks_[static_cast<size_t>(rank)].comm, stream(rank)),
+        "ncclAllGather");
   }
 
   absl::Status send_u8(int rank, const void* src, size_t bytes, int peer_rank) {
@@ -644,6 +796,32 @@ struct MappedGroupState {
   runtime::ingestion::strategy::CollectiveExecutionMetrics metrics ABSL_GUARDED_BY(mu);
 };
 
+struct SourceWindowMappedParticipant {
+  std::string artifact_id;
+  int rank{-1};
+  int device_id{-1};
+  std::shared_ptr<const loader::DiskArtifactContext> disk_context;
+  std::shared_ptr<const RepresentationWorkPlan> work_plan;
+  std::shared_ptr<const loading::IntoTargetLayout> target_layout;
+  std::vector<TargetStorageSpan> storage_spans;
+  runtime::ingestion::strategy::SourceWindowCollectiveCandidateSummary candidate_summary;
+  std::string source_index_digest;
+  std::optional<loading::SourceWindowPreparedRealizationFacts> prepared_realization;
+};
+
+struct SourceWindowMappedGroupState {
+  explicit SourceWindowMappedGroupState(uint32_t size) : world_size(size), participants(size) {}
+
+  const uint32_t world_size;
+  absl::Mutex mu;
+  absl::CondVar cv;
+  std::vector<std::optional<SourceWindowMappedParticipant>> participants ABSL_GUARDED_BY(mu);
+  uint32_t joined ABSL_GUARDED_BY(mu){0};
+  bool launching ABSL_GUARDED_BY(mu){false};
+  bool complete ABSL_GUARDED_BY(mu){false};
+  SourceWindowCollectiveMappedTargetLoadResult result ABSL_GUARDED_BY(mu);
+};
+
 struct FileSegment {
   uint64_t base_offset{0};
   uint64_t data_size{0};
@@ -713,8 +891,721 @@ ABSL_CONST_INIT absl::Mutex g_group_mu(absl::kConstInit);
 absl::flat_hash_map<std::string, std::shared_ptr<GroupState>> g_groups ABSL_GUARDED_BY(g_group_mu);
 ABSL_CONST_INIT absl::Mutex g_mapped_group_mu(absl::kConstInit);
 absl::flat_hash_map<std::string, std::shared_ptr<MappedGroupState>> g_mapped_groups ABSL_GUARDED_BY(g_mapped_group_mu);
+ABSL_CONST_INIT absl::Mutex g_source_window_mapped_group_mu(absl::kConstInit);
+absl::flat_hash_map<std::string, std::shared_ptr<SourceWindowMappedGroupState>> g_source_window_mapped_groups
+    ABSL_GUARDED_BY(g_source_window_mapped_group_mu);
 ABSL_CONST_INIT absl::Mutex g_clique_mu(absl::kConstInit);
 absl::flat_hash_map<std::string, std::shared_ptr<NcclClique>> g_clique_cache ABSL_GUARDED_BY(g_clique_mu);
+
+constexpr size_t kSourceWindowCollectivePlanCacheMaxEntries = 8;
+constexpr size_t kSourceWindowRoutedProgramCacheMaxEntries = 8;
+
+struct SourceWindowCollectivePlanCacheState {
+  absl::Mutex mu;
+  absl::flat_hash_map<std::string, SourceWindowCollectivePlan> plans ABSL_GUARDED_BY(mu);
+  std::vector<std::string> insertion_order ABSL_GUARDED_BY(mu);
+  uint64_t hits ABSL_GUARDED_BY(mu){0};
+  uint64_t misses ABSL_GUARDED_BY(mu){0};
+};
+
+struct RoutedTargetRef {
+  uint32_t rank{0};
+  uint32_t storage_index{0};
+  uint64_t logical_offset{0};
+};
+
+struct RoutedDescriptorTemplate {
+  size_t rank{0};
+  uint64_t src_offset{0};
+  RoutedTargetRef target;
+  uint64_t row_bytes{0};
+  uint64_t row_count{1};
+  uint64_t source_stride_bytes{0};
+  uint64_t target_stride_bytes{0};
+};
+
+struct RoutedPackDescriptorTemplate {
+  size_t producer{0};
+  size_t consumer{0};
+  uint64_t src_offset{0};
+  uint64_t pack_offset{0};
+  uint64_t row_bytes{0};
+  uint64_t row_count{1};
+  uint64_t source_stride_bytes{0};
+  uint64_t target_stride_bytes{0};
+};
+
+struct RoutedPackedRemotePieceTemplate {
+  size_t producer{0};
+  size_t consumer{0};
+  uint64_t pack_offset{0};
+  RoutedTargetRef target;
+  uint64_t length{0};
+};
+
+struct RoutedDirectRemotePieceTemplate {
+  size_t producer{0};
+  size_t consumer{0};
+  uint64_t src_offset{0};
+  RoutedTargetRef target;
+  uint64_t length{0};
+};
+
+struct RoutedPackedTransferTemplate {
+  size_t producer{0};
+  size_t consumer{0};
+  uint64_t bytes{0};
+};
+
+struct SourceWindowRoutedChunkProgram {
+  bool compiled{false};
+  std::vector<std::vector<RoutedDescriptorTemplate>> local_descriptors_by_rank;
+  std::vector<std::vector<RoutedPackDescriptorTemplate>> pack_descriptors_by_producer;
+  std::vector<RoutedPackedRemotePieceTemplate> packed_remote_pieces;
+  std::vector<RoutedDirectRemotePieceTemplate> direct_remote_pieces;
+  std::vector<RoutedPackedTransferTemplate> packed_transfers;
+  uint64_t target_storage_fast_path_pieces{0};
+  uint64_t target_storage_fast_path_bytes{0};
+  uint64_t local_2d_pieces{0};
+  uint64_t local_pieces{0};
+  uint64_t pack_ops{0};
+  uint64_t deferred_2d_pack_ops{0};
+  uint64_t packed_remote_piece_count{0};
+  uint64_t direct_remote_piece_count{0};
+};
+
+struct SourceWindowRoutedProgramCacheEntry {
+  std::vector<SourceWindowRoutedChunkProgram> programs;
+};
+
+struct SourceWindowRoutedProgramCacheState {
+  absl::Mutex mu;
+  absl::flat_hash_map<std::string, SourceWindowRoutedProgramCacheEntry> entries ABSL_GUARDED_BY(mu);
+  std::vector<std::string> insertion_order ABSL_GUARDED_BY(mu);
+  std::unordered_set<std::string> inflight ABSL_GUARDED_BY(mu);
+  absl::CondVar cv;
+  uint64_t hits ABSL_GUARDED_BY(mu){0};
+  uint64_t misses ABSL_GUARDED_BY(mu){0};
+  uint64_t waits ABSL_GUARDED_BY(mu){0};
+};
+
+struct SourceWindowRoutedProgramCacheAcquireResult {
+  bool cache_hit{false};
+  bool reserved_build{false};
+  bool waited{false};
+  bool size_mismatch{false};
+  double wait_sec{0.0};
+  std::vector<SourceWindowRoutedChunkProgram> programs;
+};
+
+struct SourceWindowRuntimeChunk {
+  const SourceWindowCollectiveWindow* window{nullptr};
+  std::vector<const SourceWindowCollectiveConsumerSpan*> consumer_spans;
+  SourceWindowRoutedChunkProgram routed_program;
+  uint64_t chunk_start{0};
+  uint64_t chunk_end{0};
+  size_t chunk_len{0};
+  size_t stripe_bytes{0};
+  size_t gathered_bytes{0};
+};
+
+SourceWindowCollectivePlanCacheState& source_window_collective_plan_cache() {
+  static auto* cache = new SourceWindowCollectivePlanCacheState();
+  return *cache;
+}
+
+SourceWindowRoutedProgramCacheState& source_window_routed_program_cache() {
+  static auto* cache = new SourceWindowRoutedProgramCacheState();
+  return *cache;
+}
+
+const RepresentationWorkPlan& source_window_member_work_plan(const SourceWindowCollectiveMemberInput& member) {
+  if (member.work_plan_ref != nullptr) {
+    return *member.work_plan_ref;
+  }
+  return member.work_plan;
+}
+
+const loading::IntoTargetLayout& source_window_member_target_layout(const SourceWindowCollectiveMemberInput& member) {
+  if (member.target_layout_ref != nullptr) {
+    return *member.target_layout_ref;
+  }
+  return member.target_layout;
+}
+
+void append_key_u8(std::string* payload, uint8_t value) {
+  payload->push_back(static_cast<char>(value));
+}
+
+void append_key_u32(std::string* payload, uint32_t value) {
+  for (int shift = 0; shift < 32; shift += 8) {
+    payload->push_back(static_cast<char>((value >> shift) & 0xffU));
+  }
+}
+
+void append_key_u64(std::string* payload, uint64_t value) {
+  for (int shift = 0; shift < 64; shift += 8) {
+    payload->push_back(static_cast<char>((value >> shift) & 0xffULL));
+  }
+}
+
+void append_key_i32(std::string* payload, int32_t value) {
+  append_key_u32(payload, static_cast<uint32_t>(value));
+}
+
+void append_key_i64(std::string* payload, int64_t value) {
+  append_key_u64(payload, static_cast<uint64_t>(value));
+}
+
+void append_key_bool(std::string* payload, bool value) {
+  append_key_u8(payload, value ? 1 : 0);
+}
+
+void append_key_size(std::string* payload, size_t value) {
+  append_key_u64(payload, static_cast<uint64_t>(value));
+}
+
+void append_key_string(std::string* payload, std::string_view value) {
+  append_key_size(payload, value.size());
+  payload->append(value.data(), value.size());
+}
+
+void append_key_bytes(std::string* payload, absl::Span<const uint8_t> values) {
+  append_key_size(payload, values.size());
+  if (!values.empty()) {
+    payload->append(reinterpret_cast<const char*>(values.data()), values.size());
+  }
+}
+
+void append_int64_vector_to_key(std::string* payload, absl::Span<const int64_t> values) {
+  append_key_size(payload, values.size());
+  for (const auto value : values) {
+    append_key_i64(payload, value);
+  }
+}
+
+void append_tensor_coordinate_to_key(std::string* payload, const TensorCoordinateSpec& coordinate) {
+  append_key_bool(payload, coordinate.selects_scalar);
+  append_key_size(payload, coordinate.axes.size());
+  for (const auto& axis : coordinate.axes) {
+    append_key_i32(payload, axis.dim);
+    append_key_i64(payload, axis.start);
+    append_key_i64(payload, axis.end);
+  }
+}
+
+void append_tensor_spec_to_key(std::string* payload, const RepresentationTensorSpec& spec) {
+  append_key_string(payload, spec.name);
+  append_key_string(payload, spec.dtype);
+  append_key_u64(payload, spec.logical_offset);
+  append_key_u64(payload, spec.logical_length);
+  append_key_u64(payload, spec.storage_offset);
+  append_key_u64(payload, spec.element_size);
+  append_int64_vector_to_key(payload, absl::MakeConstSpan(spec.shape));
+  append_int64_vector_to_key(payload, absl::MakeConstSpan(spec.stride));
+}
+
+void append_fill_rule_to_key(std::string* payload, const FillRule& fill_rule) {
+  append_key_bytes(payload, absl::MakeConstSpan(fill_rule.constant_value));
+  append_tensor_coordinate_to_key(payload, fill_rule.destination_range);
+}
+
+void append_source_fragment_to_key(std::string* payload, const RepresentationWorkSourceFragment& source) {
+  append_tensor_spec_to_key(payload, source.fragment.source_spec);
+  append_tensor_coordinate_to_key(payload, source.fragment.source_range);
+  append_tensor_coordinate_to_key(payload, source.fragment.destination_range);
+  append_key_u8(payload, static_cast<uint8_t>(source.fragment.role));
+  append_key_u64(payload, source.prefix_count);
+  append_key_u64(payload, source.dst_block_offset_bytes);
+  append_key_u64(payload, source.dst_block_stride_bytes);
+  append_key_u64(payload, source.dst_block_bytes);
+}
+
+void append_work_item_to_key(std::string* payload, const RepresentationWorkItem& item) {
+  append_key_u8(payload, static_cast<uint8_t>(item.kind));
+  append_key_u8(payload, static_cast<uint8_t>(item.partition_kind));
+  append_key_string(payload, item.dst_name);
+  append_key_u64(payload, item.committed_bytes);
+  append_tensor_spec_to_key(payload, item.dst_spec);
+  append_key_size(payload, item.sources.size());
+  for (const auto& source : item.sources) {
+    append_source_fragment_to_key(payload, source);
+  }
+  append_key_bool(payload, item.fill_rule.has_value());
+  if (item.fill_rule.has_value()) {
+    append_fill_rule_to_key(payload, *item.fill_rule);
+  }
+}
+
+void append_work_plan_to_key(std::string* payload, const RepresentationWorkPlan& work_plan) {
+  append_key_u64(payload, work_plan.committed_bytes);
+  append_key_size(payload, work_plan.items.size());
+  for (const auto& item : work_plan.items) {
+    append_work_item_to_key(payload, item);
+  }
+  // Source-window collective planning consumes work item geometry and residual
+  // coverage totals, not the local mapped byte-range-map segment expansion.
+  // Including those segments makes the strict cache key O(local-mapped plan)
+  // without adding source-window identity.
+  append_key_u64(payload, work_plan.residual_fallback_map.total_bytes);
+}
+
+void append_source_window_config_to_key(std::string* payload, const SourceWindowCollectiveConfig& config) {
+  absl::StrAppend(
+      payload,
+      "{enabled=",
+      config.enabled,
+      ",selection=",
+      runtime::ingestion::strategy::source_window_collective_selection_mode_name(config.selection_mode),
+      ",window_bytes=",
+      config.window_bytes,
+      ",max_gap_bytes=",
+      config.max_gap_bytes,
+      ",max_window_amplification_x1000=",
+      config.max_window_amplification_x1000,
+      ",max_plan_read_amplification_x1000=",
+      config.max_plan_read_amplification_x1000,
+      ",max_scatter_ops_per_window=",
+      config.max_scatter_ops_per_window,
+      ",peak_bytes_budget=",
+      config.peak_bytes_budget,
+      ",min_rank_read_saving_bytes=",
+      config.min_rank_read_saving_bytes,
+      ",max_peer_to_read_ratio_x1000=",
+      config.max_peer_to_read_ratio_x1000,
+      ",min_routed_peer_saving_bytes=",
+      config.min_routed_peer_saving_bytes,
+      ",distribution=",
+      runtime::ingestion::strategy::source_window_collective_distribution_mode_name(config.distribution_mode),
+      ",allow_mixed_residual=",
+      config.allow_mixed_residual,
+      "}");
+}
+
+std::string source_window_collective_plan_cache_key(
+    std::string_view artifact_id,
+    const SourceWindowCollectiveGroupInput& input) {
+  size_t item_count = 0;
+  size_t source_count = 0;
+  for (const auto& member : input.members) {
+    const auto& work_plan = source_window_member_work_plan(member);
+    item_count += work_plan.items.size();
+    for (const auto& item : work_plan.items) {
+      source_count += item.sources.size();
+    }
+  }
+
+  std::string payload;
+  payload.reserve(1024 + input.members.size() * 256 + item_count * 384 + source_count * 256);
+  absl::StrAppend(
+      &payload, "source_window_collective_group_plan_cache_v1|artifact_id=", artifact_id, "|artifact_path=");
+  if (input.disk_context != nullptr) {
+    absl::StrAppend(&payload, input.disk_context->artifact_path().generic_string());
+  }
+  absl::StrAppend(
+      &payload, "|source_index_digest=", input.source_index_digest, "|world_size=", input.group.world_size, "|config=");
+  append_source_window_config_to_key(&payload, input.config);
+  absl::StrAppend(&payload, "|members=", input.members.size());
+  for (const auto& member : input.members) {
+    const auto& target_layout = source_window_member_target_layout(member);
+    const auto& work_plan = source_window_member_work_plan(member);
+    absl::StrAppend(
+        &payload,
+        "|member=",
+        member.rank,
+        ",device=",
+        member.device_id,
+        ",target_total=",
+        target_layout.total_size,
+        ",storages=",
+        target_layout.storages.size());
+    for (const auto& storage : target_layout.storages) {
+      absl::StrAppend(&payload, "/storage_length=", storage.length);
+    }
+    absl::StrAppend(&payload, ",storage_spans=", member.storage_spans.size());
+    for (const auto& storage_span : member.storage_spans) {
+      absl::StrAppend(&payload, "/span=", storage_span.base_offset, ":", storage_span.length);
+    }
+    absl::StrAppend(&payload, ",work_plan=");
+    append_work_plan_to_key(&payload, work_plan);
+  }
+  const auto digest = common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  return common::multibase_multihash_sha256(digest);
+}
+
+std::optional<std::string> source_window_collective_prepared_plan_cache_key(
+    std::string_view artifact_id,
+    const SourceWindowCollectiveGroupInput& input) {
+  if (input.members.empty()) {
+    return std::nullopt;
+  }
+
+  struct PreparedMemberKeyPart {
+    uint32_t rank{0};
+    int device_id{-1};
+    std::string group_key;
+    std::string member_key;
+    std::string realization_plan_hash;
+    std::string target_layout_template_hash;
+    std::string target_index_hash;
+    uint64_t target_total_size{0};
+    std::vector<uint64_t> storage_lengths;
+    std::vector<std::pair<uint64_t, uint64_t>> storage_spans;
+  };
+
+  std::vector<PreparedMemberKeyPart> member_key_parts;
+  member_key_parts.reserve(input.members.size());
+  std::unordered_set<std::string> member_keys;
+  for (const auto& member : input.members) {
+    if (!member.prepared_realization.has_value()) {
+      return std::nullopt;
+    }
+    const auto& facts = *member.prepared_realization;
+    if (facts.group_key.empty() || facts.member_key.empty() || facts.realization_plan_hash.empty() ||
+        facts.target_layout_template_hash.empty() || facts.target_index_hash.empty()) {
+      return std::nullopt;
+    }
+    if (!member_keys.insert(facts.member_key).second) {
+      return std::nullopt;
+    }
+
+    const auto& target_layout = source_window_member_target_layout(member);
+    PreparedMemberKeyPart part{
+        .rank = member.rank,
+        .device_id = member.device_id,
+        .group_key = facts.group_key,
+        .member_key = facts.member_key,
+        .realization_plan_hash = facts.realization_plan_hash,
+        .target_layout_template_hash = facts.target_layout_template_hash,
+        .target_index_hash = facts.target_index_hash,
+        .target_total_size = target_layout.total_size,
+    };
+    part.storage_lengths.reserve(target_layout.storages.size());
+    for (const auto& storage : target_layout.storages) {
+      part.storage_lengths.push_back(storage.length);
+    }
+    part.storage_spans.reserve(member.storage_spans.size());
+    for (const auto& storage_span : member.storage_spans) {
+      part.storage_spans.emplace_back(storage_span.base_offset, storage_span.length);
+    }
+    member_key_parts.push_back(std::move(part));
+  }
+
+  std::sort(
+      member_key_parts.begin(),
+      member_key_parts.end(),
+      [](const PreparedMemberKeyPart& lhs, const PreparedMemberKeyPart& rhs) {
+        return std::tie(lhs.rank, lhs.device_id, lhs.member_key) < std::tie(rhs.rank, rhs.device_id, rhs.member_key);
+      });
+
+  std::string payload;
+  payload.reserve(1024 + member_key_parts.size() * 512);
+  absl::StrAppend(
+      &payload, "source_window_collective_group_prepared_plan_cache_v1|artifact_id=", artifact_id, "|artifact_path=");
+  if (input.disk_context != nullptr) {
+    absl::StrAppend(&payload, input.disk_context->artifact_path().generic_string());
+  }
+  absl::StrAppend(
+      &payload, "|source_index_digest=", input.source_index_digest, "|world_size=", input.group.world_size, "|config=");
+  append_source_window_config_to_key(&payload, input.config);
+  absl::StrAppend(&payload, "|members=", member_key_parts.size());
+  for (const auto& part : member_key_parts) {
+    absl::StrAppend(
+        &payload,
+        "|member=",
+        part.rank,
+        ",device=",
+        part.device_id,
+        ",group_key=",
+        part.group_key,
+        ",member_key=",
+        part.member_key,
+        ",realization_plan_hash=",
+        part.realization_plan_hash,
+        ",target_layout_template_hash=",
+        part.target_layout_template_hash,
+        ",target_index_hash=",
+        part.target_index_hash,
+        ",target_total=",
+        part.target_total_size,
+        ",storages=",
+        part.storage_lengths.size());
+    for (const auto length : part.storage_lengths) {
+      absl::StrAppend(&payload, "/storage_length=", length);
+    }
+    absl::StrAppend(&payload, ",storage_spans=", part.storage_spans.size());
+    for (const auto& [base_offset, length] : part.storage_spans) {
+      absl::StrAppend(&payload, "/span=", base_offset, ":", length);
+    }
+  }
+
+  const auto digest = common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  return common::multibase_multihash_sha256(digest);
+}
+
+bool lookup_source_window_collective_plan_cache(
+    const std::string& key,
+    const loading::CollectiveLoadGroupHint& group,
+    SourceWindowCollectivePlan* plan) {
+  auto& cache = source_window_collective_plan_cache();
+  absl::MutexLock lock(&cache.mu);
+  auto it = cache.plans.find(key);
+  if (it == cache.plans.end()) {
+    cache.misses += 1;
+    return false;
+  }
+  cache.hits += 1;
+  if (plan != nullptr) {
+    *plan = it->second;
+    plan->group = group;
+  }
+  return true;
+}
+
+void store_source_window_collective_plan_cache(const std::string& key, const SourceWindowCollectivePlan& plan) {
+  auto& cache = source_window_collective_plan_cache();
+  absl::MutexLock lock(&cache.mu);
+  auto existing = cache.plans.find(key);
+  if (existing != cache.plans.end()) {
+    existing->second = plan;
+    return;
+  }
+  while (cache.plans.size() >= kSourceWindowCollectivePlanCacheMaxEntries && !cache.insertion_order.empty()) {
+    cache.plans.erase(cache.insertion_order.front());
+    cache.insertion_order.erase(cache.insertion_order.begin());
+  }
+  cache.plans.emplace(key, plan);
+  cache.insertion_order.push_back(key);
+}
+
+void clear_source_window_collective_plan_cache() {
+  auto& cache = source_window_collective_plan_cache();
+  absl::MutexLock lock(&cache.mu);
+  cache.plans.clear();
+  cache.insertion_order.clear();
+  cache.hits = 0;
+  cache.misses = 0;
+}
+
+SourceWindowCollectivePlanCacheStats source_window_collective_plan_cache_stats_snapshot() {
+  auto& cache = source_window_collective_plan_cache();
+  absl::MutexLock lock(&cache.mu);
+  return SourceWindowCollectivePlanCacheStats{
+      .hits = cache.hits,
+      .misses = cache.misses,
+      .entries = cache.plans.size(),
+  };
+}
+
+std::optional<std::string> source_window_routed_program_cache_key(
+    std::string_view artifact_id,
+    const SourceWindowCollectivePlan& plan,
+    absl::Span<const SourceWindowMappedParticipant> participants,
+    size_t configured_chunk_bytes,
+    size_t max_collective_chunk_bytes,
+    size_t max_stripe_bytes) {
+  if (artifact_id.empty() || plan.plan_hash.empty() || participants.empty()) {
+    return std::nullopt;
+  }
+
+  std::string payload;
+  payload.reserve(1024 + participants.size() * 256);
+  absl::StrAppend(&payload, "source_window_routed_program_cache_v2|artifact_id=");
+  append_key_string(&payload, artifact_id);
+  absl::StrAppend(&payload, "|artifact_path=");
+  if (participants.front().disk_context != nullptr) {
+    append_key_string(&payload, participants.front().disk_context->artifact_path().generic_string());
+  } else {
+    append_key_string(&payload, "");
+  }
+  absl::StrAppend(&payload, "|plan_hash=");
+  append_key_string(&payload, plan.plan_hash);
+  append_key_size(&payload, participants.size());
+  append_key_size(&payload, configured_chunk_bytes);
+  append_key_size(&payload, max_collective_chunk_bytes);
+  append_key_size(&payload, max_stripe_bytes);
+  append_key_size(&payload, plan.windows.size());
+
+  bool can_use_prepared_identity = true;
+  std::string prepared_group_key;
+  for (const auto& participant : participants) {
+    if (!participant.prepared_realization.has_value()) {
+      can_use_prepared_identity = false;
+      break;
+    }
+    const auto& facts = *participant.prepared_realization;
+    if (facts.group_key.empty() || facts.member_key.empty() || facts.realization_plan_hash.empty() ||
+        facts.target_layout_template_hash.empty() || facts.target_index_hash.empty()) {
+      can_use_prepared_identity = false;
+      break;
+    }
+    if (prepared_group_key.empty()) {
+      prepared_group_key = facts.group_key;
+    } else if (prepared_group_key != facts.group_key) {
+      can_use_prepared_identity = false;
+      break;
+    }
+  }
+
+  append_key_bool(&payload, can_use_prepared_identity);
+  if (can_use_prepared_identity) {
+    append_key_string(&payload, prepared_group_key);
+  }
+
+  std::vector<const SourceWindowMappedParticipant*> sorted_participants;
+  sorted_participants.reserve(participants.size());
+  for (const auto& participant : participants) {
+    sorted_participants.push_back(&participant);
+  }
+  std::sort(
+      sorted_participants.begin(),
+      sorted_participants.end(),
+      [](const SourceWindowMappedParticipant* lhs, const SourceWindowMappedParticipant* rhs) {
+        return std::tie(lhs->rank, lhs->device_id) < std::tie(rhs->rank, rhs->device_id);
+      });
+
+  for (const auto* participant : sorted_participants) {
+    append_key_i32(&payload, participant->rank);
+    append_key_i32(&payload, participant->device_id);
+    append_key_string(&payload, participant->source_index_digest);
+    if (can_use_prepared_identity) {
+      const auto& facts = *participant->prepared_realization;
+      append_key_string(&payload, facts.member_key);
+      append_key_string(&payload, facts.realization_plan_hash);
+      append_key_string(&payload, facts.target_layout_template_hash);
+      append_key_string(&payload, facts.target_index_hash);
+    }
+    append_key_size(&payload, participant->storage_spans.size());
+    for (const auto& storage_span : participant->storage_spans) {
+      append_key_u64(&payload, storage_span.base_offset);
+      append_key_u64(&payload, storage_span.length);
+    }
+  }
+
+  const auto digest = common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  return common::multibase_multihash_sha256(digest);
+}
+
+void erase_source_window_routed_program_cache_entry_locked(
+    SourceWindowRoutedProgramCacheState& cache,
+    const std::string& key) ABSL_EXCLUSIVE_LOCKS_REQUIRED(cache.mu) {
+  cache.entries.erase(key);
+  const auto order_it = std::find(cache.insertion_order.begin(), cache.insertion_order.end(), key);
+  if (order_it != cache.insertion_order.end()) {
+    cache.insertion_order.erase(order_it);
+  }
+}
+
+void store_source_window_routed_program_cache_locked(
+    SourceWindowRoutedProgramCacheState& cache,
+    const std::string& key,
+    std::vector<SourceWindowRoutedChunkProgram> programs) ABSL_EXCLUSIVE_LOCKS_REQUIRED(cache.mu) {
+  auto existing = cache.entries.find(key);
+  if (existing != cache.entries.end()) {
+    existing->second.programs = std::move(programs);
+    return;
+  }
+  while (cache.entries.size() >= kSourceWindowRoutedProgramCacheMaxEntries && !cache.insertion_order.empty()) {
+    cache.entries.erase(cache.insertion_order.front());
+    cache.insertion_order.erase(cache.insertion_order.begin());
+  }
+  cache.entries.emplace(key, SourceWindowRoutedProgramCacheEntry{.programs = std::move(programs)});
+  cache.insertion_order.push_back(key);
+}
+
+SourceWindowRoutedProgramCacheAcquireResult acquire_source_window_routed_program_cache(
+    const std::string& key,
+    size_t expected_program_count) {
+  SourceWindowRoutedProgramCacheAcquireResult result;
+  auto& cache = source_window_routed_program_cache();
+  const auto wait_start = std::chrono::steady_clock::now();
+  absl::MutexLock lock(&cache.mu);
+  for (;;) {
+    auto it = cache.entries.find(key);
+    if (it != cache.entries.end()) {
+      if (expected_program_count > 0 && it->second.programs.size() != expected_program_count) {
+        result.size_mismatch = true;
+        erase_source_window_routed_program_cache_entry_locked(cache, key);
+        cache.misses += 1;
+        cache.inflight.insert(key);
+        result.reserved_build = true;
+        if (result.waited) {
+          result.wait_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - wait_start).count();
+        }
+        return result;
+      }
+      cache.hits += 1;
+      result.cache_hit = true;
+      result.programs = it->second.programs;
+      if (result.waited) {
+        result.wait_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - wait_start).count();
+      }
+      return result;
+    }
+
+    if (cache.inflight.find(key) == cache.inflight.end()) {
+      cache.misses += 1;
+      cache.inflight.insert(key);
+      result.reserved_build = true;
+      if (result.waited) {
+        result.wait_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - wait_start).count();
+      }
+      return result;
+    }
+
+    result.waited = true;
+    cache.waits += 1;
+    cache.cv.Wait(&cache.mu);
+  }
+}
+
+void complete_source_window_routed_program_cache_build(
+    const std::string& key,
+    std::vector<SourceWindowRoutedChunkProgram> programs) {
+  auto& cache = source_window_routed_program_cache();
+  absl::MutexLock lock(&cache.mu);
+  store_source_window_routed_program_cache_locked(cache, key, std::move(programs));
+  cache.inflight.erase(key);
+  cache.cv.SignalAll();
+}
+
+void abandon_source_window_routed_program_cache_build(const std::string& key) {
+  auto& cache = source_window_routed_program_cache();
+  absl::MutexLock lock(&cache.mu);
+  cache.inflight.erase(key);
+  cache.cv.SignalAll();
+}
+
+void store_source_window_routed_program_cache(
+    const std::string& key,
+    std::vector<SourceWindowRoutedChunkProgram> programs) {
+  complete_source_window_routed_program_cache_build(key, std::move(programs));
+}
+
+void clear_source_window_routed_program_cache() {
+  auto& cache = source_window_routed_program_cache();
+  absl::MutexLock lock(&cache.mu);
+  cache.entries.clear();
+  cache.insertion_order.clear();
+  cache.inflight.clear();
+  cache.hits = 0;
+  cache.misses = 0;
+  cache.waits = 0;
+  cache.cv.SignalAll();
+}
+
+SourceWindowCollectivePlanCacheStats source_window_routed_program_cache_stats_snapshot() {
+  auto& cache = source_window_routed_program_cache();
+  absl::MutexLock lock(&cache.mu);
+  return SourceWindowCollectivePlanCacheStats{
+      .hits = cache.hits,
+      .misses = cache.misses,
+      .entries = cache.entries.size(),
+  };
+}
 
 std::string clique_cache_key(const std::vector<int>& device_ids) {
   std::string key;
@@ -1653,15 +2544,6 @@ constexpr uint64_t kLocalMappedBufferedProbeMaxBytes = 256ULL << 20;
 constexpr uint64_t kLocalMappedBufferedProbeChunkBytes = 16ULL << 20;
 constexpr double kLocalMappedBufferedHotProbeMinGiBPerSec = 3.0;
 
-struct LocalMappedSafetensorsAutoIoDecision {
-  bool use_direct_aligned_edges{false};
-  double page_cache_residency_ratio{-1.0};
-  uint64_t buffered_probe_bytes{0};
-  double buffered_probe_sec{-1.0};
-  double buffered_probe_gib_per_sec{-1.0};
-  std::string reason;
-};
-
 struct LocalMappedBufferedProbeResult {
   uint64_t bytes{0};
   double sec{0.0};
@@ -1925,23 +2807,63 @@ absl::StatusOr<LocalMappedSafetensorsAutoIoDecision> choose_auto_local_mapped_sa
       };
     }
     return LocalMappedSafetensorsAutoIoDecision{
-        .use_direct_aligned_edges = false,
+        .use_direct_aligned_edges = true,
         .page_cache_residency_ratio = page_cache_residency,
         .buffered_probe_bytes = probe.bytes,
         .buffered_probe_sec = probe.sec,
         .buffered_probe_gib_per_sec = probe.gib_per_sec,
-        .reason = "page_cache_resident_probe_slow_buffered_default",
+        .reason = "page_cache_resident_probe_slow_direct",
     };
   }
   return LocalMappedSafetensorsAutoIoDecision{
-      .use_direct_aligned_edges = false,
+      .use_direct_aligned_edges = true,
       .page_cache_residency_ratio = page_cache_residency,
-      .reason = "page_cache_cold_or_partial_buffered_default",
+      .reason = "page_cache_cold_or_partial_direct",
   };
+}
+
+void log_local_mapped_safetensors_auto_decision(
+    absl::Span<const loader::SharedSafetensorsSegment> segments,
+    const LocalMappedSafetensorsAutoIoDecision& decision) {
+  LOG(INFO) << "local_mapped_safetensors_auto source_bytes=" << total_source_bytes(segments)
+            << " page_cache_residency_ratio=" << decision.page_cache_residency_ratio
+            << " buffered_probe_bytes=" << decision.buffered_probe_bytes
+            << " buffered_probe_sec=" << decision.buffered_probe_sec
+            << " buffered_probe_gib_per_sec=" << decision.buffered_probe_gib_per_sec
+            << " decision=" << (decision.use_direct_aligned_edges ? "direct_aligned_edges" : "buffered")
+            << " reason=" << decision.reason;
+}
+
+absl::StatusOr<StrategyConfig> resolve_local_mapped_safetensors_auto_strategy(
+    absl::Span<const loader::SharedSafetensorsSegment> segments,
+    const StrategyConfig& strategy,
+    bool log_decision) {
+  using IoMode = StrategyConfig::LocalMappedSafetensorsIoMode;
+  if (strategy.local_mapped_safetensors_io_mode != IoMode::kAutoByFilesystem) {
+    return strategy;
+  }
+  LocalMappedSafetensorsAutoIoDecision decision;
+  TC_ASSIGN_OR_RETURN(decision, choose_auto_local_mapped_safetensors_io(segments));
+  if (log_decision) {
+    log_local_mapped_safetensors_auto_decision(segments, decision);
+  }
+  StrategyConfig resolved = strategy;
+  resolved.local_mapped_safetensors_io_mode =
+      decision.use_direct_aligned_edges ? IoMode::kDirectAlignedEdges : IoMode::kBuffered;
+  return resolved;
 }
 
 class DirectAlignedSafetensorsSource final : public loader::SeekableSource {
  public:
+  enum class PinnedWindowFallbackReason : std::uint8_t {
+    kNone,
+    kUnalignedHostBuffer,
+    kOutsideSegment,
+    kCrossSegment,
+    kFileEdge,
+    kCapacity,
+  };
+
   explicit DirectAlignedSafetensorsSource(std::vector<loader::SharedSafetensorsSegment> segments)
       : total_bytes_(total_source_bytes(segments)) {
     segments_.reserve(segments.size());
@@ -2038,6 +2960,76 @@ class DirectAlignedSafetensorsSource final : public loader::SeekableSource {
           absl::StrCat("short logical read in DirectAlignedSafetensorsSource: got=", total, " want=", to_read));
     }
     return total;
+  }
+
+  absl::StatusOr<size_t> read_at_for_pinned_window(
+      uint64_t offset,
+      char* dst,
+      size_t read_bytes,
+      size_t h2d_bytes,
+      size_t dst_capacity,
+      PinnedWindowFallbackReason* fallback_reason = nullptr) {
+    if (fallback_reason != nullptr) {
+      *fallback_reason = PinnedWindowFallbackReason::kNone;
+    }
+    auto unimplemented = [&](PinnedWindowFallbackReason reason, std::string message) -> absl::StatusOr<size_t> {
+      if (fallback_reason != nullptr) {
+        *fallback_reason = reason;
+      }
+      return absl::UnimplementedError(std::move(message));
+    };
+    if (read_bytes == 0) {
+      return static_cast<size_t>(0);
+    }
+    if (!is_aligned_address(dst, kLocalMappedDirectIoAlignment)) {
+      return unimplemented(
+          PinnedWindowFallbackReason::kUnalignedHostBuffer,
+          "source-window direct pinned read requires an aligned host buffer");
+    }
+    if (offset >= total_bytes_ || read_bytes > total_bytes_ - offset || read_bytes > h2d_bytes) {
+      return absl::OutOfRangeError("source-window direct pinned read exceeds source or target bounds");
+    }
+    Segment* segment = find_segment_for_offset(offset);
+    if (segment == nullptr) {
+      return unimplemented(
+          PinnedWindowFallbackReason::kOutsideSegment,
+          "source-window direct pinned read starts outside a safetensors segment");
+    }
+    const uint64_t segment_end = segment->segment.base_offset + segment->segment.data_size;
+    if (read_bytes > segment_end - offset) {
+      return unimplemented(
+          PinnedWindowFallbackReason::kCrossSegment,
+          "source-window direct pinned read crosses safetensors file segments");
+    }
+    if (segment->direct_fd < 0) {
+      return absl::FailedPreconditionError("direct safetensors source was not initialized");
+    }
+    const uint64_t file_begin = segment->segment.data_start + (offset - segment->segment.base_offset);
+    const uint64_t file_end = file_begin + static_cast<uint64_t>(read_bytes);
+    const uint64_t direct_begin = align_down_u64(file_begin, kLocalMappedDirectIoAlignment);
+    const uint64_t direct_end = align_up_u64(file_end, kLocalMappedDirectIoAlignment);
+    if (direct_end > segment->direct_file_floor) {
+      return unimplemented(
+          PinnedWindowFallbackReason::kFileEdge, "source-window direct pinned read reaches an unaligned file edge");
+    }
+    const size_t prefix_bytes = static_cast<size_t>(file_begin - direct_begin);
+    const size_t direct_bytes = static_cast<size_t>(direct_end - direct_begin);
+    if (direct_bytes > dst_capacity || prefix_bytes > dst_capacity || h2d_bytes > dst_capacity - prefix_bytes) {
+      return unimplemented(
+          PinnedWindowFallbackReason::kCapacity,
+          "source-window direct pinned read does not fit in the host staging buffer");
+    }
+    size_t got = 0;
+    TC_ASSIGN_OR_RETURN(got, pread_fully(segment->direct_fd, direct_begin, dst, direct_bytes));
+    if (got != direct_bytes) {
+      return absl::OutOfRangeError(
+          absl::StrCat(
+              "short source-window O_DIRECT pinned read: got=", got, " want=", direct_bytes, " offset=", direct_begin));
+    }
+    if (read_bytes < h2d_bytes) {
+      std::memset(dst + prefix_bytes + read_bytes, 0, h2d_bytes - read_bytes);
+    }
+    return prefix_bytes;
   }
 
  private:
@@ -2170,19 +3162,10 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> make_local_mapped_safete
     absl::Span<const loader::SharedSafetensorsSegment> segments,
     const StrategyConfig& strategy) {
   using IoMode = StrategyConfig::LocalMappedSafetensorsIoMode;
-  IoMode mode = strategy.local_mapped_safetensors_io_mode;
-  if (mode == IoMode::kAutoByFilesystem) {
-    LocalMappedSafetensorsAutoIoDecision decision;
-    TC_ASSIGN_OR_RETURN(decision, choose_auto_local_mapped_safetensors_io(segments));
-    mode = decision.use_direct_aligned_edges ? IoMode::kDirectAlignedEdges : IoMode::kBuffered;
-    LOG(INFO) << "local_mapped_safetensors_auto source_bytes=" << total_source_bytes(segments)
-              << " page_cache_residency_ratio=" << decision.page_cache_residency_ratio
-              << " buffered_probe_bytes=" << decision.buffered_probe_bytes
-              << " buffered_probe_sec=" << decision.buffered_probe_sec
-              << " buffered_probe_gib_per_sec=" << decision.buffered_probe_gib_per_sec
-              << " decision=" << (decision.use_direct_aligned_edges ? "direct_aligned_edges" : "buffered")
-              << " reason=" << decision.reason;
-  }
+  StrategyConfig resolved_strategy;
+  TC_ASSIGN_OR_RETURN(
+      resolved_strategy, resolve_local_mapped_safetensors_auto_strategy(segments, strategy, /*log_decision=*/true));
+  IoMode mode = resolved_strategy.local_mapped_safetensors_io_mode;
 
   std::vector<loader::SharedSafetensorsSegment> owned_segments(segments.begin(), segments.end());
   if (mode == IoMode::kBuffered) {
@@ -4289,11 +5272,28 @@ struct TargetPiece {
   uint64_t src_offset{0};
 };
 
+struct TargetPieceGeometry {
+  uint64_t length{0};
+  uint64_t src_offset{0};
+};
+
 struct CopyPiece {
   const std::uint8_t* src_ptr{nullptr};
   std::uint8_t* dst_ptr{nullptr};
   uint64_t length{0};
 };
+
+struct PackedRemotePiece {
+  uint64_t pack_offset{0};
+  std::uint8_t* dst_ptr{nullptr};
+  uint64_t length{0};
+};
+
+absl::StatusOr<TargetPieceGeometry> resolve_target_piece_geometry_by_storage_index(
+    absl::Span<const TargetStorageSpan> storage_spans,
+    uint32_t storage_index,
+    uint64_t logical_offset,
+    uint64_t length);
 
 bool can_merge_copy_piece(const CopyPiece& prev, const CopyPiece& next) {
   return prev.length > 0 && next.length > 0 && prev.src_ptr != nullptr && prev.dst_ptr != nullptr &&
@@ -4306,6 +5306,22 @@ void append_merged_copy_piece(std::vector<CopyPiece>& pieces, CopyPiece piece) {
     return;
   }
   if (!pieces.empty() && can_merge_copy_piece(pieces.back(), piece)) {
+    pieces.back().length += piece.length;
+    return;
+  }
+  pieces.push_back(piece);
+}
+
+bool can_merge_packed_remote_piece(const PackedRemotePiece& prev, const PackedRemotePiece& next) {
+  return prev.length > 0 && next.length > 0 && prev.dst_ptr != nullptr && next.dst_ptr != nullptr &&
+      prev.pack_offset + prev.length == next.pack_offset && prev.dst_ptr + prev.length == next.dst_ptr;
+}
+
+void append_merged_packed_remote_piece(std::vector<PackedRemotePiece>& pieces, PackedRemotePiece piece) {
+  if (piece.length == 0 || piece.dst_ptr == nullptr) {
+    return;
+  }
+  if (!pieces.empty() && can_merge_packed_remote_piece(pieces.back(), piece)) {
     pieces.back().length += piece.length;
     return;
   }
@@ -4349,6 +5365,67 @@ absl::StatusOr<std::vector<TargetPiece>> resolve_target_pieces(
     }
   }
   return pieces;
+}
+
+absl::StatusOr<TargetPiece> resolve_target_piece_by_storage_index(
+    const ParsedMappedParticipant& participant,
+    uint32_t storage_index,
+    uint64_t logical_offset,
+    uint64_t length) {
+  auto geometry_or =
+      resolve_target_piece_geometry_by_storage_index(participant.storage_spans, storage_index, logical_offset, length);
+  if (!geometry_or.ok()) {
+    return geometry_or.status();
+  }
+  const auto& geometry = *geometry_or;
+  if (length == 0) {
+    return TargetPiece{
+        .dst_ptr =
+            gsl::not_null<std::uint8_t*>{
+                participant.storage_spans.empty() ? reinterpret_cast<std::uint8_t*>(1)
+                                                  : participant.storage_spans.front().base_ptr.get()},
+        .length = geometry.length,
+        .src_offset = geometry.src_offset,
+    };
+  }
+  const auto& span = participant.storage_spans[storage_index];
+  return TargetPiece{
+      .dst_ptr = gsl::not_null<std::uint8_t*>{span.base_ptr.get() + (logical_offset - span.base_offset)},
+      .length = geometry.length,
+      .src_offset = geometry.src_offset,
+  };
+}
+
+absl::StatusOr<TargetPieceGeometry> resolve_target_piece_geometry_by_storage_index(
+    absl::Span<const TargetStorageSpan> storage_spans,
+    uint32_t storage_index,
+    uint64_t logical_offset,
+    uint64_t length) {
+  if (length == 0) {
+    return TargetPieceGeometry{
+        .length = 0,
+        .src_offset = 0,
+    };
+  }
+  if (logical_offset > std::numeric_limits<uint64_t>::max() - length) {
+    return absl::OutOfRangeError("source-window target logical range overflows");
+  }
+  if (storage_index >= storage_spans.size()) {
+    return absl::InvalidArgumentError("source-window target storage index is outside target layout");
+  }
+  const auto& span = storage_spans[storage_index];
+  if (span.length > std::numeric_limits<uint64_t>::max() - span.base_offset) {
+    return absl::OutOfRangeError("source-window target storage span overflows");
+  }
+  const uint64_t logical_end = logical_offset + length;
+  const uint64_t span_end = span.base_offset + span.length;
+  if (logical_offset < span.base_offset || logical_end > span_end) {
+    return absl::InvalidArgumentError("source-window target logical range is outside planned storage span");
+  }
+  return TargetPieceGeometry{
+      .length = length,
+      .src_offset = 0,
+  };
 }
 
 absl::Status execute_replicated_tensor(
@@ -8626,6 +9703,3486 @@ CollectiveMappedTargetLoadResult wait_for_mapped_group_and_maybe_execute(
   }
 }
 
+runtime::ingestion::strategy::CollectiveExecutionMetrics source_window_metrics_from_summary(
+    const runtime::ingestion::strategy::SourceWindowCollectiveCandidateSummary& summary) {
+  runtime::ingestion::strategy::CollectiveExecutionMetrics metrics;
+  metrics.unique_source_bytes = summary.source_window_group_disk_read_bytes;
+  metrics.peer_transfer_bytes = summary.source_window_peer_transfer_bytes;
+  metrics.peak_temporary_bytes = summary.source_window_rank_read_bytes_max;
+  metrics.batch_count = summary.source_window_window_count;
+  metrics.dedup_saving_bytes = 0;
+  metrics.source_window_group_disk_read_bytes = summary.source_window_group_disk_read_bytes;
+  metrics.source_window_rank_read_bytes_max = summary.source_window_rank_read_bytes_max;
+  metrics.source_window_local_rank_read_bytes_max = summary.source_window_local_rank_read_bytes_max;
+  metrics.source_window_rank_read_saving_bytes = summary.source_window_rank_read_saving_bytes;
+  metrics.source_window_unique_payload_bytes = summary.source_window_unique_payload_bytes;
+  metrics.source_window_target_write_bytes = summary.source_window_target_write_bytes;
+  metrics.source_window_peer_transfer_bytes = summary.source_window_peer_transfer_bytes;
+  metrics.source_window_peer_useful_bytes = summary.source_window_peer_useful_bytes;
+  metrics.source_window_peer_waste_bytes = summary.source_window_peer_waste_bytes;
+  metrics.source_window_scatter_op_count = summary.source_window_scatter_op_count;
+  metrics.source_window_window_count = summary.source_window_window_count;
+  metrics.source_window_read_amplification_x1000 = summary.source_window_read_amplification_x1000;
+  metrics.source_window_distribution_mode = std::string(
+      runtime::ingestion::strategy::source_window_collective_distribution_mode_name(summary.distribution_mode));
+  return metrics;
+}
+
+bool source_window_strict_mode(const SourceWindowCollectiveConfig& config) {
+  return config.selection_mode == runtime::ingestion::strategy::SourceWindowCollectiveSelectionMode::kStrict;
+}
+
+SourceWindowCollectiveMappedTargetLoadResult source_window_unhandled_or_strict_failure(
+    const SourceWindowCollectiveConfig& config,
+    std::string reason,
+    absl::Status status = absl::OkStatus()) {
+  if (source_window_strict_mode(config)) {
+    return {
+        .handled = true,
+        .status = status.ok() ? absl::FailedPreconditionError(reason) : std::move(status),
+        .skip_reason = std::move(reason),
+    };
+  }
+  return {
+      .handled = false,
+      .status = std::move(status),
+      .skip_reason = std::move(reason),
+  };
+}
+
+std::vector<::tensorcast::store::replica::TargetStorageSpan> to_source_window_target_storage_spans(
+    absl::Span<const TargetStorageSpan> storage_spans) {
+  std::vector<::tensorcast::store::replica::TargetStorageSpan> projected;
+  projected.reserve(storage_spans.size());
+  for (const auto& span : storage_spans) {
+    projected.push_back(
+        ::tensorcast::store::replica::TargetStorageSpan{
+            .base_offset = span.base_offset,
+            .length = span.length,
+            .base_ptr = span.base_ptr.get(),
+        });
+  }
+  return projected;
+}
+
+absl::StatusOr<SourceWindowCollectiveGroupInput> build_source_window_collective_group_input(
+    const loading::CollectiveLoadGroupHint& group,
+    const std::vector<SourceWindowMappedParticipant>& participants,
+    const CollectiveMappedTargetLoadOptions& options) {
+  if (participants.empty()) {
+    return absl::FailedPreconditionError("source-window group has no participants");
+  }
+  std::string artifact_id = participants.front().artifact_id;
+  std::string source_index_digest = participants.front().source_index_digest;
+  std::shared_ptr<const loader::DiskArtifactContext> disk_context = participants.front().disk_context;
+  std::vector<SourceWindowCollectiveMemberInput> members;
+  members.reserve(participants.size());
+  for (const auto& participant : participants) {
+    if (participant.artifact_id != artifact_id) {
+      return absl::FailedPreconditionError("source-window artifact mismatch across participants");
+    }
+    if (participant.disk_context == nullptr) {
+      return absl::FailedPreconditionError("source-window disk context missing");
+    }
+    if (disk_context != nullptr && participant.disk_context->artifact_path() != disk_context->artifact_path()) {
+      return absl::FailedPreconditionError("source-window disk context mismatch across participants");
+    }
+    if (participant.source_index_digest != source_index_digest) {
+      return absl::FailedPreconditionError("source-window source index digest mismatch");
+    }
+    if (participant.work_plan == nullptr || participant.target_layout == nullptr) {
+      return absl::FailedPreconditionError("source-window participant missing work plan or target layout");
+    }
+    members.push_back(
+        SourceWindowCollectiveMemberInput{
+            .rank = static_cast<uint32_t>(participant.rank),
+            .device_id = participant.device_id,
+            .work_plan_ref = participant.work_plan,
+            .target_layout_ref = participant.target_layout,
+            .storage_spans = to_source_window_target_storage_spans(participant.storage_spans),
+            .prepared_realization = participant.prepared_realization,
+        });
+  }
+  return SourceWindowCollectiveGroupInput{
+      .group = group,
+      .disk_context = std::move(disk_context),
+      .source_index_digest = std::move(source_index_digest),
+      .members = std::move(members),
+      .config = source_window_collective_config_from_strategy(options.strategy_config),
+  };
+}
+
+SourceWindowCollectiveMappedTargetLoadResult source_window_group_rejected_result(
+    const SourceWindowCollectiveConfig& config,
+    std::string reason) {
+  const std::string skip_reason = absl::StrCat("source_window_group_rejected:", reason);
+  if (source_window_strict_mode(config)) {
+    return {
+        .handled = true,
+        .status = absl::FailedPreconditionError(skip_reason),
+        .skip_reason = skip_reason,
+    };
+  }
+  return {
+      .handled = false,
+      .status = absl::OkStatus(),
+      .skip_reason = skip_reason,
+  };
+}
+
+SourceWindowCollectiveMappedTargetLoadResult source_window_group_rejected_result(
+    const SourceWindowCollectiveConfig& config,
+    const SourceWindowCollectivePlan& plan,
+    std::string reason) {
+  SourceWindowCollectiveMappedTargetLoadResult result = source_window_group_rejected_result(config, std::move(reason));
+  result.metrics = source_window_metrics_from_summary(plan.summary);
+  result.plan_hash = plan.plan_hash;
+  return result;
+}
+
+SourceWindowCollectiveMappedTargetLoadResult source_window_runtime_unavailable_result(
+    const SourceWindowCollectiveConfig& config,
+    const SourceWindowCollectivePlan& plan,
+    std::string reason) {
+  SourceWindowCollectiveMappedTargetLoadResult result;
+  result.metrics = source_window_metrics_from_summary(plan.summary);
+  result.plan_hash = plan.plan_hash;
+  result.skip_reason = absl::StrCat("source_window_runtime_unavailable:", reason);
+  if (source_window_strict_mode(config)) {
+    result.handled = true;
+    result.status = absl::FailedPreconditionError(result.skip_reason);
+    return result;
+  }
+  result.handled = false;
+  result.status = absl::OkStatus();
+  return result;
+}
+
+SourceWindowCollectiveMappedTargetLoadResult source_window_runtime_failure_result(
+    const SourceWindowCollectivePlan& plan,
+    absl::Status status) {
+  SourceWindowCollectiveMappedTargetLoadResult result;
+  result.handled = true;
+  result.status = std::move(status);
+  result.metrics = source_window_metrics_from_summary(plan.summary);
+  result.plan_hash = plan.plan_hash;
+  result.skip_reason = absl::StrCat("source_window_runtime_failed:", result.status.message());
+  return result;
+}
+
+SourceWindowCollectiveMappedTargetLoadResult source_window_runtime_success_result(
+    const SourceWindowCollectivePlan& plan,
+    runtime::ingestion::strategy::CollectiveExecutionMetrics metrics) {
+  SourceWindowCollectiveMappedTargetLoadResult result;
+  result.handled = true;
+  result.status = absl::OkStatus();
+  result.metrics = std::move(metrics);
+  result.plan_hash = plan.plan_hash;
+  return result;
+}
+
+const RepresentationWorkPlan& source_window_request_work_plan(
+    const SourceWindowCollectiveMappedTargetLoadRequest& request) {
+  if (request.representation_work_plan_ref != nullptr) {
+    return *request.representation_work_plan_ref;
+  }
+  return request.representation_work_plan;
+}
+
+std::shared_ptr<const RepresentationWorkPlan> source_window_request_work_plan_ref(
+    const SourceWindowCollectiveMappedTargetLoadRequest& request) {
+  if (request.representation_work_plan_ref != nullptr) {
+    return request.representation_work_plan_ref;
+  }
+  return std::make_shared<const RepresentationWorkPlan>(request.representation_work_plan);
+}
+
+const loading::IntoTargetLayout& source_window_request_target_layout(
+    const SourceWindowCollectiveMappedTargetLoadRequest& request) {
+  if (request.target_layout_ref != nullptr) {
+    return *request.target_layout_ref;
+  }
+  return request.target_layout;
+}
+
+std::shared_ptr<const loading::IntoTargetLayout> source_window_request_target_layout_ref(
+    const SourceWindowCollectiveMappedTargetLoadRequest& request) {
+  if (request.target_layout_ref != nullptr) {
+    return request.target_layout_ref;
+  }
+  return std::make_shared<const loading::IntoTargetLayout>(request.target_layout);
+}
+
+struct SourceWindowPreparedRealizationFactStats {
+  uint64_t member_count{0};
+  uint64_t group_key_unique{0};
+  uint64_t member_key_unique{0};
+  uint64_t realization_plan_hash_unique{0};
+  uint64_t target_layout_template_hash_unique{0};
+  uint64_t target_index_hash_unique{0};
+};
+
+SourceWindowPreparedRealizationFactStats source_window_prepared_realization_fact_stats(
+    const SourceWindowCollectiveGroupInput& input) {
+  std::unordered_set<std::string> group_keys;
+  std::unordered_set<std::string> member_keys;
+  std::unordered_set<std::string> realization_plan_hashes;
+  std::unordered_set<std::string> target_layout_template_hashes;
+  std::unordered_set<std::string> target_index_hashes;
+  uint64_t member_count = 0;
+  for (const auto& member : input.members) {
+    if (!member.prepared_realization.has_value()) {
+      continue;
+    }
+    member_count++;
+    const auto& facts = *member.prepared_realization;
+    if (!facts.group_key.empty()) {
+      group_keys.insert(facts.group_key);
+    }
+    if (!facts.member_key.empty()) {
+      member_keys.insert(facts.member_key);
+    }
+    if (!facts.realization_plan_hash.empty()) {
+      realization_plan_hashes.insert(facts.realization_plan_hash);
+    }
+    if (!facts.target_layout_template_hash.empty()) {
+      target_layout_template_hashes.insert(facts.target_layout_template_hash);
+    }
+    if (!facts.target_index_hash.empty()) {
+      target_index_hashes.insert(facts.target_index_hash);
+    }
+  }
+  return SourceWindowPreparedRealizationFactStats{
+      .member_count = member_count,
+      .group_key_unique = group_keys.size(),
+      .member_key_unique = member_keys.size(),
+      .realization_plan_hash_unique = realization_plan_hashes.size(),
+      .target_layout_template_hash_unique = target_layout_template_hashes.size(),
+      .target_index_hash_unique = target_index_hashes.size(),
+  };
+}
+
+std::vector<ParsedMappedParticipant> source_window_parsed_mapped_participants(
+    const std::vector<SourceWindowMappedParticipant>& participants) {
+  std::vector<ParsedMappedParticipant> parsed;
+  parsed.reserve(participants.size());
+  for (const auto& participant : participants) {
+    // Source-window scatter only needs resolved target storage spans. Avoid
+    // copying the large per-rank RepresentationWorkPlan into the runtime
+    // participant view; the group plan has already consumed it.
+    parsed.push_back(
+        ParsedMappedParticipant{
+            .artifact_id = participant.artifact_id,
+            .rank = participant.rank,
+            .device_id = participant.device_id,
+            .disk_context = participant.disk_context,
+            .storage_spans = participant.storage_spans,
+        });
+  }
+  return parsed;
+}
+
+bool source_window_consumer_span_overlaps_chunk(
+    const SourceWindowCollectiveConsumerSpan& span,
+    uint64_t chunk_start,
+    uint64_t chunk_end) {
+  uint64_t span_begin = span.source_window_start;
+  uint64_t span_end = span.source_window_end;
+  if (span_end <= span_begin) {
+    span_begin = span.source_offset;
+    span_end = span.source_offset + span.length;
+  }
+  return span_end > chunk_start && span_begin < chunk_end;
+}
+
+bool source_window_window_uses_local_only(const SourceWindowCollectiveWindow& window) {
+  return window.distribution_mode == runtime::ingestion::strategy::SourceWindowCollectiveDistributionMode::kLocalOnly;
+}
+
+absl::StatusOr<std::vector<SourceWindowRuntimeChunk>> build_source_window_runtime_chunks(
+    const SourceWindowCollectivePlan& plan,
+    size_t world_size,
+    size_t configured_chunk_bytes,
+    size_t max_collective_chunk_bytes,
+    uint64_t* unfiltered_consumer_span_refs,
+    uint64_t* prefiltered_consumer_span_refs) {
+  std::vector<SourceWindowRuntimeChunk> runtime_chunks;
+  if (unfiltered_consumer_span_refs != nullptr) {
+    *unfiltered_consumer_span_refs = 0;
+  }
+  if (prefiltered_consumer_span_refs != nullptr) {
+    *prefiltered_consumer_span_refs = 0;
+  }
+  for (const auto& window : plan.windows) {
+    if (window.owner_rank >= world_size) {
+      return absl::InvalidArgumentError("source-window owner rank out of bounds");
+    }
+    if (window.end < window.start) {
+      return absl::InvalidArgumentError("source-window has an invalid interval");
+    }
+    const bool local_only_window = source_window_window_uses_local_only(window);
+    const size_t max_runtime_chunk_bytes = local_only_window ? configured_chunk_bytes : max_collective_chunk_bytes;
+    uint64_t chunk_start = window.start;
+    while (chunk_start < window.end) {
+      const uint64_t chunk_end =
+          std::min<uint64_t>(window.end, chunk_start + static_cast<uint64_t>(max_runtime_chunk_bytes));
+      const size_t chunk_len = static_cast<size_t>(chunk_end - chunk_start);
+      const size_t stripe_bytes = local_only_window ? chunk_len : (chunk_len + world_size - 1) / world_size;
+      const size_t gathered_bytes = local_only_window ? chunk_len : stripe_bytes * world_size;
+      if (stripe_bytes == 0 || gathered_bytes > configured_chunk_bytes ||
+          (!local_only_window && stripe_bytes > max_collective_chunk_bytes / world_size)) {
+        return absl::InternalError("source-window collective stripe sizing exceeded staging buffers");
+      }
+      std::vector<const SourceWindowCollectiveConsumerSpan*> chunk_consumer_spans;
+      chunk_consumer_spans.reserve(window.consumer_spans.size());
+      for (const auto& span : window.consumer_spans) {
+        if (source_window_consumer_span_overlaps_chunk(span, chunk_start, chunk_end)) {
+          chunk_consumer_spans.push_back(&span);
+        }
+      }
+      if (unfiltered_consumer_span_refs != nullptr) {
+        *unfiltered_consumer_span_refs += window.consumer_spans.size();
+      }
+      if (prefiltered_consumer_span_refs != nullptr) {
+        *prefiltered_consumer_span_refs += chunk_consumer_spans.size();
+      }
+      runtime_chunks.push_back(
+          SourceWindowRuntimeChunk{
+              .window = &window,
+              .consumer_spans = std::move(chunk_consumer_spans),
+              .chunk_start = chunk_start,
+              .chunk_end = chunk_end,
+              .chunk_len = chunk_len,
+              .stripe_bytes = stripe_bytes,
+              .gathered_bytes = gathered_bytes,
+          });
+      chunk_start = chunk_end;
+    }
+  }
+  return runtime_chunks;
+}
+
+absl::StatusOr<SourceWindowRoutedChunkProgram> build_source_window_routed_chunk_program(
+    const SourceWindowRuntimeChunk& chunk,
+    absl::Span<const ParsedMappedParticipant> mapped_participants,
+    size_t world_size,
+    size_t max_stripe_bytes) {
+  SourceWindowRoutedChunkProgram program;
+  program.compiled = true;
+  program.local_descriptors_by_rank.resize(world_size);
+  program.pack_descriptors_by_producer.resize(world_size);
+  std::vector<std::vector<uint64_t>> pack_offsets(world_size, std::vector<uint64_t>(world_size, 0));
+
+  auto producer_for_source_offset = [&](uint64_t source_offset) -> absl::StatusOr<size_t> {
+    if (source_offset < chunk.chunk_start || source_offset >= chunk.chunk_end) {
+      return absl::OutOfRangeError("source-window routed source offset is outside chunk");
+    }
+    const uint64_t chunk_offset = source_offset - chunk.chunk_start;
+    size_t producer = static_cast<size_t>(chunk_offset / chunk.stripe_bytes);
+    if (producer >= world_size) {
+      producer = world_size - 1;
+    }
+    return producer;
+  };
+
+  auto append_local_descriptor = [&](RoutedDescriptorTemplate descriptor) {
+    if (descriptor.row_bytes == 0 || descriptor.row_count == 0) {
+      return;
+    }
+    auto& descriptors = program.local_descriptors_by_rank[descriptor.rank];
+    if (!descriptors.empty()) {
+      auto& previous = descriptors.back();
+      if (previous.row_count == 1 && descriptor.row_count == 1 && previous.rank == descriptor.rank &&
+          previous.src_offset + previous.row_bytes == descriptor.src_offset &&
+          previous.target.rank == descriptor.target.rank &&
+          previous.target.storage_index == descriptor.target.storage_index &&
+          previous.target.logical_offset + previous.row_bytes == descriptor.target.logical_offset) {
+        previous.row_bytes += descriptor.row_bytes;
+        previous.source_stride_bytes = previous.row_bytes;
+        previous.target_stride_bytes = previous.row_bytes;
+        return;
+      }
+    }
+    descriptors.push_back(descriptor);
+  };
+
+  auto append_packed_remote_piece = [&](RoutedPackedRemotePieceTemplate piece) {
+    if (piece.length == 0) {
+      return;
+    }
+    if (!program.packed_remote_pieces.empty()) {
+      auto& previous = program.packed_remote_pieces.back();
+      if (previous.producer == piece.producer && previous.consumer == piece.consumer &&
+          previous.pack_offset + previous.length == piece.pack_offset && previous.target.rank == piece.target.rank &&
+          previous.target.storage_index == piece.target.storage_index &&
+          previous.target.logical_offset + previous.length == piece.target.logical_offset) {
+        previous.length += piece.length;
+        return;
+      }
+    }
+    program.packed_remote_pieces.push_back(piece);
+  };
+
+  auto append_direct_remote_piece = [&](RoutedDirectRemotePieceTemplate piece) {
+    if (piece.length == 0) {
+      return;
+    }
+    if (!program.direct_remote_pieces.empty()) {
+      auto& previous = program.direct_remote_pieces.back();
+      if (previous.producer == piece.producer && previous.consumer == piece.consumer &&
+          previous.src_offset + previous.length == piece.src_offset && previous.target.rank == piece.target.rank &&
+          previous.target.storage_index == piece.target.storage_index &&
+          previous.target.logical_offset + previous.length == piece.target.logical_offset) {
+        previous.length += piece.length;
+        return;
+      }
+    }
+    program.direct_remote_pieces.push_back(piece);
+  };
+
+  auto append_packed_linear_piece = [&](size_t producer,
+                                        uint32_t consumer_rank,
+                                        uint64_t src_offset,
+                                        uint32_t storage_index,
+                                        uint64_t target_logical_offset,
+                                        uint64_t length) -> absl::StatusOr<bool> {
+    if (producer == consumer_rank || length == 0 || length > std::numeric_limits<size_t>::max()) {
+      return false;
+    }
+    uint64_t& pack_offset = pack_offsets[producer][consumer_rank];
+    if (pack_offset > max_stripe_bytes || length > max_stripe_bytes - pack_offset) {
+      return false;
+    }
+    program.pack_descriptors_by_producer[producer].push_back(
+        RoutedPackDescriptorTemplate{
+            .producer = producer,
+            .consumer = consumer_rank,
+            .src_offset = src_offset,
+            .pack_offset = pack_offset,
+            .row_bytes = length,
+            .row_count = 1,
+            .source_stride_bytes = length,
+            .target_stride_bytes = length,
+        });
+    append_packed_remote_piece(
+        RoutedPackedRemotePieceTemplate{
+            .producer = producer,
+            .consumer = consumer_rank,
+            .pack_offset = pack_offset,
+            .target =
+                RoutedTargetRef{
+                    .rank = consumer_rank,
+                    .storage_index = storage_index,
+                    .logical_offset = target_logical_offset,
+                },
+            .length = length,
+        });
+    pack_offset += length;
+    program.pack_ops += 1;
+    return true;
+  };
+
+  auto append_routed_linear_piece = [&](uint32_t consumer_rank,
+                                        uint32_t storage_index,
+                                        uint64_t source_begin,
+                                        uint64_t target_logical_offset,
+                                        uint64_t length) -> absl::Status {
+    if (consumer_rank >= mapped_participants.size()) {
+      return absl::InvalidArgumentError("source-window consumer rank out of bounds");
+    }
+    auto piece_or = resolve_target_piece_geometry_by_storage_index(
+        absl::MakeConstSpan(mapped_participants[consumer_rank].storage_spans),
+        storage_index,
+        target_logical_offset,
+        length);
+    if (!piece_or.ok()) {
+      return piece_or.status();
+    }
+    const auto& piece = *piece_or;
+    program.target_storage_fast_path_pieces += 1;
+    program.target_storage_fast_path_bytes += piece.length;
+    uint64_t remaining = piece.length;
+    uint64_t source_cursor = source_begin + piece.src_offset;
+    uint64_t target_piece_offset = 0;
+    while (remaining > 0) {
+      auto producer_or = producer_for_source_offset(source_cursor);
+      if (!producer_or.ok()) {
+        return producer_or.status();
+      }
+      const size_t producer = *producer_or;
+      const uint64_t producer_stripe_begin = static_cast<uint64_t>(producer) * chunk.stripe_bytes;
+      const uint64_t producer_offset = source_cursor - chunk.chunk_start - producer_stripe_begin;
+      const uint64_t producer_available = chunk.stripe_bytes - producer_offset;
+      const uint64_t take =
+          std::min<uint64_t>(remaining, std::min<uint64_t>(producer_available, chunk.chunk_end - source_cursor));
+      if (take == 0) {
+        return absl::InternalError("source-window routed linear split made no progress");
+      }
+      if (take > std::numeric_limits<size_t>::max()) {
+        return absl::OutOfRangeError("source-window routed piece exceeds size_t limits");
+      }
+      const uint64_t target_cursor = target_logical_offset + target_piece_offset;
+      if (producer == consumer_rank) {
+        append_local_descriptor(
+            RoutedDescriptorTemplate{
+                .rank = consumer_rank,
+                .src_offset = producer_offset,
+                .target =
+                    RoutedTargetRef{
+                        .rank = consumer_rank,
+                        .storage_index = storage_index,
+                        .logical_offset = target_cursor,
+                    },
+                .row_bytes = take,
+                .row_count = 1,
+                .source_stride_bytes = take,
+                .target_stride_bytes = take,
+            });
+        program.local_pieces += 1;
+      } else {
+        constexpr uint64_t kRoutedPackSmallPieceBytes = 1ULL << 20;
+        const bool pair_already_packing = pack_offsets[producer][consumer_rank] > 0;
+        auto packed_or = (pair_already_packing || take <= kRoutedPackSmallPieceBytes)
+            ? append_packed_linear_piece(producer, consumer_rank, producer_offset, storage_index, target_cursor, take)
+            : absl::StatusOr<bool>(false);
+        if (!packed_or.ok()) {
+          return packed_or.status();
+        }
+        if (!*packed_or) {
+          append_direct_remote_piece(
+              RoutedDirectRemotePieceTemplate{
+                  .producer = producer,
+                  .consumer = consumer_rank,
+                  .src_offset = producer_offset,
+                  .target =
+                      RoutedTargetRef{
+                          .rank = consumer_rank,
+                          .storage_index = storage_index,
+                          .logical_offset = target_cursor,
+                      },
+                  .length = take,
+              });
+        }
+      }
+      remaining -= take;
+      source_cursor += take;
+      target_piece_offset += take;
+    }
+    return absl::OkStatus();
+  };
+
+  auto append_remote_packed_2d = [&](size_t producer,
+                                     uint32_t consumer_rank,
+                                     uint32_t storage_index,
+                                     uint64_t src_offset,
+                                     uint64_t source_pitch,
+                                     uint64_t dst_logical_offset,
+                                     uint64_t width,
+                                     uint64_t rows,
+                                     uint64_t target_pitch) -> absl::StatusOr<bool> {
+    if (producer == consumer_rank || rows <= 1 || width == 0 || target_pitch != width) {
+      return false;
+    }
+    if (rows > std::numeric_limits<uint64_t>::max() / width) {
+      return absl::OutOfRangeError("source-window routed packed bytes overflow");
+    }
+    const uint64_t packed_bytes = rows * width;
+    if (packed_bytes == 0 || packed_bytes > max_stripe_bytes || packed_bytes > std::numeric_limits<size_t>::max() ||
+        width > std::numeric_limits<size_t>::max() || source_pitch > std::numeric_limits<size_t>::max() ||
+        rows > std::numeric_limits<size_t>::max()) {
+      return false;
+    }
+    auto piece_or = resolve_target_piece_geometry_by_storage_index(
+        absl::MakeConstSpan(mapped_participants[consumer_rank].storage_spans),
+        storage_index,
+        dst_logical_offset,
+        packed_bytes);
+    if (!piece_or.ok()) {
+      return piece_or.status();
+    }
+    uint64_t& pack_offset = pack_offsets[producer][consumer_rank];
+    if (pack_offset > max_stripe_bytes || packed_bytes > max_stripe_bytes - pack_offset) {
+      return false;
+    }
+    program.pack_descriptors_by_producer[producer].push_back(
+        RoutedPackDescriptorTemplate{
+            .producer = producer,
+            .consumer = consumer_rank,
+            .src_offset = src_offset,
+            .pack_offset = pack_offset,
+            .row_bytes = width,
+            .row_count = rows,
+            .source_stride_bytes = source_pitch,
+            .target_stride_bytes = width,
+        });
+    append_packed_remote_piece(
+        RoutedPackedRemotePieceTemplate{
+            .producer = producer,
+            .consumer = consumer_rank,
+            .pack_offset = pack_offset,
+            .target =
+                RoutedTargetRef{
+                    .rank = consumer_rank,
+                    .storage_index = storage_index,
+                    .logical_offset = dst_logical_offset,
+                },
+            .length = packed_bytes,
+        });
+    program.target_storage_fast_path_pieces += 1;
+    program.target_storage_fast_path_bytes += packed_bytes;
+    pack_offset += packed_bytes;
+    program.pack_ops += 1;
+    program.deferred_2d_pack_ops += 1;
+    return true;
+  };
+
+  for (const auto* span_ptr : chunk.consumer_spans) {
+    const auto& span = *span_ptr;
+    if (span.rank >= mapped_participants.size()) {
+      return absl::InvalidArgumentError("source-window consumer rank out of bounds");
+    }
+    if (span.row_count > 1 && span.row_bytes > 0 && span.source_stride_bytes > 0 && span.target_stride_bytes > 0) {
+      if (span.source_stride_bytes < span.row_bytes || span.target_stride_bytes < span.row_bytes) {
+        return absl::InvalidArgumentError("source-window 2D routed span has invalid row strides");
+      }
+      uint64_t row = 0;
+      if (chunk.chunk_start > span.source_offset) {
+        row = std::min<uint64_t>(span.row_count, (chunk.chunk_start - span.source_offset) / span.source_stride_bytes);
+        while (row < span.row_count &&
+               span.source_offset + row * span.source_stride_bytes + span.row_bytes <= chunk.chunk_start) {
+          ++row;
+        }
+      }
+      while (row < span.row_count) {
+        const uint64_t row_source_begin = span.source_offset + row * span.source_stride_bytes;
+        if (row_source_begin >= chunk.chunk_end) {
+          break;
+        }
+        const uint64_t row_source_end = row_source_begin + span.row_bytes;
+        const uint64_t overlap_begin = std::max<uint64_t>(row_source_begin, chunk.chunk_start);
+        const uint64_t overlap_end = std::min<uint64_t>(row_source_end, chunk.chunk_end);
+        if (overlap_end <= overlap_begin) {
+          ++row;
+          continue;
+        }
+        const uint64_t copy_col_offset = overlap_begin - row_source_begin;
+        const uint64_t copy_width = overlap_end - overlap_begin;
+        uint64_t rows_in_run = 1;
+        while (row + rows_in_run < span.row_count) {
+          const uint64_t next_row_begin = span.source_offset + (row + rows_in_run) * span.source_stride_bytes;
+          if (next_row_begin >= chunk.chunk_end) {
+            break;
+          }
+          const uint64_t next_overlap_begin = std::max<uint64_t>(next_row_begin, chunk.chunk_start);
+          const uint64_t next_overlap_end = std::min<uint64_t>(next_row_begin + span.row_bytes, chunk.chunk_end);
+          if (next_overlap_end <= next_overlap_begin || next_overlap_begin - next_row_begin != copy_col_offset ||
+              next_overlap_end - next_overlap_begin != copy_width) {
+            break;
+          }
+          ++rows_in_run;
+        }
+
+        uint64_t run_row = 0;
+        while (run_row < rows_in_run) {
+          const uint64_t first_source =
+              span.source_offset + (row + run_row) * span.source_stride_bytes + copy_col_offset;
+          auto producer_or = producer_for_source_offset(first_source);
+          if (!producer_or.ok()) {
+            return producer_or.status();
+          }
+          const size_t producer = *producer_or;
+          const uint64_t producer_stripe_begin = static_cast<uint64_t>(producer) * chunk.stripe_bytes;
+          const uint64_t producer_offset = first_source - chunk.chunk_start - producer_stripe_begin;
+          if (producer_offset + copy_width > chunk.stripe_bytes) {
+            const uint64_t dst_logical_offset =
+                span.target_offset + (row + run_row) * span.target_stride_bytes + copy_col_offset;
+            TC_RETURN_IF_ERROR(append_routed_linear_piece(
+                span.rank, span.storage_index, first_source, dst_logical_offset, copy_width));
+            run_row += 1;
+            continue;
+          }
+
+          uint64_t grouped_rows = 1;
+          while (run_row + grouped_rows < rows_in_run) {
+            const uint64_t next_source =
+                span.source_offset + (row + run_row + grouped_rows) * span.source_stride_bytes + copy_col_offset;
+            auto next_producer_or = producer_for_source_offset(next_source);
+            if (!next_producer_or.ok() || *next_producer_or != producer) {
+              break;
+            }
+            const uint64_t next_producer_offset = next_source - chunk.chunk_start - producer_stripe_begin;
+            if (next_producer_offset + copy_width > chunk.stripe_bytes) {
+              break;
+            }
+            ++grouped_rows;
+          }
+
+          const uint64_t dst_logical_offset =
+              span.target_offset + (row + run_row) * span.target_stride_bytes + copy_col_offset;
+          bool copied_as_group = false;
+          if (producer == span.rank && grouped_rows > 1) {
+            const uint64_t target_envelope_bytes = (grouped_rows - 1) * span.target_stride_bytes + copy_width;
+            auto piece_or = resolve_target_piece_geometry_by_storage_index(
+                absl::MakeConstSpan(mapped_participants[span.rank].storage_spans),
+                span.storage_index,
+                dst_logical_offset,
+                target_envelope_bytes);
+            if (!piece_or.ok()) {
+              return piece_or.status();
+            }
+            if (copy_width <= std::numeric_limits<size_t>::max() &&
+                span.source_stride_bytes <= std::numeric_limits<size_t>::max() &&
+                span.target_stride_bytes <= std::numeric_limits<size_t>::max() &&
+                grouped_rows <= std::numeric_limits<size_t>::max()) {
+              append_local_descriptor(
+                  RoutedDescriptorTemplate{
+                      .rank = span.rank,
+                      .src_offset = producer_offset,
+                      .target =
+                          RoutedTargetRef{
+                              .rank = span.rank,
+                              .storage_index = span.storage_index,
+                              .logical_offset = dst_logical_offset,
+                          },
+                      .row_bytes = copy_width,
+                      .row_count = grouped_rows,
+                      .source_stride_bytes = span.source_stride_bytes,
+                      .target_stride_bytes = span.target_stride_bytes,
+                  });
+              program.target_storage_fast_path_pieces += 1;
+              program.target_storage_fast_path_bytes += copy_width * grouped_rows;
+              program.local_2d_pieces += 1;
+              program.local_pieces += 1;
+              copied_as_group = true;
+            }
+          } else if (producer != span.rank && grouped_rows > 1) {
+            auto packed_or = append_remote_packed_2d(
+                producer,
+                span.rank,
+                span.storage_index,
+                producer_offset,
+                span.source_stride_bytes,
+                dst_logical_offset,
+                copy_width,
+                grouped_rows,
+                span.target_stride_bytes);
+            if (!packed_or.ok()) {
+              return packed_or.status();
+            }
+            copied_as_group = *packed_or;
+          }
+          if (!copied_as_group) {
+            for (uint64_t offset_row = 0; offset_row < grouped_rows; ++offset_row) {
+              const uint64_t row_source =
+                  span.source_offset + (row + run_row + offset_row) * span.source_stride_bytes + copy_col_offset;
+              const uint64_t row_target =
+                  span.target_offset + (row + run_row + offset_row) * span.target_stride_bytes + copy_col_offset;
+              TC_RETURN_IF_ERROR(
+                  append_routed_linear_piece(span.rank, span.storage_index, row_source, row_target, copy_width));
+            }
+          }
+          run_row += grouped_rows;
+        }
+        row += rows_in_run;
+      }
+    } else {
+      const uint64_t span_end = span.source_offset + span.length;
+      const uint64_t overlap_begin = std::max<uint64_t>(span.source_offset, chunk.chunk_start);
+      const uint64_t overlap_end = std::min<uint64_t>(span_end, chunk.chunk_end);
+      if (overlap_end <= overlap_begin) {
+        continue;
+      }
+      const uint64_t dst_logical_offset = span.target_offset + (overlap_begin - span.source_offset);
+      TC_RETURN_IF_ERROR(append_routed_linear_piece(
+          span.rank, span.storage_index, overlap_begin, dst_logical_offset, overlap_end - overlap_begin));
+    }
+  }
+
+  for (size_t producer = 0; producer < pack_offsets.size(); ++producer) {
+    for (size_t consumer = 0; consumer < pack_offsets[producer].size(); ++consumer) {
+      if (producer != consumer && pack_offsets[producer][consumer] > 0) {
+        program.packed_transfers.push_back(
+            RoutedPackedTransferTemplate{
+                .producer = producer,
+                .consumer = consumer,
+                .bytes = pack_offsets[producer][consumer],
+            });
+      }
+    }
+  }
+  program.packed_remote_piece_count = program.packed_remote_pieces.size();
+  program.direct_remote_piece_count = program.direct_remote_pieces.size();
+  return program;
+}
+
+absl::StatusOr<std::vector<SourceWindowRoutedChunkProgram>> build_source_window_routed_programs(
+    absl::Span<const SourceWindowRuntimeChunk> runtime_chunks,
+    absl::Span<const ParsedMappedParticipant> mapped_participants,
+    size_t world_size,
+    size_t max_stripe_bytes,
+    uint32_t configured_build_threads,
+    double* build_sec) {
+  const auto build_start = std::chrono::steady_clock::now();
+  std::vector<SourceWindowRoutedChunkProgram> programs(runtime_chunks.size());
+  auto build_one = [&](size_t idx) -> absl::Status {
+    const auto& runtime_chunk = runtime_chunks[idx];
+    if (runtime_chunk.window == nullptr ||
+        runtime_chunk.window->distribution_mode !=
+            runtime::ingestion::strategy::SourceWindowCollectiveDistributionMode::kConsumerRouted) {
+      return absl::OkStatus();
+    }
+    auto program_or =
+        build_source_window_routed_chunk_program(runtime_chunk, mapped_participants, world_size, max_stripe_bytes);
+    if (!program_or.ok()) {
+      return program_or.status();
+    }
+    programs[idx] = std::move(*program_or);
+    return absl::OkStatus();
+  };
+
+  const size_t worker_count =
+      compiled_routed_program_build_thread_count(runtime_chunks.size(), configured_build_threads);
+  if (worker_count <= 1) {
+    for (size_t idx = 0; idx < runtime_chunks.size(); ++idx) {
+      TC_RETURN_IF_ERROR(build_one(idx));
+    }
+  } else {
+    std::atomic<size_t> next_idx{0};
+    std::atomic<bool> failed{false};
+    std::mutex status_mu;
+    absl::Status first_status = absl::OkStatus();
+    auto worker = [&]() {
+      while (!failed.load(std::memory_order_acquire)) {
+        const size_t idx = next_idx.fetch_add(1, std::memory_order_relaxed);
+        if (idx >= runtime_chunks.size()) {
+          break;
+        }
+        absl::Status status = build_one(idx);
+        if (!status.ok()) {
+          {
+            std::lock_guard<std::mutex> lock(status_mu);
+            if (first_status.ok()) {
+              first_status = std::move(status);
+            }
+          }
+          failed.store(true, std::memory_order_release);
+          break;
+        }
+      }
+    };
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+    for (size_t idx = 0; idx < worker_count; ++idx) {
+      workers.emplace_back(worker);
+    }
+    for (auto& thread : workers) {
+      thread.join();
+    }
+    if (!first_status.ok()) {
+      return first_status;
+    }
+  }
+  if (build_sec != nullptr) {
+    *build_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - build_start).count();
+  }
+  return programs;
+}
+
+absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute_source_window_collective_mapped(
+    const SourceWindowCollectivePlan& plan,
+    const std::vector<SourceWindowMappedParticipant>& participants,
+    const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
+    std::chrono::milliseconds pinned_timeout,
+    const CollectiveMappedTargetLoadOptions& options) {
+  const auto total_start = std::chrono::steady_clock::now();
+  if (participants.empty()) {
+    return absl::InvalidArgumentError("source-window collective participants are empty");
+  }
+  if (pinned_pool == nullptr) {
+    return absl::FailedPreconditionError("pinned_pool_missing");
+  }
+  const bool use_full_window_all_gather = plan.distribution_mode ==
+      runtime::ingestion::strategy::SourceWindowCollectiveDistributionMode::kFullWindowAllGather;
+  const bool use_consumer_routed =
+      plan.distribution_mode == runtime::ingestion::strategy::SourceWindowCollectiveDistributionMode::kConsumerRouted;
+  const bool use_local_only =
+      plan.distribution_mode == runtime::ingestion::strategy::SourceWindowCollectiveDistributionMode::kLocalOnly;
+  const bool use_hybrid_window =
+      plan.distribution_mode == runtime::ingestion::strategy::SourceWindowCollectiveDistributionMode::kHybridWindow;
+  if (!use_full_window_all_gather && !use_consumer_routed && !use_local_only && !use_hybrid_window) {
+    return absl::UnimplementedError(
+        "source-window runtime only supports full_window_all_gather, consumer_routed, hybrid_window, and local_only");
+  }
+  if (participants.front().disk_context == nullptr ||
+      participants.front().disk_context->safetensors_segments().empty()) {
+    return absl::InvalidArgumentError("source-window runtime requires safetensors segments");
+  }
+  if (pinned_pool->slice_bytes() == 0) {
+    return absl::InvalidArgumentError("source-window runtime requires a non-empty pinned slice");
+  }
+  const size_t configured_chunk_bytes = static_cast<size_t>(std::min<uint64_t>(
+      options.chunk_bytes == 0 ? pinned_pool->slice_bytes() : options.chunk_bytes, pinned_pool->slice_bytes()));
+  if (configured_chunk_bytes == 0) {
+    return absl::InvalidArgumentError("source-window runtime chunk bytes must be non-zero");
+  }
+
+  std::vector<int> device_ids;
+  device_ids.reserve(participants.size());
+  for (const auto& participant : participants) {
+    if (participant.rank < 0 || static_cast<size_t>(participant.rank) >= participants.size()) {
+      return absl::InvalidArgumentError("source-window participant rank out of bounds");
+    }
+    device_ids.push_back(participant.device_id);
+  }
+  const auto clique_start = std::chrono::steady_clock::now();
+  bool clique_cache_hit = false;
+  auto clique_or = get_or_create_cached_clique(device_ids, &clique_cache_hit);
+  if (!clique_or.ok()) {
+    return clique_or.status();
+  }
+  auto clique = *clique_or;
+  const auto clique_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - clique_start).count();
+  absl::MutexLock clique_use_lock(&clique->use_mutex());
+
+  PinnedBorrow host_pool;
+  host_pool.pool = pinned_pool;
+  const auto pinned_alloc_start = std::chrono::steady_clock::now();
+  const std::string request_context =
+      absl::StrCat("source_window_collective artifact_id=", participants.front().artifact_id);
+  const size_t requested_pipeline_slots = std::max<size_t>(1, static_cast<size_t>(options.streaming_buffer_chunks));
+  // Source-window keeps the GPU side ordered on the clique streams, but host
+  // reads can safely run several chunks ahead as long as each chunk owns a
+  // distinct pinned slot until its H2D copy has been issued and synchronized by
+  // the downstream collective/scatter step.
+  constexpr size_t kMaxSourceWindowPipelineSlots = 8;
+  const size_t max_pipeline_slots = std::min<size_t>(requested_pipeline_slots, kMaxSourceWindowPipelineSlots);
+  size_t active_pipeline_slots = 1;
+  bool parallel_host_buffers = false;
+  for (size_t slot_count = max_pipeline_slots; slot_count >= 1; --slot_count) {
+    const size_t requested_parallel_host_bytes = configured_chunk_bytes * participants.size() * slot_count;
+    if (pinned_pool->allocate(requested_parallel_host_bytes, host_pool.buffers, pinned_timeout, request_context) == 0 &&
+        host_pool.buffers.size() >= participants.size() * slot_count) {
+      parallel_host_buffers = true;
+      active_pipeline_slots = slot_count;
+      break;
+    }
+    if (!host_pool.buffers.empty()) {
+      (void)pinned_pool->deallocate(host_pool.buffers);
+      host_pool.buffers.clear();
+    }
+    if (slot_count == 1) {
+      break;
+    }
+  }
+  if (!parallel_host_buffers) {
+    if (!host_pool.buffers.empty()) {
+      (void)pinned_pool->deallocate(host_pool.buffers);
+      host_pool.buffers.clear();
+    }
+    parallel_host_buffers = false;
+    if (pinned_pool->allocate(configured_chunk_bytes, host_pool.buffers, pinned_timeout, request_context) != 0 ||
+        host_pool.buffers.empty()) {
+      return absl::ResourceExhaustedError("failed to allocate pinned buffer for source-window collective load");
+    }
+  }
+  const auto pinned_alloc_sec =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - pinned_alloc_start).count();
+
+  const size_t world_size = participants.size();
+  const size_t max_collective_chunk_bytes = (configured_chunk_bytes / world_size) * world_size;
+  if (max_collective_chunk_bytes == 0) {
+    return absl::InvalidArgumentError("source-window runtime chunk bytes must be at least world_size");
+  }
+  const size_t max_stripe_bytes = max_collective_chunk_bytes / world_size;
+  const bool has_consumer_routed_windows =
+      std::any_of(plan.windows.begin(), plan.windows.end(), [](const SourceWindowCollectiveWindow& window) {
+        return window.distribution_mode ==
+            runtime::ingestion::strategy::SourceWindowCollectiveDistributionMode::kConsumerRouted;
+      });
+
+  const auto stage_alloc_start = std::chrono::steady_clock::now();
+  std::vector<std::unique_ptr<common::memory::GpuDeviceMemory>> rank_send_stages;
+  std::vector<std::unique_ptr<common::memory::GpuDeviceMemory>> rank_stages;
+  std::vector<std::unique_ptr<common::memory::GpuDeviceMemory>> rank_batched_scatter_descriptors;
+
+  struct BatchedScatterHostDescriptorSlot {
+    SourceWindowBatchedScatterDescriptor* ptr{nullptr};
+    cudaEvent_t ready_event{nullptr};
+    int device_id{-1};
+    bool in_flight{false};
+  };
+
+  std::vector<std::vector<BatchedScatterHostDescriptorSlot>> rank_batched_scatter_host_descriptor_slots;
+  std::vector<size_t> rank_next_batched_scatter_host_descriptor_slot;
+  std::vector<std::vector<std::unique_ptr<common::memory::GpuDeviceMemory>>> route_pack_stages;
+  std::vector<std::vector<std::unique_ptr<common::memory::GpuDeviceMemory>>> route_recv_stages;
+  rank_send_stages.reserve(participants.size());
+  rank_stages.reserve(participants.size());
+  rank_batched_scatter_descriptors.resize(participants.size());
+  rank_batched_scatter_host_descriptor_slots.resize(participants.size());
+  rank_next_batched_scatter_host_descriptor_slot.resize(participants.size(), 0);
+  auto cleanup_batched_scatter_host_descriptors = absl::Cleanup([&]() {
+    for (auto& slots : rank_batched_scatter_host_descriptor_slots) {
+      for (auto& slot : slots) {
+        if (slot.ready_event != nullptr && slot.in_flight) {
+          const absl::Status wait_status = tensorcast::cuda::event_synchronize(slot.ready_event);
+          if (!wait_status.ok()) {
+            LOG(WARNING) << "source-window batched scatter host descriptor slot synchronize failed: " << wait_status;
+          }
+          slot.in_flight = false;
+        }
+        if (slot.ready_event != nullptr) {
+          if (slot.device_id >= 0) {
+            const absl::Status set_device_status = tensorcast::cuda::set_device(slot.device_id);
+            if (!set_device_status.ok()) {
+              LOG(WARNING) << "source-window batched scatter host descriptor slot set_device failed: "
+                           << set_device_status;
+            }
+          }
+          const absl::Status destroy_status = tensorcast::cuda::event_destroy(slot.ready_event);
+          if (!destroy_status.ok()) {
+            LOG(WARNING) << "source-window batched scatter host descriptor event destroy failed: " << destroy_status;
+          }
+          slot.ready_event = nullptr;
+        }
+        if (slot.ptr != nullptr) {
+          const absl::Status free_status = tensorcast::cuda::free_host(slot.ptr);
+          if (!free_status.ok()) {
+            LOG(WARNING) << "source-window batched scatter host descriptor buffer free failed: " << free_status;
+          }
+          slot.ptr = nullptr;
+        }
+      }
+    }
+  });
+  for (const auto& participant : participants) {
+    auto send_stage = std::make_unique<common::memory::GpuDeviceMemory>();
+    TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(participant.device_id));
+    TC_RETURN_IF_ERROR(send_stage->allocate(max_stripe_bytes, participant.device_id));
+    rank_send_stages.push_back(std::move(send_stage));
+    if (use_full_window_all_gather || use_local_only || use_hybrid_window) {
+      auto stage = std::make_unique<common::memory::GpuDeviceMemory>();
+      TC_RETURN_IF_ERROR(stage->allocate(configured_chunk_bytes, participant.device_id));
+      rank_stages.push_back(std::move(stage));
+    }
+  }
+  constexpr size_t kSourceWindowBatchedScatterDescriptorCapacity = 4096;
+  constexpr size_t kSourceWindowBatchedScatterMinDescriptors = 2;
+  const size_t batched_scatter_descriptor_buffer_bytes =
+      kSourceWindowBatchedScatterDescriptorCapacity * source_window_batched_scatter_descriptor_bytes();
+  const bool scatter_cuda_graph_enabled =
+      options.strategy_config.enable_source_window_scatter_cuda_graph && !tensorcast::cuda::is_fake();
+  const bool compiled_routed_program_enabled = options.strategy_config.enable_source_window_compiled_routed_program;
+  const bool batched_scatter_kernel_requested = options.strategy_config.enable_source_window_batched_scatter_kernel;
+  const bool batched_scatter_kernel_enabled = batched_scatter_kernel_requested;
+  bool batched_scatter_descriptor_buffers_ready = batched_scatter_kernel_enabled && !participants.empty();
+  constexpr size_t kSourceWindowBatchedScatterHostDescriptorSlots = 16;
+  if (batched_scatter_descriptor_buffers_ready) {
+    for (const auto& participant : participants) {
+      const size_t rank = static_cast<size_t>(participant.rank);
+      auto descriptors = std::make_unique<common::memory::GpuDeviceMemory>();
+      TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(participant.device_id));
+      const absl::Status allocate_status =
+          descriptors->allocate(batched_scatter_descriptor_buffer_bytes, participant.device_id);
+      if (!allocate_status.ok()) {
+        LOG(WARNING) << "source-window batched scatter descriptor buffer allocation failed on device "
+                     << participant.device_id << "; falling back to cudaMemcpy scatter path: " << allocate_status;
+        batched_scatter_descriptor_buffers_ready = false;
+        for (auto& rank_descriptors : rank_batched_scatter_descriptors) {
+          rank_descriptors.reset();
+        }
+        break;
+      }
+      rank_batched_scatter_descriptors[rank] = std::move(descriptors);
+      auto& slots = rank_batched_scatter_host_descriptor_slots[rank];
+      slots.resize(kSourceWindowBatchedScatterHostDescriptorSlots);
+      for (auto& slot : slots) {
+        slot.device_id = participant.device_id;
+        void* host_descriptors = nullptr;
+        const absl::Status host_allocate_status =
+            tensorcast::cuda::malloc_host(&host_descriptors, batched_scatter_descriptor_buffer_bytes);
+        if (!host_allocate_status.ok()) {
+          LOG(WARNING) << "source-window batched scatter pinned host descriptor buffer allocation failed; "
+                       << "falling back to cudaMemcpy scatter path: " << host_allocate_status;
+          batched_scatter_descriptor_buffers_ready = false;
+          for (auto& rank_descriptors : rank_batched_scatter_descriptors) {
+            rank_descriptors.reset();
+          }
+          break;
+        }
+        slot.ptr = static_cast<SourceWindowBatchedScatterDescriptor*>(host_descriptors);
+        const absl::Status event_status =
+            tensorcast::cuda::event_create_with_flags(&slot.ready_event, cudaEventDisableTiming);
+        if (!event_status.ok()) {
+          LOG(WARNING) << "source-window batched scatter host descriptor event allocation failed; "
+                       << "falling back to cudaMemcpy scatter path: " << event_status;
+          batched_scatter_descriptor_buffers_ready = false;
+          for (auto& rank_descriptors : rank_batched_scatter_descriptors) {
+            rank_descriptors.reset();
+          }
+          break;
+        }
+      }
+      if (!batched_scatter_descriptor_buffers_ready) {
+        break;
+      }
+    }
+  }
+  if (has_consumer_routed_windows) {
+    route_pack_stages.resize(participants.size());
+    route_recv_stages.resize(participants.size());
+    for (size_t producer = 0; producer < participants.size(); ++producer) {
+      route_pack_stages[producer].resize(participants.size());
+      route_recv_stages[producer].resize(participants.size());
+      TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(participants[producer].device_id));
+      for (size_t consumer = 0; consumer < participants.size(); ++consumer) {
+        if (producer == consumer) {
+          continue;
+        }
+        auto pack_stage = std::make_unique<common::memory::GpuDeviceMemory>();
+        TC_RETURN_IF_ERROR(pack_stage->allocate(max_stripe_bytes, participants[producer].device_id));
+        route_pack_stages[producer][consumer] = std::move(pack_stage);
+        auto recv_stage = std::make_unique<common::memory::GpuDeviceMemory>();
+        TC_RETURN_IF_ERROR(recv_stage->allocate(max_stripe_bytes, participants[consumer].device_id));
+        route_recv_stages[producer][consumer] = std::move(recv_stage);
+      }
+    }
+  }
+  const auto stage_alloc_sec =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - stage_alloc_start).count();
+
+  std::vector<std::unique_ptr<loader::SeekableSource>> rank_sources;
+  rank_sources.reserve(participants.size());
+  const auto source_segments = absl::MakeSpan(participants.front().disk_context->safetensors_segments());
+  StrategyConfig source_strategy;
+  TC_ASSIGN_OR_RETURN(
+      source_strategy,
+      resolve_local_mapped_safetensors_auto_strategy(source_segments, options.strategy_config, /*log_decision=*/true));
+  for (size_t rank = 0; rank < participants.size(); ++rank) {
+    auto source_or = make_local_mapped_safetensors_source(source_segments, source_strategy);
+    if (!source_or.ok()) {
+      return source_or.status();
+    }
+    rank_sources.push_back(std::move(*source_or));
+  }
+  const std::vector<ParsedMappedParticipant> mapped_participants =
+      source_window_parsed_mapped_participants(participants);
+
+  uint64_t cuda_device_switches = 0;
+  int current_cuda_device = -1;
+  auto set_device_cached = [&](int device_id) -> absl::Status {
+    if (current_cuda_device == device_id) {
+      return absl::OkStatus();
+    }
+    TC_RETURN_IF_ERROR(tensorcast::cuda::set_device(device_id));
+    current_cuda_device = device_id;
+    cuda_device_switches += 1;
+    return absl::OkStatus();
+  };
+  auto synchronize_clique_all = [&]() -> absl::Status {
+    absl::Status status = clique->synchronize_all();
+    // NcclClique::synchronize_all() switches devices internally, so the local
+    // cached device state is no longer authoritative afterwards.
+    current_cuda_device = -1;
+    return status;
+  };
+
+  double read_sec = 0.0;
+  double read_job_sec = 0.0;
+  double h2d_sec = 0.0;
+  double collective_sec = 0.0;
+  double collective_sync_sec = 0.0;
+  double scatter_issue_sec = 0.0;
+  double scatter_sync_sec = 0.0;
+  uint64_t bytes_read = 0;
+  uint64_t actual_peer_transfer_bytes = 0;
+  uint64_t actual_scatter_ops = 0;
+  uint64_t routed_pack_ops = 0;
+  uint64_t routed_deferred_2d_pack_ops = 0;
+  uint64_t routed_packed_pairs = 0;
+  uint64_t routed_local_2d_pieces = 0;
+  uint64_t routed_local_pieces = 0;
+  uint64_t routed_remote_pieces = 0;
+  uint64_t target_storage_fast_path_pieces = 0;
+  uint64_t target_storage_fast_path_bytes = 0;
+  uint64_t batched_scatter_kernel_launches = 0;
+  uint64_t batched_scatter_kernel_descriptors = 0;
+  uint64_t batched_scatter_fallback_launches = 0;
+  uint64_t batched_scatter_fallback_descriptors = 0;
+  uint64_t batched_scatter_capacity_fallback_chunks = 0;
+  uint64_t batched_routed_pack_kernel_launches = 0;
+  uint64_t batched_routed_pack_kernel_descriptors = 0;
+  uint64_t batched_routed_pack_fallback_launches = 0;
+  uint64_t batched_routed_pack_fallback_descriptors = 0;
+  double batched_scatter_descriptor_build_sec = 0.0;
+  double batched_scatter_descriptor_host_copy_sec = 0.0;
+  double batched_scatter_descriptor_slot_wait_sec = 0.0;
+  double batched_scatter_kernel_submit_sec = 0.0;
+  double batched_scatter_fallback_submit_sec = 0.0;
+  double routed_span_plan_sec = 0.0;
+  double routed_pack_descriptor_build_sec = 0.0;
+  double routed_pack_issue_sec = 0.0;
+  double routed_local_descriptor_build_sec = 0.0;
+  double routed_local_issue_sec = 0.0;
+  double routed_remote_descriptor_build_sec = 0.0;
+  double routed_remote_scatter_issue_sec = 0.0;
+  double routed_compiled_program_build_sec = 0.0;
+  size_t routed_compiled_program_build_threads = 0;
+  double routed_compiled_program_key_sec = 0.0;
+  double routed_compiled_program_lookup_sec = 0.0;
+  double routed_compiled_program_wait_sec = 0.0;
+  double routed_compiled_program_cache_store_sec = 0.0;
+  bool routed_compiled_program_cache_eligible = false;
+  bool routed_compiled_program_cache_hit = false;
+  bool routed_compiled_program_cache_waited = false;
+  bool routed_compiled_program_cache_size_mismatch = false;
+  uint64_t routed_compiled_program_chunks = 0;
+  uint64_t routed_compiled_program_local_descriptors = 0;
+  uint64_t routed_compiled_program_pack_descriptors = 0;
+  uint64_t routed_compiled_program_packed_remote_pieces = 0;
+  uint64_t routed_compiled_program_direct_remote_pieces = 0;
+  uint64_t scatter_cuda_graph_launches = 0;
+  uint64_t scatter_cuda_graph_descriptors = 0;
+  uint64_t scatter_cuda_graph_nodes = 0;
+  uint64_t scatter_cuda_graph_fallback_chunks = 0;
+  double scatter_cuda_graph_build_sec = 0.0;
+  std::atomic<uint64_t> direct_pinned_read_attempts{0};
+  std::atomic<uint64_t> direct_pinned_read_successes{0};
+  std::atomic<uint64_t> direct_pinned_read_fallbacks{0};
+  std::atomic<uint64_t> direct_pinned_read_success_bytes{0};
+  std::atomic<uint64_t> direct_pinned_read_fallback_bytes{0};
+  std::atomic<uint64_t> direct_pinned_fallback_unaligned_host{0};
+  std::atomic<uint64_t> direct_pinned_fallback_outside_segment{0};
+  std::atomic<uint64_t> direct_pinned_fallback_cross_segment{0};
+  std::atomic<uint64_t> direct_pinned_fallback_file_edge{0};
+  std::atomic<uint64_t> direct_pinned_fallback_capacity{0};
+  size_t chunk_count = 0;
+
+  auto chunk_uses_local_only = [&](const SourceWindowRuntimeChunk& chunk) {
+    return chunk.window != nullptr && source_window_window_uses_local_only(*chunk.window);
+  };
+  auto chunk_uses_consumer_routed = [&](const SourceWindowRuntimeChunk& chunk) {
+    return chunk.window != nullptr &&
+        chunk.window->distribution_mode ==
+        runtime::ingestion::strategy::SourceWindowCollectiveDistributionMode::kConsumerRouted;
+  };
+
+  std::vector<SourceWindowRuntimeChunk> runtime_chunks;
+  uint64_t runtime_chunk_unfiltered_consumer_span_refs = 0;
+  uint64_t runtime_chunk_prefiltered_consumer_span_refs = 0;
+  TC_ASSIGN_OR_RETURN(
+      runtime_chunks,
+      build_source_window_runtime_chunks(
+          plan,
+          world_size,
+          configured_chunk_bytes,
+          max_collective_chunk_bytes,
+          &runtime_chunk_unfiltered_consumer_span_refs,
+          &runtime_chunk_prefiltered_consumer_span_refs));
+
+  auto record_routed_program_stats = [&](const SourceWindowRoutedChunkProgram& program) {
+    if (!program.compiled) {
+      return;
+    }
+    routed_compiled_program_chunks += 1;
+    for (const auto& descriptors : program.local_descriptors_by_rank) {
+      routed_compiled_program_local_descriptors += descriptors.size();
+    }
+    for (const auto& descriptors : program.pack_descriptors_by_producer) {
+      routed_compiled_program_pack_descriptors += descriptors.size();
+    }
+    routed_compiled_program_packed_remote_pieces += program.packed_remote_pieces.size();
+    routed_compiled_program_direct_remote_pieces += program.direct_remote_pieces.size();
+  };
+
+  if (compiled_routed_program_enabled && has_consumer_routed_windows) {
+    std::optional<std::string> routed_program_cache_key;
+    {
+      const auto key_start = std::chrono::steady_clock::now();
+      routed_program_cache_key = source_window_routed_program_cache_key(
+          participants.front().artifact_id,
+          plan,
+          absl::MakeConstSpan(participants),
+          configured_chunk_bytes,
+          max_collective_chunk_bytes,
+          max_stripe_bytes);
+      routed_compiled_program_key_sec =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - key_start).count();
+    }
+    routed_compiled_program_cache_eligible = routed_program_cache_key.has_value();
+
+    std::vector<SourceWindowRoutedChunkProgram> cached_programs;
+    bool routed_program_cache_build_reserved = false;
+    bool routed_program_cache_build_completed = false;
+    if (routed_compiled_program_cache_eligible) {
+      const auto lookup_start = std::chrono::steady_clock::now();
+      auto acquire_result =
+          acquire_source_window_routed_program_cache(*routed_program_cache_key, runtime_chunks.size());
+      routed_compiled_program_lookup_sec =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - lookup_start).count();
+      routed_compiled_program_cache_hit = acquire_result.cache_hit;
+      routed_compiled_program_cache_waited = acquire_result.waited;
+      routed_compiled_program_wait_sec = acquire_result.wait_sec;
+      routed_compiled_program_cache_size_mismatch = acquire_result.size_mismatch;
+      routed_program_cache_build_reserved = acquire_result.reserved_build;
+      cached_programs = std::move(acquire_result.programs);
+    }
+    auto cache_build_cleanup = absl::Cleanup([&]() {
+      if (routed_compiled_program_cache_eligible && routed_program_cache_build_reserved &&
+          !routed_program_cache_build_completed) {
+        abandon_source_window_routed_program_cache_build(*routed_program_cache_key);
+      }
+    });
+
+    if (!routed_compiled_program_cache_hit) {
+      routed_compiled_program_build_threads = compiled_routed_program_build_thread_count(
+          runtime_chunks.size(), options.strategy_config.source_window_compiled_program_build_threads);
+      auto programs_or = build_source_window_routed_programs(
+          absl::MakeConstSpan(runtime_chunks),
+          absl::MakeConstSpan(mapped_participants),
+          world_size,
+          max_stripe_bytes,
+          options.strategy_config.source_window_compiled_program_build_threads,
+          &routed_compiled_program_build_sec);
+      if (!programs_or.ok()) {
+        return programs_or.status();
+      }
+      std::vector<SourceWindowRoutedChunkProgram> programs = std::move(*programs_or);
+      if (routed_compiled_program_cache_eligible) {
+        const auto store_start = std::chrono::steady_clock::now();
+        if (routed_program_cache_build_reserved) {
+          complete_source_window_routed_program_cache_build(*routed_program_cache_key, programs);
+          routed_program_cache_build_completed = true;
+        } else {
+          store_source_window_routed_program_cache(*routed_program_cache_key, programs);
+        }
+        routed_compiled_program_cache_store_sec =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - store_start).count();
+      }
+      for (size_t idx = 0; idx < runtime_chunks.size(); ++idx) {
+        runtime_chunks[idx].routed_program = std::move(programs[idx]);
+      }
+    } else {
+      for (size_t idx = 0; idx < runtime_chunks.size(); ++idx) {
+        runtime_chunks[idx].routed_program = std::move(cached_programs[idx]);
+      }
+    }
+
+    for (const auto& runtime_chunk : runtime_chunks) {
+      record_routed_program_stats(runtime_chunk.routed_program);
+    }
+  }
+
+  struct SourceWindowReadAheadResult {
+    std::vector<absl::Status> statuses;
+    double read_sec{0.0};
+    double read_job_sec{0.0};
+  };
+
+  auto host_buffer_for_slot = [&](size_t slot, size_t rank) -> char* {
+    return host_pool.buffers[slot * world_size + rank];
+  };
+  std::vector<size_t> host_h2d_offsets(active_pipeline_slots * world_size, 0);
+  auto host_h2d_offset_for_slot = [&](size_t slot, size_t rank) -> size_t& {
+    return host_h2d_offsets[slot * world_size + rank];
+  };
+
+  struct SourceWindowReaderSlotState {
+    std::mutex mu;
+    std::condition_variable cv;
+    const SourceWindowRuntimeChunk* chunk{nullptr};
+    size_t chunk_index{0};
+    uint64_t generation{0};
+    size_t remaining{0};
+    bool stop{false};
+    bool done{true};
+    std::vector<absl::Status> statuses;
+    std::chrono::steady_clock::time_point launch_time;
+    double job_sec{0.0};
+  };
+
+  std::vector<std::unique_ptr<SourceWindowReaderSlotState>> reader_slots;
+  reader_slots.reserve(active_pipeline_slots);
+  for (size_t slot = 0; slot < active_pipeline_slots; ++slot) {
+    auto state = std::make_unique<SourceWindowReaderSlotState>();
+    state->statuses.resize(world_size);
+    reader_slots.push_back(std::move(state));
+  }
+  std::vector<std::thread> reader_threads;
+  reader_threads.reserve(active_pipeline_slots * world_size);
+  for (size_t slot = 0; slot < active_pipeline_slots; ++slot) {
+    for (size_t rank = 0; rank < world_size; ++rank) {
+      reader_threads.emplace_back([&, slot, rank]() {
+        auto& slot_state = *reader_slots[slot];
+        uint64_t seen_generation = 0;
+        while (true) {
+          const SourceWindowRuntimeChunk* chunk = nullptr;
+          {
+            std::unique_lock<std::mutex> lock(slot_state.mu);
+            slot_state.cv.wait(lock, [&]() { return slot_state.stop || slot_state.generation != seen_generation; });
+            if (slot_state.stop) {
+              return;
+            }
+            seen_generation = slot_state.generation;
+            chunk = slot_state.chunk;
+          }
+
+          absl::Status status = absl::OkStatus();
+          size_t h2d_offset = 0;
+          if (chunk == nullptr) {
+            status = absl::InternalError("source-window reader received empty chunk");
+          } else {
+            char* host_buffer = host_buffer_for_slot(slot, rank);
+            const bool local_only_chunk = chunk_uses_local_only(*chunk);
+            const bool rank_reads_chunk = !local_only_chunk || rank == chunk->window->owner_rank;
+            const uint64_t stripe_start = local_only_chunk
+                ? chunk->chunk_start
+                : chunk->chunk_start + static_cast<uint64_t>(rank * chunk->stripe_bytes);
+            const size_t read_len = rank_reads_chunk && stripe_start < chunk->chunk_end
+                ? static_cast<size_t>(std::min<uint64_t>(chunk->stripe_bytes, chunk->chunk_end - stripe_start))
+                : 0;
+            if (read_len > 0) {
+              auto* direct_source = dynamic_cast<DirectAlignedSafetensorsSource*>(rank_sources[rank].get());
+              if (direct_source != nullptr) {
+                direct_pinned_read_attempts.fetch_add(1, std::memory_order_relaxed);
+                DirectAlignedSafetensorsSource::PinnedWindowFallbackReason fallback_reason =
+                    DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kNone;
+                auto h2d_offset_or = direct_source->read_at_for_pinned_window(
+                    stripe_start, host_buffer, read_len, chunk->stripe_bytes, configured_chunk_bytes, &fallback_reason);
+                if (h2d_offset_or.ok()) {
+                  h2d_offset = *h2d_offset_or;
+                  direct_pinned_read_successes.fetch_add(1, std::memory_order_relaxed);
+                  direct_pinned_read_success_bytes.fetch_add(read_len, std::memory_order_relaxed);
+                } else if (absl::IsUnimplemented(h2d_offset_or.status())) {
+                  direct_pinned_read_fallbacks.fetch_add(1, std::memory_order_relaxed);
+                  direct_pinned_read_fallback_bytes.fetch_add(read_len, std::memory_order_relaxed);
+                  switch (fallback_reason) {
+                    case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kUnalignedHostBuffer:
+                      direct_pinned_fallback_unaligned_host.fetch_add(1, std::memory_order_relaxed);
+                      break;
+                    case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kOutsideSegment:
+                      direct_pinned_fallback_outside_segment.fetch_add(1, std::memory_order_relaxed);
+                      break;
+                    case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kCrossSegment:
+                      direct_pinned_fallback_cross_segment.fetch_add(1, std::memory_order_relaxed);
+                      break;
+                    case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kFileEdge:
+                      direct_pinned_fallback_file_edge.fetch_add(1, std::memory_order_relaxed);
+                      break;
+                    case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kCapacity:
+                      direct_pinned_fallback_capacity.fetch_add(1, std::memory_order_relaxed);
+                      break;
+                    case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kNone:
+                      break;
+                  }
+                  std::memset(host_buffer, 0, chunk->stripe_bytes);
+                  status = read_exact(*rank_sources[rank], stripe_start, host_buffer, read_len);
+                } else {
+                  status = h2d_offset_or.status();
+                }
+              } else {
+                std::memset(host_buffer, 0, chunk->stripe_bytes);
+                status = read_exact(*rank_sources[rank], stripe_start, host_buffer, read_len);
+              }
+            } else {
+              std::memset(host_buffer, 0, chunk->stripe_bytes);
+            }
+          }
+
+          {
+            std::lock_guard<std::mutex> lock(slot_state.mu);
+            slot_state.statuses[rank] = std::move(status);
+            host_h2d_offset_for_slot(slot, rank) = h2d_offset;
+            if (slot_state.remaining > 0) {
+              slot_state.remaining -= 1;
+            }
+            if (slot_state.remaining == 0) {
+              slot_state.done = true;
+              slot_state.job_sec =
+                  std::chrono::duration<double>(std::chrono::steady_clock::now() - slot_state.launch_time).count();
+              slot_state.cv.notify_all();
+            }
+          }
+        }
+      });
+    }
+  }
+  auto stop_reader_threads = absl::Cleanup([&]() {
+    for (auto& slot_state_ptr : reader_slots) {
+      auto& slot_state = *slot_state_ptr;
+      {
+        std::lock_guard<std::mutex> lock(slot_state.mu);
+        slot_state.stop = true;
+        slot_state.generation += 1;
+      }
+      slot_state.cv.notify_all();
+    }
+    for (auto& thread : reader_threads) {
+      if (thread.joinable()) {
+        thread.join();
+      }
+    }
+  });
+
+  auto launch_parallel_chunk_read = [&](size_t chunk_index) -> absl::Status {
+    const size_t slot = chunk_index % active_pipeline_slots;
+    auto& slot_state = *reader_slots[slot];
+    {
+      std::lock_guard<std::mutex> lock(slot_state.mu);
+      if (!slot_state.done || slot_state.remaining != 0) {
+        return absl::FailedPreconditionError("source-window read-ahead slot already has an in-flight job");
+      }
+      slot_state.chunk = &runtime_chunks[chunk_index];
+      slot_state.chunk_index = chunk_index;
+      slot_state.remaining = world_size;
+      slot_state.done = false;
+      slot_state.job_sec = 0.0;
+      slot_state.launch_time = std::chrono::steady_clock::now();
+      std::fill(slot_state.statuses.begin(), slot_state.statuses.end(), absl::OkStatus());
+      slot_state.generation += 1;
+    }
+    slot_state.cv.notify_all();
+    return absl::OkStatus();
+  };
+
+  auto wait_parallel_chunk_read = [&](size_t chunk_index) -> SourceWindowReadAheadResult {
+    const size_t slot = chunk_index % active_pipeline_slots;
+    auto& slot_state = *reader_slots[slot];
+    const auto wait_start = std::chrono::steady_clock::now();
+    SourceWindowReadAheadResult result;
+    {
+      std::unique_lock<std::mutex> lock(slot_state.mu);
+      slot_state.cv.wait(lock, [&]() { return slot_state.done && slot_state.chunk_index == chunk_index; });
+      result.statuses = slot_state.statuses;
+      result.read_job_sec = slot_state.job_sec;
+    }
+    result.read_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - wait_start).count();
+    return result;
+  };
+
+  auto issue_h2d_from_slot = [&](const SourceWindowRuntimeChunk& chunk, size_t slot) -> absl::Status {
+    const auto step_start = std::chrono::steady_clock::now();
+    for (size_t rank = 0; rank < world_size; ++rank) {
+      TC_RETURN_IF_ERROR(set_device_cached(participants[rank].device_id));
+      const size_t h2d_offset = host_h2d_offset_for_slot(slot, rank);
+      TC_RETURN_IF_ERROR(
+          tensorcast::cuda::memcpy_async(
+              rank_send_stages[rank]->get(),
+              host_buffer_for_slot(slot, rank) + h2d_offset,
+              chunk.stripe_bytes,
+              cudaMemcpyHostToDevice,
+              clique->stream(static_cast<int>(rank))));
+    }
+    h2d_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+    return absl::OkStatus();
+  };
+
+  bool batched_scatter_kernel_disabled = false;
+  bool batched_scatter_kernel_failure_logged = false;
+  bool scatter_cuda_graph_disabled = false;
+  bool scatter_cuda_graph_failure_logged = false;
+
+  auto acquire_batched_scatter_host_descriptor_slot =
+      [&](size_t rank) -> absl::StatusOr<BatchedScatterHostDescriptorSlot*> {
+    if (rank >= rank_batched_scatter_host_descriptor_slots.size()) {
+      return absl::InvalidArgumentError("source-window batched scatter rank out of bounds");
+    }
+    auto& slots = rank_batched_scatter_host_descriptor_slots[rank];
+    if (slots.empty()) {
+      return absl::FailedPreconditionError("source-window batched scatter host descriptor slots unavailable");
+    }
+    size_t& next_slot = rank_next_batched_scatter_host_descriptor_slot[rank];
+    auto& slot = slots[next_slot % slots.size()];
+    next_slot += 1;
+    if (slot.ptr == nullptr || slot.ready_event == nullptr) {
+      return absl::FailedPreconditionError("source-window batched scatter host descriptor slot is incomplete");
+    }
+    if (slot.in_flight) {
+      const auto wait_start = std::chrono::steady_clock::now();
+      bool ready = false;
+      TC_RETURN_IF_ERROR(tensorcast::cuda::event_query(slot.ready_event, &ready));
+      if (!ready) {
+        TC_RETURN_IF_ERROR(tensorcast::cuda::event_synchronize(slot.ready_event));
+      }
+      batched_scatter_descriptor_slot_wait_sec +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - wait_start).count();
+      slot.in_flight = false;
+    }
+    return &slot;
+  };
+
+  auto issue_scatter_descriptors_with_memcpy = [&](size_t rank,
+                                                   absl::Span<const SourceWindowBatchedScatterDescriptor> descriptors,
+                                                   bool count_as_routed_pack) -> absl::Status {
+    if (descriptors.empty()) {
+      return absl::OkStatus();
+    }
+    const auto fallback_start = std::chrono::steady_clock::now();
+    TC_RETURN_IF_ERROR(set_device_cached(participants[rank].device_id));
+    cudaStream_t stream = clique->stream(static_cast<int>(rank));
+    for (const auto& desc : descriptors) {
+      auto* dst_ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(desc.dst_ptr));
+      const auto* src_ptr = reinterpret_cast<const void*>(static_cast<uintptr_t>(desc.src_ptr));
+      if (desc.row_count > 1) {
+        SC_RETURN_IF_CUDA_ERROR(cudaMemcpy2DAsync(
+            dst_ptr,
+            static_cast<size_t>(desc.target_stride_bytes),
+            src_ptr,
+            static_cast<size_t>(desc.source_stride_bytes),
+            static_cast<size_t>(desc.row_bytes),
+            static_cast<size_t>(desc.row_count),
+            cudaMemcpyDeviceToDevice,
+            stream));
+      } else {
+        TC_RETURN_IF_ERROR(
+            tensorcast::cuda::memcpy_async(
+                dst_ptr, src_ptr, static_cast<size_t>(desc.row_bytes), cudaMemcpyDeviceToDevice, stream));
+      }
+      batched_scatter_fallback_launches += 1;
+    }
+    batched_scatter_fallback_descriptors += descriptors.size();
+    if (count_as_routed_pack) {
+      batched_routed_pack_fallback_launches += descriptors.size();
+      batched_routed_pack_fallback_descriptors += descriptors.size();
+    }
+    batched_scatter_fallback_submit_sec +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - fallback_start).count();
+    return absl::OkStatus();
+  };
+
+  auto issue_scatter_descriptors_with_batched_kernel_or_memcpy =
+      [&](size_t rank,
+          absl::Span<const SourceWindowBatchedScatterDescriptor> descriptors,
+          bool count_as_routed_pack = false) -> absl::Status {
+    if (descriptors.empty()) {
+      return absl::OkStatus();
+    }
+    const bool descriptor_buffer_ready = batched_scatter_descriptor_buffers_ready &&
+        rank < rank_batched_scatter_descriptors.size() && rank_batched_scatter_descriptors[rank] != nullptr &&
+        rank < rank_batched_scatter_host_descriptor_slots.size() &&
+        !rank_batched_scatter_host_descriptor_slots[rank].empty();
+    const bool use_batched_kernel = descriptor_buffer_ready && !batched_scatter_kernel_disabled &&
+        descriptors.size() >= kSourceWindowBatchedScatterMinDescriptors &&
+        descriptors.size() <= kSourceWindowBatchedScatterDescriptorCapacity;
+    if (use_batched_kernel) {
+      auto slot_or = acquire_batched_scatter_host_descriptor_slot(rank);
+      if (!slot_or.ok()) {
+        batched_scatter_kernel_disabled = true;
+        if (!batched_scatter_kernel_failure_logged) {
+          LOG(WARNING) << "source-window batched scatter host descriptor slot unavailable; "
+                       << "falling back to cudaMemcpy scatter path: " << slot_or.status();
+          batched_scatter_kernel_failure_logged = true;
+        }
+        return issue_scatter_descriptors_with_memcpy(rank, descriptors, count_as_routed_pack);
+      }
+      auto* slot = *slot_or;
+      auto* pinned_descriptors = slot->ptr;
+      const auto host_copy_start = std::chrono::steady_clock::now();
+      std::memcpy(
+          pinned_descriptors,
+          descriptors.data(),
+          descriptors.size() * source_window_batched_scatter_descriptor_bytes());
+      batched_scatter_descriptor_host_copy_sec +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - host_copy_start).count();
+      TC_RETURN_IF_ERROR(set_device_cached(participants[rank].device_id));
+      const auto kernel_submit_start = std::chrono::steady_clock::now();
+      absl::Status launch_status = launch_source_window_batched_scatter(
+          absl::MakeSpan(pinned_descriptors, descriptors.size()),
+          rank_batched_scatter_descriptors[rank]->get(),
+          rank_batched_scatter_descriptors[rank]->size(),
+          participants[rank].device_id,
+          clique->stream(static_cast<int>(rank)));
+      batched_scatter_kernel_submit_sec +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - kernel_submit_start).count();
+      if (launch_status.ok()) {
+        TC_RETURN_IF_ERROR(tensorcast::cuda::event_record(slot->ready_event, clique->stream(static_cast<int>(rank))));
+        slot->in_flight = true;
+        batched_scatter_kernel_launches += 1;
+        batched_scatter_kernel_descriptors += descriptors.size();
+        if (count_as_routed_pack) {
+          batched_routed_pack_kernel_launches += 1;
+          batched_routed_pack_kernel_descriptors += descriptors.size();
+        }
+        return absl::OkStatus();
+      }
+      batched_scatter_kernel_disabled = true;
+      if (slot->ready_event != nullptr) {
+        const absl::Status record_status =
+            tensorcast::cuda::event_record(slot->ready_event, clique->stream(static_cast<int>(rank)));
+        if (record_status.ok()) {
+          slot->in_flight = true;
+        } else {
+          const absl::Status sync_status = tensorcast::cuda::stream_synchronize(clique->stream(static_cast<int>(rank)));
+          if (!sync_status.ok()) {
+            LOG(WARNING) << "source-window batched scatter fallback stream synchronize failed: " << sync_status;
+          }
+          slot->in_flight = false;
+        }
+      }
+      if (!batched_scatter_kernel_failure_logged) {
+        LOG(WARNING) << "source-window batched scatter kernel failed; falling back to cudaMemcpy scatter path: "
+                     << launch_status;
+        batched_scatter_kernel_failure_logged = true;
+      }
+    } else if (descriptors.size() > kSourceWindowBatchedScatterDescriptorCapacity) {
+      batched_scatter_capacity_fallback_chunks += 1;
+    }
+    return issue_scatter_descriptors_with_memcpy(rank, descriptors, count_as_routed_pack);
+  };
+
+  auto scatter_rank_stages_chunk = [&](const SourceWindowRuntimeChunk& chunk) -> absl::Status {
+    const auto step_start = std::chrono::steady_clock::now();
+    std::vector<std::vector<SourceWindowBatchedScatterDescriptor>> descriptors_by_rank(world_size);
+    auto append_scatter_descriptor = [&](uint32_t rank,
+                                         uint32_t storage_index,
+                                         const std::uint8_t* source_ptr,
+                                         uint64_t target_logical_offset,
+                                         uint64_t row_bytes,
+                                         uint64_t row_count,
+                                         uint64_t source_stride_bytes,
+                                         uint64_t target_stride_bytes) -> absl::Status {
+      if (rank >= mapped_participants.size()) {
+        return absl::InvalidArgumentError("source-window consumer rank out of bounds");
+      }
+      if (source_ptr == nullptr || row_bytes == 0 || row_count == 0) {
+        return absl::OkStatus();
+      }
+      if (row_count > 1) {
+        if (source_stride_bytes < row_bytes || target_stride_bytes < row_bytes) {
+          return absl::InvalidArgumentError("source-window scatter span has invalid row strides");
+        }
+        if (row_count - 1 > (std::numeric_limits<uint64_t>::max() - row_bytes) / target_stride_bytes) {
+          return absl::OutOfRangeError("source-window 2D scatter target envelope overflows");
+        }
+      }
+      const uint64_t target_envelope_bytes =
+          row_count <= 1 ? row_bytes : (row_count - 1) * target_stride_bytes + row_bytes;
+      if (row_count > std::numeric_limits<uint64_t>::max() / row_bytes) {
+        return absl::OutOfRangeError("source-window scatter byte count overflows");
+      }
+      if (row_bytes > std::numeric_limits<size_t>::max() || source_stride_bytes > std::numeric_limits<size_t>::max() ||
+          target_stride_bytes > std::numeric_limits<size_t>::max() || row_count > std::numeric_limits<size_t>::max() ||
+          target_envelope_bytes > std::numeric_limits<size_t>::max()) {
+        return absl::OutOfRangeError("source-window scatter descriptor exceeds CUDA size_t limits");
+      }
+      auto piece_or = resolve_target_piece_by_storage_index(
+          mapped_participants[rank], storage_index, target_logical_offset, target_envelope_bytes);
+      if (!piece_or.ok()) {
+        return piece_or.status();
+      }
+      const auto& piece = *piece_or;
+      descriptors_by_rank[rank].push_back(
+          SourceWindowBatchedScatterDescriptor{
+              .src_ptr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(source_ptr + piece.src_offset)),
+              .dst_ptr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(piece.dst_ptr.get())),
+              .row_bytes = row_bytes,
+              .row_count = row_count,
+              .source_stride_bytes = source_stride_bytes,
+              .target_stride_bytes = target_stride_bytes,
+          });
+      actual_scatter_ops += 1;
+      target_storage_fast_path_pieces += 1;
+      target_storage_fast_path_bytes += row_bytes * row_count;
+      return absl::OkStatus();
+    };
+
+    for (const auto* span_ptr : chunk.consumer_spans) {
+      const auto& span = *span_ptr;
+      if (span.rank >= mapped_participants.size()) {
+        return absl::InvalidArgumentError("source-window consumer rank out of bounds");
+      }
+      if (span.row_count > 1 && span.row_bytes > 0 && span.source_stride_bytes > 0 && span.target_stride_bytes > 0) {
+        if (span.source_stride_bytes < span.row_bytes || span.target_stride_bytes < span.row_bytes) {
+          return absl::InvalidArgumentError("source-window 2D scatter span has invalid row strides");
+        }
+        uint64_t row = 0;
+        if (chunk.chunk_start > span.source_offset) {
+          row = std::min<uint64_t>(span.row_count, (chunk.chunk_start - span.source_offset) / span.source_stride_bytes);
+          while (row < span.row_count &&
+                 span.source_offset + row * span.source_stride_bytes + span.row_bytes <= chunk.chunk_start) {
+            ++row;
+          }
+        }
+        while (row < span.row_count) {
+          const uint64_t row_source_begin = span.source_offset + row * span.source_stride_bytes;
+          if (row_source_begin >= chunk.chunk_end) {
+            break;
+          }
+          const uint64_t row_source_end = row_source_begin + span.row_bytes;
+          const uint64_t overlap_begin = std::max<uint64_t>(row_source_begin, chunk.chunk_start);
+          const uint64_t overlap_end = std::min<uint64_t>(row_source_end, chunk.chunk_end);
+          if (overlap_end <= overlap_begin) {
+            ++row;
+            continue;
+          }
+          const uint64_t copy_col_offset = overlap_begin - row_source_begin;
+          const uint64_t copy_width = overlap_end - overlap_begin;
+          uint64_t rows_in_run = 1;
+          while (row + rows_in_run < span.row_count) {
+            const uint64_t next_row_begin = span.source_offset + (row + rows_in_run) * span.source_stride_bytes;
+            if (next_row_begin >= chunk.chunk_end) {
+              break;
+            }
+            const uint64_t next_overlap_begin = std::max<uint64_t>(next_row_begin, chunk.chunk_start);
+            const uint64_t next_overlap_end = std::min<uint64_t>(next_row_begin + span.row_bytes, chunk.chunk_end);
+            if (next_overlap_end <= next_overlap_begin || next_overlap_begin - next_row_begin != copy_col_offset ||
+                next_overlap_end - next_overlap_begin != copy_width) {
+              break;
+            }
+            ++rows_in_run;
+          }
+
+          const uint64_t src_chunk_offset = overlap_begin - chunk.chunk_start;
+          const uint64_t dst_logical_offset = span.target_offset + row * span.target_stride_bytes + copy_col_offset;
+          const auto* source_ptr = static_cast<const std::uint8_t*>(rank_stages[span.rank]->get()) + src_chunk_offset;
+          TC_RETURN_IF_ERROR(append_scatter_descriptor(
+              span.rank,
+              span.storage_index,
+              source_ptr,
+              dst_logical_offset,
+              copy_width,
+              rows_in_run,
+              span.source_stride_bytes,
+              span.target_stride_bytes));
+          row += rows_in_run;
+        }
+      } else {
+        const uint64_t span_end = span.source_offset + span.length;
+        const uint64_t overlap_begin = std::max<uint64_t>(span.source_offset, chunk.chunk_start);
+        const uint64_t overlap_end = std::min<uint64_t>(span_end, chunk.chunk_end);
+        if (overlap_end <= overlap_begin) {
+          continue;
+        }
+        const uint64_t overlap_len = overlap_end - overlap_begin;
+        const uint64_t src_chunk_offset = overlap_begin - chunk.chunk_start;
+        const uint64_t dst_logical_offset = span.target_offset + (overlap_begin - span.source_offset);
+        const auto* stage_base = static_cast<const std::uint8_t*>(rank_stages[span.rank]->get()) + src_chunk_offset;
+        TC_RETURN_IF_ERROR(append_scatter_descriptor(
+            span.rank, span.storage_index, stage_base, dst_logical_offset, overlap_len, 1, overlap_len, overlap_len));
+      }
+    }
+    batched_scatter_descriptor_build_sec +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+
+    std::vector<SourceWindowRuntimeScatterGraph> in_flight_scatter_graphs;
+    auto cleanup_in_flight_scatter_graphs = absl::Cleanup([&]() {
+      if (!in_flight_scatter_graphs.empty()) {
+        const absl::Status sync_status = synchronize_clique_all();
+        if (!sync_status.ok()) {
+          LOG(WARNING) << "source-window scatter cuda graph cleanup synchronize failed: " << sync_status;
+        }
+        destroy_source_window_runtime_scatter_graphs(&in_flight_scatter_graphs);
+      }
+    });
+    auto issue_scatter_descriptors_with_cuda_graph =
+        [&](size_t rank, absl::Span<const SourceWindowBatchedScatterDescriptor> descriptors) -> absl::Status {
+      if (descriptors.empty()) {
+        return absl::OkStatus();
+      }
+      TC_RETURN_IF_ERROR(set_device_cached(participants[rank].device_id));
+      uint64_t node_count = 0;
+      const auto build_start = std::chrono::steady_clock::now();
+      auto graph_or = build_source_window_runtime_scatter_graph(descriptors, participants[rank].device_id);
+      scatter_cuda_graph_build_sec +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - build_start).count();
+      if (!graph_or.ok()) {
+        return graph_or.status();
+      }
+      SourceWindowRuntimeScatterGraph graph = std::move(*graph_or);
+      absl::Status node_count_status = source_window_runtime_scatter_graph_node_count(graph.graph, &node_count);
+      if (!node_count_status.ok()) {
+        destroy_source_window_runtime_scatter_graph(&graph);
+        return node_count_status;
+      }
+      absl::Status launch_status = tensorcast::cuda::cuda_as_status(
+          cudaGraphLaunch(graph.exec, clique->stream(static_cast<int>(rank))),
+          "cudaGraphLaunch(source-window scatter cuda graph)");
+      if (!launch_status.ok()) {
+        destroy_source_window_runtime_scatter_graph(&graph);
+        return launch_status;
+      }
+      scatter_cuda_graph_launches += 1;
+      scatter_cuda_graph_descriptors += descriptors.size();
+      scatter_cuda_graph_nodes += node_count;
+      in_flight_scatter_graphs.push_back(std::move(graph));
+      return absl::OkStatus();
+    };
+
+    for (size_t rank = 0; rank < descriptors_by_rank.size(); ++rank) {
+      const auto& descriptors = descriptors_by_rank[rank];
+      if (descriptors.empty()) {
+        continue;
+      }
+      const bool use_cuda_graph = scatter_cuda_graph_enabled && !scatter_cuda_graph_disabled &&
+          descriptors.size() >= kSourceWindowBatchedScatterMinDescriptors;
+      if (use_cuda_graph) {
+        absl::Status launch_status = issue_scatter_descriptors_with_cuda_graph(rank, absl::MakeSpan(descriptors));
+        if (launch_status.ok()) {
+          continue;
+        }
+        scatter_cuda_graph_disabled = true;
+        scatter_cuda_graph_fallback_chunks += 1;
+        if (!scatter_cuda_graph_failure_logged) {
+          LOG(WARNING) << "source-window scatter cuda graph failed; falling back to cudaMemcpy scatter path: "
+                       << launch_status;
+          scatter_cuda_graph_failure_logged = true;
+        }
+      }
+      TC_RETURN_IF_ERROR(issue_scatter_descriptors_with_batched_kernel_or_memcpy(rank, absl::MakeSpan(descriptors)));
+    }
+    scatter_issue_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+    {
+      const auto sync_start = std::chrono::steady_clock::now();
+      TC_RETURN_IF_ERROR(synchronize_clique_all());
+      scatter_sync_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - sync_start).count();
+    }
+    destroy_source_window_runtime_scatter_graphs(&in_flight_scatter_graphs);
+    return absl::OkStatus();
+  };
+
+  auto issue_local_only_chunk_from_parallel_slot =
+      [&](const SourceWindowRuntimeChunk& chunk, size_t slot, bool issue_h2d_from_host_slot) -> absl::Status {
+    if (chunk.window->owner_rank >= world_size) {
+      return absl::InvalidArgumentError("source-window local-only owner rank out of bounds");
+    }
+    const size_t owner = chunk.window->owner_rank;
+    if (issue_h2d_from_host_slot) {
+      const auto step_start = std::chrono::steady_clock::now();
+      TC_RETURN_IF_ERROR(set_device_cached(participants[owner].device_id));
+      const size_t h2d_offset = host_h2d_offset_for_slot(slot, owner);
+      TC_RETURN_IF_ERROR(
+          tensorcast::cuda::memcpy_async(
+              rank_stages[owner]->get(),
+              host_buffer_for_slot(slot, owner) + h2d_offset,
+              chunk.chunk_len,
+              cudaMemcpyHostToDevice,
+              clique->stream(static_cast<int>(owner))));
+      h2d_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+    }
+    for (const auto* span_ptr : chunk.consumer_spans) {
+      const auto& span = *span_ptr;
+      if (span.rank != owner) {
+        return absl::FailedPreconditionError("source-window local-only runtime found a remote consumer");
+      }
+    }
+    return scatter_rank_stages_chunk(chunk);
+  };
+
+  auto issue_gpu_chunk_from_parallel_slot =
+      [&](const SourceWindowRuntimeChunk& chunk, size_t slot, bool issue_h2d_from_host_slot) -> absl::Status {
+    if (issue_h2d_from_host_slot) {
+      TC_RETURN_IF_ERROR(issue_h2d_from_slot(chunk, slot));
+    }
+
+    {
+      const auto step_start = std::chrono::steady_clock::now();
+      TC_RETURN_IF_ERROR(clique->group_start());
+      for (size_t rank = 0; rank < world_size; ++rank) {
+        TC_RETURN_IF_ERROR(clique->all_gather_u8(
+            static_cast<int>(rank), rank_send_stages[rank]->get(), rank_stages[rank]->get(), chunk.stripe_bytes));
+      }
+      TC_RETURN_IF_ERROR(clique->group_end());
+      collective_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+      if (world_size > 1) {
+        actual_peer_transfer_bytes += chunk.gathered_bytes * static_cast<uint64_t>(world_size - 1);
+      }
+    }
+
+    {
+      const auto step_start = std::chrono::steady_clock::now();
+      TC_RETURN_IF_ERROR(synchronize_clique_all());
+      collective_sync_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+    }
+
+    return scatter_rank_stages_chunk(chunk);
+  };
+
+  auto issue_consumer_routed_chunk_from_parallel_slot =
+      [&](const SourceWindowRuntimeChunk& chunk, size_t slot, bool issue_h2d_from_host_slot) -> absl::Status {
+    if (issue_h2d_from_host_slot) {
+      TC_RETURN_IF_ERROR(issue_h2d_from_slot(chunk, slot));
+    }
+
+    if (chunk.routed_program.compiled) {
+      const auto& program = chunk.routed_program;
+      target_storage_fast_path_pieces += program.target_storage_fast_path_pieces;
+      target_storage_fast_path_bytes += program.target_storage_fast_path_bytes;
+      auto descriptor_target_envelope_bytes =
+          [](const RoutedDescriptorTemplate& descriptor) -> absl::StatusOr<uint64_t> {
+        if (descriptor.row_bytes == 0 || descriptor.row_count == 0) {
+          return uint64_t{0};
+        }
+        const uint64_t rows_minus_one = descriptor.row_count - 1;
+        if (rows_minus_one > 0 &&
+            descriptor.target_stride_bytes >
+                (std::numeric_limits<uint64_t>::max() - descriptor.row_bytes) / rows_minus_one) {
+          return absl::OutOfRangeError("source-window routed descriptor target envelope overflows");
+        }
+        return rows_minus_one * descriptor.target_stride_bytes + descriptor.row_bytes;
+      };
+      auto resolve_routed_target_ptr = [&](const RoutedTargetRef& target,
+                                           uint64_t length) -> absl::StatusOr<std::uint8_t*> {
+        if (target.rank >= mapped_participants.size()) {
+          return absl::InvalidArgumentError("source-window routed target rank out of bounds");
+        }
+        auto piece_or = resolve_target_piece_by_storage_index(
+            mapped_participants[target.rank], target.storage_index, target.logical_offset, length);
+        if (!piece_or.ok()) {
+          return piece_or.status();
+        }
+        return piece_or->dst_ptr.get();
+      };
+
+      {
+        const auto step_start = std::chrono::steady_clock::now();
+        for (size_t rank = 0; rank < program.local_descriptors_by_rank.size(); ++rank) {
+          const auto& descriptor_templates = program.local_descriptors_by_rank[rank];
+          if (descriptor_templates.empty()) {
+            continue;
+          }
+          const auto descriptor_build_start = std::chrono::steady_clock::now();
+          const auto* source_base = static_cast<const std::uint8_t*>(rank_send_stages[rank]->get());
+          std::vector<SourceWindowBatchedScatterDescriptor> descriptors;
+          descriptors.reserve(descriptor_templates.size());
+          for (const auto& descriptor_template : descriptor_templates) {
+            auto target_bytes_or = descriptor_target_envelope_bytes(descriptor_template);
+            if (!target_bytes_or.ok()) {
+              return target_bytes_or.status();
+            }
+            auto dst_ptr_or = resolve_routed_target_ptr(descriptor_template.target, *target_bytes_or);
+            if (!dst_ptr_or.ok()) {
+              return dst_ptr_or.status();
+            }
+            descriptors.push_back(
+                SourceWindowBatchedScatterDescriptor{
+                    .src_ptr = static_cast<uint64_t>(
+                        reinterpret_cast<uintptr_t>(source_base + descriptor_template.src_offset)),
+                    .dst_ptr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(*dst_ptr_or)),
+                    .row_bytes = descriptor_template.row_bytes,
+                    .row_count = descriptor_template.row_count,
+                    .source_stride_bytes = descriptor_template.source_stride_bytes,
+                    .target_stride_bytes = descriptor_template.target_stride_bytes,
+                });
+          }
+          routed_local_descriptor_build_sec +=
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - descriptor_build_start).count();
+          const auto local_issue_start = std::chrono::steady_clock::now();
+          TC_RETURN_IF_ERROR(
+              issue_scatter_descriptors_with_batched_kernel_or_memcpy(rank, absl::MakeSpan(descriptors)));
+          routed_local_issue_sec +=
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - local_issue_start).count();
+          actual_scatter_ops += descriptors.size();
+          routed_local_pieces += descriptors.size();
+        }
+        routed_local_2d_pieces += program.local_2d_pieces;
+
+        for (size_t producer = 0; producer < program.pack_descriptors_by_producer.size(); ++producer) {
+          const auto& descriptor_templates = program.pack_descriptors_by_producer[producer];
+          if (descriptor_templates.empty()) {
+            continue;
+          }
+          const auto descriptor_build_start = std::chrono::steady_clock::now();
+          const auto* source_base = static_cast<const std::uint8_t*>(rank_send_stages[producer]->get());
+          std::vector<SourceWindowBatchedScatterDescriptor> descriptors;
+          descriptors.reserve(descriptor_templates.size());
+          for (const auto& descriptor_template : descriptor_templates) {
+            auto* pack_stage = route_pack_stages[producer][descriptor_template.consumer].get();
+            if (pack_stage == nullptr) {
+              return absl::FailedPreconditionError("source-window routed compiled pack is missing staging buffer");
+            }
+            auto* pack_base = static_cast<std::uint8_t*>(pack_stage->get());
+            descriptors.push_back(
+                SourceWindowBatchedScatterDescriptor{
+                    .src_ptr = static_cast<uint64_t>(
+                        reinterpret_cast<uintptr_t>(source_base + descriptor_template.src_offset)),
+                    .dst_ptr =
+                        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pack_base + descriptor_template.pack_offset)),
+                    .row_bytes = descriptor_template.row_bytes,
+                    .row_count = descriptor_template.row_count,
+                    .source_stride_bytes = descriptor_template.source_stride_bytes,
+                    .target_stride_bytes = descriptor_template.target_stride_bytes,
+                });
+          }
+          routed_pack_descriptor_build_sec +=
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - descriptor_build_start).count();
+          const auto pack_issue_start = std::chrono::steady_clock::now();
+          TC_RETURN_IF_ERROR(issue_scatter_descriptors_with_batched_kernel_or_memcpy(
+              producer,
+              absl::MakeSpan(descriptors),
+              /*count_as_routed_pack=*/true));
+          routed_pack_issue_sec +=
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - pack_issue_start).count();
+        }
+        routed_pack_ops += program.pack_ops;
+        routed_deferred_2d_pack_ops += program.deferred_2d_pack_ops;
+        scatter_issue_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+      }
+
+      {
+        const auto step_start = std::chrono::steady_clock::now();
+        bool group_open = false;
+        size_t current_group_pairs = 0;
+        auto ensure_group_pair_capacity = [&]() -> absl::Status {
+          if (!group_open) {
+            TC_RETURN_IF_ERROR(clique->group_start());
+            group_open = true;
+          }
+          if (current_group_pairs >= kMaxMappedPeerPairsPerNcclGroup) {
+            TC_RETURN_IF_ERROR(clique->group_end());
+            TC_RETURN_IF_ERROR(clique->group_start());
+            group_open = true;
+            current_group_pairs = 0;
+          }
+          return absl::OkStatus();
+        };
+        auto flush_group = [&]() -> absl::Status {
+          if (!group_open) {
+            return absl::OkStatus();
+          }
+          TC_RETURN_IF_ERROR(clique->group_end());
+          group_open = false;
+          current_group_pairs = 0;
+          return absl::OkStatus();
+        };
+        for (const auto& transfer : program.packed_transfers) {
+          if (transfer.bytes > std::numeric_limits<size_t>::max()) {
+            return absl::OutOfRangeError("source-window routed packed transfer exceeds size_t limits");
+          }
+          auto* pack_stage = route_pack_stages[transfer.producer][transfer.consumer].get();
+          auto* recv_stage = route_recv_stages[transfer.producer][transfer.consumer].get();
+          if (pack_stage == nullptr || recv_stage == nullptr) {
+            return absl::FailedPreconditionError("source-window routed packed transfer is missing staging buffers");
+          }
+          TC_RETURN_IF_ERROR(ensure_group_pair_capacity());
+          TC_RETURN_IF_ERROR(clique->send_u8(
+              static_cast<int>(transfer.producer),
+              pack_stage->get(),
+              static_cast<size_t>(transfer.bytes),
+              static_cast<int>(transfer.consumer)));
+          TC_RETURN_IF_ERROR(clique->recv_u8(
+              static_cast<int>(transfer.consumer),
+              recv_stage->get(),
+              static_cast<size_t>(transfer.bytes),
+              static_cast<int>(transfer.producer)));
+          actual_peer_transfer_bytes += transfer.bytes;
+          routed_packed_pairs += 1;
+          current_group_pairs += 1;
+        }
+        for (const auto& piece : program.direct_remote_pieces) {
+          if (piece.length > std::numeric_limits<size_t>::max()) {
+            return absl::OutOfRangeError("source-window routed remote piece exceeds size_t limits");
+          }
+          const auto* source_base = static_cast<const std::uint8_t*>(rank_send_stages[piece.producer]->get());
+          auto dst_ptr_or = resolve_routed_target_ptr(piece.target, piece.length);
+          if (!dst_ptr_or.ok()) {
+            return dst_ptr_or.status();
+          }
+          TC_RETURN_IF_ERROR(ensure_group_pair_capacity());
+          TC_RETURN_IF_ERROR(clique->send_u8(
+              static_cast<int>(piece.producer),
+              source_base + piece.src_offset,
+              static_cast<size_t>(piece.length),
+              static_cast<int>(piece.consumer)));
+          TC_RETURN_IF_ERROR(clique->recv_u8(
+              static_cast<int>(piece.consumer),
+              *dst_ptr_or,
+              static_cast<size_t>(piece.length),
+              static_cast<int>(piece.producer)));
+          actual_peer_transfer_bytes += piece.length;
+          actual_scatter_ops += 1;
+          routed_remote_pieces += 1;
+          current_group_pairs += 1;
+        }
+        TC_RETURN_IF_ERROR(flush_group());
+        collective_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+      }
+
+      {
+        const auto step_start = std::chrono::steady_clock::now();
+        TC_RETURN_IF_ERROR(synchronize_clique_all());
+        collective_sync_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+      }
+
+      {
+        const auto step_start = std::chrono::steady_clock::now();
+        const auto descriptor_build_start = step_start;
+        std::vector<std::vector<SourceWindowBatchedScatterDescriptor>> descriptors_by_consumer(world_size);
+        for (const auto& piece : program.packed_remote_pieces) {
+          if (piece.length > std::numeric_limits<size_t>::max()) {
+            return absl::OutOfRangeError("source-window routed packed scatter exceeds size_t limits");
+          }
+          auto* recv_stage = route_recv_stages[piece.producer][piece.consumer].get();
+          if (recv_stage == nullptr) {
+            return absl::FailedPreconditionError("source-window routed packed scatter is missing receive staging");
+          }
+          const auto* recv_base = static_cast<const std::uint8_t*>(recv_stage->get());
+          auto dst_ptr_or = resolve_routed_target_ptr(piece.target, piece.length);
+          if (!dst_ptr_or.ok()) {
+            return dst_ptr_or.status();
+          }
+          descriptors_by_consumer[piece.consumer].push_back(
+              SourceWindowBatchedScatterDescriptor{
+                  .src_ptr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(recv_base + piece.pack_offset)),
+                  .dst_ptr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(*dst_ptr_or)),
+                  .row_bytes = piece.length,
+                  .row_count = 1,
+                  .source_stride_bytes = piece.length,
+                  .target_stride_bytes = piece.length,
+              });
+        }
+        routed_remote_descriptor_build_sec +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - descriptor_build_start).count();
+        for (size_t consumer = 0; consumer < descriptors_by_consumer.size(); ++consumer) {
+          const auto& descriptors = descriptors_by_consumer[consumer];
+          const auto remote_scatter_issue_start = std::chrono::steady_clock::now();
+          TC_RETURN_IF_ERROR(
+              issue_scatter_descriptors_with_batched_kernel_or_memcpy(consumer, absl::MakeSpan(descriptors)));
+          routed_remote_scatter_issue_sec +=
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - remote_scatter_issue_start).count();
+          actual_scatter_ops += descriptors.size();
+          routed_remote_pieces += descriptors.size();
+        }
+        scatter_issue_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+      }
+      return absl::OkStatus();
+    }
+
+    std::vector<std::vector<CopyPiece>> local_pieces(world_size);
+    std::vector<std::vector<std::vector<CopyPiece>>> remote_pieces(world_size);
+    std::vector<std::vector<std::vector<PackedRemotePiece>>> packed_remote_pieces(world_size);
+    std::vector<std::vector<uint64_t>> pack_offsets(world_size, std::vector<uint64_t>(world_size, 0));
+    struct PendingLocal2dCopy {
+      std::uint8_t* dst_ptr{nullptr};
+      const std::uint8_t* src_ptr{nullptr};
+      uint64_t width{0};
+      uint64_t rows{0};
+      uint64_t source_pitch{0};
+      uint64_t target_pitch{0};
+    };
+    struct PendingPacked2dCopy {
+      std::uint8_t* pack_ptr{nullptr};
+      const std::uint8_t* src_ptr{nullptr};
+      uint64_t width{0};
+      uint64_t rows{0};
+      uint64_t source_pitch{0};
+    };
+    std::vector<std::vector<PendingLocal2dCopy>> pending_local_2d_copies_by_rank(world_size);
+    std::vector<std::vector<PendingPacked2dCopy>> pending_packed_2d_copies_by_producer(world_size);
+    for (auto& producer_pieces : remote_pieces) {
+      producer_pieces.resize(world_size);
+    }
+    for (auto& producer_pieces : packed_remote_pieces) {
+      producer_pieces.resize(world_size);
+    }
+
+    auto producer_for_source_offset = [&](uint64_t source_offset) -> absl::StatusOr<size_t> {
+      if (source_offset < chunk.chunk_start || source_offset >= chunk.chunk_end) {
+        return absl::OutOfRangeError("source-window routed source offset is outside chunk");
+      }
+      const uint64_t chunk_offset = source_offset - chunk.chunk_start;
+      size_t producer = static_cast<size_t>(chunk_offset / chunk.stripe_bytes);
+      if (producer >= world_size) {
+        producer = world_size - 1;
+      }
+      return producer;
+    };
+
+    auto append_packed_remote_piece = [&](size_t producer,
+                                          uint32_t consumer_rank,
+                                          const std::uint8_t* src_ptr,
+                                          std::uint8_t* dst_ptr,
+                                          uint64_t length) -> absl::StatusOr<bool> {
+      if (producer == consumer_rank || length == 0 || src_ptr == nullptr || dst_ptr == nullptr ||
+          length > std::numeric_limits<size_t>::max()) {
+        return false;
+      }
+      if (producer >= route_pack_stages.size() || consumer_rank >= route_pack_stages[producer].size() ||
+          producer >= route_recv_stages.size() || consumer_rank >= route_recv_stages[producer].size()) {
+        return false;
+      }
+      auto* pack_stage = route_pack_stages[producer][consumer_rank].get();
+      auto* recv_stage = route_recv_stages[producer][consumer_rank].get();
+      if (pack_stage == nullptr || recv_stage == nullptr) {
+        return false;
+      }
+      uint64_t& pack_offset = pack_offsets[producer][consumer_rank];
+      if (pack_offset > max_stripe_bytes || length > max_stripe_bytes - pack_offset) {
+        return false;
+      }
+      auto* pack_ptr = static_cast<std::uint8_t*>(pack_stage->get()) + pack_offset;
+      TC_RETURN_IF_ERROR(set_device_cached(participants[producer].device_id));
+      TC_RETURN_IF_ERROR(
+          tensorcast::cuda::memcpy_async(
+              pack_ptr,
+              src_ptr,
+              static_cast<size_t>(length),
+              cudaMemcpyDeviceToDevice,
+              clique->stream(static_cast<int>(producer))));
+      routed_pack_ops += 1;
+      append_merged_packed_remote_piece(
+          packed_remote_pieces[producer][consumer_rank],
+          PackedRemotePiece{
+              .pack_offset = pack_offset,
+              .dst_ptr = dst_ptr,
+              .length = length,
+          });
+      pack_offset += length;
+      return true;
+    };
+
+    auto append_routed_linear_piece = [&](uint32_t consumer_rank,
+                                          uint32_t storage_index,
+                                          uint64_t source_begin,
+                                          uint64_t target_logical_offset,
+                                          uint64_t length) -> absl::Status {
+      if (consumer_rank >= mapped_participants.size()) {
+        return absl::InvalidArgumentError("source-window consumer rank out of bounds");
+      }
+      auto piece_or = resolve_target_piece_by_storage_index(
+          mapped_participants[consumer_rank], storage_index, target_logical_offset, length);
+      if (!piece_or.ok()) {
+        return piece_or.status();
+      }
+      const auto& piece = *piece_or;
+      target_storage_fast_path_pieces += 1;
+      target_storage_fast_path_bytes += piece.length;
+      uint64_t remaining = piece.length;
+      uint64_t source_cursor = source_begin + piece.src_offset;
+      uint64_t target_piece_offset = 0;
+      while (remaining > 0) {
+        auto producer_or = producer_for_source_offset(source_cursor);
+        if (!producer_or.ok()) {
+          return producer_or.status();
+        }
+        const size_t producer = *producer_or;
+        const uint64_t producer_stripe_begin = static_cast<uint64_t>(producer) * chunk.stripe_bytes;
+        const uint64_t producer_offset = source_cursor - chunk.chunk_start - producer_stripe_begin;
+        const uint64_t producer_available = chunk.stripe_bytes - producer_offset;
+        const uint64_t take =
+            std::min<uint64_t>(remaining, std::min<uint64_t>(producer_available, chunk.chunk_end - source_cursor));
+        if (take == 0) {
+          return absl::InternalError("source-window routed linear split made no progress");
+        }
+        if (take > std::numeric_limits<size_t>::max()) {
+          return absl::OutOfRangeError("source-window routed piece exceeds size_t limits");
+        }
+        const auto* src_ptr = static_cast<const std::uint8_t*>(rank_send_stages[producer]->get()) + producer_offset;
+        auto* dst_ptr = piece.dst_ptr.get() + target_piece_offset;
+        if (producer == consumer_rank) {
+          append_merged_copy_piece(
+              local_pieces[consumer_rank],
+              CopyPiece{
+                  .src_ptr = src_ptr,
+                  .dst_ptr = dst_ptr,
+                  .length = take,
+              });
+        } else {
+          constexpr uint64_t kRoutedPackSmallPieceBytes = 1ULL << 20;
+          const bool pair_already_packing = pack_offsets[producer][consumer_rank] > 0;
+          auto packed_or = (pair_already_packing || take <= kRoutedPackSmallPieceBytes)
+              ? append_packed_remote_piece(producer, consumer_rank, src_ptr, dst_ptr, take)
+              : absl::StatusOr<bool>(false);
+          if (!packed_or.ok()) {
+            return packed_or.status();
+          }
+          if (!*packed_or) {
+            append_merged_copy_piece(
+                remote_pieces[producer][consumer_rank],
+                CopyPiece{
+                    .src_ptr = src_ptr,
+                    .dst_ptr = dst_ptr,
+                    .length = take,
+                });
+          }
+        }
+        remaining -= take;
+        source_cursor += take;
+        target_piece_offset += take;
+      }
+      return absl::OkStatus();
+    };
+
+    auto append_remote_packed_2d = [&](size_t producer,
+                                       uint32_t consumer_rank,
+                                       uint32_t storage_index,
+                                       const std::uint8_t* src_ptr,
+                                       uint64_t source_pitch,
+                                       uint64_t dst_logical_offset,
+                                       uint64_t width,
+                                       uint64_t rows,
+                                       uint64_t target_pitch) -> absl::StatusOr<bool> {
+      if (producer == consumer_rank || rows <= 1 || width == 0 || target_pitch != width) {
+        return false;
+      }
+      if (rows > std::numeric_limits<uint64_t>::max() / width) {
+        return absl::OutOfRangeError("source-window routed packed bytes overflow");
+      }
+      const uint64_t packed_bytes = rows * width;
+      if (packed_bytes == 0 || packed_bytes > max_stripe_bytes || packed_bytes > std::numeric_limits<size_t>::max() ||
+          width > std::numeric_limits<size_t>::max() || source_pitch > std::numeric_limits<size_t>::max() ||
+          rows > std::numeric_limits<size_t>::max()) {
+        return false;
+      }
+      auto piece_or = resolve_target_piece_by_storage_index(
+          mapped_participants[consumer_rank], storage_index, dst_logical_offset, packed_bytes);
+      if (!piece_or.ok()) {
+        return piece_or.status();
+      }
+      auto* pack_stage = route_pack_stages[producer][consumer_rank].get();
+      if (pack_stage == nullptr) {
+        return false;
+      }
+      uint64_t& pack_offset = pack_offsets[producer][consumer_rank];
+      if (pack_offset > max_stripe_bytes || packed_bytes > max_stripe_bytes - pack_offset) {
+        return false;
+      }
+      auto* pack_ptr = static_cast<std::uint8_t*>(pack_stage->get()) + pack_offset;
+      pending_packed_2d_copies_by_producer[producer].push_back(
+          PendingPacked2dCopy{
+              .pack_ptr = pack_ptr,
+              .src_ptr = src_ptr,
+              .width = width,
+              .rows = rows,
+              .source_pitch = source_pitch,
+          });
+      append_merged_packed_remote_piece(
+          packed_remote_pieces[producer][consumer_rank],
+          PackedRemotePiece{
+              .pack_offset = pack_offset,
+              .dst_ptr = piece_or->dst_ptr.get(),
+              .length = packed_bytes,
+          });
+      target_storage_fast_path_pieces += 1;
+      target_storage_fast_path_bytes += packed_bytes;
+      pack_offset += packed_bytes;
+      return true;
+    };
+
+    {
+      const auto step_start = std::chrono::steady_clock::now();
+      const auto span_plan_start = step_start;
+      for (const auto* span_ptr : chunk.consumer_spans) {
+        const auto& span = *span_ptr;
+        if (span.rank >= mapped_participants.size()) {
+          return absl::InvalidArgumentError("source-window consumer rank out of bounds");
+        }
+        if (span.row_count > 1 && span.row_bytes > 0 && span.source_stride_bytes > 0 && span.target_stride_bytes > 0) {
+          if (span.source_stride_bytes < span.row_bytes || span.target_stride_bytes < span.row_bytes) {
+            return absl::InvalidArgumentError("source-window 2D routed span has invalid row strides");
+          }
+          uint64_t row = 0;
+          if (chunk.chunk_start > span.source_offset) {
+            row =
+                std::min<uint64_t>(span.row_count, (chunk.chunk_start - span.source_offset) / span.source_stride_bytes);
+            while (row < span.row_count &&
+                   span.source_offset + row * span.source_stride_bytes + span.row_bytes <= chunk.chunk_start) {
+              ++row;
+            }
+          }
+          while (row < span.row_count) {
+            const uint64_t row_source_begin = span.source_offset + row * span.source_stride_bytes;
+            if (row_source_begin >= chunk.chunk_end) {
+              break;
+            }
+            const uint64_t row_source_end = row_source_begin + span.row_bytes;
+            const uint64_t overlap_begin = std::max<uint64_t>(row_source_begin, chunk.chunk_start);
+            const uint64_t overlap_end = std::min<uint64_t>(row_source_end, chunk.chunk_end);
+            if (overlap_end <= overlap_begin) {
+              ++row;
+              continue;
+            }
+            const uint64_t copy_col_offset = overlap_begin - row_source_begin;
+            const uint64_t copy_width = overlap_end - overlap_begin;
+            uint64_t rows_in_run = 1;
+            while (row + rows_in_run < span.row_count) {
+              const uint64_t next_row_begin = span.source_offset + (row + rows_in_run) * span.source_stride_bytes;
+              if (next_row_begin >= chunk.chunk_end) {
+                break;
+              }
+              const uint64_t next_overlap_begin = std::max<uint64_t>(next_row_begin, chunk.chunk_start);
+              const uint64_t next_overlap_end = std::min<uint64_t>(next_row_begin + span.row_bytes, chunk.chunk_end);
+              if (next_overlap_end <= next_overlap_begin || next_overlap_begin - next_row_begin != copy_col_offset ||
+                  next_overlap_end - next_overlap_begin != copy_width) {
+                break;
+              }
+              ++rows_in_run;
+            }
+
+            uint64_t run_row = 0;
+            while (run_row < rows_in_run) {
+              const uint64_t first_source =
+                  span.source_offset + (row + run_row) * span.source_stride_bytes + copy_col_offset;
+              auto producer_or = producer_for_source_offset(first_source);
+              if (!producer_or.ok()) {
+                return producer_or.status();
+              }
+              const size_t producer = *producer_or;
+              const uint64_t producer_stripe_begin = static_cast<uint64_t>(producer) * chunk.stripe_bytes;
+              const uint64_t producer_offset = first_source - chunk.chunk_start - producer_stripe_begin;
+              if (producer_offset + copy_width > chunk.stripe_bytes) {
+                const uint64_t dst_logical_offset =
+                    span.target_offset + (row + run_row) * span.target_stride_bytes + copy_col_offset;
+                TC_RETURN_IF_ERROR(append_routed_linear_piece(
+                    span.rank, span.storage_index, first_source, dst_logical_offset, copy_width));
+                run_row += 1;
+                continue;
+              }
+
+              uint64_t grouped_rows = 1;
+              while (run_row + grouped_rows < rows_in_run) {
+                const uint64_t next_source =
+                    span.source_offset + (row + run_row + grouped_rows) * span.source_stride_bytes + copy_col_offset;
+                auto next_producer_or = producer_for_source_offset(next_source);
+                if (!next_producer_or.ok() || *next_producer_or != producer) {
+                  break;
+                }
+                const uint64_t next_producer_offset = next_source - chunk.chunk_start - producer_stripe_begin;
+                if (next_producer_offset + copy_width > chunk.stripe_bytes) {
+                  break;
+                }
+                ++grouped_rows;
+              }
+
+              const uint64_t dst_logical_offset =
+                  span.target_offset + (row + run_row) * span.target_stride_bytes + copy_col_offset;
+              const auto* src_ptr =
+                  static_cast<const std::uint8_t*>(rank_send_stages[producer]->get()) + producer_offset;
+              bool copied_as_group = false;
+              if (producer == span.rank && grouped_rows > 1) {
+                const uint64_t target_envelope_bytes = (grouped_rows - 1) * span.target_stride_bytes + copy_width;
+                auto piece_or = resolve_target_piece_by_storage_index(
+                    mapped_participants[span.rank], span.storage_index, dst_logical_offset, target_envelope_bytes);
+                if (!piece_or.ok()) {
+                  return piece_or.status();
+                }
+                if (copy_width <= std::numeric_limits<size_t>::max() &&
+                    span.source_stride_bytes <= std::numeric_limits<size_t>::max() &&
+                    span.target_stride_bytes <= std::numeric_limits<size_t>::max() &&
+                    grouped_rows <= std::numeric_limits<size_t>::max()) {
+                  pending_local_2d_copies_by_rank[span.rank].push_back(
+                      PendingLocal2dCopy{
+                          .dst_ptr = piece_or->dst_ptr.get(),
+                          .src_ptr = src_ptr,
+                          .width = copy_width,
+                          .rows = grouped_rows,
+                          .source_pitch = span.source_stride_bytes,
+                          .target_pitch = span.target_stride_bytes,
+                      });
+                  target_storage_fast_path_pieces += 1;
+                  target_storage_fast_path_bytes += copy_width * grouped_rows;
+                  copied_as_group = true;
+                }
+              } else if (producer != span.rank && grouped_rows > 1) {
+                auto packed_or = append_remote_packed_2d(
+                    producer,
+                    span.rank,
+                    span.storage_index,
+                    src_ptr,
+                    span.source_stride_bytes,
+                    dst_logical_offset,
+                    copy_width,
+                    grouped_rows,
+                    span.target_stride_bytes);
+                if (!packed_or.ok()) {
+                  return packed_or.status();
+                }
+                copied_as_group = *packed_or;
+              }
+              if (!copied_as_group) {
+                for (uint64_t offset_row = 0; offset_row < grouped_rows; ++offset_row) {
+                  const uint64_t row_source =
+                      span.source_offset + (row + run_row + offset_row) * span.source_stride_bytes + copy_col_offset;
+                  const uint64_t row_target =
+                      span.target_offset + (row + run_row + offset_row) * span.target_stride_bytes + copy_col_offset;
+                  TC_RETURN_IF_ERROR(
+                      append_routed_linear_piece(span.rank, span.storage_index, row_source, row_target, copy_width));
+                }
+              }
+              run_row += grouped_rows;
+            }
+            row += rows_in_run;
+          }
+        } else {
+          const uint64_t span_end = span.source_offset + span.length;
+          const uint64_t overlap_begin = std::max<uint64_t>(span.source_offset, chunk.chunk_start);
+          const uint64_t overlap_end = std::min<uint64_t>(span_end, chunk.chunk_end);
+          if (overlap_end <= overlap_begin) {
+            continue;
+          }
+          const uint64_t dst_logical_offset = span.target_offset + (overlap_begin - span.source_offset);
+          TC_RETURN_IF_ERROR(append_routed_linear_piece(
+              span.rank, span.storage_index, overlap_begin, dst_logical_offset, overlap_end - overlap_begin));
+        }
+      }
+      routed_span_plan_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - span_plan_start).count();
+
+      for (size_t rank = 0; rank < pending_local_2d_copies_by_rank.size(); ++rank) {
+        const auto& pending_copies = pending_local_2d_copies_by_rank[rank];
+        if (pending_copies.empty()) {
+          continue;
+        }
+        const auto descriptor_build_start = std::chrono::steady_clock::now();
+        std::vector<SourceWindowBatchedScatterDescriptor> descriptors;
+        descriptors.reserve(pending_copies.size());
+        for (const auto& pending : pending_copies) {
+          descriptors.push_back(
+              SourceWindowBatchedScatterDescriptor{
+                  .src_ptr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pending.src_ptr)),
+                  .dst_ptr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pending.dst_ptr)),
+                  .row_bytes = pending.width,
+                  .row_count = pending.rows,
+                  .source_stride_bytes = pending.source_pitch,
+                  .target_stride_bytes = pending.target_pitch,
+              });
+        }
+        routed_local_descriptor_build_sec +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - descriptor_build_start).count();
+        const auto local_issue_start = std::chrono::steady_clock::now();
+        TC_RETURN_IF_ERROR(issue_scatter_descriptors_with_batched_kernel_or_memcpy(rank, absl::MakeSpan(descriptors)));
+        routed_local_issue_sec +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - local_issue_start).count();
+        actual_scatter_ops += descriptors.size();
+        routed_local_2d_pieces += descriptors.size();
+        routed_local_pieces += descriptors.size();
+      }
+
+      for (size_t producer = 0; producer < pending_packed_2d_copies_by_producer.size(); ++producer) {
+        const auto& pending_copies = pending_packed_2d_copies_by_producer[producer];
+        if (pending_copies.empty()) {
+          continue;
+        }
+        const auto descriptor_build_start = std::chrono::steady_clock::now();
+        std::vector<SourceWindowBatchedScatterDescriptor> descriptors;
+        descriptors.reserve(pending_copies.size());
+        for (const auto& pending : pending_copies) {
+          descriptors.push_back(
+              SourceWindowBatchedScatterDescriptor{
+                  .src_ptr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pending.src_ptr)),
+                  .dst_ptr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pending.pack_ptr)),
+                  .row_bytes = pending.width,
+                  .row_count = pending.rows,
+                  .source_stride_bytes = pending.source_pitch,
+                  .target_stride_bytes = pending.width,
+              });
+        }
+        routed_pack_descriptor_build_sec +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - descriptor_build_start).count();
+        const auto pack_issue_start = std::chrono::steady_clock::now();
+        TC_RETURN_IF_ERROR(issue_scatter_descriptors_with_batched_kernel_or_memcpy(
+            producer,
+            absl::MakeSpan(descriptors),
+            /*count_as_routed_pack=*/true));
+        routed_pack_issue_sec +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - pack_issue_start).count();
+        routed_pack_ops += descriptors.size();
+        routed_deferred_2d_pack_ops += descriptors.size();
+      }
+
+      for (size_t rank = 0; rank < local_pieces.size(); ++rank) {
+        const auto descriptor_build_start = std::chrono::steady_clock::now();
+        std::vector<SourceWindowBatchedScatterDescriptor> descriptors;
+        descriptors.reserve(local_pieces[rank].size());
+        for (const auto& piece : local_pieces[rank]) {
+          if (piece.length > std::numeric_limits<size_t>::max()) {
+            return absl::OutOfRangeError("source-window routed local piece exceeds size_t limits");
+          }
+          descriptors.push_back(
+              SourceWindowBatchedScatterDescriptor{
+                  .src_ptr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(piece.src_ptr)),
+                  .dst_ptr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(piece.dst_ptr)),
+                  .row_bytes = piece.length,
+                  .row_count = 1,
+                  .source_stride_bytes = piece.length,
+                  .target_stride_bytes = piece.length,
+              });
+        }
+        routed_local_descriptor_build_sec +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - descriptor_build_start).count();
+        const auto local_issue_start = std::chrono::steady_clock::now();
+        TC_RETURN_IF_ERROR(issue_scatter_descriptors_with_batched_kernel_or_memcpy(rank, absl::MakeSpan(descriptors)));
+        routed_local_issue_sec +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - local_issue_start).count();
+        actual_scatter_ops += descriptors.size();
+        routed_local_pieces += descriptors.size();
+      }
+      scatter_issue_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+    }
+
+    {
+      const auto step_start = std::chrono::steady_clock::now();
+      bool group_open = false;
+      size_t current_group_pairs = 0;
+      auto ensure_group_pair_capacity = [&]() -> absl::Status {
+        if (!group_open) {
+          TC_RETURN_IF_ERROR(clique->group_start());
+          group_open = true;
+        }
+        if (current_group_pairs >= kMaxMappedPeerPairsPerNcclGroup) {
+          TC_RETURN_IF_ERROR(clique->group_end());
+          TC_RETURN_IF_ERROR(clique->group_start());
+          group_open = true;
+          current_group_pairs = 0;
+        }
+        return absl::OkStatus();
+      };
+      auto flush_group = [&]() -> absl::Status {
+        if (!group_open) {
+          return absl::OkStatus();
+        }
+        TC_RETURN_IF_ERROR(clique->group_end());
+        group_open = false;
+        current_group_pairs = 0;
+        return absl::OkStatus();
+      };
+      for (size_t producer = 0; producer < remote_pieces.size(); ++producer) {
+        for (size_t consumer = 0; consumer < remote_pieces[producer].size(); ++consumer) {
+          if (producer == consumer) {
+            continue;
+          }
+          const uint64_t packed_bytes = pack_offsets[producer][consumer];
+          if (packed_bytes > 0) {
+            if (packed_bytes > std::numeric_limits<size_t>::max()) {
+              return absl::OutOfRangeError("source-window routed packed transfer exceeds size_t limits");
+            }
+            auto* pack_stage = route_pack_stages[producer][consumer].get();
+            auto* recv_stage = route_recv_stages[producer][consumer].get();
+            if (pack_stage == nullptr || recv_stage == nullptr) {
+              return absl::FailedPreconditionError("source-window routed packed transfer is missing staging buffers");
+            }
+            TC_RETURN_IF_ERROR(ensure_group_pair_capacity());
+            TC_RETURN_IF_ERROR(clique->send_u8(
+                static_cast<int>(producer),
+                pack_stage->get(),
+                static_cast<size_t>(packed_bytes),
+                static_cast<int>(consumer)));
+            TC_RETURN_IF_ERROR(clique->recv_u8(
+                static_cast<int>(consumer),
+                recv_stage->get(),
+                static_cast<size_t>(packed_bytes),
+                static_cast<int>(producer)));
+            actual_peer_transfer_bytes += packed_bytes;
+            routed_packed_pairs += 1;
+            current_group_pairs += 1;
+          }
+          for (const auto& piece : remote_pieces[producer][consumer]) {
+            if (piece.length == 0) {
+              continue;
+            }
+            if (piece.length > std::numeric_limits<size_t>::max()) {
+              return absl::OutOfRangeError("source-window routed remote piece exceeds size_t limits");
+            }
+            TC_RETURN_IF_ERROR(ensure_group_pair_capacity());
+            TC_RETURN_IF_ERROR(clique->send_u8(
+                static_cast<int>(producer),
+                piece.src_ptr,
+                static_cast<size_t>(piece.length),
+                static_cast<int>(consumer)));
+            TC_RETURN_IF_ERROR(clique->recv_u8(
+                static_cast<int>(consumer),
+                piece.dst_ptr,
+                static_cast<size_t>(piece.length),
+                static_cast<int>(producer)));
+            actual_peer_transfer_bytes += piece.length;
+            actual_scatter_ops += 1;
+            routed_remote_pieces += 1;
+            current_group_pairs += 1;
+          }
+        }
+      }
+      TC_RETURN_IF_ERROR(flush_group());
+      collective_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+    }
+    {
+      const auto step_start = std::chrono::steady_clock::now();
+      TC_RETURN_IF_ERROR(synchronize_clique_all());
+      collective_sync_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+    }
+    {
+      const auto step_start = std::chrono::steady_clock::now();
+      const auto descriptor_build_start = step_start;
+      std::vector<std::vector<SourceWindowBatchedScatterDescriptor>> descriptors_by_consumer(world_size);
+      for (size_t producer = 0; producer < packed_remote_pieces.size(); ++producer) {
+        for (size_t consumer = 0; consumer < packed_remote_pieces[producer].size(); ++consumer) {
+          if (producer == consumer || packed_remote_pieces[producer][consumer].empty()) {
+            continue;
+          }
+          auto* recv_stage = route_recv_stages[producer][consumer].get();
+          if (recv_stage == nullptr) {
+            return absl::FailedPreconditionError("source-window routed packed scatter is missing receive staging");
+          }
+          const auto* recv_base = static_cast<const std::uint8_t*>(recv_stage->get());
+          auto& descriptors = descriptors_by_consumer[consumer];
+          descriptors.reserve(descriptors.size() + packed_remote_pieces[producer][consumer].size());
+          for (const auto& piece : packed_remote_pieces[producer][consumer]) {
+            if (piece.length > std::numeric_limits<size_t>::max()) {
+              return absl::OutOfRangeError("source-window routed packed scatter exceeds size_t limits");
+            }
+            descriptors.push_back(
+                SourceWindowBatchedScatterDescriptor{
+                    .src_ptr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(recv_base + piece.pack_offset)),
+                    .dst_ptr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(piece.dst_ptr)),
+                    .row_bytes = piece.length,
+                    .row_count = 1,
+                    .source_stride_bytes = piece.length,
+                    .target_stride_bytes = piece.length,
+                });
+          }
+        }
+      }
+      routed_remote_descriptor_build_sec +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - descriptor_build_start).count();
+      for (size_t consumer = 0; consumer < descriptors_by_consumer.size(); ++consumer) {
+        const auto& descriptors = descriptors_by_consumer[consumer];
+        const auto remote_scatter_issue_start = std::chrono::steady_clock::now();
+        TC_RETURN_IF_ERROR(
+            issue_scatter_descriptors_with_batched_kernel_or_memcpy(consumer, absl::MakeSpan(descriptors)));
+        routed_remote_scatter_issue_sec +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - remote_scatter_issue_start).count();
+        actual_scatter_ops += descriptors.size();
+        routed_remote_pieces += descriptors.size();
+      }
+      scatter_issue_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+    }
+    return absl::OkStatus();
+  };
+
+  auto execute_single_buffer_chunk = [&](const SourceWindowRuntimeChunk& chunk) -> absl::Status {
+    if (chunk_uses_local_only(chunk)) {
+      if (chunk.window->owner_rank >= world_size) {
+        return absl::InvalidArgumentError("source-window local-only owner rank out of bounds");
+      }
+      const size_t owner = chunk.window->owner_rank;
+      {
+        const auto step_start = std::chrono::steady_clock::now();
+        char* host_buffer = host_pool.buffers.front();
+        std::memset(host_buffer, 0, chunk.chunk_len);
+        TC_RETURN_IF_ERROR(read_exact(*rank_sources[owner], chunk.chunk_start, host_buffer, chunk.chunk_len));
+        TC_RETURN_IF_ERROR(set_device_cached(participants[owner].device_id));
+        TC_RETURN_IF_ERROR(
+            tensorcast::cuda::memcpy_async(
+                rank_stages[owner]->get(),
+                host_buffer,
+                chunk.chunk_len,
+                cudaMemcpyHostToDevice,
+                clique->stream(static_cast<int>(owner))));
+        read_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+      }
+      return issue_local_only_chunk_from_parallel_slot(chunk, /*slot=*/0, /*issue_h2d_from_host_slot=*/false);
+    }
+    {
+      const auto step_start = std::chrono::steady_clock::now();
+      std::vector<absl::Status> read_statuses(world_size);
+      for (size_t rank = 0; rank < world_size; ++rank) {
+        char* host_buffer = host_pool.buffers.front();
+        std::memset(host_buffer, 0, chunk.stripe_bytes);
+        const uint64_t stripe_start = chunk.chunk_start + static_cast<uint64_t>(rank * chunk.stripe_bytes);
+        const size_t read_len = stripe_start < chunk.chunk_end
+            ? static_cast<size_t>(std::min<uint64_t>(chunk.stripe_bytes, chunk.chunk_end - stripe_start))
+            : 0;
+        if (read_len > 0) {
+          read_statuses[rank] = read_exact(*rank_sources[rank], stripe_start, host_buffer, read_len);
+        }
+        if (!read_statuses[rank].ok()) {
+          break;
+        }
+        TC_RETURN_IF_ERROR(set_device_cached(participants[rank].device_id));
+        TC_RETURN_IF_ERROR(
+            tensorcast::cuda::memcpy_async(
+                rank_send_stages[rank]->get(),
+                host_buffer,
+                chunk.stripe_bytes,
+                cudaMemcpyHostToDevice,
+                clique->stream(static_cast<int>(rank))));
+      }
+      for (const auto& status : read_statuses) {
+        TC_RETURN_IF_ERROR(status);
+      }
+      read_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+    }
+    if (chunk_uses_consumer_routed(chunk)) {
+      return issue_consumer_routed_chunk_from_parallel_slot(chunk, /*slot=*/0, /*issue_h2d_from_host_slot=*/false);
+    }
+    return issue_gpu_chunk_from_parallel_slot(chunk, /*slot=*/0, /*issue_h2d_from_host_slot=*/false);
+  };
+
+  if (parallel_host_buffers) {
+    size_t next_launch_chunk = 0;
+    const size_t initial_read_ahead = std::min(active_pipeline_slots, runtime_chunks.size());
+    for (; next_launch_chunk < initial_read_ahead; ++next_launch_chunk) {
+      TC_RETURN_IF_ERROR(launch_parallel_chunk_read(next_launch_chunk));
+    }
+    for (size_t chunk_index = 0; chunk_index < runtime_chunks.size(); ++chunk_index) {
+      const size_t slot = chunk_index % active_pipeline_slots;
+      SourceWindowReadAheadResult read_result = wait_parallel_chunk_read(chunk_index);
+      for (const auto& status : read_result.statuses) {
+        TC_RETURN_IF_ERROR(status);
+      }
+      read_sec += read_result.read_sec;
+      read_job_sec += read_result.read_job_sec;
+      bytes_read += runtime_chunks[chunk_index].chunk_len;
+      chunk_count += 1;
+      if (chunk_uses_consumer_routed(runtime_chunks[chunk_index])) {
+        TC_RETURN_IF_ERROR(issue_consumer_routed_chunk_from_parallel_slot(
+            runtime_chunks[chunk_index], slot, /*issue_h2d_from_host_slot=*/true));
+      } else if (chunk_uses_local_only(runtime_chunks[chunk_index])) {
+        TC_RETURN_IF_ERROR(issue_local_only_chunk_from_parallel_slot(
+            runtime_chunks[chunk_index], slot, /*issue_h2d_from_host_slot=*/true));
+      } else {
+        TC_RETURN_IF_ERROR(
+            issue_gpu_chunk_from_parallel_slot(runtime_chunks[chunk_index], slot, /*issue_h2d_from_host_slot=*/true));
+      }
+      if (next_launch_chunk < runtime_chunks.size()) {
+        TC_RETURN_IF_ERROR(launch_parallel_chunk_read(next_launch_chunk));
+        ++next_launch_chunk;
+      }
+    }
+  } else {
+    for (const auto& chunk : runtime_chunks) {
+      bytes_read += chunk.chunk_len;
+      chunk_count += 1;
+      TC_RETURN_IF_ERROR(execute_single_buffer_chunk(chunk));
+    }
+  }
+
+  auto metrics = source_window_metrics_from_summary(plan.summary);
+  metrics.unique_source_bytes = bytes_read;
+  metrics.peer_transfer_bytes = actual_peer_transfer_bytes;
+  const uint64_t gpu_stage_bytes = configured_chunk_bytes * static_cast<uint64_t>(participants.size()) +
+      max_stripe_bytes * static_cast<uint64_t>(participants.size());
+  const uint64_t host_stage_bytes = parallel_host_buffers ? configured_chunk_bytes *
+          static_cast<uint64_t>(participants.size()) * static_cast<uint64_t>(active_pipeline_slots)
+                                                          : configured_chunk_bytes;
+  const uint64_t routed_stage_bytes = has_consumer_routed_windows ? 2ULL * max_stripe_bytes *
+          static_cast<uint64_t>(participants.size()) * static_cast<uint64_t>(participants.size() - 1)
+                                                                  : 0;
+  metrics.peak_temporary_bytes = gpu_stage_bytes + host_stage_bytes + routed_stage_bytes;
+  metrics.batch_count = chunk_count;
+  metrics.source_window_peer_transfer_bytes = actual_peer_transfer_bytes;
+  if (use_consumer_routed) {
+    metrics.source_window_peer_useful_bytes = actual_peer_transfer_bytes;
+    metrics.source_window_peer_waste_bytes = 0;
+  } else if (actual_peer_transfer_bytes > metrics.source_window_peer_useful_bytes) {
+    metrics.source_window_peer_waste_bytes = actual_peer_transfer_bytes - metrics.source_window_peer_useful_bytes;
+  }
+  metrics.source_window_scatter_op_count = actual_scatter_ops;
+
+  const auto total_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - total_start).count();
+  LOG(INFO) << "source_window_collective_mapped_target timings"
+            << " artifact_id=" << participants.front().artifact_id << " group_id=" << plan.group.group_id
+            << " windows=" << plan.windows.size() << " chunks=" << chunk_count
+            << " chunk_bytes=" << configured_chunk_bytes << " max_collective_chunk_bytes=" << max_collective_chunk_bytes
+            << " parallel_host_buffers=" << (parallel_host_buffers ? 1 : 0)
+            << " requested_pipeline_slots=" << requested_pipeline_slots
+            << " active_pipeline_slots=" << active_pipeline_slots << " bytes_read=" << bytes_read
+            << " peer_transfer_bytes=" << actual_peer_transfer_bytes << " scatter_ops=" << actual_scatter_ops
+            << " target_storage_fast_path_pieces=" << target_storage_fast_path_pieces
+            << " target_storage_fast_path_bytes=" << target_storage_fast_path_bytes
+            << " runtime_chunk_unfiltered_consumer_span_refs=" << runtime_chunk_unfiltered_consumer_span_refs
+            << " runtime_chunk_prefiltered_consumer_span_refs=" << runtime_chunk_prefiltered_consumer_span_refs
+            << " batched_scatter_kernel_enabled=" << (batched_scatter_kernel_enabled ? 1 : 0)
+            << " batched_scatter_kernel_launches=" << batched_scatter_kernel_launches
+            << " batched_scatter_kernel_descriptors=" << batched_scatter_kernel_descriptors
+            << " batched_scatter_fallback_launches=" << batched_scatter_fallback_launches
+            << " batched_scatter_fallback_descriptors=" << batched_scatter_fallback_descriptors
+            << " batched_scatter_capacity_fallback_chunks=" << batched_scatter_capacity_fallback_chunks
+            << " batched_routed_pack_kernel_launches=" << batched_routed_pack_kernel_launches
+            << " batched_routed_pack_kernel_descriptors=" << batched_routed_pack_kernel_descriptors
+            << " batched_routed_pack_fallback_launches=" << batched_routed_pack_fallback_launches
+            << " batched_routed_pack_fallback_descriptors=" << batched_routed_pack_fallback_descriptors
+            << " batched_scatter_descriptor_build=" << batched_scatter_descriptor_build_sec << "s"
+            << " batched_scatter_descriptor_host_copy=" << batched_scatter_descriptor_host_copy_sec << "s"
+            << " batched_scatter_descriptor_slot_wait=" << batched_scatter_descriptor_slot_wait_sec << "s"
+            << " batched_scatter_kernel_submit=" << batched_scatter_kernel_submit_sec << "s"
+            << " batched_scatter_fallback_submit=" << batched_scatter_fallback_submit_sec << "s"
+            << " routed_span_plan=" << routed_span_plan_sec << "s"
+            << " routed_pack_descriptor_build=" << routed_pack_descriptor_build_sec << "s"
+            << " routed_pack_issue=" << routed_pack_issue_sec << "s"
+            << " routed_local_descriptor_build=" << routed_local_descriptor_build_sec << "s"
+            << " routed_local_issue=" << routed_local_issue_sec << "s"
+            << " routed_remote_descriptor_build=" << routed_remote_descriptor_build_sec << "s"
+            << " routed_remote_scatter_issue=" << routed_remote_scatter_issue_sec << "s"
+            << " routed_compiled_program_enabled=" << (compiled_routed_program_enabled ? 1 : 0)
+            << " routed_compiled_program_build=" << routed_compiled_program_build_sec << "s"
+            << " routed_compiled_program_build_threads=" << routed_compiled_program_build_threads
+            << " routed_compiled_program_key=" << routed_compiled_program_key_sec << "s"
+            << " routed_compiled_program_lookup=" << routed_compiled_program_lookup_sec << "s"
+            << " routed_compiled_program_wait=" << routed_compiled_program_wait_sec << "s"
+            << " routed_compiled_program_cache_store=" << routed_compiled_program_cache_store_sec << "s"
+            << " routed_compiled_program_cache_eligible=" << (routed_compiled_program_cache_eligible ? 1 : 0)
+            << " routed_compiled_program_cache_hit=" << (routed_compiled_program_cache_hit ? 1 : 0)
+            << " routed_compiled_program_cache_waited=" << (routed_compiled_program_cache_waited ? 1 : 0)
+            << " routed_compiled_program_cache_size_mismatch=" << (routed_compiled_program_cache_size_mismatch ? 1 : 0)
+            << " routed_compiled_program_chunks=" << routed_compiled_program_chunks
+            << " routed_compiled_program_local_descriptors=" << routed_compiled_program_local_descriptors
+            << " routed_compiled_program_pack_descriptors=" << routed_compiled_program_pack_descriptors
+            << " routed_compiled_program_packed_remote_pieces=" << routed_compiled_program_packed_remote_pieces
+            << " routed_compiled_program_direct_remote_pieces=" << routed_compiled_program_direct_remote_pieces
+            << " scatter_cuda_graph_enabled=" << (scatter_cuda_graph_enabled ? 1 : 0)
+            << " scatter_cuda_graph_launches=" << scatter_cuda_graph_launches
+            << " scatter_cuda_graph_descriptors=" << scatter_cuda_graph_descriptors
+            << " scatter_cuda_graph_nodes=" << scatter_cuda_graph_nodes
+            << " scatter_cuda_graph_fallback_chunks=" << scatter_cuda_graph_fallback_chunks
+            << " scatter_cuda_graph_build=" << scatter_cuda_graph_build_sec << "s"
+            << " routed_pack_ops=" << routed_pack_ops << " routed_packed_pairs=" << routed_packed_pairs
+            << " routed_deferred_2d_pack_ops=" << routed_deferred_2d_pack_ops
+            << " routed_local_2d_pieces=" << routed_local_2d_pieces << " routed_local_pieces=" << routed_local_pieces
+            << " routed_remote_pieces=" << routed_remote_pieces << " routed_stage_bytes=" << routed_stage_bytes
+            << " cuda_device_switches=" << cuda_device_switches
+            << " direct_pinned_read_attempts=" << direct_pinned_read_attempts.load(std::memory_order_relaxed)
+            << " direct_pinned_read_successes=" << direct_pinned_read_successes.load(std::memory_order_relaxed)
+            << " direct_pinned_read_fallbacks=" << direct_pinned_read_fallbacks.load(std::memory_order_relaxed)
+            << " direct_pinned_read_success_bytes=" << direct_pinned_read_success_bytes.load(std::memory_order_relaxed)
+            << " direct_pinned_read_fallback_bytes="
+            << direct_pinned_read_fallback_bytes.load(std::memory_order_relaxed)
+            << " direct_pinned_fallback_unaligned_host="
+            << direct_pinned_fallback_unaligned_host.load(std::memory_order_relaxed)
+            << " direct_pinned_fallback_outside_segment="
+            << direct_pinned_fallback_outside_segment.load(std::memory_order_relaxed)
+            << " direct_pinned_fallback_cross_segment="
+            << direct_pinned_fallback_cross_segment.load(std::memory_order_relaxed)
+            << " direct_pinned_fallback_file_edge=" << direct_pinned_fallback_file_edge.load(std::memory_order_relaxed)
+            << " direct_pinned_fallback_capacity=" << direct_pinned_fallback_capacity.load(std::memory_order_relaxed)
+            << " clique_init=" << clique_sec << "s"
+            << " clique_cache_hit=" << (clique_cache_hit ? 1 : 0) << " pinned_alloc=" << pinned_alloc_sec << "s"
+            << " stage_alloc=" << stage_alloc_sec << "s"
+            << " read=" << read_sec << "s"
+            << " read_job_sum=" << read_job_sec << "s"
+            << " h2d=" << h2d_sec << "s"
+            << " collective_issue=" << collective_sec << "s"
+            << " collective_sync=" << collective_sync_sec << "s"
+            << " scatter_issue=" << scatter_issue_sec << "s"
+            << " scatter_sync=" << scatter_sync_sec << "s"
+            << " total=" << total_sec << "s";
+  return metrics;
+}
+
+SourceWindowCollectiveMappedTargetLoadResult execute_source_window_group_final_admission(
+    const loading::CollectiveLoadGroupHint& group,
+    const std::vector<SourceWindowMappedParticipant>& participants,
+    const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
+    std::chrono::milliseconds pinned_timeout,
+    const CollectiveMappedTargetLoadOptions& options) {
+  const auto plan_start = std::chrono::steady_clock::now();
+  const auto input_start = std::chrono::steady_clock::now();
+  auto input_or = build_source_window_collective_group_input(group, participants, options);
+  const double input_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - input_start).count();
+  const SourceWindowCollectiveConfig config = source_window_collective_config_from_strategy(options.strategy_config);
+  auto attach_plan_cache_hit = [](SourceWindowCollectiveMappedTargetLoadResult result, bool plan_cache_hit) {
+    result.plan_cache_hit = plan_cache_hit;
+    return result;
+  };
+  if (!input_or.ok()) {
+    const double plan_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - plan_start).count();
+    LOG(INFO) << "source_window_collective_plan"
+              << " artifact_id=" << participants.front().artifact_id << " group_id=" << group.group_id
+              << " tp_size=" << group.world_size << " admitted=0"
+              << " reject_reason=" << input_or.status().message() << " input_sec=" << input_sec
+              << " key_sec=0 lookup_sec=0 build_sec=0 cache_store_sec=0"
+              << " plan_cache_enabled=" << (options.enable_source_window_plan_cache ? 1 : 0)
+              << " plan_cache_hit=0 plan_cache_key_kind=none"
+              << " plan_sec=" << plan_sec;
+    return source_window_group_rejected_result(config, std::string(input_or.status().message()));
+  }
+  const SourceWindowPreparedRealizationFactStats prepared_fact_stats =
+      source_window_prepared_realization_fact_stats(*input_or);
+  std::string plan_cache_key;
+  std::string plan_cache_key_kind = "none";
+  double key_sec = 0.0;
+  SourceWindowCollectivePlan plan;
+  bool plan_cache_hit = false;
+  double lookup_sec = 0.0;
+  if (options.enable_source_window_plan_cache) {
+    const auto key_start = std::chrono::steady_clock::now();
+    if (auto prepared_key =
+            source_window_collective_prepared_plan_cache_key(participants.front().artifact_id, *input_or);
+        prepared_key.has_value()) {
+      plan_cache_key = std::move(*prepared_key);
+      plan_cache_key_kind = "prepared";
+    } else {
+      plan_cache_key = source_window_collective_plan_cache_key(participants.front().artifact_id, *input_or);
+      plan_cache_key_kind = "full_work_plan";
+    }
+    key_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - key_start).count();
+    const auto lookup_start = std::chrono::steady_clock::now();
+    plan_cache_hit = lookup_source_window_collective_plan_cache(plan_cache_key, group, &plan);
+    lookup_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - lookup_start).count();
+  }
+  absl::Status plan_status;
+  double build_sec = 0.0;
+  double cache_store_sec = 0.0;
+  if (!plan_cache_hit) {
+    const auto build_start = std::chrono::steady_clock::now();
+    auto plan_or = build_source_window_collective_plan(*input_or);
+    build_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - build_start).count();
+    if (!plan_or.ok()) {
+      plan_status = plan_or.status();
+    } else {
+      plan = std::move(*plan_or);
+      if (options.enable_source_window_plan_cache) {
+        const auto cache_store_start = std::chrono::steady_clock::now();
+        store_source_window_collective_plan_cache(plan_cache_key, plan);
+        cache_store_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - cache_store_start).count();
+      }
+    }
+  }
+  const double plan_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - plan_start).count();
+  if (!plan_status.ok()) {
+    LOG(INFO) << "source_window_collective_plan"
+              << " artifact_id=" << participants.front().artifact_id << " group_id=" << group.group_id
+              << " tp_size=" << group.world_size << " admitted=0"
+              << " reject_reason=" << plan_status.message() << " input_sec=" << input_sec << " key_sec=" << key_sec
+              << " lookup_sec=" << lookup_sec << " build_sec=" << build_sec << " cache_store_sec=" << cache_store_sec
+              << " plan_cache_enabled=" << (options.enable_source_window_plan_cache ? 1 : 0)
+              << " plan_cache_hit=" << (plan_cache_hit ? 1 : 0) << " plan_cache_key_kind=" << plan_cache_key_kind
+              << " plan_cache_key=" << plan_cache_key
+              << " prepared_realization_members=" << prepared_fact_stats.member_count
+              << " prepared_realization_group_key_unique=" << prepared_fact_stats.group_key_unique
+              << " prepared_realization_member_key_unique=" << prepared_fact_stats.member_key_unique
+              << " prepared_realization_plan_hash_unique=" << prepared_fact_stats.realization_plan_hash_unique
+              << " prepared_realization_target_layout_template_hash_unique="
+              << prepared_fact_stats.target_layout_template_hash_unique
+              << " prepared_realization_target_index_hash_unique=" << prepared_fact_stats.target_index_hash_unique
+              << " plan_sec=" << plan_sec;
+    return attach_plan_cache_hit(
+        source_window_group_rejected_result(config, std::string(plan_status.message())), plan_cache_hit);
+  }
+  const bool admitted = plan.summary.group_final_admitted;
+  LOG(INFO) << "source_window_collective_plan"
+            << " artifact_id=" << participants.front().artifact_id << " group_id=" << group.group_id
+            << " tp_size=" << group.world_size << " admitted=" << (admitted ? 1 : 0)
+            << " reject_reason=" << plan.summary.group_reject_reason
+            << " windows=" << plan.summary.source_window_window_count
+            << " group_disk_read_bytes=" << plan.summary.source_window_group_disk_read_bytes
+            << " rank_read_bytes_max=" << plan.summary.source_window_rank_read_bytes_max
+            << " local_rank_read_bytes_max=" << plan.summary.source_window_local_rank_read_bytes_max
+            << " rank_read_saving_bytes=" << plan.summary.source_window_rank_read_saving_bytes
+            << " unique_payload_bytes=" << plan.summary.source_window_unique_payload_bytes
+            << " target_write_bytes=" << plan.summary.source_window_target_write_bytes
+            << " read_amplification_x1000=" << plan.summary.source_window_read_amplification_x1000
+            << " peer_transfer_bytes=" << plan.summary.source_window_peer_transfer_bytes
+            << " peer_useful_bytes=" << plan.summary.source_window_peer_useful_bytes
+            << " peer_waste_bytes=" << plan.summary.source_window_peer_waste_bytes
+            << " scatter_ops=" << plan.summary.source_window_scatter_op_count
+            << " residual_bytes=" << plan.summary.source_window_residual_bytes << " distribution_mode="
+            << runtime::ingestion::strategy::source_window_collective_distribution_mode_name(plan.distribution_mode)
+            << " plan_hash=" << plan.plan_hash << " input_sec=" << input_sec << " key_sec=" << key_sec
+            << " lookup_sec=" << lookup_sec << " build_sec=" << build_sec << " cache_store_sec=" << cache_store_sec
+            << " plan_cache_enabled=" << (options.enable_source_window_plan_cache ? 1 : 0)
+            << " plan_cache_hit=" << (plan_cache_hit ? 1 : 0) << " plan_cache_key_kind=" << plan_cache_key_kind
+            << " plan_cache_key=" << plan_cache_key
+            << " prepared_realization_members=" << prepared_fact_stats.member_count
+            << " prepared_realization_group_key_unique=" << prepared_fact_stats.group_key_unique
+            << " prepared_realization_member_key_unique=" << prepared_fact_stats.member_key_unique
+            << " prepared_realization_plan_hash_unique=" << prepared_fact_stats.realization_plan_hash_unique
+            << " prepared_realization_target_layout_template_hash_unique="
+            << prepared_fact_stats.target_layout_template_hash_unique
+            << " prepared_realization_target_index_hash_unique=" << prepared_fact_stats.target_index_hash_unique
+            << " plan_sec=" << plan_sec;
+  if (verbose_materialization_strategy_diagnostics(options.strategy_config)) {
+    const auto tensor_stage_start = std::chrono::steady_clock::now();
+    auto tensor_stage_summary_or = summarize_source_window_tensor_staged_copy(*input_or);
+    const double tensor_stage_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - tensor_stage_start).count();
+    if (tensor_stage_summary_or.ok()) {
+      const auto& summary = *tensor_stage_summary_or;
+      LOG(INFO) << "source_window_tensor_staged_feasibility"
+                << " artifact_id=" << participants.front().artifact_id << " group_id=" << group.group_id
+                << " tp_size=" << group.world_size << " feasible=" << (summary.feasible ? 1 : 0)
+                << " reject_reason=" << summary.reject_reason << " rank_count=" << summary.rank_count
+                << " source_fragment_count=" << summary.source_fragment_count
+                << " destination_tensor_count=" << summary.destination_tensor_count
+                << " source_tensor_count=" << summary.source_tensor_count
+                << " eligible_bytes=" << summary.eligible_bytes << " ineligible_bytes=" << summary.ineligible_bytes
+                << " raw_copy_ops=" << summary.raw_copy_ops
+                << " tensor_staged_copy_ops=" << summary.tensor_staged_copy_ops
+                << " linear_copy_ops=" << summary.linear_copy_ops << " copy_2d_ops=" << summary.copy_2d_ops
+                << " max_tensor_staged_copy_ops_per_rank=" << summary.max_tensor_staged_copy_ops_per_rank
+                << " estimated_op_reduction_x1000=" << summary.estimated_op_reduction_x1000
+                << " summary_sec=" << tensor_stage_sec;
+    } else {
+      LOG(INFO) << "source_window_tensor_staged_feasibility"
+                << " artifact_id=" << participants.front().artifact_id << " group_id=" << group.group_id
+                << " tp_size=" << group.world_size << " feasible=0"
+                << " reject_reason=" << tensor_stage_summary_or.status().message()
+                << " summary_sec=" << tensor_stage_sec;
+    }
+    uint64_t diagnostic_chunk_bytes = options.chunk_bytes;
+    if (pinned_pool != nullptr && pinned_pool->slice_bytes() > 0) {
+      diagnostic_chunk_bytes = diagnostic_chunk_bytes == 0
+          ? static_cast<uint64_t>(pinned_pool->slice_bytes())
+          : std::min<uint64_t>(diagnostic_chunk_bytes, pinned_pool->slice_bytes());
+    }
+    const auto batched_scatter_start = std::chrono::steady_clock::now();
+    auto batched_scatter_summary_or = summarize_source_window_batched_scatter(plan, diagnostic_chunk_bytes);
+    const double batched_scatter_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - batched_scatter_start).count();
+    if (batched_scatter_summary_or.ok()) {
+      const auto& summary = *batched_scatter_summary_or;
+      LOG(INFO) << "source_window_batched_scatter_feasibility"
+                << " artifact_id=" << participants.front().artifact_id << " group_id=" << group.group_id
+                << " tp_size=" << group.world_size << " feasible=" << (summary.feasible ? 1 : 0)
+                << " reject_reason=" << summary.reject_reason << " rank_count=" << summary.rank_count
+                << " window_count=" << summary.window_count << " runtime_chunk_bytes=" << summary.runtime_chunk_bytes
+                << " estimated_runtime_chunk_count=" << summary.estimated_runtime_chunk_count
+                << " consumer_span_count=" << summary.consumer_span_count
+                << " full_window_all_gather_windows=" << summary.full_window_all_gather_windows
+                << " consumer_routed_windows=" << summary.consumer_routed_windows
+                << " local_only_windows=" << summary.local_only_windows
+                << " target_write_bytes=" << summary.target_write_bytes
+                << " estimated_current_copy_launches=" << summary.estimated_current_copy_launches
+                << " estimated_current_scatter_launches=" << summary.estimated_current_scatter_launches
+                << " estimated_current_pack_launches=" << summary.estimated_current_pack_launches
+                << " estimated_current_linear_copy_launches=" << summary.estimated_current_linear_copy_launches
+                << " estimated_current_copy_2d_launches=" << summary.estimated_current_copy_2d_launches
+                << " batched_total_copy_launches=" << summary.batched_total_copy_launches
+                << " batched_scatter_launches=" << summary.batched_scatter_launches
+                << " batched_pack_launches=" << summary.batched_pack_launches
+                << " max_descriptors_per_batched_scatter=" << summary.max_descriptors_per_batched_scatter
+                << " max_descriptors_per_batched_pack=" << summary.max_descriptors_per_batched_pack
+                << " estimated_copy_launch_reduction_x1000=" << summary.estimated_copy_launch_reduction_x1000
+                << " summary_sec=" << batched_scatter_sec;
+    } else {
+      LOG(INFO) << "source_window_batched_scatter_feasibility"
+                << " artifact_id=" << participants.front().artifact_id << " group_id=" << group.group_id
+                << " tp_size=" << group.world_size << " feasible=0"
+                << " reject_reason=" << batched_scatter_summary_or.status().message()
+                << " summary_sec=" << batched_scatter_sec;
+    }
+  }
+  if (!admitted) {
+    return attach_plan_cache_hit(
+        source_window_group_rejected_result(config, plan, plan.summary.group_reject_reason), plan_cache_hit);
+  }
+  if (config.selection_mode == runtime::ingestion::strategy::SourceWindowCollectiveSelectionMode::kDryRun) {
+    SourceWindowCollectiveMappedTargetLoadResult result;
+    result.handled = false;
+    result.status = absl::OkStatus();
+    result.metrics = source_window_metrics_from_summary(plan.summary);
+    result.skip_reason = "source_window_dry_run";
+    result.plan_hash = plan.plan_hash;
+    result.plan_cache_hit = plan_cache_hit;
+    return result;
+  }
+  if (pinned_pool == nullptr) {
+    return attach_plan_cache_hit(
+        source_window_runtime_unavailable_result(config, plan, "pinned_pool_missing"), plan_cache_hit);
+  }
+  if (plan.distribution_mode !=
+          runtime::ingestion::strategy::SourceWindowCollectiveDistributionMode::kFullWindowAllGather &&
+      plan.distribution_mode != runtime::ingestion::strategy::SourceWindowCollectiveDistributionMode::kConsumerRouted &&
+      plan.distribution_mode != runtime::ingestion::strategy::SourceWindowCollectiveDistributionMode::kHybridWindow &&
+      plan.distribution_mode != runtime::ingestion::strategy::SourceWindowCollectiveDistributionMode::kLocalOnly) {
+    return attach_plan_cache_hit(
+        source_window_runtime_unavailable_result(config, plan, "distribution_unsupported"), plan_cache_hit);
+  }
+  auto metrics_or = execute_source_window_collective_mapped(plan, participants, pinned_pool, pinned_timeout, options);
+  if (!metrics_or.ok()) {
+    return attach_plan_cache_hit(source_window_runtime_failure_result(plan, metrics_or.status()), plan_cache_hit);
+  }
+  return attach_plan_cache_hit(source_window_runtime_success_result(plan, std::move(*metrics_or)), plan_cache_hit);
+}
+
+SourceWindowCollectiveMappedTargetLoadResult wait_for_source_window_mapped_group_and_maybe_execute(
+    const SourceWindowCollectiveMappedTargetLoadRequest& request,
+    const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
+    std::chrono::milliseconds pinned_timeout,
+    const CollectiveMappedTargetLoadOptions& options) {
+  const auto call_start = std::chrono::steady_clock::now();
+  const SourceWindowCollectiveConfig config = source_window_collective_config_from_strategy(options.strategy_config);
+  auto work_plan_ref = source_window_request_work_plan_ref(request);
+  auto target_layout_ref = source_window_request_target_layout_ref(request);
+  if (work_plan_ref == nullptr || target_layout_ref == nullptr) {
+    return source_window_unhandled_or_strict_failure(config, "request_incomplete");
+  }
+  auto storage_spans_or = build_target_storage_spans(*target_layout_ref);
+  if (!storage_spans_or.ok()) {
+    return source_window_unhandled_or_strict_failure(
+        config, "invalid_target_storage_layout", storage_spans_or.status());
+  }
+  auto parsed = SourceWindowMappedParticipant{
+      .artifact_id = request.artifact_id,
+      .rank = static_cast<int>(request.group.rank),
+      .device_id = request.device_id,
+      .disk_context = request.disk_context,
+      .work_plan = std::move(work_plan_ref),
+      .target_layout = std::move(target_layout_ref),
+      .storage_spans = std::move(*storage_spans_or),
+      .candidate_summary = request.candidate_summary,
+      .source_index_digest = request.source_index_digest,
+      .prepared_realization = request.prepared_realization,
+  };
+  const auto request_prepared = std::chrono::steady_clock::now();
+  std::shared_ptr<SourceWindowMappedGroupState> state;
+  {
+    absl::MutexLock lock(&g_source_window_mapped_group_mu);
+    auto& slot = g_source_window_mapped_groups[request.group.group_id];
+    if (slot == nullptr) {
+      slot = std::make_shared<SourceWindowMappedGroupState>(request.group.world_size);
+    }
+    state = slot;
+  }
+  const auto group_state_ready = std::chrono::steady_clock::now();
+
+  bool leader = false;
+  bool erase_empty_group = false;
+  bool timed_out = false;
+  uint32_t joined_after = 0;
+  const auto assemble_start = std::chrono::steady_clock::now();
+  {
+    absl::MutexLock lock(&state->mu);
+    if (request.group.rank >= state->world_size) {
+      return {
+          .handled = false,
+          .status = absl::InvalidArgumentError("source-window collective rank out of range"),
+          .skip_reason = "collective_rank_out_of_range",
+      };
+    }
+    auto& slot = state->participants[request.group.rank];
+    if (!slot.has_value()) {
+      slot = std::move(parsed);
+      state->joined += 1;
+      LOG(INFO) << "source_window_collective_mapped_target join group_id=" << request.group.group_id
+                << " rank=" << request.group.rank << " joined=" << state->joined << "/" << state->world_size;
+    }
+    joined_after = state->joined;
+    if (state->joined == state->world_size) {
+      state->launching = true;
+      leader = true;
+      state->cv.SignalAll();
+      LOG(INFO) << "source_window_collective_mapped_target launching group_id=" << request.group.group_id
+                << " world_size=" << state->world_size;
+    } else {
+      const absl::Time deadline =
+          absl::Now() + absl::Milliseconds(collective_group_assemble_timeout(options.strategy_config).count());
+      while (!state->launching && !state->complete && absl::Now() < deadline) {
+        state->cv.WaitWithDeadline(&state->mu, deadline);
+      }
+      if (!state->launching && !state->complete) {
+        if (slot.has_value()) {
+          slot.reset();
+          state->joined -= 1;
+        }
+        timed_out = true;
+        erase_empty_group = state->joined == 0;
+        LOG(INFO) << "source_window_collective_mapped_target timeout group_id=" << request.group.group_id
+                  << " rank=" << request.group.rank << " remaining=" << state->joined;
+      }
+    }
+  }
+  const auto assemble_done = std::chrono::steady_clock::now();
+  if (erase_empty_group) {
+    absl::MutexLock group_lock(&g_source_window_mapped_group_mu);
+    g_source_window_mapped_groups.erase(request.group.group_id);
+    auto result = source_window_unhandled_or_strict_failure(config, "group_assemble_timeout");
+    const auto done = std::chrono::steady_clock::now();
+    LOG(INFO) << "source_window_collective_mapped_target call_profile"
+              << " group_id=" << request.group.group_id << " rank=" << request.group.rank
+              << " leader=0 timeout=1 joined_after=" << joined_after
+              << " request_prep_sec=" << std::chrono::duration<double>(request_prepared - call_start).count()
+              << " group_state_sec=" << std::chrono::duration<double>(group_state_ready - request_prepared).count()
+              << " assemble_wait_sec=" << std::chrono::duration<double>(assemble_done - assemble_start).count()
+              << " result_wait_sec=0 leader_execute_sec=0 total_sec="
+              << std::chrono::duration<double>(done - call_start).count() << " handled=" << result.handled
+              << " status_ok=" << result.status.ok() << " skip_reason=" << result.skip_reason;
+    return result;
+  }
+  if (timed_out) {
+    auto result = source_window_unhandled_or_strict_failure(config, "group_assemble_timeout");
+    const auto done = std::chrono::steady_clock::now();
+    LOG(INFO) << "source_window_collective_mapped_target call_profile"
+              << " group_id=" << request.group.group_id << " rank=" << request.group.rank
+              << " leader=0 timeout=1 joined_after=" << joined_after
+              << " request_prep_sec=" << std::chrono::duration<double>(request_prepared - call_start).count()
+              << " group_state_sec=" << std::chrono::duration<double>(group_state_ready - request_prepared).count()
+              << " assemble_wait_sec=" << std::chrono::duration<double>(assemble_done - assemble_start).count()
+              << " result_wait_sec=0 leader_execute_sec=0 total_sec="
+              << std::chrono::duration<double>(done - call_start).count() << " handled=" << result.handled
+              << " status_ok=" << result.status.ok() << " skip_reason=" << result.skip_reason;
+    return result;
+  }
+
+  if (leader) {
+    std::vector<SourceWindowMappedParticipant> participants;
+    participants.reserve(state->world_size);
+    const auto collect_start = std::chrono::steady_clock::now();
+    {
+      absl::MutexLock lock(&state->mu);
+      for (auto& participant : state->participants) {
+        if (!participant.has_value()) {
+          state->result = {
+              .handled = true,
+              .status = absl::FailedPreconditionError("source-window mapped collective group is incomplete"),
+              .skip_reason = "group_incomplete",
+          };
+          state->complete = true;
+          state->cv.SignalAll();
+          return state->result;
+        }
+        participants.push_back(std::move(*participant));
+        participant.reset();
+      }
+    }
+    const auto collect_done = std::chrono::steady_clock::now();
+    std::sort(
+        participants.begin(),
+        participants.end(),
+        [](const SourceWindowMappedParticipant& a, const SourceWindowMappedParticipant& b) { return a.rank < b.rank; });
+    const auto execute_start = std::chrono::steady_clock::now();
+    SourceWindowCollectiveMappedTargetLoadResult result =
+        execute_source_window_group_final_admission(request.group, participants, pinned_pool, pinned_timeout, options);
+    const auto execute_done = std::chrono::steady_clock::now();
+    LOG(INFO) << "source_window_collective_mapped_target finished group_id=" << request.group.group_id
+              << " handled=" << result.handled << " status=" << result.status << " skip_reason=" << result.skip_reason;
+    {
+      absl::MutexLock lock(&state->mu);
+      state->result = result;
+      state->complete = true;
+      state->cv.SignalAll();
+    }
+    const auto publish_done = std::chrono::steady_clock::now();
+    {
+      absl::MutexLock lock(&g_source_window_mapped_group_mu);
+      g_source_window_mapped_groups.erase(request.group.group_id);
+    }
+    const auto done = std::chrono::steady_clock::now();
+    LOG(INFO) << "source_window_collective_mapped_target call_profile"
+              << " group_id=" << request.group.group_id << " rank=" << request.group.rank
+              << " leader=1 timeout=0 joined_after=" << joined_after
+              << " request_prep_sec=" << std::chrono::duration<double>(request_prepared - call_start).count()
+              << " group_state_sec=" << std::chrono::duration<double>(group_state_ready - request_prepared).count()
+              << " assemble_wait_sec=" << std::chrono::duration<double>(assemble_done - assemble_start).count()
+              << " participant_collect_sec=" << std::chrono::duration<double>(collect_done - collect_start).count()
+              << " leader_execute_sec=" << std::chrono::duration<double>(execute_done - execute_start).count()
+              << " publish_sec=" << std::chrono::duration<double>(publish_done - execute_done).count()
+              << " result_wait_sec=0 total_sec=" << std::chrono::duration<double>(done - call_start).count()
+              << " handled=" << result.handled << " status_ok=" << result.status.ok()
+              << " skip_reason=" << result.skip_reason;
+    return result;
+  }
+
+  SourceWindowCollectiveMappedTargetLoadResult result;
+  const auto result_wait_start = std::chrono::steady_clock::now();
+  {
+    absl::MutexLock lock(&state->mu);
+    while (!state->complete) {
+      state->cv.Wait(&state->mu);
+    }
+    result = state->result;
+  }
+  const auto done = std::chrono::steady_clock::now();
+  LOG(INFO) << "source_window_collective_mapped_target call_profile"
+            << " group_id=" << request.group.group_id << " rank=" << request.group.rank
+            << " leader=0 timeout=0 joined_after=" << joined_after
+            << " request_prep_sec=" << std::chrono::duration<double>(request_prepared - call_start).count()
+            << " group_state_sec=" << std::chrono::duration<double>(group_state_ready - request_prepared).count()
+            << " assemble_wait_sec=" << std::chrono::duration<double>(assemble_done - assemble_start).count()
+            << " result_wait_sec=" << std::chrono::duration<double>(done - result_wait_start).count()
+            << " leader_execute_sec=0 total_sec=" << std::chrono::duration<double>(done - call_start).count()
+            << " handled=" << result.handled << " status_ok=" << result.status.ok()
+            << " skip_reason=" << result.skip_reason;
+  return result;
+}
+
 } // namespace
 
 absl::StatusOr<LocalBatchedPlanSummary> summarize_local_batched_disk_load(
@@ -8668,6 +13225,406 @@ LocalBatchedDiskLoadResult try_local_batched_disk_load(
     const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
     std::chrono::milliseconds pinned_timeout) {
   return try_local_batched_disk_load_impl(request, pinned_pool, pinned_timeout);
+}
+
+absl::StatusOr<LocalMappedSafetensorsAutoIoDecision> choose_auto_local_mapped_safetensors_io_for_testing(
+    absl::Span<const loader::SharedSafetensorsSegment> segments) {
+  return choose_auto_local_mapped_safetensors_io(segments);
+}
+
+void clear_source_window_collective_plan_cache_for_testing() {
+  clear_source_window_collective_plan_cache();
+}
+
+SourceWindowCollectivePlanCacheStats source_window_collective_plan_cache_stats_for_testing() {
+  return source_window_collective_plan_cache_stats_snapshot();
+}
+
+void clear_source_window_routed_program_cache_for_testing() {
+  clear_source_window_routed_program_cache();
+}
+
+SourceWindowCollectivePlanCacheStats source_window_routed_program_cache_stats_for_testing() {
+  return source_window_routed_program_cache_stats_snapshot();
+}
+
+absl::StatusOr<std::string> source_window_routed_program_cache_key_for_testing(
+    std::string_view artifact_id,
+    const SourceWindowCollectivePlan& plan,
+    absl::Span<const SourceWindowCollectiveMappedTargetLoadRequest> requests,
+    size_t configured_chunk_bytes,
+    size_t max_collective_chunk_bytes,
+    size_t max_stripe_bytes) {
+  std::vector<SourceWindowMappedParticipant> participants;
+  participants.reserve(requests.size());
+  for (const auto& request : requests) {
+    auto storage_spans_or = build_target_storage_spans(source_window_request_target_layout(request));
+    if (!storage_spans_or.ok()) {
+      return storage_spans_or.status();
+    }
+    participants.push_back(
+        SourceWindowMappedParticipant{
+            .artifact_id = request.artifact_id,
+            .rank = static_cast<int>(request.group.rank),
+            .device_id = request.device_id,
+            .disk_context = request.disk_context,
+            .target_layout = source_window_request_target_layout_ref(request),
+            .storage_spans = std::move(*storage_spans_or),
+            .source_index_digest = request.source_index_digest,
+            .prepared_realization = request.prepared_realization,
+        });
+  }
+  auto key = source_window_routed_program_cache_key(
+      artifact_id,
+      plan,
+      absl::MakeConstSpan(participants),
+      configured_chunk_bytes,
+      max_collective_chunk_bytes,
+      max_stripe_bytes);
+  if (!key.has_value()) {
+    return absl::FailedPreconditionError("source-window routed program cache key is not eligible");
+  }
+  return *key;
+}
+
+SourceWindowRoutedProgramCachePrepareResult prepare_source_window_routed_program_cache(
+    std::string_view artifact_id,
+    const SourceWindowCollectivePlan& plan,
+    absl::Span<const SourceWindowCollectiveMappedTargetLoadRequest> requests,
+    size_t configured_chunk_bytes,
+    size_t max_collective_chunk_bytes,
+    size_t max_stripe_bytes,
+    uint32_t configured_build_threads) {
+  SourceWindowRoutedProgramCachePrepareResult result;
+  result.plan_hash = plan.plan_hash;
+  if (requests.empty()) {
+    result.status = absl::InvalidArgumentError("source-window routed program prepare requires requests");
+    result.skip_reason = "requests_empty";
+    return result;
+  }
+  if (configured_chunk_bytes == 0 || max_collective_chunk_bytes == 0 || max_stripe_bytes == 0) {
+    result.status = absl::InvalidArgumentError("source-window routed program prepare requires non-zero chunk sizing");
+    result.skip_reason = "invalid_chunk_sizing";
+    return result;
+  }
+  const bool has_consumer_routed_windows =
+      std::any_of(plan.windows.begin(), plan.windows.end(), [](const SourceWindowCollectiveWindow& window) {
+        return window.distribution_mode ==
+            runtime::ingestion::strategy::SourceWindowCollectiveDistributionMode::kConsumerRouted;
+      });
+  if (!has_consumer_routed_windows) {
+    result.status = absl::OkStatus();
+    result.skip_reason = "no_consumer_routed_windows";
+    return result;
+  }
+
+  std::vector<SourceWindowMappedParticipant> participants;
+  participants.reserve(requests.size());
+  for (const auto& request : requests) {
+    auto storage_spans_or = build_target_storage_spans(source_window_request_target_layout(request));
+    if (!storage_spans_or.ok()) {
+      result.status = storage_spans_or.status();
+      result.skip_reason = "invalid_target_storage_layout";
+      return result;
+    }
+    participants.push_back(
+        SourceWindowMappedParticipant{
+            .artifact_id = request.artifact_id,
+            .rank = static_cast<int>(request.group.rank),
+            .device_id = request.device_id,
+            .disk_context = request.disk_context,
+            .target_layout = source_window_request_target_layout_ref(request),
+            .storage_spans = std::move(*storage_spans_or),
+            .source_index_digest = request.source_index_digest,
+            .prepared_realization = request.prepared_realization,
+        });
+  }
+
+  auto key = source_window_routed_program_cache_key(
+      artifact_id,
+      plan,
+      absl::MakeConstSpan(participants),
+      configured_chunk_bytes,
+      max_collective_chunk_bytes,
+      max_stripe_bytes);
+  if (!key.has_value()) {
+    result.status = absl::FailedPreconditionError("source-window routed program cache key is not eligible");
+    result.skip_reason = "cache_key_ineligible";
+    return result;
+  }
+
+  std::vector<SourceWindowRuntimeChunk> runtime_chunks;
+  uint64_t unfiltered_consumer_span_refs = 0;
+  uint64_t prefiltered_consumer_span_refs = 0;
+  auto runtime_chunks_or = build_source_window_runtime_chunks(
+      plan,
+      requests.size(),
+      configured_chunk_bytes,
+      max_collective_chunk_bytes,
+      &unfiltered_consumer_span_refs,
+      &prefiltered_consumer_span_refs);
+  if (!runtime_chunks_or.ok()) {
+    result.status = runtime_chunks_or.status();
+    result.skip_reason = "runtime_chunk_build_failed";
+    return result;
+  }
+  runtime_chunks = std::move(*runtime_chunks_or);
+  result.runtime_chunk_count = runtime_chunks.size();
+
+  std::vector<SourceWindowRoutedChunkProgram> cached_programs;
+  auto acquire_result = acquire_source_window_routed_program_cache(*key, runtime_chunks.size());
+  cached_programs = std::move(acquire_result.programs);
+  if (acquire_result.cache_hit) {
+    result.prepared = true;
+    result.cache_hit = true;
+    for (const auto& program : cached_programs) {
+      if (program.compiled) {
+        result.compiled_chunk_count += 1;
+      }
+    }
+    return result;
+  }
+  bool cache_build_completed = false;
+  auto cache_build_cleanup = absl::Cleanup([&]() {
+    if (acquire_result.reserved_build && !cache_build_completed) {
+      abandon_source_window_routed_program_cache_build(*key);
+    }
+  });
+
+  const std::vector<ParsedMappedParticipant> mapped_participants =
+      source_window_parsed_mapped_participants(participants);
+  double build_sec = 0.0;
+  result.program_build_threads =
+      compiled_routed_program_build_thread_count(runtime_chunks.size(), configured_build_threads);
+  auto programs_or = build_source_window_routed_programs(
+      absl::MakeConstSpan(runtime_chunks),
+      absl::MakeConstSpan(mapped_participants),
+      requests.size(),
+      max_stripe_bytes,
+      configured_build_threads,
+      &build_sec);
+  if (!programs_or.ok()) {
+    result.status = programs_or.status();
+    result.skip_reason = "program_build_failed";
+    return result;
+  }
+  result.program_build_sec = build_sec;
+  std::vector<SourceWindowRoutedChunkProgram> programs = std::move(*programs_or);
+  for (const auto& program : programs) {
+    if (program.compiled) {
+      result.compiled_chunk_count += 1;
+    }
+  }
+  if (acquire_result.reserved_build) {
+    complete_source_window_routed_program_cache_build(*key, std::move(programs));
+    cache_build_completed = true;
+  } else {
+    store_source_window_routed_program_cache(*key, std::move(programs));
+  }
+  result.prepared = true;
+  result.status = absl::OkStatus();
+  return result;
+}
+
+SourceWindowRoutedProgramCachePrepareResult prepare_source_window_collective_routed_program_cache(
+    absl::Span<const SourceWindowCollectiveMappedTargetLoadRequest> requests,
+    const CollectiveMappedTargetLoadOptions& options) {
+  SourceWindowRoutedProgramCachePrepareResult result;
+  if (requests.empty()) {
+    result.status = absl::InvalidArgumentError("source-window collective routed program prepare requires requests");
+    result.skip_reason = "requests_empty";
+    return result;
+  }
+
+  const SourceWindowCollectiveConfig config = source_window_collective_config_from_strategy(options.strategy_config);
+  if (!config.enabled) {
+    result.status = absl::OkStatus();
+    result.skip_reason = "strategy_disabled";
+    return result;
+  }
+  if (config.selection_mode == runtime::ingestion::strategy::SourceWindowCollectiveSelectionMode::kDryRun) {
+    result.status = absl::OkStatus();
+    result.skip_reason = "source_window_dry_run";
+    return result;
+  }
+  if (!options.strategy_config.enable_source_window_compiled_routed_program) {
+    result.status = absl::OkStatus();
+    result.skip_reason = "compiled_routed_program_disabled";
+    return result;
+  }
+  const auto& first = requests.front();
+  if (first.group.world_size <= 1) {
+    result.status = absl::OkStatus();
+    result.skip_reason = "collective_group_missing";
+    return result;
+  }
+  if (requests.size() != first.group.world_size) {
+    result.status = absl::FailedPreconditionError("source-window collective prepare member count mismatch");
+    result.skip_reason = "member_count_mismatch";
+    return result;
+  }
+  if (options.chunk_bytes == 0) {
+    result.status = absl::InvalidArgumentError("source-window collective routed program prepare requires chunk bytes");
+    result.skip_reason = "invalid_chunk_sizing";
+    return result;
+  }
+
+  std::vector<std::optional<SourceWindowMappedParticipant>> participant_slots(first.group.world_size);
+  for (const auto& request : requests) {
+    if (request.group.group_id != first.group.group_id || request.group.world_size != first.group.world_size) {
+      result.status = absl::FailedPreconditionError("source-window collective prepare group mismatch");
+      result.skip_reason = "group_mismatch";
+      return result;
+    }
+    if (request.group.rank >= first.group.world_size) {
+      result.status = absl::InvalidArgumentError("source-window collective prepare rank out of range");
+      result.skip_reason = "collective_rank_out_of_range";
+      return result;
+    }
+    if (participant_slots[request.group.rank].has_value()) {
+      result.status = absl::InvalidArgumentError("source-window collective prepare duplicate rank");
+      result.skip_reason = "duplicate_member_rank";
+      return result;
+    }
+    auto work_plan_ref = source_window_request_work_plan_ref(request);
+    auto target_layout_ref = source_window_request_target_layout_ref(request);
+    if (work_plan_ref == nullptr || target_layout_ref == nullptr || request.artifact_id.empty() ||
+        request.device_id < 0 || request.disk_context == nullptr || target_layout_ref->storages.empty() ||
+        work_plan_ref->items.empty()) {
+      result.status = absl::OkStatus();
+      result.skip_reason = "request_incomplete";
+      return result;
+    }
+    if (!request.candidate_summary.candidate) {
+      result.status = absl::OkStatus();
+      result.skip_reason = request.candidate_summary.pre_admission_reason.empty()
+          ? "candidate_missing"
+          : request.candidate_summary.pre_admission_reason;
+      return result;
+    }
+    if (!request.disk_context->is_safetensors()) {
+      result.status = absl::OkStatus();
+      result.skip_reason = "non_safetensors_source";
+      return result;
+    }
+    auto storage_spans_or = build_target_storage_spans(*target_layout_ref);
+    if (!storage_spans_or.ok()) {
+      result.status = storage_spans_or.status();
+      result.skip_reason = "invalid_target_storage_layout";
+      return result;
+    }
+    participant_slots[request.group.rank] = SourceWindowMappedParticipant{
+        .artifact_id = request.artifact_id,
+        .rank = static_cast<int>(request.group.rank),
+        .device_id = request.device_id,
+        .disk_context = request.disk_context,
+        .work_plan = std::move(work_plan_ref),
+        .target_layout = std::move(target_layout_ref),
+        .storage_spans = std::move(*storage_spans_or),
+        .candidate_summary = request.candidate_summary,
+        .source_index_digest = request.source_index_digest,
+        .prepared_realization = request.prepared_realization,
+    };
+  }
+
+  std::vector<SourceWindowMappedParticipant> participants;
+  participants.reserve(participant_slots.size());
+  for (auto& participant : participant_slots) {
+    if (!participant.has_value()) {
+      result.status = absl::FailedPreconditionError("source-window collective prepare missing rank");
+      result.skip_reason = "missing_member_rank";
+      return result;
+    }
+    participants.push_back(std::move(*participant));
+  }
+
+  auto input_or = build_source_window_collective_group_input(first.group, participants, options);
+  if (!input_or.ok()) {
+    result.status = input_or.status();
+    result.skip_reason = absl::StrCat("source_window_group_rejected:", input_or.status().message());
+    return result;
+  }
+
+  SourceWindowCollectivePlan plan;
+  bool plan_cache_hit = false;
+  if (options.enable_source_window_plan_cache) {
+    std::string plan_cache_key;
+    if (auto prepared_key = source_window_collective_prepared_plan_cache_key(first.artifact_id, *input_or);
+        prepared_key.has_value()) {
+      plan_cache_key = std::move(*prepared_key);
+    } else {
+      plan_cache_key = source_window_collective_plan_cache_key(first.artifact_id, *input_or);
+    }
+    plan_cache_hit = lookup_source_window_collective_plan_cache(plan_cache_key, first.group, &plan);
+    if (!plan_cache_hit) {
+      auto plan_or = build_source_window_collective_plan(*input_or);
+      if (!plan_or.ok()) {
+        result.status = plan_or.status();
+        result.skip_reason = absl::StrCat("source_window_group_rejected:", plan_or.status().message());
+        return result;
+      }
+      plan = std::move(*plan_or);
+      store_source_window_collective_plan_cache(plan_cache_key, plan);
+    }
+  } else {
+    auto plan_or = build_source_window_collective_plan(*input_or);
+    if (!plan_or.ok()) {
+      result.status = plan_or.status();
+      result.skip_reason = absl::StrCat("source_window_group_rejected:", plan_or.status().message());
+      return result;
+    }
+    plan = std::move(*plan_or);
+  }
+  result.plan_hash = plan.plan_hash;
+
+  LOG(INFO) << "source_window_collective_routed_program_prepare"
+            << " artifact_id=" << first.artifact_id << " group_id=" << first.group.group_id
+            << " tp_size=" << first.group.world_size << " admitted=" << (plan.summary.group_final_admitted ? 1 : 0)
+            << " reject_reason=" << plan.summary.group_reject_reason << " distribution_mode="
+            << runtime::ingestion::strategy::source_window_collective_distribution_mode_name(plan.distribution_mode)
+            << " plan_hash=" << plan.plan_hash
+            << " plan_cache_enabled=" << (options.enable_source_window_plan_cache ? 1 : 0)
+            << " plan_cache_hit=" << (plan_cache_hit ? 1 : 0);
+  if (!plan.summary.group_final_admitted) {
+    result.status = absl::OkStatus();
+    result.skip_reason = absl::StrCat("source_window_group_rejected:", plan.summary.group_reject_reason);
+    return result;
+  }
+
+  const size_t configured_chunk_bytes = static_cast<size_t>(options.chunk_bytes);
+  const size_t max_collective_chunk_bytes = (configured_chunk_bytes / requests.size()) * requests.size();
+  if (max_collective_chunk_bytes == 0) {
+    result.status = absl::InvalidArgumentError("source-window collective routed program chunk bytes below world size");
+    result.skip_reason = "invalid_chunk_sizing";
+    return result;
+  }
+  const size_t max_stripe_bytes = max_collective_chunk_bytes / requests.size();
+  return prepare_source_window_routed_program_cache(
+      first.artifact_id,
+      plan,
+      requests,
+      configured_chunk_bytes,
+      max_collective_chunk_bytes,
+      max_stripe_bytes,
+      options.strategy_config.source_window_compiled_program_build_threads);
+}
+
+SourceWindowRoutedProgramCachePrepareResult prepare_source_window_routed_program_cache_for_testing(
+    std::string_view artifact_id,
+    const SourceWindowCollectivePlan& plan,
+    absl::Span<const SourceWindowCollectiveMappedTargetLoadRequest> requests,
+    size_t configured_chunk_bytes,
+    size_t max_collective_chunk_bytes,
+    size_t max_stripe_bytes,
+    uint32_t configured_build_threads) {
+  return prepare_source_window_routed_program_cache(
+      artifact_id,
+      plan,
+      requests,
+      configured_chunk_bytes,
+      max_collective_chunk_bytes,
+      max_stripe_bytes,
+      configured_build_threads);
 }
 
 CollectiveDiskLoadResult try_collective_disk_load(
@@ -8717,6 +13674,43 @@ CollectiveMappedTargetLoadResult try_collective_mapped_target_load(
     return {.handled = false, .status = absl::OkStatus(), .skip_reason = "non_safetensors_source"};
   }
   return wait_for_mapped_group_and_maybe_execute(request, pinned_pool, pinned_timeout, options);
+}
+
+SourceWindowCollectiveMappedTargetLoadResult try_source_window_collective_mapped_target_load(
+    const SourceWindowCollectiveMappedTargetLoadRequest& request,
+    const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
+    std::chrono::milliseconds pinned_timeout,
+    const CollectiveMappedTargetLoadOptions& options) {
+  (void)pinned_pool;
+  (void)pinned_timeout;
+  const SourceWindowCollectiveConfig config = source_window_collective_config_from_strategy(options.strategy_config);
+  if (!config.enabled) {
+    return {.handled = false, .status = absl::OkStatus(), .skip_reason = "strategy_disabled"};
+  }
+  const auto& request_work_plan = source_window_request_work_plan(request);
+  const auto& request_target_layout = source_window_request_target_layout(request);
+  if (request.group.world_size <= 1 || request.device_id < 0 || request.disk_context == nullptr ||
+      request_target_layout.storages.empty() || request_work_plan.items.empty() || request.artifact_id.empty()) {
+    LOG(INFO) << "source_window_collective_mapped_target skipped group_id=" << request.group.group_id
+              << " reason=request_incomplete"
+              << " world_size=" << request.group.world_size << " device_id=" << request.device_id
+              << " disk_context=" << (request.disk_context != nullptr)
+              << " storages=" << request_target_layout.storages.size()
+              << " work_items=" << request_work_plan.items.size() << " artifact_id=" << (!request.artifact_id.empty());
+    return source_window_unhandled_or_strict_failure(config, "request_incomplete");
+  }
+  if (!request.candidate_summary.candidate) {
+    const std::string reason = request.candidate_summary.pre_admission_reason.empty()
+        ? "candidate_missing"
+        : request.candidate_summary.pre_admission_reason;
+    return source_window_unhandled_or_strict_failure(config, reason);
+  }
+  if (!request.disk_context->is_safetensors()) {
+    LOG(INFO) << "source_window_collective_mapped_target skipped group_id=" << request.group.group_id
+              << " reason=non_safetensors_source";
+    return source_window_unhandled_or_strict_failure(config, "non_safetensors_source");
+  }
+  return wait_for_source_window_mapped_group_and_maybe_execute(request, pinned_pool, pinned_timeout, options);
 }
 
 LocalMappedTargetLoadResult try_local_mapped_target_load(

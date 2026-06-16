@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -85,6 +86,7 @@ bool allow_collective_mapped_executor(const StrategyConfig& strategy_config) {
   switch (strategy_config.executor_preference) {
     case StrategyConfig::ExecutorPreference::kGenericByteRange:
     case StrategyConfig::ExecutorPreference::kTensorAwareLocal:
+    case StrategyConfig::ExecutorPreference::kSourceWindowCollective:
       return false;
     case StrategyConfig::ExecutorPreference::kAuto:
     case StrategyConfig::ExecutorPreference::kOwnerFileCollective:
@@ -114,6 +116,36 @@ std::string_view source_locality_name(loading::SourceLocalityHint hint) {
     case loading::SourceLocalityHint::kAuto:
     default:
       return "auto";
+  }
+}
+
+strategy::SourceWindowCollectiveSelectionMode source_window_selection_mode_from_config(
+    StrategyConfig::SourceWindowCollectiveSelectionMode mode) {
+  switch (mode) {
+    case StrategyConfig::SourceWindowCollectiveSelectionMode::kAuto:
+      return strategy::SourceWindowCollectiveSelectionMode::kAuto;
+    case StrategyConfig::SourceWindowCollectiveSelectionMode::kStrict:
+      return strategy::SourceWindowCollectiveSelectionMode::kStrict;
+    case StrategyConfig::SourceWindowCollectiveSelectionMode::kDryRun:
+    default:
+      return strategy::SourceWindowCollectiveSelectionMode::kDryRun;
+  }
+}
+
+strategy::SourceWindowCollectiveDistributionMode source_window_distribution_mode_from_config(
+    StrategyConfig::SourceWindowCollectiveDistributionMode mode) {
+  switch (mode) {
+    case StrategyConfig::SourceWindowCollectiveDistributionMode::kFullWindowAllGather:
+      return strategy::SourceWindowCollectiveDistributionMode::kFullWindowAllGather;
+    case StrategyConfig::SourceWindowCollectiveDistributionMode::kConsumerRouted:
+      return strategy::SourceWindowCollectiveDistributionMode::kConsumerRouted;
+    case StrategyConfig::SourceWindowCollectiveDistributionMode::kHybridWindow:
+      return strategy::SourceWindowCollectiveDistributionMode::kHybridWindow;
+    case StrategyConfig::SourceWindowCollectiveDistributionMode::kLocalOnly:
+      return strategy::SourceWindowCollectiveDistributionMode::kLocalOnly;
+    case StrategyConfig::SourceWindowCollectiveDistributionMode::kAuto:
+    default:
+      return strategy::SourceWindowCollectiveDistributionMode::kAuto;
   }
 }
 
@@ -402,7 +434,8 @@ bool source_bound_execution_mode_uses_collective(strategy::SourceBoundExecutionM
 }
 
 bool source_bound_execution_mode_uses_local_mapped(strategy::SourceBoundExecutionMode mode) {
-  return mode == strategy::SourceBoundExecutionMode::kLocalMappedTyped;
+  return mode == strategy::SourceBoundExecutionMode::kLocalMappedTyped ||
+      mode == strategy::SourceBoundExecutionMode::kSourceWindowCollectiveMixed;
 }
 
 bool source_bound_execution_mode_requires_executor_source_map(strategy::SourceBoundExecutionMode mode) {
@@ -3118,6 +3151,26 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
       strategy_config.owner_file_collective_group_assemble_timeout;
   environment.owner_file_collective_allow_mixed_residual = strategy_config.owner_file_collective_allow_mixed_residual;
   environment.owner_file_collective_planner_cache_entries = strategy_config.owner_file_collective_planner_cache_entries;
+  environment.enable_source_window_collective = strategy_config.enable_source_window_collective;
+  environment.source_window_collective_selection_mode =
+      source_window_selection_mode_from_config(strategy_config.source_window_collective_selection_mode);
+  environment.source_window_collective_window_bytes = strategy_config.source_window_collective_window_bytes;
+  environment.source_window_collective_max_gap_bytes = strategy_config.source_window_collective_max_gap_bytes;
+  environment.source_window_collective_max_window_amplification_x1000 =
+      strategy_config.source_window_collective_max_window_amplification_x1000;
+  environment.source_window_collective_max_plan_read_amplification_x1000 =
+      strategy_config.source_window_collective_max_plan_read_amplification_x1000;
+  environment.source_window_collective_max_scatter_ops_per_window =
+      strategy_config.source_window_collective_max_scatter_ops_per_window;
+  environment.source_window_collective_peak_bytes_budget = strategy_config.source_window_collective_peak_bytes_budget;
+  environment.source_window_collective_min_rank_read_saving_bytes =
+      strategy_config.source_window_collective_min_rank_read_saving_bytes;
+  environment.source_window_collective_max_peer_to_read_ratio_x1000 =
+      strategy_config.source_window_collective_max_peer_to_read_ratio_x1000;
+  environment.source_window_collective_distribution_mode =
+      source_window_distribution_mode_from_config(strategy_config.source_window_collective_distribution_mode);
+  environment.source_window_collective_allow_mixed_residual =
+      strategy_config.source_window_collective_allow_mixed_residual;
 
   if (ctx.resolved_view_plan.has_value()) {
     environment.requested_bytes = ctx.resolved_view_plan->view_size_bytes;
@@ -3140,14 +3193,17 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
 
   std::string local_reason = "target_not_gpu";
   std::string collective_reason = "target_not_gpu";
+  std::string source_window_reason = "target_not_gpu";
   strategy::ExecutionStrategyCostEstimate local_estimate = generic_estimate;
   strategy::ExecutionStrategyCostEstimate collective_estimate = generic_estimate;
+  strategy::ExecutionStrategyCostEstimate source_window_estimate = generic_estimate;
   bool shared_source_proven = false;
   std::optional<replica::LocalBatchedPlanSummary> local_plan_summary;
 
   if (ctx.target_is_gpu) {
     local_reason = "strategy_disabled";
     collective_reason = "strategy_disabled";
+    source_window_reason = "strategy_disabled";
 
     auto disk_context_or = loader::get_disk_artifact_context(ctx.disk.artifact_path);
     if (disk_context_or.ok()) {
@@ -3218,6 +3274,8 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
     const uint64_t local_peak_bytes = std::min<uint64_t>(
         environment.requested_bytes,
         std::max<uint64_t>(config_.artifact_chunk_bytes, ctx.runtime_context->tx_slice_bytes()));
+    const auto group = environment.execution_topology.collective_load_group;
+    const uint32_t world_size = group.has_value() ? group->world_size : 0;
     if (plan.representation_work_plan.has_value() && !has_fill_items && !has_residual_fallback &&
         !environment.requires_server_transform) {
       auto local_summary_or =
@@ -3263,8 +3321,36 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
       local_reason = representation_reason;
     }
 
-    const auto group = environment.execution_topology.collective_load_group;
-    const uint32_t world_size = group.has_value() ? group->world_size : 0;
+    const bool source_window_prereqs_ready = strategy_config.enable_source_window_collective &&
+        ctx.disk.is_safetensors && group.has_value() && group->world_size > 1 && plan.disk_context != nullptr &&
+        plan.representation_work_plan.has_value() && !has_fill_items && !has_residual_fallback &&
+        !environment.requires_server_transform;
+    source_window_estimate = strategy::ExecutionStrategyCostEstimate{
+        .requested_source_bytes = plan.representation_work_plan.has_value()
+            ? plan.representation_work_plan->committed_bytes
+            : environment.requested_bytes,
+        .unique_source_bytes = plan.representation_work_plan.has_value()
+            ? plan.representation_work_plan->committed_bytes
+            : environment.requested_bytes,
+        .estimated_peak_temporary_bytes = strategy_config.source_window_collective_window_bytes,
+        .estimated_batch_bytes = strategy_config.source_window_collective_window_bytes,
+        .estimated_owner_skew_ratio = 1.0,
+    };
+    if (source_window_prereqs_ready) {
+      source_window_reason = "candidate_pending_group_final_admission";
+      plan.collective_load_group = group;
+    } else if (!strategy_config.enable_source_window_collective) {
+      source_window_reason = "strategy_disabled";
+    } else if (!ctx.disk.is_safetensors) {
+      source_window_reason = "non_safetensors_source";
+    } else if (!group.has_value() || group->world_size <= 1) {
+      source_window_reason = "collective_group_missing";
+    } else if (plan.disk_context == nullptr) {
+      source_window_reason = "shared_disk_context_unavailable";
+    } else {
+      source_window_reason = representation_reason;
+    }
+
     const uint64_t dedup_saving_bytes =
         estimate_collective_dedup_saving_bytes(plan.representation_work_plan, world_size);
     shared_source_proven =
@@ -3337,6 +3423,12 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
           .reason = collective_reason,
           .estimate = collective_estimate,
       },
+      strategy::ExecutionStrategyCandidate{
+          .executor = strategy::ExecutionStrategyExecutor::kSourceWindowCollective,
+          .eligible = source_window_reason == "candidate_pending_group_final_admission",
+          .reason = source_window_reason,
+          .estimate = source_window_estimate,
+      },
   };
 
   auto choose_generic = [&](std::string reason) {
@@ -3345,6 +3437,11 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
   };
   const bool local_eligible = plan.candidates[1].eligible;
   const bool collective_eligible = plan.candidates[2].eligible;
+  const bool source_window_pre_admission_ready = source_window_reason == "candidate_pending_group_final_admission";
+  const bool source_window_eligible = plan.candidates[3].eligible || source_window_pre_admission_ready;
+  const bool auto_can_select_source_window = source_window_eligible &&
+      strategy_config.source_window_collective_selection_mode !=
+          StrategyConfig::SourceWindowCollectiveSelectionMode::kDryRun;
   const std::optional<std::string> local_auto_reject =
       local_eligible ? local_auto_reject_reason(generic_estimate, local_estimate, local_plan_summary) : std::nullopt;
   const bool auto_prefers_local = local_eligible && !local_auto_reject.has_value();
@@ -3372,9 +3469,20 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
         choose_generic(absl::StrCat("owner_file_collective_unavailable:", collective_reason));
       }
       break;
+    case StrategyConfig::ExecutorPreference::kSourceWindowCollective:
+      if (source_window_eligible) {
+        plan.executor = strategy::ExecutionStrategyExecutor::kSourceWindowCollective;
+        plan.selection_reason = "executor_preference_source_window_collective";
+      } else {
+        choose_generic(absl::StrCat("source_window_collective_unavailable:", source_window_reason));
+      }
+      break;
     case StrategyConfig::ExecutorPreference::kAuto:
     default:
-      if (auto_prefers_local) {
+      if (auto_can_select_source_window) {
+        plan.executor = strategy::ExecutionStrategyExecutor::kSourceWindowCollective;
+        plan.selection_reason = "auto_source_window_collective_candidate";
+      } else if (auto_prefers_local) {
         plan.executor = strategy::ExecutionStrategyExecutor::kTensorBatchedLocal;
         plan.selection_reason = "auto_prefers_local_batched";
       } else if (collective_eligible) {
@@ -3697,6 +3805,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               .merge_max_gap_bytes = config_.options->byte_mapping.disk_source_merge_max_gap_bytes,
               .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
               .strategy_config = config_.options->materialization_strategy,
+              .enable_source_window_plan_cache =
+                  config_.options->materialization_strategy.enable_source_window_plan_cache,
           };
           auto collective_result = execute_collective_mapped_target_load(
               config_.hooks,
@@ -3731,6 +3841,21 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                 .collective_peak_temporary_bytes = collective_result.metrics.peak_temporary_bytes,
                 .collective_batch_count = collective_result.metrics.batch_count,
                 .collective_dedup_saving_bytes = collective_result.metrics.dedup_saving_bytes,
+                .source_window_group_disk_read_bytes = collective_result.metrics.source_window_group_disk_read_bytes,
+                .source_window_rank_read_bytes_max = collective_result.metrics.source_window_rank_read_bytes_max,
+                .source_window_local_rank_read_bytes_max =
+                    collective_result.metrics.source_window_local_rank_read_bytes_max,
+                .source_window_rank_read_saving_bytes = collective_result.metrics.source_window_rank_read_saving_bytes,
+                .source_window_unique_payload_bytes = collective_result.metrics.source_window_unique_payload_bytes,
+                .source_window_target_write_bytes = collective_result.metrics.source_window_target_write_bytes,
+                .source_window_peer_transfer_bytes = collective_result.metrics.source_window_peer_transfer_bytes,
+                .source_window_peer_useful_bytes = collective_result.metrics.source_window_peer_useful_bytes,
+                .source_window_peer_waste_bytes = collective_result.metrics.source_window_peer_waste_bytes,
+                .source_window_scatter_op_count = collective_result.metrics.source_window_scatter_op_count,
+                .source_window_window_count = collective_result.metrics.source_window_window_count,
+                .source_window_read_amplification_x1000 =
+                    collective_result.metrics.source_window_read_amplification_x1000,
+                .source_window_distribution_mode = collective_result.metrics.source_window_distribution_mode,
                 .collective_skip_reason = {},
                 .collective_handled = true,
                 .direct_write_supported = false,
@@ -4271,8 +4396,13 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     }
 
     const bool source_is_view = source_byte_space == strategy::SourceByteSpace::kView;
-    const bool use_source_layout =
-        !source_is_view && (source_kind == loading::MaterializationSource::kDisk) && source_index_json.has_value();
+    const bool strict_source_window_selected =
+        (source_bound_lane_plan.mode == strategy::SourceBoundExecutionMode::kSourceWindowCollective ||
+         source_bound_lane_plan.mode == strategy::SourceBoundExecutionMode::kSourceWindowCollectiveMixed) &&
+        source_bound_strategy->summary.source_window_selection_mode ==
+            strategy::SourceWindowCollectiveSelectionMode::kStrict;
+    const bool use_source_layout = !strict_source_window_selected && !source_is_view &&
+        (source_kind == loading::MaterializationSource::kDisk) && source_index_json.has_value();
     const bool source_exposes_target_byte_space =
         source_is_view && request_hints.variant && request_hints.variant->view_id.has_value() && !view_plan.has_value();
     std::optional<loader::ByteRangeMap> source_layout_map;
@@ -4465,9 +4595,11 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
          local_mapped_required_by_plan);
     const uint64_t planned_generic_after_local_mapped =
         planned_generic_backend_bytes_after_local_mapped(source_bound_strategy->summary);
-    if (source_bound_lane_plan.generic_backend_map_coverage_only && !local_mapped_selected) {
+    if (source_bound_lane_plan.generic_backend_map_coverage_only && !local_mapped_selected &&
+        !strict_source_window_selected) {
       return absl::FailedPreconditionError(
-          "materialize_mapped_into_target coverage-only data map requires tensor-aware local mapped execution");
+          "materialize_mapped_into_target coverage-only data map requires tensor-aware local mapped execution or "
+          "strict source-window collective execution");
     }
     const auto setup_done = std::chrono::steady_clock::now();
     LOG(INFO) << "tc_profile materialize_mapped_into_target source_setup"
@@ -4493,6 +4625,135 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               << " setup_after_open_sec=" << std::chrono::duration<double>(setup_done - source_open_done).count()
               << " total_setup_sec=" << std::chrono::duration<double>(setup_done - source_total_start).count();
 
+    const bool source_window_runtime_candidate = source_kind == loading::MaterializationSource::kDisk &&
+        request_hints.collective_load_group.has_value() &&
+        source_bound_strategy->summary.source_window_collective_candidate;
+    if (source_window_runtime_candidate) {
+      if (auto* disk_loader = dynamic_cast<DiskLoader*>(loader.get()); disk_loader != nullptr) {
+        auto shared_or = disk_loader->shared_context();
+        if (!shared_or.ok()) {
+          collective_skip_reason = "source_window_disk_shared_context_unavailable";
+        } else {
+          const replica::CollectiveMappedTargetLoadOptions collective_options{
+              .chunk_bytes = std::min<uint64_t>(slice_bytes, total_size),
+              .streaming_buffer_chunks = config_.options->streaming_buffer_chunks,
+              .merge_max_gap_bytes = config_.options->byte_mapping.disk_source_merge_max_gap_bytes,
+              .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
+              .strategy_config = strategy_config,
+              .enable_source_window_plan_cache = strategy_config.enable_source_window_plan_cache,
+          };
+          const std::string source_index_digest =
+              source_index_json.has_value() ? index_hash(*source_index_json) : index_hash(canonical_index_json);
+          const auto source_window_start = std::chrono::steady_clock::now();
+          auto source_window_result = replica::try_source_window_collective_mapped_target_load(
+              replica::SourceWindowCollectiveMappedTargetLoadRequest{
+                  .artifact_id = request_hints.artifact_id,
+                  .group = *request_hints.collective_load_group,
+                  .disk_context = *shared_or,
+                  .representation_work_plan_ref =
+                      std::make_shared<const RepresentationWorkPlan>(representation_work_plan),
+                  .target_layout_ref = std::make_shared<const loading::IntoTargetLayout>(target_layout),
+                  .candidate_summary = source_bound_strategy->summary.source_window_candidate_summary,
+                  .source_index_digest = source_index_digest,
+                  .prepared_realization = request_hints.source_window_prepared_realization,
+                  .device_id = target_device.ordinal,
+              },
+              config_.runtime_context->pinned_buffer_pool(),
+              timeout,
+              collective_options);
+          const auto source_window_done = std::chrono::steady_clock::now();
+          LOG(INFO) << "tc_profile materialize_mapped_into_target source_window_collective_call"
+                    << " artifact_id=" << request_hints.artifact_id << " target_device=" << target_device.ordinal
+                    << " handled=" << source_window_result.handled << " status_ok=" << source_window_result.status.ok()
+                    << " skip_reason=" << source_window_result.skip_reason
+                    << " plan_hash=" << source_window_result.plan_hash
+                    << " group_disk_read_bytes=" << source_window_result.metrics.source_window_group_disk_read_bytes
+                    << " rank_read_bytes_max=" << source_window_result.metrics.source_window_rank_read_bytes_max
+                    << " local_rank_read_bytes_max="
+                    << source_window_result.metrics.source_window_local_rank_read_bytes_max
+                    << " rank_read_saving_bytes=" << source_window_result.metrics.source_window_rank_read_saving_bytes
+                    << " unique_payload_bytes=" << source_window_result.metrics.source_window_unique_payload_bytes
+                    << " read_amplification_x1000="
+                    << source_window_result.metrics.source_window_read_amplification_x1000
+                    << " sec=" << std::chrono::duration<double>(source_window_done - source_window_start).count();
+          if (source_window_result.handled) {
+            if (!source_window_result.status.ok()) {
+              return absl::Status(
+                  source_window_result.status.code(),
+                  absl::StrCat(
+                      "materialize_mapped_into_target source-window collective execution failed: ",
+                      source_window_result.status.message()));
+            }
+            double source_window_continuation_sec = 0.0;
+            if (effective_local_typed_bytes > 0) {
+              const auto continuation_start = std::chrono::steady_clock::now();
+              loader::TargetLayoutGpuSink continuation_sink(
+                  loader::TargetLayoutGpuSink::Options{
+                      .storages = storages,
+                      .chunk_size = config_.artifact_chunk_bytes,
+                      .device_id = target_device.ordinal,
+                  });
+              auto fill_status = execute_local_typed_work(continuation_sink);
+              if (!fill_status.ok()) {
+                return absl::DataLossError(
+                    absl::StrCat(
+                        "materialize_mapped_into_target source-window local typed execution failed: ",
+                        fill_status.message()));
+              }
+              source_window_continuation_sec =
+                  std::chrono::duration<double>(std::chrono::steady_clock::now() - continuation_start).count();
+            }
+            const uint64_t source_window_rank_collective_bytes =
+                total_size > effective_local_typed_bytes ? total_size - effective_local_typed_bytes : 0;
+            LOG(INFO) << "tc_profile materialize_mapped_into_target source_window_continuation"
+                      << " artifact_id=" << request_hints.artifact_id << " target_device=" << target_device.ordinal
+                      << " collective_committed_bytes=" << source_window_rank_collective_bytes
+                      << " local_typed_bytes=" << effective_local_typed_bytes
+                      << " sec=" << source_window_continuation_sec;
+            return loading::MaterializeIntoTargetResult{
+                .source = source_kind,
+                .requested_bytes = total_size,
+                .committed_bytes = source_window_rank_collective_bytes + effective_local_typed_bytes,
+                .fallback_bytes = 0,
+                .residual_bytes = 0,
+                .actual_collective_committed_bytes = source_window_rank_collective_bytes,
+                .actual_local_typed_bytes = effective_local_typed_bytes,
+                .actual_generic_backend_bytes = 0,
+                .collective_unique_source_bytes = source_window_result.metrics.unique_source_bytes,
+                .collective_peer_transfer_bytes = source_window_result.metrics.peer_transfer_bytes,
+                .collective_peak_temporary_bytes = source_window_result.metrics.peak_temporary_bytes,
+                .collective_batch_count = source_window_result.metrics.batch_count,
+                .collective_dedup_saving_bytes = source_window_result.metrics.dedup_saving_bytes,
+                .source_window_group_disk_read_bytes = source_window_result.metrics.source_window_group_disk_read_bytes,
+                .source_window_rank_read_bytes_max = source_window_result.metrics.source_window_rank_read_bytes_max,
+                .source_window_local_rank_read_bytes_max =
+                    source_window_result.metrics.source_window_local_rank_read_bytes_max,
+                .source_window_rank_read_saving_bytes =
+                    source_window_result.metrics.source_window_rank_read_saving_bytes,
+                .source_window_unique_payload_bytes = source_window_result.metrics.source_window_unique_payload_bytes,
+                .source_window_target_write_bytes = source_window_result.metrics.source_window_target_write_bytes,
+                .source_window_peer_transfer_bytes = source_window_result.metrics.source_window_peer_transfer_bytes,
+                .source_window_peer_useful_bytes = source_window_result.metrics.source_window_peer_useful_bytes,
+                .source_window_peer_waste_bytes = source_window_result.metrics.source_window_peer_waste_bytes,
+                .source_window_scatter_op_count = source_window_result.metrics.source_window_scatter_op_count,
+                .source_window_window_count = source_window_result.metrics.source_window_window_count,
+                .source_window_read_amplification_x1000 =
+                    source_window_result.metrics.source_window_read_amplification_x1000,
+                .source_window_distribution_mode = source_window_result.metrics.source_window_distribution_mode,
+                .collective_handled = true,
+                .direct_write_supported = false,
+                .source_ordered = false,
+                .dominant_executor = "SourceWindowCollectiveExecutor",
+                .selection_reason = "source_window_collective",
+            };
+          }
+          if (!source_window_result.skip_reason.empty()) {
+            collective_skip_reason = source_window_result.skip_reason;
+          }
+        }
+      }
+    }
+
     if (source_binding.collective_eligible) {
       if (auto* disk_loader = dynamic_cast<DiskLoader*>(loader.get()); disk_loader != nullptr) {
         auto shared_or = disk_loader->shared_context();
@@ -4507,6 +4768,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               .merge_max_gap_bytes = config_.options->byte_mapping.disk_source_merge_max_gap_bytes,
               .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
               .strategy_config = strategy_config,
+              .enable_source_window_plan_cache = strategy_config.enable_source_window_plan_cache,
           };
           const auto collective_start = std::chrono::steady_clock::now();
           auto collective_result = execute_collective_mapped_target_load(
@@ -4699,6 +4961,27 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                 .collective_peak_temporary_bytes = collective_report.collective_metrics.peak_temporary_bytes,
                 .collective_batch_count = collective_report.collective_metrics.batch_count,
                 .collective_dedup_saving_bytes = collective_report.collective_metrics.dedup_saving_bytes,
+                .source_window_group_disk_read_bytes =
+                    collective_report.collective_metrics.source_window_group_disk_read_bytes,
+                .source_window_rank_read_bytes_max =
+                    collective_report.collective_metrics.source_window_rank_read_bytes_max,
+                .source_window_local_rank_read_bytes_max =
+                    collective_report.collective_metrics.source_window_local_rank_read_bytes_max,
+                .source_window_rank_read_saving_bytes =
+                    collective_report.collective_metrics.source_window_rank_read_saving_bytes,
+                .source_window_unique_payload_bytes =
+                    collective_report.collective_metrics.source_window_unique_payload_bytes,
+                .source_window_target_write_bytes =
+                    collective_report.collective_metrics.source_window_target_write_bytes,
+                .source_window_peer_transfer_bytes =
+                    collective_report.collective_metrics.source_window_peer_transfer_bytes,
+                .source_window_peer_useful_bytes = collective_report.collective_metrics.source_window_peer_useful_bytes,
+                .source_window_peer_waste_bytes = collective_report.collective_metrics.source_window_peer_waste_bytes,
+                .source_window_scatter_op_count = collective_report.collective_metrics.source_window_scatter_op_count,
+                .source_window_window_count = collective_report.collective_metrics.source_window_window_count,
+                .source_window_read_amplification_x1000 =
+                    collective_report.collective_metrics.source_window_read_amplification_x1000,
+                .source_window_distribution_mode = collective_report.collective_metrics.source_window_distribution_mode,
                 .collective_skip_reason = collective_report.collective_skip_reason,
                 .collective_handled = collective_report.collective_handled,
                 .direct_write_supported = collective_report.direct_write_supported,
@@ -4741,6 +5024,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               .merge_max_gap_bytes = config_.options->byte_mapping.disk_source_merge_max_gap_bytes,
               .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
               .strategy_config = strategy_config,
+              .enable_source_window_plan_cache = strategy_config.enable_source_window_plan_cache,
           };
           const auto local_start = std::chrono::steady_clock::now();
           auto local_result = replica::try_local_mapped_target_load(
@@ -4875,6 +5159,24 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
                 .collective_peak_temporary_bytes = local_report.collective_metrics.peak_temporary_bytes,
                 .collective_batch_count = local_report.collective_metrics.batch_count,
                 .collective_dedup_saving_bytes = local_report.collective_metrics.dedup_saving_bytes,
+                .source_window_group_disk_read_bytes =
+                    local_report.collective_metrics.source_window_group_disk_read_bytes,
+                .source_window_rank_read_bytes_max = local_report.collective_metrics.source_window_rank_read_bytes_max,
+                .source_window_local_rank_read_bytes_max =
+                    local_report.collective_metrics.source_window_local_rank_read_bytes_max,
+                .source_window_rank_read_saving_bytes =
+                    local_report.collective_metrics.source_window_rank_read_saving_bytes,
+                .source_window_unique_payload_bytes =
+                    local_report.collective_metrics.source_window_unique_payload_bytes,
+                .source_window_target_write_bytes = local_report.collective_metrics.source_window_target_write_bytes,
+                .source_window_peer_transfer_bytes = local_report.collective_metrics.source_window_peer_transfer_bytes,
+                .source_window_peer_useful_bytes = local_report.collective_metrics.source_window_peer_useful_bytes,
+                .source_window_peer_waste_bytes = local_report.collective_metrics.source_window_peer_waste_bytes,
+                .source_window_scatter_op_count = local_report.collective_metrics.source_window_scatter_op_count,
+                .source_window_window_count = local_report.collective_metrics.source_window_window_count,
+                .source_window_read_amplification_x1000 =
+                    local_report.collective_metrics.source_window_read_amplification_x1000,
+                .source_window_distribution_mode = local_report.collective_metrics.source_window_distribution_mode,
                 .collective_skip_reason = local_report.collective_skip_reason,
                 .collective_handled = local_report.collective_handled,
                 .direct_write_supported = local_report.direct_write_supported,
@@ -5050,6 +5352,21 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         .collective_peak_temporary_bytes = commit_report.collective_metrics.peak_temporary_bytes,
         .collective_batch_count = commit_report.collective_metrics.batch_count,
         .collective_dedup_saving_bytes = commit_report.collective_metrics.dedup_saving_bytes,
+        .source_window_group_disk_read_bytes = commit_report.collective_metrics.source_window_group_disk_read_bytes,
+        .source_window_rank_read_bytes_max = commit_report.collective_metrics.source_window_rank_read_bytes_max,
+        .source_window_local_rank_read_bytes_max =
+            commit_report.collective_metrics.source_window_local_rank_read_bytes_max,
+        .source_window_rank_read_saving_bytes = commit_report.collective_metrics.source_window_rank_read_saving_bytes,
+        .source_window_unique_payload_bytes = commit_report.collective_metrics.source_window_unique_payload_bytes,
+        .source_window_target_write_bytes = commit_report.collective_metrics.source_window_target_write_bytes,
+        .source_window_peer_transfer_bytes = commit_report.collective_metrics.source_window_peer_transfer_bytes,
+        .source_window_peer_useful_bytes = commit_report.collective_metrics.source_window_peer_useful_bytes,
+        .source_window_peer_waste_bytes = commit_report.collective_metrics.source_window_peer_waste_bytes,
+        .source_window_scatter_op_count = commit_report.collective_metrics.source_window_scatter_op_count,
+        .source_window_window_count = commit_report.collective_metrics.source_window_window_count,
+        .source_window_read_amplification_x1000 =
+            commit_report.collective_metrics.source_window_read_amplification_x1000,
+        .source_window_distribution_mode = commit_report.collective_metrics.source_window_distribution_mode,
         .collective_skip_reason = commit_report.collective_skip_reason,
         .collective_handled = commit_report.collective_handled,
         .direct_write_supported = commit_report.direct_write_supported,

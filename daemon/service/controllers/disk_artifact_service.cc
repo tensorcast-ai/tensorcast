@@ -159,6 +159,57 @@ materialization_disk_resolve::MountedSourceAttestationPolicy build_attestation_p
   return out;
 }
 
+std::string mounted_source_policy_cache_key(
+    const materialization_disk_resolve::MountedSourceAttestationPolicy& policy) {
+  return absl::StrCat(
+      policy.policy_id,
+      "|partitioned=",
+      policy.allow_partitioned ? "1" : "0",
+      "|safetensors=",
+      policy.allow_safetensors ? "1" : "0",
+      "|tensor_aware=",
+      policy.allow_tensor_aware ? "1" : "0",
+      "|byte_only=",
+      policy.allow_byte_only ? "1" : "0",
+      "|descriptor_reuse=",
+      static_cast<int>(policy.descriptor_reuse_mode),
+      "|validation=",
+      static_cast<int>(policy.validation_mode),
+      "|lightweight=",
+      policy.lightweight_attestation_enabled ? "1" : "0");
+}
+
+absl::Status descriptor_presence_matches(
+    const std::filesystem::path& normalized_path,
+    bool expected_descriptor_present) {
+  std::error_code ec;
+  const bool descriptor_present = std::filesystem::exists(normalized_path / "artifact_descriptor.json", ec);
+  if (ec) {
+    return absl::ErrnoToStatus(
+        ec.value(), absl::StrCat("SOURCE_MUTATED: cannot stat artifact_descriptor.json: ", normalized_path.string()));
+  }
+  if (descriptor_present != expected_descriptor_present) {
+    return absl::FailedPreconditionError("SOURCE_MUTATED: artifact_descriptor.json presence changed");
+  }
+  return absl::OkStatus();
+}
+
+absl::Status validate_descriptorless_cached_mounted_source(
+    const std::filesystem::path& normalized_path,
+    const materialization_disk_resolve::ResolveMountedSourceResult& resolved) {
+  if (resolved.descriptor_present) {
+    return absl::FailedPreconditionError("descriptor-backed mounted source is not resolve-cache eligible");
+  }
+  if (resolved.normalized_path != normalized_path) {
+    return absl::FailedPreconditionError("mounted-source resolve cache path mismatch");
+  }
+  auto descriptor_status = descriptor_presence_matches(normalized_path, /*expected_descriptor_present=*/false);
+  if (!descriptor_status.ok()) {
+    return descriptor_status;
+  }
+  return materialization_disk_resolve::validate_source_fingerprints(normalized_path, resolved.file_fingerprints);
+}
+
 struct ResolvedDiskPathPolicy {
   std::filesystem::path normalized_path;
   TrustedRootPolicy policy;
@@ -584,6 +635,13 @@ std::string DiskArtifactService::import_cache_key_for_path(
   return absl::StrCat(normalized_path.string(), "|verify=", verify_checksums ? "1" : "0");
 }
 
+std::string DiskArtifactService::mounted_source_resolve_cache_key_for_path(
+    const std::filesystem::path& normalized_path,
+    bool verify_checksums,
+    std::string_view policy_cache_key) const {
+  return absl::StrCat(normalized_path.string(), "|verify=", verify_checksums ? "1" : "0", "|policy=", policy_cache_key);
+}
+
 std::string DiskArtifactService::mounted_source_policy_id() const {
   if (storage_path_.empty()) {
     return "trusted_absolute_local_path";
@@ -625,6 +683,38 @@ void DiskArtifactService::enforce_cache_capacity_locked() {
       }
     }
     import_cache_.erase(oldest_it);
+  }
+}
+
+void DiskArtifactService::prune_expired_mounted_source_resolve_cache_locked(absl::Time now) {
+  if (import_cache_ttl_ <= absl::ZeroDuration()) {
+    mounted_source_resolve_cache_.clear();
+    return;
+  }
+  for (auto it = mounted_source_resolve_cache_.begin(); it != mounted_source_resolve_cache_.end();) {
+    if (now - it->second.cached_at > import_cache_ttl_) {
+      auto erase_it = it;
+      ++it;
+      mounted_source_resolve_cache_.erase(erase_it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+void DiskArtifactService::enforce_mounted_source_resolve_cache_capacity_locked() {
+  if (import_cache_max_entries_ == 0) {
+    mounted_source_resolve_cache_.clear();
+    return;
+  }
+  while (mounted_source_resolve_cache_.size() > import_cache_max_entries_) {
+    auto oldest_it = mounted_source_resolve_cache_.begin();
+    for (auto it = mounted_source_resolve_cache_.begin(); it != mounted_source_resolve_cache_.end(); ++it) {
+      if (it->second.cached_at < oldest_it->second.cached_at) {
+        oldest_it = it;
+      }
+    }
+    mounted_source_resolve_cache_.erase(oldest_it);
   }
 }
 
@@ -763,6 +853,93 @@ absl::StatusOr<materialization_disk_resolve::ImportArtifactFromPathResult> DiskA
   return imported_or;
 }
 
+absl::StatusOr<materialization_disk_resolve::ResolveMountedSourceResult> DiskArtifactService::
+    resolve_mounted_source_artifact_cached(
+        const std::filesystem::path& normalized_path,
+        bool verify_checksums,
+        const materialization_disk_resolve::MountedSourceAttestationPolicy& policy) {
+  const std::string key = mounted_source_resolve_cache_key_for_path(
+      normalized_path, verify_checksums, mounted_source_policy_cache_key(policy));
+
+  for (;;) {
+    std::optional<materialization_disk_resolve::ResolveMountedSourceResult> cached;
+    std::shared_ptr<InflightMountedSourceResolve> inflight;
+    bool is_leader = false;
+    {
+      absl::MutexLock lock(&mounted_source_resolve_mu_);
+      const absl::Time now = absl::Now();
+      prune_expired_mounted_source_resolve_cache_locked(now);
+
+      auto cache_it = mounted_source_resolve_cache_.find(key);
+      if (cache_it != mounted_source_resolve_cache_.end()) {
+        cached = cache_it->second.resolved;
+      } else {
+        auto [it, inserted] =
+            inflight_mounted_source_resolves_.try_emplace(key, std::make_shared<InflightMountedSourceResolve>());
+        inflight = it->second;
+        is_leader = inserted;
+      }
+    }
+
+    if (cached.has_value()) {
+      auto validation_status = validate_descriptorless_cached_mounted_source(normalized_path, *cached);
+      if (validation_status.ok()) {
+        materialization_disk_resolve::record_disk_import_outcome("mounted_source_resolve_cache_hit");
+        return *cached;
+      }
+      materialization_disk_resolve::record_disk_import_outcome("mounted_source_resolve_cache_stale");
+      {
+        absl::MutexLock lock(&mounted_source_resolve_mu_);
+        mounted_source_resolve_cache_.erase(key);
+      }
+      const bool erased = d_.source_registry.erase_binding(cached->artifact_id);
+      (void)erased;
+      continue;
+    }
+
+    if (!is_leader) {
+      materialization_disk_resolve::record_disk_import_outcome("mounted_source_resolve_inflight_join");
+      absl::StatusOr<materialization_disk_resolve::ResolveMountedSourceResult> resolved_or(
+          absl::UnknownError("inflight mounted-source resolve incomplete"));
+      {
+        absl::MutexLock wait_lock(&inflight->mu);
+        while (!inflight->done) {
+          inflight->cv.Wait(&inflight->mu);
+        }
+        resolved_or = inflight->resolved;
+      }
+      return resolved_or;
+    }
+
+    materialization_disk_resolve::record_disk_import_outcome("mounted_source_resolve_cache_miss");
+    auto resolved_or = materialization_disk_resolve::resolve_mounted_source_artifact(
+        normalized_path, verify_checksums, daemon_session_token_, policy);
+
+    {
+      absl::MutexLock wait_lock(&inflight->mu);
+      inflight->resolved = resolved_or;
+      inflight->done = true;
+      inflight->cv.SignalAll();
+    }
+
+    {
+      absl::MutexLock lock(&mounted_source_resolve_mu_);
+      inflight_mounted_source_resolves_.erase(key);
+      if (resolved_or.ok() && !resolved_or->descriptor_present && import_cache_ttl_ > absl::ZeroDuration()) {
+        mounted_source_resolve_cache_.insert_or_assign(
+            key,
+            MountedSourceResolveCacheEntry{
+                .resolved = *resolved_or,
+                .cached_at = absl::Now(),
+            });
+        enforce_mounted_source_resolve_cache_capacity_locked();
+      }
+    }
+
+    return resolved_or;
+  }
+}
+
 grpc::Status DiskArtifactService::import_artifact_from_path(
     RpcContext& rctx,
     const v2::ImportArtifactFromPathRequest& req,
@@ -846,11 +1023,9 @@ grpc::Status DiskArtifactService::resolve_public_disk_source(
 
   span->SetAttribute("tc.store.verify_checksums", verify_checksums);
   span->SetAttribute("tc.disk.hash_data_skipped", true);
-  auto resolved_or = materialization_disk_resolve::resolve_mounted_source_artifact(
-      path_policy_or->normalized_path,
-      verify_checksums,
-      daemon_session_token_,
-      build_attestation_policy(path_policy_or->policy));
+  const auto attestation_policy = build_attestation_policy(path_policy_or->policy);
+  auto resolved_or =
+      resolve_mounted_source_artifact_cached(path_policy_or->normalized_path, verify_checksums, attestation_policy);
   if (!resolved_or.ok()) {
     return to_import_grpc_status(resolved_or.status());
   }

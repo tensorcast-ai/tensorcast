@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import tempfile
@@ -18,16 +19,17 @@ import torch
 
 from tensorcast._c_ext import build_canonical_index_from_safetensors
 from tensorcast.api.store.common import (
-    canonical_index_from_bytes,
     canonical_index_to_bytes,
+    dtype_from_string,
 )
-from tensorcast.api.store.types import CanonicalIndex
+from tensorcast.api.store.types import ArtifactError, CanonicalIndex
 from tensorcast.artifact_runtime.errors import SourceSubjectError
 from tensorcast.common.identity import ArtifactIdKind, validate_artifact_id
 from tensorcast.types import PublicDiskSourceHandle
 
 _SOURCE_CATALOG_FINGERPRINT_VERSION = "tensorcast-source-catalog-v1"
 SOURCE_CATALOG_SCHEMA_VERSION = 1
+_DTYPE_CACHE: dict[str, torch.dtype] = {}
 
 
 @dataclass(frozen=True)
@@ -237,6 +239,7 @@ def source_catalog_from_selected_safetensors(
     selected_files: Sequence[str | os.PathLike[str]],
     source_artifact_ref: str,
 ) -> SourceCatalog:
+    source_ref = resolve_source_artifact_ref(source_artifact_ref)
     root = Path(directory).expanduser().resolve()
     if not selected_files:
         raise ValueError(
@@ -245,11 +248,10 @@ def source_catalog_from_selected_safetensors(
     entries = tuple(_selected_file_entry(root, selected) for selected in selected_files)
     _validate_unique_selected_files(entries)
     canonical_index_bytes = _build_selected_canonical_index_bytes(entries)
-    return source_catalog_from_canonical_index(
-        canonical_index_from_bytes(canonical_index_bytes),
-        source_artifact_ref=source_artifact_ref,
+    return source_catalog_from_canonical_index_bytes(
+        canonical_index_bytes,
+        source_artifact_ref=source_ref,
         selected_files=entries,
-        canonical_index_bytes=canonical_index_bytes,
     )
 
 
@@ -282,12 +284,86 @@ def source_catalog_from_manifest(
             f"expected={SOURCE_CATALOG_SCHEMA_VERSION}, "
             f"actual={manifest.schema_version}"
         )
+    source_ref = resolve_source_artifact_ref(source_artifact_ref)
     canonical_index_bytes = bytes(manifest.canonical_index_bytes)
-    return source_catalog_from_canonical_index(
-        canonical_index_from_bytes(canonical_index_bytes),
-        source_artifact_ref=source_artifact_ref,
+    return source_catalog_from_canonical_index_bytes(
+        canonical_index_bytes,
+        source_artifact_ref=source_ref,
         selected_files=manifest.selected_files,
-        canonical_index_bytes=canonical_index_bytes,
+    )
+
+
+def source_catalog_from_canonical_index_bytes(
+    canonical_index_bytes: bytes,
+    *,
+    source_artifact_ref: str,
+    selected_files: Sequence[SourceFileEntry] = (),
+) -> SourceCatalog:
+    """Build SourceCatalog directly from canonical-index JSON bytes.
+
+    The local-ready recipe path only needs source tensor metadata and canonical
+    identity. Avoiding the intermediate CanonicalIndex dataclasses keeps the
+    daemon-attested manifest fast path artifact-centered while reducing
+    per-rank Python object churn.
+    """
+
+    source_ref = resolve_source_artifact_ref(source_artifact_ref)
+    index_bytes = bytes(canonical_index_bytes)
+    try:
+        raw = json.loads(index_bytes.decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise ArtifactError(
+            "Failed to parse canonical index JSON",
+            status_code="DATA_LOSS",
+            retryable=False,
+        ) from exc
+    if not isinstance(raw, dict):
+        raise ArtifactError(
+            "Canonical index JSON must be an object",
+            status_code="DATA_LOSS",
+            retryable=False,
+        )
+
+    ordered_names: list[str] = []
+    meta_by_name: dict[str, SourceTensorMeta] = {}
+    for name, meta in raw.items():
+        if not isinstance(meta, (list, tuple)) or len(meta) != 6:
+            raise ArtifactError(
+                f"Invalid canonical index entry for '{name}'",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        _, _, shape, stride, dtype_str, storage_offset = meta
+        dtype_key = str(dtype_str)
+        dtype = _DTYPE_CACHE.get(dtype_key)
+        if dtype is None:
+            dtype = dtype_from_string(dtype_key)
+            _DTYPE_CACHE[dtype_key] = dtype
+        tensor_name = str(name)
+        ordered_names.append(tensor_name)
+        meta_by_name[tensor_name] = SourceTensorMeta(
+            dtype=dtype,
+            shape=tuple(int(dim) for dim in shape),
+            stride=tuple(int(dim) for dim in stride),
+            storage_offset=int(storage_offset),
+        )
+
+    ordered_names_tuple = tuple(ordered_names)
+    meta_proxy = MappingProxyType(meta_by_name)
+    canonical_index_hash = hashlib.sha256(index_bytes).hexdigest()
+    return SourceCatalog(
+        ordered_names=ordered_names_tuple,
+        meta_by_name=meta_proxy,
+        selected_files=tuple(selected_files),
+        source_artifact_ref=source_ref,
+        canonical_index_hash=canonical_index_hash,
+        metadata_fingerprint=compute_source_metadata_fingerprint(
+            ordered_names=ordered_names_tuple,
+            meta_by_name=meta_proxy,
+            canonical_index_hash=canonical_index_hash,
+            selected_files=selected_files,
+        ),
+        canonical_index_bytes=index_bytes,
     )
 
 
@@ -354,6 +430,8 @@ def compute_source_metadata_fingerprint(
         digest.update(b"\0")
         digest.update(str(file_entry.digest or "").encode("utf-8"))
         digest.update(b"\n")
+    if canonical_index_hash:
+        return digest.hexdigest()
     for name in ordered_names:
         meta = meta_by_name[str(name)]
         digest.update(str(name).encode("utf-8"))
@@ -449,6 +527,7 @@ __all__ = [
     "resolve_source_subject",
     "source_catalog_from_all_safetensors_dir",
     "source_catalog_from_canonical_index",
+    "source_catalog_from_canonical_index_bytes",
     "source_catalog_from_manifest",
     "source_catalog_from_selected_safetensors",
     "source_subject_broadcast_payload",

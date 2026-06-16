@@ -27,6 +27,7 @@ class AdminLocalSourceBootstrap(LocalSourceBootstrap):
     coordinator: SourceSubjectCoordinator | None = None
     source_catalog_config: object | None = None
     cache_config_factory: object | None = None
+    source_catalog: object | None = None
     recipe: object | None = None
     source_subject: object | None = None
     source_artifact_ref: str | None = None

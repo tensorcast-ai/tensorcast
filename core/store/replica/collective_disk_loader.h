@@ -11,6 +11,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "core/common/memory/cuda_memory.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/materialization/contracts/loading_spec.h"
@@ -20,6 +21,8 @@
 #include "core/store/store_engine_options.h"
 
 namespace tensorcast::store::replica {
+
+struct SourceWindowCollectivePlan;
 
 struct CollectiveDiskLoadRequest {
   loading::ReplicaKey replica_key;
@@ -45,6 +48,7 @@ struct CollectiveMappedTargetLoadOptions {
   uint64_t merge_max_gap_bytes{256ULL * 1024ULL};
   uint64_t merge_max_amplification{4};
   StoreEngineOptions::MaterializationStrategyConfig strategy_config;
+  bool enable_source_window_plan_cache{false};
 };
 
 struct CollectiveMappedTargetLoadRequest {
@@ -62,6 +66,47 @@ struct CollectiveMappedTargetLoadResult {
   absl::Status status{absl::OkStatus()};
   runtime::ingestion::strategy::CollectiveExecutionMetrics metrics;
   std::string skip_reason;
+};
+
+struct SourceWindowCollectiveMappedTargetLoadRequest {
+  std::string artifact_id;
+  loading::CollectiveLoadGroupHint group;
+  std::shared_ptr<const loader::DiskArtifactContext> disk_context;
+  std::shared_ptr<const materialization::contracts::RepresentationWorkPlan> representation_work_plan_ref;
+  materialization::contracts::RepresentationWorkPlan representation_work_plan;
+  std::shared_ptr<const loading::IntoTargetLayout> target_layout_ref;
+  loading::IntoTargetLayout target_layout;
+  runtime::ingestion::strategy::SourceWindowCollectiveCandidateSummary candidate_summary;
+  std::string source_index_digest;
+  std::optional<loading::SourceWindowPreparedRealizationFacts> prepared_realization;
+  int device_id{-1};
+};
+
+struct SourceWindowCollectiveMappedTargetLoadResult {
+  bool handled{false};
+  absl::Status status{absl::OkStatus()};
+  runtime::ingestion::strategy::CollectiveExecutionMetrics metrics;
+  std::string skip_reason;
+  std::string plan_hash;
+  bool plan_cache_hit{false};
+};
+
+struct SourceWindowCollectivePlanCacheStats {
+  uint64_t hits{0};
+  uint64_t misses{0};
+  uint64_t entries{0};
+};
+
+struct SourceWindowRoutedProgramCachePrepareResult {
+  bool prepared{false};
+  absl::Status status{absl::OkStatus()};
+  std::string skip_reason;
+  std::string plan_hash;
+  bool cache_hit{false};
+  uint64_t runtime_chunk_count{0};
+  uint64_t compiled_chunk_count{0};
+  double program_build_sec{0.0};
+  uint64_t program_build_threads{0};
 };
 
 struct LocalMappedTargetLoadRequest {
@@ -113,6 +158,15 @@ struct LocalBatchedPlanSummary {
   size_t dim1_jobs{0};
 };
 
+struct LocalMappedSafetensorsAutoIoDecision {
+  bool use_direct_aligned_edges{false};
+  double page_cache_residency_ratio{-1.0};
+  uint64_t buffered_probe_bytes{0};
+  double buffered_probe_sec{-1.0};
+  double buffered_probe_gib_per_sec{-1.0};
+  std::string reason;
+};
+
 absl::StatusOr<LocalBatchedPlanSummary> summarize_local_batched_disk_load(
     const materialization::contracts::RepresentationWorkPlan& representation_work_plan,
     const StoreEngineOptions::MaterializationStrategyConfig& strategy_config);
@@ -128,6 +182,12 @@ CollectiveMappedTargetLoadResult try_collective_mapped_target_load(
     std::chrono::milliseconds pinned_timeout,
     const CollectiveMappedTargetLoadOptions& options);
 
+SourceWindowCollectiveMappedTargetLoadResult try_source_window_collective_mapped_target_load(
+    const SourceWindowCollectiveMappedTargetLoadRequest& request,
+    const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
+    std::chrono::milliseconds pinned_timeout,
+    const CollectiveMappedTargetLoadOptions& options);
+
 LocalMappedTargetLoadResult try_local_mapped_target_load(
     const LocalMappedTargetLoadRequest& request,
     const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
@@ -139,6 +199,47 @@ LocalBatchedDiskLoadResult try_local_batched_disk_load(
     const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
     std::chrono::milliseconds pinned_timeout);
 
+absl::StatusOr<LocalMappedSafetensorsAutoIoDecision> choose_auto_local_mapped_safetensors_io_for_testing(
+    absl::Span<const loader::SharedSafetensorsSegment> segments);
+
 absl::Status warm_collective_clique_cache(const std::vector<int>& device_ids);
+
+void clear_source_window_collective_plan_cache_for_testing();
+
+SourceWindowCollectivePlanCacheStats source_window_collective_plan_cache_stats_for_testing();
+
+void clear_source_window_routed_program_cache_for_testing();
+
+SourceWindowCollectivePlanCacheStats source_window_routed_program_cache_stats_for_testing();
+
+absl::StatusOr<std::string> source_window_routed_program_cache_key_for_testing(
+    std::string_view artifact_id,
+    const SourceWindowCollectivePlan& plan,
+    absl::Span<const SourceWindowCollectiveMappedTargetLoadRequest> requests,
+    size_t configured_chunk_bytes,
+    size_t max_collective_chunk_bytes,
+    size_t max_stripe_bytes);
+
+SourceWindowRoutedProgramCachePrepareResult prepare_source_window_routed_program_cache(
+    std::string_view artifact_id,
+    const SourceWindowCollectivePlan& plan,
+    absl::Span<const SourceWindowCollectiveMappedTargetLoadRequest> requests,
+    size_t configured_chunk_bytes,
+    size_t max_collective_chunk_bytes,
+    size_t max_stripe_bytes,
+    uint32_t configured_build_threads);
+
+SourceWindowRoutedProgramCachePrepareResult prepare_source_window_collective_routed_program_cache(
+    absl::Span<const SourceWindowCollectiveMappedTargetLoadRequest> requests,
+    const CollectiveMappedTargetLoadOptions& options);
+
+SourceWindowRoutedProgramCachePrepareResult prepare_source_window_routed_program_cache_for_testing(
+    std::string_view artifact_id,
+    const SourceWindowCollectivePlan& plan,
+    absl::Span<const SourceWindowCollectiveMappedTargetLoadRequest> requests,
+    size_t configured_chunk_bytes,
+    size_t max_collective_chunk_bytes,
+    size_t max_stripe_bytes,
+    uint32_t configured_build_threads = 0);
 
 } // namespace tensorcast::store::replica

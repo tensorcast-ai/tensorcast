@@ -40,7 +40,8 @@ namespace {
 using materialization_layout::CanonicalIndexEntry;
 using materialization_layout::CanonicalIndexTable;
 using materialization_layout::dtype_element_size;
-using materialization_layout::parse_canonical_index;
+using materialization_layout::parse_canonical_index_shared;
+using materialization_layout::parse_canonical_index_shared_with_identity;
 using materialization_layout::TargetOffsetEntry;
 using materialization_mapped_target_layout::validate_mapped_target_layout;
 using materialization_mapped_target_layout::ValidatedMappedTargetLayout;
@@ -146,19 +147,85 @@ void patch_transform_contract_source_specs(
   }
 }
 
+bool source_spec_patch_compatible(
+    const store::materialization::contracts::RepresentationTensorSpec& spec,
+    const CanonicalIndexEntry& entry,
+    uint64_t element_size) {
+  return spec.shape == entry.shape && spec.stride == entry.stride && spec.dtype == entry.dtype &&
+      spec.logical_length == entry.logical_length && spec.element_size == element_size;
+}
+
+absl::StatusOr<bool> can_patch_work_plan_source_specs(
+    const CanonicalIndexTable& source_table,
+    const store::materialization::contracts::RepresentationTransformContract& transform_contract) {
+  for (const auto& binding : transform_contract.tensor_bindings) {
+    for (const auto& source : binding.sources) {
+      auto it = source_table.entries.find(source.source_spec.name);
+      if (it == source_table.entries.end()) {
+        continue;
+      }
+      auto elem_or = materialization_layout::dtype_element_size(it->second.dtype);
+      if (!elem_or.ok()) {
+        return elem_or.status();
+      }
+      if (!source_spec_patch_compatible(source.source_spec, it->second, *elem_or)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+void patch_source_spec_from_entry(
+    const CanonicalIndexEntry& entry,
+    uint64_t element_size,
+    store::materialization::contracts::RepresentationTensorSpec* spec) {
+  if (spec == nullptr) {
+    return;
+  }
+  spec->shape = entry.shape;
+  spec->stride = entry.stride;
+  spec->dtype = entry.dtype;
+  spec->logical_offset = entry.logical_offset;
+  spec->logical_length = entry.logical_length;
+  spec->storage_offset = entry.storage_offset;
+  spec->element_size = element_size;
+}
+
+absl::Status patch_work_plan_source_specs(
+    const CanonicalIndexTable& source_table,
+    store::materialization::contracts::RepresentationWorkPlan* work_plan) {
+  if (work_plan == nullptr) {
+    return absl::OkStatus();
+  }
+  for (auto& item : work_plan->items) {
+    for (auto& source : item.sources) {
+      auto it = source_table.entries.find(source.fragment.source_spec.name);
+      if (it == source_table.entries.end()) {
+        continue;
+      }
+      auto elem_or = materialization_layout::dtype_element_size(it->second.dtype);
+      if (!elem_or.ok()) {
+        return elem_or.status();
+      }
+      patch_source_spec_from_entry(it->second, *elem_or, &source.fragment.source_spec);
+    }
+  }
+  return absl::OkStatus();
+}
+
 absl::StatusOr<store::materialization::contracts::RepresentationWorkPlan> build_execution_representation_work_plan(
     const store::materialization::contracts::RepresentationTransformContract& transform_contract,
-    const std::optional<CanonicalIndexTable>& physical_source_table,
-    std::optional<store::loader::ByteRangeMap> collective_lowered_map = std::nullopt) {
-  auto execution_contract = transform_contract;
-  if (physical_source_table.has_value()) {
-    patch_transform_contract_source_specs(*physical_source_table, &execution_contract);
+    const CanonicalIndexTable* physical_source_table,
+    std::optional<store::loader::ByteRangeMap> collective_lowered_map = std::nullopt,
+    bool* source_rebind_fast_path = nullptr) {
+  if (source_rebind_fast_path != nullptr) {
+    *source_rebind_fast_path = false;
   }
-  auto work_plan_or = store::materialization::contracts::build_representation_work_plan(execution_contract);
-  if (!work_plan_or.ok()) {
-    return work_plan_or.status();
-  }
-  if (collective_lowered_map.has_value()) {
+  auto append_pad_items = [&](store::materialization::contracts::RepresentationWorkPlan* work_plan) {
+    if (work_plan == nullptr || !collective_lowered_map.has_value()) {
+      return;
+    }
     store::loader::ByteRangeMap pad_map;
     pad_map.total_bytes = collective_lowered_map->total_bytes;
     pad_map.num_sources = collective_lowered_map->num_sources;
@@ -175,10 +242,42 @@ absl::StatusOr<store::materialization::contracts::RepresentationWorkPlan> build_
       for (const auto& segment : pad_item.byte_range_map.segments) {
         pad_item.committed_bytes += segment.length;
       }
-      work_plan_or->committed_bytes += pad_item.committed_bytes;
-      work_plan_or->items.push_back(std::move(pad_item));
+      work_plan->committed_bytes += pad_item.committed_bytes;
+      work_plan->items.push_back(std::move(pad_item));
+    }
+  };
+
+  if (physical_source_table != nullptr) {
+    auto compatible_or = can_patch_work_plan_source_specs(*physical_source_table, transform_contract);
+    if (!compatible_or.ok()) {
+      return compatible_or.status();
+    }
+    if (*compatible_or) {
+      auto work_plan_or = store::materialization::contracts::build_representation_work_plan(transform_contract);
+      if (!work_plan_or.ok()) {
+        return work_plan_or.status();
+      }
+      auto patch_status = patch_work_plan_source_specs(*physical_source_table, &*work_plan_or);
+      if (!patch_status.ok()) {
+        return patch_status;
+      }
+      append_pad_items(&*work_plan_or);
+      if (source_rebind_fast_path != nullptr) {
+        *source_rebind_fast_path = true;
+      }
+      return std::move(*work_plan_or);
     }
   }
+
+  auto execution_contract = transform_contract;
+  if (physical_source_table != nullptr) {
+    patch_transform_contract_source_specs(*physical_source_table, &execution_contract);
+  }
+  auto work_plan_or = store::materialization::contracts::build_representation_work_plan(execution_contract);
+  if (!work_plan_or.ok()) {
+    return work_plan_or.status();
+  }
+  append_pad_items(&*work_plan_or);
   return std::move(*work_plan_or);
 }
 
@@ -700,11 +799,11 @@ absl::StatusOr<ValidatedMappedTargetLayout> build_mapped_layout_from_target_inde
     std::string_view target_index_json,
     const std::vector<TargetOffsetEntry>& offsets,
     const absl::flat_hash_map<std::string, StorageRange>& storage_ranges) {
-  auto index_table_or = parse_canonical_index(target_index_json);
+  auto index_table_or = parse_canonical_index_shared(target_index_json);
   if (!index_table_or.ok()) {
     return index_table_or.status();
   }
-  const auto& index_table = *index_table_or;
+  const auto& index_table = **index_table_or;
 
   ValidatedMappedTargetLayout result;
   result.logical_total_size = index_table.logical_total_size;
@@ -1016,12 +1115,12 @@ Status build_target_materialization_plan(
     return tensor_selection_status;
   }
 
-  auto canonical_table_or = parse_canonical_index(plan.canonical_index_json);
+  auto canonical_table_or = parse_canonical_index_shared(plan.canonical_index_json);
   if (!canonical_table_or.ok()) {
     record_error(record_result, "index_parse_failed");
     return to_grpc_status(canonical_table_or.status());
   }
-  const CanonicalIndexTable& canonical_table = *canonical_table_or;
+  const CanonicalIndexTable& canonical_table = **canonical_table_or;
 
   auto canonical_layout_validation_status = validate_layout_names_exist_in_index(
       tensor_selection.layout_name_set, canonical_table, "target_layout includes unknown tensor name", record_result);
@@ -1073,12 +1172,12 @@ Status build_target_materialization_plan(
     return selected_index_status;
   }
 
-  auto index_table_or = parse_canonical_index(plan.selected_index_json);
+  auto index_table_or = parse_canonical_index_shared(plan.selected_index_json);
   if (!index_table_or.ok()) {
     record_error(record_result, "index_parse_failed");
     return to_grpc_status(index_table_or.status());
   }
-  const CanonicalIndexTable& index_table = *index_table_or;
+  const CanonicalIndexTable& index_table = **index_table_or;
   plan.logical_total_size = index_table.logical_total_size;
 
   auto selected_index_validation_status =
@@ -1280,18 +1379,20 @@ Status build_mapped_target_materialization_plan(
   // resolved_selection must describe the packed target byte-space that this RPC
   // materializes and later publishes.
   plan.selected_index_json = std::move(*target_index_json_or);
-  auto canonical_source_table_or = parse_canonical_index(plan.canonical_index_json);
+  auto canonical_source_table_or = parse_canonical_index_shared(plan.canonical_index_json);
   if (!canonical_source_table_or.ok()) {
     record_error(record_result, "index_parse_failed");
     return to_grpc_status(canonical_source_table_or.status());
   }
-  const CanonicalIndexTable& canonical_source_table = *canonical_source_table_or;
-  auto source_table_or = parse_canonical_index(source_index_json);
+  auto source_table_or = source_index_json == plan.canonical_index_json
+      ? canonical_source_table_or
+      : parse_canonical_index_shared(source_index_json);
   if (!source_table_or.ok()) {
     record_error(record_result, "index_parse_failed");
     return to_grpc_status(source_table_or.status());
   }
-  const CanonicalIndexTable& source_table = *source_table_or;
+  const CanonicalIndexTable& canonical_source_table = **canonical_source_table_or;
+  const CanonicalIndexTable& source_table = **source_table_or;
 
   auto representation_or = build_representation_transform_contract(
       req.copy_plan(),
@@ -1371,6 +1472,7 @@ Status build_binding_realization_materialization_plan(
     const std::vector<TargetOffsetEntry>& offsets,
     std::string canonical_index_json,
     RecordMaterializeResultFn record_result,
+    BindingRealizationMaterializationPlanOptions options,
     MappedTargetMaterializationPlan& plan) {
   const auto profile_start = std::chrono::steady_clock::now();
   auto elapsed_sec = [](auto start, auto end) { return std::chrono::duration<double>(end - start).count(); };
@@ -1384,8 +1486,10 @@ Status build_binding_realization_materialization_plan(
   double view_narrows_sec = 0.0;
   double view_plan_sec = 0.0;
   double parse_source_tables_sec = 0.0;
+  bool source_table_reused = false;
   double representation_contract_sec = 0.0;
   double selection_identity_sec = 0.0;
+  const bool build_byte_range_maps = options.build_byte_range_maps;
 
   if (selection.artifact_id().empty()) {
     record_error(record_result, "selection_missing");
@@ -1438,13 +1542,14 @@ Status build_binding_realization_materialization_plan(
     return to_grpc_status(mapped_layout_or.status());
   }
   const auto parse_target_index_start = std::chrono::steady_clock::now();
-  auto target_index_table_or = parse_canonical_index(plan.selected_index_json);
+  auto target_index_table_or = parse_canonical_index_shared(plan.selected_index_json);
   parse_target_index_sec = elapsed_sec(parse_target_index_start, std::chrono::steady_clock::now());
   if (!target_index_table_or.ok()) {
     record_error(record_result, "index_parse_failed");
     return to_grpc_status(target_index_table_or.status());
   }
-  plan.logical_total_size = target_index_table_or->logical_total_size;
+  const CanonicalIndexTable& target_index_table = **target_index_table_or;
+  plan.logical_total_size = target_index_table.logical_total_size;
   const auto validate_target_layout_start = std::chrono::steady_clock::now();
   auto storage_span_status = validate_storage_span_matches_index(
       prepared_storage_layout.total_storage_bytes, plan.logical_total_size, record_result);
@@ -1452,7 +1557,7 @@ Status build_binding_realization_materialization_plan(
     return storage_span_status;
   }
   auto offset_validation_status = validate_target_offsets_against_layout(
-      offsets, *target_index_table_or, prepared_storage_layout.storage_ranges, record_result);
+      offsets, target_index_table, prepared_storage_layout.storage_ranges, record_result);
   if (!offset_validation_status.ok()) {
     return offset_validation_status;
   }
@@ -1519,23 +1624,31 @@ Status build_binding_realization_materialization_plan(
     source_index_json = plan.view_plan->view_index_json;
   }
   const auto parse_source_tables_start = std::chrono::steady_clock::now();
-  auto canonical_source_table_or = parse_canonical_index(plan.canonical_index_json);
+  auto canonical_source_table_or =
+      options.canonical_index_parse_identity_key.has_value() && !options.canonical_index_parse_identity_key->empty()
+      ? parse_canonical_index_shared_with_identity(
+            plan.canonical_index_json, *options.canonical_index_parse_identity_key)
+      : parse_canonical_index_shared(plan.canonical_index_json);
   if (!canonical_source_table_or.ok()) {
     record_error(record_result, "index_parse_failed");
     return to_grpc_status(canonical_source_table_or.status());
   }
-  auto source_table_or = parse_canonical_index(source_index_json);
+  source_table_reused = source_index_json == plan.canonical_index_json;
+  auto source_table_or =
+      source_table_reused ? canonical_source_table_or : parse_canonical_index_shared(source_index_json);
   if (!source_table_or.ok()) {
     record_error(record_result, "index_parse_failed");
     return to_grpc_status(source_table_or.status());
   }
+  const CanonicalIndexTable& canonical_source_table = **canonical_source_table_or;
+  const CanonicalIndexTable& source_table = **source_table_or;
   parse_source_tables_sec = elapsed_sec(parse_source_tables_start, std::chrono::steady_clock::now());
 
   const auto representation_contract_start = std::chrono::steady_clock::now();
   auto representation_or = build_representation_transform_contract(
       realization_plan,
-      *source_table_or,
-      *canonical_source_table_or,
+      source_table,
+      canonical_source_table,
       mapped_layout_or->dst_specs,
       mapped_layout_or->dst_base_offsets,
       view_narrows,
@@ -1544,7 +1657,7 @@ Status build_binding_realization_materialization_plan(
       "local_seal_then_promote",
       representation_transform_builder::BuildRepresentationTransformOptions{
           .compute_identity_hashes = false,
-          .build_byte_range_maps = true,
+          .build_byte_range_maps = build_byte_range_maps,
       });
   if (!representation_or.ok()) {
     record_error(record_result, "mapping_invalid");
@@ -1581,12 +1694,18 @@ Status build_binding_realization_materialization_plan(
             << " target_tensors=" << mapped_layout_or->dst_specs.size()
             << " selected_index_bytes=" << plan.selected_index_json.size()
             << " canonical_index_bytes=" << plan.canonical_index_json.size()
+            << " build_byte_range_maps=" << (build_byte_range_maps ? 1 : 0) << " canonical_index_identity_parse_key="
+            << (options.canonical_index_parse_identity_key.has_value() &&
+                        !options.canonical_index_parse_identity_key->empty()
+                    ? 1
+                    : 0)
             << " selection_names_sec=" << selection_names_sec << " subset_hash_sec=" << subset_hash_sec
             << " storage_layout_sec=" << storage_layout_sec << " mapped_layout_sec=" << mapped_layout_sec
             << " parse_target_index_sec=" << parse_target_index_sec
             << " validate_target_layout_sec=" << validate_target_layout_sec << " resolve_view_sec=" << resolve_view_sec
             << " view_narrows_sec=" << view_narrows_sec << " view_plan_sec=" << view_plan_sec
             << " parse_source_tables_sec=" << parse_source_tables_sec
+            << " source_table_reused=" << (source_table_reused ? 1 : 0)
             << " representation_contract_sec=" << representation_contract_sec
             << " selection_identity_sec=" << selection_identity_sec
             << " collective_segments=" << plan.representation.collective_lowered_map.segments.size()
@@ -1596,6 +1715,31 @@ Status build_binding_realization_materialization_plan(
   return Status::OK;
 }
 
+Status build_binding_realization_materialization_plan(
+    store::StoreEngine& engine,
+    const tensorcast::common::v1::ArtifactSelection& selection,
+    const v2::BindingRealizationPlan& realization_plan,
+    std::string_view resolved_artifact_id,
+    const v2::TargetLayout& target_layout,
+    std::string_view target_index_json,
+    const std::vector<TargetOffsetEntry>& offsets,
+    std::string canonical_index_json,
+    RecordMaterializeResultFn record_result,
+    MappedTargetMaterializationPlan& plan) {
+  return build_binding_realization_materialization_plan(
+      engine,
+      selection,
+      realization_plan,
+      resolved_artifact_id,
+      target_layout,
+      target_index_json,
+      offsets,
+      std::move(canonical_index_json),
+      record_result,
+      BindingRealizationMaterializationPlanOptions{},
+      plan);
+}
+
 absl::StatusOr<store::runtime::ingestion::strategy::PreparedSourceBoundExecutionPlan>
 build_resolved_mapped_materialization_plan(
     std::string_view resolved_artifact_id,
@@ -1603,12 +1747,15 @@ build_resolved_mapped_materialization_plan(
     const store::loading::IntoTargetLayout& target_layout,
     const MappedTargetMaterializationPlan& mapped_plan,
     const std::optional<store::loading::VariantIdentity>& variant,
-    std::optional<std::string_view> source_index_json) {
+    std::optional<std::string_view> source_index_json,
+    std::shared_ptr<const CanonicalIndexTable> physical_source_table,
+    ResolvedMappedMaterializationPlanOptions options) {
   const auto profile_start = std::chrono::steady_clock::now();
   auto elapsed_sec = [](auto start, auto end) { return std::chrono::duration<double>(end - start).count(); };
   double parse_source_index_sec = 0.0;
   double init_plan_sec = 0.0;
   double work_plan_sec = 0.0;
+  bool work_plan_source_rebind_fast_path = false;
   double filter_collective_candidate_sec = 0.0;
   double collective_ranges_sec = 0.0;
   double filter_collective_sec = 0.0;
@@ -1622,15 +1769,16 @@ build_resolved_mapped_materialization_plan(
   bool compact_collective_coverage_map_used = false;
   uint64_t compact_collective_coverage_data_bytes = 0;
   size_t compact_collective_coverage_segments = 0;
+  bool source_window_coverage_proof_map_used = false;
   uint64_t collective_candidate_data_bytes = 0;
 
   using PreparedExecutionPlan = store::runtime::ingestion::strategy::PreparedSourceBoundExecutionPlan;
   using StrategyPlan = store::runtime::ingestion::strategy::ResolvedMaterializationPlan;
 
-  std::optional<CanonicalIndexTable> physical_source_table;
-  if (source_index_json.has_value()) {
+  const bool physical_source_table_preparsed = physical_source_table != nullptr;
+  if (physical_source_table == nullptr && source_index_json.has_value()) {
     const auto parse_source_index_start = std::chrono::steady_clock::now();
-    auto physical_source_table_or = parse_canonical_index(*source_index_json);
+    auto physical_source_table_or = parse_canonical_index_shared(*source_index_json);
     parse_source_index_sec = elapsed_sec(parse_source_index_start, std::chrono::steady_clock::now());
     if (!physical_source_table_or.ok()) {
       return physical_source_table_or.status();
@@ -1676,10 +1824,11 @@ build_resolved_mapped_materialization_plan(
     const auto work_plan_start = std::chrono::steady_clock::now();
     auto work_plan_or = build_execution_representation_work_plan(
         *resolved_plan.representation_transform_contract,
-        physical_source_table,
+        physical_source_table.get(),
         collective_candidate_map.segments.empty()
             ? std::nullopt
-            : std::optional<store::loader::ByteRangeMap>(collective_candidate_map));
+            : std::optional<store::loader::ByteRangeMap>(collective_candidate_map),
+        &work_plan_source_rebind_fast_path);
     work_plan_sec = elapsed_sec(work_plan_start, std::chrono::steady_clock::now());
     if (!work_plan_or.ok()) {
       return work_plan_or.status();
@@ -1690,28 +1839,49 @@ build_resolved_mapped_materialization_plan(
     if (byte_range_maps_omitted && resolved_plan.representation_work_plan->residual_fallback_map.segments.empty()) {
       const uint64_t coverage_total_bytes =
           target_layout.total_size > 0 ? target_layout.total_size : mapped_plan.logical_total_size;
-      auto compact_map_or =
-          build_compact_data_coverage_map_from_work_plan(*resolved_plan.representation_work_plan, coverage_total_bytes);
-      if (!compact_map_or.ok()) {
-        return compact_map_or.status();
+      if (options.source_window_strict_coverage_proof_only) {
+        auto proof_map_or = build_compact_data_coverage_map_from_work_plan(
+            *resolved_plan.representation_work_plan, coverage_total_bytes);
+        if (!proof_map_or.ok()) {
+          return proof_map_or.status();
+        }
+        if (!proof_map_or->segments.empty()) {
+          source_window_coverage_proof_map_used = true;
+          compact_coverage_map_used = true;
+          compact_coverage_segments = proof_map_or->segments.size();
+          compact_coverage_data_bytes = byte_range_map_covered_bytes(*proof_map_or);
+          prepared_execution.lowering_artifacts->executor_generic_data_map = *proof_map_or;
+          prepared_execution.lowering_artifacts->executor_generic_data_map_coverage_only = true;
+          executor_merge_skipped = true;
+        }
+      } else {
+        auto compact_map_or = build_compact_data_coverage_map_from_work_plan(
+            *resolved_plan.representation_work_plan, coverage_total_bytes);
+        if (!compact_map_or.ok()) {
+          return compact_map_or.status();
+        }
+        auto compact_collective_map_or = build_compact_data_coverage_map_from_work_plan(
+            *resolved_plan.representation_work_plan, coverage_total_bytes, work_item_has_collective_source_overlap);
+        if (!compact_collective_map_or.ok()) {
+          return compact_collective_map_or.status();
+        }
+        if (!compact_collective_map_or->segments.empty()) {
+          compact_collective_coverage_map_used = true;
+          compact_collective_coverage_segments = compact_collective_map_or->segments.size();
+          compact_collective_coverage_data_bytes = byte_range_map_covered_bytes(*compact_collective_map_or);
+          collective_candidate_data_bytes = compact_collective_coverage_data_bytes;
+          prepared_execution.lowering_artifacts->collective_data_map = *compact_collective_map_or;
+        }
+        if (!compact_map_or->segments.empty()) {
+          compact_coverage_map_used = true;
+          compact_coverage_segments = compact_map_or->segments.size();
+          compact_coverage_data_bytes = byte_range_map_covered_bytes(*compact_map_or);
+          prepared_execution.lowering_artifacts->executor_generic_data_map = *compact_map_or;
+          prepared_execution.lowering_artifacts->executor_generic_data_map_coverage_only = true;
+          executor_merge_skipped = true;
+        }
       }
-      auto compact_collective_map_or = build_compact_data_coverage_map_from_work_plan(
-          *resolved_plan.representation_work_plan, coverage_total_bytes, work_item_has_collective_source_overlap);
-      if (!compact_collective_map_or.ok()) {
-        return compact_collective_map_or.status();
-      }
-      if (!compact_collective_map_or->segments.empty()) {
-        compact_collective_coverage_map_used = true;
-        compact_collective_coverage_segments = compact_collective_map_or->segments.size();
-        compact_collective_coverage_data_bytes = byte_range_map_covered_bytes(*compact_collective_map_or);
-        collective_candidate_data_bytes = compact_collective_coverage_data_bytes;
-        prepared_execution.lowering_artifacts->collective_data_map = *compact_collective_map_or;
-      }
-      if (!compact_map_or->segments.empty()) {
-        compact_coverage_map_used = true;
-        compact_coverage_segments = compact_map_or->segments.size();
-        compact_coverage_data_bytes = byte_range_map_covered_bytes(*compact_map_or);
-        prepared_execution.lowering_artifacts->executor_generic_data_map = *compact_map_or;
+      if (source_window_coverage_proof_map_used) {
         prepared_execution.lowering_artifacts->executor_generic_data_map_coverage_only = true;
         executor_merge_skipped = true;
       }
@@ -1797,8 +1967,10 @@ build_resolved_mapped_materialization_plan(
             << (resolved_plan.representation_work_plan.has_value()
                     ? resolved_plan.representation_work_plan->items.size()
                     : 0)
+            << " physical_source_table_preparsed=" << (physical_source_table_preparsed ? 1 : 0)
             << " parse_source_index_sec=" << parse_source_index_sec << " init_plan_sec=" << init_plan_sec
             << " work_plan_sec=" << work_plan_sec
+            << " work_plan_source_rebind_fast_path=" << (work_plan_source_rebind_fast_path ? 1 : 0)
             << " filter_collective_candidate_sec=" << filter_collective_candidate_sec
             << " collective_ranges_sec=" << collective_ranges_sec << " filter_collective_sec=" << filter_collective_sec
             << " filter_generic_sec=" << filter_generic_sec << " merge_executor_sec=" << merge_executor_sec
@@ -1812,6 +1984,7 @@ build_resolved_mapped_materialization_plan(
             << " compact_collective_coverage_map_used=" << (compact_collective_coverage_map_used ? 1 : 0)
             << " compact_collective_coverage_segments=" << compact_collective_coverage_segments
             << " compact_collective_coverage_data_bytes=" << compact_collective_coverage_data_bytes
+            << " source_window_coverage_proof_map_used=" << (source_window_coverage_proof_map_used ? 1 : 0)
             << " total_sec=" << elapsed_sec(profile_start, done);
   return prepared_execution;
 }

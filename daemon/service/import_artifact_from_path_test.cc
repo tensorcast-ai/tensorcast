@@ -14,6 +14,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/materialization/dataplane/metadata/disk_artifact_context.h"
 #include "core/store/store_engine.h"
 #include "core/store/testing/recording_global_store_client.h"
 #include "core/testing/common.h"
@@ -638,6 +639,8 @@ TEST_CASE(
 TEST_CASE(
     "ResolvePublicDiskSource attests descriptorless safetensors to msa1 without a trusted mi2 hint",
     "[daemon][disk][resolve][msa1][safetensors]") {
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+
   const auto storage_root = make_clean_dir("resolve_public_disk_source_safetensors_storage");
   const auto artifact_dir = storage_root / "artifact_resolve_safetensors";
   std::filesystem::create_directories(artifact_dir);
@@ -658,6 +661,53 @@ TEST_CASE(
   REQUIRE(resolve_resp.source().format_kind() == tensorcast::daemon::v2::DISK_SOURCE_FORMAT_KIND_SAFETENSORS);
   REQUIRE(
       resolve_resp.source().resolution_strategy() == tensorcast::daemon::v2::DISK_RESOLUTION_STRATEGY_ATTESTED_ONLY);
+
+  const auto stats_after_resolve = tensorcast::store::loader::get_disk_artifact_context_cache_stats();
+  REQUIRE(stats_after_resolve.context_misses == 1);
+  REQUIRE(stats_after_resolve.index_misses == 1);
+
+  auto context_or = tensorcast::store::loader::get_disk_artifact_context(artifact_dir);
+  REQUIRE(context_or.ok());
+  const auto stats_after_lookup = tensorcast::store::loader::get_disk_artifact_context_cache_stats();
+  REQUIRE(stats_after_lookup.context_misses == stats_after_resolve.context_misses);
+  REQUIRE(stats_after_lookup.context_hits > stats_after_resolve.context_hits);
+
+  grpc::ServerContext second_ctx;
+  ResolvePublicDiskSourceResponse second_resp;
+  const auto second_status = fix.service().ResolvePublicDiskSource(&second_ctx, &resolve_req, &second_resp);
+
+  REQUIRE(second_status.ok());
+  REQUIRE(second_resp.has_source());
+  REQUIRE(second_resp.source().artifact_id() == resolve_resp.source().artifact_id());
+  REQUIRE(second_resp.source().canonical_index_bytes() == resolve_resp.source().canonical_index_bytes());
+  REQUIRE(second_resp.source().trusted_content_artifact_id().empty());
+}
+
+TEST_CASE(
+    "ResolvePublicDiskSource descriptorless resolve cache does not serve stale safetensors",
+    "[daemon][disk][resolve][msa1][safetensors][mutation]") {
+  const auto storage_root = make_clean_dir("resolve_public_disk_source_safetensors_mutation_storage");
+  const auto artifact_dir = storage_root / "artifact_resolve_safetensors_mutation";
+  std::filesystem::create_directories(artifact_dir);
+  create_safetensors_file(artifact_dir / "weights.safetensors", "weights", /*size_bytes=*/32);
+
+  HarnessFixture fix(storage_root);
+
+  ResolvePublicDiskSourceRequest resolve_req;
+  resolve_req.set_path(artifact_dir.string());
+  grpc::ServerContext resolve_ctx;
+  ResolvePublicDiskSourceResponse resolve_resp;
+  REQUIRE(fix.service().ResolvePublicDiskSource(&resolve_ctx, &resolve_req, &resolve_resp).ok());
+
+  const std::string artifact_id = resolve_resp.source().artifact_id();
+  REQUIRE(std::filesystem::remove(artifact_dir / "weights.safetensors"));
+
+  grpc::ServerContext second_ctx;
+  ResolvePublicDiskSourceResponse second_resp;
+  const auto second_status = fix.service().ResolvePublicDiskSource(&second_ctx, &resolve_req, &second_resp);
+
+  REQUIRE_FALSE(second_status.ok());
+  REQUIRE_FALSE(fix.harness->kernel().source_registry().lookup_binding(artifact_id).has_value());
 }
 
 TEST_CASE(

@@ -949,6 +949,7 @@ class Artifact:
         runtime_context: Any | None,
         runtime_resolver: Any | None,
         profile_sink: Any | None,
+        runtime_prepared_local_ready: Any | None,
     ) -> ArtifactRealizationHandle:
         if runtime_host is None:
             raise ArtifactError(
@@ -996,8 +997,16 @@ class Artifact:
                     context=context,
                     source_selection=source_selection,
                     materialization=resolved_spec.options,
+                    prepared_local_ready=runtime_prepared_local_ready,
                 )
             else:
+                if runtime_prepared_local_ready is not None:
+                    raise ArtifactError(
+                        "runtime_prepared_local_ready is only valid for "
+                        "mounted-source model_runtime realization",
+                        status_code="INVALID_ARGUMENT",
+                        retryable=False,
+                    )
                 source_selection = self._resolve_model_runtime_source_selection(
                     artifact_id
                 )
@@ -1068,6 +1077,7 @@ class Artifact:
         runtime_context: Any | None = None,
         runtime_resolver: Any | None = None,
         profile_sink: Any | None = None,
+        runtime_prepared_local_ready: Any | None = None,
     ) -> ArtifactRealizationHandle:
         if spec.target_kind == "tensor_dict":
             if spec.device is None:
@@ -1427,6 +1437,7 @@ class Artifact:
                 runtime_context=runtime_context,
                 runtime_resolver=runtime_resolver,
                 profile_sink=profile_sink,
+                runtime_prepared_local_ready=runtime_prepared_local_ready,
             )
         raise ArtifactError(
             f"Unsupported realization target kind: {spec.target_kind}",

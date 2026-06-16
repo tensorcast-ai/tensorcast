@@ -167,6 +167,8 @@ sc_cc_library(
     hdrs = ["collective_disk_loader.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":source_window_batched_scatter_kernel",
+        ":source_window_collective_plan",
         "//core/common:async_runtime_lib",
         "//core/common:cuda_memory_lib",
         "//core/common:pinned_buffer_pool_lib",
@@ -192,6 +194,41 @@ sc_cc_library(
         "@folly//folly:executor",
         "@nccl",
         "@nlohmann_json//:json",
+    ],
+)
+
+sc_cc_library(
+    name = "source_window_batched_scatter_kernel",
+    srcs = ["source_window_batched_scatter_kernel.cc"],
+    hdrs = ["source_window_batched_scatter_kernel.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core/cuda:cuda_api_lib",
+        "@abseil-cpp//absl/base:no_destructor",
+        "@abseil-cpp//absl/cleanup",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+        "@cudart",
+        "@nvrtc//:nvrtc_headers",
+    ],
+)
+
+sc_cc_library(
+    name = "source_window_collective_plan",
+    srcs = ["source_window_collective_plan.cc"],
+    hdrs = ["source_window_collective_plan.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core/common:artifact_hash_lib",
+        "//core/store:store_engine_options",
+        "//core/store/materialization/contracts:loading_spec",
+        "//core/store/materialization/contracts:representation_contract",
+        "//core/store/materialization/dataplane:disk_artifact_context",
+        "//core/store/runtime/ingestion:materialization_strategy_types",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+        "@glog",
     ],
 )
 
@@ -327,6 +364,34 @@ cc_test(
         "//core/store/materialization/dataplane:disk_artifact_context",
         "//core/testing:catch_main",
         "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "source_window_collective_plan_test",
+    srcs = ["source_window_collective_plan_test.cc"],
+    deps = [
+        ":source_window_collective_plan",
+        "//core/store/materialization/contracts:loading_spec",
+        "//core/store/materialization/contracts:representation_contract",
+        "//core/store/materialization/dataplane:disk_artifact_context",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+        "@gsl",
+    ],
+)
+
+cc_test(
+    name = "source_window_batched_scatter_kernel_test",
+    srcs = ["source_window_batched_scatter_kernel_test.cc"],
+    tags = ["requires_cuda"],
+    deps = [
+        ":source_window_batched_scatter_kernel",
+        "//core/common:cuda_memory_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/testing:catch_main",
+        "@abseil-cpp//absl/status",
         "@catch2//:catch2_main",
     ],
 )

@@ -52,6 +52,7 @@ from tensorcast.artifact_runtime.lifecycle import (
     LocalReadyBindingContract,
     LocalReadyManifestCarrierResult,
     LocalReadyMaterializationIdentity,
+    LocalReadyPreparationResult,
     LocalSourceBootstrap,
     ManifestMismatchError,
     MaterializationExecutionFacts,
@@ -1178,6 +1179,39 @@ def test_source_catalog_provider_uses_integration_host():
     assert provider.request.schema_version == SOURCE_CATALOG_REQUEST_SCHEMA_VERSION
 
 
+def test_prepared_source_catalog_skips_host_provider_and_validates_identity():
+    class _Provider:
+        @staticmethod
+        def build_catalog(request):  # pragma: no cover - must not be called
+            raise AssertionError(f"unexpected source catalog build: {request!r}")
+
+    prepared_catalog = SimpleNamespace(source_artifact_ref="mi2:source")
+    service = ArtifactRuntimeIntegration(
+        host=IntegrationHost(
+            framework=_ContractFrameworkHost(),
+            placement=_ContractPlacementHost(),
+            source_catalog=_Provider(),
+        )
+    )
+    source_subject = SourceSubject(
+        artifact_ref="mi2:source",
+        subject=object(),
+    )
+
+    catalog = service._local_ready_source_catalog(
+        _LocalReadyBootstrap(
+            source_selector=SourceSelector.local_path("/tmp/model"),
+            source_subject=source_subject,
+            source_catalog=prepared_catalog,
+            model_config=object(),
+        ),
+        source_subject=source_subject,
+        source_artifact_ref="mi2:source",
+    )
+
+    assert catalog is prepared_catalog
+
+
 @pytest.mark.parametrize(
     "provider_ref, expected",
     (
@@ -1315,6 +1349,39 @@ def test_public_intent_attachment_type_exists():
         bootstrap_policy=BootstrapPolicy(),
     )
     assert intent.source_selector.kind == "local_path"
+
+
+def test_admin_local_source_bootstrap_carries_prepared_source_catalog():
+    prepared_catalog = SimpleNamespace(source_artifact_ref="mi2:source")
+    integration = ArtifactRuntimeIntegration(
+        host=IntegrationHost(
+            framework=_ContractFrameworkHost(),
+            placement=_ContractPlacementHost(),
+            tensor_surface=integration_mod.TorchTensorHost(),
+        )
+    )
+
+    request = integration._local_source_bootstrap_request(
+        AdminLocalSourceBootstrap(
+            source_selector=SourceSelector.local_path("/tmp/model"),
+            bootstrap_policy=BootstrapPolicy(),
+            source_catalog=prepared_catalog,
+        ),
+        RequestContext(
+            framework_config="framework-config",
+            model_config=SimpleNamespace(model="fake-model"),
+            target_device=torch.device("cpu"),
+        ),
+        decision=AdmissionDecision(
+            family="fake-family",
+            support_level="runtime_bind_swap_ready",
+            startup_allowed=True,
+            reload_allowed=True,
+            local_bootstrap_allowed=True,
+        ),
+    )
+
+    assert request.source_catalog is prepared_catalog
 
 
 def test_local_source_bootstrap_start_derives_request_from_host(monkeypatch):
@@ -3740,6 +3807,86 @@ def test_serving_integration_rejects_representation_changing_finalize_without_re
     assert binding.closed
 
 
+def test_prepare_local_ready_rejects_prepared_recipe_source_ref_mismatch(monkeypatch):
+    recipe = _local_ready_recipe()
+    recipe.source_artifact_ref = "mi2:test:other-source"
+
+    monkeypatch.setattr(
+        local_ready_mod,
+        "realize_local_ready_binding_from_source",
+        lambda **_kwargs: pytest.fail("realization must not start"),
+    )
+
+    with pytest.raises(
+        ArtifactRuntimeIntegrationError,
+        match="prepared recipe source_artifact_ref",
+    ):
+        ArtifactRuntimeIntegration()._prepare_local_source_bootstrap(
+            _LocalReadyBootstrap(
+                recipe=recipe,
+                source_subject=SimpleNamespace(),
+                source_artifact_ref="mi2:test:source",
+                target_device=torch.device("cpu"),
+                manifest_tensor_name="__tensorcast_meta__.manifest",
+            )
+        )
+
+
+def test_prepare_local_ready_rejects_prepared_recipe_source_subject_mismatch(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        local_ready_mod,
+        "realize_local_ready_binding_from_source",
+        lambda **_kwargs: pytest.fail("realization must not start"),
+    )
+
+    with pytest.raises(
+        ArtifactRuntimeIntegrationError,
+        match="source subject",
+    ):
+        ArtifactRuntimeIntegration()._prepare_local_source_bootstrap(
+            _LocalReadyBootstrap(
+                recipe=_local_ready_recipe(),
+                source_subject=SourceSubject(
+                    artifact_ref="mi2:test:other-source",
+                    subject=object(),
+                ),
+                source_artifact_ref="mi2:test:source",
+                target_device=torch.device("cpu"),
+                manifest_tensor_name="__tensorcast_meta__.manifest",
+            )
+        )
+
+
+def test_prepare_local_ready_rejects_prepared_recipe_catalog_fingerprint_mismatch(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        local_ready_mod,
+        "realize_local_ready_binding_from_source",
+        lambda **_kwargs: pytest.fail("realization must not start"),
+    )
+
+    with pytest.raises(
+        ArtifactRuntimeIntegrationError,
+        match="source metadata fingerprint",
+    ):
+        ArtifactRuntimeIntegration()._prepare_local_source_bootstrap(
+            _LocalReadyBootstrap(
+                recipe=_local_ready_recipe(),
+                source_subject=SimpleNamespace(),
+                source_artifact_ref="mi2:test:source",
+                source_catalog=SimpleNamespace(
+                    source_artifact_ref="mi2:test:source",
+                    metadata_fingerprint="other-fingerprint",
+                ),
+                target_device=torch.device("cpu"),
+                manifest_tensor_name="__tensorcast_meta__.manifest",
+            )
+        )
+
+
 def test_serving_integration_prepare_local_ready_owns_contract_and_options(monkeypatch):
     adapter = _MaterializationAdapter()
     align_calls = []
@@ -4019,6 +4166,280 @@ def test_serving_integration_prepare_local_ready_builds_recipe_from_source(monke
     assert calls[3][1]["cache_config"] is cache_config
     assert calls[5][0] == "prepare"
     assert calls[5][1]["source_subject"] is source_handle
+
+
+def test_prepare_local_ready_recipe_builds_source_metadata_without_materialization(
+    monkeypatch,
+):
+    calls = []
+    source_handle = SimpleNamespace()
+    source_subject = SourceSubject(
+        artifact_ref="mi2:test:source",
+        source_kind="fake",
+        subject=source_handle,
+        metadata_fingerprint="meta-fingerprint",
+    )
+    source_catalog = SimpleNamespace(
+        ordered_names=("w",),
+        meta_by_name={},
+        selected_files=(),
+        source_artifact_ref="mi2:test:source",
+        metadata_fingerprint="meta-fingerprint",
+    )
+
+    class _Admission:
+        @staticmethod
+        def admit(request):
+            calls.append(("admit", request))
+            return AdmissionDecision(
+                family="fake-family",
+                support_level="runtime_bind_swap_ready",
+                startup_allowed=True,
+                reload_allowed=True,
+                local_bootstrap_allowed=True,
+            )
+
+    class _Provider:
+        @staticmethod
+        def build_catalog(request):
+            calls.append(("source_catalog", request))
+            return source_catalog
+
+    class _Source:
+        @staticmethod
+        def source_catalog_config(framework_config, model_config):
+            calls.append(("source_catalog_config", framework_config, model_config))
+            return "source-config"
+
+        @staticmethod
+        def recipe_cache_policy(framework_config, model_config):
+            calls.append(("recipe_cache_policy", framework_config, model_config))
+            return RecipeCachePolicy(fields={"cache_root": "/tmp/cache"})
+
+    class _Session:
+        @staticmethod
+        def build_recipe(**kwargs):
+            calls.append(("build_recipe", kwargs))
+            return SimpleNamespace(
+                recipe=_local_ready_recipe(),
+                diagnostics={"compile_key": "recipe-key"},
+            )
+
+    monkeypatch.setattr(
+        ArtifactRuntimeIntegration,
+        "resolve_source_subject",
+        lambda self, selector, **kwargs: calls.append(("resolve", selector, kwargs))
+        or source_subject,
+    )
+    monkeypatch.setattr(
+        ArtifactRuntimeIntegration,
+        "build_recipe_session",
+        lambda self, request: calls.append(("session", request)) or _Session(),
+    )
+    monkeypatch.setattr(
+        local_ready_mod,
+        "realize_local_ready_binding_from_source",
+        lambda **_kwargs: pytest.fail("materialization must not start"),
+    )
+
+    result = ArtifactRuntimeIntegration(
+        host=IntegrationHost(
+            framework=_ContractFrameworkHost(),
+            placement=_ContractPlacementHost(),
+            source=_Source(),
+            source_catalog=_Provider(),
+            admission=_Admission(),
+        ),
+    ).prepare_local_ready_recipe(
+        LocalSourceBootstrap(
+            source_selector=SourceSelector.local_path("/tmp/model"),
+            bootstrap_policy=BootstrapPolicy({"verify_source_checksums": True}),
+        ),
+        RequestContext(
+            framework_config="framework-config",
+            model_config=SimpleNamespace(name="model-config"),
+            target_device=torch.device("cpu"),
+        ),
+    )
+
+    assert isinstance(result, LocalReadyPreparationResult)
+    assert result.recipe.source_artifact_ref == "mi2:test:source"
+    assert result.source_subject is source_handle
+    assert result.source_catalog is source_catalog
+    assert result.cache_config is not None
+    assert result.placement is not None
+    assert result.family == "fake-family"
+    assert result.tp_rank == 0
+    assert result.tp_world_size == 1
+    assert [call[0] for call in calls] == [
+        "admit",
+        "source_catalog_config",
+        "recipe_cache_policy",
+        "resolve",
+        "source_catalog",
+        "session",
+        "build_recipe",
+    ]
+    assert calls[3][2] == {
+        "verify_checksums": False,
+        "coordinator": None,
+    }
+    assert calls[4][1].source_catalog_config == "source-config"
+    assert calls[6][1]["source_catalog"] is source_catalog
+    assert calls[6][1]["cache_config"] is result.cache_config
+
+
+def test_prepare_local_ready_recipe_accepts_prebuilt_admin_inputs(monkeypatch):
+    recipe = _local_ready_recipe()
+    source_subject = SourceSubject(
+        artifact_ref="mi2:test:source",
+        subject=object(),
+        metadata_fingerprint="meta-fingerprint",
+    )
+    source_catalog = SimpleNamespace(
+        source_artifact_ref="mi2:test:source",
+        metadata_fingerprint="meta-fingerprint",
+    )
+
+    class _Admission:
+        @staticmethod
+        def admit(request):
+            del request
+            return AdmissionDecision(
+                family="fake-family",
+                support_level="runtime_bind_swap_ready",
+                startup_allowed=True,
+                reload_allowed=True,
+                local_bootstrap_allowed=True,
+            )
+
+    monkeypatch.setattr(
+        local_ready_mod,
+        "realize_local_ready_binding_from_source",
+        lambda **_kwargs: pytest.fail("materialization must not start"),
+    )
+
+    result = ArtifactRuntimeIntegration(
+        host=IntegrationHost(
+            framework=_ContractFrameworkHost(),
+            placement=_ContractPlacementHost(),
+            admission=_Admission(),
+        ),
+    ).prepare_local_ready_recipe(
+        AdminLocalSourceBootstrap(
+            source_selector=SourceSelector.local_path("/tmp/model"),
+            bootstrap_policy=BootstrapPolicy(),
+            recipe=recipe,
+            source_subject=source_subject,
+            source_catalog=source_catalog,
+            source_artifact_ref="mi2:test:source",
+        ),
+        RequestContext(
+            framework_config="framework-config",
+            model_config=SimpleNamespace(name="model-config"),
+            target_device=torch.device("cpu"),
+        ),
+    )
+
+    assert result.recipe is recipe
+    assert result.source_subject is source_subject.subject
+    assert result.source_catalog is source_catalog
+    assert result.source_artifact_ref == "mi2:test:source"
+
+
+def test_mounted_source_realization_reuses_prepared_local_ready(monkeypatch):
+    recipe = _local_ready_recipe()
+    recipe.source_artifact_ref = "msa1:test:source"
+    source_catalog = SimpleNamespace(
+        source_artifact_ref="msa1:test:source",
+        metadata_fingerprint="meta-fingerprint",
+    )
+    cache_config = SimpleNamespace(cache=True)
+    prepared_subject = SimpleNamespace(artifact_id="msa1:test:source")
+    prepared = LocalReadyPreparationResult(
+        recipe=recipe,
+        source_subject=prepared_subject,
+        source_artifact_ref="msa1:test:source",
+        source_catalog=source_catalog,
+        cache_config=cache_config,
+        placement=_matrix_placement(tp_size=1),
+        family="fake-family",
+        tp_rank=0,
+        tp_world_size=1,
+    )
+    captured = {}
+
+    class _Admission:
+        @staticmethod
+        def admit(request):
+            del request
+            return AdmissionDecision(
+                family="fake-family",
+                support_level="runtime_bind_swap_ready",
+                startup_allowed=True,
+                reload_allowed=True,
+                local_bootstrap_allowed=True,
+            )
+
+    model = nn.Module()
+    runtime_view = RuntimeBindingView(
+        source_artifact_ref="msa1:test:source",
+        readiness="runtime_local_ready",
+    )
+    runtime_state = RuntimeBindingState(
+        artifact_ref="msa1:test:source",
+        runtime_view=runtime_view,
+    )
+
+    def fake_prepare(self, request):
+        del self
+        captured["request"] = request
+        return integration_mod.LocalReadyRuntimeResult(
+            model=model,
+            runtime_state=runtime_state,
+            runtime_view=runtime_view,
+            recipe=request.recipe,
+        )
+
+    monkeypatch.setattr(
+        ArtifactRuntimeIntegration,
+        "_prepare_local_source_bootstrap",
+        fake_prepare,
+    )
+
+    attachment = ArtifactRuntimeIntegration(
+        host=IntegrationHost(
+            framework=_ContractFrameworkHost(),
+            placement=_ContractPlacementHost(),
+            admission=_Admission(),
+        )
+    ).realize_mounted_source_model_runtime(
+        artifact_ref="msa1:test:source",
+        source_subject=SimpleNamespace(
+            artifact_id="msa1:test:source",
+            path="/tmp/model",
+        ),
+        spec=integration_mod.tc.ArtifactRealizationSpec.model_runtime(
+            framework="fake",
+            device=torch.device("cpu"),
+        ),
+        context=RequestContext(
+            framework_config="framework-config",
+            model_config=SimpleNamespace(name="model-config"),
+            target_device=torch.device("cpu"),
+        ),
+        prepared_local_ready=prepared,
+    )
+
+    request = captured["request"]
+    assert attachment.model is model
+    assert request.recipe is recipe
+    assert request.source_subject is prepared_subject
+    assert request.source_catalog is source_catalog
+    assert request.cache_config is cache_config
+    assert request.placement is prepared.placement
+    assert not request.build_recipe_from_framework_context
+    assert request.source_artifact_ref == "msa1:test:source"
 
 
 def test_serving_integration_prepare_local_ready_builds_framework_context(monkeypatch):

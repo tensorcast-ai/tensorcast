@@ -12,7 +12,15 @@ from typing import Any
 import pytest
 import torch
 
+from tensorcast.api._config import (
+    CollectiveLoadGroup,
+    ExecutionTopologyContext,
+    GetArtifactOptions,
+    RetrievalPolicy,
+    RetrievalPreference,
+)
 from tensorcast.api._materialize import MaterializationPayload, TensorPayloadDescriptor
+from tensorcast.artifact_runtime import lifecycle as tc_lifecycle
 from tensorcast.api.store.common import canonical_index_to_bytes
 from tensorcast.api.store.realization_kernel import (
     ArtifactRealizationHandle,
@@ -93,6 +101,26 @@ def _canonical_index_bytes() -> bytes:
     )
     return canonical_index_to_bytes(
         CanonicalIndex(entries=entries, total_size_bytes=24, avbs_hash="")
+    )
+
+
+def _execution_topology_options() -> GetArtifactOptions:
+    return GetArtifactOptions(
+        source=RetrievalPolicy(
+            preference=RetrievalPreference.PREFER_DISK,
+            allow_p2p=False,
+            allow_disk=True,
+        ),
+        execution_topology=ExecutionTopologyContext(
+            collective_group=CollectiveLoadGroup(
+                group_id="same-host-tp-load",
+                world_size=8,
+                rank=3,
+            ),
+            collective_policy="collective_first",
+            source_locality="shared_source",
+            source_sharing_domain="node-a",
+        ),
     )
 
 
@@ -1822,6 +1850,39 @@ def test_runtime_attachment_envelope_and_report_capture_release_contract() -> No
         "source": "disk",
         "total_bytes": 128,
     }
+
+
+def test_runtime_attachment_resolved_report_projects_execution_topology_options() -> (
+    None
+):
+    tensors = {"a": torch.zeros(2, dtype=torch.float32)}
+    options = _execution_topology_options()
+
+    report = tc_lifecycle._runtime_attachment_report_for_resolved(
+        resolved=SimpleNamespace(artifact_ref="mi2:test:serving"),
+        tensors=tensors,
+        binding_handle=SimpleNamespace(binding_layout_id="bl1:test"),
+        target_device="cuda:0",
+        tensor_schema_hash="schema-test",
+        execution_diagnostics=_FakeExecutionDiagnostics(),
+        materialization_diagnostics={"source": "disk", "total_bytes": 128},
+        options=options,
+    )
+
+    assert report.target_kind == "runtime_attachment"
+    assert report.operation_backend == "runtime_attachment"
+    assert report.strategy_plan is not None
+    assert report.strategy_plan.source_policy["preference"] == "prefer_disk"
+    assert report.strategy_plan.source_policy["allow_p2p"] is False
+    assert report.strategy_plan.source_policy["allow_disk"] is True
+    assert report.strategy_plan.source_policy["topology_collective_policy"] == (
+        "collective_first"
+    )
+    assert report.strategy_plan.source_policy["source_locality"] == (
+        "shared_source"
+    )
+    assert report.strategy_plan.source_policy["source_sharing_domain"] == "node-a"
+    assert report.strategy_plan.collective_policy == "collective_used"
 
 
 def test_runtime_attachment_envelope_requires_target_layout_digest() -> None:

@@ -84,6 +84,8 @@ engine:
     enable_tensor_aware_mapped_executor: true
     allow_mixed_execution: true
     enable_owner_file_collective: false
+    enable_source_window_collective: false
+    enable_source_window_plan_cache: false
     executor_preference: MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO
     owner_file_collective_peak_bytes_budget: 8GB
     owner_file_collective_batch_bytes: 512MB
@@ -95,6 +97,23 @@ engine:
     owner_file_collective_group_assemble_timeout: 15s
     owner_file_collective_allow_mixed_residual: false
     owner_file_collective_planner_cache_entries: 256
+    local_mapped_safetensors_io_mode: MATERIALIZATION_STRATEGY_LOCAL_MAPPED_SAFETENSORS_IO_MODE_AUTO_BY_FILESYSTEM
+    source_window_collective_selection_mode: MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_DRY_RUN
+    source_window_collective_window_bytes: 512MB
+    source_window_collective_max_gap_bytes: 256KB
+    source_window_collective_max_window_amplification_x1000: 2000
+    source_window_collective_max_plan_read_amplification_x1000: 1200
+    source_window_collective_max_scatter_ops_per_window: 4096
+    source_window_collective_peak_bytes_budget: 4GB
+    source_window_collective_min_rank_read_saving_bytes: 512MB
+    source_window_collective_max_peer_to_read_ratio_x1000: 8000
+    source_window_collective_min_routed_peer_saving_bytes: 64MB
+    source_window_collective_distribution_mode: MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_DISTRIBUTION_MODE_AUTO
+    source_window_collective_allow_mixed_residual: false
+    enable_source_window_batched_scatter_kernel: false
+    enable_source_window_compiled_routed_program: false
+    source_window_compiled_program_build_threads: 0
+    enable_source_window_scatter_cuda_graph: false
 ```
 
 See `examples/config/store_daemon_config.yaml`.
@@ -104,6 +123,19 @@ Operationally, this means:
 - local-batched disk load is enabled by default,
 - tensor-aware mapped execution remains available for eligible mapped paths,
 - owner-file collective now uses a bounded batched executor when selected,
+- source-window collective is represented in typed config and remains
+  disabled/dry-run by default for generic daemon startup, while validated
+  TensorCast loader benchmarks opt into the source-window path with explicit
+  typed config,
+- when source-window is explicitly enabled and selected, its strict/auto
+  admission is independent from owner-file `pure_collective` gates; a required
+  collective request can be satisfied by `SourceWindowCollectiveExecutor` after
+  group final admission,
+- `local_mapped_safetensors_io_mode=AUTO_BY_FILESYSTEM` is shared by local
+  mapped and source-window mapped execution. Large regular safetensors on
+  direct-friendly local filesystems use `direct_aligned_edges` when page-cache
+  residency is cold or partial; small sources, non-direct-friendly filesystems,
+  and hot page-cache probes stay buffered,
 - eager owner-file preload and root whole-source preload are no longer part of
   the selected collective steady path.
 
@@ -405,11 +437,12 @@ This is the current best-known default path for ordinary host-local startup.
 
 Expected behavior:
 
-- current vllm loader still defaults to no collective hint,
+- ordinary `disk:<model_path>` startup still defaults to no collective hint,
 - daemon therefore usually stays on the non-collective local-batched or generic
-  path,
-- explicit collective experiments can still attach a group and exercise
-  `collective_disk_load` when eligibility is satisfied.
+  path for generic startup,
+- TensorCast loader benchmarks that need source-window collective attach an
+  explicit collective group and typed source-window config; this path is
+  validated separately from ordinary SDK startup defaults.
 
 The important point is that these filesystems are currently handled by storage
 class inference, not by a product-specific special case table, but current
@@ -423,7 +456,9 @@ used by `MaterializeIntoTarget`, `bind(...)`, and `bind_into(...)` flows.
 ```mermaid
 flowchart TD
     A["disk-backed mapped into-target request"] --> B{"disk + collective hint + representation work plan?"}
-    B -- "yes" --> C["try collective mapped executor"]
+    B -- "yes" --> C{"source-window candidate admitted?"}
+    C -- "yes" --> G["SourceWindowCollectiveExecutor"]
+    C -- "no" --> H["owner-file collective or local mapped strategy"]
     B -- "no" --> D{"source-ordered path available?"}
     D -- "yes" --> E["SourceOrderedMappedTargetExecutor"]
     D -- "no" --> F["MappedTargetStreamingExecutor"]
@@ -515,9 +550,9 @@ The intended operator-facing behavior today is:
   - otherwise keep `AUTO` on exact generic execution and treat local-batched as
     an explicit experiment-only override for that workload,
 - shared filesystem startup:
-  - still default to non-collective startup today,
-  - reserve collective for explicit experiments until owner-file collective is
-    production-ready,
+  - still default to non-collective startup for ordinary SDK disk startup,
+  - reserve collective for explicit TensorCast loader or operator-configured
+    workflows that provide group facts and typed strategy config,
   - let the daemon decide whether collective eligibility is satisfied once a
     collective hint is actually present,
 - mapped runtime binding:

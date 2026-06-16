@@ -131,6 +131,7 @@ struct StoreEngineOptions {
       kGenericByteRange = 1,
       kTensorAwareLocal = 2,
       kOwnerFileCollective = 3,
+      kSourceWindowCollective = 4,
     };
 
     enum class DiagnosticsVerbosity : std::uint8_t {
@@ -145,9 +146,28 @@ struct StoreEngineOptions {
       kDirectAlignedEdges = 2,
     };
 
+    enum class SourceWindowCollectiveSelectionMode : std::uint8_t {
+      kDryRun = 0,
+      kAuto = 1,
+      kStrict = 2,
+    };
+
+    enum class SourceWindowCollectiveDistributionMode : std::uint8_t {
+      kAuto = 0,
+      kFullWindowAllGather = 1,
+      kConsumerRouted = 2,
+      kHybridWindow = 3,
+      kLocalOnly = 4,
+    };
+
     bool enable_tensor_aware_mapped_executor{true};
     bool enable_local_batched_disk_load{false};
     bool enable_owner_file_collective{false};
+    bool enable_source_window_collective{false};
+    bool enable_source_window_plan_cache{false};
+    bool enable_source_window_batched_scatter_kernel{false};
+    bool enable_source_window_compiled_routed_program{false};
+    bool enable_source_window_scatter_cuda_graph{false};
     bool allow_mixed_execution{true};
     bool prefer_local_canonical_for_mapped{false};
     bool allow_source_ordered_for_mapped{true};
@@ -175,6 +195,21 @@ struct StoreEngineOptions {
     bool owner_file_collective_allow_mixed_residual{false};
     uint32_t owner_file_collective_planner_cache_entries{256};
     LocalMappedSafetensorsIoMode local_mapped_safetensors_io_mode{LocalMappedSafetensorsIoMode::kAutoByFilesystem};
+    SourceWindowCollectiveSelectionMode source_window_collective_selection_mode{
+        SourceWindowCollectiveSelectionMode::kDryRun};
+    uint64_t source_window_collective_window_bytes{512ULL * 1024ULL * 1024ULL};
+    uint64_t source_window_collective_max_gap_bytes{256ULL * 1024ULL};
+    uint32_t source_window_collective_max_window_amplification_x1000{2000};
+    uint32_t source_window_collective_max_plan_read_amplification_x1000{1200};
+    uint32_t source_window_collective_max_scatter_ops_per_window{4096};
+    uint64_t source_window_collective_peak_bytes_budget{4ULL * 1024ULL * 1024ULL * 1024ULL};
+    uint64_t source_window_collective_min_rank_read_saving_bytes{512ULL * 1024ULL * 1024ULL};
+    uint32_t source_window_collective_max_peer_to_read_ratio_x1000{8000};
+    uint64_t source_window_collective_min_routed_peer_saving_bytes{64ULL * 1024ULL * 1024ULL};
+    uint32_t source_window_compiled_program_build_threads{0};
+    SourceWindowCollectiveDistributionMode source_window_collective_distribution_mode{
+        SourceWindowCollectiveDistributionMode::kAuto};
+    bool source_window_collective_allow_mixed_residual{false};
   };
 
   MaterializationStrategyConfig materialization_strategy{};
