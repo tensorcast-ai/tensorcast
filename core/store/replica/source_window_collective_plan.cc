@@ -104,7 +104,7 @@ SourceWindowDistributionMode distribution_mode_from_strategy(
 
 SourceWindowDistributionMode resolve_distribution_mode(SourceWindowDistributionMode mode) {
   if (mode == SourceWindowDistributionMode::kAuto) {
-    return SourceWindowDistributionMode::kFullWindowAllGather;
+    return SourceWindowDistributionMode::kHybridWindow;
   }
   return mode;
 }
@@ -145,9 +145,49 @@ bool window_has_only_linear_or_contiguous_consumer_spans(const SourceWindowColle
   return std::all_of(window.consumer_spans.begin(), window.consumer_spans.end(), consumer_span_is_linear_or_contiguous);
 }
 
+std::optional<uint64_t> consumer_routed_peer_saving_bytes(
+    const SourceWindowCollectiveWindow& window,
+    uint32_t world_size) {
+  if (world_size <= 1 || window_has_only_one_consumer_rank(window) ||
+      !window_has_only_linear_or_contiguous_consumer_spans(window)) {
+    return std::nullopt;
+  }
+  const uint64_t window_bytes = window.end > window.start ? window.end - window.start : 0;
+  uint64_t all_gather_peer_bytes = std::numeric_limits<uint64_t>::max();
+  if (window_bytes <= std::numeric_limits<uint64_t>::max() / (world_size - 1)) {
+    all_gather_peer_bytes = window_bytes * static_cast<uint64_t>(world_size - 1);
+  }
+  uint64_t routed_peer_bytes = 0;
+  for (const auto& span : window.consumer_spans) {
+    uint64_t span_peer_bytes = 0;
+    const uint64_t useful_bytes = consumer_span_useful_bytes(span);
+    if (!checked_mul(useful_bytes, world_size - 1, &span_peer_bytes)) {
+      return std::nullopt;
+    }
+    span_peer_bytes /= world_size;
+    if (!checked_add(routed_peer_bytes, span_peer_bytes, &routed_peer_bytes)) {
+      return std::nullopt;
+    }
+  }
+  if (routed_peer_bytes >= all_gather_peer_bytes) {
+    return std::nullopt;
+  }
+  return all_gather_peer_bytes - routed_peer_bytes;
+}
+
+bool window_prefers_consumer_routed(
+    const SourceWindowCollectiveWindow& window,
+    uint32_t world_size,
+    const SourceWindowCollectiveConfig& config) {
+  const std::optional<uint64_t> saving = consumer_routed_peer_saving_bytes(window, world_size);
+  return saving.has_value() && *saving >= config.min_routed_peer_saving_bytes;
+}
+
 SourceWindowDistributionMode resolve_distribution_mode_for_windows(
     SourceWindowDistributionMode requested_mode,
-    absl::Span<const SourceWindowCollectiveWindow> windows) {
+    absl::Span<const SourceWindowCollectiveWindow> windows,
+    uint32_t world_size,
+    const SourceWindowCollectiveConfig& config) {
   if (requested_mode == SourceWindowDistributionMode::kHybridWindow) {
     return SourceWindowDistributionMode::kHybridWindow;
   }
@@ -156,6 +196,26 @@ SourceWindowDistributionMode resolve_distribution_mode_for_windows(
   }
   if (!windows.empty() && std::all_of(windows.begin(), windows.end(), window_has_only_one_consumer_rank)) {
     return SourceWindowDistributionMode::kLocalOnly;
+  }
+  bool has_consumer_routed = false;
+  bool has_full_window = false;
+  bool has_local_only = false;
+  for (const auto& window : windows) {
+    if (window_has_only_one_consumer_rank(window)) {
+      has_local_only = true;
+      continue;
+    }
+    if (window_prefers_consumer_routed(window, world_size, config)) {
+      has_consumer_routed = true;
+      continue;
+    }
+    has_full_window = true;
+  }
+  if (has_consumer_routed && !has_full_window && !has_local_only) {
+    return SourceWindowDistributionMode::kConsumerRouted;
+  }
+  if (has_consumer_routed || has_local_only) {
+    return SourceWindowDistributionMode::kHybridWindow;
   }
   return SourceWindowDistributionMode::kFullWindowAllGather;
 }
@@ -169,33 +229,8 @@ SourceWindowDistributionMode resolve_window_distribution_mode(
     if (window_has_only_one_consumer_rank(window)) {
       return SourceWindowDistributionMode::kLocalOnly;
     }
-    if (world_size > 1 && window_has_only_linear_or_contiguous_consumer_spans(window)) {
-      const uint64_t window_bytes = window.end > window.start ? window.end - window.start : 0;
-      uint64_t all_gather_peer_bytes = std::numeric_limits<uint64_t>::max();
-      if (window_bytes <= std::numeric_limits<uint64_t>::max() / (world_size - 1)) {
-        all_gather_peer_bytes = window_bytes * static_cast<uint64_t>(world_size - 1);
-      }
-      uint64_t routed_peer_bytes = 0;
-      bool routed_overflow = false;
-      for (const auto& span : window.consumer_spans) {
-        uint64_t span_peer_bytes = 0;
-        const uint64_t useful_bytes = consumer_span_useful_bytes(span);
-        if (!checked_mul(useful_bytes, world_size - 1, &span_peer_bytes)) {
-          routed_overflow = true;
-          break;
-        }
-        span_peer_bytes /= world_size;
-        if (!checked_add(routed_peer_bytes, span_peer_bytes, &routed_peer_bytes)) {
-          routed_overflow = true;
-          break;
-        }
-      }
-      const uint64_t routed_saving_bytes =
-          all_gather_peer_bytes > routed_peer_bytes ? all_gather_peer_bytes - routed_peer_bytes : 0;
-      if (!routed_overflow && routed_peer_bytes < all_gather_peer_bytes &&
-          routed_saving_bytes >= config.min_routed_peer_saving_bytes) {
-        return SourceWindowDistributionMode::kConsumerRouted;
-      }
+    if (window_prefers_consumer_routed(window, world_size, config)) {
+      return SourceWindowDistributionMode::kConsumerRouted;
     }
     return SourceWindowDistributionMode::kFullWindowAllGather;
   }
@@ -1896,8 +1931,8 @@ absl::StatusOr<SourceWindowCollectivePlan> build_source_window_collective_plan(
   if (plan.windows.empty()) {
     return absl::FailedPreconditionError("no_source_window_windows");
   }
-  const SourceWindowDistributionMode distribution_mode =
-      resolve_distribution_mode_for_windows(requested_distribution_mode, absl::MakeSpan(plan.windows));
+  const SourceWindowDistributionMode distribution_mode = resolve_distribution_mode_for_windows(
+      requested_distribution_mode, absl::MakeSpan(plan.windows), input.group.world_size, input.config);
   plan.distribution_mode = distribution_mode;
   assign_window_distribution_modes(distribution_mode, input.group.world_size, input.config, &plan.windows);
   assign_window_owners(sorted_member_ranks(input), &plan.windows);

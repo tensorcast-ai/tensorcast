@@ -867,9 +867,9 @@ int main(int argc, char** argv) {
     strategy.enable_owner_file_collective =
         ms.has_enable_owner_file_collective() ? ms.enable_owner_file_collective() : false;
     strategy.enable_source_window_collective =
-        ms.has_enable_source_window_collective() ? ms.enable_source_window_collective() : false;
+        ms.has_enable_source_window_collective() ? ms.enable_source_window_collective() : true;
     strategy.enable_source_window_plan_cache =
-        ms.has_enable_source_window_plan_cache() ? ms.enable_source_window_plan_cache() : false;
+        ms.has_enable_source_window_plan_cache() ? ms.enable_source_window_plan_cache() : true;
     strategy.allow_mixed_execution = ms.has_allow_mixed_execution() ? ms.allow_mixed_execution() : true;
     strategy.prefer_local_canonical_for_mapped = ms.prefer_local_canonical_for_mapped();
     strategy.allow_source_ordered_for_mapped =
@@ -986,8 +986,10 @@ int main(int argc, char** argv) {
       case EngineConfig::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_STRICT:
         strategy.source_window_collective_selection_mode = RuntimeSourceWindowSelectionMode::kStrict;
         break;
-      case EngineConfig::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_DRY_RUN:
       case EngineConfig::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_UNSPECIFIED:
+        strategy.source_window_collective_selection_mode = RuntimeSourceWindowSelectionMode::kAuto;
+        break;
+      case EngineConfig::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_DRY_RUN:
       default:
         strategy.source_window_collective_selection_mode = RuntimeSourceWindowSelectionMode::kDryRun;
         break;
@@ -1050,10 +1052,10 @@ int main(int argc, char** argv) {
         ? ms.source_window_collective_allow_mixed_residual()
         : false;
     strategy.enable_source_window_batched_scatter_kernel =
-        ms.has_enable_source_window_batched_scatter_kernel() ? ms.enable_source_window_batched_scatter_kernel() : false;
+        ms.has_enable_source_window_batched_scatter_kernel() ? ms.enable_source_window_batched_scatter_kernel() : true;
     strategy.enable_source_window_compiled_routed_program = ms.has_enable_source_window_compiled_routed_program()
         ? ms.enable_source_window_compiled_routed_program()
-        : false;
+        : true;
     strategy.enable_source_window_scatter_cuda_graph =
         ms.has_enable_source_window_scatter_cuda_graph() ? ms.enable_source_window_scatter_cuda_graph() : false;
     strategy.source_window_compiled_program_build_threads = ms.source_window_compiled_program_build_threads();

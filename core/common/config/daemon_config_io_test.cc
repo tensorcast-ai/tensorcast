@@ -304,7 +304,7 @@ pinned_memory:
   REQUIRE(strategy.source_window_collective_allow_mixed_residual());
 }
 
-TEST_CASE("DaemonConfig missing materialization strategy gets 0108 defaults", "[config]") {
+TEST_CASE("DaemonConfig missing materialization strategy gets auto strategy defaults", "[config]") {
   const std::string yaml = R"YAML(
 server:
   listen: {host: "127.0.0.1", port: 50052}
@@ -330,13 +330,13 @@ pinned_memory:
   REQUIRE(strategy.has_enable_owner_file_collective());
   REQUIRE_FALSE(strategy.enable_owner_file_collective());
   REQUIRE(strategy.has_enable_source_window_collective());
-  REQUIRE_FALSE(strategy.enable_source_window_collective());
+  REQUIRE(strategy.enable_source_window_collective());
   REQUIRE(strategy.has_enable_source_window_plan_cache());
-  REQUIRE_FALSE(strategy.enable_source_window_plan_cache());
+  REQUIRE(strategy.enable_source_window_plan_cache());
   REQUIRE(strategy.has_enable_source_window_batched_scatter_kernel());
-  REQUIRE_FALSE(strategy.enable_source_window_batched_scatter_kernel());
+  REQUIRE(strategy.enable_source_window_batched_scatter_kernel());
   REQUIRE(strategy.has_enable_source_window_compiled_routed_program());
-  REQUIRE_FALSE(strategy.enable_source_window_compiled_routed_program());
+  REQUIRE(strategy.enable_source_window_compiled_routed_program());
   REQUIRE(strategy.source_window_compiled_program_build_threads() == 0);
   REQUIRE(strategy.has_enable_source_window_scatter_cuda_graph());
   REQUIRE_FALSE(strategy.enable_source_window_scatter_cuda_graph());
@@ -357,7 +357,7 @@ pinned_memory:
   REQUIRE(strategy.owner_file_collective_planner_cache_entries() == 256);
   REQUIRE(
       strategy.source_window_collective_selection_mode() ==
-      tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_DRY_RUN);
+      tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_AUTO);
   REQUIRE(strategy.source_window_collective_window_bytes() == 512ULL * 1024ULL * 1024ULL);
   REQUIRE(strategy.source_window_collective_max_gap_bytes() == 256ULL * 1024ULL);
   REQUIRE(strategy.source_window_collective_max_window_amplification_x1000() == 2000);
@@ -377,7 +377,7 @@ pinned_memory:
       tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO);
 }
 
-TEST_CASE("DaemonConfig partial materialization strategy preserves 0108 defaults", "[config]") {
+TEST_CASE("DaemonConfig partial materialization strategy preserves auto strategy defaults", "[config]") {
   const std::string yaml = R"YAML(
 server:
   listen: {host: "127.0.0.1", port: 50052}
@@ -401,13 +401,13 @@ pinned_memory:
   REQUIRE(strategy.has_enable_owner_file_collective());
   REQUIRE_FALSE(strategy.enable_owner_file_collective());
   REQUIRE(strategy.has_enable_source_window_collective());
-  REQUIRE_FALSE(strategy.enable_source_window_collective());
+  REQUIRE(strategy.enable_source_window_collective());
   REQUIRE(strategy.has_enable_source_window_plan_cache());
-  REQUIRE_FALSE(strategy.enable_source_window_plan_cache());
+  REQUIRE(strategy.enable_source_window_plan_cache());
   REQUIRE(strategy.has_enable_source_window_batched_scatter_kernel());
-  REQUIRE_FALSE(strategy.enable_source_window_batched_scatter_kernel());
+  REQUIRE(strategy.enable_source_window_batched_scatter_kernel());
   REQUIRE(strategy.has_enable_source_window_compiled_routed_program());
-  REQUIRE_FALSE(strategy.enable_source_window_compiled_routed_program());
+  REQUIRE(strategy.enable_source_window_compiled_routed_program());
   REQUIRE(strategy.source_window_compiled_program_build_threads() == 0);
   REQUIRE(strategy.has_enable_source_window_scatter_cuda_graph());
   REQUIRE_FALSE(strategy.enable_source_window_scatter_cuda_graph());
@@ -417,7 +417,7 @@ pinned_memory:
   REQUIRE(strategy.owner_file_collective_planner_cache_entries() == 256);
   REQUIRE(
       strategy.source_window_collective_selection_mode() ==
-      tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_DRY_RUN);
+      tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_AUTO);
   REQUIRE(strategy.source_window_collective_window_bytes() == 512ULL * 1024ULL * 1024ULL);
   REQUIRE(
       strategy.executor_preference() ==

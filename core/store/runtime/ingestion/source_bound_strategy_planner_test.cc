@@ -137,11 +137,14 @@ TEST_CASE(
   lowering_artifacts.collective_data_map = make_data_map(8);
   lowering_artifacts.executor_generic_data_map = make_data_map(8);
 
+  auto strategy_config = make_strategy_config();
+  strategy_config.enable_source_window_collective = false;
+
   auto strategy_plan_or = build_source_bound_execution_strategy_plan(
       plan,
       lowering_artifacts,
       SourceBoundPolicy::kCollectiveFirst,
-      make_strategy_config(),
+      strategy_config,
       make_collective_topology(),
       safetensors_disk_source());
   REQUIRE(strategy_plan_or.ok());

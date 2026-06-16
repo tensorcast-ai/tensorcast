@@ -625,6 +625,25 @@ TEST_CASE("source-window auto distribution keeps all-gather for multi-rank consu
   CHECK(plan.summary.group_final_admitted);
 }
 
+TEST_CASE("source-window auto distribution selects consumer-routed when peer saving is material", "[source_window]") {
+  auto input = make_two_rank_dim1_group();
+  input.config.distribution_mode = strategy::SourceWindowCollectiveDistributionMode::kAuto;
+  input.config.min_routed_peer_saving_bytes = 0;
+
+  auto plan_or = build_source_window_collective_plan(input);
+  REQUIRE(plan_or.ok());
+  const auto& plan = *plan_or;
+
+  CHECK(plan.distribution_mode == strategy::SourceWindowCollectiveDistributionMode::kConsumerRouted);
+  CHECK(plan.summary.distribution_mode == strategy::SourceWindowCollectiveDistributionMode::kConsumerRouted);
+  REQUIRE(plan.windows.size() == 1);
+  CHECK(plan.windows.front().distribution_mode == strategy::SourceWindowCollectiveDistributionMode::kConsumerRouted);
+  CHECK(plan.summary.source_window_peer_transfer_bytes == 16);
+  CHECK(plan.summary.source_window_peer_useful_bytes == 16);
+  CHECK(plan.summary.source_window_peer_waste_bytes == 0);
+  CHECK(plan.summary.group_final_admitted);
+}
+
 TEST_CASE("source-window hybrid distribution mixes local-only and routed windows", "[source_window]") {
   auto config = base_config();
   config.window_bytes = 64;

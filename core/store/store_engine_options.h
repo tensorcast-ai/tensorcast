@@ -163,10 +163,10 @@ struct StoreEngineOptions {
     bool enable_tensor_aware_mapped_executor{true};
     bool enable_local_batched_disk_load{false};
     bool enable_owner_file_collective{false};
-    bool enable_source_window_collective{false};
-    bool enable_source_window_plan_cache{false};
-    bool enable_source_window_batched_scatter_kernel{false};
-    bool enable_source_window_compiled_routed_program{false};
+    bool enable_source_window_collective{true};
+    bool enable_source_window_plan_cache{true};
+    bool enable_source_window_batched_scatter_kernel{true};
+    bool enable_source_window_compiled_routed_program{true};
     bool enable_source_window_scatter_cuda_graph{false};
     bool allow_mixed_execution{true};
     bool prefer_local_canonical_for_mapped{false};
@@ -196,7 +196,7 @@ struct StoreEngineOptions {
     uint32_t owner_file_collective_planner_cache_entries{256};
     LocalMappedSafetensorsIoMode local_mapped_safetensors_io_mode{LocalMappedSafetensorsIoMode::kAutoByFilesystem};
     SourceWindowCollectiveSelectionMode source_window_collective_selection_mode{
-        SourceWindowCollectiveSelectionMode::kDryRun};
+        SourceWindowCollectiveSelectionMode::kAuto};
     uint64_t source_window_collective_window_bytes{512ULL * 1024ULL * 1024ULL};
     uint64_t source_window_collective_max_gap_bytes{256ULL * 1024ULL};
     uint32_t source_window_collective_max_window_amplification_x1000{2000};

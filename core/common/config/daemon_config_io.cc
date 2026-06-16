@@ -525,7 +525,7 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
     auto* defaults = e->mutable_materialization_strategy();
     defaults->set_enable_local_batched_disk_load(true);
     defaults->set_enable_owner_file_collective(false);
-    defaults->set_enable_source_window_collective(false);
+    defaults->set_enable_source_window_collective(true);
   }
   auto* ms = e->mutable_materialization_strategy();
   if (!ms->has_enable_local_batched_disk_load()) {
@@ -535,16 +535,16 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
     ms->set_enable_owner_file_collective(false);
   }
   if (!ms->has_enable_source_window_collective()) {
-    ms->set_enable_source_window_collective(false);
+    ms->set_enable_source_window_collective(true);
   }
   if (!ms->has_enable_source_window_plan_cache()) {
-    ms->set_enable_source_window_plan_cache(false);
+    ms->set_enable_source_window_plan_cache(true);
   }
   if (!ms->has_enable_source_window_batched_scatter_kernel()) {
-    ms->set_enable_source_window_batched_scatter_kernel(false);
+    ms->set_enable_source_window_batched_scatter_kernel(true);
   }
   if (!ms->has_enable_source_window_compiled_routed_program()) {
-    ms->set_enable_source_window_compiled_routed_program(false);
+    ms->set_enable_source_window_compiled_routed_program(true);
   }
   if (!ms->has_enable_source_window_scatter_cuda_graph()) {
     ms->set_enable_source_window_scatter_cuda_graph(false);
@@ -617,7 +617,7 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
   if (ms->source_window_collective_selection_mode() ==
       tcfg::Engine::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_UNSPECIFIED) {
     ms->set_source_window_collective_selection_mode(
-        tcfg::Engine::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_DRY_RUN);
+        tcfg::Engine::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_AUTO);
   }
   if (ms->source_window_collective_window_bytes() == 0) {
     ms->set_source_window_collective_window_bytes(512ULL * 1024ULL * 1024ULL);

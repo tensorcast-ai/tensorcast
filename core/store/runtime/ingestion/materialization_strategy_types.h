@@ -305,9 +305,9 @@ struct ExecutionEnvironmentFacts {
   std::chrono::milliseconds owner_file_collective_group_assemble_timeout{0};
   bool owner_file_collective_allow_mixed_residual{false};
   uint32_t owner_file_collective_planner_cache_entries{0};
-  bool enable_source_window_collective{false};
+  bool enable_source_window_collective{true};
   SourceWindowCollectiveSelectionMode source_window_collective_selection_mode{
-      SourceWindowCollectiveSelectionMode::kDryRun};
+      SourceWindowCollectiveSelectionMode::kAuto};
   uint64_t source_window_collective_window_bytes{0};
   uint64_t source_window_collective_max_gap_bytes{0};
   uint32_t source_window_collective_max_window_amplification_x1000{0};

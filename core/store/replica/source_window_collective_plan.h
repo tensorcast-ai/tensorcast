@@ -24,9 +24,9 @@ struct TargetStorageSpan {
 };
 
 struct SourceWindowCollectiveConfig {
-  bool enabled{false};
+  bool enabled{true};
   runtime::ingestion::strategy::SourceWindowCollectiveSelectionMode selection_mode{
-      runtime::ingestion::strategy::SourceWindowCollectiveSelectionMode::kDryRun};
+      runtime::ingestion::strategy::SourceWindowCollectiveSelectionMode::kAuto};
   uint64_t window_bytes{512ULL * 1024ULL * 1024ULL};
   uint64_t max_gap_bytes{256ULL * 1024ULL};
   uint64_t max_window_amplification_x1000{2000};
