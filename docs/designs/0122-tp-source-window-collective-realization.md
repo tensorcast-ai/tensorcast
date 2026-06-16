@@ -130,6 +130,34 @@ Observed with daemon startup excluded:
 | Qwen3-235B-A22B-Instruct-2507 | TensorCast ConsumerRouted compiled+batched, parallel program build | SSD cold | 80.90s | 116.98s |
 | Qwen3-235B-A22B-Instruct-2507 | TensorCast ConsumerRouted compiled+batched, same-daemon hot | SSD cold | 76.84s | 104.74s |
 
+Experiment evidence summary:
+
+- Metadata feasibility matches the measured local-mapped read profile closely:
+  estimated/profile read bytes are within about `1.005x` for both 30B and
+  235B, so the source-window planning model is representative enough to guide
+  the implementation.
+- Source-window disk read volume drops to nearly one model payload per TP
+  group: 30B read/rank moves from `25.27GB` estimated local-mapped reads to
+  `7.63GB` source-window reads (`0.302x`), and 235B moves from `196.85GB` to
+  `58.77GB` (`0.299x`).
+- Rank-striped IO smoke tests show the storage shape is viable before NCCL and
+  scatter are added: 30B reads `61.06GB` in `9.96s` (`6.13GB/s` wall), and
+  235B reads `470.19GB` in `71.50s` (`6.58GB/s` wall).
+- Runtime validation confirms the design direction. Prepared full-window runs
+  reach `12.97s` weight load on 30B and `79.67s` on 235B; compiled routed plus
+  batched scatter reaches `13.71s` first-load and `11.54s` same-daemon hot on
+  30B, and `80.90s` first-load / `76.84s` same-daemon hot on 235B.
+- The main remaining limits are not source metadata parsing or group assembly.
+  The retained diagnostics point to group-level prepared realization, full-window
+  peer waste, and routed pack/scatter operation density. Real WorkPlan gates
+  estimate full-window scatter copy launches can drop from `151,685` to
+  `3,605` on 30B and from `303,223` to `28,181` on 235B if batching preserves
+  copy-engine-like bandwidth.
+- Rejected experiments are part of the design boundary: rank-local cache
+  singleflight, generic per-rank preparse, stream-ordered all-gather/scatter,
+  simple adjacent-span coalescing, and reorder-only routed packing did not move
+  the dominant path enough to justify new abstractions.
+
 Rejected 30B follow-ups: `representation_transform_builder` reserve variants
 measured `17.70s/50.83s` and `17.68s/49.21s`, did not reduce
 `representation_realization_plan` beyond noise, and were reverted. They confirm
