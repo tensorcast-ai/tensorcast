@@ -40,7 +40,7 @@ jobs:
             # github_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Restore proto/gen cache
         id: restore-proto-gen
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: head/proto/gen
           key: proto-gen-${{ hashFiles('head/proto/**/*.proto', 'head/proto/buf.gen.yaml', 'head/proto/buf.yaml') }}
@@ -52,7 +52,7 @@ jobs:
         run: cd head/proto && buf generate
       - name: Save proto/gen cache
         if: steps.restore-proto-gen.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: head/proto/gen
           key: proto-gen-${{ hashFiles('head/proto/**/*.proto', 'head/proto/buf.gen.yaml', 'head/proto/buf.yaml') }}

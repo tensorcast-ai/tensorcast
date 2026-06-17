@@ -92,7 +92,7 @@ jobs:
 
       - name: Restore Bazel external headers cache
         id: cache-externals
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: bazel-external-includes.tar.gz
           key: bazel-external-includes-v13-${{ hashFiles('MODULE.bazel') }}
@@ -259,7 +259,7 @@ jobs:
 
       - name: Restore Bazel external headers cache
         id: cache-externals
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: bazel-external-includes.tar.gz
           key: bazel-external-includes-v13-${{ hashFiles('MODULE.bazel') }}
