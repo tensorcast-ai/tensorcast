@@ -92,6 +92,7 @@ absl::StatusOr<replica::ReplicaConfig> build_replica_config(IngestionContext& ct
     config.source = ctx.p2p.source;
     config.local_device_id = ctx.target_device_id;
     config.p2p_comm_enabled = true;
+    config.source_is_view = ctx.p2p.source.source_is_view;
   }
 
   return config;

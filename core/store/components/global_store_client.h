@@ -112,6 +112,7 @@ struct RemoteReplicaInfo {
   std::string endpoint_id;
   std::string node_address;
   uint32_t node_port;
+  uint32_t grpc_port{0};
   uint64_t memory_size;
   common::memory::MemoryLocation memory_type;
   uint32_t device_id;
@@ -121,11 +122,19 @@ struct RemoteReplicaInfo {
   std::optional<std::string> view_id;
 };
 
+struct ViewTransportMetadata {
+  std::string view_id;
+  uint64_t view_size_bytes{0};
+  std::optional<std::string> view_data_hash;
+};
+
 // Transport session for P2P transfers
 struct TransportSession {
   std::string transport_id;
   RemoteReplicaInfo remote_replica;
   absl::Time start_time;
+  global_store::TransportRouteKind route_kind{global_store::TRANSPORT_ROUTE_KIND_UNSPECIFIED};
+  std::optional<ViewTransportMetadata> view_transport_metadata;
 };
 
 struct TransportSchedulingGroupHint {

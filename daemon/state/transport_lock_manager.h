@@ -55,6 +55,17 @@ class TransportLockManager {
     return locks_.erase(token) > 0;
   }
 
+  std::optional<LockEntry> take(const std::string& token) {
+    absl::MutexLock l(&mu_);
+    auto it = locks_.find(token);
+    if (it == locks_.end()) {
+      return std::nullopt;
+    }
+    LockEntry entry = it->second;
+    locks_.erase(it);
+    return entry;
+  }
+
   bool has_lock_for_key(const store::loading::ReplicaKey& key) const {
     absl::MutexLock l(&mu_);
     for (const auto& entry : locks_) {

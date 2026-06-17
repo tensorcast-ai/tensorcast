@@ -21,6 +21,7 @@
 #include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
 #include "daemon/state/binding_registry.h"
+#include "daemon/state/derived_view_export_manager.h"
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/ref_tracker.h"
 #include "daemon/state/session_lifecycle.h"
@@ -43,13 +44,17 @@ class IBackgroundTask {
 
 class LockTtlTask final : public IBackgroundTask {
  public:
-  LockTtlTask(TransportLockManager& locks, store::StoreEngine& engine) : locks_(locks), engine_(engine) {}
+  LockTtlTask(TransportLockManager& locks, store::StoreEngine& engine, DerivedViewExportManager* derived_view_exports)
+      : locks_(locks), engine_(engine), derived_view_exports_(derived_view_exports) {}
 
   void run_once() override {
     for (const auto& tok : locks_.tokens()) {
       auto expired = locks_.remove_if_expired(tok);
       if (expired.has_value()) {
         // UMA final: no engine-level unlock; TTL sweep clears daemon bookkeeping only.
+        if (expired->key.view_id.has_value() && derived_view_exports_ != nullptr) {
+          derived_view_exports_->end_fetch(tok, "lock_ttl_expired");
+        }
         VLOG(1) << "LockTtlTask: expired transport lock cleared for artifact_id=" << expired->key.artifact_id;
       }
     }
@@ -62,6 +67,7 @@ class LockTtlTask final : public IBackgroundTask {
  private:
   TransportLockManager& locks_;
   [[maybe_unused]] store::StoreEngine& engine_;
+  DerivedViewExportManager* derived_view_exports_{nullptr};
 };
 
 class RegionRegistrySweepTask final : public IBackgroundTask {

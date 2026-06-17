@@ -103,10 +103,11 @@ absl::Status PinnedMemoryAuthority::validate_and_build_pools() {
   pools_.resize(classes_.size());
   if (classes_.size() == 1) {
     const auto& cls = classes_.front();
-    PinnedBufferPool::Options options{
-        .name = std::string(cls.name),
-        .register_on_create = !cfg_.defer_host_registration,
-    };
+    PinnedBufferPool::Options options;
+    options.name = std::string(cls.name);
+    options.numa_node = cls.numa_node;
+    options.prefault = cls.numa_prefault;
+    options.register_on_create = !cfg_.defer_host_registration;
     pools_.front() = std::make_shared<PinnedBufferPool>(static_cast<size_t>(cls.pool_bytes), cls.slice_bytes, options);
     return absl::OkStatus();
   }

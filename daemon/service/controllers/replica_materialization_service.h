@@ -6,11 +6,13 @@
 #include <memory>
 #include <string>
 
+#include "core/common/async_runtime.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/rpc_context.h"
 #include "daemon/state/artifact_source_registry.h"
 #include "daemon/state/daemon_options.h"
+#include "daemon/state/derived_view_export_manager.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/handle_lease_registry.h"
 #include "daemon/state/lip_bridge.h"
@@ -33,9 +35,11 @@ class ReplicaMaterializationService {
     DeviceResolver& devices;
     ArtifactSourceRegistry& disk_imports;
     ShutdownSignal& shutdown_signal;
+    common::AsyncRuntime* async_runtime{nullptr};
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     WorkerIdentityStore* identity{nullptr};
     SessionLifecycleManager* lifecycle{nullptr};
+    DerivedViewExportManager* derived_view_exports{nullptr};
     HandleLeaseRegistry* handle_leases{nullptr};
     bool cpu_shared_memory_enabled{true};
     DaemonOptions::PostSealPolicy post_seal_policy{};

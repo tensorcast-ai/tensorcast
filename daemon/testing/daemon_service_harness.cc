@@ -135,6 +135,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       kernel->persistence_manager()->set_global_store_client(global_store_client.get());
     }
     kernel->lip_manager().set_global_store_client(global_store_client);
+    kernel->derived_view_export_manager().set_global_store_client(global_store_client);
   }
   std::shared_ptr<store::components::CommunicationManager> comm_manager = kernel->engine().get_shared_comm_manager();
 
@@ -199,6 +200,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .external_target_access_service = *external_target_access_service,
       .global_store_client = global_store_client,
       .lifecycle = &kernel->lifecycle_manager(),
+      .derived_view_exports = &kernel->derived_view_export_manager(),
       .lifecycle_kernel = &kernel->lifecycle_kernel(),
       .handle_leases = kernel->handle_leases(),
       .capability_tokens = kernel->capability_tokens(),
@@ -228,6 +230,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .engine = kernel->engine(),
       .locks = kernel->transport_lock_manager(),
       .lip = kernel->lip_manager(),
+      .derived_view_exports = &kernel->derived_view_export_manager(),
       .materialization_controller = materialization_controller.get(),
       .payload_transport_broker = &kernel->payload_transport_broker(),
   };

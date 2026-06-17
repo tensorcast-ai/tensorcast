@@ -40,6 +40,14 @@ DaemonKernel::DaemonKernel(
   verif_tracker_->set_serial_executor(async_runtime_->serial_executor());
 
   lifecycle_mgr_ = std::make_shared<SessionLifecycleManager>(sessions_, refs_, *lip_mgr_, *engine_);
+  derived_view_export_mgr_ = std::make_unique<DerivedViewExportManager>(
+      *engine_,
+      *lifecycle_mgr_,
+      DerivedViewExportManager::Options{
+          .ttl = absl::Milliseconds(static_cast<int64_t>(options_.derived_view_exports.ttl.count())),
+          .retry_retire_ttl =
+              absl::Milliseconds(static_cast<int64_t>(options_.derived_view_exports.retry_retire_ttl.count())),
+      });
   lifecycle_kernel_ =
       std::make_unique<LifecycleKernel>(options_.daemon_id.empty() ? std::string("daemon-local") : options_.daemon_id);
   pid_monitor_ = std::make_unique<PidMonitor>(
@@ -325,7 +333,7 @@ void DaemonKernel::configure_scheduler_tasks_() {
 
   // Lock TTL
   {
-    auto t = std::make_shared<LockTtlTask>(locks_, *engine_);
+    auto t = std::make_shared<LockTtlTask>(locks_, *engine_, derived_view_export_mgr_.get());
     scheduler_->add_task(
         TaskKind::kLockTTL, std::chrono::duration_cast<milliseconds>(options_.locks_sweep_interval), [t]() {
           t->run_once();

@@ -593,6 +593,8 @@ int main(int argc, char** argv) {
     cc.slice_bytes = cls.slice_bytes();
     cc.pool_bytes = cls.pool_bytes();
     cc.rdma_preregister = cls.rdma_preregister();
+    cc.numa_node = cls.numa_node();
+    cc.numa_prefault = cls.numa_prefault();
     pinned_total_bytes += cls.pool_bytes();
     pm_cfg.classes.push_back(std::move(cc));
   }
@@ -1186,6 +1188,15 @@ int main(int argc, char** argv) {
     daemon_opts.handle_lease_ttl = duration_to_millis(cfg.lifecycle().handle_leases().ttl());
   }
   daemon_opts.handle_lease_max_mints_per_second = cfg.lifecycle().handle_leases().max_mints_per_second();
+  if (cfg.lifecycle().has_derived_view_exports()) {
+    const auto& derived_cfg = cfg.lifecycle().derived_view_exports();
+    if (derived_cfg.has_ttl()) {
+      daemon_opts.derived_view_exports.ttl = duration_to_millis(derived_cfg.ttl());
+    }
+    if (derived_cfg.has_retry_retire_ttl()) {
+      daemon_opts.derived_view_exports.retry_retire_ttl = duration_to_millis(derived_cfg.retry_retire_ttl());
+    }
+  }
   daemon_opts.cpu_shared_memory_enabled = opts.cpu_shared_memory_enabled;
   daemon_opts.external_target_verification_enabled = cfg.engine().enable_external_target_verification();
   daemon_opts.max_concurrency = std::max<uint32_t>(1, opts.promotion.max_concurrency);

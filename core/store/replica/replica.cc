@@ -136,6 +136,7 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
   // --- Create Loader based on Source ---
   std::unique_ptr<IArtifactLoader> loader;
   common::memory::MemoryLocation source_type = common::memory::MemoryLocation::NONE;
+  bool source_is_view = false;
 
   absl::Status visitor_status = absl::OkStatus(); // Initialize status
 
@@ -154,6 +155,7 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
                       << p2p_source.port;
               loader = std::make_unique<P2PLoader>(p2p_source);
               source_type = common::memory::MemoryLocation::REMOTE;
+              source_is_view = p2p_source.source_is_view;
               return absl::OkStatus(); // Return OK status
             },
             [&](const loading::InlineBufferSource& buffer_source) -> absl::Status {
@@ -259,6 +261,7 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
       std::move(memory_manager),
       config.async_runtime,
       source_type,
+      source_is_view || config.source_is_view,
       std::move(view_plan),
       std::move(config.canonical_index_json),
       std::move(config.source_index_json),
@@ -281,6 +284,7 @@ Replica::Replica(
     std::shared_ptr<ReplicaLoadController> memory_manager,
     gsl::not_null<std::shared_ptr<common::AsyncRuntime>> async_runtime,
     common::memory::MemoryLocation source_type,
+    bool source_is_view,
     std::optional<loader::ViewPlan> view_plan,
     std::optional<std::string> canonical_index_json,
     std::optional<std::string> source_index_json,
@@ -295,6 +299,7 @@ Replica::Replica(
       memory_manager_(std::move(memory_manager)),
       async_runtime_(std::move(async_runtime)),
       original_source_type_(source_type),
+      source_is_view_(source_is_view),
       view_plan_(std::move(view_plan)),
       canonical_index_json_(std::move(canonical_index_json)),
       source_index_json_(std::move(source_index_json)),
@@ -444,6 +449,7 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
       return ready_signal->subscribe();
     }
     std::unique_ptr<loader::SeekableSource> source_ptr = std::move(*src_or);
+    const bool source_is_view = source_location == MemoryLocation::REMOTE && source_is_view_;
     std::optional<ReplicaLoadController::CollectiveDiskLoadInput> collective_disk_load;
     std::optional<ReplicaLoadController::LocalBatchedDiskLoadInput> local_batched_disk_load;
     const std::optional<runtime::ingestion::strategy::ExecutionStrategyPlan>& execution_strategy_plan =
@@ -489,7 +495,8 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
           std::nullopt);
     } else {
       bool composed_view = false;
-      if (!local_batched_disk_load.has_value() && canonical_index_json_.has_value() && source_index_json_.has_value()) {
+      if (!source_is_view && !local_batched_disk_load.has_value() && canonical_index_json_.has_value() &&
+          source_index_json_.has_value()) {
         auto canonical_total_size = compute_total_size_from_index(*canonical_index_json_);
         if (!canonical_total_size.has_value()) {
           ready_signal->set_value(absl::FailedPreconditionError("canonical index total_size is unavailable"));
@@ -533,14 +540,16 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
         }
         source_ptr = std::move(*mapped_or);
       }
-      if (!local_batched_disk_load.has_value() && view_plan_.has_value() && !view_plan_->is_identity) {
+      if (!source_is_view && !local_batched_disk_load.has_value() && view_plan_.has_value() &&
+          !view_plan_->is_identity) {
         if (!composed_view) {
           source_ptr = loader::make_view_plan_source(
               std::move(source_ptr), view_plan_->selection, effective_byte_mapping_config);
         }
       }
       std::function<absl::Status()> post_load_fn;
-      if (view_plan_.has_value() && !view_plan_->is_identity && view_plan_->transform.requires_materialization &&
+      if (!source_is_view && view_plan_.has_value() && !view_plan_->is_identity &&
+          view_plan_->transform.requires_materialization &&
           transform_placement_ == loading::TransformPlacement::kServer) {
         loader::TransformPlan transform_plan = view_plan_->transform;
         auto mm_shared = memory_manager_;

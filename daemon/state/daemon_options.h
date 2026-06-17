@@ -202,6 +202,13 @@ struct DaemonOptions {
   // Best-effort guardrail: limit lease-bearing handle mints per second (0 => unlimited).
   uint32_t handle_lease_max_mints_per_second{0};
 
+  struct DerivedViewExports {
+    std::chrono::milliseconds ttl{std::chrono::minutes(10)};
+    std::chrono::milliseconds retry_retire_ttl{std::chrono::seconds(30)};
+  };
+
+  DerivedViewExports derived_view_exports{};
+
   // CPU shared-memory materialization (memfd-backed UMA CPU arena).
   bool cpu_shared_memory_enabled{true};
   // Enable verification for MaterializeIntoTarget external target writes.

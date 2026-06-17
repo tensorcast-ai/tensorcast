@@ -1016,6 +1016,22 @@ message RequestReplicaTransportResponse {
   Status status = 1;
   tensorcast.common.v1.MemoryInfo remote_memory_info = 2;
   string transport_id = 3;
+  TransportRouteKind route_kind = 4;
+  ViewTransportMetadata view_transport_metadata = 5;
+  uint32 source_grpc_port = 6;
+}
+
+enum TransportRouteKind {
+  TRANSPORT_ROUTE_KIND_UNSPECIFIED = 0;
+  TRANSPORT_ROUTE_KIND_CANONICAL = 1;
+  TRANSPORT_ROUTE_KIND_RESIDENT_VIEW = 2;
+  TRANSPORT_ROUTE_KIND_DERIVED_VIEW_FROM_CANONICAL = 3;
+}
+
+message ViewTransportMetadata {
+  string view_id = 1;
+  uint64 view_size_bytes = 2;
+  optional string view_data_hash = 3;
 }
 
 message TransportSchedulingGroup {

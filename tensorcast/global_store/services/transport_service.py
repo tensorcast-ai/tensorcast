@@ -112,6 +112,23 @@ class TransportService:
             diffusion_bonus=float(policy.diffusion_bonus_weight),
         )
 
+    def _has_any_transport_route(
+        self,
+        *,
+        artifact_id: str,
+        view_id: str | None,
+        canonical_equivalent_view_ids: tuple[str, ...] | None = None,
+    ) -> bool:
+        if self.replica_repository.has_any_replica(
+            artifact_id,
+            view_id,
+            canonical_equivalent_view_ids=canonical_equivalent_view_ids,
+        ):
+            return True
+        if view_id is None:
+            return False
+        return self.replica_repository.has_any_replica(artifact_id, None)
+
     def _group_source_spread_policy(self) -> GroupSourceSpreadPolicy:
         policy = self.config.transport_scheduler.group_dispatch
         return GroupSourceSpreadPolicy(
@@ -121,6 +138,44 @@ class TransportService:
                 1,
                 int(policy.group_source_min_candidates_for_enforce),
             ),
+        )
+
+    def _select_transport_source(
+        self,
+        *,
+        artifact_id: str,
+        view_id: str | None,
+        canonical_equivalent_view_ids: tuple[str, ...] | None = None,
+        heartbeat_timeout_seconds: float,
+        scheduler_mode: str,
+        source_balance_weights: SourceBalanceWeights | None = None,
+        group_source_counts: dict[str, int] | None = None,
+        group_source_policy: GroupSourceSpreadPolicy | None = None,
+        cursor=None,
+    ):
+        primary = self.replica_repository.find_available_for_transport(
+            artifact_id=artifact_id,
+            view_id=view_id,
+            canonical_equivalent_view_ids=canonical_equivalent_view_ids,
+            heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+            scheduler_mode=scheduler_mode,
+            source_balance_weights=source_balance_weights,
+            group_source_counts=group_source_counts,
+            group_source_policy=group_source_policy,
+            cursor=cursor,
+        )
+        if primary.replica is not None or view_id is None:
+            return primary
+        return self.replica_repository.find_available_for_transport(
+            artifact_id=artifact_id,
+            view_id=None,
+            canonical_equivalent_view_ids=canonical_equivalent_view_ids,
+            heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+            scheduler_mode=scheduler_mode,
+            source_balance_weights=source_balance_weights,
+            group_source_counts=group_source_counts,
+            group_source_policy=group_source_policy,
+            cursor=cursor,
         )
 
     def _canonical_equivalent_view_ids(
@@ -441,9 +496,9 @@ class TransportService:
         canonical_equivalent_view_ids = (
             self._canonical_equivalent_view_ids(artifact_id) if view_id is None else ()
         )
-        if not self.replica_repository.has_any_replica(
-            artifact_id,
-            view_id,
+        if not self._has_any_transport_route(
+            artifact_id=artifact_id,
+            view_id=view_id,
             canonical_equivalent_view_ids=canonical_equivalent_view_ids,
         ):
             inc_transport_request(artifact_id, "not_found")
@@ -998,7 +1053,7 @@ class TransportService:
                 if pending_request.requested_view_id is None
                 else ()
             )
-            selection = self.replica_repository.find_available_for_transport(
+            selection = self._select_transport_source(
                 artifact_id=pending_request.artifact_id,
                 view_id=pending_request.requested_view_id,
                 canonical_equivalent_view_ids=canonical_equivalent_view_ids,
@@ -1114,7 +1169,7 @@ class TransportService:
         except DatabaseError as exc:
             # Keep public contract stable for callers/tests.
             if isinstance(exc.__cause__, NotFoundError):
-                raise exc.__cause__ from exc
+                raise exc.__cause__ from None
             raise
 
         if released:

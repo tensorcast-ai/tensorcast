@@ -41,6 +41,8 @@ sc_cc_library(
         "//core/store:global_store_client",
         "//core/store:worker_identity",
         "//core/store/materialization/contracts:loading_spec",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/cleanup",
         "@abseil-cpp//absl/log:absl_log",
         "@abseil-cpp//absl/strings",
         "@gsl",

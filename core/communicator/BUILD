@@ -154,6 +154,16 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "mtcp_recv_request_state_test",
+    srcs = ["transport/mtcp_recv_request_state_test.cc"],
+    deps = [
+        ":mtcp_transport_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
 cc_binary(
     name = "cpu_ce_test_binary",
     srcs = ["engine/cpu_ce_test.cc"],

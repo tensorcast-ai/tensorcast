@@ -1018,6 +1018,14 @@ class TestGRPCService:
             ),
             test_context,
         )
+        servicer.view_repository.upsert(
+            artifact_id=artifact_id,
+            view_id=view_id,
+            view_spec_json='{"kind":"dense_view"}',
+            view_size=256,
+            view_data_hash="view-hash-1",
+            verified_at=None,
+        )
         servicer.WorkerHeartbeat(
             global_store_pb2.WorkerHeartbeatRequest(
                 worker_id=registered_worker,
@@ -1027,6 +1035,8 @@ class TestGRPCService:
             ),
             test_context,
         )
+        worker = servicer.worker_repository.find_by_worker_id(registered_worker)
+        assert worker is not None
 
         view_request = global_store_pb2.RequestReplicaTransportRequest(
             artifact_id=artifact_id,
@@ -1043,10 +1053,18 @@ class TestGRPCService:
         view_response = servicer.RequestReplicaTransport(view_request, test_context)
         assert view_response.status == global_store_pb2.Status.STATUS_OK
         assert (
+            view_response.route_kind
+            == global_store_pb2.TransportRouteKind.TRANSPORT_ROUTE_KIND_RESIDENT_VIEW
+        )
+        assert (
             view_response.remote_memory_info.byte_space.kind
             == common_pb2.BYTE_SPACE_KIND_VIEW
         )
         assert view_response.remote_memory_info.byte_space.id == view_id
+        assert view_response.view_transport_metadata.view_id == view_id
+        assert view_response.view_transport_metadata.view_size_bytes == 256
+        assert view_response.view_transport_metadata.view_data_hash == "view-hash-1"
+        assert view_response.source_grpc_port == worker.grpc_port
 
         canonical_request = global_store_pb2.RequestReplicaTransportRequest(
             artifact_id=artifact_id,
@@ -1065,9 +1083,78 @@ class TestGRPCService:
         )
         assert canonical_response.status == global_store_pb2.Status.STATUS_OK
         assert (
+            canonical_response.route_kind
+            == global_store_pb2.TransportRouteKind.TRANSPORT_ROUTE_KIND_CANONICAL
+        )
+        assert (
             canonical_response.remote_memory_info.byte_space.kind
             == common_pb2.BYTE_SPACE_KIND_CANONICAL
         )
+        assert not canonical_response.HasField("view_transport_metadata")
+        assert canonical_response.source_grpc_port == worker.grpc_port
+
+    def test_request_replica_transport_routes_canonical_source_for_view_miss(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        artifact_id = "mi2:artifact-bytespace-derived"
+        view_id = "view-derived-1"
+        servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id=artifact_id,
+                mem_info=memory_info,
+                max_concurrency=1,
+                worker_id=registered_worker,
+            ),
+            test_context,
+        )
+        servicer.view_repository.upsert(
+            artifact_id=artifact_id,
+            view_id=view_id,
+            view_spec_json='{"kind":"dense_view"}',
+            view_size=2048,
+            view_data_hash="derived-hash-1",
+            verified_at=None,
+        )
+        servicer.WorkerHeartbeat(
+            global_store_pb2.WorkerHeartbeatRequest(
+                worker_id=registered_worker,
+                mem_pool_available_size=7000000000,
+                accepting_new_requests=True,
+                state_version=1,
+            ),
+            test_context,
+        )
+        worker = servicer.worker_repository.find_by_worker_id(registered_worker)
+        assert worker is not None
+
+        request = global_store_pb2.RequestReplicaTransportRequest(
+            artifact_id=artifact_id,
+            local_memory_info=memory_info,
+            wait_timeout_dur=duration_pb2.Duration(seconds=1),
+            source_node_id="source_node",
+            source_address="192.168.1.2",
+            source_port=9000,
+            request_id="transport-bytespace-derived-1",
+            requested_byte_space=common_pb2.ByteSpaceRef(
+                kind=common_pb2.BYTE_SPACE_KIND_VIEW, id=view_id
+            ),
+        )
+
+        response = servicer.RequestReplicaTransport(request, test_context)
+
+        assert response.status == global_store_pb2.Status.STATUS_OK
+        assert (
+            response.route_kind
+            == global_store_pb2.TransportRouteKind.TRANSPORT_ROUTE_KIND_DERIVED_VIEW_FROM_CANONICAL
+        )
+        assert (
+            response.remote_memory_info.byte_space.kind
+            == common_pb2.BYTE_SPACE_KIND_CANONICAL
+        )
+        assert response.view_transport_metadata.view_id == view_id
+        assert response.view_transport_metadata.view_size_bytes == 2048
+        assert response.view_transport_metadata.view_data_hash == "derived-hash-1"
+        assert response.source_grpc_port == worker.grpc_port
 
     def test_canonical_transport_prefers_full_identity_view_replica(
         self, servicer, test_context, registered_worker
@@ -2079,6 +2166,85 @@ class TestGRPCService:
         assert detail.missing_leaf_ranges[0].start == 3
         assert detail.missing_leaf_ranges[0].count == 1
         assert test_context.code == grpc.StatusCode.NOT_FOUND
+
+    def test_update_artifact_view_state_accepts_metadata_only_view_residency(
+        self, servicer, test_context
+    ):
+        artifact_id = "mi2:index_hash:view_residency"
+        servicer.artifacts_repo.upsert_artifact(
+            artifact_id=artifact_id,
+            index_multihash="index_hash",
+            data_multihash="data_hash",
+            schema_version="v3",
+            encoding="json",
+        )
+
+        create_resp = servicer.UpdateArtifactViewState(
+            global_store_pb2.UpdateArtifactViewStateRequest(
+                artifact_id=artifact_id,
+                view=global_store_pb2.ViewUpsert(
+                    view_id="view-resident",
+                    view_size=8192,
+                    view_data_hash="hash-a",
+                ),
+            ),
+            test_context,
+        )
+        assert create_resp.status == global_store_pb2.Status.STATUS_OK
+        assert test_context.code is None
+
+        test_context.code = None
+        list_resp = servicer.ListViews(
+            global_store_pb2.ListViewsRequest(artifact_id=artifact_id),
+            test_context,
+        )
+        assert list_resp.status == global_store_pb2.Status.STATUS_OK
+        assert len(list_resp.views) == 1
+        assert list_resp.views[0].view_id == "view-resident"
+        assert list_resp.views[0].view_spec_json == ""
+        assert list_resp.views[0].view_size == 8192
+        assert list_resp.views[0].view_data_hash == "hash-a"
+        assert test_context.code is None
+
+        test_context.code = None
+        preserve_resp = servicer.UpdateArtifactViewState(
+            global_store_pb2.UpdateArtifactViewStateRequest(
+                artifact_id=artifact_id,
+                view=global_store_pb2.ViewUpsert(
+                    view_id="view-resident",
+                    view_spec_json="{\"kind\":\"tp\"}",
+                    view_size=8192,
+                    view_data_hash="hash-a",
+                ),
+            ),
+            test_context,
+        )
+        assert preserve_resp.status == global_store_pb2.Status.STATUS_OK
+        assert test_context.code is None
+
+        test_context.code = None
+        servicer.UpdateArtifactViewState(
+            global_store_pb2.UpdateArtifactViewStateRequest(
+                artifact_id=artifact_id,
+                view=global_store_pb2.ViewUpsert(
+                    view_id="view-resident",
+                    view_size=8192,
+                ),
+            ),
+            test_context,
+        )
+        assert test_context.code is None
+
+        test_context.code = None
+        preserved_list_resp = servicer.ListViews(
+            global_store_pb2.ListViewsRequest(artifact_id=artifact_id),
+            test_context,
+        )
+        assert preserved_list_resp.status == global_store_pb2.Status.STATUS_OK
+        assert len(preserved_list_resp.views) == 1
+        assert preserved_list_resp.views[0].view_spec_json == "{\"kind\":\"tp\"}"
+        assert preserved_list_resp.views[0].view_data_hash == "hash-a"
+        assert test_context.code is None
 
     def test_write_tensor_proof_commitments_roundtrip(self, servicer, test_context):
         artifact_id = "mi2:index_hash:data_hash"

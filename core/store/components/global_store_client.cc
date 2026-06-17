@@ -101,6 +101,57 @@ const char* status_to_cstr(global_store::Status s) {
   }
 }
 
+std::optional<ViewTransportMetadata> convert_view_transport_metadata(
+    const global_store::RequestReplicaTransportResponse& response) {
+  if (!response.has_view_transport_metadata()) {
+    return std::nullopt;
+  }
+  const auto& proto = response.view_transport_metadata();
+  if (proto.view_id().empty()) {
+    return std::nullopt;
+  }
+  ViewTransportMetadata metadata;
+  metadata.view_id = proto.view_id();
+  metadata.view_size_bytes = proto.view_size_bytes();
+  if (proto.has_view_data_hash() && !proto.view_data_hash().empty()) {
+    metadata.view_data_hash = proto.view_data_hash();
+  }
+  return metadata;
+}
+
+global_store::TransportRouteKind normalize_transport_route_kind(
+    global_store::TransportRouteKind route_kind,
+    const RemoteReplicaInfo& remote_replica,
+    std::optional<std::string_view> requested_view_id) {
+  if (route_kind != global_store::TRANSPORT_ROUTE_KIND_UNSPECIFIED) {
+    return route_kind;
+  }
+  if (requested_view_id.has_value() && remote_replica.view_id.has_value() &&
+      *remote_replica.view_id == std::string(*requested_view_id)) {
+    return global_store::TRANSPORT_ROUTE_KIND_RESIDENT_VIEW;
+  }
+  return global_store::TRANSPORT_ROUTE_KIND_CANONICAL;
+}
+
+std::optional<ViewTransportMetadata> normalize_view_transport_metadata(
+    const global_store::RequestReplicaTransportResponse& response,
+    const RemoteReplicaInfo& remote_replica,
+    std::optional<std::string_view> requested_view_id) {
+  auto metadata = convert_view_transport_metadata(response);
+  if (metadata.has_value()) {
+    return metadata;
+  }
+  if (requested_view_id.has_value() && remote_replica.view_id.has_value() &&
+      *remote_replica.view_id == std::string(*requested_view_id)) {
+    return ViewTransportMetadata{
+        .view_id = *remote_replica.view_id,
+        .view_size_bytes = remote_replica.memory_size,
+        .view_data_hash = std::nullopt,
+    };
+  }
+  return std::nullopt;
+}
+
 global_store::TransportCompletionOutcome to_proto_transport_completion_outcome(TransportCompletionOutcome outcome) {
   switch (outcome) {
     case TransportCompletionOutcome::kSuccess:
@@ -1093,14 +1144,27 @@ absl::Status GlobalStoreClient::record_view_residency(
     std::string_view view_id,
     uint64_t view_size_bytes,
     std::optional<std::string_view> view_data_hash) {
-  (void)canonical_artifact_id;
-  (void)view_id;
-  (void)view_size_bytes;
-  (void)view_data_hash;
-  // A dedicated RPC for view metadata will be introduced for view-residency signals.
-  // Until that lands, treat this as a best-effort noop so core plumbing can wire
-  // the call sites without coupling to server availability.
-  return absl::UnimplementedError("Global Store view residency RPC not yet implemented");
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (canonical_artifact_id.empty()) {
+    return absl::InvalidArgumentError("record_view_residency requires canonical_artifact_id");
+  }
+  if (view_id.empty()) {
+    return absl::InvalidArgumentError("record_view_residency requires view_id");
+  }
+  if (view_size_bytes == 0) {
+    return absl::InvalidArgumentError("record_view_residency requires view_size_bytes > 0");
+  }
+
+  ViewStateUpdate update;
+  update.artifact_id = std::string(canonical_artifact_id);
+  update.view_id = std::string(view_id);
+  update.view_size_bytes = view_size_bytes;
+  if (view_data_hash.has_value() && !view_data_hash->empty()) {
+    update.view_data_hash = std::string(*view_data_hash);
+  }
+  return update_artifact_view_state(update);
 }
 
 absl::Status GlobalStoreClient::update_artifact_view_state(const ViewStateUpdate& update) {
@@ -2266,6 +2330,10 @@ absl::Status GlobalStoreClient::unregister_replica(std::string_view artifact_id,
   }
 
   if (response.status() != global_store::STATUS_OK) {
+    if (response.status() == global_store::STATUS_NOT_FOUND) {
+      return absl::NotFoundError(
+          absl::StrFormat("UnregisterReplica target not found: artifact_id=%s replica_id=%s", artifact_id, replica_id));
+    }
     return absl::InternalError(absl::StrFormat("UnregisterReplica failed with status: %d", response.status()));
   }
 
@@ -2484,7 +2552,10 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
   TransportSession session;
   session.transport_id = response.transport_id();
   session.remote_replica = convert_from_proto_memory_info(response.remote_memory_info());
+  session.remote_replica.grpc_port = response.source_grpc_port();
   session.start_time = absl::Now();
+  session.route_kind = normalize_transport_route_kind(response.route_kind(), session.remote_replica, std::nullopt);
+  session.view_transport_metadata = normalize_view_transport_metadata(response, session.remote_replica, std::nullopt);
 
   LOG(INFO) << "Started P2P transport " << session.transport_id << " from " << session.remote_replica.node_id;
 
@@ -2583,7 +2654,10 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_view_transport(
   TransportSession session;
   session.transport_id = response.transport_id();
   session.remote_replica = convert_from_proto_memory_info(response.remote_memory_info());
+  session.remote_replica.grpc_port = response.source_grpc_port();
   session.start_time = absl::Now();
+  session.route_kind = normalize_transport_route_kind(response.route_kind(), session.remote_replica, view_id);
+  session.view_transport_metadata = normalize_view_transport_metadata(response, session.remote_replica, view_id);
 
   LOG(INFO) << "Started view transport " << session.transport_id << " from " << session.remote_replica.node_id
             << " view_id=" << view_id;
@@ -3425,8 +3499,12 @@ absl::StatusOr<KeyMapping> GlobalStoreClient::resolve_key_mapping_with_options(
   if (!status.ok()) {
     return status;
   }
-  if (response.status() != global_store::STATUS_OK) {
+  if (response.status() == global_store::STATUS_NOT_FOUND) {
     return absl::NotFoundError("key not found");
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError(
+        absl::StrFormat("ResolveKeyMapping failed with global-store status=%d", static_cast<int>(response.status())));
   }
 
   KeyMapping out{

@@ -64,6 +64,7 @@ struct ReplicaConfig {
 
   // Whether to enable P2P communication for this replica
   bool p2p_comm_enabled = false;
+  bool source_is_view = false;
 
   // Future runtime configurations can be added here:
   // - Variant residency metadata (view identifiers)

@@ -773,6 +773,22 @@ Status StoreDaemonServiceImpl::LockTransportChunks(
   return transport_controller_->lock(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::BeginReplicaFetch(
+    grpc::ServerContext* ctx,
+    const v2::BeginReplicaFetchRequest* req,
+    v2::BeginReplicaFetchResponse* resp) {
+  RpcContext rctx{"BeginReplicaFetch", *ctx, opts_.allow_high_card_attrs};
+  return transport_controller_->begin_replica_fetch(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::EndReplicaFetch(
+    grpc::ServerContext* ctx,
+    const v2::EndReplicaFetchRequest* req,
+    v2::EndReplicaFetchResponse* resp) {
+  RpcContext rctx{"EndReplicaFetch", *ctx, opts_.allow_high_card_attrs};
+  return transport_controller_->end_replica_fetch(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::PublishTargetReplica(
     grpc::ServerContext* ctx,
     const v2::PublishTargetReplicaRequest* req,

@@ -13,9 +13,11 @@
 #include <utility>
 #include <vector>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/escaping.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/time/clock.h"
@@ -77,6 +79,7 @@ using materialization_policy::validate_controller_process_visible_export_authori
 using materialization_policy::validate_group_realization_staged_publish_supported;
 using materialization_post_seal::check_post_seal_view_reuse_safe;
 using materialization_replica_handle::bind_replica_handle_for_response;
+using materialization_replica_handle::register_session_and_refs;
 using materialization_request_common::LeaseContext;
 using materialization_request_common::LipFastPathRequest;
 using materialization_request_common::materialize_with_shared_disk_retry;
@@ -89,6 +92,19 @@ using selection_validation::validate_request_tensor_names;
 using store::loader::ViewSpec;
 
 using store::loading::MaterializationSource;
+
+constexpr std::string_view kDerivedViewExportReplicaPrefix = "derived-view-export:";
+
+uint64_t compute_derived_view_export_reservation_bytes(uint64_t view_size_bytes) {
+  // Source-side derived view export transiently overlaps:
+  // 1. newly materialized view bytes,
+  // 2. still-live older derived views that are only retired at reservation boundaries,
+  // 3. chunk/export staging that exists before the final resident bytes settle.
+  //
+  // Reserving at 1.5x keeps first-time exports admissible while forcing later
+  // generations to evict more stale views before materialization starts.
+  return view_size_bytes + (view_size_bytes / 2);
+}
 
 namespace global_store = tensorcast::global_store::v1;
 
@@ -396,29 +412,98 @@ absl::StatusOr<store::loading::ReplicaHandle> retry_materialize_from_shared_disk
       prepare_retry_disk_source);
 }
 
-std::chrono::milliseconds resolve_materialization_request_budget(
+struct MaterializationBudgetInfo {
+  std::chrono::milliseconds request_budget{0};
+  std::optional<std::chrono::milliseconds> grpc_deadline_remaining;
+  std::chrono::milliseconds pinned_timeout{0};
+};
+
+MaterializationBudgetInfo resolve_materialization_budget_info(
     const grpc::ServerContext& server_context,
     const v2::MaterializeReplicaRequest& req) {
   using clock = std::chrono::system_clock;
   constexpr std::chrono::milliseconds kDefaultBudget{600000};
-  constexpr std::chrono::milliseconds kHardCap{1800000};
-  const std::chrono::milliseconds requested_budget = req.pinned_allocation_timeout_ms() > 0
+  MaterializationBudgetInfo out;
+  out.pinned_timeout = req.pinned_allocation_timeout_ms() > 0
       ? std::chrono::milliseconds(req.pinned_allocation_timeout_ms())
-      : kDefaultBudget;
-  std::chrono::milliseconds effective_budget = std::min(requested_budget, kHardCap);
+      : std::chrono::milliseconds(0);
   const auto grpc_deadline = server_context.deadline();
   if (grpc_deadline != clock::time_point::max()) {
     const auto now = clock::now();
     if (grpc_deadline <= now) {
-      return std::chrono::milliseconds(0);
+      out.grpc_deadline_remaining = std::chrono::milliseconds(0);
+      out.request_budget = std::chrono::milliseconds(0);
+      return out;
     }
     const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(grpc_deadline - now);
     if (remaining.count() <= 0) {
-      return std::chrono::milliseconds(1);
+      out.grpc_deadline_remaining = std::chrono::milliseconds(1);
+      out.request_budget = std::chrono::milliseconds(1);
+      return out;
     }
-    effective_budget = std::min(effective_budget, remaining);
+    out.grpc_deadline_remaining = remaining;
+    out.request_budget = remaining;
+    return out;
   }
-  return effective_budget.count() > 0 ? effective_budget : std::chrono::milliseconds(1);
+  out.request_budget = kDefaultBudget;
+  return out;
+}
+
+absl::Status retry_post_seal_view_reuse_if_needed(
+    store::StoreEngine& engine,
+    const std::shared_ptr<store::components::IGlobalStoreClient>& global_store_client,
+    const DaemonOptions::PostSealPolicy& post_seal_policy,
+    const store::DeviceKey& dev,
+    store::StoreEngine::MaterializeMode mode,
+    bool view_requested,
+    const std::optional<std::string>& pre_binding_artifact_id,
+    std::string_view resolved_artifact_id,
+    const std::optional<std::string>& disk_source_artifact_id,
+    const std::optional<store::loading::DiskSource>& current_disk_source,
+    store::loading::MaterializeHints* hints_for_retry,
+    absl::StatusOr<store::loading::ReplicaHandle>* result_for_retry) {
+  if (result_for_retry->ok() || !view_requested || !pre_binding_artifact_id.has_value() ||
+      !absl::IsNotFound(result_for_retry->status())) {
+    return absl::OkStatus();
+  }
+
+  bool allow_reuse = false;
+  if (post_seal_policy.reuse_views_if_safe) {
+    if (!global_store_client || !global_store_client->is_connected()) {
+      return absl::FailedPreconditionError("GlobalStoreClient not connected");
+    }
+    auto safe_or =
+        check_post_seal_view_reuse_safe(*global_store_client, *pre_binding_artifact_id, resolved_artifact_id);
+    if (!safe_or.ok()) {
+      LOG(WARNING) << "post-seal view reuse check failed for assembly=" << *pre_binding_artifact_id
+                   << " mi2=" << resolved_artifact_id << ": " << safe_or.status();
+      return safe_or.status();
+    }
+    allow_reuse = *safe_or;
+    if (!allow_reuse) {
+      LOG(WARNING) << "post-seal view reuse disabled: proof commitments mismatch for assembly="
+                   << *pre_binding_artifact_id << " mi2=" << resolved_artifact_id;
+    }
+  }
+
+  if (!allow_reuse) {
+    return absl::OkStatus();
+  }
+
+  hints_for_retry->artifact_id = *pre_binding_artifact_id;
+  if (hints_for_retry->variant.has_value()) {
+    hints_for_retry->variant->canonical_artifact_id = *pre_binding_artifact_id;
+  }
+  std::optional<store::loading::DiskSource> fallback_disk_source;
+  if (disk_source_artifact_id.has_value() && *disk_source_artifact_id == *pre_binding_artifact_id) {
+    fallback_disk_source = current_disk_source;
+  }
+  auto fallback_or = engine.materialize_replica(dev, mode, *hints_for_retry, fallback_disk_source);
+  if (!fallback_or.ok()) {
+    return fallback_or.status();
+  }
+  *result_for_retry = std::move(fallback_or);
+  return absl::OkStatus();
 }
 
 } // namespace
@@ -955,7 +1040,8 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   if (req.pinned_allocation_timeout_ms() > 0) {
     hints.pinned_timeout = std::chrono::milliseconds(req.pinned_allocation_timeout_ms());
   }
-  const std::chrono::milliseconds request_budget = resolve_materialization_request_budget(rctx.server_context(), req);
+  const MaterializationBudgetInfo budget_info = resolve_materialization_budget_info(rctx.server_context(), req);
+  const std::chrono::milliseconds request_budget = budget_info.request_budget;
   hints.request_budget = request_budget;
   hints.transport_wait_timeout = request_budget;
   hints.verify = verify_checksums ? store::loading::MaterializeHints::Verify::CHECKSUM
@@ -981,6 +1067,18 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   }
   hints.export_policy = to_hint_export_policy(req.export_policy());
   hints.need_view_data_hash = req.has_need_view_data_hash() ? req.need_view_data_hash() : true;
+  LOG(INFO) << "event=materialize_budget"
+            << " artifact_id=" << resolved_artifact_id
+            << " view_id=" << (resolved_view_id.has_value() ? *resolved_view_id : std::string())
+            << " pinned_timeout_ms=" << budget_info.pinned_timeout.count() << " grpc_deadline_remaining_ms="
+            << (budget_info.grpc_deadline_remaining.has_value()
+                    ? std::to_string(budget_info.grpc_deadline_remaining->count())
+                    : std::string("unbounded"))
+            << " request_budget_ms=" << request_budget.count()
+            << " transport_wait_timeout_ms=" << hints.transport_wait_timeout.count()
+            << " source_preference=" << static_cast<int>(hints.source_preference)
+            << " allow_p2p=" << (hints.allow_p2p ? "true" : "false")
+            << " allow_disk=" << (hints.allow_disk ? "true" : "false");
   if (has_artifact)
     hints.artifact_id = resolved_artifact_id;
   if (disk_metadata.has_value()) {
@@ -1038,49 +1136,176 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   const auto mode = (has_disk && !has_artifact && !prefer_disk) ? store::StoreEngine::MaterializeMode::LOAD_ONLY
                                                                 : store::StoreEngine::MaterializeMode::AUTO;
 
-  auto result = d_.engine.materialize_replica(dev, mode, hints, disk_source);
-  if (!result.ok() && view_requested && pre_binding_artifact_id.has_value() && absl::IsNotFound(result.status())) {
-    bool allow_reuse = false;
-    if (d_.post_seal_policy.reuse_views_if_safe) {
-      if (!post_seal_view_reuse_safe.has_value()) {
-        if (!d_.global_store_client || !d_.global_store_client->is_connected()) {
-          resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-          return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
-        }
-        auto safe_or =
-            check_post_seal_view_reuse_safe(*d_.global_store_client, *pre_binding_artifact_id, resolved_artifact_id);
-        if (!safe_or.ok()) {
-          LOG(WARNING) << "post-seal view reuse check failed for assembly=" << *pre_binding_artifact_id
-                       << " mi2=" << resolved_artifact_id << ": " << safe_or.status();
-          resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-          return to_grpc_status(safe_or.status());
-        }
-        post_seal_view_reuse_safe = *safe_or;
+  const bool async_prepare_fast_path = cpu_target && no_lease && !req.wait_for_completion() &&
+      !req.replica_uuid().empty() && hints.variant.has_value() && d_.async_runtime != nullptr && !has_disk;
+  const bool manage_derived_view_export = async_prepare_fast_path && d_.derived_view_exports != nullptr &&
+      absl::StartsWith(req.replica_uuid(), kDerivedViewExportReplicaPrefix);
+  std::optional<uint64_t> derived_view_export_reserved_bytes;
+  if (manage_derived_view_export) {
+    if (view_plan.has_value() && !view_plan->is_identity && view_plan->view_size_bytes > 0) {
+      derived_view_export_reserved_bytes = compute_derived_view_export_reservation_bytes(view_plan->view_size_bytes);
+    } else if (resolved_view_id.has_value()) {
+      auto view_metadata_or = d_.engine.get_view_metadata(resolved_artifact_id, *resolved_view_id);
+      if (view_metadata_or.ok() && view_metadata_or->view_size_bytes > 0) {
+        derived_view_export_reserved_bytes =
+            compute_derived_view_export_reservation_bytes(view_metadata_or->view_size_bytes);
+      } else if (!view_metadata_or.ok()) {
+        LOG(WARNING) << "Derived view export reservation size lookup failed: artifact_id=" << resolved_artifact_id
+                     << " view_id=" << *resolved_view_id << " status=" << view_metadata_or.status();
       }
-      allow_reuse = *post_seal_view_reuse_safe;
-      if (!allow_reuse) {
-        LOG(WARNING) << "post-seal view reuse disabled: proof commitments mismatch for assembly="
-                     << *pre_binding_artifact_id << " mi2=" << resolved_artifact_id;
-      }
+    }
+  }
+  if (async_prepare_fast_path) {
+    auto ready_signal = std::make_shared<tensorcast::common::ReadySignal<absl::Status>>();
+    store::loading::ReplicaKey pending_key{
+        .artifact_id = resolved_artifact_id,
+        .view_id = hints.variant->view_id,
+        .device = dev,
+        .replica = 0,
+    };
+    auto session_status = register_session_and_refs(
+        d_.sessions,
+        d_.refs,
+        pending_key,
+        ready_signal,
+        req.replica_uuid(),
+        /*pid=*/0,
+        /*allow_pid_ref=*/false);
+    if (!session_status.ok()) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(session_status);
     }
 
-    if (allow_reuse) {
-      hints.artifact_id = *pre_binding_artifact_id;
-      if (hints.variant.has_value()) {
-        hints.variant->canonical_artifact_id = *pre_binding_artifact_id;
+    auto executor = d_.async_runtime->blocking_executor();
+    auto hints_for_async = hints;
+    const auto pre_binding_artifact_id_for_async = pre_binding_artifact_id;
+    const auto disk_source_for_async = disk_source;
+    const auto replica_uuid = req.replica_uuid();
+    executor->add([this,
+                   ready_signal,
+                   replica_uuid,
+                   manage_derived_view_export,
+                   derived_view_export_reserved_bytes,
+                   dev,
+                   mode,
+                   hints_for_async = std::move(hints_for_async),
+                   disk_source_for_async,
+                   pre_binding_artifact_id_for_async,
+                   disk_source_artifact_id_for_async = disk_source_artifact_id,
+                   resolved_artifact_id,
+                   pending_key]() mutable {
+      bool reserved_derived_view_export = false;
+      bool acquired_prepare_budget = false;
+      if (manage_derived_view_export && derived_view_export_reserved_bytes.has_value() &&
+          *derived_view_export_reserved_bytes > 0) {
+        const absl::Status reserve_status =
+            d_.derived_view_exports->reserve(pending_key, *derived_view_export_reserved_bytes);
+        if (!reserve_status.ok()) {
+          ready_signal->set_value(reserve_status);
+          LOG(WARNING) << "Async NO_LEASE derived view reservation failed: replica_uuid=" << replica_uuid
+                       << " artifact_id=" << resolved_artifact_id << " status=" << reserve_status;
+          return;
+        }
+        reserved_derived_view_export = true;
+        const absl::Status prepare_budget_status =
+            d_.derived_view_exports->acquire_prepare_budget(*derived_view_export_reserved_bytes);
+        if (!prepare_budget_status.ok()) {
+          d_.derived_view_exports->cancel_reserved(pending_key).IgnoreError();
+          ready_signal->set_value(prepare_budget_status);
+          LOG(WARNING) << "Async NO_LEASE derived view prepare-budget wait failed: replica_uuid=" << replica_uuid
+                       << " artifact_id=" << resolved_artifact_id << " status=" << prepare_budget_status;
+          return;
+        }
+        acquired_prepare_budget = true;
       }
-      std::optional<store::loading::DiskSource> pre_binding_disk_source;
-      if (disk_source_artifact_id.has_value() && *disk_source_artifact_id == *pre_binding_artifact_id) {
-        pre_binding_disk_source = disk_source;
+      auto prepare_budget_guard = absl::MakeCleanup([&]() {
+        if (acquired_prepare_budget) {
+          d_.derived_view_exports->release_prepare_budget(*derived_view_export_reserved_bytes);
+        }
+      });
+      absl::StatusOr<store::loading::ReplicaHandle> async_result =
+          d_.engine.materialize_replica(dev, mode, hints_for_async, disk_source_for_async);
+      const absl::Status retry_status = retry_post_seal_view_reuse_if_needed(
+          d_.engine,
+          d_.global_store_client,
+          d_.post_seal_policy,
+          dev,
+          mode,
+          /*view_requested=*/true,
+          pre_binding_artifact_id_for_async,
+          resolved_artifact_id,
+          disk_source_artifact_id_for_async,
+          disk_source_for_async,
+          &hints_for_async,
+          &async_result);
+      if (!retry_status.ok()) {
+        if (reserved_derived_view_export) {
+          d_.derived_view_exports->cancel_reserved(pending_key).IgnoreError();
+        }
+        ready_signal->set_value(retry_status);
+        LOG(WARNING) << "Async NO_LEASE materialize failed during post-seal reuse retry: replica_uuid=" << replica_uuid
+                     << " artifact_id=" << resolved_artifact_id << " status=" << retry_status;
+        return;
       }
-      auto pre_binding_or = d_.engine.materialize_replica(dev, mode, hints, pre_binding_disk_source);
-      if (pre_binding_or.ok()) {
-        result = std::move(pre_binding_or);
+      const absl::Status final_status = async_result.ok() ? absl::OkStatus() : async_result.status();
+      if (final_status.ok() && manage_derived_view_export) {
+        const absl::Status retain_status = reserved_derived_view_export
+            ? d_.derived_view_exports->commit_reserved(async_result->replica_key)
+            : d_.derived_view_exports->retain_or_refresh(async_result->replica_key);
+        if (!retain_status.ok()) {
+          if (reserved_derived_view_export) {
+            d_.derived_view_exports->cancel_reserved(async_result->replica_key).IgnoreError();
+          }
+          ready_signal->set_value(retain_status);
+          LOG(WARNING) << "Async NO_LEASE derived view retention failed: replica_uuid=" << replica_uuid
+                       << " artifact_id=" << resolved_artifact_id << " status=" << retain_status;
+          return;
+        }
+      } else if (!final_status.ok() && reserved_derived_view_export) {
+        d_.derived_view_exports->cancel_reserved(pending_key).IgnoreError();
+      }
+      ready_signal->set_value(final_status);
+      if (!final_status.ok()) {
+        LOG(WARNING) << "Async NO_LEASE materialize failed: replica_uuid=" << replica_uuid
+                     << " artifact_id=" << resolved_artifact_id << " status=" << final_status;
       } else {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return to_grpc_status(pre_binding_or.status());
+        VLOG(1) << "Async NO_LEASE materialize completed: replica_uuid=" << replica_uuid
+                << " artifact_id=" << resolved_artifact_id;
       }
+    });
+
+    resp.clear_mem_handle();
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
+    resp.set_source(v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
+    if (view_plan.has_value() && !view_plan->is_identity) {
+      resp.set_view_index_bytes(view_plan->view_index_json);
     }
+    VLOG(1) << "MaterializationController: fast-return async NO_LEASE materialize accepted for replica_uuid="
+            << req.replica_uuid() << " artifact_id=" << resolved_artifact_id << " view_id="
+            << (resolved_view_id.has_value()
+                    ? *resolved_view_id
+                    : (hints.variant && hints.variant->view_id ? *hints.variant->view_id : std::string("<none>")));
+    return finalize_response();
+  }
+
+  auto result = d_.engine.materialize_replica(dev, mode, hints, disk_source);
+  const absl::Status post_seal_retry_status = retry_post_seal_view_reuse_if_needed(
+      d_.engine,
+      d_.global_store_client,
+      d_.post_seal_policy,
+      dev,
+      mode,
+      view_requested,
+      pre_binding_artifact_id,
+      resolved_artifact_id,
+      disk_source_artifact_id,
+      disk_source,
+      &hints,
+      &result);
+  if (!post_seal_retry_status.ok()) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(post_seal_retry_status);
   }
   if (!result.ok()) {
     auto retry_or = retry_materialize_from_shared_disk(
@@ -1208,6 +1433,36 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     LOG(WARNING) << "MaterializationController: cpu_target but engine handle missing cpu_memfd_region for key="
                  << handle.replica_key << " cpu_state=" << static_cast<int>(handle.cpu_state)
                  << " gpu_state=" << static_cast<int>(handle.gpu_state);
+  }
+  if (no_lease) {
+    auto session_status = register_session_and_refs(
+        d_.sessions,
+        d_.refs,
+        handle.replica_key,
+        handle.ready_signal,
+        req.replica_uuid(),
+        /*pid=*/0,
+        /*allow_pid_ref=*/false);
+    if (!session_status.ok()) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(session_status);
+    }
+    resp.clear_mem_handle();
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
+    if (handle.view_index_json.has_value()) {
+      resp.set_view_index_bytes(*handle.view_index_json);
+    }
+    if (resp.view_index_bytes().empty() && normalized_disk_path.has_value()) {
+      if (disk_index.has_value()) {
+        resp.set_view_index_bytes(disk_index->canonical_index_json);
+      } else {
+        auto local_index_or = store::loader::read_from_artifact_dir(*normalized_disk_path, dev.ordinal);
+        if (local_index_or.ok()) {
+          resp.set_view_index_bytes(local_index_or->canonical_index_json);
+        }
+      }
+    }
+    return finalize_response();
   }
   auto bind_status = bind_materialized_handle(
       d_.engine,

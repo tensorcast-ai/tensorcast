@@ -272,14 +272,27 @@ absl::Status verify_disk(IngestionContext& ctx) {
 
 absl::Status verify_p2p(IngestionContext& ctx) {
   const auto& source = ctx.p2p.source;
+  const bool is_view_request = ctx.resolved_view_plan.has_value() && !ctx.resolved_view_plan->is_identity &&
+      ctx.resolved_view_plan->view_size_bytes > 0;
+  const uint64_t expected_view_size = is_view_request ? ctx.resolved_view_plan->view_size_bytes : 0;
   if (!source.verification_json.empty()) {
     auto info_or = common::ArtifactVerificationInfo::from_json(source.verification_json);
     if (!info_or.ok()) {
       return absl::DataLossError("verification_json parse failed");
     }
-    auto verify_status = ctx.replica->verify_key_points(ctx.target_location, *info_or);
-    if (!verify_status.ok()) {
-      return absl::DataLossError(std::string(verify_status.message()));
+    if (is_view_request && info_or->artifact_size != expected_view_size) {
+      LOG(INFO) << "verify_p2p: skipping incompatible canonical verification metadata for view materialization"
+                << " artifact_id=" << ctx.artifact_identifier << " expected_view_size=" << expected_view_size
+                << " verification_size=" << info_or->artifact_size << " view_id="
+                << (ctx.hints.variant.has_value() && ctx.hints.variant->view_id.has_value()
+                        ? *ctx.hints.variant->view_id
+                        : std::string("<unknown>"))
+                << " need_view_data_hash=" << ctx.hints.need_view_data_hash;
+    } else {
+      auto verify_status = ctx.replica->verify_key_points(ctx.target_location, *info_or);
+      if (!verify_status.ok()) {
+        return absl::DataLossError(std::string(verify_status.message()));
+      }
     }
   }
 

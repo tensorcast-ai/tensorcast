@@ -502,6 +502,8 @@ class GlobalStoreServicer(
         )
         self.transport_rpc_handler = TransportRpcHandler(
             transport_service=self.transport_service,
+            view_repository=self.view_repository,
+            worker_repository=self.worker_repository,
             replica_to_memory_info=self._replica_to_memory_info,
             logger=logger,
         )

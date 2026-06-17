@@ -28,9 +28,11 @@
 #include "daemon/state/artifact_source_registry.h"
 #include "daemon/state/binding_registry.h"
 #include "daemon/state/daemon_options.h"
+#include "daemon/state/derived_view_export_manager.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/handle_lease_registry.h"
 #include "daemon/state/ipc_region_registry.h"
+#include "daemon/state/lifecycle_kernel.h"
 #include "daemon/state/lip_bridge.h"
 #include "daemon/state/ref_tracker.h"
 #include "daemon/state/registration_manager.h"
@@ -64,6 +66,7 @@ class MaterializationController {
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     uint32_t max_concurrency{4};
     SessionLifecycleManager* lifecycle{nullptr};
+    DerivedViewExportManager* derived_view_exports{nullptr};
     LifecycleKernel* lifecycle_kernel{nullptr};
     HandleLeaseRegistry* handle_leases{nullptr};
     common::CapabilityTokenManager* capability_tokens{nullptr};

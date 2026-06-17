@@ -21,6 +21,7 @@
 #include "daemon/state/background_scheduler.h"
 #include "daemon/state/binding_registry.h"
 #include "daemon/state/daemon_options.h"
+#include "daemon/state/derived_view_export_manager.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/handle_lease_registry.h"
 #include "daemon/state/instance_execution_directory_cache.h"
@@ -108,6 +109,10 @@ class DaemonKernel {
 
   [[nodiscard]] LipBridge& lip_bridge() const {
     return *lip_bridge_;
+  }
+
+  [[nodiscard]] DerivedViewExportManager& derived_view_export_manager() const {
+    return *derived_view_export_mgr_;
   }
 
   [[nodiscard]] ArtifactSourceRegistry& source_registry() {
@@ -217,6 +222,7 @@ class DaemonKernel {
   RefTracker refs_;
   std::unique_ptr<IpcRegionRegistry> region_registry_;
   std::unique_ptr<LipManager> lip_mgr_;
+  std::unique_ptr<DerivedViewExportManager> derived_view_export_mgr_;
 
   std::unique_ptr<BackgroundScheduler> scheduler_;
   std::shared_ptr<SessionLifecycleManager> lifecycle_mgr_;

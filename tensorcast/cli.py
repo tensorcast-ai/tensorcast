@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 import click
 
+import tensorcast.runtime as runtime
 from tensorcast.cli_utils import ServiceError, global_store_manager, service_manager
 from tensorcast.cli_utils.health import ping_global_store
 from tensorcast.cli_utils.network import resolve_connect_host
@@ -20,11 +20,6 @@ from tensorcast.cli_utils.paths import (
 )
 from tensorcast.cli_utils.process import read_json_default, read_runtime_state
 from tensorcast.logger import init_logger
-
-runtime = importlib.import_module("tensorcast.runtime")
-
-if TYPE_CHECKING:
-    import tensorcast.runtime as runtime_module
 
 logger = init_logger(__name__)
 
@@ -66,9 +61,7 @@ def _parse_endpoint(value: str) -> str:
     return f"{host}:{port}"
 
 
-def _runtime_session_to_dict(
-    session: "runtime_module.RuntimeSession",
-) -> dict[str, Any]:
+def _runtime_session_to_dict(session: runtime.RuntimeSession) -> dict[str, Any]:
     return {
         "session_id": session.session_id,
         "daemon": {
@@ -89,7 +82,7 @@ def _runtime_session_to_dict(
     }
 
 
-def _echo_daemon_status(session: "runtime_module.RuntimeSession") -> None:
+def _echo_daemon_status(session: runtime.RuntimeSession) -> None:
     click.echo(f"Daemon session: {session.session_id}")
     if session.daemon_pid:
         click.echo(f"  status      : running (pid={session.daemon_pid})")

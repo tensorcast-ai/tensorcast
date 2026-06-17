@@ -2,6 +2,10 @@
 
 #include "core/store/materialization/dataplane/sources/byte_range_mapped_source.h"
 
+#include <linux/mempolicy.h>
+#include <sched.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -27,6 +31,26 @@
 namespace tensorcast::store::loader {
 
 namespace {
+
+pid_t current_tid() {
+  return static_cast<pid_t>(::syscall(SYS_gettid));
+}
+
+int current_cpu() {
+  return ::sched_getcpu();
+}
+
+int addr_numa_node(const void* addr) {
+  if (addr == nullptr) {
+    return -1;
+  }
+  int node = -1;
+  long rc = ::syscall(SYS_get_mempolicy, &node, nullptr, 0, const_cast<void*>(addr), MPOL_F_NODE | MPOL_F_ADDR);
+  if (rc != 0) {
+    return -1;
+  }
+  return node;
+}
 
 struct StridedBlock {
   size_t run_index{0};
@@ -368,11 +392,12 @@ absl::StatusOr<size_t> ByteRangeMappedSource::read_base(
   stats_.base_read_bytes.fetch_add(*read_or, std::memory_order_relaxed);
   if (*read_or != bytes) {
     VLOG(2) << "byte_range.read_base short_read source_index=" << source_index << " offset=" << offset
-            << " requested=" << bytes << " got=" << *read_or << " duration_us=" << elapsed_us(start);
+            << " requested=" << bytes << " got=" << *read_or << " duration_us=" << elapsed_us(start)
+            << " tid=" << current_tid() << " cpu=" << current_cpu();
     return absl::DataLossError("short read while executing byte range program");
   }
   VLOG(2) << "byte_range.read_base ok source_index=" << source_index << " offset=" << offset << " bytes=" << bytes
-          << " duration_us=" << elapsed_us(start);
+          << " duration_us=" << elapsed_us(start) << " tid=" << current_tid() << " cpu=" << current_cpu();
   return *read_or;
 }
 
@@ -563,10 +588,15 @@ absl::StatusOr<size_t> ByteRangeMappedSource::fill_strided_run(
   const uint64_t rows_touched = last_row_exclusive > first_row ? (last_row_exclusive - first_row) : 0;
   auto& source = sources_[run.source_index];
   const uint8_t* cpu_source_base_ptr = source->cpu_base_ptr();
+  const uint64_t first_src_offset = run.src_base + first_row * run.stride + (run_offset % run.row_len);
   VLOG(2) << "byte_range.strided.direct_gather_probe run_index=" << run_index << " source_index=" << run.source_index
           << " source_type=" << typeid(*source).name()
           << " has_cpu_base_ptr=" << (cpu_source_base_ptr != nullptr ? 1 : 0) << " row_len=" << run.row_len
-          << " stride=" << run.stride << " bytes=" << bytes << " rows_touched=" << rows_touched;
+          << " stride=" << run.stride << " bytes=" << bytes << " rows_touched=" << rows_touched
+          << " tid=" << current_tid() << " cpu=" << current_cpu()
+          << " source_base_numa=" << addr_numa_node(cpu_source_base_ptr) << " first_src_addr_numa="
+          << addr_numa_node(cpu_source_base_ptr != nullptr ? cpu_source_base_ptr + first_src_offset : nullptr)
+          << " dst_numa=" << addr_numa_node(dst);
   const bool force_mmap_direct_gather = false;
   const bool threshold_direct_gather = run.stride > run.row_len &&
       run.row_len >= options_.direct_gather_min_row_len_bytes && bytes >= options_.direct_gather_min_total_bytes &&
@@ -614,7 +644,11 @@ absl::StatusOr<size_t> ByteRangeMappedSource::fill_strided_run(
     stats_.base_read_bytes.fetch_add(copied, std::memory_order_relaxed);
     VLOG(2) << "byte_range.strided.direct_gather run_index=" << run_index << " source_index=" << run.source_index
             << " forced=" << (force_mmap_direct_gather ? 1 : 0) << " rows_touched=" << rows_touched
-            << " bytes=" << copied << " memcpy_calls=" << direct_gather_memcpy_calls << " duration_us=" << gather_us;
+            << " bytes=" << copied << " memcpy_calls=" << direct_gather_memcpy_calls << " duration_us=" << gather_us
+            << " tid=" << current_tid() << " cpu=" << current_cpu()
+            << " source_base_numa=" << addr_numa_node(cpu_source_base_ptr) << " first_src_addr_numa="
+            << addr_numa_node(cpu_source_base_ptr != nullptr ? cpu_source_base_ptr + first_src_offset : nullptr)
+            << " dst_numa=" << addr_numa_node(dst);
     flush_local_stats();
     return copied;
   }

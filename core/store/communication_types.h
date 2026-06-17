@@ -38,6 +38,7 @@ struct P2PSource {
   std::vector<std::string> memory_keys;
   std::vector<size_t> buf_sizes;
   bool enable_checksum = true;
+  bool source_is_view = false;
   Location location;
 
   // Optional verification metadata (JSON) passed from the sender side, e.g.,
