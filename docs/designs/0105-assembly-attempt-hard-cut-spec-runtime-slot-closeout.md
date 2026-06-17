@@ -3,7 +3,7 @@ slug: assembly-attempt-hard-cut-spec-runtime-slot-closeout
 title: Assembly Attempt Hard Cut for Intent, Workflow, and Durable Attempt State
 status: proposed
 created: 2026-03-18
-last_updated: 2026-03-19
+last_updated: 2026-03-25
 areas: ["sdk", "daemon", "proto", "global_store", "core"]
 related_code:
   - docs/designs/0085-distributed-binding-assembly-and-coordinator.md
@@ -89,7 +89,10 @@ It projects that model honestly.
 - Remove implicit state transitions from observation APIs.
 - Keep binding-backed contribution, direct `register_view`, and future frontends
   on the same structural commit helper path.
-- Make the closeout boundary explicit relative to `0102` and `0104`.
+- Make the closeout boundary explicit relative to `0111` and `0104`.
+- Allow typed child contracts such as `0111` to expose a pending local-ready
+  runtime state, while keeping final closeout, durable key activation, and
+  externally visible lineage anchored in the attempt closeout result.
 
 ## Non-Goals
 
@@ -99,7 +102,7 @@ It projects that model honestly.
 - Introduce `TP > 1` assembly semantics in this cut.
 - Invent a repo-wide generic set abstraction beyond this domain. `0056` remains
   the owner of `ArtifactSetRef`.
-- Force `0102` or `0104` closeout semantics into the first dependency-ready
+- Force `0111` or `0104` closeout semantics into the first dependency-ready
   implementation if their typed child contracts are not yet ready.
 - Remove `Store.seal_assembly(...)` as the low-level structural primitive below
   the attempt surface.
@@ -189,7 +192,7 @@ That is not a strong long-term contract for a repository that already splits:
 - backing truth,
 - and closeout truth.
 
-If attempt closeout depends on `0102` representation or `0104` rollout
+If attempt closeout depends on `0111` representation or `0104` rollout
 contracts, those dependencies must appear as typed child references.
 For `0104`, that means a typed rollout barrier child contract such as
 `RolloutBarrierRef`, not an ambient rollout alias or implicit workflow name.
@@ -217,7 +220,11 @@ For assembly attempts:
 - workflow currentness belongs to `AssemblyAttemptRuntime`,
 - live occupancy belongs to durable slot occupancy plus lifecycle-backed
   liveness,
-- final published success belongs to `PublishedModelVersion`.
+- final published success belongs to `PublishedModelVersion`, including future
+  serving-representation lineage when typed `0111`
+  `RepresentationPublishContract` closeout becomes dependency-ready.
+- pending local runtime readiness, when a child contract supports it, belongs to
+  that child contract and operation status; it is not final published success.
 
 No row, proto, or helper may silently answer more than one of those questions by
 accident.
@@ -315,6 +322,8 @@ Normative split:
 - `AssemblyReadinessCut` answers what exact evidence the seal transition
   consumed.
 - `PublishedModelVersion` answers final externally visible lineage.
+- runtime materialization or builder semantic contracts may feed closeout, but
+  they do not replace closeout lineage.
 - attempt success also implies that the returned source artifact is readable
   through the owning daemon's ordinary artifact-read path.
 
@@ -435,19 +444,51 @@ Dependency-ready rule:
 
 Follow-on rule:
 
-- `representation_publish` becomes dependency-ready only when `0102` exposes a
-  typed representation or manifest child contract,
+- `representation_publish` becomes dependency-ready only when `0111` exposes a
+  typed `RepresentationPublishContract` child contract that carries
+  representation-specific publication facts such as serving-artifact identity,
+  manifest reference, and builder-layer publication digest,
 - `rollout_gated_publish` becomes dependency-ready only when `0104` exposes a
   dependency-ready typed rollout barrier child contract such as
   `RolloutBarrierRef`.
+
+Builder relation:
+
+- future source-to-serving builder work should resolve its semantic transform
+  below this layer, then surface externally visible serving lineage through
+  `representation_publish` rather than inventing a second publication truth.
 
 Normative rules:
 
 1. if a child closeout dependency is not typed and fail-closed, it must not be
    hidden inside `policy_json`,
 2. closeout-contract digest is separate from requirement-set digest,
-3. final success must be checked against the closeout contract that the attempt
-   actually snapped at creation time.
+3. the parent closeout contract remains generic; representation-specific fields
+   must live in the `0111` child contract rather than being reintroduced as
+   untyped top-level payload,
+4. final success must be checked against the closeout contract that the attempt
+   actually snapped at creation time,
+5. pending child closeout is allowed only as an explicit phase with a typed
+   status; it must not activate immutable keys, durable mappings, or
+   cross-daemon publication before closeout succeeds.
+
+### 3.1 Pending child closeout
+
+Some child contracts, notably `0111` optimistic same-daemon serving, may expose
+runtime readiness before their canonical publication result exists. This design
+allows that as a child-contract state, not as a completed assembly attempt.
+
+Rules:
+
+- `Operation` status may expose `phase=local_ready_pending_closeout` with a
+  child-owned payload such as verification job id and local serving ref;
+- `wait` remains observation only and must not implicitly finish closeout;
+- closeout success remains the only transition that produces
+  `PublishedModelVersion`;
+- key activation, durable key mapping, Global Store visibility, and
+  cross-daemon reuse remain blocked until the closeout result exists;
+- failure of the pending child closeout must be recorded and surfaced instead of
+  being collapsed into success.
 
 ## 4. Intent And Immutable Attempt Record
 
@@ -602,7 +643,7 @@ Binding-specific bridge rules:
 Attempt semantics sit above this helper path.
 They do not replace it.
 
-## 8. Closeout Scope Relative To `0102` And `0104`
+## 8. Closeout Scope Relative To `0111` And `0104`
 
 This design must stay explicit about the current dependency-ready closeout
 boundary.
@@ -616,10 +657,13 @@ Recommended first implementation wave:
 Optional follow-on wave:
 
 - if the repository chooses to absorb representation or rollout closeout in the
-  same program, `0102` and `0104` must expose typed child references first,
+  same program, `0111` and `0104` must expose typed child references first,
   where the `0104` child ref is a typed rollout barrier contract rather than an
   untyped rollout string,
 - `0105` may then extend `AssemblyCloseoutContract.kind`,
+- and representation-facing publication should consume a typed semantic child
+  contract from `0111` rather than rebuilding semantic or builder-publication
+  truth inside closeout helpers,
 - but it must not do so through untyped JSON or mutable post-start policy.
 
 ## Public Surface
@@ -685,6 +729,7 @@ Surface rules:
 - public continuation aligns with `0100`,
 - final success is reported only through the attempt workflow result and
   `PublishedModelVersion`,
+- pending local-ready child states are observable but are not final success,
 - daemon-owned bridge lowering is authoritative for binding-backed attempt
   contributions,
 - and final success requires both closeout-contract satisfaction and readable
@@ -755,7 +800,7 @@ No compatibility-only storage alias is part of the target end state.
   - That is intentional because a strong-consistency domain cannot keep durable
     truth only in workflow snapshots.
 - **Narrow first closeout scope**
-  - Deferring `0102` or `0104` child contracts keeps the first implementation
+  - Deferring `0111` or `0104` child contracts keeps the first implementation
     wave smaller.
   - That is preferable to hiding not-yet-typed child contracts inside JSON.
 
@@ -778,7 +823,7 @@ Acceptance requires:
 - binding-backed contribution, direct `register_view`, and future frontends all
   still lower onto the same structural helper path,
 - the first dependency-ready closeout scope is explicit,
-- and any broader closeout scope depends on typed child contracts from `0102`
+- and any broader closeout scope depends on typed child contracts from `0111`
   and `0104`, with rollout-gated closeout consuming a typed rollout barrier
   contract rather than ambient rollout metadata.
 
@@ -789,6 +834,7 @@ Acceptance requires:
 - `docs/designs/0084-binding-unified-model-and-contract.md`
 - `docs/designs/0011-unified-session-lifecycle-leases.md`
 - `docs/designs/0055-programmable-framework.md`
+- `docs/designs/0111-source-to-serving-builder-and-representation-publication.md`
 - `docs/designs/0090-existence-semantics-and-single-authority-truth.md`
 - `docs/designs/0092-artifact-profiles-shared-dataplane-and-truth-layering.md`
 - `docs/designs/0094-unified-lifecycle-kernel-and-capability-families.md`

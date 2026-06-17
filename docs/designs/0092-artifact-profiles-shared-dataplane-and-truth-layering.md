@@ -4,7 +4,7 @@ title: Foundation - Artifact Profiles, Shared Dataplane, and Truth Layering
 status: completed
 areas: ["core", "daemon", "sdk", "docs", "tests"]
 created: 2026-03-09
-last_updated: 2026-03-10
+last_updated: 2026-04-14
 related_code:
   - docs/designs/0039-artifact-first-sdk.md
   - docs/designs/0055-programmable-framework.md
@@ -153,6 +153,14 @@ Key clarification:
 - `mi2:` and `cgid:` are identity kinds,
 - profile is a separate concept,
 - a high-cardinality artifact may use `cgid:` today without implying every `cgid:` uses the same authority model.
+
+Follow-up note:
+
+- this foundation also cleanly admits future artifact families whose authority
+  is neither GS-backed nor client-generated,
+- `0115` uses that slot for daemon-attested mounted-source artifacts (`msa1:`),
+- so mounted trusted disk sources should evolve as a distinct profile and
+  authority model rather than as a permanent source-handle side plane.
 
 ### 1.1 Routed `byte_artifact` semantic position
 

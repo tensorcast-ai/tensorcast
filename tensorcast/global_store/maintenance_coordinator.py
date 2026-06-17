@@ -27,12 +27,16 @@ class GlobalStoreMaintenanceCoordinator:
         get_instance_service: Callable[[], Any],
         get_transport_service: Callable[[], Any],
         logger,
+        get_group_realization_service: Callable[[], Any] | None = None,
+        get_progressive_replication_service: Callable[[], Any] | None = None,
     ) -> None:
         self._config = config
         self._connection = connection
         self._get_worker_service = get_worker_service
         self._get_instance_service = get_instance_service
         self._get_transport_service = get_transport_service
+        self._get_group_realization_service = get_group_realization_service
+        self._get_progressive_replication_service = get_progressive_replication_service
         self._logger = logger
         self._thread: threading.Thread | None = None
 
@@ -101,6 +105,26 @@ class GlobalStoreMaintenanceCoordinator:
                         )
                     except Exception:
                         self._logger.exception("Error cleaning up expired transports")
+
+                if self._get_group_realization_service is not None:
+                    group_realization_service = self._get_group_realization_service()
+                    if group_realization_service is not None:
+                        try:
+                            group_realization_service.run_expiration_scan()
+                        except Exception:
+                            self._logger.exception(
+                                "Error expiring group realization transactions"
+                            )
+
+                if self._get_progressive_replication_service is not None:
+                    progressive_service = self._get_progressive_replication_service()
+                    if progressive_service is not None:
+                        try:
+                            progressive_service.expire_progressive_state()
+                        except Exception:
+                            self._logger.exception(
+                                "Error expiring progressive replication state"
+                            )
 
                 try:
                     self._run_retention_gc()

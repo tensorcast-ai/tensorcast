@@ -36,6 +36,8 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     bool allow_high_card_attrs{false};
     bool use_cursor_pagination{false};
     bool gateway_ingress_enabled{false};
+    bool serving_prefetch_enabled{false};
+    bool serving_same_daemon_acquire_enabled{true};
     std::filesystem::path storage_path;
     absl::Duration directory_staleness_budget{absl::Seconds(2)};
   };
@@ -87,6 +89,21 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::CreateOwnedBindingRequest* req,
       v2::CreateOwnedBindingResponse* resp) override;
 
+  grpc::Status PrefetchServingBinding(
+      grpc::ServerContext* ctx,
+      const v2::PrefetchServingBindingRequest* req,
+      v2::PrefetchServingBindingResponse* resp) override;
+
+  grpc::Status AcquireBindingValue(
+      grpc::ServerContext* ctx,
+      const v2::AcquireBindingValueRequest* req,
+      v2::AcquireBindingValueResponse* resp) override;
+
+  grpc::Status RegisterGroupVersionSet(
+      grpc::ServerContext* ctx,
+      const v2::RegisterGroupVersionSetRequest* req,
+      v2::RegisterGroupVersionSetResponse* resp) override;
+
   grpc::Status CreateBinding(
       grpc::ServerContext* ctx,
       const v2::CreateBindingRequest* req,
@@ -109,6 +126,26 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
 
   grpc::Status SealBinding(grpc::ServerContext* ctx, const v2::SealBindingRequest* req, v2::SealBindingResponse* resp)
       override;
+
+  grpc::Status FreezeBindingCurrentValue(
+      grpc::ServerContext* ctx,
+      const v2::FreezeBindingCurrentValueRequest* req,
+      v2::FreezeBindingCurrentValueResponse* resp) override;
+
+  grpc::Status PromoteBindingCurrentValue(
+      grpc::ServerContext* ctx,
+      const v2::PromoteBindingCurrentValueRequest* req,
+      v2::PromoteBindingCurrentValueResponse* resp) override;
+
+  grpc::Status StartPromoteBindingCurrentValue(
+      grpc::ServerContext* ctx,
+      const v2::StartPromoteBindingCurrentValueRequest* req,
+      v2::StartPromoteBindingCurrentValueResponse* resp) override;
+
+  grpc::Status GetBindingPromotionStatus(
+      grpc::ServerContext* ctx,
+      const v2::GetBindingPromotionStatusRequest* req,
+      v2::GetBindingPromotionStatusResponse* resp) override;
 
   grpc::Status StartAssemblyAttempt(
       grpc::ServerContext* ctx,
@@ -171,10 +208,10 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::LockTransportChunksRequest* req,
       v2::LockTransportChunksResponse* resp) override;
 
-  grpc::Status RegisterVramRegion(
+  grpc::Status RegisterRegion(
       grpc::ServerContext* ctx,
-      const v2::RegisterVramRegionRequest* req,
-      v2::RegisterVramRegionResponse* resp) override;
+      const v2::RegisterRegionRequest* req,
+      v2::RegisterRegionResponse* resp) override;
 
   grpc::Status BeginReplicaFetch(
       grpc::ServerContext* ctx,
@@ -186,10 +223,15 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::EndReplicaFetchRequest* req,
       v2::EndReplicaFetchResponse* resp) override;
 
-  grpc::Status UnregisterVramRegion(
+  grpc::Status UnregisterRegion(
       grpc::ServerContext* ctx,
-      const v2::UnregisterVramRegionRequest* req,
-      v2::UnregisterVramRegionResponse* resp) override;
+      const v2::UnregisterRegionRequest* req,
+      v2::UnregisterRegionResponse* resp) override;
+
+  grpc::Status ActivateStableLocalBacking(
+      grpc::ServerContext* ctx,
+      const v2::ActivateStableLocalBackingRequest* req,
+      v2::ActivateStableLocalBackingResponse* resp) override;
 
   grpc::Status DeregisterArtifact(
       grpc::ServerContext* ctx,
@@ -253,6 +295,16 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       grpc::ServerContext* ctx,
       const v2::ImportArtifactFromPathRequest* req,
       v2::ImportArtifactFromPathResponse* resp) override;
+
+  grpc::Status ResolvePublicDiskSource(
+      grpc::ServerContext* ctx,
+      const v2::ResolvePublicDiskSourceRequest* req,
+      v2::ResolvePublicDiskSourceResponse* resp) override;
+
+  grpc::Status PromoteMountedSourceArtifact(
+      grpc::ServerContext* ctx,
+      const v2::PromoteMountedSourceArtifactRequest* req,
+      v2::PromoteMountedSourceArtifactResponse* resp) override;
 
   grpc::Status ImportArtifactFromPathStream(
       grpc::ServerContext* ctx,
@@ -323,6 +375,16 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::GetArtifactIndexByIdRequest* req,
       v2::GetArtifactIndexByIdResponse* resp) override;
 
+  grpc::Status ListArtifactLayouts(
+      grpc::ServerContext* ctx,
+      const v2::ListArtifactLayoutsRequest* req,
+      v2::ListArtifactLayoutsResponse* resp) override;
+
+  grpc::Status EnsureCanonicalLayout(
+      grpc::ServerContext* ctx,
+      const v2::EnsureCanonicalLayoutRequest* req,
+      v2::EnsureCanonicalLayoutResponse* resp) override;
+
   grpc::Status SealAssembly(
       grpc::ServerContext* ctx,
       const v2::SealAssemblyRequest* req,
@@ -363,10 +425,10 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::GetDetailedStatusRequest* req,
       v2::GetDetailedStatusResponse* resp) override;
 
-  grpc::Status GetLoadedReplicasV2(
+  grpc::Status GetLoadedReplicas(
       grpc::ServerContext* ctx,
-      const v2::GetLoadedReplicasV2Request* req,
-      v2::GetLoadedReplicasV2Response* resp) override;
+      const v2::GetLoadedReplicasRequest* req,
+      v2::GetLoadedReplicasResponse* resp) override;
 
   grpc::Status BatchExists(grpc::ServerContext* ctx, const v2::BatchExistsRequest* req, v2::BatchExistsResponse* resp)
       override;
@@ -410,6 +472,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       grpc::ServerContext* ctx,
       const v2::FetchPayloadRefChunkRequest* req,
       v2::FetchPayloadRefChunkResponse* resp) override;
+
+  grpc::Status FetchBatchPayloadRefChunk(
+      grpc::ServerContext* ctx,
+      const v2::FetchBatchPayloadRefChunkRequest* req,
+      v2::FetchBatchPayloadRefChunkResponse* resp) override;
 
   grpc::Status RouteAuthorityStage(
       grpc::ServerContext* ctx,

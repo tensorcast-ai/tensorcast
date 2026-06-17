@@ -135,6 +135,7 @@ sc_cc_library(
         ":endpoint_id",
         "//core/common:memory_location_lib",
         "//core/common:otel_grpc_propagation_lib",
+        "//core/common:trace_macros_lib",
         "//core/communicator:utils_lib",
         "//core/store/replica:chunk_state",
         "//proto/tensorcast/common/v1:common_cc",
@@ -170,6 +171,7 @@ sc_cc_library(
         "//core/communicator:config_io_lib",
         "//core/communicator:engine_lib",
         "//core/communicator:routing_context_lib",
+        "//core/store/materialization/contracts:stable_local_backing",
         "//proto/tensorcast/communicator/v1:communicator_cc",
     ],
 )
@@ -270,6 +272,21 @@ sc_cc_library(
         "@abseil-cpp//absl/types:span",
         "@gsl",
         "@opentelemetry-cpp//api:api",
+    ],
+)
+
+cc_test(
+    name = "replica_registry_test",
+    srcs = ["components/replica_registry_test.cc"],
+    deps = [
+        ":replica_registry",
+        "//core/common:async_runtime_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/store/replica",
+        "//core/testing:catch_main",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/time",
+        "@catch2//:catch2_main",
     ],
 )
 
@@ -539,6 +556,16 @@ cc_test(
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
         "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "communication_manager_test",
+    srcs = ["components/communication_manager_test.cc"],
+    deps = [
+        ":communication_manager",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
     ],
 )
 

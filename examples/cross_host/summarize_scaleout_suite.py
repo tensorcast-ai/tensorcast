@@ -7,7 +7,6 @@ import argparse
 import json
 import math
 import re
-import statistics
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -121,21 +120,24 @@ class FanoutCase:
 
 
 @dataclass(slots=True)
-class Tp4Case:
+class TpCase:
     path: str
     case_name: str
+    lane: str
     workers: int | None
     receivers: int | None
     round_index: int | None
     order_slot: int | None
-    group_mode: str
+    progressive_enabled: bool
+    failure_injection_enabled: bool
+    failure_injection_status: str
     passed: bool | None
     l0_pass: bool
     group_probe_enabled: bool | None
     window_has_transports: bool | None
     requester_tagged_complete: bool | None
     grouped_transports: int | None
-    group_mode_consistent: bool | None
+    grouping_present: bool | None
     group_contract_consistent: bool | None
     publish_to_apply_p95_s: float | None
     throughput_peak_active_gib_s: float | None
@@ -146,27 +148,33 @@ class Tp4Case:
     diffusion_hhi: float | None
 
 
-@dataclass(slots=True)
-class Tp4Improvement:
-    workers: int
-    receivers: int
-    non_group_case: str
-    group_case: str
-    top1_share_improve_ratio: float | None
-    hhi_improve_ratio: float | None
-    publish_to_apply_p95_improve_ratio: float | None
+def _first_bool(*values: Any, default: bool = False) -> bool:
+    for value in values:
+        parsed = _safe_bool(value)
+        if parsed is not None:
+            return bool(parsed)
+    return bool(default)
 
 
-@dataclass(slots=True)
-class Tp4RoundImprovement:
-    workers: int
-    receivers: int
-    round_index: int
-    none_case_count: int
-    group_case_count: int
-    top1_share_improve_ratio: float | None
-    hhi_improve_ratio: float | None
-    publish_to_apply_p95_improve_ratio: float | None
+def _first_str(*values: Any, default: str = "") -> str:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return default
+
+
+def _tp_lane(
+    *,
+    progressive_enabled: bool,
+    failure_injection_enabled: bool,
+) -> str:
+    if failure_injection_enabled and progressive_enabled:
+        return "progressive_failure_injection"
+    if failure_injection_enabled:
+        return "failure_injection"
+    if progressive_enabled:
+        return "progressive"
+    return "baseline"
 
 
 def _parse_fanout_case(path: Path) -> FanoutCase | None:
@@ -286,7 +294,7 @@ def _parse_fanout_case(path: Path) -> FanoutCase | None:
     )
 
 
-def _parse_tp4_case(path: Path) -> Tp4Case | None:
+def _parse_tp_case(path: Path) -> TpCase | None:
     payload = _read_json(path)
     summary = payload.get("summary")
     if not isinstance(summary, dict):
@@ -302,18 +310,6 @@ def _parse_tp4_case(path: Path) -> Tp4Case | None:
     )
     workers = receivers + 1 if isinstance(receivers, int) else _infer_workers(payload)
 
-    params = payload.get("params", {})
-    if not isinstance(params, dict):
-        params = {}
-    group_mode = str(params.get("transport_group_mode", "")).strip().lower()
-    if not group_mode:
-        if "tp_version" in case_name:
-            group_mode = "tp_version"
-        elif "none" in case_name:
-            group_mode = "none"
-        else:
-            group_mode = "unknown"
-
     passed = _safe_bool(summary.get("passed"))
     transport_checks = summary.get("transport_checks", {})
     if not isinstance(transport_checks, dict):
@@ -326,7 +322,7 @@ def _parse_tp4_case(path: Path) -> Tp4Case | None:
     window_has_transports = _safe_bool(probe.get("window_has_transports"))
     requester_tagged_complete = _safe_bool(probe.get("requester_tagged_complete"))
     grouped_transports = _safe_int(probe.get("grouped_transports"))
-    group_mode_consistent = _safe_bool(probe.get("group_mode_consistent"))
+    grouping_present = _safe_bool(probe.get("grouping_present"))
     group_contract_consistent = _safe_bool(probe.get("group_contract_consistent"))
 
     distribution = summary.get("distribution", {})
@@ -346,37 +342,69 @@ def _parse_tp4_case(path: Path) -> Tp4Case | None:
     if not isinstance(throughput, dict):
         throughput = {}
 
-    if group_mode == "tp_version":
-        group_gate_ok = bool(
-            window_has_transports is True
-            and requester_tagged_complete is True
-            and grouped_transports is not None
-            and grouped_transports > 0
-            and group_mode_consistent is True
-            and group_contract_consistent is True
+    params = payload.get("params", {})
+    if not isinstance(params, dict):
+        params = {}
+    progressive = summary.get("progressive", {})
+    if not isinstance(progressive, dict):
+        progressive = {}
+    failure_payload = payload.get("failure_injection", {})
+    if not isinstance(failure_payload, dict):
+        failures = summary.get("failures", {})
+        failure_payload = (
+            failures.get("failure_injection", {}) if isinstance(failures, dict) else {}
         )
-    elif group_mode == "none":
-        group_gate_ok = bool(grouped_transports == 0 and group_mode_consistent is True)
-    else:
-        group_gate_ok = False
+    if not isinstance(failure_payload, dict):
+        failure_payload = {}
+
+    progressive_enabled = _first_bool(
+        progressive.get("enabled"),
+        params.get("enable_progressive_replication"),
+        default=False,
+    )
+    failure_injection_status = _first_str(
+        failure_payload.get("status"),
+        default="disabled",
+    )
+    failure_mode = str(params.get("failure_injection_mode", "")).strip().lower()
+    failure_injection_enabled = _first_bool(
+        failure_payload.get("enabled"),
+        failure_mode not in {"", "none"},
+        default=False,
+    )
+
+    group_gate_ok = bool(
+        window_has_transports is True
+        and requester_tagged_complete is True
+        and grouped_transports is not None
+        and grouped_transports > 0
+        and grouping_present is True
+        and group_contract_consistent is True
+    )
 
     l0_pass = bool(passed is True and group_gate_ok)
 
-    return Tp4Case(
+    return TpCase(
         path=str(path),
         case_name=case_name,
+        lane=_tp_lane(
+            progressive_enabled=progressive_enabled,
+            failure_injection_enabled=failure_injection_enabled,
+        ),
         workers=workers,
         receivers=receivers,
         round_index=round_index,
         order_slot=order_slot,
-        group_mode=group_mode,
+        progressive_enabled=progressive_enabled,
+        failure_injection_enabled=failure_injection_enabled,
+        failure_injection_status=failure_injection_status,
         passed=passed,
         l0_pass=l0_pass,
         group_probe_enabled=group_probe_enabled,
         window_has_transports=window_has_transports,
         requester_tagged_complete=requester_tagged_complete,
         grouped_transports=grouped_transports,
-        group_mode_consistent=group_mode_consistent,
+        grouping_present=grouping_present,
         group_contract_consistent=group_contract_consistent,
         publish_to_apply_p95_s=_safe_float(publish_to_apply.get("p95")),
         throughput_peak_active_gib_s=_safe_float(
@@ -394,36 +422,6 @@ def _parse_tp4_case(path: Path) -> Tp4Case | None:
     )
 
 
-def _compute_improve_ratio(
-    baseline: float | None, target: float | None
-) -> float | None:
-    if baseline is None or target is None:
-        return None
-    if baseline <= 0:
-        return None
-    return (baseline - target) / baseline
-
-
-def _median_optional(values: list[float | None]) -> float | None:
-    data = [value for value in values if value is not None]
-    if not data:
-        return None
-    return float(statistics.median(data))
-
-
-def _collect_metric_median(
-    cases: list[Tp4Case],
-    metric: str,
-) -> float | None:
-    return _median_optional([getattr(case, metric) for case in cases])
-
-
-def _render_percent(value: float | None) -> str:
-    if value is None:
-        return "NA"
-    return f"{value * 100.0:.2f}%"
-
-
 def _render_float(value: float | None, digits: int = 3) -> str:
     if value is None:
         return "NA"
@@ -436,11 +434,47 @@ def _render_int(value: int | None) -> str:
     return str(value)
 
 
+def _mean_float(values: list[float | None]) -> float | None:
+    valid = [value for value in values if value is not None]
+    if not valid:
+        return None
+    return sum(valid) / float(len(valid))
+
+
+def _build_tp_lane_summary(tp_cases: list[TpCase]) -> list[dict[str, Any]]:
+    lanes = sorted({case.lane for case in tp_cases})
+    rows: list[dict[str, Any]] = []
+    for lane in lanes:
+        lane_cases = [case for case in tp_cases if case.lane == lane]
+        rows.append(
+            {
+                "lane": lane,
+                "case_count": len(lane_cases),
+                "passed_count": sum(1 for case in lane_cases if case.passed is True),
+                "l0_pass_count": sum(1 for case in lane_cases if case.l0_pass),
+                "failure_injection_count": sum(
+                    1 for case in lane_cases if case.failure_injection_enabled
+                ),
+                "publish_to_apply_p95_mean_s": _mean_float(
+                    [case.publish_to_apply_p95_s for case in lane_cases]
+                ),
+                "diffusion_top1_share_mean": _mean_float(
+                    [case.diffusion_top1_share for case in lane_cases]
+                ),
+                "diffusion_hhi_mean": _mean_float(
+                    [case.diffusion_hhi for case in lane_cases]
+                ),
+                "throughput_peak_active_gib_s_mean": _mean_float(
+                    [case.throughput_peak_active_gib_s for case in lane_cases]
+                ),
+            }
+        )
+    return rows
+
+
 def _build_markdown(
     fanout_cases: list[FanoutCase],
-    tp4_cases: list[Tp4Case],
-    improvements: list[Tp4Improvement],
-    round_improvements: list[Tp4RoundImprovement],
+    tp_cases: list[TpCase],
 ) -> str:
     lines: list[str] = []
     lines.append(f"# Scaleout Summary ({datetime.now(tz=timezone.utc).isoformat()})")
@@ -503,99 +537,77 @@ def _build_markdown(
         )
 
     lines.append("")
-    lines.append("## Phase B (TP4)")
+    lines.append("## Phase B (TP)")
     lines.append("")
-    if not tp4_cases:
-        lines.append("No TP4 result found.")
+    if not tp_cases:
+        lines.append("No TP result found.")
     else:
-        tp4_l0_all = all(case.l0_pass for case in tp4_cases)
-        lines.append(f"- cases={len(tp4_cases)} l0_all_pass={tp4_l0_all}")
+        tp_l0_all = all(case.l0_pass for case in tp_cases)
+        lines.append(f"- cases={len(tp_cases)} l0_all_pass={tp_l0_all}")
         lines.append("")
         lines.append(
-            "| case | workers | round | order | group_mode | passed | L0 | grouped_transports | p95_publish_to_apply_s | top1_share | hhi |"
+            "| case | lane | workers | round | order | passed | L0 | grouped_transports | p95_publish_to_apply_s | top1_share | hhi | failure_injection |"
         )
-        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|")
         lines.extend(
             [
                 "| "
                 + " | ".join(
                     [
                         case.case_name,
+                        case.lane,
                         _render_int(case.workers),
                         _render_int(case.round_index),
                         _render_int(case.order_slot),
-                        case.group_mode,
                         str(case.passed),
                         "PASS" if case.l0_pass else "FAIL",
                         _render_int(case.grouped_transports),
                         _render_float(case.publish_to_apply_p95_s),
                         _render_float(case.diffusion_top1_share),
                         _render_float(case.diffusion_hhi),
+                        case.failure_injection_status,
                     ]
                 )
                 + " |"
                 for case in sorted(
-                    tp4_cases,
+                    tp_cases,
                     key=lambda x: (
+                        x.lane,
                         x.workers if x.workers is not None else 0,
                         x.round_index if x.round_index is not None else -1,
                         x.order_slot if x.order_slot is not None else -1,
-                        x.group_mode,
                         x.case_name,
                     ),
                 )
             ]
         )
         lines.append("")
+        lines.append("### TP Lane Summary")
+        lines.append("")
         lines.append(
-            "| workers | receivers | none samples | tp_version samples | top1_share improvement | hhi improvement | p95 improvement |"
+            "| lane | cases | passed | L0 | failure_injection | p95_publish_to_apply_mean_s | top1_share_mean | hhi_mean | peak_gib_s_mean |"
         )
-        lines.append("|---:|---:|---:|---:|---:|---:|---:|")
+        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
         lines.extend(
             [
                 "| "
                 + " | ".join(
                     [
-                        str(row.workers),
-                        str(row.receivers),
-                        row.non_group_case,
-                        row.group_case,
-                        _render_percent(row.top1_share_improve_ratio),
-                        _render_percent(row.hhi_improve_ratio),
-                        _render_percent(row.publish_to_apply_p95_improve_ratio),
+                        str(row["lane"]),
+                        str(row["case_count"]),
+                        str(row["passed_count"]),
+                        str(row["l0_pass_count"]),
+                        str(row["failure_injection_count"]),
+                        _render_float(row["publish_to_apply_p95_mean_s"]),
+                        _render_float(row["diffusion_top1_share_mean"]),
+                        _render_float(row["diffusion_hhi_mean"]),
+                        _render_float(row["throughput_peak_active_gib_s_mean"]),
                     ]
                 )
                 + " |"
-                for row in sorted(improvements, key=lambda x: x.workers)
+                for row in _build_tp_lane_summary(tp_cases)
             ]
         )
-        lines.append("")
-        if round_improvements:
-            lines.append(
-                "| workers | receivers | round | none samples | tp_version samples | top1_share improvement | hhi improvement | p95 improvement |"
-            )
-            lines.append("|---:|---:|---:|---:|---:|---:|---:|---:|")
-            lines.extend(
-                [
-                    "| "
-                    + " | ".join(
-                        [
-                            str(row.workers),
-                            str(row.receivers),
-                            str(row.round_index),
-                            str(row.none_case_count),
-                            str(row.group_case_count),
-                            _render_percent(row.top1_share_improve_ratio),
-                            _render_percent(row.hhi_improve_ratio),
-                            _render_percent(row.publish_to_apply_p95_improve_ratio),
-                        ]
-                    )
-                    + " |"
-                    for row in round_improvements
-                ]
-            )
-        else:
-            lines.append("No round-paired TP4 rows detected.")
 
     return "\n".join(lines) + "\n"
 
@@ -615,15 +627,15 @@ def _collect_fanout_cases(fanout_dir: Path) -> list[FanoutCase]:
     return cases
 
 
-def _collect_tp4_cases(tp4_dir: Path) -> list[Tp4Case]:
-    cases: list[Tp4Case] = []
-    if not tp4_dir.exists():
+def _collect_tp_cases(tp_dir: Path) -> list[TpCase]:
+    cases: list[TpCase] = []
+    if not tp_dir.exists():
         return cases
-    for path in sorted(tp4_dir.rglob("*.json")):
+    for path in sorted(tp_dir.rglob("*.json")):
         try:
-            parsed = _parse_tp4_case(path)
+            parsed = _parse_tp_case(path)
         except Exception as exc:  # noqa: BLE001
-            print(f"[warn] skip tp4 file {path}: {exc}")
+            print(f"[warn] skip tp file {path}: {exc}")
             continue
         if parsed is None:
             continue
@@ -631,131 +643,49 @@ def _collect_tp4_cases(tp4_dir: Path) -> list[Tp4Case]:
         if parsed.case_name.endswith("_summary"):
             continue
         cases.append(parsed)
-    dedup: dict[str, Tp4Case] = {}
+    dedup: dict[str, TpCase] = {}
     for case in cases:
         dedup[case.path] = case
     return list(dedup.values())
 
 
-def _build_tp4_improvements(tp4_cases: list[Tp4Case]) -> list[Tp4Improvement]:
-    keyed: dict[tuple[int, int], dict[str, list[Tp4Case]]] = {}
-    for case in tp4_cases:
-        if case.workers is None or case.receivers is None:
-            continue
-        bucket = keyed.setdefault((case.workers, case.receivers), {})
-        bucket.setdefault(case.group_mode, []).append(case)
-
-    rows: list[Tp4Improvement] = []
-    for (workers, receivers), bucket in keyed.items():
-        base_cases = bucket.get("none", [])
-        group_cases = bucket.get("tp_version", [])
-        if not base_cases or not group_cases:
-            continue
-
-        base_top1 = _collect_metric_median(base_cases, "diffusion_top1_share")
-        group_top1 = _collect_metric_median(group_cases, "diffusion_top1_share")
-        base_hhi = _collect_metric_median(base_cases, "diffusion_hhi")
-        group_hhi = _collect_metric_median(group_cases, "diffusion_hhi")
-        base_p95 = _collect_metric_median(base_cases, "publish_to_apply_p95_s")
-        group_p95 = _collect_metric_median(group_cases, "publish_to_apply_p95_s")
-
-        rows.append(
-            Tp4Improvement(
-                workers=workers,
-                receivers=receivers,
-                non_group_case=f"none_samples={len(base_cases)}",
-                group_case=f"tp_version_samples={len(group_cases)}",
-                top1_share_improve_ratio=_compute_improve_ratio(base_top1, group_top1),
-                hhi_improve_ratio=_compute_improve_ratio(base_hhi, group_hhi),
-                publish_to_apply_p95_improve_ratio=_compute_improve_ratio(
-                    base_p95, group_p95
-                ),
-            )
-        )
-    return sorted(rows, key=lambda x: x.workers)
-
-
-def _build_tp4_round_improvements(
-    tp4_cases: list[Tp4Case],
-) -> list[Tp4RoundImprovement]:
-    keyed: dict[tuple[int, int, int], dict[str, list[Tp4Case]]] = {}
-    for case in tp4_cases:
-        if case.workers is None or case.receivers is None or case.round_index is None:
-            continue
-        key = (case.workers, case.receivers, case.round_index)
-        bucket = keyed.setdefault(key, {})
-        bucket.setdefault(case.group_mode, []).append(case)
-
-    rows: list[Tp4RoundImprovement] = []
-    for (workers, receivers, round_index), bucket in keyed.items():
-        base_cases = bucket.get("none", [])
-        group_cases = bucket.get("tp_version", [])
-        if not base_cases or not group_cases:
-            continue
-
-        base_top1 = _collect_metric_median(base_cases, "diffusion_top1_share")
-        group_top1 = _collect_metric_median(group_cases, "diffusion_top1_share")
-        base_hhi = _collect_metric_median(base_cases, "diffusion_hhi")
-        group_hhi = _collect_metric_median(group_cases, "diffusion_hhi")
-        base_p95 = _collect_metric_median(base_cases, "publish_to_apply_p95_s")
-        group_p95 = _collect_metric_median(group_cases, "publish_to_apply_p95_s")
-
-        rows.append(
-            Tp4RoundImprovement(
-                workers=workers,
-                receivers=receivers,
-                round_index=round_index,
-                none_case_count=len(base_cases),
-                group_case_count=len(group_cases),
-                top1_share_improve_ratio=_compute_improve_ratio(base_top1, group_top1),
-                hhi_improve_ratio=_compute_improve_ratio(base_hhi, group_hhi),
-                publish_to_apply_p95_improve_ratio=_compute_improve_ratio(
-                    base_p95, group_p95
-                ),
-            )
-        )
-    return sorted(rows, key=lambda x: (x.workers, x.receivers, x.round_index))
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Summarize multihost fanout scaleout and TP4 group experiment results."
+        description="Summarize multihost fanout scaleout and TP group experiment results."
     )
     parser.add_argument(
         "--fanout-dir",
         type=Path,
-        default=Path("/data/tc_cross_20260226/results_multi_host_scaleout"),
+        default=Path("/tmp/tensorcast/cross_host/results_multi_host_scaleout"),
         help="Directory that contains fanout/cascade JSON outputs.",
     )
     parser.add_argument(
-        "--tp4-dir",
+        "--tp-dir",
         type=Path,
-        default=Path("/data/tc_cross_20260226/results_0083_tp4"),
-        help="Directory that contains TP4 case JSON outputs.",
+        default=Path("/tmp/tensorcast/cross_host/results_tp4"),
+        help="Directory that contains TP case JSON outputs.",
     )
     parser.add_argument(
         "--out-json",
         type=Path,
-        default=Path("/data/tc_cross_20260226/report/scaleout_summary.json"),
+        default=Path("/tmp/tensorcast/cross_host/report/scaleout_summary.json"),
         help="Output path for merged JSON summary.",
     )
     parser.add_argument(
         "--out-md",
         type=Path,
-        default=Path("/data/tc_cross_20260226/report/scaleout_summary.md"),
+        default=Path("/tmp/tensorcast/cross_host/report/scaleout_summary.md"),
         help="Output path for markdown report snippet.",
     )
     args = parser.parse_args()
 
     fanout_cases = _collect_fanout_cases(args.fanout_dir)
-    tp4_cases = _collect_tp4_cases(args.tp4_dir)
-    improvements = _build_tp4_improvements(tp4_cases)
-    round_improvements = _build_tp4_round_improvements(tp4_cases)
+    tp_cases = _collect_tp_cases(args.tp_dir)
 
     payload = {
         "generated_at_utc": datetime.now(tz=timezone.utc).isoformat(),
         "fanout_dir": str(args.fanout_dir),
-        "tp4_dir": str(args.tp4_dir),
+        "tp_dir": str(args.tp_dir),
         "fanout": {
             "case_count": len(fanout_cases),
             "l0_all_pass": all(case.l0_pass for case in fanout_cases)
@@ -763,14 +693,11 @@ def main() -> None:
             else None,
             "cases": [asdict(case) for case in fanout_cases],
         },
-        "tp4": {
-            "case_count": len(tp4_cases),
-            "l0_all_pass": all(case.l0_pass for case in tp4_cases)
-            if tp4_cases
-            else None,
-            "cases": [asdict(case) for case in tp4_cases],
-            "improvements": [asdict(row) for row in improvements],
-            "round_improvements": [asdict(row) for row in round_improvements],
+        "tp": {
+            "case_count": len(tp_cases),
+            "l0_all_pass": all(case.l0_pass for case in tp_cases) if tp_cases else None,
+            "lane_summary": _build_tp_lane_summary(tp_cases),
+            "cases": [asdict(case) for case in tp_cases],
         },
     }
 
@@ -779,14 +706,12 @@ def main() -> None:
 
     markdown = _build_markdown(
         fanout_cases,
-        tp4_cases,
-        improvements,
-        round_improvements,
+        tp_cases,
     )
     args.out_md.parent.mkdir(parents=True, exist_ok=True)
     args.out_md.write_text(markdown)
 
-    print(f"[summary] fanout_cases={len(fanout_cases)} tp4_cases={len(tp4_cases)}")
+    print(f"[summary] fanout_cases={len(fanout_cases)} tp_cases={len(tp_cases)}")
     print(f"[summary] json={args.out_json}")
     print(f"[summary] md={args.out_md}")
 

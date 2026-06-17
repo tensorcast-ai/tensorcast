@@ -23,22 +23,18 @@ def test_materialization_device_explicit_value_is_preserved(
     assert e2e._materialization_device("cpu") == "cpu"
 
 
-def test_fallback_for_checks_enforces_local_only_under_fake_backend(
+def test_check_options_enforces_local_only_under_fake_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("TENSORCAST_CUDA_BACKEND", "fake")
     publisher = e2e.WeightUpdatePublisher.__new__(e2e.WeightUpdatePublisher)
-    fallback = publisher._fallback_for_checks()
-    assert fallback.prefer == "local"
-    assert fallback.allow_p2p is False
-    assert fallback.allow_disk is False
-    assert fallback.verify_checksums is True
+    assert publisher._check_options() == e2e.GetArtifactOptions(source="local_only")
 
 
 def test_pre_publish_trim_is_enforced_with_keep_last_minus_one(tmp_path: Path) -> None:
     publisher = e2e.WeightUpdatePublisher(
         model_name="m",
-        key_template="k:{model_name}:v{version}",
+        key_template="k:{model_name}:v{weight_version}",
         keep_last=2,
         history_path=tmp_path / "history.json",
         run_root=tmp_path,

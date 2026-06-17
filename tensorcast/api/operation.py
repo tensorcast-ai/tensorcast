@@ -155,10 +155,10 @@ def _coerce_grpc_status_code(code: object) -> ArtifactStatusCode:
         name = code
     else:
         try:
-            name = str(code.name)  # type: ignore[attr-defined]
+            name = str(code.name)
         except Exception:
             name = "UNKNOWN"
-    allowed: set[str] = {
+    allowed: set[ArtifactStatusCode] = {
         "OK",
         "CANCELLED",
         "UNKNOWN",
@@ -177,7 +177,9 @@ def _coerce_grpc_status_code(code: object) -> ArtifactStatusCode:
         "DATA_LOSS",
         "UNAUTHENTICATED",
     }
-    return name if name in allowed else "UNKNOWN"
+    if name in allowed:
+        return name
+    return "UNKNOWN"
 
 
 def _retryable_for_grpc(code: object) -> bool:

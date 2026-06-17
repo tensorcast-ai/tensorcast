@@ -9,8 +9,9 @@ from typing import Sequence
 import grpc
 import pytest
 import torch
+from safetensors.torch import save_file as st_save
 
-from tensorcast import FallbackOptions, from_disk, startup
+from tensorcast import GetArtifactOptions, from_disk, startup
 from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
 from tensorcast.global_store.config.settings import GlobalStoreConfig, set_config
 from tensorcast.global_store.grpc_service import (
@@ -20,9 +21,22 @@ from tensorcast.global_store.grpc_service import (
 from tensorcast.proto.global_store.v1 import global_store_pb2
 from tensorcast.testing.io_disk import save_dict
 from tests.python.utils.daemon import start_daemon_binary
+from tests.python.utils.hardware import synchronize_cuda
 from tests.python.utils.ports import get_free_port
 
 pytestmark = pytest.mark.requires_cuda_or_fake
+
+
+def _pad_standard_partitions_to_4k(artifact_dir: Path) -> None:
+    for partition in sorted(artifact_dir.glob("tensor.data*")):
+        if not partition.is_file():
+            continue
+        size = partition.stat().st_size
+        padded_size = ((size + 4095) // 4096) * 4096
+        if padded_size == size:
+            continue
+        with partition.open("ab") as handle:
+            handle.write(b"\0" * (padded_size - size))
 
 
 def test_shared_storage_roundtrip(tmp_path):
@@ -63,6 +77,7 @@ def test_shared_storage_roundtrip(tmp_path):
     save_path = storage_root / "artifact"
     # Save using the unified writer
     descriptor = save_dict(state_dict, str(save_path))
+    _pad_standard_partitions_to_4k(save_path)
 
     listen = f"127.0.0.1:{get_free_port()}"
     cpu_target = os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake"
@@ -109,21 +124,19 @@ def test_shared_storage_roundtrip(tmp_path):
         try:
             startup.init(mode="connect", address=listen)
             try:
-                fallback = FallbackOptions(
-                    prefer="disk",
-                    allow_p2p=False,
-                    verify_checksums=False,
-                )
                 device_selector = (
                     "cpu"
                     if cpu_target
                     else ("cuda:0" if torch.cuda.is_available() else "cpu")
                 )
-                artifact_handle = from_disk(
-                    str(save_path),
-                    verify_checksums=False,
-                ).with_fallback(fallback)
-                loaded_state_dict = artifact_handle.tensor_dict(device=device_selector)
+                artifact_handle = from_disk(str(save_path), verify_checksums=False)
+                loaded_state_dict = artifact_handle.tensor_dict(
+                    device=device_selector,
+                    options=GetArtifactOptions(
+                        source="disk_only",
+                        verify_checksums=False,
+                    ),
+                )
             finally:
                 startup.shutdown()
         finally:
@@ -153,7 +166,7 @@ def test_shared_storage_roundtrip(tmp_path):
     # -----------------------
     def assert_shared(names: Sequence[str]):
         """Assert tensors referenced by `names` share storage in `loaded_state_dict`."""
-        ptrs = {loaded_state_dict[n].storage().data_ptr() for n in names}
+        ptrs = {loaded_state_dict[n].untyped_storage().data_ptr() for n in names}
         assert len(ptrs) == 1, (
             f"Tensors {names} are expected to share storage after load but found {len(ptrs)} distinct storages"
         )
@@ -164,16 +177,16 @@ def test_shared_storage_roundtrip(tmp_path):
     assert_shared(["base2", "view2"])
 
     # Groups should not share with each other
-    ptr_group1 = loaded_state_dict["base1"].storage().data_ptr()
-    ptr_group2 = loaded_state_dict["base2"].storage().data_ptr()
+    ptr_group1 = loaded_state_dict["base1"].untyped_storage().data_ptr()
+    ptr_group2 = loaded_state_dict["base2"].untyped_storage().data_ptr()
     assert ptr_group1 != ptr_group2, (
         "Separate storage groups share the same backing storage unexpectedly"
     )
 
     # Independent tensors should each have unique storage
     indep_ptrs = {
-        loaded_state_dict["indep1"].storage().data_ptr(),
-        loaded_state_dict["indep2"].storage().data_ptr(),
+        loaded_state_dict["indep1"].untyped_storage().data_ptr(),
+        loaded_state_dict["indep2"].untyped_storage().data_ptr(),
     }
     assert len(indep_ptrs) == 2
     # And they should not collide with shared groups
@@ -187,6 +200,7 @@ def test_from_disk_tensor_dict_without_global_store(tmp_path):
     save_path = storage_root / "artifact"
     expected = {"weights": torch.arange(32, dtype=torch.float32)}
     save_dict(expected, str(save_path))
+    _pad_standard_partitions_to_4k(save_path)
 
     listen = f"127.0.0.1:{get_free_port()}"
     cpu_target = os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake"
@@ -205,17 +219,19 @@ def test_from_disk_tensor_dict_without_global_store(tmp_path):
     try:
         startup.init(mode="connect", address=listen)
         try:
-            artifact_handle = from_disk(
-                str(save_path), verify_checksums=False
-            ).with_fallback(
-                FallbackOptions(prefer="disk", allow_p2p=False, verify_checksums=False)
-            )
+            artifact_handle = from_disk(str(save_path), verify_checksums=False)
             device_selector = (
                 "cpu"
                 if cpu_target
                 else ("cuda:0" if torch.cuda.is_available() else "cpu")
             )
-            loaded = artifact_handle.tensor_dict(device=device_selector)
+            loaded = artifact_handle.tensor_dict(
+                device=device_selector,
+                options=GetArtifactOptions(
+                    source="disk_only",
+                    verify_checksums=False,
+                ),
+            )
         finally:
             startup.shutdown()
     finally:
@@ -229,6 +245,86 @@ def test_from_disk_tensor_dict_without_global_store(tmp_path):
         loaded["weights"].cpu() if loaded["weights"].is_cuda else loaded["weights"]
     )
     assert torch.equal(loaded_cpu, expected["weights"])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_from_disk_bind_and_bind_into_respect_safetensors_source_layout(
+    tmp_path,
+):
+    tmp_path = Path(tmp_path)
+    storage_root = tmp_path / "daemon-storage"
+    save_path = storage_root / "artifact"
+    save_path.mkdir(parents=True, exist_ok=True)
+    expected = torch.arange(32, dtype=torch.bfloat16)
+    st_save({"weights": expected}, str(save_path / "weights.safetensors"))
+    compat_libs = [
+        "/data/cuda/compat",
+        "/data/cuda/cuda-12.8/lib64",
+        "/usr/local/nvidia/lib64",
+    ]
+    available_compat_libs = [path for path in compat_libs if Path(path).exists()]
+    if available_compat_libs:
+        current_ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
+        compat_ld_library_path = ":".join(available_compat_libs)
+        if current_ld_library_path:
+            os.environ["LD_LIBRARY_PATH"] = (
+                f"{compat_ld_library_path}:{current_ld_library_path}"
+            )
+        else:
+            os.environ["LD_LIBRARY_PATH"] = compat_ld_library_path
+
+    listen = f"127.0.0.1:{get_free_port()}"
+    local_handle_dir = tmp_path / "local-handle"
+    local_handle_dir.mkdir(parents=True, exist_ok=True)
+    daemon_proc = start_daemon_binary(
+        listen,
+        storage_root,
+        stable_bytes=64 * 1024 * 1024,
+        local_handle_socket_path=str(local_handle_dir / "local_handle.sock"),
+    )
+    try:
+        startup.init(mode="connect", address=listen)
+        try:
+            artifact_handle = from_disk(str(save_path), verify_checksums=False)
+            ref = artifact_handle.tensor_dict(device="cuda:0")["weights"]
+
+            binding = artifact_handle.bind(
+                device="cuda:0",
+                packing="byte_space",
+                options=GetArtifactOptions(
+                    source="disk_only",
+                    verify_checksums=False,
+                ),
+            )
+            try:
+                bound = dict(binding.tensors)["weights"]
+                synchronize_cuda()
+                assert torch.equal(bound.cpu(), expected)
+                assert torch.equal(bound, ref)
+            finally:
+                binding.close()
+
+            if os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake":
+                return
+
+            target = torch.empty_like(ref)
+            binding = artifact_handle.bind_into(
+                {"weights": target}, packing="byte_space"
+            )
+            try:
+                synchronize_cuda()
+                assert torch.equal(target.cpu(), expected)
+                assert torch.equal(target, ref)
+            finally:
+                binding.close()
+        finally:
+            startup.shutdown()
+    finally:
+        try:
+            daemon_proc.terminate()
+            daemon_proc.wait(timeout=3)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

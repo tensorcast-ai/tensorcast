@@ -16,6 +16,7 @@ class TestConfiguration:
     def test_config_defaults(self):
         """Test default configuration."""
         config = GlobalStoreConfig()
+        assert config.listen_host == "0.0.0.0"
         assert config.port == 50051
         assert config.max_workers == 10
         assert config.heartbeat_timeout_ms == 30000
@@ -42,6 +43,7 @@ class TestConfiguration:
         p.write_text(yaml.safe_dump(cfg), encoding="utf-8")
         config = GlobalStoreConfig.from_file(str(p))
         assert config.port == 50053
+        assert config.listen_host == "0.0.0.0"
         assert config.max_workers == 10  # Default value
         assert config.heartbeat_timeout_ms == 30000  # Default value
 

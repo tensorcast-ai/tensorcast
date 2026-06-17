@@ -6,11 +6,20 @@ sidebar_position: 6
 
 # Weight Publisher
 
-`tensorcast.tools.weight_publisher` is a small helper for the common workflow:
+`tensorcast.tools.weight_publisher` is a legacy helper for the generic
+weight-version workflow:
 
 1) Publish a new set of weights to Tensorcast under an immutable versioned key.
 2) Trigger an inference service to reload that `weight_version`.
 3) Optionally wait for acknowledgement and garbage-collect old versions.
+
+Current `vllm` with `load_format="tensorcast"` no longer treats
+`weight_version` or `/set_model_weight` as TensorCast serving identity. That
+runtime expects a published serving artifact and reloads through
+`POST /reload_serving_artifact` with a `selector + policy` request. Use
+`vllm/tools/tensorcast_prepare_local_dir.py` or a serving-artifact
+publisher to produce that request. The reload sections below apply to
+non-TensorCast or legacy `/set_model_weight` deployments.
 
 It supports two publishing modes:
 
@@ -104,7 +113,7 @@ publisher = WeightPublisher(
     )
 )
 
-artifact_id = publisher.publish_from_disk("/mnt/shared/it123_hf", version=123)
+artifact_id = publisher.publish_from_disk("/shared/tensorcast/models/demo_hf_v123", version=123)
 print("published", artifact_id)
 ```
 
@@ -114,10 +123,10 @@ Important:
 - `publish_from_disk` requires a Tensorcast daemon that can access the folder
   path (typically via shared storage).
 
-## Trigger Reload: Direct HTTP Endpoint
+## Trigger Reload: Legacy Direct HTTP Endpoint
 
-If your inference service exposes a single reload endpoint, set `reload_url`.
-The publisher sends:
+If your non-TensorCast or legacy inference service exposes a single generic
+reload endpoint, set `reload_url`. The publisher sends:
 
 ```json
 { "weight_version": 123, "model_overrides": null }
@@ -131,10 +140,27 @@ cfg = WeightPublisherConfig(
     reload_url="http://127.0.0.1:8000/set_model_weight",
     trigger_reload=True,
 )
-WeightPublisher(cfg).publish_from_disk("/mnt/shared/it123_hf", version=123)
+WeightPublisher(cfg).publish_from_disk("/shared/tensorcast/models/demo_hf_v123", version=123)
 ```
 
-## Trigger Reload: Stepcast Router (Multi-endpoint)
+For current vLLM TensorCast serving reload, the request shape is instead:
+
+```json
+{
+  "selector": {
+    "kind": "version_key",
+    "value": "models/demo/serving/v123"
+  },
+  "policy": {
+    "mode": "from_manifest"
+  },
+  "model_overrides": null
+}
+```
+
+`WeightPublisher` does not synthesize this serving-artifact request today.
+
+## Trigger Reload: Legacy Stepcast Router (Multi-endpoint)
 
 For Stepcast deployments that expose vLLM dev endpoints per replica, set:
 
@@ -145,10 +171,9 @@ The publisher will:
 
 1) Discover endpoints via:
    `GET http://{router}/v1/model/{served_model_name}`
-2) Optionally push vLLM Tensorcast loader config via `/collective_rpc update_config`
-3) Call each endpoint:
+2) Call each endpoint:
    `POST /set_model_weight?drain_timeout_s=...`
-4) Optionally ack by polling `GET /weight_version`
+3) Optionally ack by polling `GET /weight_version`
 
 Example:
 
@@ -157,21 +182,21 @@ cfg = WeightPublisherConfig(
     model_name="llama7b",
     stepcast_router="stepcast-router:9200",
     stepcast_served_model_name="llama7b",
-    stepcast_update_config=True,
     stepcast_ack=True,
     vllm_drain_timeout_s=300.0,
 )
 
 publisher = WeightPublisher(cfg)
-publisher.publish_from_disk("/mnt/shared/it123_hf", version=123)
+publisher.publish_from_disk("/shared/tensorcast/models/demo_hf_v123", version=123)
 ```
 
 Notes:
 - The Stepcast reload path assumes vLLM dev endpoints are enabled on each
   replica (e.g. `VLLM_SERVER_DEV_MODE=1`).
-- vLLM Tensorcast loader settings are pushed via:
-  `load_config.load_format="tensorcast"` and `model_loader_extra_config`
-  (`tensorcast_key_template`, `tensorcast_model_name`, disk fallback options).
+- This path no longer pushes vLLM TensorCast loader config. Current
+  `vllm` serving-artifact runtime must be configured through
+  `tensorcast.serving.ServingConfig` and reloaded with
+  `/reload_serving_artifact`.
 
 ## Retention and Garbage Collection (keep_last)
 
@@ -210,11 +235,9 @@ It models two independent roles:
 
 - `publisher`: continuously publishes new weight versions through
   `WeightPublisher.publish(...)` (CUDA/CPU tensor dict -> local stable DRAM).
-- `receiver`: continuously receives and validates versioned weights by key.
-  It supports two apply modes:
-  - `tensor_dict` (default): materialize each version via `artifact.tensor_dict(...)`.
-  - `binding_swap`: create one `Binding` and update versions via
-    `binding.swap(...)`, which models online inference weight hot-swap.
+- `receiver`: continuously receives and validates versioned weights by key by
+  staging tensor-parallel rank-local values through `group_realization`,
+  waiting for the publish barrier, then acquiring the staged binding values.
 
 ### Single-host scenario (local)
 
@@ -233,9 +256,11 @@ python ./tensorcast/tools/weight_publisher_e2e.py single-host \
   --start-version 1 \
   --num-versions 3 \
   --keep-last 2 \
+  --payload-mode tp_ranked \
+  --tp-world-size 1 \
   --publish-interval-s 2 \
   --receiver-timeout-s 120 \
-  --receiver-apply-mode binding_swap
+  --materialize-device cuda:0
 
 tensorcast-cli daemon stop
 ```
@@ -277,6 +302,8 @@ python ./tensorcast/tools/weight_publisher_e2e.py publisher \
   --start-version 1 \
   --num-versions 6 \
   --keep-last 2 \
+  --payload-mode tp_ranked \
+  --tp-world-size 1 \
   --publish-interval-s 3 \
   --receiver-timeout-s 180 \
   --retention-timeout-s 90
@@ -297,8 +324,9 @@ python ./tensorcast/tools/weight_publisher_e2e.py receiver \
   --start-version 1 \
   --num-versions 6 \
   --receiver-timeout-s 180 \
-  --materialize-device cuda:0 \
-  --receiver-apply-mode binding_swap
+  --payload-mode tp_ranked \
+  --tp-world-size 1 \
+  --materialize-device cuda:0
 ```
 
 ```bash
@@ -320,10 +348,10 @@ Distributed checklist:
   daemons alive briefly after completion, then query GS metadata
   (`ClusterRuntimeService.BatchGetReplicaCounts`).
 
-## Multi-host Suite (brainctl)
+## Multi-host Suite (orchestratorctl)
 
-For staged scale-out (`2-node -> 3-node`) with `binding.swap` updates and
-retention checks, use:
+For staged scale-out (`2-node -> 3-node`) with `group_realization` staged
+binding updates and retention checks, use:
 
 - `examples/cross_host/cross_host_weight_publisher_runner.py` (single case runner)
 - `examples/cross_host/run_multihost_weight_publisher_suite.sh` (suite entry)
@@ -348,6 +376,30 @@ export TC_PROGRESS_POLL_S=10
 
 bash examples/cross_host/run_multihost_weight_publisher_suite.sh
 ```
+
+Progressive dissemination benchmark lane:
+
+- Keep it disabled for baseline runs. Enable it explicitly with
+  `TC_WP_PROGRESSIVE_ENABLE=1` after starting Global Store with
+  `worker_policy.progressive_replication.enabled=true`.
+- The suite propagates daemon-side reporting knobs:
+  `TC_WP_PROGRESSIVE_REPORT_INTERVAL`,
+  `TC_WP_PROGRESSIVE_MIN_REPORT_DELTA_BYTES`, and
+  `TC_WP_PROGRESSIVE_VERIFY_BEFORE_REPORT`.
+- Progressive and baseline runs should use the same receiver counts, payload
+  mode, publish interval, and timeout settings before comparing concentration or
+  tail-latency metrics.
+- Add the optional failure-injection lane with
+  `TC_WP_FAILURE_INJECTION_ENABLE=1`. The suite then appends one extra case
+  that stops a selected receiver daemon after publisher start
+  (`TC_WP_FAILURE_INJECTION_TARGET=receiver:0` by default) and records whether
+  the remaining receivers still complete. Tune
+  `TC_WP_FAILURE_INJECTION_DELAY_S` so the selected receiver has become a useful
+  progressive source in the target topology.
+- Use `examples/cross_host/summarize_scaleout_suite.py --tp-dir <RUN_DIR>` to
+  produce JSON and Markdown reports. The TP report groups cases into baseline,
+  progressive, and failure-injection lanes and summarizes source concentration
+  and publish-to-apply latency metrics.
 
 Timeout guidance:
 

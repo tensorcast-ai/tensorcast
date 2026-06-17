@@ -32,6 +32,8 @@
 #include "core/communicator/misc/utils.h"
 #include "core/store/device_registry.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "daemon/state/lip_manager.h"
+#include "daemon/state/worker_directory_cache.h"
 #include "daemon/util/identity_utils.h"
 #include "folly/futures/Future.h"
 #include "opentelemetry/metrics/provider.h"
@@ -420,6 +422,47 @@ WorkerLifecycleManager::WorkerLifecycleManager(
   }
 }
 
+std::vector<store::StoreEngine::ReplicaInventoryEntry> WorkerLifecycleManager::collect_ha_inventory() const {
+  std::vector<store::StoreEngine::ReplicaInventoryEntry> inventory = engine_->get_ha_inventory();
+  const auto routable_inventory = ports_.lip_manager.list_active_routable_inventory();
+  if (routable_inventory.empty()) {
+    return inventory;
+  }
+
+  absl::flat_hash_set<store::loading::ReplicaKey, store::loading::ReplicaKeyHash> seen_keys;
+  seen_keys.reserve(inventory.size() + routable_inventory.size());
+  for (const auto& entry : inventory) {
+    seen_keys.insert(entry.key);
+  }
+
+  inventory.reserve(inventory.size() + routable_inventory.size());
+  for (const auto& routable_entry : routable_inventory) {
+    store::loading::ReplicaKey key;
+    key.artifact_id = routable_entry.key.artifact_id;
+    if (!routable_entry.key.view_id.empty()) {
+      key.view_id = routable_entry.key.view_id;
+    }
+    key.device = store::DeviceRegistry::instance().gpu_key(routable_entry.key.device_id);
+    if (!seen_keys.insert(key).second) {
+      continue;
+    }
+
+    store::StoreEngine::ReplicaInventoryEntry inventory_entry;
+    inventory_entry.key = std::move(key);
+    inventory_entry.size_bytes = routable_entry.total_size;
+    inventory_entry.memory_location = common::memory::MemoryLocation::GPU;
+    inventory_entry.is_available = !routable_entry.remote_memory_keys.empty();
+    inventory_entry.publish_state = store::StoreEngine::ReplicaPublishState::kPublished;
+    inventory_entry.remote_memory_keys = routable_entry.remote_memory_keys;
+    inventory_entry.buffer_sizes = routable_entry.buffer_sizes;
+    inventory_entry.export_state = inventory_entry.is_available ? store::runtime::ReplicaExportState::kExportable
+                                                                : store::runtime::ReplicaExportState::kPresenceOnly;
+    inventory.push_back(std::move(inventory_entry));
+  }
+
+  return inventory;
+}
+
 gsl::not_null<std::shared_ptr<store::components::IGlobalStoreClient>> WorkerLifecycleManager::make_global_store_client(
     const Options& opts) {
   if (opts.global_store_client) {
@@ -533,6 +576,17 @@ absl::Status WorkerLifecycleManager::start() {
   // Propagate worker identity into the engine so subsequent GS registrations
   // use the real worker_id instead of a placeholder.
   engine_->set_worker_identity(reg_or->worker_id, node_id_, node_addr, grpc_port, opts_.p2p_port);
+  ports_.worker_directory_cache.update_local_entry(
+      WorkerDirectoryCache::Entry{
+          .daemon_id = daemon_id_,
+          .worker_id = reg_or->worker_id,
+          .node_id = node_id_,
+          .node_address = node_addr,
+          .grpc_port = grpc_port,
+          .p2p_port = opts_.p2p_port,
+          .address = absl::StrCat(node_addr, ":", grpc_port),
+          .capability_flags = opts_.capability_flags,
+      });
   const uint64_t epoch_seed = static_cast<uint64_t>(absl::ToUnixNanos(absl::Now()));
   state_sync_epoch_.store(epoch_seed);
   state_sync_request_id_.store(0);
@@ -598,6 +652,15 @@ absl::Status WorkerLifecycleManager::start() {
   const auto bootstrap_timeout = state_sync_stall_budget().value_or(std::chrono::seconds(10));
   if (!wait_for_state_sync_success(baseline, bootstrap_timeout)) {
     LOG(WARNING) << "Bootstrap reconcile did not complete before timeout";
+  }
+  return absl::OkStatus();
+}
+
+absl::Status WorkerLifecycleManager::wait_for_state_sync_barrier() {
+  const uint64_t request_generation = request_state_sync();
+  const auto timeout = state_sync_stall_budget().value_or(std::chrono::seconds(10));
+  if (!wait_for_state_sync_request(request_generation, timeout)) {
+    return absl::DeadlineExceededError("state sync barrier timed out");
   }
   return absl::OkStatus();
 }
@@ -728,16 +791,19 @@ std::optional<std::chrono::milliseconds> WorkerLifecycleManager::state_sync_stal
   return std::chrono::milliseconds(budget_ms);
 }
 
-void WorkerLifecycleManager::request_state_sync() {
-  uint64_t expected = 0;
-  if (!state_sync_requests_.compare_exchange_strong(expected, 1)) {
+uint64_t WorkerLifecycleManager::request_state_sync() {
+  const uint64_t request_generation = state_sync_request_generation_.fetch_add(1) + 1;
+  uint64_t observed = state_sync_requests_.load();
+  while (observed < request_generation && !state_sync_requests_.compare_exchange_weak(observed, request_generation)) {
+  }
+  if (observed != 0) {
     state_sync_enqueue_suppressed_.fetch_add(1);
     if (auto* counter = reconcile_enqueue_suppressed_counter()) {
       counter->Add(1);
     }
-    return;
   }
   state_sync_cv_.notify_all();
+  return request_generation;
 }
 
 bool WorkerLifecycleManager::wait_for_state_sync_success(uint64_t baseline, std::chrono::milliseconds timeout) {
@@ -748,6 +814,19 @@ bool WorkerLifecycleManager::wait_for_state_sync_success(uint64_t baseline, std:
   std::unique_lock<std::mutex> lock(sync_success_mu_);
   return sync_success_cv_.wait_until(
       lock, deadline, [this, baseline]() { return stop_.load() || sync_success_.load() > baseline; });
+}
+
+bool WorkerLifecycleManager::wait_for_state_sync_request(
+    uint64_t request_generation,
+    std::chrono::milliseconds timeout) {
+  if (timeout.count() <= 0) {
+    return state_sync_completed_generation_.load() >= request_generation;
+  }
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  std::unique_lock<std::mutex> lock(sync_success_mu_);
+  return sync_success_cv_.wait_until(lock, deadline, [this, request_generation]() {
+    return stop_.load() || state_sync_completed_generation_.load() >= request_generation;
+  });
 }
 
 void WorkerLifecycleManager::queue_obsolete_replicas(std::vector<std::string> obsolete) {
@@ -781,7 +860,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
     while (!stop_.load() && hb_epoch_.load() == epoch) {
       // Prepare enhanced heartbeat fields
       const bool accepting = !ports_.shutdown_signal.is_shutting_down();
-      const auto inventory = engine_->get_ha_inventory();
+      const auto inventory = collect_ha_inventory();
       absl::flat_hash_set<std::string> registered_set;
       registered_set.reserve(inventory.size());
       for (const auto& entry : inventory) {
@@ -958,9 +1037,9 @@ void WorkerLifecycleManager::state_sync_loop(uint64_t epoch) {
         apply_obsolete_replicas(obsolete);
       }
 
-      const uint64_t requests = state_sync_requests_.exchange(0);
-      if (requests > 0) {
-        perform_state_sync(epoch);
+      const uint64_t request_generation = state_sync_requests_.exchange(0);
+      if (request_generation > 0) {
+        perform_state_sync(epoch, request_generation);
         state_sync_ticks_.fetch_add(1);
       }
 
@@ -1013,7 +1092,7 @@ void WorkerLifecycleManager::state_sync_loop(uint64_t epoch) {
   }
 }
 
-void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
+void WorkerLifecycleManager::perform_state_sync(uint64_t epoch, uint64_t request_generation) {
   if (stop_.load() || state_sync_epoch_.load() != epoch) {
     return;
   }
@@ -1039,7 +1118,7 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
       }
     }
   }
-  const auto inventory = engine_->get_ha_inventory();
+  const auto inventory = collect_ha_inventory();
   std::string worker_id;
   std::string node_address;
   {
@@ -1058,8 +1137,11 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
       state_checksum_ = checksum;
     }
   }
-  const int64_t reconcile_ts_s = static_cast<int64_t>(
-      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+  const int64_t reconcile_ts_ns = static_cast<int64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
+          .count());
+  const int64_t reconcile_ts_s = reconcile_ts_ns / 1000000000;
+  const int64_t reconcile_ts_nanos = reconcile_ts_ns % 1000000000;
   std::vector<commonpb::ReplicaInfo> inventory_proto;
   inventory_proto.reserve(inventory.size());
   for (const auto& entry : inventory) {
@@ -1151,7 +1233,7 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
     rep.mutable_stats()->set_is_available(entry.is_available);
     auto* registered_ts = rep.mutable_stats()->mutable_registered_ts();
     registered_ts->set_seconds(reconcile_ts_s);
-    registered_ts->set_nanos(0);
+    registered_ts->set_nanos(static_cast<int32_t>(reconcile_ts_nanos));
     inventory_proto.push_back(std::move(rep));
   }
 
@@ -1222,13 +1304,19 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
   state_sync_next_retry_ns_.store(0);
   mark_state_sync_progress();
 
-  auto record_sync_success = [this, epoch, &sync_or](int64_t last_sync_success) {
+  auto record_sync_success = [this, epoch, request_generation, &sync_or](int64_t last_sync_success) {
     {
       std::lock_guard<std::mutex> lock(state_mu_);
       if (state_sync_epoch_.load() == epoch) {
         state_version_ = sync_or->new_state_version;
         state_checksum_ = sync_or->new_state_checksum;
         last_sync_success_ts_ = last_sync_success;
+      }
+    }
+    if (request_generation > 0) {
+      uint64_t observed = state_sync_completed_generation_.load();
+      while (observed < request_generation &&
+             !state_sync_completed_generation_.compare_exchange_weak(observed, request_generation)) {
       }
     }
     sync_success_.fetch_add(1);
@@ -1521,6 +1609,17 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
   last_reconnect_latency_ms_.store(0);
   ports_.identity_store.set_registered(new_worker_id, node_id_);
   engine_->set_worker_identity(new_worker_id, node_id_, node_addr, grpc_port, opts_.p2p_port);
+  ports_.worker_directory_cache.update_local_entry(
+      WorkerDirectoryCache::Entry{
+          .daemon_id = daemon_id_,
+          .worker_id = new_worker_id,
+          .node_id = node_id_,
+          .node_address = node_addr,
+          .grpc_port = grpc_port,
+          .p2p_port = opts_.p2p_port,
+          .address = absl::StrCat(node_addr, ":", grpc_port),
+          .capability_flags = opts_.capability_flags,
+      });
   // Bootstrap reconcile once after re-registration.
   const uint64_t baseline = sync_success_.load();
   request_state_sync();

@@ -20,13 +20,17 @@ import pytest
 import torch
 import yaml
 from google.protobuf import wrappers_pb2
+from pydantic import ValidationError
 
 from tensorcast.api.store import (
     ArtifactError,
     AssemblyCloseoutContract,
     AssemblyReadinessPolicy,
     AssemblyRequirementSetRef,
+    BuilderMode,
+    RuntimeArtifactBuildIntent,
     Store,
+    build_serving_manifest_ref,
 )
 from tensorcast.api.store.view_composer import compute_index_multihash, compute_view_id
 from tensorcast.cli_utils.proc import build_daemon_process_env, ensure_cpp_daemon_binary
@@ -41,6 +45,7 @@ from tensorcast.proto.daemon.v2 import store_daemon_pb2, store_daemon_pb2_grpc
 from tensorcast.proto.global_store.v1 import global_store_pb2
 from tensorcast.proto.layout.v1 import layout_pb2
 from tensorcast.proto.operation.v1 import operation_pb2
+from tests.python.utils.hardware import synchronize_cuda
 
 pytestmark = [pytest.mark.requires_cuda_or_fake, pytest.mark.integration]
 
@@ -69,6 +74,30 @@ def _wait_ready(addr: str, proc: subprocess.Popen, timeout_s: float = 15.0) -> N
             pass
         time.sleep(0.2)
     raise RuntimeError("daemon failed to start")
+
+
+def _require_registered_worker_after_ready(
+    *, gs_port: int, listen_port: int, daemon_id: str
+) -> None:
+    channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    stub = GlobalStoreCompositeStub(channel)
+    try:
+        resp = stub.ListActiveWorkers(
+            global_store_pb2.ListActiveWorkersRequest(include_unavailable=True)
+        )
+    finally:
+        channel.close()
+
+    for worker in resp.workers:
+        if worker.grpc_port != listen_port:
+            continue
+        assert worker.daemon_id == daemon_id
+        assert worker.worker_id
+        return
+
+    raise AssertionError(
+        f"daemon reported READY before registering worker: listen_port={listen_port} daemon_id={daemon_id}"
+    )
 
 
 def _wait_for_artifact_view_info(
@@ -361,44 +390,53 @@ def _spawn_daemon(
     post_seal: dict[str, bool] | None = None,
 ) -> tuple[str, int, subprocess.Popen]:
     bin_path = ensure_cpp_daemon_binary()
-    listen_port = _get_free_port()
-    storage_dir = tmp_path / f"daemon_{listen_port}"
-    storage_dir.mkdir(parents=True, exist_ok=True)
-    daemon_id = f"daemon_piece_{listen_port}"
+    last_error: Exception | None = None
+    for _attempt in range(3):
+        listen_port = _get_free_port()
+        storage_dir = tmp_path / f"daemon_{listen_port}"
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        daemon_id = f"daemon_piece_{listen_port}"
 
-    cfg = _build_daemon_config(
-        listen_port=listen_port,
-        storage_dir=storage_dir,
-        gs_port=gs_port,
-        daemon_id=daemon_id,
-        post_seal=post_seal,
-    )
-
-    with tempfile.NamedTemporaryFile(
-        prefix="tc_daemon_cfg_", suffix=".yaml", mode="w", delete=False
-    ) as f:
-        yaml.safe_dump(cfg, f, sort_keys=False)
-        cfg_path = Path(f.name)
-
-    env = build_daemon_process_env(os.environ)
-    proc_log = storage_dir / "daemon_proc.log"
-    with proc_log.open("a") as log_fd:
-        proc = subprocess.Popen(
-            [str(bin_path), f"--config={cfg_path}"],
-            stdout=log_fd,
-            stderr=log_fd,
-            env=env,
+        cfg = _build_daemon_config(
+            listen_port=listen_port,
+            storage_dir=storage_dir,
+            gs_port=gs_port,
+            daemon_id=daemon_id,
+            post_seal=post_seal,
         )
-        try:
-            _wait_ready(f"127.0.0.1:{listen_port}", proc)
-            return (f"127.0.0.1:{listen_port}", gs_port, proc)
-        except Exception:
-            proc.terminate()
+
+        with tempfile.NamedTemporaryFile(
+            prefix="tc_daemon_cfg_", suffix=".yaml", mode="w", delete=False
+        ) as f:
+            yaml.safe_dump(cfg, f, sort_keys=False)
+            cfg_path = Path(f.name)
+
+        env = build_daemon_process_env(os.environ)
+        proc_log = storage_dir / "daemon_proc.log"
+        with proc_log.open("a") as log_fd:
+            proc = subprocess.Popen(
+                [str(bin_path), f"--config={cfg_path}"],
+                stdout=log_fd,
+                stderr=log_fd,
+                env=env,
+            )
             try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-            raise
+                _wait_ready(f"127.0.0.1:{listen_port}", proc)
+                _require_registered_worker_after_ready(
+                    gs_port=gs_port, listen_port=listen_port, daemon_id=daemon_id
+                )
+                return (f"127.0.0.1:{listen_port}", gs_port, proc)
+            except Exception as exc:
+                last_error = exc
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                continue
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("failed to spawn daemon")
 
 
 @pytest.fixture(scope="module")
@@ -562,6 +600,8 @@ def _seal_two_piece_assembly(
     assembly_id: str,
     canonical_index_bytes: bytes,
     canonical_size_bytes: int,
+    weights: list[float] | None = None,
+    bias: list[float] | None = None,
 ) -> tuple[str, str, str]:
     seed_port = _get_free_port()
     worker_resp = gs_stub.RegisterWorker(
@@ -600,8 +640,16 @@ def _seal_two_piece_assembly(
     view_spec_b = _make_view_spec(bias_start=4, bias_length=4)
     view_id_b = compute_view_id(view_spec_b, canonical_index_bytes)
 
-    weights = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
-    bias = [9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+    weights = (
+        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        if weights is None
+        else [float(value) for value in weights]
+    )
+    bias = (
+        [9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+        if bias is None
+        else [float(value) for value in bias]
+    )
     piece_a = _pack_floats(bias[:4]) + _pack_floats(weights)
     piece_b = _pack_floats(bias[4:]) + _pack_floats(weights)
 
@@ -930,7 +978,8 @@ def test_binding_canonical_full_attempt_publishes_lineage(daemon_process, gs_ser
 
         source_artifact = store.artifact(artifact_id=source_artifact_id)
         binding = source_artifact.bind(device="cuda:0", packing="byte_space")
-        sealed = binding.seal_current(update_epoch=binding.begin_update())
+        current_value = binding.current_value
+        assert current_value is not None
         source_version_key = "models/demo/source/v1"
         attempt = store.start_assembly_attempt(
             layout_id=layout_id,
@@ -941,7 +990,7 @@ def test_binding_canonical_full_attempt_publishes_lineage(daemon_process, gs_ser
             ),
         )
 
-        partial = sealed.contribute_to_assembly(attempt=attempt)
+        partial = current_value.contribute_to_assembly(attempt=attempt)
         assert partial.contribution_kind == "canonical_full"
 
         result = store.seal_assembly_attempt(attempt).wait(timeout_s=60.0)
@@ -962,6 +1011,283 @@ def test_binding_canonical_full_attempt_publishes_lineage(daemon_process, gs_ser
         with contextlib.suppress(Exception):
             if binding is not None:
                 binding.close()
+        with contextlib.suppress(Exception):
+            store.close()
+        gs_channel.close()
+
+
+def test_complete_pure_transform_publication_publishes_serving_lineage(
+    daemon_process, gs_server
+):
+    listen_addr, gs_port, _ = daemon_process
+    gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
+    store = Store(listen_addr)
+    channel = grpc.insecure_channel(listen_addr)
+    stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+    try:
+        source_artifact_id, _, _ = _seal_two_piece_assembly(
+            stub,
+            gs_stub,
+            assembly_id="cgid:pure-transform-source-serving-publish",
+            canonical_index_bytes=_make_index_bytes(),
+            canonical_size_bytes=64,
+        )
+        layout_id = _put_layout_for_source_artifact(
+            gs_stub,
+            artifact_id=source_artifact_id,
+            expected_view_ids=[],
+        )
+        source_artifact = store.artifact(artifact_id=source_artifact_id)
+        source_tensors = _artifact_tensor_dict(store, artifact_id=source_artifact_id)
+
+        result = store.complete_pure_transform_publication(
+            source_tensors,
+            build_intent=RuntimeArtifactBuildIntent(
+                builder_mode=BuilderMode.PURE_TRANSFORM,
+                framework_name="torch",
+                adapter_version="adapter-v1",
+                serving_abi_version="abi-v1",
+                build_pipeline_version="pipeline-v1",
+                source_artifact_ref=source_artifact_id,
+            ),
+            source_artifact=source_artifact,
+            contract_family="canonical_full",
+            layout_id=layout_id,
+            source_contribution_device="cuda:0",
+            source_version_key="models/demo/source/v1",
+            serving_version_key="models/demo/serving/v1",
+            timeout_s=60.0,
+        )
+
+        assert result.source_artifact_id == source_artifact_id
+        assert result.source_version_key == "models/demo/source/v1"
+        assert result.serving_version_key == "models/demo/serving/v1"
+        assert result.serving_artifact_id is not None
+        assert result.representation_contract_hash is not None
+        assert result.serving_build_digest is not None
+        assert result.serving_manifest_ref == build_serving_manifest_ref()
+
+        serving_mapping = gs_stub.ResolveKeyMapping(
+            global_store_pb2.ResolveKeyMappingRequest(key="models/demo/serving/v1")
+        )
+        assert serving_mapping.status == global_store_pb2.Status.STATUS_OK
+        assert serving_mapping.artifact_id == result.serving_artifact_id
+
+        serving_tensors = _artifact_tensor_dict(
+            store, artifact_id=str(result.serving_artifact_id)
+        )
+        assert torch.equal(serving_tensors["weights"], source_tensors["weights"])
+        assert torch.equal(serving_tensors["bias"], source_tensors["bias"])
+        assert "__tensorcast_meta__.manifest_json" in serving_tensors
+    finally:
+        with contextlib.suppress(Exception):
+            channel.close()
+        with contextlib.suppress(Exception):
+            store.close()
+        gs_channel.close()
+
+
+def test_complete_pure_transform_publication_structural_pp_publishes_serving_lineage(
+    daemon_process, gs_server
+):
+    listen_addr, gs_port, _ = daemon_process
+    gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
+    store = Store(listen_addr)
+    channel = grpc.insecure_channel(listen_addr)
+    stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+    try:
+        source_artifact_id, _, _ = _seal_two_piece_assembly(
+            stub,
+            gs_stub,
+            assembly_id="cgid:pure-transform-source-serving-publish-pp",
+            canonical_index_bytes=_make_index_bytes(),
+            canonical_size_bytes=64,
+        )
+        source_artifact = store.artifact(artifact_id=source_artifact_id)
+        source_tensors = _artifact_tensor_dict(store, artifact_id=source_artifact_id)
+        source_view_a = source_artifact.view(slices={"bias": (slice(0, 4),)})
+        source_view_b = source_artifact.view(slices={"bias": (slice(4, 8),)})
+        view_id_a = source_view_a._ensure_view_metadata_cache(
+            require_view_id=True
+        ).view_id
+        view_id_b = source_view_b._ensure_view_metadata_cache(
+            require_view_id=True
+        ).view_id
+        layout_id = _put_layout_for_source_artifact(
+            gs_stub,
+            artifact_id=source_artifact_id,
+            expected_view_ids=[str(view_id_a), str(view_id_b)],
+            replicated_tensors=["weights"],
+        )
+
+        result = store.complete_pure_transform_publication(
+            source_tensors,
+            build_intent=RuntimeArtifactBuildIntent(
+                builder_mode=BuilderMode.PURE_TRANSFORM,
+                framework_name="torch",
+                adapter_version="adapter-v1",
+                serving_abi_version="abi-v1",
+                build_pipeline_version="pipeline-v1",
+                source_artifact_ref=source_artifact_id,
+            ),
+            source_artifact=source_artifact,
+            contract_family="pp",
+            source_contribution_device="cuda:0",
+            source_contribution_artifacts=(source_view_a, source_view_b),
+            layout_id=layout_id,
+            source_version_key="models/demo/source/pp/v1",
+            serving_version_key="models/demo/serving/pp/v1",
+            timeout_s=60.0,
+        )
+
+        assert result.source_artifact_id == source_artifact_id
+        assert result.source_version_key == "models/demo/source/pp/v1"
+        assert result.serving_version_key == "models/demo/serving/pp/v1"
+        assert result.serving_artifact_id is not None
+        assert result.serving_manifest_ref == build_serving_manifest_ref()
+
+        serving_mapping = gs_stub.ResolveKeyMapping(
+            global_store_pb2.ResolveKeyMappingRequest(key="models/demo/serving/pp/v1")
+        )
+        assert serving_mapping.status == global_store_pb2.Status.STATUS_OK
+        assert serving_mapping.artifact_id == result.serving_artifact_id
+
+        serving_tensors = _artifact_tensor_dict(
+            store, artifact_id=str(result.serving_artifact_id)
+        )
+        assert torch.equal(serving_tensors["weights"], source_tensors["weights"])
+        assert torch.equal(serving_tensors["bias"], source_tensors["bias"])
+        assert "__tensorcast_meta__.manifest_json" in serving_tensors
+    finally:
+        with contextlib.suppress(Exception):
+            channel.close()
+        with contextlib.suppress(Exception):
+            store.close()
+        gs_channel.close()
+
+
+def test_complete_pure_transform_publication_serving_binding_swap(
+    daemon_process, gs_server
+):
+    listen_addr, gs_port, _ = daemon_process
+    gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
+    store = Store(listen_addr)
+    channel = grpc.insecure_channel(listen_addr)
+    stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+    binding = None
+    try:
+        source_artifact_v1, _, _ = _seal_two_piece_assembly(
+            stub,
+            gs_stub,
+            assembly_id="cgid:pure-transform-source-serving-publish-swap-v1",
+            canonical_index_bytes=_make_index_bytes(),
+            canonical_size_bytes=64,
+            weights=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            bias=[9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+        )
+        layout_id_v1 = _put_layout_for_source_artifact(
+            gs_stub,
+            artifact_id=source_artifact_v1,
+            expected_view_ids=[],
+        )
+        source_handle_v1 = store.artifact(artifact_id=source_artifact_v1)
+        result_v1 = store.complete_pure_transform_publication(
+            _artifact_tensor_dict(store, artifact_id=source_artifact_v1),
+            build_intent=RuntimeArtifactBuildIntent(
+                builder_mode=BuilderMode.PURE_TRANSFORM,
+                framework_name="torch",
+                adapter_version="adapter-v1",
+                serving_abi_version="abi-v1",
+                build_pipeline_version="pipeline-v1",
+                source_artifact_ref=source_artifact_v1,
+            ),
+            source_artifact=source_handle_v1,
+            contract_family="canonical_full",
+            source_contribution_device="cuda:0",
+            layout_id=layout_id_v1,
+            source_version_key="models/demo/source/swap/v1",
+            serving_version_key="models/demo/serving/swap/v1",
+            timeout_s=60.0,
+        )
+
+        source_artifact_v2, _, _ = _seal_two_piece_assembly(
+            stub,
+            gs_stub,
+            assembly_id="cgid:pure-transform-source-serving-publish-swap-v2",
+            canonical_index_bytes=_make_index_bytes(),
+            canonical_size_bytes=64,
+            weights=[21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0],
+            bias=[29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0, 36.0],
+        )
+        layout_id_v2 = _put_layout_for_source_artifact(
+            gs_stub,
+            artifact_id=source_artifact_v2,
+            expected_view_ids=[],
+        )
+        source_handle_v2 = store.artifact(artifact_id=source_artifact_v2)
+        result_v2 = store.complete_pure_transform_publication(
+            _artifact_tensor_dict(store, artifact_id=source_artifact_v2),
+            build_intent=RuntimeArtifactBuildIntent(
+                builder_mode=BuilderMode.PURE_TRANSFORM,
+                framework_name="torch",
+                adapter_version="adapter-v1",
+                serving_abi_version="abi-v1",
+                build_pipeline_version="pipeline-v1",
+                source_artifact_ref=source_artifact_v2,
+            ),
+            source_artifact=source_handle_v2,
+            contract_family="canonical_full",
+            source_contribution_device="cuda:0",
+            layout_id=layout_id_v2,
+            source_version_key="models/demo/source/swap/v2",
+            serving_version_key="models/demo/serving/swap/v2",
+            timeout_s=60.0,
+        )
+
+        assert result_v1.serving_artifact_id is not None
+        assert result_v2.serving_artifact_id is not None
+
+        binding = store.artifact(key="models/demo/serving/swap/v1").bind(
+            device="cuda:0",
+            packing="byte_space",
+            runtime_artifact_policy=result_v1.require_runtime_artifact_policy(),
+        )
+        torch.testing.assert_close(
+            binding.tensors["weights"].cpu(),
+            torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], dtype=torch.float32),
+        )
+        torch.testing.assert_close(
+            binding.tensors["bias"].cpu(),
+            torch.tensor(
+                [9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0], dtype=torch.float32
+            ),
+        )
+        binding.swap(
+            store.artifact(artifact_id=str(result_v2.serving_artifact_id)),
+            runtime_artifact_policy=result_v2.require_runtime_artifact_policy(),
+        )
+        synchronize_cuda()
+        torch.testing.assert_close(
+            binding.tensors["weights"].cpu(),
+            torch.tensor(
+                [21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0], dtype=torch.float32
+            ),
+        )
+        torch.testing.assert_close(
+            binding.tensors["bias"].cpu(),
+            torch.tensor(
+                [29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0, 36.0], dtype=torch.float32
+            ),
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            if binding is not None:
+                binding.close()
+        with contextlib.suppress(Exception):
+            channel.close()
         with contextlib.suppress(Exception):
             store.close()
         gs_channel.close()
@@ -1089,7 +1415,7 @@ def test_binding_attempt_rejects_serving_closeout_before_typed_contracts(
             expected_view_ids=[],
         )
 
-        with pytest.raises((ArtifactError, grpc.RpcError)) as exc_info:
+        with pytest.raises((ArtifactError, grpc.RpcError, ValidationError)) as exc_info:
             store.start_assembly_attempt(
                 layout_id=layout_id,
                 requirements=_canonical_full_requirements(),
@@ -1134,7 +1460,8 @@ def test_binding_attempt_uses_frozen_closeout_contract_from_creation(
 
         source_artifact = store.artifact(artifact_id=source_artifact_id)
         binding = source_artifact.bind(device="cuda:0", packing="byte_space")
-        sealed = binding.seal_current(update_epoch=binding.begin_update())
+        current_value = binding.current_value
+        assert current_value is not None
 
         frozen_key = "models/demo/source/frozen-v1"
         ignored_key = "models/demo/source/ignored-v2"
@@ -1155,7 +1482,7 @@ def test_binding_attempt_uses_frozen_closeout_contract_from_creation(
         assert attempt_record.ParseFromString(attempt_resp.attempt.attempt_record_proto)
         assert attempt_record.intent.closeout_contract.source_version_key == frozen_key
 
-        sealed.contribute_to_assembly(attempt=attempt)
+        current_value.contribute_to_assembly(attempt=attempt)
         result = store.seal_assembly_attempt(attempt).wait(timeout_s=60.0)
         assert result.source_version_key == frozen_key
 
@@ -1180,7 +1507,7 @@ def test_binding_attempt_uses_frozen_closeout_contract_from_creation(
         gs_channel.close()
 
 
-def test_piece_partial_contribution_rejected_for_ep_requirements(
+def test_piece_partial_contribution_accepted_for_ep_requirements(
     daemon_process, gs_server
 ):
     listen_addr, gs_port, _ = daemon_process
@@ -1214,11 +1541,10 @@ def test_piece_partial_contribution_rejected_for_ep_requirements(
             requirements=_ep_requirements([view_id]),
         )
 
-        with pytest.raises(ArtifactError) as exc_info:
-            binding.seal_current(
-                update_epoch=binding.begin_update()
-            ).contribute_to_assembly(attempt=attempt)
-        assert "coverage_contract mismatch" in str(exc_info.value)
+        partial = binding.seal_current(
+            update_epoch=binding.begin_update()
+        ).contribute_to_assembly(attempt=attempt)
+        assert partial.contribution_kind == "piece_partial"
     finally:
         with contextlib.suppress(Exception):
             channel.close()
@@ -1609,9 +1935,6 @@ def test_binding_piece_partial_replacement_and_pp_attempt(daemon_process, gs_ser
         replacement = sealed_a_new.contribute_to_assembly(attempt=attempt)
         assert replacement.contribution_kind == "piece_partial"
         assert replacement.view_id == view_id_a
-
-        reopened_epoch = binding_a_old.begin_update()
-        assert reopened_epoch
 
         second = sealed_b.contribute_to_assembly(attempt=attempt)
         assert second.contribution_kind == "piece_partial"

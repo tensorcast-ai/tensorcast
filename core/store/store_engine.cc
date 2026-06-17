@@ -591,6 +591,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_buffer_internal(
       .artifact_chunk_bytes = artifact_chunk_bytes_,
       .expected_artifact_size = source.size_bytes,
       .byte_mapping_config = options_.byte_mapping,
+      .materialization_strategy = options_.materialization_strategy,
       .memory_tier_config = options_.memory_tier_config,
   };
   config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
@@ -789,36 +790,29 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_in
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_mapped_into_target(
     const DeviceKey& target_device,
-    const loading::IntoTargetLayout& target_layout,
-    const loader::ByteRangeMap& mapping,
-    std::string_view canonical_index_json,
-    uint64_t generation,
+    const runtime::ingestion::strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
     const loading::MaterializeHints& hints,
     std::optional<loading::DiskSource> disk_source) {
   return ingestion_runtime_->materialize_mapped_into_target(
-      target_device, target_layout, mapping, canonical_index_json, generation, hints, std::move(disk_source));
+      target_device, prepared_execution, hints, std::move(disk_source));
 }
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_mapped_into_target(
     const DeviceKey& target_device,
-    const loading::IntoTargetLayout& target_layout,
-    const loader::ByteRangeMap& mapping,
-    std::string_view canonical_index_json,
-    uint64_t generation,
+    const runtime::ingestion::strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
     const loading::MaterializeHints& hints) {
-  return ingestion_runtime_->materialize_mapped_into_target(
-      target_device, target_layout, mapping, canonical_index_json, generation, hints);
+  return ingestion_runtime_->materialize_mapped_into_target(target_device, prepared_execution, hints);
 }
 
-absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_mapped_loader_into_target(
+absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_mapped_sources_into_target(
     const DeviceKey& target_device,
     const loading::IntoTargetLayout& target_layout,
-    std::unique_ptr<IArtifactLoader> loader,
+    std::vector<std::shared_ptr<loader::SeekableSource>> sources,
     const loader::ByteRangeMap& mapping,
     const loading::MaterializeHints& hints,
     loading::MaterializationSource source_kind) {
-  return ingestion_runtime_->materialize_mapped_loader_into_target(
-      target_device, target_layout, std::move(loader), mapping, hints, source_kind);
+  return ingestion_runtime_->materialize_mapped_sources_into_target(
+      target_device, target_layout, std::move(sources), mapping, hints, source_kind);
 }
 
 absl::StatusOr<runtime::ingestion::ArtifactLoweringResult> StoreEngine::execute_artifact_lowering_plan(
@@ -884,6 +878,15 @@ absl::StatusOr<components::KeyMappingSwapResult> StoreEngine::swap_key_mapping(
     std::optional<std::string_view> expected_artifact_id,
     std::optional<uint64_t> expected_generation) {
   return metadata_gateway_->swap_key_mapping(key, new_artifact_id, expected_artifact_id, expected_generation);
+}
+
+absl::StatusOr<tensorcast::common::v1::ArtifactDescriptor> StoreEngine::get_artifact_descriptor(
+    std::string_view artifact_id) {
+  auto client = runtime_env_->runtime_context().global_store_client();
+  if (!client || !client->is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  return client->get_artifact_descriptor(artifact_id);
 }
 
 absl::StatusOr<std::string> StoreEngine::get_canonical_index_by_id(std::string_view artifact_id) {
@@ -1047,6 +1050,54 @@ absl::StatusOr<void*> StoreEngine::get_replica_cpu_base_ptr(std::string_view art
     return absl::FailedPreconditionError("CPU replica base pointer unavailable");
   }
   return ptrs.front();
+}
+
+absl::StatusOr<StoreEngine::ReplicaBasePointer> StoreEngine::get_loaded_replica_base_ptr(
+    std::string_view artifact_id) const {
+  const auto keys = replica_runtime_->registry().find_by_artifact(artifact_id);
+  absl::Status last_status = absl::NotFoundError(absl::StrFormat("replica for artifact %s not found", artifact_id));
+
+  auto try_location = [&](common::memory::MemoryLocation location) -> absl::StatusOr<StoreEngine::ReplicaBasePointer> {
+    for (const auto& key : keys) {
+      const bool device_matches =
+          (location == common::memory::MemoryLocation::CPU && key.device.type == DeviceType::CPU) ||
+          (location == common::memory::MemoryLocation::GPU && key.device.type == DeviceType::GPU);
+      if (!device_matches) {
+        continue;
+      }
+      auto replica_or = replica_runtime_->registry().find(key);
+      if (!replica_or.ok()) {
+        last_status = replica_or.status();
+        continue;
+      }
+      auto replica = *replica_or;
+      if (replica->get_memory_state(location) != replica::MemoryState::LOADED) {
+        last_status = absl::FailedPreconditionError(
+            location == common::memory::MemoryLocation::CPU ? "CPU replica is not loaded"
+                                                            : "GPU replica is not loaded");
+        continue;
+      }
+      auto ptrs = replica->get_data_pointer(location);
+      if (ptrs.empty() || ptrs.front() == nullptr) {
+        last_status = absl::FailedPreconditionError(
+            location == common::memory::MemoryLocation::CPU ? "CPU replica base pointer unavailable"
+                                                            : "GPU replica base pointer unavailable");
+        continue;
+      }
+      return StoreEngine::ReplicaBasePointer{
+          .ptr = ptrs.front(),
+          .location = location,
+          .device_id = location == common::memory::MemoryLocation::GPU ? key.device.ordinal : -1,
+      };
+    }
+    return last_status;
+  };
+
+  auto cpu_or = try_location(common::memory::MemoryLocation::CPU);
+  if (cpu_or.ok()) {
+    return cpu_or;
+  }
+  return try_location(common::memory::MemoryLocation::GPU);
 }
 
 gsl::not_null<std::shared_ptr<components::CommunicationManager>> StoreEngine::get_shared_comm_manager() const {

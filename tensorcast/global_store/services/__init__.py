@@ -4,9 +4,11 @@
 
 from .artifact_service import ArtifactService
 from .chunk_service import ChunkService
+from .group_realization_service import GroupRealizationService
 from .instance_service import InstanceService
 from .memory_tier_service import MemoryTierService
 from .placement_service import PlacementService
+from .progressive_service import ProgressiveReplicationService
 from .recovery_service import RecoveryService
 from .shard_home_lease_service import ShardHomeLeaseService
 from .transport_service import TransportService
@@ -17,6 +19,7 @@ from .worker_service import WorkerService
 __all__ = [
     "ChunkService",
     "ArtifactService",
+    "GroupRealizationService",
     "TransportService",
     "WorkerService",
     "InstanceService",
@@ -24,6 +27,7 @@ __all__ = [
     "ViewStateService",
     "MemoryTierService",
     "PlacementService",
+    "ProgressiveReplicationService",
     "WorkerControlReducer",
     "ShardHomeLeaseService",
 ]

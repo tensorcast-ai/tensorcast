@@ -1,8 +1,9 @@
 #  Copyright (c) 2026, TensorCast Team.
 
+# import os
 # import tensorcast as tc
 
-# path = "/mnt/step3-alignment/inference/Qwen2-1.5B-Instruct"
+# path = os.environ.get("TENSORCAST_EXAMPLE_MODEL_DIR", "/tmp/tensorcast/example-safetensors")
 # artifact = tc.from_disk(path, verify_checksums=False)
 # names = artifact.tensor_names
 
@@ -15,9 +16,13 @@
 
 # print(tensor_dict)
 
+import os
+
 import tensorcast as tc
 
-path = "/mnt/step3-alignment/inference/Qwen2-1.5B-Instruct"
+path = os.environ.get(
+    "TENSORCAST_EXAMPLE_MODEL_DIR", "/tmp/tensorcast/example-safetensors"
+)
 
 # HF safetensors 目录通常没有 artifact_descriptor.json；要么先 backfill，要么先关掉校验
 artifact = tc.from_disk(path, verify_checksums=False)

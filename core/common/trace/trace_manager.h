@@ -124,6 +124,7 @@ class TraceManager {
   static void set_current_artifact_id(const std::string& artifact_id) {
     tls_artifact_id_ = artifact_id;
   }
+
   static const std::string& current_artifact_id() {
     return tls_artifact_id_;
   }
@@ -133,6 +134,7 @@ class TraceManager {
     explicit ArtifactIdGuard(const std::string& artifact_id) : previous_id_(TraceManager::current_artifact_id()) {
       TraceManager::set_current_artifact_id(artifact_id);
     }
+
     ~ArtifactIdGuard() {
       TraceManager::set_current_artifact_id(previous_id_);
     }
@@ -180,6 +182,7 @@ class TraceSummaryGuard {
       const std::string& artifact_id,
       const std::string& request_id = TraceManager::current_request_id())
       : artifact_id_(artifact_id), request_id_(request_id) {}
+
   ~TraceSummaryGuard() {
     std::ostringstream oss;
     TraceManager::instance().dump_summary(artifact_id_, request_id_, oss);

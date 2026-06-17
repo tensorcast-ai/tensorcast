@@ -17,8 +17,11 @@ constexpr static uint32_t kHeaderPrefix = 0xAABBAABB;
 enum {
   ENGINE_OP_INVALID = 0,
   ENGINE_OP_READ_REQUEST,
+  ENGINE_OP_READ_PLAN_REQUEST,
   ENGINE_OP_READ_RESPONSE_EX,
+  ENGINE_OP_READ_PLAN_RESPONSE_EX,
   ENGINE_OP_READ_FAILED,
+  ENGINE_OP_READ_PLAN_FAILED,
   ENGINE_OP_RDMA_CONNECT_REQUEST,
   ENGINE_OP_RDMA_CONNECT_RESPONSE,
   ENGINE_OP_RDMA_CONNECT_FAILED,
@@ -26,6 +29,7 @@ enum {
   ENGINE_OP_MTCP_CONNECT_RESPONSE,
   ENGINE_OP_MTCP_CONNECT_FAILED,
   ENGINE_OP_RDMA_READ_DONE_EX,
+  ENGINE_OP_RDMA_READ_PLAN_DONE_EX,
   ENGINE_OP_CLOSE,
 };
 
@@ -91,6 +95,23 @@ struct ProtoReadRequest {
   uint64_t request_id;
 };
 
+// Variable-length plan request.
+// Layout: [ProtoReadPlanRequestHeader][ProtoReadPlanSourceSlice[num_source_slices]]
+struct ProtoReadPlanRequestHeader {
+  uint8_t transport_type;
+  int16_t rail_id;
+  uint8_t reserved = 0;
+  uint64_t request_id;
+  uint32_t num_source_slices;
+};
+
+struct ProtoReadPlanSourceSlice {
+  char tensor_key[kMaxTensorNameLen];
+  uint32_t source_slice_index;
+  uint64_t remote_offset;
+  uint64_t bytes;
+};
+
 // Variable-length response supporting multiple segments.
 // Layout: [ProtoReadResponseExHeader][ProtoReadResponseExSeg[num_segments]]
 struct ProtoReadResponseExHeader {
@@ -115,9 +136,37 @@ struct ProtoReadResponseExSeg {
   uint32_t rkey;
 };
 
+// Variable-length response supporting plan slices.
+// Layout: [ProtoReadPlanResponseExHeader][ProtoReadPlanResponseExSeg[num_segments]]
+struct ProtoReadPlanResponseExHeader {
+  uint8_t transport_type;
+  uint8_t staged;
+  char nic_name[kMaxDevName];
+  uint64_t request_id;
+  uint32_t num_segments;
+  uint32_t window_seq;
+  uint32_t credit_granted;
+  uint8_t more_segments;
+  uint8_t zero_copy;
+  int16_t rail_id;
+};
+
+struct ProtoReadPlanResponseExSeg {
+  uint32_t source_slice_index;
+  uint64_t source_slice_offset;
+  uint64_t addr;
+  uint32_t bytes;
+  uint32_t rkey;
+};
+
 struct ProtoReadFailed {
   char tensor_key[kMaxTensorNameLen];
   uint64_t offset;
+  uint64_t request_id;
+  uint32_t reason;
+};
+
+struct ProtoReadPlanFailed {
   uint64_t request_id;
   uint32_t reason;
 };
@@ -136,6 +185,14 @@ struct ProtoRdmaReadDoneExHeader {
 
 struct ProtoRdmaReadDoneExSeg {
   uint64_t offset;
+};
+
+struct ProtoRdmaReadPlanDoneExHeader {
+  uint64_t request_id;
+  uint32_t num_segments;
+  uint32_t window_seq;
+  uint8_t final_window;
+  uint8_t reserved[3];
 };
 
 } // namespace tensorcast::communicator::engine

@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import weakref
+from typing import Any, cast
 
+import pytest
+import torch
+
+from tensorcast.api._config import PlanType
 from tensorcast.api.context import CallContext, GovernanceContext
 from tensorcast.api.errors import ArtifactError
 from tensorcast.api.plan import (
@@ -13,25 +18,121 @@ from tensorcast.api.plan import (
     Instance,
     Plan,
     PlanResult,
+    PlanStepRef,
     Worker,
 )
 from tensorcast.api.plan.artifact_set import resolve_artifact_set_ref
+from tensorcast.api.store import (
+    BuilderMode,
+    RepresentationPublishSpec,
+    RuntimeArtifactBuildIntent,
+    build_pure_transform_publication_bundle_from_registered_artifact,
+)
 from tensorcast.api.store.artifact import Artifact
 from tensorcast.api.store.common import canonical_index_from_bytes
+from tensorcast.api.store.handles import RegisteredArtifact
+from tensorcast.api.store.types import ReplicaInfo
 from tensorcast.engine_adapter.artifact_api import (
     BatchResult,
+    EngineOwnedManifest,
     HydrateResult,
     ManifestArtifactSetBridge,
     ManifestResult,
+    PublishManifest,
     PublishResult,
 )
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.node_agent.v1 import node_agent_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
+from tensorcast.types import (
+    RealizationTarget,
+    RuntimeBindingMemberRef,
+    RuntimeBindingResolvedLayout,
+    RuntimeBindingSourceRef,
+    RuntimeBindingSourceReuseDecision,
+    RuntimeTopologyRef,
+    build_serving_manifest_ref,
+)
 
 
 def _canonical_index_bytes() -> bytes:
     return b'{"w":[0,4,[1],[1],"torch.float32",0]}'
+
+
+def _realization_target() -> RealizationTarget:
+    topology = RuntimeTopologyRef(schema_topology_digest="topology-schema")
+    member = RuntimeBindingMemberRef(
+        member_id="member-0",
+        member_index=0,
+        member_count=1,
+        group_id="group-1",
+    )
+    source = RuntimeBindingSourceRef(
+        source_kind="checkpoint_artifact",
+        artifact_selection_digest="selection-digest",
+        source_artifact_ref="mi2:source",
+        source_schema_hash="source-schema",
+    )
+    resolved_layout = RuntimeBindingResolvedLayout(
+        binding_layout_id="layout-1",
+        source=source,
+        source_reuse=RuntimeBindingSourceReuseDecision(
+            mode="checkpoint_to_runtime",
+            representation_contract_hash="repr-contract",
+        ),
+        topology=topology,
+        member=member,
+        target_layout=b"target-layout",
+        target_index_bytes=b"target-index",
+        target_layout_hash="target-layout-hash",
+        tensor_schema_hash="tensor-schema",
+        spec_digest="spec-digest",
+        source_schema_hash="source-schema",
+    )
+    return RealizationTarget(
+        runtime="vllm",
+        device="cuda:0",
+        device_uuid="GPU-0",
+        source=source,
+        topology=topology,
+        member=member,
+        model_config_digest="model-config",
+        runtime_build_digest="serving-build",
+        resolved_layout=resolved_layout,
+    )
+
+
+def _sample_publish_manifest() -> PublishManifest:
+    artifact_manifest = ManifestResult.from_artifact_selections(
+        engine_request_id="rid-transfer",
+        layout_id="layout-v1",
+        manifest_selection=common_pb2.ArtifactSelection(
+            artifact_id="engine-manifest:rid-transfer",
+            logical_layout_hash=b"manifest-logical",
+            selection_hash=b"manifest-selection",
+        ),
+        artifact_selections=(
+            common_pb2.ArtifactSelection(
+                artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",
+                logical_layout_hash=b"logical-a",
+                selection_hash=b"selection-a",
+            ),
+        ),
+    )
+    return PublishManifest(
+        artifact_manifest=artifact_manifest,
+        engine_owned_manifest=EngineOwnedManifest(
+            engine="sglang",
+            schema="sglang.engine_owned_manifest.v1",
+            version=1,
+            encoding="json",
+            created_at_ms=1774223000123,
+            expires_at_ms=1774223060123,
+            artifact_manifest_digest=artifact_manifest.key_set_digest_hex,
+            payload_sha256="f" * 64,
+            payload=b'{"logical_request_id":"rid-transfer"}',
+        ),
+    )
 
 
 class _StoreStub:
@@ -39,11 +140,15 @@ class _StoreStub:
     _runtime = None
 
 
+def _store_ref(store: _StoreStub) -> weakref.ReferenceType[Any]:
+    return cast(weakref.ReferenceType[Any], weakref.ref(store))
+
+
 def test_plan_to_spec_is_deterministic() -> None:
     store = _StoreStub()
     canonical_bytes = _canonical_index_bytes()
     artifact = Artifact(
-        store_ref=weakref.ref(store),
+        store_ref=_store_ref(store),
         artifact_id="mi2:test",
         canonical_index_bytes=canonical_bytes,
         canonical_index=canonical_index_from_bytes(canonical_bytes),
@@ -73,7 +178,7 @@ def test_plan_view_selection_hash_populated() -> None:
     store = _StoreStub()
     canonical_bytes = _canonical_index_bytes()
     base = Artifact(
-        store_ref=weakref.ref(store),
+        store_ref=_store_ref(store),
         artifact_id="mi2:view-test",
         canonical_index_bytes=canonical_bytes,
         canonical_index=canonical_index_from_bytes(canonical_bytes),
@@ -92,6 +197,33 @@ def test_plan_view_selection_hash_populated() -> None:
     assert selection.view_id
     assert selection.view_subset_hash
     assert list(selection.tensor_names) == ["w"]
+
+
+def test_plan_prefetch_accepts_realization_target() -> None:
+    store = _StoreStub()
+    canonical_bytes = _canonical_index_bytes()
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="mi2:target-test",
+        canonical_index_bytes=canonical_bytes,
+        canonical_index=canonical_index_from_bytes(canonical_bytes),
+    )
+    target = _realization_target()
+    plan = Plan(CallContext(request_id="req-target"))
+    worker = Worker(
+        worker_id="worker-target",
+        daemon_address="127.0.0.1:50051",
+        daemon_id="daemon-target",
+    )
+
+    ref = plan.on_worker(worker).prefetch(artifact, target=target)
+
+    spec = plan.to_spec()
+    assert spec.steps[0].step_id == ref.step_id
+    prefetch = spec.steps[0].action.prefetch
+    assert prefetch.HasField("serving_binding_target")
+    assert prefetch.serving_binding_target.runtime == "vllm"
+    assert prefetch.serving_binding_target.member.member_id == "member-0"
 
 
 def test_plan_publish_serializes_canonical_action() -> None:
@@ -120,18 +252,116 @@ def test_plan_publish_serializes_canonical_action() -> None:
     assert first_step.action.publish.engine_request_id == "rid-123"
     assert int(first_step.action.publish.ttl_ms) == 60_000
 
+def test_plan_hydrate_serializes_publish_manifest() -> None:
+    ctx = CallContext(request_id="req-hydrate", idempotency_key="idem-hydrate")
+    plan = Plan(ctx)
+    inst = Instance(instance_id="inst-a", worker_id="worker-a", engine="sglang")
+    publish_manifest = _sample_publish_manifest()
+
+    step = plan.on_instance(inst).hydrate(publish_manifest=publish_manifest)
+
+    spec = plan.to_spec()
+    assert len(spec.steps) == 1
+    hydrate_step = spec.steps[0]
+    assert hydrate_step.step_id == step.step_id
+    assert hydrate_step.action.WhichOneof("kind") == "hydrate"
+    assert (
+        hydrate_step.action.hydrate.WhichOneof("request_source") == "publish_manifest"
+    )
+    assert (
+        hydrate_step.action.hydrate.publish_manifest.schema == publish_manifest.schema
+    )
+    assert (
+        hydrate_step.action.hydrate.publish_manifest.engine_owned_manifest.payload
+        == publish_manifest.engine_owned_manifest.payload
+    )
+
+
+def test_plan_hydrate_rejects_ambiguous_request_source() -> None:
+    plan = Plan(CallContext(request_id="req-hydrate-invalid"))
+    inst = Instance(instance_id="inst-a", worker_id="worker-a", engine="sglang")
+    publish_manifest = _sample_publish_manifest()
+
+    with pytest.raises(
+        ArtifactError, match="exactly one of engine_request_id or publish_manifest"
+    ):
+        plan.on_instance(inst).hydrate(
+            engine_request_id="rid-123",
+            publish_manifest=publish_manifest,
+        )
+
+    with pytest.raises(
+        ArtifactError, match="exactly one of engine_request_id or publish_manifest"
+    ):
+        plan.on_instance(inst).hydrate()
+
+
+def test_plan_transform_register_pure_transform_builds_repo_owned_spec() -> None:
+    store = _StoreStub()
+    canonical_bytes = _canonical_index_bytes()
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="mi2:test",
+        canonical_index_bytes=canonical_bytes,
+        canonical_index=canonical_index_from_bytes(canonical_bytes),
+    )
+    ctx = CallContext(request_id="req-pure-transform")
+    plan = Plan(ctx)
+    inst = Instance(instance_id="inst-a", worker_id="worker-a", engine="sglang")
+
+    step_ref = plan.on_instance(inst).transform_register_pure_transform(
+        artifact,
+        build_intent=RuntimeArtifactBuildIntent(
+            builder_mode=BuilderMode.PURE_TRANSFORM,
+            framework_name="torch",
+            adapter_version="adapter-v7",
+            serving_abi_version="abi-v7",
+            build_pipeline_version="pipeline-v7",
+            source_artifact_ref="mi2:test",
+        ),
+        out_key="models/demo/serving/v7",
+        source_version_key="models/demo/source/v7",
+        serving_version_key="models/demo/serving/v7",
+        transform_args={"quant": 4},
+        layout_hash="layout-v7",
+    )
+
+    spec = plan.to_spec()
+
+    assert len(spec.steps) == 1
+    step = spec.steps[0]
+    assert step.step_id == step_ref.step_id
+    assert step.action.WhichOneof("kind") == "transform_register"
+    assert step.action.transform_register.out_key == "models/demo/serving/v7"
+    assert step.action.transform_register.spec.name == "identity.v1"
+    assert step.action.transform_register.spec.layout_hash == "layout-v7"
+    assert step.action.transform_register.spec.HasField("publication_spec")
+    args = {
+        str(item.key): (
+            int(item.int_value)
+            if item.WhichOneof("value") == "int_value"
+            else str(item.string_value)
+        )
+        for item in step.action.transform_register.spec.args
+    }
+    assert args["quant"] == 4
+    publication_spec = step.action.transform_register.spec.publication_spec
+    assert publication_spec.build_intent.framework_name == "torch"
+    assert publication_spec.source_version_key == "models/demo/source/v7"
+    assert publication_spec.serving_version_key == "models/demo/serving/v7"
+
 
 def test_prefetch_many_lowers_to_inline_artifact_set_ref() -> None:
     store = _StoreStub()
     canonical_bytes = _canonical_index_bytes()
     artifact_a = Artifact(
-        store_ref=weakref.ref(store),
+        store_ref=_store_ref(store),
         artifact_id="mi2:a",
         canonical_index_bytes=canonical_bytes,
         canonical_index=canonical_index_from_bytes(canonical_bytes),
     )
     artifact_b = Artifact(
-        store_ref=weakref.ref(store),
+        store_ref=_store_ref(store),
         artifact_id="mi2:b",
         canonical_index_bytes=canonical_bytes,
         canonical_index=canonical_index_from_bytes(canonical_bytes),
@@ -151,8 +381,8 @@ def test_prefetch_many_lowers_to_inline_artifact_set_ref() -> None:
 
     explicit_set = ArtifactSetRef.inline(
         (
-            artifact_a._build_artifact_selection(),
-            artifact_b._build_artifact_selection(),
+            artifact_a._resolve_realization_selection().proto,
+            artifact_b._resolve_realization_selection().proto,
         )
     )
     explicit_plan = Plan(ctx)
@@ -241,7 +471,9 @@ def test_plan_proto_reserves_cluster_transport_slot() -> None:
     assert action.WhichOneof("kind") == "cluster_action"
 
 
-def test_local_plan_run_fails_closed_on_instance_steps_without_node_agent_bridge() -> None:
+def test_local_plan_run_fails_closed_on_instance_steps_without_node_agent_bridge() -> (
+    None
+):
     ctx = CallContext(request_id="req-instance-local")
     plan = Plan(ctx)
     inst = Instance(instance_id="inst-a", worker_id="worker-a", engine="sglang")
@@ -253,7 +485,7 @@ def test_local_plan_run_fails_closed_on_instance_steps_without_node_agent_bridge
     step_result = result.step(step)
     assert step_result.action == "manifest"
     assert step_result.status.state == "failed"
-    assert "Node Agent" in step_result.status.message
+    assert "Node Agent" in (step_result.status.message or "")
 
 
 def test_artifact_set_ref_resolution_fails_closed_on_mismatch() -> None:
@@ -355,7 +587,7 @@ def test_plan_result_decodes_node_agent_artifact_results() -> None:
         ),
         artifact_selections=(
             common_pb2.ArtifactSelection(
-                artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE",
+                artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",
                 logical_layout_hash=b"logical-a",
                 selection_hash=b"selection-a",
             ),
@@ -399,9 +631,12 @@ def test_plan_result_decodes_node_agent_artifact_results() -> None:
     publish_step.artifact_result.publish.manifest.CopyFrom(
         manifest_step.artifact_result.manifest
     )
+    publish_step.artifact_result.publish.publish_manifest.CopyFrom(
+        _sample_publish_manifest().to_proto()
+    )
     publish_outcome = publish_step.artifact_result.publish.put_outcomes.add()
     publish_outcome.artifact_id = (
-        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE"
+        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE"
     )
     publish_outcome.status_code = "OK"
     publish_outcome.message = "created"
@@ -418,11 +653,11 @@ def test_plan_result_decodes_node_agent_artifact_results() -> None:
     )
     hydrate_outcome = hydrate_step.artifact_result.hydrate.get_outcomes.add()
     hydrate_outcome.artifact_id = (
-        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE"
+        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE"
     )
     hydrate_outcome.status_code = "MISS"
     hydrate_step.artifact_result.hydrate.missing_artifact_ids.append(
-        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azI"
+        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azI"
     )
 
     evict_step = response.steps.add(
@@ -434,7 +669,7 @@ def test_plan_result_decodes_node_agent_artifact_results() -> None:
     evict_step.artifact_result.evict_local.engine_request_id = "rid-123"
     evict_outcome = evict_step.artifact_result.evict_local.outcomes.add()
     evict_outcome.artifact_id = (
-        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE"
+        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE"
     )
     evict_outcome.status_code = "OK"
 
@@ -452,10 +687,12 @@ def test_plan_result_decodes_node_agent_artifact_results() -> None:
     publish_result = result.steps["s2"].artifact_result
     assert isinstance(publish_result, PublishResult)
     assert publish_result.put_outcomes[0].message == "created"
+    assert publish_result.publish_manifest is not None
+    assert publish_result.publish_manifest.engine_owned_manifest.engine == "sglang"
     hydrate_result = result.steps["s3"].artifact_result
     assert isinstance(hydrate_result, HydrateResult)
     assert hydrate_result.missing_artifact_ids == (
-        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azI",
+        "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azI",
     )
     evict_result = result.steps["s4"].artifact_result
     assert isinstance(evict_result, BatchResult)
@@ -505,3 +742,87 @@ def test_plan_result_decodes_node_agent_artifact_set_results() -> None:
     assert decoded.outcomes[0].status is not None
     assert decoded.outcomes[0].status.state == "success"
     assert result.steps["s-set"].value == decoded
+
+
+def test_plan_result_decodes_pure_transform_publication_result() -> None:
+    canonical_index = canonical_index_from_bytes(_canonical_index_bytes())
+    registered_artifact = RegisteredArtifact(
+        artifact_id="mi2:test:serving",
+        replica=ReplicaInfo(
+            replica_id="mi2:test:serving",
+            replica_type="COALESCED_VRAM",
+            device=torch.device("cuda", 0),
+            plan=PlanType.VRAM_COALESCED,
+            size_bytes=4,
+        ),
+        canonical_index=canonical_index,
+        lease=None,
+    )
+    bundle = build_pure_transform_publication_bundle_from_registered_artifact(
+        build_intent=RuntimeArtifactBuildIntent(
+            representation_contract_hash="bafkrepresentation",
+            builder_mode=BuilderMode.PURE_TRANSFORM,
+            framework_name="torch",
+            adapter_version="adapter-v1",
+            serving_abi_version="abi-v1",
+            build_pipeline_version="pipeline-v1",
+            source_artifact_ref="mi2:test:source",
+        ),
+        serving_artifact=registered_artifact,
+        source_version_key="models/demo/source/v1",
+        serving_version_key="models/demo/serving/v1",
+    ).model_copy(update={"contract_family": "canonical_full"})
+
+    response = node_agent_pb2.ExecutePlanResponse(
+        request_id="req-node-agent-pure-transform",
+        ok=True,
+    )
+    step = response.steps.add(
+        step_id="s-pure",
+        target_id="inst-a",
+        action="transform_register",
+    )
+    step.status.state = node_agent_pb2.OPERATION_STATE_SUCCESS
+    step.status.message = "transform_register completed"
+    step.artifact_result.representation_publish.CopyFrom(bundle.to_proto())
+
+    result = PlanResult.from_node_agent_response(response)
+
+    decoded = result.steps["s-pure"].artifact_result
+    assert isinstance(decoded, RepresentationPublishSpec)
+    assert decoded.source_artifact_ref == "mi2:test:source"
+    assert decoded.contract_family == "canonical_full"
+    assert decoded.structural_view_ids == ()
+    assert decoded.serving_artifact_id == "mi2:test:serving"
+    assert decoded.serving_manifest_ref == build_serving_manifest_ref()
+    assert (
+        decoded.representation_publish_contract.representation_contract_hash
+        == "bafkrepresentation"
+    )
+    assert decoded.closeout_contract.kind == "representation_publish"
+
+    required = result.require_representation_publish_spec(PlanStepRef("s-pure"))
+    assert required == decoded
+
+
+def test_plan_result_require_representation_publish_spec_rejects_non_bundle() -> None:
+    response = node_agent_pb2.ExecutePlanResponse(
+        request_id="req-node-agent-manifest-only",
+        ok=True,
+    )
+    step = response.steps.add(
+        step_id="s-manifest",
+        target_id="inst-a",
+        action="manifest",
+    )
+    step.status.state = node_agent_pb2.OPERATION_STATE_SUCCESS
+    step.status.message = "manifest completed"
+    step.artifact_result.manifest.engine_request_id = "rid-123"
+    step.artifact_result.manifest.layout_id = "layout-v1"
+
+    result = PlanResult.from_node_agent_response(response)
+
+    with pytest.raises(ArtifactError) as exc_info:
+        result.require_representation_publish_spec(PlanStepRef("s-manifest"))
+
+    assert "does not carry a RepresentationPublishSpec" in str(exc_info.value)

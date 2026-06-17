@@ -29,7 +29,7 @@ server:
     port: 65090
   # Optional default root for relative disk_path values.
   # When empty, disk materialization accepts absolute disk_path only.
-  storage_path: "/data/models"
+  storage_path: "/var/lib/tensorcast/models"
   # StoreEngine I/O worker threads; tune for disk/P2P parallelism vs CPU contention.
   num_threads: 16
   # gRPC server channel args and TLS.
@@ -68,6 +68,14 @@ engine:
   streaming_buffer_chunks: 8
   # Enable external target verification for MaterializeIntoTarget (off by default).
   enable_external_target_verification: false
+  progressive_replication:
+    # Default off. Cross-host WeightPublisher progressive benchmark lanes turn
+    # this on through runner overrides together with Global Store progressive
+    # source eligibility.
+    enabled: false
+    report_interval: 1s
+    min_report_delta_bytes: 16777216
+    verify_before_report: true
   # Enable memfd-backed UMA CPU allocations for zero-copy CPU tensor materialization.
   cpu_shared_memory:
     enabled: true
@@ -331,6 +339,14 @@ observability:
   tracing:
     # Chrome trace output directory; empty disables.
     chrome_trace_dir: ""
+
+# Staged serving acquisition path used by final group realization.
+serving_prefetch:
+  enabled: true
+  same_daemon_acquire_enabled: true
+
+group_realization:
+  enabled: true
 
 # Compatibility toggles for legacy behavior.
 compatibility:

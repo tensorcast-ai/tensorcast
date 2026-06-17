@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -38,6 +39,16 @@ struct ByteArtifactRuntimeState {
     absl::Time refreshed_at{absl::UnixEpoch()};
   };
 
+  struct PublishPreregEntry {
+    store::runtime::ingestion::BackingIdentity backing_identity;
+    std::uint64_t instance_generation{0};
+    common::memory::MemoryLocation memory_location{common::memory::MemoryLocation::NONE};
+    std::shared_ptr<void> keepalive;
+    std::uint64_t size_bytes{0};
+    absl::Time activated_at{absl::UnixEpoch()};
+    absl::Time expires_at{absl::UnixEpoch()};
+  };
+
   struct AuthorityEntry {
     BodyDescriptor claim_descriptor;
     store::runtime::ingestion::VerifiedContentDescriptor verified_content_descriptor;
@@ -64,14 +75,22 @@ struct ByteArtifactRuntimeState {
       absl::flat_hash_set<std::string>,
       store::runtime::ingestion::BackingIdentityHash>
       backing_authority_index ABSL_GUARDED_BY(mu);
+  absl::flat_hash_set<store::runtime::ingestion::BackingIdentity, store::runtime::ingestion::BackingIdentityHash>
+      orphan_backing_candidates ABSL_GUARDED_BY(mu);
   absl::flat_hash_map<
       store::loading::ReplicaKey,
       absl::flat_hash_set<store::runtime::ingestion::BackingIdentity, store::runtime::ingestion::BackingIdentityHash>,
       store::loading::ReplicaKeyHash>
       replica_visibility_index ABSL_GUARDED_BY(mu);
+  absl::flat_hash_map<std::uint64_t, std::uint64_t> shard_authority_refcounts ABSL_GUARDED_BY(mu);
   absl::flat_hash_map<std::uint64_t, ShardRouteCacheEntry> shard_routes ABSL_GUARDED_BY(mu);
   absl::flat_hash_map<std::uint64_t, OwnedShardLeaseEntry> owned_shard_leases ABSL_GUARDED_BY(mu);
   absl::flat_hash_map<std::string, DaemonEndpointCacheEntry> daemon_endpoints ABSL_GUARDED_BY(mu);
+  absl::flat_hash_map<
+      store::runtime::ingestion::BackingIdentity,
+      PublishPreregEntry,
+      store::runtime::ingestion::BackingIdentityHash>
+      publish_prereg_entries ABSL_GUARDED_BY(mu);
 };
 
 } // namespace tensorcast::daemon

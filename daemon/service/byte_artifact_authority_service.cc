@@ -265,12 +265,97 @@ std::vector<v2::BatchItemOutcome> ByteArtifactAuthorityService::batch_put_if_abs
         outcomes.push_back(make_outcome(item.artifact_id, v2::BATCH_ITEM_STATUS_OK, "joined"));
         break;
       case ByteArtifactBodyStore::PutOutcome::kConflict:
+        retire_put_item_backing(item);
         outcomes.push_back(make_outcome(
             item.artifact_id, v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION, "put_if_absent invariant mismatch"));
         break;
     }
   }
   return outcomes;
+}
+
+std::vector<ByteArtifactAuthorityService::PutPreflightResult> ByteArtifactAuthorityService::
+    batch_preflight_put_if_absent(
+        const std::vector<PutPreflightItem>& items,
+        const Context& context,
+        const std::optional<std::uint64_t>& ttl_ms) const {
+  std::vector<PutPreflightResult> results;
+  results.reserve(items.size());
+  for (const auto& item : items) {
+    const auto artifact_st = validate_artifact_for_context(item.artifact_id, context);
+    if (!artifact_st.ok()) {
+      results.push_back(
+          PutPreflightResult{
+              .artifact_id = item.artifact_id,
+              .requires_backing = false,
+              .terminal_outcome = make_outcome(
+                  item.artifact_id,
+                  absl::IsInvalidArgument(artifact_st) ? v2::BATCH_ITEM_STATUS_INVALID_ARGUMENT
+                                                       : v2::BATCH_ITEM_STATUS_INTERNAL_ERROR,
+                  artifact_st.message()),
+          });
+      continue;
+    }
+
+    auto authority = body_store_.inspect_authority(
+        item.artifact_id, context.shard_id, context.lease_generation, context.routing_epoch, context.now);
+    if (!authority.has_value()) {
+      results.push_back(PutPreflightResult{.artifact_id = item.artifact_id});
+      continue;
+    }
+
+    const auto invariant_st =
+        byte_artifact_runtime().validate_invariant_body_descriptor(item.invariant, authority->descriptor);
+    if (!invariant_st.ok()) {
+      results.push_back(
+          PutPreflightResult{
+              .artifact_id = item.artifact_id,
+              .requires_backing = false,
+              .terminal_outcome = make_outcome(
+                  item.artifact_id, v2::BATCH_ITEM_STATUS_FAILED_PRECONDITION, "put_if_absent invariant mismatch"),
+          });
+      continue;
+    }
+
+    if (!authority->authority_record.visible ||
+        authority->authority_record.visibility_kind != AuthorityVisibilityKind::kReadyBacking) {
+      results.push_back(PutPreflightResult{.artifact_id = item.artifact_id});
+      continue;
+    }
+
+    auto entry = body_store_.get(
+        item.artifact_id, context.shard_id, context.lease_generation, context.routing_epoch, context.now);
+    if (!entry.has_value()) {
+      results.push_back(PutPreflightResult{.artifact_id = item.artifact_id});
+      continue;
+    }
+
+    if (ttl_ms.has_value() && *ttl_ms > 0 &&
+        !body_store_.touch_ttl(
+            item.artifact_id,
+            context.shard_id,
+            context.lease_generation,
+            context.routing_epoch,
+            context.now,
+            *ttl_ms)) {
+      results.push_back(
+          PutPreflightResult{
+              .artifact_id = item.artifact_id,
+              .requires_backing = false,
+              .terminal_outcome = make_outcome(
+                  item.artifact_id, v2::BATCH_ITEM_STATUS_INTERNAL_ERROR, "failed to extend existing artifact ttl"),
+          });
+      continue;
+    }
+
+    results.push_back(
+        PutPreflightResult{
+            .artifact_id = item.artifact_id,
+            .requires_backing = false,
+            .terminal_outcome = make_outcome(item.artifact_id, v2::BATCH_ITEM_STATUS_OK, "joined"),
+        });
+  }
+  return results;
 }
 
 std::vector<v2::BatchItemOutcome> ByteArtifactAuthorityService::batch_touch_ttl(

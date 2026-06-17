@@ -1,6 +1,6 @@
 // Copyright (c) 2025-2026, TensorCast Team.
 
-// StatusController: handles get_server_config / get_worker_status / get_detailed_status / get_loaded_replicas_v2
+// StatusController: handles get_server_config / get_worker_status / get_detailed_status / get_loaded_replicas
 
 #pragma once
 
@@ -42,6 +42,12 @@ class StatusController {
     std::chrono::steady_clock::time_point start_time;
     std::string local_handle_socket_path;
     bool cpu_shared_memory_enabled{true};
+    uint32_t batch_transport_protocol_version{0};
+    bool batch_payload_grpc_chunk_ref_enabled{false};
+    bool batch_payload_communicator_source_enabled{false};
+    bool batch_payload_host_memory_export_enabled{false};
+    bool batch_payload_segmented_communicator_export_enabled{false};
+    uint64_t max_batch_payload_bytes{0};
     std::shared_ptr<StartupCoordinator> startup_coordinator;
     WorkerDirectoryCache& worker_directory_cache;
     InstanceExecutionDirectoryCache& instance_execution_directory_cache;
@@ -54,6 +60,15 @@ class StatusController {
   grpc::Status get_server_config(RpcContext& rctx, v2::GetServerConfigResponse& resp) {
     auto& e = d_.engine;
     (void)rctx;
+    // Contract version 4 hard-cuts binding realization to execution-only
+    // semantics and adds typed hash diagnostics for the surviving
+    // identity-forming seal path.
+    constexpr uint32_t kSourceBoundContractVersion = 4;
+    constexpr uint64_t kSourceBoundCapabilityFlags =
+        static_cast<uint64_t>(
+            v2::SourceBoundCapabilityFlag::SOURCE_BOUND_CAPABILITY_FLAG_FIRST_CLASS_COLLECTIVE_INGRESS) |
+        static_cast<uint64_t>(v2::SourceBoundCapabilityFlag::SOURCE_BOUND_CAPABILITY_FLAG_TYPED_EXECUTION_DIAGNOSTICS) |
+        static_cast<uint64_t>(v2::SourceBoundCapabilityFlag::SOURCE_BOUND_CAPABILITY_FLAG_SINGLE_MINT_BINDING_CLOSEOUT);
     resp.set_mem_pool_size(static_cast<int64_t>(e.get_mem_pool_size()));
     // Canonical fields (no gRPC frame size surfaced)
     resp.set_artifact_chunk_bytes(static_cast<uint64_t>(e.get_artifact_chunk_bytes()));
@@ -61,6 +76,15 @@ class StatusController {
     resp.set_local_handle_socket_path(d_.local_handle_socket_path);
     resp.set_cpu_shared_memory_enabled(d_.cpu_shared_memory_enabled);
     resp.set_startup_phase(startup_phase_proto());
+    resp.set_source_bound_capability_flags(kSourceBoundCapabilityFlags);
+    resp.set_source_bound_contract_version(kSourceBoundContractVersion);
+    resp.set_batch_transport_protocol_version(d_.batch_transport_protocol_version);
+    resp.set_batch_payload_grpc_chunk_ref_enabled(d_.batch_payload_grpc_chunk_ref_enabled);
+    resp.set_batch_payload_communicator_source_enabled(d_.batch_payload_communicator_source_enabled);
+    resp.set_batch_payload_host_memory_export_enabled(d_.batch_payload_host_memory_export_enabled);
+    resp.set_batch_payload_segmented_communicator_export_enabled(
+        d_.batch_payload_segmented_communicator_export_enabled);
+    resp.set_max_batch_payload_bytes(d_.max_batch_payload_bytes);
     rctx.mark_success();
     return grpc::Status::OK;
   }
@@ -227,16 +251,16 @@ class StatusController {
     return grpc::Status::OK;
   }
 
-  grpc::Status get_loaded_replicas_v2(
+  grpc::Status get_loaded_replicas(
       RpcContext& rctx,
-      const v2::GetLoadedReplicasV2Request& req,
-      v2::GetLoadedReplicasV2Response& resp,
+      const v2::GetLoadedReplicasRequest& req,
+      v2::GetLoadedReplicasResponse& resp,
       bool use_cursor_pagination) {
     if (rctx.allow_high_card_attrs()) {
       if (req.has_artifact_id_filter())
         rctx.span()->SetAttribute("tc.artifact.filter", req.artifact_id_filter());
     }
-    listing::FillLoadedReplicasV2(d_.engine, d_.refs, req, resp, use_cursor_pagination);
+    listing::FillLoadedReplicas(d_.engine, d_.refs, req, resp, use_cursor_pagination);
     try {
       static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
       static auto page_counter = meter->CreateDoubleCounter("tc_status_list_pages_total");

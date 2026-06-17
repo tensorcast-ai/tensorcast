@@ -8,7 +8,9 @@ import hashlib
 import json
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+from typing import TypeVar
 from uuid import UUID
 
 from tensorcast.global_store.config import get_config
@@ -18,6 +20,7 @@ from tensorcast.global_store.exceptions import (
     TimeoutError,
     ValidationError,
 )
+from tensorcast.global_store.grpc_helpers import multibase_sha256_to_hex
 from tensorcast.global_store.metrics import (
     dec_active_transports,
     inc_active_transports,
@@ -39,6 +42,10 @@ from tensorcast.global_store.repositories import (
     ReplicaRepository,
     TransportRepository,
 )
+from tensorcast.global_store.repositories.artifact_index_repository import (
+    ArtifactIndexRepository,
+)
+from tensorcast.global_store.repositories.artifact_repository import ArtifactRepository
 from tensorcast.global_store.repositories.base import is_transient_tx_conflict
 from tensorcast.global_store.repositories.replica_repository import (
     GroupSourceSpreadPolicy,
@@ -50,6 +57,7 @@ from tensorcast.global_store.repositories.transport_repository import (
 from tensorcast.logger import init_logger
 
 logger = init_logger(__name__)
+T = TypeVar("T")
 
 
 class TransportService:
@@ -60,16 +68,22 @@ class TransportService:
         replica_repository: ReplicaRepository,
         transport_repository: TransportRepository,
         pending_transport_request_repository: PendingTransportRequestRepository,
+        artifact_repository: ArtifactRepository | None = None,
+        artifact_index_repository: ArtifactIndexRepository | None = None,
     ):
         """Initialize service with repositories."""
         self.replica_repository = replica_repository
         self.transport_repository = transport_repository
         self.pending_transport_request_repository = pending_transport_request_repository
+        self.artifact_repository = artifact_repository
+        self.artifact_index_repository = artifact_index_repository
         self.config = get_config()
         # Serialize queue-wide dispatch to avoid multi-thread transaction storms.
         self._dispatch_loop_lock = threading.Lock()
+        self._canonical_identity_view_cache: dict[str, tuple[str, ...]] = {}
+        self._canonical_identity_view_cache_lock = threading.Lock()
 
-    def _retry_transient_db_call(self, *, op_name: str, fn):
+    def _retry_transient_db_call(self, *, op_name: str, fn: Callable[[], T]) -> T:
         max_attempts = 8
         for attempt in range(max_attempts):
             try:
@@ -87,6 +101,7 @@ class TransportService:
                     exc,
                 )
                 time.sleep(backoff_sec)
+        raise RuntimeError(f"{op_name} retry loop exhausted")
 
     def _source_balance_weights(self) -> SourceBalanceWeights:
         policy = self.config.transport_scheduler.source_balance_weights
@@ -98,9 +113,17 @@ class TransportService:
         )
 
     def _has_any_transport_route(
-        self, *, artifact_id: str, view_id: str | None
+        self,
+        *,
+        artifact_id: str,
+        view_id: str | None,
+        canonical_equivalent_view_ids: tuple[str, ...] | None = None,
     ) -> bool:
-        if self.replica_repository.has_any_replica(artifact_id, view_id):
+        if self.replica_repository.has_any_replica(
+            artifact_id,
+            view_id,
+            canonical_equivalent_view_ids=canonical_equivalent_view_ids,
+        ):
             return True
         if view_id is None:
             return False
@@ -122,6 +145,7 @@ class TransportService:
         *,
         artifact_id: str,
         view_id: str | None,
+        canonical_equivalent_view_ids: tuple[str, ...] | None = None,
         heartbeat_timeout_seconds: float,
         scheduler_mode: str,
         source_balance_weights: SourceBalanceWeights | None = None,
@@ -132,6 +156,7 @@ class TransportService:
         primary = self.replica_repository.find_available_for_transport(
             artifact_id=artifact_id,
             view_id=view_id,
+            canonical_equivalent_view_ids=canonical_equivalent_view_ids,
             heartbeat_timeout_seconds=heartbeat_timeout_seconds,
             scheduler_mode=scheduler_mode,
             source_balance_weights=source_balance_weights,
@@ -144,6 +169,7 @@ class TransportService:
         return self.replica_repository.find_available_for_transport(
             artifact_id=artifact_id,
             view_id=None,
+            canonical_equivalent_view_ids=canonical_equivalent_view_ids,
             heartbeat_timeout_seconds=heartbeat_timeout_seconds,
             scheduler_mode=scheduler_mode,
             source_balance_weights=source_balance_weights,
@@ -151,6 +177,60 @@ class TransportService:
             group_source_policy=group_source_policy,
             cursor=cursor,
         )
+
+    def _canonical_equivalent_view_ids(
+        self,
+        artifact_id: str,
+        *,
+        cursor=None,
+    ) -> tuple[str, ...]:
+        if self.artifact_repository is None or self.artifact_index_repository is None:
+            return ()
+        with self._canonical_identity_view_cache_lock:
+            cached = self._canonical_identity_view_cache.get(artifact_id)
+        if cached is not None:
+            return cached
+
+        artifact_row = self.artifact_repository.get(artifact_id, cursor=cursor)
+        index_multihash = (
+            str(artifact_row.get("index_multihash") or "") if artifact_row else ""
+        )
+        index_key = multibase_sha256_to_hex(index_multihash)
+        if not index_key:
+            return ()
+        index_data = self.artifact_index_repository.get(index_key, cursor=cursor)
+        if not index_data:
+            return ()
+
+        try:
+            from tensorcast.api.store.common import canonical_index_from_bytes
+            from tensorcast.api.store.view_composer import (
+                _build_subset_identity_view_spec_proto,
+                compute_view_id,
+            )
+
+            canonical_index = canonical_index_from_bytes(bytes(index_data))
+            tensor_names = tuple(str(entry.name) for entry in canonical_index.entries)
+            view_spec = _build_subset_identity_view_spec_proto(
+                canonical_index=canonical_index,
+                tensor_names=tensor_names,
+            )
+            if view_spec is None:
+                return ()
+            view_id = str(compute_view_id(view_spec, bytes(index_data)) or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Unable to compute canonical-equivalent identity view_id for artifact_id=%s: %s",
+                artifact_id,
+                exc,
+            )
+            return ()
+
+        aliases = (view_id,) if view_id else ()
+        if aliases:
+            with self._canonical_identity_view_cache_lock:
+                self._canonical_identity_view_cache[artifact_id] = aliases
+        return aliases
 
     @staticmethod
     def _normalize_request_id(request_id: str) -> str:
@@ -177,14 +257,7 @@ class TransportService:
         requester_worker_id: str | None,
         scheduling_group: TransportSchedulingGroup | None,
     ) -> str:
-        group_kind = (
-            str(scheduling_group.group_kind).strip().lower()
-            if scheduling_group is not None
-            else ""
-        )
         normalized_view_id = view_id or ""
-        if group_kind == "tp_version":
-            normalized_view_id = ""
         payload = {
             "artifact_id": artifact_id,
             "view_id": normalized_view_id,
@@ -420,7 +493,14 @@ class TransportService:
         start_time = time.time()
         timeout_deadline = start_time + (max(0, wait_timeout_ms) / 1000.0)
 
-        if not self._has_any_transport_route(artifact_id=artifact_id, view_id=view_id):
+        canonical_equivalent_view_ids = (
+            self._canonical_equivalent_view_ids(artifact_id) if view_id is None else ()
+        )
+        if not self._has_any_transport_route(
+            artifact_id=artifact_id,
+            view_id=view_id,
+            canonical_equivalent_view_ids=canonical_equivalent_view_ids,
+        ):
             inc_transport_request(artifact_id, "not_found")
             observe_transport_wait(artifact_id, time.time() - start_time)
             raise NotFoundError(f"No replicas registered for artifact {artifact_id}")
@@ -445,67 +525,45 @@ class TransportService:
         pending_request.set_scheduling_group(scheduling_group)
 
         try:
-            with self.replica_repository.transaction() as tx:
-                self.pending_transport_request_repository.purge_malformed_rows(
-                    cursor=tx
-                )
-                self._reconcile_request_replay_state(request_id=request_id, tx=tx)
-                existing_pending = (
-                    self.pending_transport_request_repository.find_by_request_id(
-                        request_id, cursor=tx
-                    )
-                )
-                if (
-                    existing_pending is not None
-                    and existing_pending.request_fingerprint != request_fingerprint
-                ):
-                    raise ValidationError(
-                        f"request_id={request_id} already used with different payload"
-                    )
-                self._validate_group_contract_with_cursor(
-                    tx=tx,
+            (
+                resolved_replica,
+                resolved_transport_id,
+                terminal_pending_state,
+            ) = self._retry_transient_db_call(
+                op_name="request_transport_initial_dispatch",
+                fn=lambda: self._enqueue_and_attempt_initial_dispatch(
+                    pending_request=pending_request,
                     request_id=request_id,
+                    request_fingerprint=request_fingerprint,
                     artifact_id=artifact_id,
                     view_id=view_id,
                     scheduling_group=scheduling_group,
-                )
-                persisted_pending = self.pending_transport_request_repository.create_if_absent_with_cursor(
-                    pending_request,
-                    tx,
-                )
-                if persisted_pending.request_fingerprint != request_fingerprint:
-                    raise ValidationError(
-                        f"request_id={request_id} already used with different payload"
-                    )
-                existing_transport = self.transport_repository.find_by_request_id(
-                    request_id, cursor=tx
-                )
-                if (
-                    existing_transport is not None
-                    and existing_transport.request_fingerprint is not None
-                    and existing_transport.request_fingerprint != request_fingerprint
-                ):
-                    raise ValidationError(
-                        f"request_id={request_id} already used with different payload"
-                    )
-                if existing_transport is not None:
-                    replica = self.replica_repository.find_by_id(
-                        existing_transport.replica_id,
-                        existing_transport.artifact_id,
-                        cursor=tx,
-                    )
-                    if replica is not None:
-                        return replica, existing_transport.transport_id
+                ),
+            )
+            if resolved_replica is not None and resolved_transport_id is not None:
+                inc_transport_request(artifact_id, "success")
+                observe_transport_wait(artifact_id, time.time() - start_time)
+                return resolved_replica, resolved_transport_id
+            if terminal_pending_state == PendingTransportState.EXPIRED:
+                inc_transport_dispatch_event("request_terminal_expired")
+                inc_transport_request(artifact_id, "timeout")
+                observe_transport_wait(artifact_id, time.time() - start_time)
+                raise TimeoutError("Queued transport request expired before dispatch")
+            if terminal_pending_state == PendingTransportState.CANCELLED:
+                inc_transport_dispatch_event("request_terminal_cancelled")
+                inc_transport_request(artifact_id, "timeout")
+                observe_transport_wait(artifact_id, time.time() - start_time)
+                raise TimeoutError("Queued transport request cancelled before dispatch")
         except DatabaseError as exc:
             if isinstance(exc.__cause__, ValidationError):
                 raise exc.__cause__ from exc
             raise
 
         while True:
-            terminal_pending_state: PendingTransportState | None = None
+            loop_terminal_pending_state: PendingTransportState | None = None
             try:
-                resolved_replica: Replica | None = None
-                resolved_transport_id: UUID | None = None
+                loop_resolved_replica: Replica | None = None
+                loop_resolved_transport_id: UUID | None = None
                 dispatch_owner = self._dispatch_loop_lock.acquire(blocking=False)
                 if dispatch_owner:
                     try:
@@ -519,9 +577,9 @@ class TransportService:
                             )
                             self._dispatch_pending_requests(tx=tx)
                             (
-                                resolved_replica,
-                                resolved_transport_id,
-                                terminal_pending_state,
+                                loop_resolved_replica,
+                                loop_resolved_transport_id,
+                                loop_terminal_pending_state,
                             ) = self._resolve_pending_request_state(
                                 request_id=request_id,
                                 request_fingerprint=request_fingerprint,
@@ -531,18 +589,21 @@ class TransportService:
                         self._dispatch_loop_lock.release()
                 else:
                     (
-                        resolved_replica,
-                        resolved_transport_id,
-                        terminal_pending_state,
+                        loop_resolved_replica,
+                        loop_resolved_transport_id,
+                        loop_terminal_pending_state,
                     ) = self._resolve_pending_request_state(
                         request_id=request_id,
                         request_fingerprint=request_fingerprint,
                     )
 
-                if resolved_replica is not None and resolved_transport_id is not None:
+                if (
+                    loop_resolved_replica is not None
+                    and loop_resolved_transport_id is not None
+                ):
                     inc_transport_request(artifact_id, "success")
                     observe_transport_wait(artifact_id, time.time() - start_time)
-                    return resolved_replica, resolved_transport_id
+                    return loop_resolved_replica, loop_resolved_transport_id
             except (NotFoundError, TimeoutError):
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -555,12 +616,12 @@ class TransportService:
                 else:
                     raise
 
-            if terminal_pending_state == PendingTransportState.EXPIRED:
+            if loop_terminal_pending_state == PendingTransportState.EXPIRED:
                 inc_transport_dispatch_event("request_terminal_expired")
                 inc_transport_request(artifact_id, "timeout")
                 observe_transport_wait(artifact_id, time.time() - start_time)
                 raise TimeoutError("Queued transport request expired before dispatch")
-            if terminal_pending_state == PendingTransportState.CANCELLED:
+            if loop_terminal_pending_state == PendingTransportState.CANCELLED:
                 inc_transport_dispatch_event("request_terminal_cancelled")
                 inc_transport_request(artifact_id, "timeout")
                 observe_transport_wait(artifact_id, time.time() - start_time)
@@ -576,6 +637,82 @@ class TransportService:
                 )
 
             time.sleep(self.config.transport_wait_retry_interval_ms / 1000)
+
+    def _enqueue_and_attempt_initial_dispatch(
+        self,
+        *,
+        pending_request: PendingTransportRequest,
+        request_id: str,
+        request_fingerprint: str,
+        artifact_id: str,
+        view_id: str | None,
+        scheduling_group: TransportSchedulingGroup | None,
+    ) -> tuple[Replica | None, UUID | None, PendingTransportState | None]:
+        # Keep the first request replay check, queue mutation, and initial dispatch
+        # on a single serialized transaction timeline so competing callers either
+        # observe the same pending row or retry on a fresh snapshot.
+        with self._dispatch_loop_lock, self.replica_repository.transaction() as tx:
+            self.pending_transport_request_repository.purge_malformed_rows(cursor=tx)
+            self._reconcile_request_replay_state(request_id=request_id, tx=tx)
+            existing_pending = (
+                self.pending_transport_request_repository.find_by_request_id(
+                    request_id, cursor=tx
+                )
+            )
+            if (
+                existing_pending is not None
+                and existing_pending.request_fingerprint != request_fingerprint
+            ):
+                raise ValidationError(
+                    f"request_id={request_id} already used with different payload"
+                )
+            self._validate_group_contract_with_cursor(
+                tx=tx,
+                request_id=request_id,
+                artifact_id=artifact_id,
+                view_id=view_id,
+                scheduling_group=scheduling_group,
+            )
+            persisted_pending = (
+                self.pending_transport_request_repository.create_if_absent_with_cursor(
+                    pending_request,
+                    tx,
+                )
+            )
+            if persisted_pending.request_fingerprint != request_fingerprint:
+                raise ValidationError(
+                    f"request_id={request_id} already used with different payload"
+                )
+            existing_transport = self.transport_repository.find_by_request_id(
+                request_id, cursor=tx
+            )
+            if (
+                existing_transport is not None
+                and existing_transport.request_fingerprint is not None
+                and existing_transport.request_fingerprint != request_fingerprint
+            ):
+                raise ValidationError(
+                    f"request_id={request_id} already used with different payload"
+                )
+            if existing_transport is not None:
+                replica = self.replica_repository.find_by_id(
+                    existing_transport.replica_id,
+                    existing_transport.artifact_id,
+                    cursor=tx,
+                )
+                if replica is not None:
+                    return replica, existing_transport.transport_id, None
+
+            self.pending_transport_request_repository.expire_enqueued_deadlines(
+                now_utc=datetime.now(timezone.utc),
+                cursor=tx,
+            )
+            self._dispatch_pending_requests(tx=tx)
+            return self._resolve_pending_request_state(
+                request_id=request_id,
+                request_fingerprint=request_fingerprint,
+                cursor=tx,
+            )
 
     def _resolve_pending_request_state(
         self,
@@ -660,15 +797,8 @@ class TransportService:
             return
         group = scheduling_group
         normalized_view_id = view_id or ""
-        normalized_group_kind = str(group.group_kind).strip().lower()
         group_epoch = int(group.epoch)
         group_total_parts = int(group.total_parts)
-        # tp_version groups are keyed by logical version, and key remap retries
-        # may transiently produce different artifact ids within the same epoch.
-        # Keep total_parts/part_id invariants strict, but do not fail the whole
-        # request path on artifact/view variance for tp_version.
-        enforce_view_consistency = normalized_group_kind != "tp_version"
-        enforce_artifact_consistency = normalized_group_kind != "tp_version"
         if group_total_parts <= 0:
             raise ValidationError(
                 "group contract violation: total_parts must be > 0 for "
@@ -701,9 +831,9 @@ class TransportService:
                 group.group_id,
                 group_epoch,
                 request_id,
-                int(enforce_artifact_consistency),
+                1,
                 artifact_id,
-                int(enforce_view_consistency),
+                1,
                 normalized_view_id,
                 group_total_parts,
             ],
@@ -734,9 +864,9 @@ class TransportService:
                 group.group_id,
                 group_epoch,
                 request_id,
-                int(enforce_artifact_consistency),
+                1,
                 artifact_id,
-                int(enforce_view_consistency),
+                1,
                 normalized_view_id,
                 group_total_parts,
             ],
@@ -915,9 +1045,18 @@ class TransportService:
                     cursor=tx,
                 )
 
+            canonical_equivalent_view_ids = (
+                self._canonical_equivalent_view_ids(
+                    pending_request.artifact_id,
+                    cursor=tx,
+                )
+                if pending_request.requested_view_id is None
+                else ()
+            )
             selection = self._select_transport_source(
                 artifact_id=pending_request.artifact_id,
                 view_id=pending_request.requested_view_id,
+                canonical_equivalent_view_ids=canonical_equivalent_view_ids,
                 heartbeat_timeout_seconds=self.config.heartbeat_timeout_ms / 1000,
                 scheduler_mode="GROUP_DISPATCH",
                 source_balance_weights=source_weights,

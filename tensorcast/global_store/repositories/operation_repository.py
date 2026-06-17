@@ -245,6 +245,47 @@ class OperationRepository(BaseRepository):
         )
         return True
 
+    def has_active_lease_token(self, *, lease_token: str) -> bool:
+        """Return whether *lease_token* identifies a currently active lease."""
+        return self.get_active_lease_token(lease_token=lease_token) is not None
+
+    def get_active_lease_token(self, *, lease_token: str) -> dict[str, Any] | None:
+        """Return the active lease row for *lease_token*, if any."""
+        cursor = self.get_cursor()
+        try:
+            now = datetime.now(timezone.utc)
+            row = cursor.execute(
+                """
+                SELECT operation_id,
+                       kind,
+                       target_artifact_id,
+                       lease_owner,
+                       lease_token,
+                       lease_generation,
+                       lease_expires_at
+                FROM operations
+                WHERE lease_token = ?
+                  AND lease_expires_at IS NOT NULL
+                """,
+                [lease_token],
+            ).fetchone()
+            if row is None:
+                return None
+            expires_at = row[6]
+            if expires_at is None or self._coerce_utc(expires_at) <= now:
+                return None
+            return {
+                "operation_id": str(row[0]),
+                "kind": str(row[1]),
+                "target_artifact_id": str(row[2]),
+                "lease_owner": str(row[3] or ""),
+                "lease_token": str(row[4]),
+                "lease_generation": int(row[5]),
+                "lease_expires_at": expires_at,
+            }
+        finally:
+            cursor.close()
+
     def update_operation(
         self,
         *,

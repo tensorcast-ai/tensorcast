@@ -1,5 +1,7 @@
 #  Copyright (c) 2025-2026, TensorCast Team.
 
+from datetime import datetime, timezone
+
 from tensorcast.global_store.config import GlobalStoreConfig
 from tensorcast.global_store.config.settings import get_config, set_config
 from tensorcast.global_store.exceptions import DatabaseError
@@ -42,6 +44,7 @@ def _make_inventory_replica(
     node_port: int = 0,
     memory_size: int = 0,
     is_available: bool = True,
+    observed_at: datetime | None = None,
 ) -> common_pb2.ReplicaInfo:
     replica = common_pb2.ReplicaInfo()
     replica.ref.artifact_id = artifact_id
@@ -55,6 +58,8 @@ def _make_inventory_replica(
     if memory_size > 0:
         replica.memory_info.memory_size = memory_size
     replica.stats.is_available = is_available
+    if observed_at is not None:
+        replica.stats.registered_ts.FromDatetime(observed_at)
     return replica
 
 
@@ -228,6 +233,77 @@ def test_snapshot_request_allows_empty_inventory_removal(repositories):
         if change.type == global_store_pb2.StateChange.CHANGE_TYPE_REMOVE_REPLICA
     ) == len(replicas)
     assert new_version >= 1
+
+
+def test_snapshot_reconcile_preserves_replicas_created_after_snapshot(repositories):
+    recovery = _make_recovery_service(repositories)
+    worker_id = "worker-snapshot-race"
+    repositories["worker"].create_or_update(
+        Worker(
+            worker_id=worker_id,
+            daemon_id="daemon-snapshot-race",
+            node_id="node-snapshot-race",
+            node_address="10.0.0.3",
+            grpc_port=50051,
+            p2p_port=65090,
+            mem_pool_total_size=1024,
+            mem_pool_available_size=1024,
+        )
+    )
+
+    keep = Replica(
+        artifact_id="artifact-snapshot-keep",
+        node_id="node-snapshot-race",
+        node_address="10.0.0.3",
+        node_port=50051,
+        memory_size=512,
+        memory_type=MemoryType.GPU,
+        device_id=0,
+        worker_id=worker_id,
+    )
+    newly_registered = Replica(
+        artifact_id="artifact-snapshot-new",
+        node_id="node-snapshot-race",
+        node_address="10.0.0.3",
+        node_port=50051,
+        memory_size=256,
+        memory_type=MemoryType.RAM,
+        device_id=0,
+        worker_id=worker_id,
+    )
+    repositories["replica"].create_or_update(keep)
+    repositories["replica"].create_or_update(newly_registered)
+
+    result_kind, _, _, state_changes, _, _ = _reconcile(
+        recovery=recovery,
+        worker_id=worker_id,
+        generation=1,
+        request_seq=1,
+        inventory=[
+            _make_inventory_replica(
+                artifact_id=keep.artifact_id,
+                node_id=keep.node_id,
+                node_address=keep.node_address,
+                node_port=keep.node_port,
+                memory_type=common_pb2.MEMORY_TYPE_GPU,
+                device_id=keep.device_id,
+                memory_size=keep.memory_size,
+                observed_at=datetime(2000, 1, 1, tzinfo=timezone.utc),
+            )
+        ],
+        request_kind=global_store_pb2.RECONCILE_REQUEST_KIND_SNAPSHOT,
+        daemon_id="daemon-snapshot-race",
+    )
+
+    assert result_kind == global_store_pb2.RECONCILE_RESULT_KIND_NOOP
+    assert not any(
+        change.type == global_store_pb2.StateChange.CHANGE_TYPE_REMOVE_REPLICA
+        for change in state_changes
+    )
+    assert any(
+        replica.artifact_id == newly_registered.artifact_id
+        for replica in repositories["replica"].get_replicas_by_worker(worker_id)
+    )
 
 
 def test_availability_drift_triggers_update(repositories):

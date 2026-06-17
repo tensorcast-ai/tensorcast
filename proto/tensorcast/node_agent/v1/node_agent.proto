@@ -4,7 +4,9 @@ package tensorcast.node_agent.v1;
 
 import "google/protobuf/timestamp.proto";
 import "tensorcast/common/v1/common.proto";
+import "tensorcast/daemon/v2/store_daemon.proto";
 import "tensorcast/plan/v1/plan.proto";
+import "tensorcast/publication/v1/publication.proto";
 
 service NodeAgentService {
   rpc ExecutePlan(ExecutePlanRequest) returns (ExecutePlanResponse) {}
@@ -28,22 +30,14 @@ message ArtifactBatchOutcome {
   string message = 3;
 }
 
-message ArtifactManifestResult {
-  string engine_request_id = 1;
-  string layout_id = 2;
-  repeated string artifact_ids = 3;
-  string key_set_digest_alg = 4;
-  string key_set_digest_hex = 5;
-  tensorcast.plan.v1.ManifestArtifactSetBridge manifest_bridge = 6;
-}
-
 message ArtifactPublishResult {
-  ArtifactManifestResult manifest = 1;
+  tensorcast.plan.v1.ArtifactManifest manifest = 1;
   repeated ArtifactBatchOutcome put_outcomes = 2;
+  tensorcast.plan.v1.PublishManifest publish_manifest = 3;
 }
 
 message ArtifactHydrateResult {
-  ArtifactManifestResult manifest = 1;
+  tensorcast.plan.v1.ArtifactManifest manifest = 1;
   repeated ArtifactBatchOutcome get_outcomes = 2;
   repeated string missing_artifact_ids = 3;
 }
@@ -51,6 +45,18 @@ message ArtifactHydrateResult {
 message ArtifactBatchResult {
   optional string engine_request_id = 1;
   repeated ArtifactBatchOutcome outcomes = 2;
+}
+
+message PureTransformPublicationResult {
+  string serving_artifact_id = 1;
+  string serving_manifest_ref = 2;
+  string manifest_tensor_name = 3;
+  bytes serving_manifest_bytes = 4;
+  tensorcast.daemon.v2.RepresentationPublishContract representation_publish_contract = 5;
+  tensorcast.daemon.v2.AssemblyCloseoutContract closeout_contract = 6;
+  optional string source_artifact_ref = 7;
+  optional string contract_family = 8;
+  repeated string structural_view_ids = 9;
 }
 
 message ArtifactSetItemResult {
@@ -66,10 +72,12 @@ message ArtifactSetResult {
 
 message ArtifactActionResult {
   oneof result {
-    ArtifactManifestResult manifest = 1;
+    tensorcast.plan.v1.ArtifactManifest manifest = 1;
     ArtifactPublishResult publish = 2;
     ArtifactHydrateResult hydrate = 3;
     ArtifactBatchResult evict_local = 4;
+    PureTransformPublicationResult pure_transform_publication = 5;
+    tensorcast.publication.v1.RepresentationPublishSpec representation_publish = 6;
   }
 }
 

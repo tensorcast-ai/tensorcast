@@ -13,6 +13,7 @@
 #include <ranges>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <fcntl.h>
 #include <linux/memfd.h>
@@ -48,6 +49,7 @@
 #include "daemon/app/daemon_app.h"
 #include "daemon/app/startup_memory_preflight.h"
 #include "daemon/util/identity_utils.h"
+#include "daemon/util/local_handle_socket_path.h"
 #include "grpcpp/server.h"
 #include "grpcpp/server_builder.h"
 #include "gsl/pointers"
@@ -59,10 +61,34 @@
 #include <sstream>
 
 ABSL_FLAG(std::string, config, "", "Path to unified daemon config (YAML/JSON)");
-ABSL_FLAG(bool, use_cursor_pagination, false, "Enable opaque cursor pagination for GetLoadedReplicasV2");
+ABSL_FLAG(bool, use_cursor_pagination, false, "Enable opaque cursor pagination for GetLoadedReplicas");
 using namespace tensorcast;
 
 namespace {
+
+absl::StatusOr<std::filesystem::path> normalize_storage_root_for_config(const std::filesystem::path& storage_root) {
+  std::error_code ec;
+  const bool exists = std::filesystem::exists(storage_root, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat storage root: ", storage_root.string()));
+  }
+  if (!exists) {
+    return absl::InvalidArgumentError(absl::StrCat("storage root does not exist: ", storage_root.string()));
+  }
+  const bool is_dir = std::filesystem::is_directory(storage_root, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat storage root: ", storage_root.string()));
+  }
+  if (!is_dir) {
+    return absl::InvalidArgumentError(absl::StrCat("storage root must be a directory: ", storage_root.string()));
+  }
+  auto normalized = std::filesystem::weakly_canonical(storage_root, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(
+        ec.value(), absl::StrCat("Failed to canonicalize storage root: ", storage_root.string()));
+  }
+  return normalized;
+}
 
 absl::Status probe_memfd_shared_mapping() {
   constexpr size_t kProbeBytes = 4096;
@@ -130,19 +156,7 @@ absl::Status ensure_local_handle_parent_dir(const std::filesystem::path& dir) {
 }
 
 absl::Status ensure_local_handle_socket_path_ready(const std::string& socket_path) {
-  if (socket_path.empty()) {
-    return absl::InvalidArgumentError("local_handle_socket_path is empty");
-  }
-  if (socket_path.size() >= sizeof(sockaddr_un::sun_path)) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("local_handle_socket_path is too long for AF_UNIX (len=", socket_path.size(), "): ", socket_path));
-  }
-  const std::filesystem::path parent = std::filesystem::path(socket_path).parent_path();
-  if (parent.empty()) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("local_handle_socket_path must include a parent directory: ", socket_path));
-  }
-  return ensure_local_handle_parent_dir(parent);
+  return daemon::validate_local_handle_socket_path(socket_path);
 }
 
 absl::StatusOr<std::filesystem::path> tensorcast_home_dir() {
@@ -166,20 +180,6 @@ std::string trim_copy(std::string_view value) {
     --end;
   }
   return std::string(value.substr(begin, end - begin));
-}
-
-uint64_t fnv1a_hash_64(std::string_view value) {
-  uint64_t hash = 1469598103934665603ULL;
-  for (unsigned char c : value) {
-    hash ^= c;
-    hash *= 1099511628211ULL;
-  }
-  return hash;
-}
-
-std::string short_socket_name(std::string_view seed) {
-  const uint64_t hash = fnv1a_hash_64(seed);
-  return std::format("lh-{:016x}.sock", hash);
 }
 
 uint64_t saturating_mul_u64(uint64_t lhs, uint64_t rhs) {
@@ -216,25 +216,23 @@ std::string format_binary_bytes(uint64_t bytes) {
   return std::format("{}B", bytes);
 }
 
-absl::StatusOr<std::string> shorten_socket_path_if_needed(const std::filesystem::path& preferred) {
+absl::StatusOr<std::string> select_auto_local_handle_socket_path(const std::filesystem::path& preferred) {
   const std::string preferred_str = preferred.string();
-  if (preferred_str.size() < sizeof(sockaddr_un::sun_path)) {
-    return preferred_str;
-  }
+  std::vector<std::filesystem::path> fallback_dirs;
   auto home_or = tensorcast_home_dir();
-  if (!home_or.ok()) {
-    return home_or.status();
+  if (home_or.ok()) {
+    fallback_dirs.push_back(*home_or / "uds");
   }
-  const std::filesystem::path fallback = *home_or / "uds" / short_socket_name(preferred_str);
-  const std::string fallback_str = fallback.string();
-  if (fallback_str.size() >= sizeof(sockaddr_un::sun_path)) {
-    return absl::InvalidArgumentError(
-        absl::StrCat(
-            "local_handle_socket_path too long even after shortening (len=", fallback_str.size(), "): ", fallback_str));
+  auto selected_or = daemon::select_local_handle_socket_path(preferred, preferred_str, std::move(fallback_dirs));
+  if (!selected_or.ok()) {
+    return selected_or.status();
   }
-  LOG(WARNING) << "local_handle_socket_path too long (len=" << preferred_str.size()
-               << "); using shortened path=" << fallback_str;
-  return fallback_str;
+  if (*selected_or != preferred_str) {
+    LOG(INFO) << "Auto-selected bounded lifecycle.handle_leases.local_handle_socket_path=" << *selected_or
+              << " preferred_len=" << preferred_str.size()
+              << " max_len=" << daemon::local_handle_socket_path_limit_bytes();
+  }
+  return *selected_or;
 }
 
 absl::StatusOr<std::filesystem::path> tensorcast_host_root_dir() {
@@ -415,7 +413,7 @@ absl::StatusOr<std::string> discover_local_handle_socket_path(std::string_view d
       return st;
     }
     std::filesystem::path sock = dir / "local_handle.sock";
-    return shorten_socket_path_if_needed(sock);
+    return select_auto_local_handle_socket_path(sock);
   }
   auto runtime_dir_or = discover_daemon_runtime_dir(daemon_id);
   if (!runtime_dir_or.ok()) {
@@ -427,7 +425,7 @@ absl::StatusOr<std::string> discover_local_handle_socket_path(std::string_view d
     return st;
   }
   std::filesystem::path sock = dir / "local_handle.sock";
-  return shorten_socket_path_if_needed(sock);
+  return select_auto_local_handle_socket_path(sock);
 }
 
 absl::StatusOr<std::optional<uint64_t>> read_cgroup_v2_memory_max() {
@@ -483,6 +481,9 @@ absl::StatusOr<std::optional<uint64_t>> read_memlock_limit_bytes() {
 int main(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
   common::ensure_logging_initialized();
+  // Broken pipes from log sinks or peer sockets must surface as write/send
+  // errors instead of terminating the daemon process.
+  std::signal(SIGPIPE, SIG_IGN);
   // Avoid global using-directives per project guidelines
   // Note: config loading happens below; defer OTel/log-sink init until then.
   const std::string cfg_path = absl::GetFlag(FLAGS_config);
@@ -857,6 +858,118 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (cfg.engine().has_materialization_strategy()) {
+    const auto& ms = cfg.engine().materialization_strategy();
+    auto& strategy = opts.materialization_strategy;
+    strategy.enable_tensor_aware_mapped_executor =
+        ms.has_enable_tensor_aware_mapped_executor() ? ms.enable_tensor_aware_mapped_executor() : true;
+    strategy.enable_local_batched_disk_load =
+        ms.has_enable_local_batched_disk_load() ? ms.enable_local_batched_disk_load() : true;
+    strategy.enable_owner_file_collective =
+        ms.has_enable_owner_file_collective() ? ms.enable_owner_file_collective() : false;
+    strategy.allow_mixed_execution = ms.has_allow_mixed_execution() ? ms.allow_mixed_execution() : true;
+    strategy.prefer_local_canonical_for_mapped = ms.prefer_local_canonical_for_mapped();
+    strategy.allow_source_ordered_for_mapped =
+        ms.has_allow_source_ordered_for_mapped() ? ms.allow_source_ordered_for_mapped() : true;
+    strategy.enable_mapped_dim0_tensor_jobs =
+        ms.has_enable_mapped_dim0_tensor_jobs() ? ms.enable_mapped_dim0_tensor_jobs() : true;
+    strategy.enable_mapped_dim1_tensor_jobs =
+        ms.has_enable_mapped_dim1_tensor_jobs() ? ms.enable_mapped_dim1_tensor_jobs() : true;
+    strategy.enable_mapped_concat_jobs = ms.has_enable_mapped_concat_jobs() ? ms.enable_mapped_concat_jobs() : true;
+    strategy.enable_mapped_concat_execution =
+        ms.has_enable_mapped_concat_execution() ? ms.enable_mapped_concat_execution() : true;
+    strategy.enable_mapped_single_range_concat_jobs =
+        ms.has_enable_mapped_single_range_concat_jobs() ? ms.enable_mapped_single_range_concat_jobs() : true;
+    strategy.enable_mapped_multirange_concat_jobs =
+        ms.has_enable_mapped_multirange_concat_jobs() ? ms.enable_mapped_multirange_concat_jobs() : true;
+    strategy.sync_after_single_range_concat_job = ms.sync_after_single_range_concat_job();
+    strategy.use_dedicated_single_range_concat_stream = ms.use_dedicated_single_range_concat_stream();
+    if (ms.direct_write_batch_bytes() > 0) {
+      strategy.direct_write_batch_bytes = ms.direct_write_batch_bytes();
+    }
+    if (ms.direct_write_batch_ops() > 0) {
+      strategy.direct_write_batch_ops = ms.direct_write_batch_ops();
+    }
+    if (ms.owner_file_collective_peak_bytes_budget() > 0) {
+      strategy.owner_file_collective_peak_bytes_budget = ms.owner_file_collective_peak_bytes_budget();
+    }
+    if (ms.owner_file_collective_batch_bytes() > 0) {
+      strategy.owner_file_collective_batch_bytes = ms.owner_file_collective_batch_bytes();
+    }
+    if (ms.owner_file_collective_dim1_staging_bytes() > 0) {
+      strategy.owner_file_collective_dim1_staging_bytes = ms.owner_file_collective_dim1_staging_bytes();
+    }
+    if (ms.owner_file_collective_max_inflight_batches() > 0) {
+      strategy.owner_file_collective_max_inflight_batches = ms.owner_file_collective_max_inflight_batches();
+    }
+    strategy.owner_file_collective_shared_fs_only =
+        ms.has_owner_file_collective_shared_fs_only() ? ms.owner_file_collective_shared_fs_only() : true;
+    if (ms.owner_file_collective_max_owner_skew_ratio() > 0.0) {
+      strategy.owner_file_collective_max_owner_skew_ratio = ms.owner_file_collective_max_owner_skew_ratio();
+    }
+    if (ms.owner_file_collective_min_dedup_saving_bytes() > 0) {
+      strategy.owner_file_collective_min_dedup_saving_bytes = ms.owner_file_collective_min_dedup_saving_bytes();
+    }
+    if (ms.has_owner_file_collective_group_assemble_timeout()) {
+      strategy.owner_file_collective_group_assemble_timeout =
+          duration_to_millis(ms.owner_file_collective_group_assemble_timeout());
+    }
+    strategy.owner_file_collective_allow_mixed_residual =
+        ms.has_owner_file_collective_allow_mixed_residual() ? ms.owner_file_collective_allow_mixed_residual() : false;
+    if (ms.owner_file_collective_planner_cache_entries() > 0) {
+      strategy.owner_file_collective_planner_cache_entries = ms.owner_file_collective_planner_cache_entries();
+    }
+    switch (ms.executor_preference()) {
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_GENERIC_BYTE_RANGE:
+        strategy.executor_preference =
+            store::StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference::kGenericByteRange;
+        break;
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_TENSOR_AWARE_LOCAL:
+        strategy.executor_preference =
+            store::StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference::kTensorAwareLocal;
+        break;
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_OWNER_FILE_COLLECTIVE:
+        strategy.executor_preference =
+            store::StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference::kOwnerFileCollective;
+        break;
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO:
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_UNSPECIFIED:
+      default:
+        strategy.executor_preference =
+            store::StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference::kAuto;
+        break;
+    }
+    switch (ms.diagnostics_verbosity()) {
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_OFF:
+        strategy.diagnostics_verbosity =
+            store::StoreEngineOptions::MaterializationStrategyConfig::DiagnosticsVerbosity::kOff;
+        break;
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_VERBOSE:
+        strategy.diagnostics_verbosity =
+            store::StoreEngineOptions::MaterializationStrategyConfig::DiagnosticsVerbosity::kVerbose;
+        break;
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_BASIC:
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_DIAGNOSTICS_VERBOSITY_UNSPECIFIED:
+      default:
+        strategy.diagnostics_verbosity =
+            store::StoreEngineOptions::MaterializationStrategyConfig::DiagnosticsVerbosity::kBasic;
+        break;
+    }
+  }
+
+  if (cfg.engine().has_progressive_replication()) {
+    const auto& progressive = cfg.engine().progressive_replication();
+    opts.progressive_replication.enabled = progressive.enabled();
+    if (progressive.has_report_interval()) {
+      opts.progressive_replication.report_interval = duration_to_millis(progressive.report_interval());
+    }
+    if (progressive.min_report_delta_bytes() > 0) {
+      opts.progressive_replication.min_report_delta_bytes = progressive.min_report_delta_bytes();
+    }
+    opts.progressive_replication.verify_before_report =
+        progressive.has_verify_before_report() ? progressive.verify_before_report() : true;
+  }
+
   if (cfg.has_promotion()) {
     const auto& promo = cfg.promotion();
     switch (promo.policy()) {
@@ -1020,6 +1133,56 @@ int main(int argc, char** argv) {
     daemon_opts.eviction_check_interval = std::chrono::milliseconds(d.seconds() * 1000 + d.nanos() / 1000000);
   }
   daemon_opts.storage_path = storage_root;
+  const auto& public_disk_source = cfg.public_disk_source();
+  for (const auto& trusted_root : public_disk_source.trusted_root_policies()) {
+    daemon::DaemonOptions::PublicDiskSourcePolicy::TrustedRootPolicy policy;
+    policy.policy_id = trusted_root.policy_id();
+    if (!trusted_root.root_path().empty()) {
+      auto normalized_root_or = normalize_storage_root_for_config(std::filesystem::path(trusted_root.root_path()));
+      if (!normalized_root_or.ok()) {
+        LOG(ERROR) << "INVALID_ARGUMENT: public_disk_source.trusted_root_policies.root_path invalid ("
+                   << trusted_root.root_path() << "): " << normalized_root_or.status();
+        return 2;
+      }
+      policy.root_path = *normalized_root_or;
+    }
+    for (const auto format : trusted_root.allowed_formats()) {
+      switch (format) {
+        case tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_FORMAT_PARTITIONED:
+          policy.allowed_formats.push_back(daemon::DaemonOptions::PublicDiskSourcePolicy::Format::kPartitioned);
+          break;
+        case tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_FORMAT_SAFETENSORS:
+          policy.allowed_formats.push_back(daemon::DaemonOptions::PublicDiskSourcePolicy::Format::kSafetensors);
+          break;
+        case tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_FORMAT_UNSPECIFIED:
+        default:
+          break;
+      }
+    }
+    for (const auto capability : trusted_root.allowed_metadata_capabilities()) {
+      switch (capability) {
+        case tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_TENSOR_AWARE:
+          policy.allowed_metadata_capabilities.push_back(
+              daemon::DaemonOptions::PublicDiskSourcePolicy::MetadataCapability::kTensorAware);
+          break;
+        case tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_BYTE_ONLY:
+          policy.allowed_metadata_capabilities.push_back(
+              daemon::DaemonOptions::PublicDiskSourcePolicy::MetadataCapability::kByteOnly);
+          break;
+        case tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_UNSPECIFIED:
+        default:
+          break;
+      }
+    }
+    policy.descriptor_reuse_mode = trusted_root.descriptor_reuse_mode() ==
+            tensorcast::config::v1::DaemonConfig::PUBLIC_DISK_SOURCE_DESCRIPTOR_REUSE_MODE_DISABLED
+        ? daemon::DaemonOptions::PublicDiskSourcePolicy::DescriptorReuseMode::kDisabled
+        : daemon::DaemonOptions::PublicDiskSourcePolicy::DescriptorReuseMode::kTrustedHintOnly;
+    policy.validation_mode = daemon::DaemonOptions::PublicDiskSourcePolicy::ValidationMode::kValidateBeforeRead;
+    policy.lightweight_attestation_enabled =
+        !trusted_root.has_lightweight_attestation_enabled() || trusted_root.lightweight_attestation_enabled();
+    daemon_opts.public_disk_source_policy.trusted_root_policies.push_back(std::move(policy));
+  }
   daemon_opts.local_handle_socket_path = cfg.lifecycle().handle_leases().local_handle_socket_path();
   if (cfg.lifecycle().handle_leases().has_ttl()) {
     daemon_opts.handle_lease_ttl = duration_to_millis(cfg.lifecycle().handle_leases().ttl());
@@ -1037,6 +1200,81 @@ int main(int argc, char** argv) {
   daemon_opts.cpu_shared_memory_enabled = opts.cpu_shared_memory_enabled;
   daemon_opts.external_target_verification_enabled = cfg.engine().enable_external_target_verification();
   daemon_opts.max_concurrency = std::max<uint32_t>(1, opts.promotion.max_concurrency);
+  daemon_opts.progressive_replication.enabled = opts.progressive_replication.enabled;
+  daemon_opts.progressive_replication.report_interval = opts.progressive_replication.report_interval;
+  daemon_opts.progressive_replication.min_report_delta_bytes = opts.progressive_replication.min_report_delta_bytes;
+  daemon_opts.progressive_replication.verify_before_report = opts.progressive_replication.verify_before_report;
+  const auto& optimistic = cfg.optimistic_local_ready();
+  switch (optimistic.mode()) {
+    case tensorcast::config::v1::OptimisticLocalReady::MODE_STRICT_CANONICAL_BLOCKING:
+      daemon_opts.optimistic_local_ready.mode =
+          daemon::DaemonOptions::OptimisticLocalReady::Mode::kStrictCanonicalBlocking;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::MODE_OPTIMISTIC_ASYNC_MI2:
+      daemon_opts.optimistic_local_ready.mode = daemon::DaemonOptions::OptimisticLocalReady::Mode::kOptimisticAsyncMi2;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::MODE_OPTIMISTIC_LOCAL_ONLY:
+      daemon_opts.optimistic_local_ready.mode = daemon::DaemonOptions::OptimisticLocalReady::Mode::kOptimisticLocalOnly;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::MODE_DISABLED:
+    case tensorcast::config::v1::OptimisticLocalReady::MODE_UNSPECIFIED:
+    default:
+      daemon_opts.optimistic_local_ready.mode = daemon::DaemonOptions::OptimisticLocalReady::Mode::kDisabled;
+      break;
+  }
+  daemon_opts.optimistic_local_ready.trusted_root_policy_ids.assign(
+      optimistic.trusted_root_policy_ids().begin(), optimistic.trusted_root_policy_ids().end());
+  daemon_opts.optimistic_local_ready.model_families.assign(
+      optimistic.model_families().begin(), optimistic.model_families().end());
+  daemon_opts.optimistic_local_ready.topology_constraints.assign(
+      optimistic.topology_constraints().begin(), optimistic.topology_constraints().end());
+  switch (optimistic.promotion_trigger()) {
+    case tensorcast::config::v1::OptimisticLocalReady::PROMOTION_TRIGGER_AFTER_READY:
+      daemon_opts.optimistic_local_ready.promotion_trigger =
+          daemon::DaemonOptions::OptimisticLocalReady::PromotionTrigger::kAfterReady;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::PROMOTION_TRIGGER_AFTER_FIRST_TOKEN:
+      daemon_opts.optimistic_local_ready.promotion_trigger =
+          daemon::DaemonOptions::OptimisticLocalReady::PromotionTrigger::kAfterFirstToken;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::PROMOTION_TRIGGER_DELAYED:
+      daemon_opts.optimistic_local_ready.promotion_trigger =
+          daemon::DaemonOptions::OptimisticLocalReady::PromotionTrigger::kDelayed;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::PROMOTION_TRIGGER_AFTER_FREEZE:
+    case tensorcast::config::v1::OptimisticLocalReady::PROMOTION_TRIGGER_UNSPECIFIED:
+    default:
+      daemon_opts.optimistic_local_ready.promotion_trigger =
+          daemon::DaemonOptions::OptimisticLocalReady::PromotionTrigger::kAfterFreeze;
+      break;
+  }
+  daemon_opts.optimistic_local_ready.per_device_promotion_concurrency =
+      std::max<uint32_t>(1, optimistic.per_device_promotion_concurrency());
+  daemon_opts.optimistic_local_ready.scheduling_class = optimistic.scheduling_class();
+  daemon_opts.optimistic_local_ready.retry_budget = optimistic.retry_budget();
+  if (optimistic.has_timeout()) {
+    daemon_opts.optimistic_local_ready.timeout = duration_to_millis(optimistic.timeout());
+  }
+  switch (optimistic.failure_action()) {
+    case tensorcast::config::v1::OptimisticLocalReady::FAILURE_ACTION_FAIL_HEALTH:
+      daemon_opts.optimistic_local_ready.failure_action =
+          daemon::DaemonOptions::OptimisticLocalReady::FailureAction::kFailHealth;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::FAILURE_ACTION_DRAIN:
+      daemon_opts.optimistic_local_ready.failure_action =
+          daemon::DaemonOptions::OptimisticLocalReady::FailureAction::kDrain;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::FAILURE_ACTION_WARN_ONLY:
+      daemon_opts.optimistic_local_ready.failure_action =
+          daemon::DaemonOptions::OptimisticLocalReady::FailureAction::kWarnOnly;
+      break;
+    case tensorcast::config::v1::OptimisticLocalReady::FAILURE_ACTION_MARK_UNVERIFIED:
+    case tensorcast::config::v1::OptimisticLocalReady::FAILURE_ACTION_UNSPECIFIED:
+    default:
+      daemon_opts.optimistic_local_ready.failure_action =
+          daemon::DaemonOptions::OptimisticLocalReady::FailureAction::kMarkUnverified;
+      break;
+  }
   const auto& post_seal = cfg.post_seal();
   daemon_opts.post_seal_policy.migrate_views = post_seal.migrate_views();
   daemon_opts.post_seal_policy.migrate_transpose_only = post_seal.migrate_transpose_only();
@@ -1081,6 +1319,28 @@ int main(int argc, char** argv) {
       daemon_opts.retention_handles.max_ttl = duration_to_millis(retention_cfg.max_ttl());
     }
   }
+  if (cfg.has_serving_prefetch()) {
+    const auto& serving_cfg = cfg.serving_prefetch();
+    daemon_opts.serving_prefetch.enabled = serving_cfg.enabled();
+    if (serving_cfg.has_same_daemon_acquire_enabled()) {
+      daemon_opts.serving_prefetch.same_daemon_acquire_enabled = serving_cfg.same_daemon_acquire_enabled();
+    }
+    if (!serving_cfg.resolved_spec_cache_root().empty()) {
+      daemon_opts.serving_prefetch.resolved_spec_cache_root = serving_cfg.resolved_spec_cache_root();
+    }
+    if (serving_cfg.has_default_expire_if_unacquired()) {
+      daemon_opts.serving_prefetch.default_expire_if_unacquired =
+          duration_to_millis(serving_cfg.default_expire_if_unacquired());
+    }
+    if (serving_cfg.has_default_idle_ttl_after_last_release()) {
+      daemon_opts.serving_prefetch.default_idle_ttl_after_last_release =
+          duration_to_millis(serving_cfg.default_idle_ttl_after_last_release());
+    }
+    if (serving_cfg.has_default_materialization_timeout()) {
+      daemon_opts.serving_prefetch.default_materialization_timeout =
+          duration_to_millis(serving_cfg.default_materialization_timeout());
+    }
+  }
 
   if (cfg.has_byte_artifact_routing()) {
     const auto& bar = cfg.byte_artifact_routing();
@@ -1119,6 +1379,58 @@ int main(int argc, char** argv) {
       }
       if (pt.has_cleanup_interval()) {
         daemon_opts.byte_artifact_routing.payload_transport.cleanup_interval = duration_to_absl(pt.cleanup_interval());
+      }
+      if (pt.max_batch_payload_bytes() > 0) {
+        daemon_opts.byte_artifact_routing.payload_transport.max_batch_payload_bytes = pt.max_batch_payload_bytes();
+      }
+      if (pt.max_batch_items() > 0) {
+        daemon_opts.byte_artifact_routing.payload_transport.max_batch_items = pt.max_batch_items();
+      }
+      if (pt.max_batch_stage_bytes_per_peer() > 0) {
+        daemon_opts.byte_artifact_routing.payload_transport.max_batch_stage_bytes_per_peer =
+            pt.max_batch_stage_bytes_per_peer();
+      }
+      if (pt.has_batch_transport_protocol_version()) {
+        daemon_opts.byte_artifact_routing.payload_transport.batch_transport_protocol_version =
+            pt.batch_transport_protocol_version();
+      }
+      if (pt.has_communicator_source_enabled()) {
+        daemon_opts.byte_artifact_routing.payload_transport.communicator_source_enabled =
+            pt.communicator_source_enabled();
+      }
+      if (pt.has_host_memory_export_enabled()) {
+        daemon_opts.byte_artifact_routing.payload_transport.host_memory_export_enabled =
+            pt.host_memory_export_enabled();
+      }
+      if (pt.has_segmented_communicator_export_enabled()) {
+        daemon_opts.byte_artifact_routing.payload_transport.segmented_communicator_export_enabled =
+            pt.segmented_communicator_export_enabled();
+      }
+      if (pt.has_minimum_batch_transport_ttl()) {
+        daemon_opts.byte_artifact_routing.payload_transport.minimum_batch_transport_ttl =
+            duration_to_absl(pt.minimum_batch_transport_ttl());
+      }
+      if (pt.has_transport_release_guard()) {
+        daemon_opts.byte_artifact_routing.payload_transport.transport_release_guard =
+            duration_to_absl(pt.transport_release_guard());
+      }
+      if (pt.has_source_publish_prereg()) {
+        const auto& prereg = pt.source_publish_prereg();
+        if (prereg.has_enabled()) {
+          daemon_opts.byte_artifact_routing.payload_transport.source_publish_prereg.enabled = prereg.enabled();
+        }
+        if (prereg.has_ttl()) {
+          daemon_opts.byte_artifact_routing.payload_transport.source_publish_prereg.ttl =
+              duration_to_absl(prereg.ttl());
+        }
+        if (prereg.max_live_entries() > 0) {
+          daemon_opts.byte_artifact_routing.payload_transport.source_publish_prereg.max_live_entries =
+              prereg.max_live_entries();
+        }
+        if (prereg.max_live_bytes() > 0) {
+          daemon_opts.byte_artifact_routing.payload_transport.source_publish_prereg.max_live_bytes =
+              prereg.max_live_bytes();
+        }
       }
     }
   }
@@ -1197,27 +1509,29 @@ int main(int argc, char** argv) {
   daemon::DaemonApp::GrpcOptions grpc_opts;
   grpc_opts.listen_addr = listen_addr;
   grpc_opts.credentials = creds;
+  grpc_opts.sync_server_threads = std::max<int>(1, static_cast<int>(cfg.server().num_threads()));
   grpc_opts.max_concurrent_streams = cfg.server().grpc().max_concurrent_streams();
   auto to_ms = [](const google::protobuf::Duration& d) -> int {
     return static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
   };
+  auto assign_grpc_duration_if_enabled = [&to_ms](
+                                             const google::protobuf::Duration& duration, std::optional<int>* target) {
+    const int duration_ms = to_ms(duration);
+    if (duration_ms > 0) {
+      *target = duration_ms;
+    }
+  };
   if (cfg.server().grpc().has_keepalive_time()) {
-    grpc_opts.keepalive_time_ms = to_ms(cfg.server().grpc().keepalive_time());
+    assign_grpc_duration_if_enabled(cfg.server().grpc().keepalive_time(), &grpc_opts.keepalive_time_ms);
   }
   if (cfg.server().grpc().has_keepalive_timeout()) {
-    grpc_opts.keepalive_timeout_ms = to_ms(cfg.server().grpc().keepalive_timeout());
+    assign_grpc_duration_if_enabled(cfg.server().grpc().keepalive_timeout(), &grpc_opts.keepalive_timeout_ms);
   }
   if (cfg.server().grpc().has_max_connection_idle()) {
-    const int max_connection_idle_ms = to_ms(cfg.server().grpc().max_connection_idle());
-    if (max_connection_idle_ms > 0) {
-      grpc_opts.max_connection_idle_ms = max_connection_idle_ms;
-    }
+    assign_grpc_duration_if_enabled(cfg.server().grpc().max_connection_idle(), &grpc_opts.max_connection_idle_ms);
   }
   if (cfg.server().grpc().has_max_connection_age()) {
-    const int max_connection_age_ms = to_ms(cfg.server().grpc().max_connection_age());
-    if (max_connection_age_ms > 0) {
-      grpc_opts.max_connection_age_ms = max_connection_age_ms;
-    }
+    assign_grpc_duration_if_enabled(cfg.server().grpc().max_connection_age(), &grpc_opts.max_connection_age_ms);
   }
   grpc_opts.tcp_nodelay = cfg.server().grpc().tcp_nodelay();
   grpc_opts.so_reuseport = cfg.server().grpc().so_reuseport();

@@ -20,16 +20,31 @@ RouteChannel::RouteChannel(
 
 transport::future_read_result_t RouteChannel::read_tensor(const ReadRequest& request) {
   if (hops_.empty()) {
-    return make_failed_read_future(
-        absl::FailedPreconditionError("route channel has no hops"),
-        request.tensor_key);
+    return make_failed_read_future(absl::FailedPreconditionError("route channel has no hops"), request.tensor_key);
   }
   if (hops_.size() != 1) {
-    return make_failed_read_future(absl::UnimplementedError(
-        std::format("multi-hop read not implemented (hops={})", hops_.size())),
+    return make_failed_read_future(
+        absl::UnimplementedError(std::format("multi-hop read not implemented (hops={})", hops_.size())),
         request.tensor_key);
   }
   return hops_.front()->read_tensor(request);
+}
+
+transport::future_read_result_t RouteChannel::read_plan(const ReadPlan& plan) {
+  const absl::Status status = validate_read_plan(plan);
+  if (!status.ok()) {
+    return make_failed_read_future(status, read_plan_tensor_key(plan));
+  }
+  if (hops_.empty()) {
+    return make_failed_read_future(
+        absl::FailedPreconditionError("route channel has no hops"), read_plan_tensor_key(plan));
+  }
+  if (hops_.size() != 1) {
+    return make_failed_read_future(
+        absl::UnimplementedError(std::format("multi-hop read plan not implemented (hops={})", hops_.size())),
+        read_plan_tensor_key(plan));
+  }
+  return hops_.front()->read_plan(plan);
 }
 
 HealthState RouteChannel::health() const {

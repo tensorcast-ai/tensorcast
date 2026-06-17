@@ -1,0 +1,258 @@
+"""TensorCast Bazel module configuration for Docker builds."""
+
+module(name = "tensorcast")
+
+bazel_dep(name = "platforms", version = "1.0.0")
+#bazel_dep(name = "toolchains_llvm", version = "1.6.0")
+#
+#llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
+#llvm.toolchain(
+#    llvm_version = "21.1.0",
+#    sha256 = {"linux-x86_64": "4a8c4b07646a4a2eb76ccf1d73522c3e13519745b72ef09d631c09b7577b0ed2"},
+#    stdlib = {"linux-x86_64": "stdc++"},
+#    strip_prefix = {
+#        "linux-x86_64": "LLVM-21.1.0-Linux-X64",
+#    },
+#    urls = {
+#        "linux-x86_64": [
+#            "https://githubfast.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/LLVM-21.1.0-Linux-X64.tar.xz",
+#            "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/LLVM-21.1.0-Linux-X64.tar.xz",
+#        ],
+#    },
+#)
+#use_repo(llvm, "llvm_toolchain")
+#
+#register_toolchains("@llvm_toolchain//:all")
+
+bazel_dep(name = "rules_cc", version = "0.2.14")
+bazel_dep(name = "rules_python", version = "1.7.0")
+bazel_dep(name = "bazel_skylib", version = "1.8.2")
+bazel_dep(name = "abseil-cpp", version = "20250512.1")
+bazel_dep(name = "catch2", version = "3.8.1")
+bazel_dep(name = "nlohmann_json", version = "3.12.0")
+bazel_dep(name = "yaml-cpp", version = "0.8.0")
+bazel_dep(name = "google_benchmark", version = "1.9.4")
+bazel_dep(name = "rules_proto_grpc_cpp", version = "5.7.1")
+bazel_dep(name = "toolchains_protoc", version = "0.5.0")
+bazel_dep(name = "protobuf", version = "31.1")
+bazel_dep(name = "gsl", version = "4.0.0")
+bazel_dep(name = "glog", version = "0.7.1")
+bazel_dep(name = "boringssl", version = "0.20250818.0")
+bazel_dep(name = "opentelemetry-cpp", version = "1.22.0")
+bazel_dep(name = "grpc", version = "1.74.1")
+bazel_dep(name = "rules_buf", version = "0.5.2")
+bazel_dep(name = "rules_proto", version = "7.1.0")
+bazel_dep(name = "folly", version = "2025.01.13.00.bcr.3")
+bazel_dep(name = "double-conversion", version = "3.3.1")
+
+single_version_override(
+    module_name = "glog",
+    patch_strip = 1,
+    patches = ["//third_party/glog/patches:0001-export-macros.patch"],
+    version = "0.7.1",
+)
+
+single_version_override(
+    module_name = "jemalloc",
+    patch_strip = 1,
+    patches = ["//third_party/jemalloc/patches:0001-disable-initial-exec-tls.patch"],
+    version = "5.3.0-bcr.alpha.4",
+)
+
+protoc = use_extension("@toolchains_protoc//protoc:extensions.bzl", "protoc")
+protoc.toolchain(
+    google_protobuf = "protobuf",
+    version = "v31.1",
+)
+
+# Register Buf toolchains for using the Buf CLI via Bazel
+buf = use_extension("@rules_buf//buf:extensions.bzl", "buf")
+buf.toolchains(version = "v1.57.0")
+use_repo(buf, "rules_buf_toolchains")
+
+# new_local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
+
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+# new_local_repository(
+#     name = "cudnn",
+#     build_file = "@//third_party/cudnn/archive:BUILD",
+#     path = ".venv/lib/python3.10/site-packages",
+# )
+
+# new_local_repository(
+#     name = "nccl",
+#     build_file = "@//third_party/nccl:BUILD",
+#     path = ".venv/lib/python3.10/site-packages",
+# )
+
+# new_local_repository(
+#     name = "libtorch",
+#     build_file = "@//third_party/libtorch:BUILD",
+#     path = ".venv/lib/python3.10/site-packages",
+# )
+
+# new_local_repository(
+#     name = "cusparselt",
+#     build_file = "@//third_party/cusparselt:BUILD",
+#     path = ".venv/lib/python3.10/site-packages/cusparselt",
+# )
+
+# new_local_repository(
+#     name = "cupti",
+#     build_file = "@//third_party/cupti:BUILD",
+#     path = ".venv/lib/python3.10/site-packages/nvidia/cuda_cupti",
+# )
+
+http_archive(
+    name = "cudnn",
+    build_file = "@//third_party/cudnn/archive:BUILD",
+    integrity = "sha256-rGrZCgdbszqU8rTPRiLqwT3U3GXPbdnHVyoxhRajZiU=",
+    urls = [
+        "https://files.pythonhosted.org/packages/c5/41/65225d42fba06fb3dd3972485ea258e7dd07a40d6e01c95da6766ad87354/nvidia_cudnn_cu12-9.19.0.56-py3-none-manylinux_2_27_x86_64.whl",
+    ],
+)
+
+http_archive(
+    name = "nccl",
+    build_file = "@//third_party/nccl:BUILD",
+    integrity = "sha256-SFd22qhEfaXaOWga9FWqOywlht3PSvh3JJXnxTLH5as=",
+    urls = [
+        "https://files.pythonhosted.org/packages/4a/4e/44dbb46b3d1b0ec61afda8e84837870f2f9ace33c564317d59b70bc19d3e/nvidia_nccl_cu12-2.28.9-py3-none-manylinux_2_18_x86_64.whl",
+    ],
+)
+
+http_archive(
+    name = "libtorch",
+    build_file = "@//third_party/libtorch:BUILD",
+    integrity = "sha256-ctU/MXamnMIHEMTsuV99xMa6EMTk7aRbg5buee5A91o=",
+    urls = [
+        "https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl",
+    ],
+)
+
+http_archive(
+    name = "cusparselt",
+    build_file = "@//third_party/cusparselt:BUILD",
+    integrity = "sha256-8btwHWuTDVp86kTBnOuXMxFQCEf4G2NNgCt7U53FViM=",
+    urls = [
+        "https://files.pythonhosted.org/packages/56/79/12978b96bd44274fe38b5dde5cfb660b1d114f70a65ef962bcbbed99b549/nvidia_cusparselt_cu12-0.7.1-py3-none-manylinux2014_x86_64.whl",
+    ],
+)
+
+http_archive(
+    name = "cupti",
+    build_file = "@//third_party/cupti:BUILD",
+    integrity = "sha256-6gywfr2ia7mym6gs2jSEnnPBZsGBYtORNXWwyduaYYI=",
+    urls = [
+        "https://files.pythonhosted.org/packages/f8/02/2adcaa145158bf1a8295d83591d22e4103dbfd821bcaf6f3f53151ca4ffa/nvidia_cuda_cupti_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+    ],
+)
+
+http_archive(
+    name = "cublas",
+    build_file = "@//third_party/cublas:BUILD",
+    integrity = "sha256-isTncdWjSMVRsqQm7aYZPBmqYwI2tBgIYCDfW6lmcUI=",
+    urls = [
+        "https://files.pythonhosted.org/packages/dc/61/e24b560ab2e2eaeb3c839129175fb330dfcfc29e5203196e5541a4c44682/nvidia_cublas_cu12-12.8.4.1-py3-none-manylinux_2_27_x86_64.whl",
+    ],
+)
+
+http_archive(
+    name = "cufft",
+    build_file = "@//third_party/cufft:BUILD",
+    integrity = "sha256-TS3SHsC4jPYbYua0NWQ1XlIi5KP7OUysDbEB8t0NT3Q=",
+    urls = [
+        "https://files.pythonhosted.org/packages/1f/13/ee4e00f30e676b66ae65b4f08cb5bcbb8392c03f54f2d5413ea99a5d1c80/nvidia_cufft_cu12-11.3.3.83-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+    ],
+)
+
+http_archive(
+    name = "cudart",
+    build_file = "@//third_party/cudart:BUILD",
+    integrity = "sha256-ra3o3L0O30J7cgTUgNYGbTOQLKsqRwfc/Eii0P1Eq5A=",
+    urls = [
+        "https://files.pythonhosted.org/packages/0d/9b/a997b638fcd068ad6e4d53b8551a7d30fe8b404d6f1804abf1df69838932/nvidia_cuda_runtime_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+    ],
+)
+
+http_archive(
+    name = "curand",
+    build_file = "@//third_party/curand:BUILD",
+    integrity = "sha256-syMx1PTfXW7voFVMVltibHIW+HoGpPVvqyfDtoqDDsk=",
+    urls = [
+        "https://files.pythonhosted.org/packages/fb/aa/6584b56dc84ebe9cf93226a5cde4d99080c8e90ab40f0c27bda7a0f29aa1/nvidia_curand_cu12-10.3.9.90-py3-none-manylinux_2_27_x86_64.whl",
+    ],
+)
+
+http_archive(
+    name = "cusparse",
+    build_file = "@//third_party/cusparse:BUILD",
+    integrity = "sha256-HsBddru9i2GwaoDh6vjPSVnD1M6OcRtl69BEO7DrsTs=",
+    urls = [
+        "https://files.pythonhosted.org/packages/c2/f5/e1854cb2f2bcd4280c44736c93550cc300ff4b8c95ebe370d0aa7d2b473d/nvidia_cusparse_cu12-12.5.8.93-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+    ],
+)
+
+http_archive(
+    name = "cusolver",
+    build_file = "@//third_party/cusolver:BUILD",
+    integrity = "sha256-Q3bBGtJjFSvVDqKVwFNwNgd2+MNCezCZHfd0+fsmxFA=",
+    urls = [
+        "https://files.pythonhosted.org/packages/85/48/9a13d2975803e8cf2777d5ed57b87a0b6ca2cc795f9a4f59796a910bfb80/nvidia_cusolver_cu12-11.7.3.90-py3-none-manylinux_2_27_x86_64.whl",
+    ],
+)
+
+http_archive(
+    name = "nvjitlink",
+    build_file = "@//third_party/nvjitlink:BUILD",
+    integrity = "sha256-gf9jNxp+vW5kUZcGhPkWvi6rBzIbc8nSRNwrTaf3O4g=",
+    urls = [
+        "https://files.pythonhosted.org/packages/f6/74/86a07f1d0f42998ca31312f998bd3b9a7eff7f52378f4f270c8679c77fb9/nvidia_nvjitlink_cu12-12.8.93-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl",
+    ],
+)
+
+http_archive(
+    name = "nvrtc",
+    build_file = "@//third_party/nvrtc:BUILD",
+    integrity = "sha256-p3VlKIUu+Il3KoTGzYnUHfp0Zn4kzKFrsx+PBh4+mZQ=",
+    urls = [
+        "https://files.pythonhosted.org/packages/05/6b/32f747947df2da6994e999492ab306a903659555dddc0fbdeb9d71f75e52/nvidia_cuda_nvrtc_cu12-12.8.93-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl",
+    ],
+)
+
+http_archive(
+    name = "nvtx",
+    build_file = "@//third_party/nvtx:BUILD",
+    integrity = "sha256-WxfiABzA11GlvCxuxtJq2VkTMkpK24Z4jJRPjOm6RB8=",
+    urls = [
+        "https://files.pythonhosted.org/packages/a2/eb/86626c1bbc2edb86323022371c39aa48df6fd8b0a1647bc274577f72e90b/nvidia_nvtx_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+    ],
+)
+
+http_archive(
+    name = "nvshmem",
+    build_file = "@//third_party/nvshmem:BUILD",
+    integrity = "sha256-BC8lAPJMAh24oGxe7CU5An1XRg4cGnYgVaZVT3LDab0=",
+    urls = [
+        "https://files.pythonhosted.org/packages/b5/09/6ea3ea725f82e1e76684f0708bbedd871fc96da89945adeba65c3835a64c/nvidia_nvshmem_cu12-3.4.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+    ],
+)
+
+http_archive(
+    name = "triton",
+    build_file = "@//third_party/triton:BUILD",
+    integrity = "sha256-plUPrkKeBmfjl+XeZLMy0eVpW3NlDudaYUbi6QJ3C+o=",
+    urls = [
+        "https://files.pythonhosted.org/packages/8c/f7/f1c9d3424ab199ac53c2da567b859bcddbb9c9e7154805119f8bd95ec36f/triton-3.6.0-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+    ],
+)
+
+http_archive(
+    name = "cufile",
+    build_file = "@//third_party/cufile:BUILD",
+    integrity = "sha256-HQaQA75lDhMbIcky7D2JacFxU3klH40joYYFVLHLJPw=",
+    urls = [
+        "https://files.pythonhosted.org/packages/bb/fe/1bcba1dfbfb8d01be8d93f07bfc502c93fa23afa6fd5ab3fc7c1df71038a/nvidia_cufile_cu12-1.13.1.3-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+    ],
+)

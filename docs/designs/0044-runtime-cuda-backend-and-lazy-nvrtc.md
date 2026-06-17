@@ -251,7 +251,7 @@ To meet “at least as elegant as PyTorch” expectations, the implementation sh
      - declare members in a struct, and
      - generate resolution code with uniform error handling.
    - Do the same for NVRTC entrypoints.
-   - This mirrors PyTorch’s `C10_LIBCUDA_DRIVER_API_REQUIRED(_)` pattern (`/data/workspace/pytorch/c10/cuda/driver_api.h`).
+   - This mirrors PyTorch’s `C10_LIBCUDA_DRIVER_API_REQUIRED(_)` pattern (`/opt/pytorch/c10/cuda/driver_api.h`).
 
 2. **Single DynamicLibrary helper** (no scattered `dlopen/dlsym`)
    - Provide a small `DynamicLibrary` wrapper in `core/cuda/` (Linux-only) and use it for:
@@ -498,7 +498,7 @@ Config philosophy compatibility:
 - Unified config philosophy:
   - `docs/designs/0004-unified-runtime-config.md`
 - PyTorch Lazy NVRTC pattern (reference implementation):
-  - `/data/workspace/pytorch/aten/src/ATen/cuda/detail/LazyNVRTC.cpp`
+  - `/opt/pytorch/aten/src/ATen/cuda/detail/LazyNVRTC.cpp`
 
 # Open Questions
 

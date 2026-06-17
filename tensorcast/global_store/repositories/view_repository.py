@@ -56,15 +56,12 @@ class ViewRepository(BaseRepository):
                     canonical_bytes_covered
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (artifact_id, view_id) DO UPDATE SET
-                    view_spec_json = CASE
-                        WHEN EXCLUDED.view_spec_json <> '' THEN EXCLUDED.view_spec_json
-                        ELSE views.view_spec_json
-                    END,
+                    view_spec_json = EXCLUDED.view_spec_json,
                     view_size = EXCLUDED.view_size,
-                    view_data_hash = COALESCE(EXCLUDED.view_data_hash, views.view_data_hash),
-                    verified_at = COALESCE(EXCLUDED.verified_at, views.verified_at),
-                    canonical_size_bytes = COALESCE(EXCLUDED.canonical_size_bytes, views.canonical_size_bytes),
-                    canonical_bytes_covered = COALESCE(EXCLUDED.canonical_bytes_covered, views.canonical_bytes_covered)
+                    view_data_hash = EXCLUDED.view_data_hash,
+                    verified_at = EXCLUDED.verified_at,
+                    canonical_size_bytes = EXCLUDED.canonical_size_bytes,
+                    canonical_bytes_covered = EXCLUDED.canonical_bytes_covered
                 """,
                 params,
             )

@@ -12,7 +12,37 @@ Related docs:
 - `docs/architecture/artifact-views-and-retrieval.md`
 - `docs/architecture/api/materialization-flow.md`
 - `docs/internals/byte-range-mapping-and-execution.md`
+- `docs/internals/disk-load-strategy.md`
 - `docs/designs/0084-binding-unified-model-and-contract.md`
+- `docs/designs/0108-tensor-aware-materialization-strategy-plane.md`
+
+## 0108 Strategy Plane
+
+The loading stack now has an explicit strategy-lowering seam between semantic
+resolution and executor choice.
+
+- controller code resolves semantic truth first:
+  - `ArtifactSelection`
+  - resolved `view_id` / `ViewPlan`
+  - target layout
+  - `RepresentationTransformContract`
+- the common runtime then lowers that semantic plan plus source facts into
+  executor strategy inside `MaterializationFacade`
+- internal contracts for this seam live in
+  `core/store/runtime/ingestion/materialization_strategy_types.h`:
+  - `ResolvedMaterializationPlan`
+  - `RepresentationTransformContract`
+  - `RepresentationWorkPlan`
+  - `ResolvedSourceBinding`
+  - `ExecutionCommitReport`
+
+Current rule:
+
+- residual generic byte-range work must be explicit in `RepresentationWorkPlan`,
+- executors do not rediscover semantic truth from source/view metadata during
+  execution,
+- executors must not implicitly reconstruct fallback work after a partial fast
+  path attempt.
 
 ## System Components
 
@@ -38,6 +68,16 @@ All client processes call `tensorcast.init(mode=...)` to establish the daemon se
 the daemon endpoint and constructs the shared Store used by the module-level helpers. The Store owns
 retry policy, lease keepalive, and fallback orchestration for the process. Advanced integrations can
 access it via `tensorcast.store()`, but day-to-day usage goes through the functional helpers.
+
+Typed runtime rollout for the 0108 strategy plane now comes from daemon config
+under `engine.materialization_strategy`, not from ambient process environment.
+That config is lowered into `StoreEngineOptions::MaterializationStrategyConfig`
+and shared by the common runtime plus replica-side loaders.
+
+For a path-by-path summary of current disk-backed loading decisions, including
+TP-aware rank-local slicing, local SSD vs shared filesystem behavior, and
+collective/local-batched/generic fallback selection, see
+`docs/internals/disk-load-strategy.md`.
 
 ## Artifact Loading Sequence
 
@@ -118,10 +158,90 @@ region-backed data plane:
 - `Artifact.subset(...).view(...).bind(...)` captures a rank-local source
   selection once; later `binding.swap("model:v2")` reuses that same selection
   against the new full artifact version.
-- `bind_into(..., mapping=copy_plan)` captures a copy plan for mapped binding;
-  later `binding.swap(...)` reuses the same plan without Python copy loops.
+- `bind_into(..., mapping=copy_plan)` captures mapped binding intent once; the
+  daemon lowers it into the shared `RepresentationTransformContract` family,
+  and later `binding.swap(...)` reuses that same lowered semantic shape without
+  Python copy loops.
 - `binding.publish_replica()` or `binding.swap(..., publish=True)` publishes the
   current bound layout once the local overwrite succeeds.
+
+This publish path is the ordinary artifact-backed replica path from `0084`. It
+is not the runtime-artifact publication or `representation_publish` closeout
+path used by representation-publication builder work.
+
+## Runtime-Artifact Preflight
+
+When runtime consumes an artifact with serving-manifest ABI metadata,
+TensorCast performs a runtime-artifact preflight before accepting it into the
+steady-state loading path.
+
+Phase-1 rules:
+
+- the phase-1 manifest carrier is
+  `tensor:__tensorcast_meta__.manifest_json`
+- artifacts without that reserved manifest tensor continue to load as ordinary
+  non-serving artifacts
+- runtime-artifact policy is explicit rather than inferred from every
+  generic materialization request:
+  `PublishedModelVersion.require_runtime_artifact_policy()`,
+  `RepresentationPublishContract.to_runtime_policy()`, and
+  `RuntimeArtifactManifest.to_runtime_policy()` produce a
+  `RuntimeArtifactPolicy` that callers can pass as `runtime_artifact_policy` to
+  `artifact.bind(...)`, `artifact.bind_into(...)`, and `binding.swap(...)`
+- artifacts with that reserved manifest tensor must pass:
+  - manifest JSON parseability
+  - `schema_version == 1`
+  - `artifact_kind == "serving"`
+  - non-empty `framework_name`, `adapter_version`,
+    `serving_abi_version`, `representation_contract_hash`,
+    `serving_build_digest`, `tensor_schema_hash`, `builder_mode`, and
+    `build_pipeline_version`
+  - `serving_manifest_ref` agreement between the manifest and the runtime
+    policy when runtime-artifact policy is requested
+  - canonical tensor count equality between manifest and canonical index
+  - tensor schema hash equality between manifest and the canonical index with
+    the reserved manifest tensor excluded
+
+Current daemon coverage:
+
+- `MaterializeReplica`
+- `MaterializeIntoTarget`
+- source-bound owned-binding create/refill paths
+
+This keeps runtime-artifact publication-time validation and runtime acceptance
+validation on the same contract, so runtime no longer silently accepts a
+manifest-bearing artifact whose self-description is inconsistent with its
+canonical tensor layout.
+
+Important distinction:
+
+- generic artifact load remains fail-open for ordinary non-serving artifacts
+- runtime-artifact preflight is opt-in through `RuntimeArtifactPolicy`
+- this lets model-runtime startup and reload fail closed without turning the
+  whole artifact runtime into a serving-only surface
+
+### Runtime Recipe Builder Guardrails
+
+The Python runtime recipe builder keeps artifact identity as the source
+authority for compiled runtime recipes:
+
+- `SourceCatalog.source_artifact_ref` must be a real artifact identity. The
+  builder accepts `mi2` content identities and daemon-attested `msa1` mounted
+  sources; synthetic `disk:`, `key:`, path, and cache-local references are
+  rejected before compile.
+- `ServingBindingPlan` is the single recipe, compile, resolved-spec, and
+  realization identity. It must agree with `TensorcastServingFacts` for
+  `framework_name`, `adapter_version`, and `serving_abi_version`; its compile
+  payload also carries source/schema/realization digests and destination tensor
+  schema coverage for every trace-plan destination.
+- Mapped binding lowering accepts only single-axis source and destination ranges.
+  Destination `MultiRange` slices stay on the binding-realization path until the
+  mapped-binding protocol has an explicit flattened-layout contract; coverage
+  validation fails closed for unsupported `MultiRange` writes.
+- Retained serving binding authority may carry a `group_realization_acquire`
+  reference. Acquire passes it through to the Store Daemon, and retained
+  attachment handles own lease release unless ownership has been explicitly
+  transferred to runtime.
 
 ### Lease-In-Place Fast Path & Use Leases
 
@@ -188,8 +308,8 @@ coalesced VRAM (CUDA IPC) for zero-copy use.
   `artifact.tensor_dict_into(...)` or the convenience `artifact.tensor_into(name, target, ...)`.
   The Store validates shapes/strides/device before mutating buffers, zero-fills PAD segments to keep
   tensors consistent on failure, and unloads daemon-backed replicas immediately after copy/validation.
-- `StoreOptions` and per-call `FallbackOptions` express disk/P2P strategies without sprinkling
-  policy flags across call sites.
+- `StoreOptions.get` and per-call `GetArtifactOptions` carry execution-scoped retrieval
+  policy (`source`) and topology hints without sprinkling ad-hoc flags across call sites.
 - Low-level lease feeding and commit orchestration are handled internally by the Store,
   so most integrations rely entirely on the functional facade and its cancellation hooks.
 

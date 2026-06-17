@@ -18,10 +18,12 @@
 #include "core/checkpoint/checkpoint.h"
 #include "core/checkpoint/streaming_tensor_writer.h"
 #include "core/common/artifact_hash.h"
+#include "core/common/async_copy_manager.h"
 #include "core/common/const/granularity.h"
 #include "core/common/logging_init.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/cuda/cuda_api.h"
+#include "core/cuda/cuda_runtime.h"
 
 #include <filesystem>
 #include <fstream>
@@ -460,7 +462,11 @@ static uint64_t get_cuda_memory_ptr_wrapper(int device_id, const py::bytes& cuda
   // Convert Python bytes to std::string handle
   const auto handle = cuda_ipc_handle_py.cast<std::string>();
 
-  absl::StatusOr<std::uint64_t> ptr_or = get_cuda_memory_ptr(device_id, handle);
+  absl::StatusOr<std::uint64_t> ptr_or;
+  {
+    py::gil_scoped_release release;
+    ptr_or = get_cuda_memory_ptr(device_id, handle);
+  }
   if (!ptr_or.ok()) {
     const auto str = std::string("Failed to get CUDA memory pointer: ") + ptr_or.status().ToString();
     PY_THROW_WITH_LOG(PyExc_ValueError, str);
@@ -1040,20 +1046,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("size"),
           "Allocate CUDA memory on a single device")
       .def(
-          "get_cuda_memory_handle",
-          [](int device_id, std::uint64_t memory_ptr_int) {
-            const std::string handle = tensorcast::checkpoint::get_cuda_memory_handle(device_id, memory_ptr_int);
-            return py::bytes(handle);
-          },
-          py::arg("device_id"),
-          py::arg("memory_ptr"),
-          "Get a CUDA IPC memory handle for a single allocation")
-      .def(
           "get_cuda_memory_handle_with_offset",
           [](int device_id, std::uint64_t memory_ptr_int) {
             auto handle_or = tensorcast::checkpoint::get_cuda_memory_handle_with_offset(device_id, memory_ptr_int);
             if (!handle_or.ok()) {
-              return py::make_tuple(py::bytes(""), py::int_(0));
+              PY_THROW_WITH_LOG(PyExc_RuntimeError, handle_or.status().ToString());
             }
             const auto& [handle, base_offset] = *handle_or;
             return py::make_tuple(py::bytes(handle), py::int_(base_offset));
@@ -1106,4 +1103,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       &build_canonical_index_from_safetensors_wrapper,
       py::arg("artifact_dir"),
       "Build canonical RFC-0007 index JSON bytes from a directory of .safetensors files");
+
+  m.def(
+      "shutdown_native_runtime",
+      []() {
+        tensorcast::common::AsyncCopyManager::instance().shutdown();
+        tensorcast::cuda::CudaRuntime::instance().stream_pool().release_all();
+      },
+      "Best-effort cleanup for TensorCast native runtime resources");
 }

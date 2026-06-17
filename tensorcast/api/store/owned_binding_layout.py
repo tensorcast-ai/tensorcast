@@ -7,7 +7,11 @@ import hashlib
 from dataclasses import dataclass
 from typing import Sequence
 
-from tensorcast.api.store.common import canonical_index_to_bytes
+from tensorcast.api.store.common import (
+    canonical_entry_storage_span_bytes,
+    canonical_index_storage_extent,
+    canonical_index_to_bytes,
+)
 from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry
 from tensorcast.common.selection_identity import compute_logical_layout_hash
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
@@ -74,11 +78,12 @@ def build_owned_layout(
     view_id: str | None = None,
     ordered_names: Sequence[str] | None = None,
     dst_specs: Sequence[store_daemon_pb2.MappedTensorSpec] | None = None,
+    separate_storages: bool = False,
 ) -> BindingLayout:
     packed_entries = _pack_entries(entries, ordered_names=ordered_names)
     packed_index = CanonicalIndex(
         entries=tuple(packed_entries),
-        total_size_bytes=sum(int(entry.size_bytes) for entry in packed_entries),
+        total_size_bytes=canonical_index_storage_extent(packed_entries),
         avbs_hash="",
     )
     target_index_bytes = canonical_index_to_bytes(packed_index)
@@ -100,20 +105,36 @@ def build_owned_layout(
     resolved_view_id = str(view_id or "").strip()
     if resolved_view_id:
         target_layout.view_id = resolved_view_id
-    storage_id = "binding:coalesced:0"
-    target_layout.storages.add(
-        storage_id=storage_id,
-        device_id=int(device_id),
-        storage_length=int(packed_index.total_size_bytes),
-        mapping_base_offset=0,
-    )
-    for entry in packed_entries:
-        target_layout.offsets.add(
-            name=entry.name,
+    if separate_storages:
+        for idx, entry in enumerate(packed_entries):
+            storage_id = f"binding:tensor:{idx}"
+            target_layout.storages.add(
+                storage_id=storage_id,
+                device_id=int(device_id),
+                storage_length=int(entry.size_bytes),
+                mapping_base_offset=int(entry.segment_offset),
+            )
+            target_layout.offsets.add(
+                name=entry.name,
+                storage_id=storage_id,
+                storage_offset=0,
+                logical_length=int(entry.size_bytes),
+            )
+    else:
+        storage_id = "binding:coalesced:0"
+        target_layout.storages.add(
             storage_id=storage_id,
-            storage_offset=int(entry.segment_offset),
-            logical_length=int(entry.size_bytes),
+            device_id=int(device_id),
+            storage_length=int(packed_index.total_size_bytes),
+            mapping_base_offset=0,
         )
+        for entry in packed_entries:
+            target_layout.offsets.add(
+                name=entry.name,
+                storage_id=storage_id,
+                storage_offset=int(entry.segment_offset),
+                logical_length=int(entry.size_bytes),
+            )
     return build_binding_layout(
         target_layout=target_layout,
         target_index_bytes=target_index_bytes,
@@ -127,12 +148,13 @@ def build_mapped_tensor_spec(
     shape: Sequence[int],
     stride: Sequence[int],
     dtype: str,
+    storage_offset: int = 0,
     logical_length: int,
 ) -> store_daemon_pb2.MappedTensorSpec:
     spec = store_daemon_pb2.MappedTensorSpec(
         name=str(name),
         dtype=str(dtype),
-        storage_offset=0,
+        storage_offset=int(storage_offset),
         logical_length=int(logical_length),
     )
     spec.shape.extend(int(v) for v in shape)
@@ -152,6 +174,7 @@ def _pack_entries(
     packed: list[CanonicalIndexEntry] = []
     cursor = 0
     for entry in source_entries:
+        size_bytes = canonical_entry_storage_span_bytes(entry)
         packed.append(
             CanonicalIndexEntry(
                 name=str(entry.name),
@@ -160,10 +183,10 @@ def _pack_entries(
                 stride=tuple(int(v) for v in entry.stride),
                 storage_offset=0,
                 segment_offset=int(cursor),
-                size_bytes=int(entry.size_bytes),
+                size_bytes=int(size_bytes),
             )
         )
-        cursor += int(entry.size_bytes)
+        cursor += int(size_bytes)
     return tuple(packed)
 
 

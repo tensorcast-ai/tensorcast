@@ -7,33 +7,50 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <numeric>
 #include <optional>
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
+#include "core/checkpoint/tensor_writer.h"
+#include "core/store/materialization/dataplane/metadata/index_reader.h"
 #include "core/store/materialization/dataplane/metadata/safetensors_util.h"
+#include "nlohmann/json.hpp"
 
 namespace tensorcast::store::loader {
 namespace {
 
 struct CacheState {
   absl::Mutex mutex;
-  absl::flat_hash_map<std::string, std::weak_ptr<const DiskArtifactContext>> contexts ABSL_GUARDED_BY(mutex);
+
+  struct ContextEntry {
+    std::shared_ptr<const DiskArtifactContext> context;
+    uint64_t last_access{0};
+  };
+
+  absl::flat_hash_map<std::string, ContextEntry> contexts ABSL_GUARDED_BY(mutex);
+  std::atomic<uint64_t> access_counter{0};
   std::atomic<uint64_t> context_hits{0};
   std::atomic<uint64_t> context_misses{0};
   std::atomic<uint64_t> index_hits{0};
   std::atomic<uint64_t> index_misses{0};
 };
+
+constexpr size_t kMaxCachedDiskArtifactContexts = 16;
 
 CacheState& cache_state() {
   static CacheState state;
@@ -45,6 +62,62 @@ std::filesystem::path normalize_artifact_path(const std::filesystem::path& artif
     return artifact_path.lexically_normal();
   }
   return std::filesystem::absolute(artifact_path).lexically_normal();
+}
+
+bool is_cache_relevant_file(std::string_view filename) {
+  return filename == "artifact_descriptor.json" || filename == "tensor_index.json" || filename == "tensor_index.cbor" ||
+      filename == "tensor.data" || filename.starts_with("tensor.data_") || filename.ends_with(".safetensors");
+}
+
+absl::StatusOr<std::string> artifact_directory_cache_fingerprint(const std::filesystem::path& artifact_path) {
+  std::vector<std::string> entries;
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::directory_iterator(artifact_path, ec)) {
+    if (ec) {
+      return absl::ErrnoToStatus(
+          ec.value(), absl::StrCat("Failed to enumerate artifact directory '", artifact_path.string(), "'"));
+    }
+    if (!entry.is_regular_file(ec)) {
+      if (ec) {
+        return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat '", entry.path().string(), "'"));
+      }
+      continue;
+    }
+    const std::string filename = entry.path().filename().string();
+    if (!is_cache_relevant_file(filename)) {
+      continue;
+    }
+    const uint64_t size = entry.file_size(ec);
+    if (ec) {
+      return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat size for '", entry.path().string(), "'"));
+    }
+    const auto mtime = entry.last_write_time(ec);
+    if (ec) {
+      return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat mtime for '", entry.path().string(), "'"));
+    }
+    entries.push_back(absl::StrCat(filename, ":", size, ":", mtime.time_since_epoch().count()));
+  }
+  std::ranges::sort(entries);
+  return absl::StrJoin(entries, "|");
+}
+
+std::vector<std::shared_ptr<const DiskArtifactContext>> evict_old_contexts_locked(CacheState& state)
+    ABSL_EXCLUSIVE_LOCKS_REQUIRED(state.mutex) {
+  std::vector<std::shared_ptr<const DiskArtifactContext>> evicted;
+  while (state.contexts.size() > kMaxCachedDiskArtifactContexts) {
+    auto victim = state.contexts.end();
+    for (auto it = state.contexts.begin(); it != state.contexts.end(); ++it) {
+      if (victim == state.contexts.end() || it->second.last_access < victim->second.last_access) {
+        victim = it;
+      }
+    }
+    if (victim == state.contexts.end()) {
+      break;
+    }
+    evicted.push_back(std::move(victim->second.context));
+    state.contexts.erase(victim);
+  }
+  return evicted;
 }
 
 absl::StatusOr<size_t> pread_fully(int fd, uint64_t off, void* dst, size_t bytes) {
@@ -94,6 +167,203 @@ absl::StatusOr<std::shared_ptr<SharedFileHandle>> open_shared_file(const std::fi
     return absl::ErrnoToStatus(saved_errno, absl::StrCat("Failed to stat ", path.string()));
   }
   return std::make_shared<SharedFileHandle>(path, fd, static_cast<uint64_t>(st.st_size));
+}
+
+struct StandardPartitionLayout {
+  std::vector<size_t> partition_sizes;
+  uint64_t total_size{0};
+};
+
+absl::StatusOr<std::optional<StandardPartitionLayout>> maybe_reconstruct_checkpoint_partition_layout(
+    std::string_view layout_json,
+    uint64_t logical_total_size,
+    size_t partition_count) {
+  CHECK(partition_count > 0);
+  if (layout_json.empty()) {
+    return absl::InvalidArgumentError("disk artifact index is empty for standard partition artifact");
+  }
+
+  nlohmann::json parsed;
+  try {
+    parsed = nlohmann::json::parse(layout_json, nullptr, true);
+  } catch (const std::exception& e) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Failed to parse disk artifact index for checkpoint-style layout reconstruction: ", e.what()));
+  }
+  if (!parsed.is_object()) {
+    return absl::InvalidArgumentError("disk artifact index must be a JSON object");
+  }
+
+  absl::flat_hash_map<uint64_t, uint64_t> max_size_by_offset;
+  max_size_by_offset.reserve(parsed.size());
+  for (auto it = parsed.begin(); it != parsed.end(); ++it) {
+    const auto& entry = it.value();
+    if (!entry.is_array() || entry.size() < 2) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("disk artifact index entry must contain [offset,size,...] for tensor '", it.key(), "'"));
+    }
+    const uint64_t offset = entry[0].get<uint64_t>();
+    const uint64_t size = entry[1].get<uint64_t>();
+    auto existing = max_size_by_offset.find(offset);
+    if (existing == max_size_by_offset.end()) {
+      max_size_by_offset.emplace(offset, size);
+    } else if (size > existing->second) {
+      existing->second = size;
+    }
+  }
+
+  if (max_size_by_offset.empty()) {
+    return StandardPartitionLayout{
+        .partition_sizes = std::vector<size_t>(partition_count, 0),
+        .total_size = logical_total_size,
+    };
+  }
+
+  std::vector<std::pair<uint64_t, uint64_t>> records;
+  records.reserve(max_size_by_offset.size());
+  for (const auto& [offset, size] : max_size_by_offset) {
+    records.emplace_back(offset, size);
+  }
+  std::sort(records.begin(), records.end(), [](const auto& a, const auto& b) {
+    if (a.first != b.first) {
+      return a.first < b.first;
+    }
+    return a.second < b.second;
+  });
+
+  std::vector<size_t> partition_sizes;
+  partition_sizes.reserve(partition_count);
+  uint64_t current_partition_start = 0;
+  uint64_t current_partition_used = 0;
+
+  for (size_t i = 0; i < records.size(); ++i) {
+    const auto [offset, size] = records[i];
+    const uint64_t occupied_bytes = (i + 1 < records.size())
+        ? (records[i + 1].first - offset)
+        : static_cast<uint64_t>(checkpoint::TensorWriter::aligned_size(static_cast<size_t>(size)));
+
+    if (occupied_bytes < size) {
+      return absl::FailedPreconditionError(
+          absl::StrCat(
+              "disk artifact index layout is inconsistent: occupied bytes ",
+              occupied_bytes,
+              " smaller than tensor size ",
+              size,
+              " at offset ",
+              offset));
+    }
+
+    if (offset < current_partition_start + current_partition_used) {
+      return absl::FailedPreconditionError(
+          absl::StrCat("disk artifact index layout overlaps within a partition at offset ", offset));
+    }
+
+    const uint64_t gap_before = offset - (current_partition_start + current_partition_used);
+    const uint64_t bytes_if_kept = current_partition_used + gap_before + occupied_bytes;
+    if (current_partition_used > 0 && bytes_if_kept > checkpoint::kPartitionMaxSize) {
+      partition_sizes.push_back(static_cast<size_t>(offset - current_partition_start));
+      current_partition_start = offset;
+      current_partition_used = occupied_bytes;
+      continue;
+    }
+
+    current_partition_used = bytes_if_kept;
+  }
+
+  if (logical_total_size < current_partition_start) {
+    return absl::FailedPreconditionError(
+        absl::StrCat(
+            "disk artifact logical total size ",
+            logical_total_size,
+            " is smaller than reconstructed last partition start ",
+            current_partition_start));
+  }
+
+  partition_sizes.push_back(static_cast<size_t>(logical_total_size - current_partition_start));
+  if (partition_sizes.size() != partition_count) {
+    return std::nullopt;
+  }
+
+  return StandardPartitionLayout{
+      .partition_sizes = std::move(partition_sizes),
+      .total_size = logical_total_size,
+  };
+}
+
+absl::StatusOr<std::optional<StandardPartitionLayout>> maybe_resolve_standard_partition_layout(
+    const std::filesystem::path& artifact_path,
+    const std::vector<size_t>& physical_partition_sizes) {
+  CHECK(!physical_partition_sizes.empty());
+
+  auto info_or = read_from_artifact_dir(artifact_path, /*target_device_id=*/0);
+  if (!info_or.ok()) {
+    if (absl::IsNotFound(info_or.status())) {
+      return std::nullopt;
+    }
+    return info_or.status();
+  }
+
+  const IndexInfo& info = *info_or;
+  if (info.is_safetensors) {
+    return std::nullopt;
+  }
+
+  const std::string& layout_json =
+      info.source_index_json.has_value() ? *info.source_index_json : info.canonical_index_json;
+  const uint64_t logical_total_size = (info.source_index_json.has_value() && info.source_total_size_bytes > 0)
+      ? info.source_total_size_bytes
+      : info.total_size_bytes;
+  const uint64_t physical_total_size =
+      std::accumulate(physical_partition_sizes.begin(), physical_partition_sizes.end(), uint64_t{0});
+
+  if (logical_total_size > physical_total_size) {
+    return absl::FailedPreconditionError(
+        absl::StrCat(
+            "disk artifact logical total size ",
+            logical_total_size,
+            " exceeds physical partition bytes ",
+            physical_total_size,
+            " for artifact ",
+            artifact_path.string()));
+  }
+
+  auto checkpoint_layout_or =
+      maybe_reconstruct_checkpoint_partition_layout(layout_json, logical_total_size, physical_partition_sizes.size());
+  if (!checkpoint_layout_or.ok()) {
+    return checkpoint_layout_or.status();
+  }
+  if (checkpoint_layout_or->has_value()) {
+    return checkpoint_layout_or;
+  }
+
+  std::vector<size_t> resolved_partition_sizes = physical_partition_sizes;
+  if (resolved_partition_sizes.empty()) {
+    return StandardPartitionLayout{.partition_sizes = {}, .total_size = logical_total_size};
+  }
+  if (resolved_partition_sizes.size() == 1) {
+    resolved_partition_sizes[0] = static_cast<size_t>(logical_total_size);
+    return StandardPartitionLayout{
+        .partition_sizes = std::move(resolved_partition_sizes),
+        .total_size = logical_total_size,
+    };
+  }
+
+  const uint64_t prefix_before_last = physical_total_size - resolved_partition_sizes.back();
+  if (logical_total_size < prefix_before_last) {
+    return absl::FailedPreconditionError(
+        absl::StrCat(
+            "disk artifact logical total size ",
+            logical_total_size,
+            " falls before the final partition under numeric concatenation for ",
+            artifact_path.string(),
+            "; per-part logical boundaries require checkpoint-style inference or explicit metadata"));
+  }
+
+  resolved_partition_sizes.back() = static_cast<size_t>(logical_total_size - prefix_before_last);
+  return StandardPartitionLayout{
+      .partition_sizes = std::move(resolved_partition_sizes),
+      .total_size = logical_total_size,
+  };
 }
 
 absl::StatusOr<std::shared_ptr<const DiskArtifactContext>> build_disk_artifact_context(
@@ -243,6 +513,30 @@ absl::StatusOr<std::shared_ptr<const DiskArtifactContext>> build_disk_artifact_c
         absl::StrCat("No replica partition files found in: ", artifact_path.string(), " (also no .safetensors)"));
   }
 
+  if (!is_safetensors && !partition_paths.empty()) {
+    auto layout_or = maybe_resolve_standard_partition_layout(artifact_path, partition_sizes);
+    if (!layout_or.ok()) {
+      return layout_or.status();
+    }
+    if (layout_or->has_value()) {
+      const auto& layout = **layout_or;
+      for (size_t i = 0; i < partition_sizes.size(); ++i) {
+        if (partition_sizes[i] < layout.partition_sizes[i]) {
+          return absl::FailedPreconditionError(
+              absl::StrCat(
+                  "disk artifact partition file is smaller than index-defined logical layout: path=",
+                  partition_paths[i].string(),
+                  " physical_size=",
+                  partition_sizes[i],
+                  " logical_size=",
+                  layout.partition_sizes[i]));
+        }
+      }
+      partition_sizes = layout.partition_sizes;
+      total_size = layout.total_size;
+    }
+  }
+
   return std::shared_ptr<const DiskArtifactContext>(new DiskArtifactContext(
       artifact_path,
       std::move(partition_paths),
@@ -344,18 +638,20 @@ absl::StatusOr<IndexInfo> DiskArtifactContext::get_index_info(int target_device_
 absl::StatusOr<std::shared_ptr<const DiskArtifactContext>> get_disk_artifact_context(
     const std::filesystem::path& artifact_path) {
   const std::filesystem::path normalized = normalize_artifact_path(artifact_path);
-  const std::string cache_key = normalized.string();
+  auto fingerprint_or = artifact_directory_cache_fingerprint(normalized);
+  if (!fingerprint_or.ok()) {
+    return fingerprint_or.status();
+  }
+  const std::string cache_key = absl::StrCat(normalized.string(), "\n", *fingerprint_or);
   auto& state = cache_state();
   {
     absl::MutexLock lock(&state.mutex);
     auto it = state.contexts.find(cache_key);
     if (it != state.contexts.end()) {
-      if (auto existing = it->second.lock(); existing != nullptr) {
-        LOG(INFO) << "DiskArtifactContext cache hit path=" << normalized.string();
-        state.context_hits.fetch_add(1, std::memory_order_relaxed);
-        return existing;
-      }
-      state.contexts.erase(it);
+      it->second.last_access = state.access_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+      LOG(INFO) << "DiskArtifactContext cache hit path=" << normalized.string();
+      state.context_hits.fetch_add(1, std::memory_order_relaxed);
+      return it->second.context;
     }
   }
 
@@ -365,12 +661,28 @@ absl::StatusOr<std::shared_ptr<const DiskArtifactContext>> get_disk_artifact_con
   }
   LOG(INFO) << "DiskArtifactContext cache miss path=" << normalized.string();
 
+  std::vector<std::shared_ptr<const DiskArtifactContext>> evicted_contexts;
   {
     absl::MutexLock lock(&state.mutex);
-    state.contexts[cache_key] = *built_or;
+    auto it = state.contexts.find(cache_key);
+    if (it != state.contexts.end()) {
+      it->second.last_access = state.access_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+      state.context_hits.fetch_add(1, std::memory_order_relaxed);
+      return it->second.context;
+    }
+    state.contexts[cache_key] = CacheState::ContextEntry{
+        .context = *built_or, .last_access = state.access_counter.fetch_add(1, std::memory_order_relaxed) + 1};
+    evicted_contexts = evict_old_contexts_locked(state);
   }
+  // Release retired mmap handles outside the cache mutex.
+  evicted_contexts.clear();
   state.context_misses.fetch_add(1, std::memory_order_relaxed);
   return *built_or;
+}
+
+absl::StatusOr<std::shared_ptr<const DiskArtifactContext>> get_uncached_disk_artifact_context(
+    const std::filesystem::path& artifact_path) {
+  return build_disk_artifact_context(normalize_artifact_path(artifact_path));
 }
 
 DiskArtifactContextCacheStats get_disk_artifact_context_cache_stats() {
@@ -389,6 +701,7 @@ void reset_disk_artifact_context_cache_for_testing() {
     absl::MutexLock lock(&state.mutex);
     state.contexts.clear();
   }
+  state.access_counter.store(0, std::memory_order_relaxed);
   state.context_hits.store(0, std::memory_order_relaxed);
   state.context_misses.store(0, std::memory_order_relaxed);
   state.index_hits.store(0, std::memory_order_relaxed);

@@ -54,6 +54,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cuda_api_lib",
+        ":device_guard_lib",
         "@abseil-cpp//absl/log:absl_log",
         "@abseil-cpp//absl/strings:string_view",
         "@abseil-cpp//absl/types:span",
@@ -123,6 +124,7 @@ cc_test(
     name = "cuda_ipc_test",
     srcs = ["cuda_ipc_test.cc"],
     deps = [
+        ":cuda_api_lib",
         ":cuda_ipc_lib",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",

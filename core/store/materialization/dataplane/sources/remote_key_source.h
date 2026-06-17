@@ -17,6 +17,12 @@
 
 namespace tensorcast::store::loader {
 
+communicator::routing::ConnectionProtocol normalize_direct_write_read_plan_protocol(
+    communicator::routing::ConnectionProtocol protocol,
+    const communicator::routing::EndpointBinding& local_binding,
+    const communicator::routing::EndpointBinding& remote_binding,
+    bool rdma_enabled);
+
 class RemoteKeySource : public SeekableSource {
  public:
   struct Options {
@@ -38,6 +44,10 @@ class RemoteKeySource : public SeekableSource {
     std::chrono::milliseconds stalled_log_interval{std::chrono::seconds(30)};
     // Optional artifact id used only for diagnostics.
     std::string artifact_id;
+    // Optional transport request id used only for diagnostics/correlation.
+    std::string transport_request_id;
+    // Optional request-local authority label for communicator ReadPlan lowering.
+    std::string authority_id;
   };
 
   explicit RemoteKeySource(Options options);
@@ -48,19 +58,53 @@ class RemoteKeySource : public SeekableSource {
   // Random access read (required for pump_ranges)
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override;
 
-  // Enable direct-write when RDMA is available on the engine.
+  // Enable direct-write when RDMA is available or a same-node routed local
+  // datapath is selected.
   [[nodiscard]] uint64_t total_bytes() const override {
     return options_.total_size;
   }
 
   [[nodiscard]] bool supports_direct_write_at() const override;
+  [[nodiscard]] bool supports_batched_direct_write_at() const override;
   absl::StatusOr<size_t> read_into_at(
       uint64_t src_offset,
       uint64_t dest_va_offset,
       size_t bytes,
       const DirectWriteGrant& grant) override;
+  absl::StatusOr<size_t> readv_into_at(absl::Span<const DirectWriteOp> ops, const DirectWriteGrant& grant) override;
 
  private:
+  struct LocatedKeySegment {
+    size_t key_index = 0;
+    size_t key_offset = 0;
+  };
+
+  enum class DirectWriteMode : uint8_t {
+    kDirect = 0,
+    kRouted = 1,
+  };
+
+  struct FrozenDirectWriteContext {
+    DirectWriteMode mode = DirectWriteMode::kDirect;
+    std::shared_ptr<communicator::routing::RoutingContext::Communicator> routed_communicator;
+    communicator::routing::ReadRouteContext route_context;
+  };
+
+  absl::Status validate_key_layout() const;
+  absl::StatusOr<LocatedKeySegment> locate_key_segment(uint64_t offset) const;
+  absl::StatusOr<FrozenDirectWriteContext> freeze_direct_write_context() const;
+  absl::StatusOr<communicator::routing::ReadPlan> build_routed_read_plan(
+      absl::Span<const DirectWriteOp> ops,
+      const DirectWriteGrant& grant,
+      const FrozenDirectWriteContext& context) const;
+  absl::StatusOr<size_t> execute_direct_write_op(
+      const DirectWriteOp& op,
+      const DirectWriteGrant& grant,
+      const FrozenDirectWriteContext& context);
+  absl::StatusOr<size_t> execute_direct_write_batch_fallback(
+      absl::Span<const DirectWriteOp> ops,
+      const DirectWriteGrant& grant,
+      const FrozenDirectWriteContext& context);
   absl::StatusOr<communicator::transport::read_result_t> await_read_result(
       communicator::transport::future_read_result_t& future,
       std::string_view key,
@@ -73,6 +117,15 @@ class RemoteKeySource : public SeekableSource {
       uint64_t remote_offset,
       int dev_type,
       int dev_id);
+  absl::StatusOr<communicator::transport::read_result_t> read_with_frozen_mode(
+      const FrozenDirectWriteContext& context,
+      const std::string& key,
+      uint64_t local_addr,
+      size_t bytes,
+      uint64_t remote_offset,
+      int dev_type,
+      int dev_id);
+  [[nodiscard]] std::string resolved_authority_id() const;
   void abort_timed_out_channel(std::string_view key, uint64_t remote_offset, size_t bytes) const;
   std::chrono::milliseconds remaining_request_budget() const;
 

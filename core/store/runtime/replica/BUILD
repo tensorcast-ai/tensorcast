@@ -40,6 +40,7 @@ sc_cc_library(
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/replica",
         "//core/store/replica:memory_state",
+        "//core/store/replica:replica_placement",
         "//core/store/runtime:ingestion_events",
         "//core/store/runtime/context:runtime_context",
         "//core/store/runtime/context:runtime_context_events",

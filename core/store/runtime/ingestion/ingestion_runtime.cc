@@ -51,36 +51,40 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> IngestionRuntime::materiali
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> IngestionRuntime::materialize_mapped_into_target(
     const DeviceKey& target_device,
-    const loading::IntoTargetLayout& target_layout,
-    const loader::ByteRangeMap& mapping,
-    std::string_view canonical_index_json,
-    uint64_t generation,
+    const ingestion::strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
     const loading::MaterializeHints& hints,
     std::optional<loading::DiskSource> disk_source) {
   return materialization_facade_->materialize_mapped_into_target(
-      target_device, target_layout, mapping, canonical_index_json, generation, hints, std::move(disk_source));
+      target_device, prepared_execution, hints, std::move(disk_source));
 }
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> IngestionRuntime::materialize_mapped_into_target(
     const DeviceKey& target_device,
-    const loading::IntoTargetLayout& target_layout,
-    const loader::ByteRangeMap& mapping,
-    std::string_view canonical_index_json,
-    uint64_t generation,
+    const ingestion::strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
     const loading::MaterializeHints& hints) {
-  return materialization_facade_->materialize_mapped_into_target(
-      target_device, target_layout, mapping, canonical_index_json, generation, hints);
+  return materialization_facade_->materialize_mapped_into_target(target_device, prepared_execution, hints);
 }
 
-absl::StatusOr<loading::MaterializeIntoTargetResult> IngestionRuntime::materialize_mapped_loader_into_target(
+absl::StatusOr<loading::MaterializeIntoTargetResult> IngestionRuntime::materialize_mapped_sources_into_target(
     const DeviceKey& target_device,
     const loading::IntoTargetLayout& target_layout,
-    std::unique_ptr<IArtifactLoader> loader,
+    std::vector<std::shared_ptr<loader::SeekableSource>> sources,
     const loader::ByteRangeMap& mapping,
     const loading::MaterializeHints& hints,
     loading::MaterializationSource source_kind) {
-  return materialization_facade_->materialize_mapped_loader_into_target(
-      target_device, target_layout, std::move(loader), mapping, hints, source_kind);
+  return materialization_facade_->materialize_mapped_sources_into_target(
+      target_device, target_layout, std::move(sources), mapping, hints, source_kind);
+}
+
+absl::StatusOr<ingestion::MaterializationFacade::IngestMappedSourcesIntoReplicasResult> IngestionRuntime::
+    ingest_mapped_sources_into_replicas(
+        std::vector<ingestion::MaterializationFacade::MappedReplicaTarget> targets,
+        std::vector<std::shared_ptr<loader::SeekableSource>> sources,
+        const loader::ByteRangeMap& mapping,
+        const loading::MaterializeHints& hints,
+        loading::MaterializationSource source_kind) {
+  return materialization_facade_->ingest_mapped_sources_into_replicas(
+      std::move(targets), std::move(sources), mapping, hints, source_kind);
 }
 
 absl::StatusOr<ingestion::ArtifactLoweringResult> IngestionRuntime::execute_artifact_lowering_plan(

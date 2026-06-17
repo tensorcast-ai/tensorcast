@@ -125,6 +125,59 @@ struct StoreEngineOptions {
 
   ByteMappingConfig byte_mapping{};
 
+  struct MaterializationStrategyConfig {
+    enum class ExecutorPreference : std::uint8_t {
+      kAuto = 0,
+      kGenericByteRange = 1,
+      kTensorAwareLocal = 2,
+      kOwnerFileCollective = 3,
+    };
+
+    enum class DiagnosticsVerbosity : std::uint8_t {
+      kOff = 0,
+      kBasic = 1,
+      kVerbose = 2,
+    };
+
+    enum class LocalMappedSafetensorsIoMode : std::uint8_t {
+      kAutoByFilesystem = 0,
+      kBuffered = 1,
+      kDirectAlignedEdges = 2,
+    };
+
+    bool enable_tensor_aware_mapped_executor{true};
+    bool enable_local_batched_disk_load{false};
+    bool enable_owner_file_collective{false};
+    bool allow_mixed_execution{true};
+    bool prefer_local_canonical_for_mapped{false};
+    bool allow_source_ordered_for_mapped{true};
+    bool enable_mapped_dim0_tensor_jobs{true};
+    bool enable_mapped_dim1_tensor_jobs{true};
+    bool enable_mapped_concat_jobs{true};
+    bool enable_mapped_concat_execution{true};
+    bool enable_mapped_single_range_concat_jobs{true};
+    bool enable_mapped_multirange_concat_jobs{true};
+    bool sync_after_single_range_concat_job{false};
+    bool use_dedicated_single_range_concat_stream{false};
+    ExecutorPreference executor_preference{ExecutorPreference::kAuto};
+    DiagnosticsVerbosity diagnostics_verbosity{DiagnosticsVerbosity::kBasic};
+    uint64_t direct_write_batch_bytes{0};
+    uint32_t direct_write_batch_ops{0};
+    uint64_t owner_file_collective_peak_bytes_budget{8ULL * 1024ULL * 1024ULL * 1024ULL};
+    uint64_t owner_file_collective_batch_bytes{512ULL * 1024ULL * 1024ULL};
+    uint64_t owner_file_collective_dim1_staging_bytes{256ULL * 1024ULL * 1024ULL};
+    uint32_t owner_file_collective_max_inflight_batches{1};
+    bool owner_file_collective_shared_fs_only{true};
+    double owner_file_collective_max_owner_skew_ratio{1.5};
+    uint64_t owner_file_collective_min_dedup_saving_bytes{512ULL * 1024ULL * 1024ULL};
+    std::chrono::milliseconds owner_file_collective_group_assemble_timeout{std::chrono::milliseconds(15000)};
+    bool owner_file_collective_allow_mixed_residual{false};
+    uint32_t owner_file_collective_planner_cache_entries{256};
+    LocalMappedSafetensorsIoMode local_mapped_safetensors_io_mode{LocalMappedSafetensorsIoMode::kAutoByFilesystem};
+  };
+
+  MaterializationStrategyConfig materialization_strategy{};
+
   enum class PromotionPolicy : std::uint8_t {
     kUnspecified = 0,
     kNever = 1,
@@ -141,6 +194,15 @@ struct StoreEngineOptions {
   };
 
   PromotionOptions promotion{};
+
+  struct ProgressiveReplicationConfig {
+    bool enabled{false};
+    std::chrono::milliseconds report_interval{std::chrono::milliseconds{1000}};
+    uint64_t min_report_delta_bytes{16ULL * 1024ULL * 1024ULL};
+    bool verify_before_report{true};
+  };
+
+  ProgressiveReplicationConfig progressive_replication{};
 };
 
 } // namespace tensorcast::store

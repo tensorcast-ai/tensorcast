@@ -8,18 +8,31 @@ import pytest
 import torch
 
 import tensorcast.node_agent.executor as executor_mod
+from tensorcast.api._config import PlanType
 from tensorcast.api._errors import DeviceMismatch
 from tensorcast.api.context import CallContext
 from tensorcast.api.plan import ArtifactSetRef, Plan, Worker
+from tensorcast.api.store import (
+    BuilderMode,
+    RepresentationPublishSpec,
+    RuntimeArtifactBuildIntent,
+    build_pure_transform_publication_bundle_from_registered_artifact,
+    build_pure_transform_transform_spec,
+    compute_pure_transform_representation_contract_hash,
+)
 from tensorcast.api.store.artifact import Artifact
 from tensorcast.api.store.common import canonical_index_from_bytes
+from tensorcast.api.store.handles import RegisteredArtifact
+from tensorcast.api.store.types import ReplicaInfo
 from tensorcast.engine_adapter import (
     BatchOutcome,
     BatchResult,
     EngineAdapter,
+    EngineOwnedManifest,
     HydrateResult,
     ManifestArtifactSetBridge,
     ManifestResult,
+    PublishManifest,
     PublishResult,
 )
 from tensorcast.node_agent.executor import NodeAgentExecutor
@@ -27,6 +40,11 @@ from tensorcast.node_agent.server import NodeAgentServicer
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.node_agent.v1 import node_agent_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
+from tensorcast.types import (
+    RuntimeArtifactManifest,
+    ServerConfig,
+    build_serving_manifest_ref,
+)
 
 
 class _DaemonStub:
@@ -37,7 +55,7 @@ class _DaemonStub:
         self.materialized_artifact_ids: list[str] = []
         self.wait_for_completion_values: list[bool] = []
 
-    def materialize_by_artifact_id_v2(self, *args, **kwargs):  # noqa: ANN002, ANN003
+    def materialize_by_artifact_id(self, *args, **kwargs):  # noqa: ANN002, ANN003
         self.materialize_timeout_s = kwargs.get("timeout_s")
         selection = kwargs.get("selection")
         if selection is not None:
@@ -59,6 +77,15 @@ class _DaemonStub:
 
         return _Resp()
 
+    def get_server_config(self) -> ServerConfig:
+        return ServerConfig(
+            tx_slice_bytes=0,
+            mem_pool_size=0,
+            artifact_chunk_bytes=0,
+            local_handle_socket_path="/tmp/tensorcast-node-agent-test.sock",
+            cpu_shared_memory_enabled=True,
+        )
+
 
 def _selection() -> common_pb2.ArtifactSelection:
     return common_pb2.ArtifactSelection(
@@ -70,6 +97,56 @@ def _selection() -> common_pb2.ArtifactSelection:
 
 def _canonical_index_bytes() -> bytes:
     return b'{"w":[0,4,[1],[1],"torch.float32",0]}'
+
+
+def _sample_publish_manifest(*, rid: str = "rid-123") -> PublishManifest:
+    artifact_manifest = ManifestResult.from_artifact_selections(
+        engine_request_id=rid,
+        layout_id="layout-v1",
+        manifest_selection=common_pb2.ArtifactSelection(
+            artifact_id=f"engine-manifest:{rid}",
+            logical_layout_hash=b"manifest-logical",
+            selection_hash=b"manifest-selection",
+        ),
+        artifact_selections=(
+            common_pb2.ArtifactSelection(
+                artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",
+                logical_layout_hash=b"logical-a",
+                selection_hash=b"selection-a",
+            ),
+        ),
+    )
+    return PublishManifest(
+        artifact_manifest=artifact_manifest,
+        engine_owned_manifest=EngineOwnedManifest(
+            engine="sglang",
+            schema="sglang.engine_owned_manifest.v1",
+            version=1,
+            encoding="json",
+            created_at_ms=1774223000123,
+            expires_at_ms=1774223060123,
+            artifact_manifest_digest=artifact_manifest.key_set_digest_hex,
+            payload_sha256="f" * 64,
+            payload=f'{{"logical_request_id":"{rid}"}}'.encode("utf-8"),
+        ),
+    )
+
+
+def _registered_artifact_stub(
+    artifact_id: str = "mi2:test:serving",
+) -> RegisteredArtifact:
+    return RegisteredArtifact(
+        artifact_id=artifact_id,
+        replica=ReplicaInfo(
+            replica_id=artifact_id,
+            replica_type="COALESCED_VRAM",
+            device=torch.device("cuda", 0),
+            plan=PlanType.VRAM_COALESCED,
+            size_bytes=4,
+        ),
+        canonical_index=canonical_index_from_bytes(_canonical_index_bytes()),
+        lease=None,
+    )
 
 
 def test_node_agent_executes_instance_transform_into() -> None:
@@ -84,7 +161,11 @@ def test_node_agent_executes_instance_transform_into() -> None:
         called["into"] = True
 
     adapter.register_transform_fn("noop.v1", into=_into)
-    target = adapter.mint_target("target", {"w": torch.zeros(1)})
+    target = adapter.mint_target(
+        "target",
+        {"w": torch.zeros(1)},
+        ttl_ms=300_000,
+    )
 
     spec = plan_pb2.PlanSpec(plan_id="plan-1")
     spec.context.request_id = "req-1"
@@ -110,12 +191,89 @@ def test_node_agent_executes_instance_transform_into() -> None:
     assert called["into"] is True
 
 
+def test_engine_adapter_identity_transform_register_can_return_pure_transform_bundle() -> (
+    None
+):
+    adapter = EngineAdapter(instance_id="inst-1", engine="test")
+    source_index = canonical_index_from_bytes(_canonical_index_bytes())
+
+    class _SourceStub:
+        def subset(self, _names):  # noqa: ANN001
+            return self
+
+        _canonical_index = source_index
+        _canonical_index_bytes = _canonical_index_bytes()
+
+        def _ensure_metadata(self):  # noqa: ANN001
+            return self._canonical_index
+
+        def _ensure_view_metadata_cache(self, **_kwargs):  # noqa: ANN001
+            return None
+
+        def tensor_dict(self, *, device, ctx):  # noqa: ANN001
+            assert device == "cpu"
+            assert ctx is None
+            return {"w": torch.tensor([1.0], dtype=torch.float32)}
+
+        def _ensure_identified(self) -> str:
+            return "mi2:test:source"
+
+    class _StoreStub:
+        def register(self, tensors, key, policy):  # noqa: ANN001
+            assert key == "models/demo/serving/v1"
+            assert policy is None
+            assert "w" in tensors
+            assert "__tensorcast_meta__.manifest_json" in tensors
+            manifest_tensor = tensors["__tensorcast_meta__.manifest_json"]
+            assert manifest_tensor.dtype == torch.uint8
+            assert manifest_tensor.ndim == 1
+            manifest = RuntimeArtifactManifest.from_bytes(
+                bytes(manifest_tensor.tolist())
+            )
+            assert manifest.framework_name == "torch"
+            return _registered_artifact_stub()
+
+    result = adapter.execute_transform_register(
+        spec=build_pure_transform_transform_spec(
+            transform_name="identity.v1",
+            build_intent=RuntimeArtifactBuildIntent(
+                builder_mode=BuilderMode.PURE_TRANSFORM,
+                framework_name="torch",
+                adapter_version="adapter-v1",
+                serving_abi_version="abi-v1",
+                build_pipeline_version="pipeline-v1",
+            ),
+            source_version_key="models/demo/source/v1",
+            serving_version_key="models/demo/serving/v1",
+        ),
+        source=_SourceStub(),  # type: ignore[arg-type]
+        out_key="models/demo/serving/v1",
+        store=_StoreStub(),  # type: ignore[arg-type]
+    )
+
+    assert isinstance(result, RepresentationPublishSpec)
+    assert result.serving_artifact_id == "mi2:test:serving"
+    assert result.serving_manifest_ref == build_serving_manifest_ref()
+    assert result.closeout_contract.kind == "representation_publish"
+    assert (
+        result.representation_publish_contract.representation_contract_hash
+        == compute_pure_transform_representation_contract_hash(
+            source_artifact=source_index,
+            serving_artifact=_registered_artifact_stub(),
+        )
+    )
+
+
 def test_node_agent_marks_dependents_cancelled_on_failure() -> None:
     adapter = EngineAdapter(
         instance_id="inst-1", engine="test", register_identity_transform=False
     )
     adapter.register_transform_fn("noop.v1", into=lambda _ctx: None)
-    target = adapter.mint_target("target", {"w": torch.zeros(1)})
+    target = adapter.mint_target(
+        "target",
+        {"w": torch.zeros(1)},
+        ttl_ms=300_000,
+    )
 
     spec = plan_pb2.PlanSpec(plan_id="plan-2")
     spec.context.request_id = "req-2"
@@ -404,7 +562,9 @@ def test_node_agent_executes_artifact_actions() -> None:
         return ManifestResult.from_artifact_ids(
             engine_request_id=rid,
             layout_id="layout-v1",
-            artifact_ids=("cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE",),
+            artifact_ids=(
+                "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",
+            ),
         )
 
     def _publish(rid: str, ttl_ms: int | None, _sealed, _ctx):  # noqa: ANN001
@@ -412,7 +572,9 @@ def test_node_agent_executes_artifact_actions() -> None:
         manifest = ManifestResult.from_artifact_ids(
             engine_request_id=rid,
             layout_id="layout-v1",
-            artifact_ids=("cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE",),
+            artifact_ids=(
+                "cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",
+            ),
         )
         return PublishResult(
             manifest=manifest,
@@ -422,9 +584,12 @@ def test_node_agent_executes_artifact_actions() -> None:
                     status_code="OK",
                 ),
             ),
+            publish_manifest=_sample_publish_manifest(rid=rid),
         )
 
-    def _hydrate(rid: str, _ctx):  # noqa: ANN001
+    def _hydrate(rid: str | None, publish_manifest, _ctx):  # noqa: ANN001
+        assert publish_manifest is None
+        assert rid is not None
         observed["hydrate"].append(rid)
         manifest = ManifestResult.from_artifact_ids(
             engine_request_id=rid,
@@ -494,6 +659,7 @@ def test_node_agent_executes_artifact_actions() -> None:
     publish_result = result.steps["s2"].artifact_result
     assert isinstance(publish_result, PublishResult)
     assert publish_result.put_outcomes[0].status_code == "OK"
+    assert publish_result.publish_manifest is not None
     hydrate_result = result.steps["s3"].artifact_result
     assert isinstance(hydrate_result, HydrateResult)
     assert hydrate_result.manifest is not None
@@ -504,6 +670,51 @@ def test_node_agent_executes_artifact_actions() -> None:
     assert observed["publish"] == ["rid-123:60000"]
     assert observed["hydrate"] == ["rid-123"]
     assert observed["evict"] == ["rid-123"]
+
+
+def test_node_agent_executes_hydrate_from_publish_manifest() -> None:
+    observed: list[PublishManifest] = []
+    adapter = EngineAdapter(
+        instance_id="inst-1", engine="test", register_identity_transform=False
+    )
+    publish_manifest = _sample_publish_manifest(rid="rid-transfer")
+
+    def _hydrate(
+        rid: str | None,
+        incoming_publish_manifest: PublishManifest | None,
+        _ctx,
+    ):  # noqa: ANN001
+        assert rid is None
+        assert incoming_publish_manifest is not None
+        observed.append(incoming_publish_manifest)
+        return HydrateResult(
+            manifest=incoming_publish_manifest.artifact_manifest,
+            get_outcomes=(),
+            missing_artifact_ids=(),
+        )
+
+    adapter.register_artifact_fns(hydrate=_hydrate)
+
+    spec = plan_pb2.PlanSpec(plan_id="plan-cache-hydrate-manifest")
+    spec.context.request_id = "req-cache-hydrate-manifest"
+    step = spec.steps.add()
+    step.step_id = "s1"
+    step.target.target_type = plan_pb2.TARGET_TYPE_INSTANCE
+    step.target.target_id = "inst-1"
+    step.action.hydrate.publish_manifest.CopyFrom(publish_manifest.to_proto())
+
+    executor = NodeAgentExecutor(
+        daemon_id="daemon-1",
+        daemon_address="127.0.0.1:50051",
+        instance_id="inst-1",
+        engine_adapter=adapter,
+        client_factory=lambda _addr: _DaemonStub(),
+    )
+    result = executor.execute_plan(spec)
+
+    assert result.ok is True
+    assert result.steps["s1"].status.state == "success"
+    assert observed == [publish_manifest]
 
 
 def test_node_agent_servicer_serializes_artifact_results() -> None:
@@ -522,7 +733,7 @@ def test_node_agent_servicer_serializes_artifact_results() -> None:
             ),
             artifact_selections=(
                 common_pb2.ArtifactSelection(
-                    artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE",
+                    artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~b64u.djE~layout-v1~b64u.azE",
                     logical_layout_hash=b"logical-a",
                     selection_hash=b"selection-a",
                 ),
@@ -531,22 +742,8 @@ def test_node_agent_servicer_serializes_artifact_results() -> None:
 
     def _publish(rid: str, ttl_ms: int | None, _sealed, _ctx):  # noqa: ANN001
         _ = ttl_ms
-        manifest = ManifestResult.from_artifact_selections(
-            engine_request_id=rid,
-            layout_id="layout-v1",
-            manifest_selection=common_pb2.ArtifactSelection(
-                artifact_id=f"engine-manifest:{rid}",
-                logical_layout_hash=b"manifest-logical",
-                selection_hash=b"manifest-selection",
-            ),
-            artifact_selections=(
-                common_pb2.ArtifactSelection(
-                    artifact_id="cgid:byte_artifact~ns~eng~b64u.bW9kZWw~layout-v1~b64u.azE",
-                    logical_layout_hash=b"logical-a",
-                    selection_hash=b"selection-a",
-                ),
-            ),
-        )
+        publish_manifest = _sample_publish_manifest(rid=rid)
+        manifest = publish_manifest.artifact_manifest
         return PublishResult(
             manifest=manifest,
             put_outcomes=(
@@ -556,6 +753,7 @@ def test_node_agent_servicer_serializes_artifact_results() -> None:
                     message="created",
                 ),
             ),
+            publish_manifest=publish_manifest,
         )
 
     adapter.register_artifact_fns(manifest=_manifest, publish=_publish)
@@ -598,7 +796,79 @@ def test_node_agent_servicer_serializes_artifact_results() -> None:
         "manifest_bridge"
     )
     assert (
+        response.steps[1].artifact_result.publish.publish_manifest.schema
+        == "tensorcast.publish_manifest.v1"
+    )
+    assert (
         response.steps[1].artifact_result.publish.put_outcomes[0].message == "created"
+    )
+
+
+def test_node_agent_servicer_serializes_pure_transform_publication_result() -> None:
+    adapter = EngineAdapter(
+        instance_id="inst-1", engine="test", register_identity_transform=False
+    )
+    bundle = build_pure_transform_publication_bundle_from_registered_artifact(
+        build_intent=RuntimeArtifactBuildIntent(
+            representation_contract_hash="bafkrepresentation",
+            builder_mode=BuilderMode.PURE_TRANSFORM,
+            framework_name="torch",
+            adapter_version="adapter-v1",
+            serving_abi_version="abi-v1",
+            build_pipeline_version="pipeline-v1",
+            source_artifact_ref="mi2:test:source",
+        ),
+        serving_artifact=_registered_artifact_stub(),
+        source_version_key="models/demo/source/v1",
+        serving_version_key="models/demo/serving/v1",
+    ).model_copy(update={"contract_family": "canonical_full"})
+
+    adapter.register_transform_fn(
+        "return_bundle.v1",
+        register=lambda _ctx: bundle,
+    )
+
+    spec = plan_pb2.PlanSpec(plan_id="plan-node-agent-pure-transform")
+    spec.context.request_id = "req-node-agent-pure-transform"
+
+    step = spec.steps.add()
+    step.step_id = "s1"
+    step.target.target_type = plan_pb2.TARGET_TYPE_INSTANCE
+    step.target.target_id = "inst-1"
+    action = step.action.transform_register
+    action.selection.CopyFrom(_selection())
+    action.spec.name = "return_bundle.v1"
+    action.out_key = "models/demo/serving/v1"
+
+    executor = NodeAgentExecutor(
+        daemon_id="daemon-1",
+        daemon_address="127.0.0.1:50051",
+        instance_id="inst-1",
+        engine_adapter=adapter,
+        client_factory=lambda _addr: _DaemonStub(),
+    )
+    servicer = NodeAgentServicer(executor)
+    response = servicer.ExecutePlan(
+        node_agent_pb2.ExecutePlanRequest(plan=spec),
+        None,  # type: ignore[arg-type]
+    )
+
+    assert response.ok is True
+    assert response.steps[0].HasField("artifact_result")
+    pure_result = response.steps[0].artifact_result.representation_publish
+    assert (
+        pure_result.representation_publish_contract.subject.serving_artifact_id
+        == "mi2:test:serving"
+    )
+    assert (
+        pure_result.representation_publish_contract.serving_manifest_ref
+        == build_serving_manifest_ref()
+    )
+    assert pure_result.source_artifact_ref == "mi2:test:source"
+    assert pure_result.contract_family == "canonical_full"
+    assert (
+        pure_result.representation_publish_contract.representation_contract_hash
+        == "bafkrepresentation"
     )
 
 

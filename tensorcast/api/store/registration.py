@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import logging
 import os
@@ -64,6 +63,7 @@ from tensorcast.api.store.views import (
 from tensorcast.common.selection_contract import compute_selected_index_bytes
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.types import CanonicalRange
 
 logger = logging.getLogger(__name__)
 
@@ -191,8 +191,13 @@ class RegistrationPipeline:
             with handle_lock:
                 handle = handle_ref.get("handle")
             if handle is not None:
-                with contextlib.suppress(Exception):
+                try:
                     return bool(handle.abort(timeout_s=5.0))
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "store.register_async cancel abort failed",
+                        extra={"tc.artifact.key": key or ""},
+                    )
             return True
 
         return self._executor.submit(_task, cancel_callback=_cancel)
@@ -540,7 +545,7 @@ class RegistrationPipeline:
                 inverse_requires_materialization=False,
                 inverse_tensors=(),
             )
-            canonical_ranges = ()
+            canonical_ranges: tuple[CanonicalRange, ...] = ()
         else:
             plan_metadata = _compute_view_plan_metadata(
                 canonical_index_bytes, build_result
@@ -816,8 +821,13 @@ class RegistrationPipeline:
             with handle_lock:
                 handle = handle_ref.get("handle")
             if handle is not None:
-                with contextlib.suppress(Exception):
+                try:
                     return bool(handle.abort(timeout_s=5.0))
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "store.register_view_async cancel abort failed",
+                        extra={"tc.artifact.id": artifact_id or ""},
+                    )
             return True
 
         return self._executor.submit(_task, cancel_callback=_cancel)

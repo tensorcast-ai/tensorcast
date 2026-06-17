@@ -137,10 +137,12 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
     kernel->lip_manager().set_global_store_client(global_store_client);
     kernel->derived_view_export_manager().set_global_store_client(global_store_client);
   }
+  std::shared_ptr<store::components::CommunicationManager> comm_manager = kernel->engine().get_shared_comm_manager();
 
   auto external_target_access_service = std::make_unique<ExternalTargetAccessService>(ExternalTargetAccessService::Dep{
       .devices = kernel->device_resolver(),
       .regions = kernel->region_registry(),
+      .comm_manager = comm_manager.get(),
   });
 
   auto byte_artifact_controller = std::make_unique<ByteArtifactController>(
@@ -152,6 +154,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
           .external_target_access_service = *external_target_access_service,
           .identity_store = kernel->worker_identity_store(),
           .engine = kernel->engine(),
+          .async_runtime = kernel->async_runtime(),
           .persistence_manager = kernel->persistence_manager(),
           .global_store_client = global_store_client,
           .inter_daemon_channel_credentials = kernel->inter_daemon_channel_credentials(),
@@ -167,6 +170,15 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
                   .worker_directory_staleness_budget = options.byte_artifact_routing.worker_directory_staleness_budget,
                   .routing_epoch = options.byte_artifact_routing.routing_epoch,
                   .shard_home_eligible = options.byte_artifact_routing.shard_home_eligible,
+              },
+          .publish_prereg =
+              {
+                  .enabled = options.byte_artifact_routing.payload_transport.source_publish_prereg.enabled,
+                  .ttl = options.byte_artifact_routing.payload_transport.source_publish_prereg.ttl,
+                  .max_live_entries =
+                      options.byte_artifact_routing.payload_transport.source_publish_prereg.max_live_entries,
+                  .max_live_bytes =
+                      options.byte_artifact_routing.payload_transport.source_publish_prereg.max_live_bytes,
               },
           .gateway_ingress_enabled = options.gateway_ingress_enabled,
       });
@@ -194,6 +206,10 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .capability_tokens = kernel->capability_tokens(),
       .cpu_shared_memory_enabled = options.cpu_shared_memory_enabled,
       .storage_path = options.storage_path,
+      .public_disk_source_policy = options.public_disk_source_policy,
+      .serving_prefetch = options.serving_prefetch,
+      .progressive_replication = options.progressive_replication,
+      .daemon_id = options.daemon_id,
   };
   auto materialization_controller = std::make_unique<MaterializationController>(mdep);
 
@@ -228,6 +244,19 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .start_time = kernel->start_time(),
       .local_handle_socket_path = options.local_handle_socket_path,
       .cpu_shared_memory_enabled = options.cpu_shared_memory_enabled,
+      .batch_transport_protocol_version =
+          options.byte_artifact_routing.payload_transport.batch_transport_protocol_version,
+      .batch_payload_grpc_chunk_ref_enabled =
+          options.byte_artifact_routing.payload_transport.batch_transport_protocol_version > 0,
+      .batch_payload_communicator_source_enabled =
+          options.byte_artifact_routing.payload_transport.batch_transport_protocol_version >= 2 &&
+          options.byte_artifact_routing.payload_transport.communicator_source_enabled,
+      .batch_payload_host_memory_export_enabled =
+          options.byte_artifact_routing.payload_transport.batch_transport_protocol_version >= 2 &&
+          options.byte_artifact_routing.payload_transport.host_memory_export_enabled,
+      .batch_payload_segmented_communicator_export_enabled =
+          kernel->payload_transport_broker().batch_transport_segmented_communicator_export_enabled(),
+      .max_batch_payload_bytes = options.byte_artifact_routing.payload_transport.max_batch_payload_bytes,
       .startup_coordinator = startup_coordinator,
       .worker_directory_cache = kernel->worker_directory_cache(),
       .instance_execution_directory_cache = kernel->instance_execution_directory_cache(),
@@ -295,6 +324,8 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .allow_high_card_attrs = options.allow_high_card_attrs,
       .use_cursor_pagination = options.use_cursor_pagination,
       .gateway_ingress_enabled = options.gateway_ingress_enabled,
+      .serving_prefetch_enabled = options.serving_prefetch.enabled,
+      .serving_same_daemon_acquire_enabled = options.serving_prefetch.same_daemon_acquire_enabled,
       .storage_path = options.storage_path,
       .directory_staleness_budget = absl::Milliseconds(
           std::max<int64_t>(
@@ -308,11 +339,8 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
         .socket_path = options.local_handle_socket_path,
         .cpu_shared_memory_enabled = options.cpu_shared_memory_enabled,
     };
-    auto* leases = kernel->handle_leases();
-    if (leases == nullptr) {
-      return absl::FailedPreconditionError("handle leases unavailable for local handle server");
-    }
-    local_handle_server = std::make_unique<LocalHandleServer>(lh_opts, *leases);
+    local_handle_server =
+        std::make_unique<LocalHandleServer>(lh_opts, kernel->region_registry(), kernel->handle_leases());
   }
 
   return std::unique_ptr<DaemonServiceHarness>(new DaemonServiceHarness(

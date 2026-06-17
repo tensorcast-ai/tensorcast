@@ -32,6 +32,21 @@ sc_header_only_library(
         "//core/common:pinned_buffer_pool_lib",
         "//core/store:store_engine_options",
         "//core/store/materialization/contracts:loading_spec",
+        "//core/store/materialization/dataplane:view_planner",
+        "//core/store/runtime/ingestion:materialization_strategy_types",
+    ],
+)
+
+sc_cc_library(
+    name = "replica_placement",
+    srcs = ["replica_placement.cc"],
+    hdrs = ["replica_placement.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":replica_config",
+        "//core/store:device_registry",
+        "//core/store:device_types",
+        "@abseil-cpp//absl/strings",
     ],
 )
 
@@ -40,6 +55,9 @@ sc_header_only_library(
     name = "direct_write",
     hdrs = ["types/direct_write_grant.h"],
     visibility = ["//visibility:public"],
+    deps = [
+        "//core/store/materialization/contracts:stable_local_backing",
+    ],
 )
 
 ## Unified Memory Authority (canonical UMA target)
@@ -155,12 +173,16 @@ sc_cc_library(
         "//core/common:streaming_pinned_buffer_lib",
         "//core/cuda:cuda_api_lib",
         "//core/cuda:error_handling_lib",
+        "//core/store:store_engine_options",
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/materialization/dataplane:disk_artifact_context",
         "//core/store/materialization/dataplane:gpu_memory_sink",
         "//core/store/materialization/dataplane:multi_safetensors_source",
         "//core/store/materialization/dataplane:pump",
         "//core/store/materialization/dataplane:streaming_buffer_adapter",
+        "//core/store/materialization/dataplane:target_layout_gpu_sink",
+        "//core/store/materialization/dataplane:view_plan_source",
+        "//core/store/runtime/ingestion:materialization_strategy_types",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
@@ -184,6 +206,7 @@ sc_cc_library(
         ":direct_write",
         ":memory_export_registry",
         ":memory_state",
+        ":replica_placement",
         ":transfer_helpers",
         ":transfer_service",
         ":unified_memory_authority",
@@ -201,6 +224,7 @@ sc_cc_library(
         "//core/store/materialization/dataplane:gpu_memory_sink",
         "//core/store/materialization/dataplane:pump",
         "//core/store/materialization/dataplane:streaming_buffer_adapter",
+        "//core/store/runtime/ingestion:materialization_strategy_types",
         "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/functional:overload",
@@ -223,15 +247,16 @@ sc_cc_library(
         ":chunk_state",
         ":memory_state",
         ":replica_load_controller",
+        ":replica_placement",
         "//core/common:memory_location_lib",
         "//core/communicator:engine_lib",
         "//core/cuda:cuda_api_lib",
         "//core/store:communication_types",
-        "//core/store:device_registry",
         "//core/store:device_types",
         "//core/store:memory_types",
         "//core/store:store_engine_options",
         "//core/store/materialization/contracts:loading_spec",
+        "//core/store/materialization/contracts:representation_contract",
         "//core/store/materialization/dataplane:byte_range_map_builder",
         "//core/store/materialization/dataplane:byte_range_mapped_source",
         "//core/store/materialization/dataplane:byte_range_program",
@@ -241,6 +266,7 @@ sc_cc_library(
         "//core/store/materialization/dataplane:p2p_loader",
         "//core/store/materialization/dataplane:view_plan_source",
         "//core/store/materialization/dataplane:view_transform_executor",
+        "//core/store/runtime/ingestion:materialization_strategy_types",
         "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/functional:overload",
@@ -252,6 +278,21 @@ sc_cc_library(
 )
 
 # Tests
+
+cc_test(
+    name = "replica_placement_test",
+    srcs = ["replica_placement_test.cc"],
+    deps = [
+        ":replica_placement",
+        "//core/common:async_runtime_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/store:device_registry",
+        "//core/store:device_types",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+        "@gsl",
+    ],
+)
 
 cc_test(
     name = "unified_memory_authority_plan_commit_test",
@@ -272,6 +313,20 @@ cc_test(
         "//core/common:pinned_buffer_pool_lib",
         "//core/store:device_types",
         "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "collective_disk_loader_test",
+    srcs = ["collective_disk_loader_test.cc"],
+    deps = [
+        ":collective_disk_loader",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/store/materialization/dataplane:disk_artifact_context",
+        "//core/testing:catch_main",
+        "//core/testing:test_helpers",
         "@catch2//:catch2_main",
     ],
 )

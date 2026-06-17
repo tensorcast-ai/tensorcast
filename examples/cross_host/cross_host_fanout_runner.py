@@ -189,7 +189,7 @@ def run_remote(
         run_as_user=_resolved_remote_run_as_user(),
     )
     cmd = (
-        f"brainctl exec process/{process_id} -n shai-core -- bash -lc "
+        f"orchestratorctl exec process/{process_id} -n tensorcast -- bash -lc "
         f"{shlex.quote(wrapped_cmd)}"
     )
     return run(cmd, timeout_sec=timeout_sec)
@@ -228,24 +228,24 @@ def collect_worker_failure_probe(
     }
     per_call_timeout = max(5.0, min(60.0, float(timeout_sec)))
 
-    get_cmd = f"brainctl get process {worker.process_id} -n shai-core --no-headers"
+    get_cmd = (
+        f"orchestratorctl get process {worker.process_id} -n tensorcast --no-headers"
+    )
     try:
-        probe["brainctl_get_process"] = _tail_text(
+        probe["orchestratorctl_get_process"] = _tail_text(
             run(get_cmd, timeout_sec=per_call_timeout)
         )
     except Exception as exc:  # noqa: BLE001
-        probe["brainctl_get_process_error"] = str(exc)
+        probe["orchestratorctl_get_process_error"] = str(exc)
 
-    describe_cmd = (
-        f"brainctl describe process/{worker.process_id} -n shai-core | sed -n '1,140p'"
-    )
+    describe_cmd = f"orchestratorctl describe process/{worker.process_id} -n tensorcast | sed -n '1,140p'"
     try:
-        probe["brainctl_describe_head"] = _tail_text(
+        probe["orchestratorctl_describe_head"] = _tail_text(
             run(describe_cmd, timeout_sec=per_call_timeout),
             max_chars=6000,
         )
     except Exception as exc:  # noqa: BLE001
-        probe["brainctl_describe_error"] = str(exc)
+        probe["orchestratorctl_describe_error"] = str(exc)
 
     remote_probe_cmd = (
         "set -euo pipefail; "
@@ -256,12 +256,12 @@ def collect_worker_failure_probe(
         "source .venv/bin/activate; "
         'status_json="$(mktemp)"; '
         "LD_LIBRARY_PATH=/data/cuda/compat tensorcast-cli daemon status "
-        f"--session {shlex.quote(worker.daemon_session)} --json >\"${{status_json}}\" || true; "
-        "cat \"${status_json}\" || true; "
+        f'--session {shlex.quote(worker.daemon_session)} --json >"${{status_json}}" || true; '
+        'cat "${status_json}" || true; '
         'logs_dir="$(sed -n \'s/.*\\"logs_dir\\"[[:space:]]*:[[:space:]]*\\"\\([^\\"]*\\)\\".*/\\1/p\' "${status_json}" | head -n 1)"; '
         'if [[ -n "${logs_dir}" ]]; then '
         'echo "__tc_daemon_logs_tail_begin__"; '
-        'for log_name in daemon.err daemon.INFO daemon.log daemon.out; do '
+        "for log_name in daemon.err daemon.INFO daemon.log daemon.out; do "
         'if [[ -f "${logs_dir}/${log_name}" ]]; then '
         'echo "__tc_daemon_log_file__=${log_name}"; '
         'tail -n 240 "${logs_dir}/${log_name}" 2>/dev/null || true; '
@@ -1083,9 +1083,9 @@ def compute_replica_id_diffusion(
         if artifact_ids and artifact_id not in artifact_ids:
             continue
         replica_id = str(row.get("replica_id", "")).strip()
-        diffusion["transport_rows_in_scope"] = int(
-            diffusion["transport_rows_in_scope"]
-        ) + 1
+        diffusion["transport_rows_in_scope"] = (
+            int(diffusion["transport_rows_in_scope"]) + 1
+        )
         if not replica_id:
             continue
         source_counter[replica_id] += 1
@@ -1258,10 +1258,9 @@ def summarize_completion_profile(
         completion_curve_auc_s = 0.0
         completion_curve_auc_norm = 1.0
     else:
-        completion_by_half_ratio = (
-            float(sum(1 for value in ordered if value <= (makespan * 0.5)))
-            / float(sample_count)
-        )
+        completion_by_half_ratio = float(
+            sum(1 for value in ordered if value <= (makespan * 0.5))
+        ) / float(sample_count)
         area = 0.0
         prev_t = 0.0
         for completed, value in enumerate(ordered):
@@ -1306,9 +1305,7 @@ def run_wave_gets(
     start_ts = time.perf_counter()
     results: list[dict[str, Any]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(workers)) as pool:
-        future_map: dict[
-            concurrent.futures.Future, tuple[WorkerSpec, float]
-        ] = {}
+        future_map: dict[concurrent.futures.Future, tuple[WorkerSpec, float]] = {}
         for worker in workers:
             submitted_at = time.perf_counter()
             future = pool.submit(
@@ -1449,7 +1446,11 @@ def classify_timeout_root(
     if isinstance(failure_probe, dict):
         probe_text = " ".join(
             str(failure_probe.get(key, ""))
-            for key in ("remote_probe_tail", "daemon_err_excerpt", "daemon_logs_excerpt")
+            for key in (
+                "remote_probe_tail",
+                "daemon_err_excerpt",
+                "daemon_logs_excerpt",
+            )
         )
     lowered = f"{error_message} {probe_text}".lower()
     timeout_trigger_tokens = (
@@ -1927,7 +1928,9 @@ def run_fanout_mode(
     events: list[dict[str, Any]] = []
     source_cardinality_timeline: list[dict[str, Any]] = []
 
-    def select_wave_workers(iteration_index: int) -> tuple[list[WorkerSpec], list[WorkerSpec]]:
+    def select_wave_workers(
+        iteration_index: int,
+    ) -> tuple[list[WorkerSpec], list[WorkerSpec]]:
         if len(getters) == 1:
             return getters[:1], []
         ordered = list(getters)
@@ -2089,8 +2092,8 @@ def run_fanout_mode(
                 post_cleanup_probe.get("total_artifact_size_bytes", 0)
             )
             observed_replicas = int(post_cleanup_probe.get("total_replicas_loaded", 0))
-            leak_guard_limit = (
-                int(baseline_seed_artifact_bytes) + int(cleanup_leak_threshold_bytes)
+            leak_guard_limit = int(baseline_seed_artifact_bytes) + int(
+                cleanup_leak_threshold_bytes
             )
             if (
                 observed_artifact_bytes > leak_guard_limit
@@ -2371,8 +2374,8 @@ def run_fanout_mode(
         if not isinstance(record_class, dict):
             record_class = {}
         for label in ("infra", "product", "unknown"):
-            classification_totals[label] = (
-                classification_totals.get(label, 0) + int(record_class.get(label, 0))
+            classification_totals[label] = classification_totals.get(label, 0) + int(
+                record_class.get(label, 0)
             )
         record_timeout = item.get("timeout_root_counts", {})
         if not isinstance(record_timeout, dict):
@@ -2452,7 +2455,9 @@ def run_fanout_mode(
         "task_total_sec_p90": percentile(task_total_vals, 0.9),
         "completion_curve_auc_norm_mean": float(statistics.mean(completion_auc_vals)),
         "completion_curve_auc_norm_p90": percentile(completion_auc_vals, 0.9),
-        "completion_by_half_ratio_mean": float(statistics.mean(completion_by_half_vals)),
+        "completion_by_half_ratio_mean": float(
+            statistics.mean(completion_by_half_vals)
+        ),
         "completion_by_half_ratio_p90": percentile(completion_by_half_vals, 0.9),
         "completion_mean_s_mean": float(statistics.mean(completion_mean_vals)),
         "completion_mean_s_p90": percentile(completion_mean_vals, 0.9),
@@ -2621,7 +2626,7 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Collect on-failure worker diagnostics (brainctl get/describe + "
+            "Collect on-failure worker diagnostics (orchestratorctl get/describe + "
             "remote daemon status probe)."
         ),
     )
@@ -2665,10 +2670,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--runtime-root",
-        default="/data/tc_cross_rerun/runtime",
+        default="/tmp/tensorcast/cross_host/runtime",
         help=(
             "Remote runtime root for daemon home/storage state; "
-            "use a /data path for reproducible reruns."
+            "override for persistent scratch storage on your workers."
         ),
     )
     parser.add_argument(
@@ -2710,7 +2715,7 @@ def parse_args() -> argparse.Namespace:
         help="Consecutive suspicious cleanup iterations required to fail-fast.",
     )
     parser.add_argument(
-        "--out-dir", default="/data/tc_cross_rerun/results_multi_host_scaleout"
+        "--out-dir", default="/tmp/tensorcast/cross_host/results_multi_host_scaleout"
     )
     return parser.parse_args()
 

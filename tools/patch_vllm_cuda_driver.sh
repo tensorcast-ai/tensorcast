@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 DEFAULT_VENV_ROOT="${REPO_ROOT}/.venv"
-DEFAULT_VLLM_ROOT="/data/workspace/internal-vllm"
+DEFAULT_VLLM_ROOT="/opt/vllm"
 DEFAULT_CUDA_DRIVER_DIR="/usr/local/nvidia/lib64"
 
 VENV_ROOT="${VENV_ROOT:-${DEFAULT_VENV_ROOT}}"
@@ -25,7 +25,7 @@ without relying on LD_PRELOAD.
 
 Options:
   --venv-root PATH          Python virtualenv root. Default: <repo>/.venv
-  --vllm-root PATH          internal-vllm source root. Auto-detected when possible
+  --vllm-root PATH          vllm source root. Auto-detected when possible
   --cuda-driver-dir PATH    Directory that contains libcuda.so.1
                             Default: /usr/local/nvidia/lib64
   --cuda-runtime-dir PATH   Directory that contains libcudart.so.12

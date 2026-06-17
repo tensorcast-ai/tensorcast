@@ -5,6 +5,7 @@
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import cast
 from uuid import UUID
 
 from tensorcast.global_store.exceptions import NotFoundError
@@ -22,6 +23,19 @@ from tensorcast.global_store.repositories.base import (
 from tensorcast.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+def _transport_view_ids(
+    view_id: str | None,
+    canonical_equivalent_view_ids: Sequence[str] | None,
+) -> tuple[str, ...]:
+    ids = [view_id or ""]
+    if view_id is None:
+        for alias in canonical_equivalent_view_ids or ():
+            normalized = str(alias or "").strip()
+            if normalized and normalized not in ids:
+                ids.append(normalized)
+    return tuple(ids)
 
 
 def _to_uuid(value: str | UUID) -> UUID:
@@ -270,14 +284,23 @@ class ReplicaRepository(BaseRepository):
             last_assigned_at=last_assigned_at,
         )
 
-    def has_any_replica(self, artifact_id: str, view_id: str | None = None) -> bool:
+    def has_any_replica(
+        self,
+        artifact_id: str,
+        view_id: str | None = None,
+        *,
+        canonical_equivalent_view_ids: Sequence[str] | None = None,
+    ) -> bool:
         """Return True when at least one replica exists for *artifact_id*."""
 
+        view_ids = _transport_view_ids(view_id, canonical_equivalent_view_ids)
+        placeholders = ", ".join("?" for _ in view_ids)
         cursor = self.get_cursor()
         try:
             row = cursor.execute(
-                "SELECT 1 FROM artifact_replicas WHERE artifact_id = ? AND COALESCE(view_id, '') = COALESCE(?, '') LIMIT 1",
-                [artifact_id, view_id or ""],
+                "SELECT 1 FROM artifact_replicas "
+                f"WHERE artifact_id = ? AND COALESCE(view_id, '') IN ({placeholders}) LIMIT 1",
+                [artifact_id, *view_ids],
             ).fetchone()
             return row is not None
         finally:
@@ -391,6 +414,7 @@ class ReplicaRepository(BaseRepository):
         artifact_id: str,
         heartbeat_timeout_seconds: float,
         view_id: str | None = None,
+        canonical_equivalent_view_ids: Sequence[str] | None = None,
         scheduler_mode: str = "LEGACY",
         source_balance_weights: SourceBalanceWeights | None = None,
         group_source_counts: dict[str, int] | None = None,
@@ -406,6 +430,20 @@ class ReplicaRepository(BaseRepository):
         if owns_cursor:
             cursor = self.get_cursor()
         try:
+            view_ids = _transport_view_ids(view_id, canonical_equivalent_view_ids)
+            view_placeholders = ", ".join("?" for _ in view_ids)
+            alias_ids = tuple(view_ids[1:]) if view_id is None else ()
+            alias_order = {alias: index for index, alias in enumerate(alias_ids)}
+            alias_order_sql = ""
+            order_params: list[str] = []
+            if alias_ids:
+                alias_placeholders = ", ".join("?" for _ in alias_ids)
+                alias_order_sql = (
+                    "CASE WHEN COALESCE(mr.view_id, '') IN ("
+                    + alias_placeholders
+                    + ") THEN 0 ELSE 1 END, "
+                )
+                order_params.extend(alias_ids)
             query = (
                 "SELECT "
                 + self._REPLICA_PROJECTION
@@ -418,8 +456,9 @@ class ReplicaRepository(BaseRepository):
                 + "LEFT JOIN workers w ON mr.worker_id = w.worker_id "
                 + "LEFT JOIN worker_liveness wl ON wl.worker_id = w.worker_id "
                 + "WHERE mr.artifact_id = ? "
-                + "AND COALESCE(mr.view_id, '') = COALESCE(?, '') "
+                + f"AND COALESCE(mr.view_id, '') IN ({view_placeholders}) "
                 + "ORDER BY "
+                + alias_order_sql
                 + "CASE "
                 + "WHEN mr.memory_type = 'GPU' THEN 0 "
                 + "WHEN mr.memory_type = 'RAM' THEN 1 "
@@ -432,7 +471,7 @@ class ReplicaRepository(BaseRepository):
                 + "COALESCE(rc.last_assigned_at, TIMESTAMP '1970-01-01') ASC, "
                 + "mr.updated_at ASC"
             )
-            result = cursor.execute(query, [artifact_id, view_id or ""])
+            result = cursor.execute(query, [artifact_id, *view_ids, *order_params])
             rows = result.fetchall()
             if not rows:
                 return TransportSelectionResult(replica=None, exportable_replicas=0)
@@ -505,15 +544,18 @@ class ReplicaRepository(BaseRepository):
                 )
                 ranked_candidates = sorted(
                     eligible_candidates,
-                    key=lambda candidate: self._source_balance_sort_key(
-                        candidate,
-                        worker_loads,
-                        now_ts,
-                        weights,
-                        group_source_counts=normalized_group_source_counts,
-                        group_candidate_count=group_candidate_count,
-                        group_source_spread_weight=spread_policy.spread_weight,
-                        group_source_penalty_scale=group_penalty_scale,
+                    key=lambda candidate: (
+                        self._alias_preference_rank(candidate, alias_order),
+                        *self._source_balance_sort_key(
+                            candidate,
+                            worker_loads,
+                            now_ts,
+                            weights,
+                            group_source_counts=normalized_group_source_counts,
+                            group_candidate_count=group_candidate_count,
+                            group_source_spread_weight=spread_policy.spread_weight,
+                            group_source_penalty_scale=group_penalty_scale,
+                        ),
                     ),
                 )
 
@@ -600,7 +642,7 @@ class ReplicaRepository(BaseRepository):
         timestamp_fn = getattr(last_assigned_at, "timestamp", None)
         if callable(timestamp_fn):
             try:
-                return float(timestamp_fn())
+                return float(cast(float, timestamp_fn()))
             except Exception:  # noqa: BLE001
                 return 0.0
         return 0.0
@@ -746,6 +788,16 @@ class ReplicaRepository(BaseRepository):
             cls._last_assigned_timestamp_seconds(candidate.last_assigned_at),
             str(replica.replica_id),
         )
+
+    @staticmethod
+    def _alias_preference_rank(
+        candidate: TransportCandidate,
+        alias_order: dict[str, int],
+    ) -> int:
+        if not alias_order:
+            return 0
+        view_id = candidate.replica.byte_space.id or ""
+        return alias_order.get(view_id, len(alias_order))
 
     def get_transport_eligibility_snapshot(
         self,
@@ -955,9 +1007,7 @@ class ReplicaRepository(BaseRepository):
         else:
             return self.create(replica)
 
-    def create_or_update_atomic(
-        self, replica: Replica, cursor, *, preserve_transport: bool = False
-    ) -> Replica:
+    def create_or_update_atomic(self, replica: Replica, cursor) -> Replica:
         """
         Atomically create or update a replica within a transaction.
 
@@ -974,7 +1024,7 @@ class ReplicaRepository(BaseRepository):
         # First, try to find existing replica within the transaction
         existing_result = cursor.execute(
             """
-            SELECT replica_id, memory_size FROM artifact_replicas
+            SELECT replica_id FROM artifact_replicas
             WHERE artifact_id = ? AND COALESCE(view_id, '') = COALESCE(?, '')
               AND node_id = ? AND node_address = ?
               AND node_port = ? AND memory_type = ?
@@ -994,71 +1044,37 @@ class ReplicaRepository(BaseRepository):
         if existing_result:
             # Update existing replica
             existing_replica_id = existing_result[0]
-            existing_memory_size = int(existing_result[1] or 0)
-            if preserve_transport:
-                cursor.execute(
-                    """
-                    UPDATE artifact_replicas
-                    SET
-                        updated_at = CURRENT_TIMESTAMP,
-                        is_available = ?,
-                        max_concurrency = ?,
-                        worker_id = ?,
-                        expires_at = ?
-                    WHERE replica_id = ?
-                    """,
-                    [
-                        replica.is_available,
-                        replica.max_concurrency,
-                        replica.worker_id,
-                        replica.expires_at,
-                        str(existing_replica_id),
-                    ],
-                )
-                if (
-                    existing_memory_size > 0
-                    and replica.memory_size != existing_memory_size
-                ):
-                    logger.warning(
-                        "RegisterReplica preserving transport metadata for replica_id=%s but memory_size differs (existing=%s new=%s); keeping existing",
-                        existing_replica_id,
-                        existing_memory_size,
-                        replica.memory_size,
-                    )
-                if existing_memory_size > 0:
-                    replica.memory_size = existing_memory_size
-            else:
-                cursor.execute(
-                    """
-                    UPDATE artifact_replicas
-                    SET
-                        updated_at = CURRENT_TIMESTAMP,
-                        is_available = ?,
-                        max_concurrency = ?,
-                        remote_memory_keys = ?,
-                        buffer_sizes = ?,
-                        export_state = ?,
-                        export_generation = ?,
-                        verification_json = ?,
-                        memory_size = ?,
-                        worker_id = ?,
-                        expires_at = ?
-                    WHERE replica_id = ?
-                    """,
-                    [
-                        replica.is_available,
-                        replica.max_concurrency,
-                        list(replica.remote_memory_keys),
-                        list(replica.buffer_sizes),
-                        replica.export_state.value,
-                        replica.export_generation,
-                        replica.verification_json,
-                        replica.memory_size,
-                        replica.worker_id,
-                        replica.expires_at,
-                        str(existing_replica_id),
-                    ],
-                )
+            cursor.execute(
+                """
+                UPDATE artifact_replicas
+                SET
+                    updated_at = CURRENT_TIMESTAMP,
+                    is_available = ?,
+                    max_concurrency = ?,
+                    remote_memory_keys = ?,
+                    buffer_sizes = ?,
+                    export_state = ?,
+                    export_generation = ?,
+                    verification_json = ?,
+                    memory_size = ?,
+                    worker_id = ?,
+                    expires_at = ?
+                WHERE replica_id = ?
+                """,
+                [
+                    replica.is_available,
+                    replica.max_concurrency,
+                    list(replica.remote_memory_keys),
+                    list(replica.buffer_sizes),
+                    replica.export_state.value,
+                    replica.export_generation,
+                    replica.verification_json,
+                    replica.memory_size,
+                    replica.worker_id,
+                    replica.expires_at,
+                    str(existing_replica_id),
+                ],
+            )
             replica.replica_id = UUID(str(existing_replica_id))
         else:
             # Create new replica
@@ -1363,7 +1379,10 @@ class ReplicaRepository(BaseRepository):
         finally:
             cursor.close()
 
-        counts = dict.fromkeys(unique_ids, (0, 0))
+        counts = cast(
+            dict[str, tuple[int, int]],
+            dict.fromkeys(unique_ids, (0, 0)),
+        )
         for row in rows:
             artifact_id = str(row[0])
             replica_count = int(row[1])

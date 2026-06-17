@@ -20,6 +20,10 @@
 namespace tensorcast::daemon {
 namespace {
 
+constexpr std::size_t kLargePayloadBytes = (4U << 20U) + 1024U;
+
+// Test-only self-signed mTLS fixtures. These keys are not used by any
+// production or example configuration.
 constexpr char kCaCertPem[] = R"(-----BEGIN CERTIFICATE-----
 MIIDGzCCAgOgAwIBAgIUXeqZ4PVXCLRPgyJkup3nWR2HNHowDQYJKoZIhvcNAQEL
 BQAwHTEbMBkGA1UEAwwSdGVuc29yY2FzdC10ZXN0LWNhMB4XDTI2MDMxMTE1Mjk1
@@ -173,6 +177,25 @@ class AuthCaptureService final : public v2::StoreDaemonService::Service {
   std::optional<AuthenticatedPeerIdentity> captured_peer_identity_ ABSL_GUARDED_BY(mu_);
 };
 
+class LargePayloadService final : public v2::StoreDaemonService::Service {
+ public:
+  LargePayloadService() : payload_(kLargePayloadBytes, 'x') {}
+
+  grpc::Status FetchPayloadRefChunk(
+      grpc::ServerContext*,
+      const v2::FetchPayloadRefChunkRequest*,
+      v2::FetchPayloadRefChunkResponse* response) override {
+    response->set_status(v2::BATCH_ITEM_STATUS_OK);
+    response->set_total_size(payload_.size());
+    response->set_eof(true);
+    response->set_chunk(payload_);
+    return grpc::Status::OK;
+  }
+
+ private:
+  std::string payload_;
+};
+
 TEST_CASE(
     "inter-daemon transport helper establishes mTLS and authority presentation",
     "[daemon][grpc_transport][mtls]") {
@@ -226,6 +249,39 @@ TEST_CASE(
   CHECK(server_peer_identity->auth_class == DaemonHopAuthClass::kDaemonMutualAuth);
   REQUIRE(server_peer_identity->presented_authority_ref.has_value());
   CHECK(server_peer_identity->presented_authority_ref->authority_id == "authority-a");
+
+  server->Shutdown();
+}
+
+TEST_CASE(
+    "inter-daemon transport helper accepts payloads larger than grpc defaults",
+    "[daemon][grpc_transport][message_size]") {
+  LargePayloadService service;
+  grpc::ServerBuilder builder;
+  int selected_port = 0;
+  builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &selected_port);
+  builder.RegisterService(&service);
+  auto server = builder.BuildAndStart();
+  REQUIRE(server != nullptr);
+  REQUIRE(selected_port != 0);
+
+  auto channel =
+      create_inter_daemon_channel(absl::StrCat("127.0.0.1:", selected_port), grpc::InsecureChannelCredentials());
+  auto stub = v2::StoreDaemonService::NewStub(channel);
+
+  grpc::ClientContext client_context;
+  client_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+  v2::FetchPayloadRefChunkRequest request;
+  request.set_payload_ref("payload-ref");
+  request.set_artifact_id("artifact-id");
+  request.set_offset(0);
+  request.set_max_bytes(kLargePayloadBytes);
+  v2::FetchPayloadRefChunkResponse response;
+  const auto status = stub->FetchPayloadRefChunk(&client_context, request, &response);
+  REQUIRE(status.ok());
+  CHECK(response.status() == v2::BATCH_ITEM_STATUS_OK);
+  CHECK(response.chunk().size() == kLargePayloadBytes);
+  CHECK(response.eof());
 
   server->Shutdown();
 }

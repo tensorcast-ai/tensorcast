@@ -29,7 +29,7 @@ server:
     port: 65090
   # Optional default root for relative disk_path values.
   # When empty, disk materialization accepts absolute disk_path only.
-  storage_path: "/data/models"
+  storage_path: "/var/lib/tensorcast/models"
   # StoreEngine I/O worker threads; tune for disk/P2P parallelism vs CPU contention.
   num_threads: 16
   # gRPC server channel args and TLS.
@@ -334,6 +334,14 @@ observability:
   tracing:
     # Chrome trace output directory; empty disables.
     chrome_trace_dir: ""
+
+# Staged serving acquisition path used by final group realization.
+serving_prefetch:
+  enabled: true
+  same_daemon_acquire_enabled: true
+
+group_realization:
+  enabled: true
 
 # Compatibility toggles for legacy behavior.
 compatibility:

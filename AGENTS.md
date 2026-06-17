@@ -6,6 +6,20 @@ This file provides guidance to AI when working with code in this repository.
 
 TensorCast is a high-performance distributed artifact storage and loading system. It uses a distributed master-worker architecture; see Architecture Overview below for details.
 
+## Artifact-First Architecture Principle (Required)
+
+TensorCast should keep artifact as the primary system abstraction for durable
+identity, data movement, discovery, routing, and lifecycle. When a new workflow
+needs a capability that looks adjacent to loading, serving, publication, or
+sharing, first ask how the artifact model should express it and extend that
+model deeply.
+
+Avoid introducing parallel concepts, side channels, or feature-specific source
+authorities when the capability can be represented as stronger artifact
+metadata, artifact lifecycle, artifact publication, or artifact replica
+semantics. Add a new concept only when the artifact model is clearly
+insufficient, and document why extending artifact would be the wrong abstraction.
+
 ## Command Execution
 
 - You must use `pytest tests/python/xxxx` to run python tests
@@ -473,3 +487,8 @@ if (fd < 0) {
 
 ### Code Fixing and Testing
 - When debugging or fixing tests—or investigating/fixing any issue—first identify the root cause and implement the fundamental solution. Make tests reflect the real, reasonable system behavior rather than bending the system to fit an original test, and avoid quick or convenient workarounds. Never modify the system merely to make a test pass; find the root cause and design a fundamental fix, aiming for the minimal sufficient change. When a test must change, update it to assert the clearly documented, reasonable system behavior. Solve from a system-wide perspective, aiming for globally optimal changes, not local patches.
+
+### Explicit Planning and Fallbacks
+- Prefer explicit plans over implicit fallbacks. Known cases should be classified before execution, and the chosen behavior should be intentional for that scenario.
+- Fallbacks are acceptable only when they are part of the plan or clearly requested by configuration. Do not use a broad fallback to hide unexpected states, contract violations, or partial failures.
+- When an unplanned situation is encountered, fail with a clear error rather than silently switching to a slower or less precise path.

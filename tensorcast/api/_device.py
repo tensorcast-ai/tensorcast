@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 from tensorcast._c_ext import get_device_uuid_map
@@ -24,6 +26,13 @@ def resolve_device(device: int | torch.device, *, allow_cpu: bool = False) -> in
 
 
 def device_uuid_for(device_id: int) -> str:
+    if device_id >= 0 and torch.cuda.is_available():
+        try:
+            uuid = getattr(torch.cuda.get_device_properties(device_id), "uuid", None)
+            if uuid:
+                return str(uuid)
+        except Exception:
+            pass
     device_uuid_map = get_device_uuid_map()
     try:
         return device_uuid_map[device_id]
@@ -31,3 +40,33 @@ def device_uuid_for(device_id: int) -> str:
         raise DeviceMismatch(
             f"Device ordinal {device_id} not found in daemon device map; available={list(device_uuid_map.keys())}"
         ) from e
+
+
+def protocol_device_id_for(device_id: int) -> int:
+    """Map a process-local CUDA ordinal to the physical ordinal used on RPCs.
+
+    TensorCast local processes may run with `CUDA_VISIBLE_DEVICES` set, in
+    which case torch-visible ordinals are remapped (for example visible
+    `cuda:0` may correspond to physical GPU1). Daemon RPCs validate target
+    layouts against the daemon's full-device registry, so those protocol
+    surfaces must use physical ordinals.
+    """
+
+    if device_id < 0:
+        return CPU_DEVICE_ID
+
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if not visible or visible in {"-1", "none", "None"}:
+        return int(device_id)
+
+    tokens = [token.strip() for token in visible.split(",") if token.strip()]
+    if device_id >= len(tokens):
+        raise DeviceMismatch(
+            "Visible CUDA device ordinal "
+            f"{device_id} is out of range for CUDA_VISIBLE_DEVICES={visible!r}"
+        )
+
+    token = tokens[device_id]
+    if token.isdigit():
+        return int(token)
+    return int(device_id)

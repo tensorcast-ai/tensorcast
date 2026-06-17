@@ -14,7 +14,7 @@
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 
-#include "core/store/device_registry.h"
+#include "core/store/materialization/contracts/representation_contract.h"
 #include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
 #include "core/store/materialization/dataplane/contracts/loader.h"
 #include "core/store/materialization/dataplane/loaders/disk_loader.h"
@@ -25,6 +25,7 @@
 #include "core/store/materialization/dataplane/view/view_plan_source.h"
 #include "core/store/materialization/dataplane/view/view_transform_executor.h"
 #include "core/store/replica/replica_load_controller.h"
+#include "core/store/replica/replica_placement.h"
 #include "nlohmann/json.hpp"
 
 namespace tensorcast::store::replica {
@@ -228,19 +229,11 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
   // --- Create ReplicaLoadController ---
   auto view_id = config.view_id;
 
-  const bool gpu_requested = (config.device_type == DeviceType::GPU) || (config.local_device_id >= 0);
-  DeviceKey dev_key;
-  if (gpu_requested) {
-    // Either explicit GPU target or legacy configs that only set local_device_id.
-    // Bind the Replica to that GPU so CUDA stream initialisation works for GPU copies.
-    const int ordinal = (config.local_device_id >= 0) ? config.local_device_id : 0;
-    dev_key = DeviceRegistry::instance().gpu_key(ordinal);
-  } else {
-    // Default / explicit CPU target (or unsupported type which we map to CPU for now).
-    dev_key.type = DeviceType::CPU;
-    dev_key.ordinal = -1;
-    dev_key.uuid.clear();
+  auto dev_key_or = resolve_replica_config_device_key(config);
+  if (!dev_key_or.ok()) {
+    return dev_key_or.status();
   }
+  DeviceKey dev_key = *dev_key_or;
 
   auto memory_manager = std::make_shared<ReplicaLoadController>(
       config.artifact_identifier,
@@ -275,7 +268,9 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
       std::move(config.collective_load_group),
       std::move(config.variant_identity),
       config.transform_placement,
-      config.byte_mapping_config));
+      config.byte_mapping_config,
+      config.materialization_strategy,
+      std::move(config.execution_strategy_plan)));
   return replica_ptr;
 }
 
@@ -296,7 +291,9 @@ Replica::Replica(
     std::optional<loading::CollectiveLoadGroupHint> collective_load_group,
     std::optional<loading::VariantIdentity> variant_identity,
     loading::TransformPlacement transform_placement,
-    StoreEngineOptions::ByteMappingConfig byte_mapping_config)
+    StoreEngineOptions::ByteMappingConfig byte_mapping_config,
+    StoreEngineOptions::MaterializationStrategyConfig materialization_strategy,
+    std::optional<runtime::ingestion::strategy::ExecutionStrategyPlan> execution_strategy_plan)
     : key_(std::move(key)),
       loader_(std::move(loader)),
       memory_manager_(std::move(memory_manager)),
@@ -309,7 +306,9 @@ Replica::Replica(
       collective_load_group_(std::move(collective_load_group)),
       variant_identity_(std::move(variant_identity)),
       transform_placement_(transform_placement),
-      byte_mapping_config_(std::move(byte_mapping_config)) {}
+      byte_mapping_config_(std::move(byte_mapping_config)),
+      materialization_strategy_(std::move(materialization_strategy)),
+      execution_strategy_plan_(std::move(execution_strategy_plan)) {}
 
 //--------------------------------------------------------------------------
 // Destructor
@@ -452,60 +451,52 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
     std::unique_ptr<loader::SeekableSource> source_ptr = std::move(*src_or);
     const bool source_is_view = source_location == MemoryLocation::REMOTE && source_is_view_;
     std::optional<ReplicaLoadController::CollectiveDiskLoadInput> collective_disk_load;
-    if (collective_load_group_.has_value()) {
-      if (target_location != MemoryLocation::GPU || source_location != MemoryLocation::DISK) {
-        LOG(INFO) << "Replica(" << key_.artifact_id
-                  << "): collective disk load skipped because target/source are not GPU<-DISK"
-                  << " target=" << location_to_string(target_location)
-                  << " source=" << location_to_string(source_location);
+    std::optional<ReplicaLoadController::LocalBatchedDiskLoadInput> local_batched_disk_load;
+    const std::optional<runtime::ingestion::strategy::ExecutionStrategyPlan>& execution_strategy_plan =
+        execution_strategy_plan_;
+    if (execution_strategy_plan.has_value() && target_location == MemoryLocation::GPU &&
+        source_location == MemoryLocation::DISK) {
+      const auto& plan = *execution_strategy_plan;
+      if (plan.executor == runtime::ingestion::strategy::ExecutionStrategyExecutor::kOwnerFileCollective &&
+          plan.collective_load_group.has_value() && plan.disk_context != nullptr &&
+          plan.representation_work_plan.has_value()) {
+        collective_disk_load = ReplicaLoadController::CollectiveDiskLoadInput{
+            .group = *plan.collective_load_group,
+            .disk_context = plan.disk_context,
+            .representation_work_plan = *plan.representation_work_plan,
+            .materialization_strategy = materialization_strategy_,
+        };
       } else if (
-          !source_index_json_.has_value() || !canonical_index_json_.has_value() || !variant_identity_.has_value()) {
-        LOG(INFO) << "Replica(" << key_.artifact_id << "): collective disk load skipped because metadata is incomplete"
-                  << " source_index=" << source_index_json_.has_value()
-                  << " canonical_index=" << canonical_index_json_.has_value()
-                  << " variant_identity=" << variant_identity_.has_value();
-      } else if (view_plan_.has_value() && view_plan_->transform.requires_materialization) {
-        LOG(INFO) << "Replica(" << key_.artifact_id
-                  << "): collective disk load skipped because view transform requires materialization";
-      } else if (auto* disk_loader = dynamic_cast<const DiskLoader*>(loader_.get().get()); disk_loader != nullptr) {
-        auto shared_or = disk_loader->shared_context();
-        if (shared_or.ok()) {
-          const std::string view_index_json =
-              view_plan_.has_value() ? view_plan_->view_index_json : *canonical_index_json_;
-          if (!view_index_json.empty()) {
-            collective_disk_load = ReplicaLoadController::CollectiveDiskLoadInput{
-                .group = *collective_load_group_,
-                .disk_context = *shared_or,
-                .source_index_json = *source_index_json_,
-                .view_index_json = view_index_json,
-                .variant_identity = variant_identity_,
-            };
-            LOG(INFO) << "Replica(" << key_.artifact_id
-                      << "): collective disk load eligible for group_id=" << collective_load_group_->group_id
-                      << " rank=" << collective_load_group_->rank
-                      << " world_size=" << collective_load_group_->world_size;
-          } else {
-            LOG(INFO) << "Replica(" << key_.artifact_id
-                      << "): collective disk load skipped because view_index_json is empty";
-          }
-        } else {
-          LOG(WARNING) << "Replica(" << key_.artifact_id
-                       << "): collective disk load disabled because shared_context is unavailable: "
-                       << shared_or.status();
-        }
-      } else {
-        LOG(INFO) << "Replica(" << key_.artifact_id
-                  << "): collective disk load skipped because loader is not DiskLoader";
+          plan.executor == runtime::ingestion::strategy::ExecutionStrategyExecutor::kTensorBatchedLocal &&
+          plan.disk_context != nullptr && plan.representation_work_plan.has_value()) {
+        local_batched_disk_load = ReplicaLoadController::LocalBatchedDiskLoadInput{
+            .disk_context = plan.disk_context,
+            .representation_work_plan = *plan.representation_work_plan,
+            .materialization_strategy = materialization_strategy_,
+        };
       }
+      LOG(INFO) << "Replica(" << key_.artifact_id << "): using execution_strategy_plan executor="
+                << runtime::ingestion::strategy::execution_strategy_executor_name(plan.executor)
+                << " selection_reason=" << plan.selection_reason
+                << " collective_selected=" << collective_disk_load.has_value()
+                << " local_batched_selected=" << local_batched_disk_load.has_value();
     }
     const StoreEngineOptions::ByteMappingConfig effective_byte_mapping_config =
         maybe_relax_mmap_strided_thresholds(byte_mapping_config_, *source_ptr, source_location, key_.artifact_id);
     if (collective_disk_load.has_value()) {
       op = memory_manager_->load_async_from_source(
-          std::move(source_ptr), target_location, concurrency, std::nullopt, {}, std::move(collective_disk_load));
+          std::move(source_ptr),
+          target_location,
+          concurrency,
+          std::nullopt,
+          {},
+          execution_strategy_plan,
+          std::move(collective_disk_load),
+          std::nullopt);
     } else {
       bool composed_view = false;
-      if (!source_is_view && canonical_index_json_.has_value() && source_index_json_.has_value()) {
+      if (!source_is_view && !local_batched_disk_load.has_value() && canonical_index_json_.has_value() &&
+          source_index_json_.has_value()) {
         auto canonical_total_size = compute_total_size_from_index(*canonical_index_json_);
         if (!canonical_total_size.has_value()) {
           ready_signal->set_value(absl::FailedPreconditionError("canonical index total_size is unavailable"));
@@ -549,7 +540,8 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
         }
         source_ptr = std::move(*mapped_or);
       }
-      if (!source_is_view && view_plan_.has_value() && !view_plan_->is_identity) {
+      if (!source_is_view && !local_batched_disk_load.has_value() && view_plan_.has_value() &&
+          !view_plan_->is_identity) {
         if (!composed_view) {
           source_ptr = loader::make_view_plan_source(
               std::move(source_ptr), view_plan_->selection, effective_byte_mapping_config);
@@ -571,7 +563,14 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
         };
       }
       op = memory_manager_->load_async_from_source(
-          std::move(source_ptr), target_location, concurrency, std::nullopt, std::move(post_load_fn));
+          std::move(source_ptr),
+          target_location,
+          concurrency,
+          std::nullopt,
+          std::move(post_load_fn),
+          execution_strategy_plan,
+          std::nullopt,
+          std::move(local_batched_disk_load));
     }
   } else {
     op = folly::makeSemiFuture<absl::Status>(absl::InternalError("Invalid source/target combination."));
@@ -772,33 +771,44 @@ absl::Status Replica::verify_artifact_data(
     common::memory::MemoryLocation location,
     const tensorcast::common::ArtifactVerificationInfo& expected_info,
     tensorcast::common::VerificationLevel level) const {
-  absl::MutexLock lock(&mutex_);
-
-  // Check if data is loaded at the specified location
-  MemoryState state = memory_manager_->get_state(location);
-  if (state != MemoryState::LOADED) {
-    return absl::FailedPreconditionError(
-        absl::StrCat(
-            "Replica data must be loaded at ",
-            location_to_string(location),
-            " before verification. Current state: ",
-            state_to_string(state)));
-  }
-
-  // Get data pointers and sizes
-  std::vector<void*> data_ptrs = memory_manager_->get_pointer(location);
-  if (data_ptrs.empty()) {
-    return absl::InternalError("No data pointers available for loaded replica.");
-  }
-
+  std::vector<void*> data_ptrs;
   std::vector<size_t> data_sizes;
-  uint64_t artifact_size = memory_manager_->get_artifact_size();
+  int device_id = -1;
+  std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation_guard;
 
-  // Single contiguous buffer for both GPU and CPU under VS
-  data_sizes.push_back(artifact_size);
+  {
+    absl::MutexLock lock(&mutex_);
 
-  // Determine device ID for verification
-  int device_id = (location == common::memory::MemoryLocation::GPU) ? memory_manager_->get_local_device_id() : -1;
+    // Check if data is loaded at the specified location
+    MemoryState state = memory_manager_->get_state(location);
+    if (state != MemoryState::LOADED) {
+      return absl::FailedPreconditionError(
+          absl::StrCat(
+              "Replica data must be loaded at ",
+              location_to_string(location),
+              " before verification. Current state: ",
+              state_to_string(state)));
+    }
+
+    // Get data pointers and sizes
+    data_ptrs = memory_manager_->get_pointer(location);
+    if (data_ptrs.empty()) {
+      return absl::InternalError("No data pointers available for loaded replica.");
+    }
+
+    uint64_t artifact_size = memory_manager_->get_artifact_size();
+
+    // Single contiguous buffer for both GPU and CPU under VS
+    data_sizes.push_back(artifact_size);
+
+    if (location == common::memory::MemoryLocation::GPU) {
+      device_id = memory_manager_->get_local_device_id();
+      gpu_allocation_guard = memory_manager_->get_gpu_allocation_shared();
+      if (!gpu_allocation_guard) {
+        return absl::FailedPreconditionError("GPU allocation not available for verification");
+      }
+    }
+  }
 
   LOG(INFO) << "Replica(" << key_.artifact_id << "): Verifying " << location_to_string(location) << " data at level "
             << static_cast<int>(level);

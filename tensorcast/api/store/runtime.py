@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import concurrent.futures
-import contextlib
 import logging
 import os
 import threading
@@ -13,6 +13,7 @@ import uuid
 import weakref
 from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Iterator, Mapping
 
 from opentelemetry import trace
@@ -36,6 +37,20 @@ from tensorcast.types import ServerConfig
 logger = logging.getLogger(__name__)
 
 
+def _log_best_effort_cleanup_failure(context: str, **fields: object) -> None:
+    handlers = tuple(logger.handlers) + tuple(logging.getLogger().handlers)
+    if any(
+        getattr(getattr(handler, "stream", None), "closed", False)
+        for handler in handlers
+    ):
+        return
+    details = ", ".join(f"{key}={value}" for key, value in fields.items())
+    if details:
+        logger.exception("%s failed (%s)", context, details)
+        return
+    logger.exception("%s failed", context)
+
+
 class _ForkAwareHandle:
     """Track per-context resources that must be refreshed across fork."""
 
@@ -43,28 +58,35 @@ class _ForkAwareHandle:
         self._cleanup = cleanup
 
     def close(self) -> None:
-        with contextlib.suppress(Exception):
+        try:
             self._cleanup()
+        except Exception:  # noqa: BLE001
+            _log_best_effort_cleanup_failure("store_runtime.fork_handle_cleanup")
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedKeyMapping:
+    artifact_id: str | None
+    disk_path: str | None
+    generation: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class _KeyCacheEntry:
-    def __init__(
-        self,
-        *,
-        artifact_id: str | None,
-        disk_path: str | None,
-        expires_at: float,
-    ) -> None:
-        self.artifact_id = artifact_id
-        self.disk_path = disk_path
-        self.expires_at = expires_at
+    artifact_id: str | None
+    disk_path: str | None
+    generation: int | None
+    expires_at: float
 
 
 class StoreRuntimeContext:
     """Process-wide runtime and lifecycle manager for Store operations."""
 
     _AT_FORK_REGISTRY: "weakref.WeakSet[StoreRuntimeContext]" = weakref.WeakSet()
+    _LIVE_CONTEXTS: "weakref.WeakSet[StoreRuntimeContext]" = weakref.WeakSet()
     _DEFAULT_LEASE_TTL_MS = 600_000
+    _SERVER_CONFIG_READY_TIMEOUT_S = 30.0
+    _SERVER_CONFIG_RETRY_INTERVAL_S = 1.0
 
     def __init__(
         self,
@@ -117,6 +139,7 @@ class StoreRuntimeContext:
         self._closed = False
 
         self._init_session_record()
+        StoreRuntimeContext._LIVE_CONTEXTS.add(self)
         self._install_at_fork()
         self._client = self._create_client()
         self._initialize_session_metadata(self._client)
@@ -272,6 +295,7 @@ class StoreRuntimeContext:
         *,
         artifact_id: str | None,
         disk_path: str | None = None,
+        generation: int | None = None,
         ttl_override: float | None = None,
     ) -> None:
         if not key:
@@ -284,28 +308,40 @@ class StoreRuntimeContext:
             self._key_cache[key] = _KeyCacheEntry(
                 artifact_id=artifact_id,
                 disk_path=disk_path,
+                generation=generation,
                 expires_at=expires_at,
             )
 
-    def resolve_key_mapping_cached(self, *, key: str) -> tuple[str | None, str | None]:
+    def resolve_key_mapping_cached(self, *, key: str) -> ResolvedKeyMapping:
         now = time.monotonic()
         with self._key_cache_lock:
             cached = self._key_cache.get(key)
             if cached and cached.expires_at > now:
-                return cached.artifact_id, cached.disk_path
+                return ResolvedKeyMapping(
+                    artifact_id=cached.artifact_id,
+                    disk_path=cached.disk_path,
+                    generation=cached.generation,
+                )
             if cached is not None:
                 del self._key_cache[key]
         mapping = self.ensure_client().resolve_key_mapping(key)
         resolved_id = mapping.artifact_id or None
         resolved_path = getattr(mapping, "used_disk_path", "") or None
+        raw_generation = int(getattr(mapping, "generation", 0) or 0)
+        generation = raw_generation if raw_generation > 0 else None
         ttl_override = float(mapping.cache_ttl_seconds)
         self.cache_key_mapping(
             key,
             artifact_id=resolved_id,
             disk_path=resolved_path,
+            generation=generation,
             ttl_override=ttl_override,
         )
-        return resolved_id, resolved_path
+        return ResolvedKeyMapping(
+            artifact_id=resolved_id,
+            disk_path=resolved_path,
+            generation=generation,
+        )
 
     def get_artifact_index_cached(self, artifact_id: str) -> ArtifactCacheEntry | None:
         return self._artifact_cache.get_artifact_index_cached(artifact_id)
@@ -376,10 +412,51 @@ class StoreRuntimeContext:
             },
         )
 
+    def _load_server_config_with_retry(self, client: DaemonCtl) -> ServerConfig:
+        deadline = time.monotonic() + self._SERVER_CONFIG_READY_TIMEOUT_S
+        attempt = 0
+        last_exc: Exception | None = None
+        while True:
+            try:
+                config = client.get_server_config()
+                local_handle_socket_path = str(
+                    getattr(config, "local_handle_socket_path", "") or ""
+                )
+                cpu_shared_memory_enabled = bool(
+                    getattr(config, "cpu_shared_memory_enabled", True)
+                )
+                if cpu_shared_memory_enabled and not local_handle_socket_path:
+                    raise RuntimeError(
+                        "GetServerConfig succeeded before local_handle_socket_path "
+                        "was ready"
+                    )
+                return config
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if isinstance(exc, (AttributeError, NotImplementedError)):
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                logger.info(
+                    "store.capabilities_fetch_retry",
+                    extra={
+                        "tc.store.daemon": self._daemon_endpoint,
+                        "tc.store.session_id": self._session_id,
+                        "attempt": attempt,
+                        "remaining_s": round(remaining, 3),
+                    },
+                    exc_info=exc,
+                )
+                time.sleep(min(self._SERVER_CONFIG_RETRY_INTERVAL_S, remaining))
+                attempt += 1
+        assert last_exc is not None
+        raise last_exc
+
     def _initialize_session_metadata(self, client: DaemonCtl) -> None:
         capabilities = self._default_capabilities()
         try:
-            config = client.get_server_config()
+            config = self._load_server_config_with_retry(client)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "store.capabilities_fetch_failed",
@@ -479,19 +556,29 @@ class StoreRuntimeContext:
         if self._closed:
             return
         self._closed = True
+        try:
+            StoreRuntimeContext._LIVE_CONTEXTS.discard(self)
+        except Exception:  # noqa: BLE001
+            _log_best_effort_cleanup_failure("store_runtime.close.live_context_discard")
         with self._client_lock:
             if self._client is not None:
-                with contextlib.suppress(Exception):
+                try:
                     self._client.close()
+                except Exception:  # noqa: BLE001
+                    _log_best_effort_cleanup_failure("store_runtime.close.client_close")
                 self._client = None
         self.release_all_leases()
         self._executor_handle.close()
-        with contextlib.suppress(Exception):
+        try:
             self._loop.call_soon_threadsafe(self._loop.stop)
+        except Exception:  # noqa: BLE001
+            _log_best_effort_cleanup_failure("store_runtime.close.loop_stop")
         if hasattr(self, "_loop_thread") and self._loop_thread.is_alive():
-            self._loop_thread.join(timeout=1.0)
-        with contextlib.suppress(Exception):
+            self._loop_thread.join(timeout=5.0)
+        try:
             self._loop.close()
+        except Exception:  # noqa: BLE001
+            _log_best_effort_cleanup_failure("store_runtime.close.loop_close")
         with self._key_cache_lock:
             self._key_cache.clear()
         self._artifact_cache.clear()
@@ -525,8 +612,12 @@ class StoreRuntimeContext:
             leases = list(self._active_leases)
             self._active_leases.clear()
         for lease in leases:
-            with contextlib.suppress(Exception):
+            try:
                 lease.__exit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                _log_best_effort_cleanup_failure(
+                    "store_runtime.release_all_leases.lease_exit"
+                )
         self._update_session_record(activity=False)
 
     @contextmanager
@@ -675,8 +766,10 @@ def get_context(
         _GLOBAL_CONTEXT_OPTIONS = effective_opts
 
     if prior is not None:
-        with contextlib.suppress(Exception):
+        try:
             prior.close()
+        except Exception:  # noqa: BLE001
+            _log_best_effort_cleanup_failure("store_runtime.get_context.close_prior")
 
     return new_context
 
@@ -692,8 +785,23 @@ def shutdown_context() -> None:
         _GLOBAL_CONTEXT_OPTIONS = None
 
     if current is not None:
-        with contextlib.suppress(Exception):
+        try:
             current.close()
+        except Exception:  # noqa: BLE001
+            _log_best_effort_cleanup_failure("store_runtime.shutdown_context.close")
+
+
+def _shutdown_all_contexts() -> None:
+    for context in list(StoreRuntimeContext._LIVE_CONTEXTS):
+        try:
+            context.close()
+        except Exception:  # noqa: BLE001
+            _log_best_effort_cleanup_failure(
+                "store_runtime.shutdown_all_contexts.close"
+            )
+
+
+atexit.register(_shutdown_all_contexts)
 
 
 __all__ = ["StoreRuntimeContext", "get_context", "shutdown_context"]

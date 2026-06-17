@@ -9,6 +9,8 @@ proto_library(
     visibility = ["//visibility:public"],
     deps = [
         "//proto/tensorcast/common/v1:common_proto",
+        "//proto/tensorcast/operation/v1:operation_proto",
+        "//proto/tensorcast/publication/v1:publication_proto",
     ],
 )
 
@@ -18,6 +20,8 @@ cpp_proto_library(
     visibility = ["//visibility:public"],
     deps = [
         "//proto/tensorcast/common/v1:common_cc",
+        "//proto/tensorcast/operation/v1:operation_cc",
+        "//proto/tensorcast/publication/v1:publication_cc",
     ],
 )
 

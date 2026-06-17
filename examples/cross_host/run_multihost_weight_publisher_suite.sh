@@ -9,13 +9,15 @@ cd "${REPO_ROOT}"
 
 source .venv/bin/activate
 
-: "${TC_WP_PUBLISHER_PROC:?set TC_WP_PUBLISHER_PROC (publisher brainctl process id)}"
+: "${TC_WP_PUBLISHER_PROC:?set TC_WP_PUBLISHER_PROC (publisher orchestratorctl process id)}"
 : "${TC_WP_RECEIVER_PROCS:?set TC_WP_RECEIVER_PROCS (comma-separated receiver process ids)}"
 : "${TC_GS_ADDR:?set TC_GS_ADDR (global store host:port)}"
 
 TC_DAEMON_CONFIG="${TC_DAEMON_CONFIG:-examples/config/store_daemon_config_cross_host_bench.yaml}"
 TC_DAEMON_CONNECT_ADDRESS="${TC_DAEMON_CONNECT_ADDRESS:-127.0.0.1:50052}"
-TC_OUT_DIR="${TC_OUT_DIR:-/data/tc_cross_rerun/results_weight_publisher}"
+TC_OUT_DIR="${TC_OUT_DIR:-/tmp/tensorcast/cross_host/results_weight_publisher}"
+TC_REMOTE_OUT_DIR="${TC_REMOTE_OUT_DIR:-${TC_OUT_DIR}}"
+TC_WEIGHTS_ROOT="${TC_WEIGHTS_ROOT:-/tmp/tensorcast/cross_host/weights_single_host}"
 TC_RUN_ID="${TC_RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 TC_MODEL_NAME_PREFIX="${TC_MODEL_NAME_PREFIX:-wp-multihost-suite}"
 TC_START_VERSION="${TC_START_VERSION:-1}"
@@ -41,14 +43,10 @@ TC_ALLOW_RECEIVER_SKIPS="${TC_ALLOW_RECEIVER_SKIPS:-0}"
 TC_WP_SCALE_RECEIVER_COUNTS="${TC_WP_SCALE_RECEIVER_COUNTS:-${TC_SCALE_RECEIVER_COUNTS:-1,2,4,8,16,31}}"
 TC_SCALE_NUM_VERSIONS="${TC_SCALE_NUM_VERSIONS:-10}"
 TC_SCALE_PUBLISH_INTERVAL_S="${TC_SCALE_PUBLISH_INTERVAL_S:-20}"
-TC_WP_TRANSPORT_GROUP_MODES="${TC_WP_TRANSPORT_GROUP_MODES:-none}"
-TC_WP_GROUP_PAIR_ORDER="${TC_WP_GROUP_PAIR_ORDER:-linear}"
-TC_WP_GROUP_PAIR_ROUNDS="${TC_WP_GROUP_PAIR_ROUNDS:-1}"
-TC_WP_PAYLOAD_MODE="${TC_WP_PAYLOAD_MODE:-probe}"
+TC_WP_PAYLOAD_MODE="${TC_WP_PAYLOAD_MODE:-tp_ranked}"
 TC_WP_TP_WORLD_SIZE="${TC_WP_TP_WORLD_SIZE:-1}"
 TC_WP_TP_TOTAL_BYTES="${TC_WP_TP_TOTAL_BYTES:-0}"
 TC_WP_TP_DEVICE_MAP_POLICY="${TC_WP_TP_DEVICE_MAP_POLICY:-auto}"
-TC_WP_RECEIVER_APPLY_MODE="${TC_WP_RECEIVER_APPLY_MODE:-binding_swap}"
 TC_WP_MAX_CONCURRENCY="${TC_WP_MAX_CONCURRENCY:-1}"
 TC_WP_PUBLISHER_DAEMON_CONFIG="${TC_WP_PUBLISHER_DAEMON_CONFIG:-${TC_DAEMON_CONFIG}}"
 TC_WP_RECEIVER_DAEMON_CONFIG="${TC_WP_RECEIVER_DAEMON_CONFIG:-${TC_DAEMON_CONFIG}}"
@@ -57,6 +55,15 @@ TC_WP_P0_EARLY_STOP="${TC_WP_P0_EARLY_STOP:-1}"
 TC_WP_P0_EARLY_STOP_GRACE_S="${TC_WP_P0_EARLY_STOP_GRACE_S:-20}"
 TC_WP_THROUGHPUT_SAMPLE_INTERVAL_S="${TC_WP_THROUGHPUT_SAMPLE_INTERVAL_S:-1.0}"
 TC_WP_THROUGHPUT_MAX_SAMPLES="${TC_WP_THROUGHPUT_MAX_SAMPLES:-20000}"
+TC_WP_PROGRESSIVE_ENABLE="${TC_WP_PROGRESSIVE_ENABLE:-0}"
+TC_WP_PROGRESSIVE_REPORT_INTERVAL="${TC_WP_PROGRESSIVE_REPORT_INTERVAL:-1s}"
+TC_WP_PROGRESSIVE_MIN_REPORT_DELTA_BYTES="${TC_WP_PROGRESSIVE_MIN_REPORT_DELTA_BYTES:-16777216}"
+TC_WP_PROGRESSIVE_VERIFY_BEFORE_REPORT="${TC_WP_PROGRESSIVE_VERIFY_BEFORE_REPORT:-1}"
+TC_WP_FAILURE_INJECTION_ENABLE="${TC_WP_FAILURE_INJECTION_ENABLE:-0}"
+TC_WP_FAILURE_INJECTION_MODE="${TC_WP_FAILURE_INJECTION_MODE:-stop-daemon}"
+TC_WP_FAILURE_INJECTION_TARGET="${TC_WP_FAILURE_INJECTION_TARGET:-receiver:0}"
+TC_WP_FAILURE_INJECTION_DELAY_S="${TC_WP_FAILURE_INJECTION_DELAY_S:-15}"
+TC_WP_FAILURE_INJECTION_RECEIVER_COUNT="${TC_WP_FAILURE_INJECTION_RECEIVER_COUNT:-0}"
 TC_SINGLE_HOST_FUNCTIONAL_ENABLE="${TC_SINGLE_HOST_FUNCTIONAL_ENABLE:-1}"
 TC_SINGLE_HOST_DAEMON_CONFIG="${TC_SINGLE_HOST_DAEMON_CONFIG:-${TC_DAEMON_CONFIG}}"
 TC_WP_TP_AUTO_KEEP_LAST_ONE="${TC_WP_TP_AUTO_KEEP_LAST_ONE:-1}"
@@ -160,7 +167,7 @@ remote_exec_as_user() {
   local inner_cmd="$2"
   local inner_b64
   inner_b64="$(printf '%s' "${inner_cmd}" | base64 | tr -d '\n')"
-  brainctl exec process/"${process_id}" -n shai-core -- bash -lc "
+  orchestratorctl exec process/"${process_id}" -n tensorcast -- bash -lc "
 set -euo pipefail
 run_as_user='${TC_RUN_AS_USER}'
 if [ \"\${run_as_user}\" = \"root\" ]; then
@@ -179,7 +186,7 @@ fi
 
 run_single_host_functional() {
   local model_name="${TC_MODEL_NAME_PREFIX}-${TC_RUN_ID}-single"
-  local remote_summary="/data/tc_cross_rerun/results_weight_publisher/${TC_RUN_ID}/single_host_summary.json"
+  local remote_summary="${TC_REMOTE_OUT_DIR}/${TC_RUN_ID}/single_host_summary.json"
   local local_summary="${RUN_DIR}/single_host_summary.json"
   local daemon_session="wp-suite-single-${TC_RUN_ID}"
   local daemon_port="${TC_DAEMON_CONNECT_ADDRESS##*:}"
@@ -226,8 +233,13 @@ python ./tensorcast/tools/weight_publisher_e2e.py single-host \
   --retention-timeout-s ${TC_RETENTION_TIMEOUT_S} \
   --publish-device ${TC_PUBLISH_DEVICE} \
   --materialize-device ${TC_MATERIALIZE_DEVICE} \
-  --receiver-apply-mode tensor_dict \
-  --weights-root /data/tc_cross_rerun/weights_single_host \
+  --payload-mode ${TC_WP_PAYLOAD_MODE} \
+  --tp-world-size ${TC_WP_TP_WORLD_SIZE} \
+  --tp-total-bytes ${TC_WP_TP_TOTAL_BYTES} \
+  --tp-device-map-policy ${TC_WP_TP_DEVICE_MAP_POLICY} \
+  --transport-group-namespace ${model_name}:single \
+  --transport-group-total-parts ${TC_WP_TP_WORLD_SIZE} \
+  --weights-root ${TC_WEIGHTS_ROOT} \
   --run-id ${TC_RUN_ID}-single \
   --output-json ${remote_summary}
 EOF
@@ -242,7 +254,9 @@ run_case() {
   local num_versions=$3
   local publish_interval_s=$4
   local receiver_timeout_s=$5
-  local transport_group_mode=$6
+  local failure_injection_mode=${6:-none}
+  local failure_injection_target=${7:-${TC_WP_FAILURE_INJECTION_TARGET}}
+  local failure_injection_delay_s=${8:-${TC_WP_FAILURE_INJECTION_DELAY_S}}
   local receiver_procs
   receiver_procs="$(join_first_n RECEIVER_PROCS_ARR "${receiver_count}")"
   local model_name="${TC_MODEL_NAME_PREFIX}-${case_name}"
@@ -268,13 +282,11 @@ run_case() {
     --max-publish-to-apply-s "${TC_MAX_PUBLISH_TO_APPLY_S}"
     --retention-timeout-s "${TC_RETENTION_TIMEOUT_S}"
     --publish-device "${TC_PUBLISH_DEVICE}"
-    --receiver-apply-mode "${TC_WP_RECEIVER_APPLY_MODE}"
     --materialize-device "${TC_MATERIALIZE_DEVICE}"
     --receiver-hold-after-finish-s "${TC_RECEIVER_HOLD_AFTER_FINISH_S}"
     --publisher-hold-after-finish-s "${TC_PUBLISHER_HOLD_AFTER_FINISH_S}"
     --receiver-warmup-s "${TC_RECEIVER_WARMUP_S}"
     --remote-timeout-sec "${TC_REMOTE_TIMEOUT_SEC}"
-    --transport-group-mode "${transport_group_mode}"
     --payload-mode "${TC_WP_PAYLOAD_MODE}"
     --tp-world-size "${TC_WP_TP_WORLD_SIZE}"
     --tp-total-bytes "${TC_WP_TP_TOTAL_BYTES}"
@@ -283,6 +295,9 @@ run_case() {
     --receiver-preflight-transient-overlap "${TC_WP_RECEIVER_PREFLIGHT_TRANSIENT_OVERLAP}"
     --throughput-sample-interval-s "${TC_WP_THROUGHPUT_SAMPLE_INTERVAL_S}"
     --throughput-max-samples "${TC_WP_THROUGHPUT_MAX_SAMPLES}"
+    --failure-injection-mode "${failure_injection_mode}"
+    --failure-injection-target "${failure_injection_target}"
+    --failure-injection-delay-s "${failure_injection_delay_s}"
     --p0-early-stop-grace-s "${TC_WP_P0_EARLY_STOP_GRACE_S}"
     --out-dir "${RUN_DIR}"
   )
@@ -306,17 +321,31 @@ run_case() {
   else
     cmd+=(--no-p0-early-stop)
   fi
+  if [[ "${TC_WP_PROGRESSIVE_ENABLE}" == "1" ]]; then
+    cmd+=(--enable-progressive-replication)
+  fi
+  cmd+=(
+    --progressive-report-interval "${TC_WP_PROGRESSIVE_REPORT_INTERVAL}"
+    --progressive-min-report-delta-bytes "${TC_WP_PROGRESSIVE_MIN_REPORT_DELTA_BYTES}"
+  )
+  if [[ "${TC_WP_PROGRESSIVE_VERIFY_BEFORE_REPORT}" == "1" ]]; then
+    cmd+=(--progressive-verify-before-report)
+  else
+    cmd+=(--no-progressive-verify-before-report)
+  fi
   if [[ "${TC_ALLOW_RECEIVER_SKIPS}" == "1" ]]; then
     cmd+=(--allow-receiver-skips)
   fi
-  echo "[wp-suite] running case=${case_name} receivers=${receiver_count} num_versions=${num_versions} publish_interval_s=${publish_interval_s} receiver_timeout_s=${receiver_timeout_s} group_mode=${transport_group_mode}"
+  echo "[wp-suite] running case=${case_name} receivers=${receiver_count} num_versions=${num_versions} publish_interval_s=${publish_interval_s} receiver_timeout_s=${receiver_timeout_s} failure_injection_mode=${failure_injection_mode}"
   "${cmd[@]}"
 }
 
 echo "[wp-suite] run_id=${TC_RUN_ID} publisher=${TC_WP_PUBLISHER_PROC} receivers=${#RECEIVER_PROCS_ARR[@]}"
 echo "[wp-suite] daemon_config=${TC_DAEMON_CONFIG} daemon_connect=${TC_DAEMON_CONNECT_ADDRESS} gs_addr=${TC_GS_ADDR}"
-echo "[wp-suite] payload_mode=${TC_WP_PAYLOAD_MODE} receiver_apply_mode=${TC_WP_RECEIVER_APPLY_MODE} tp_world_size=${TC_WP_TP_WORLD_SIZE} tp_total_bytes=${TC_WP_TP_TOTAL_BYTES} tp_device_map_policy=${TC_WP_TP_DEVICE_MAP_POLICY} max_concurrency=${TC_WP_MAX_CONCURRENCY}"
+echo "[wp-suite] payload_mode=${TC_WP_PAYLOAD_MODE} tp_world_size=${TC_WP_TP_WORLD_SIZE} tp_total_bytes=${TC_WP_TP_TOTAL_BYTES} tp_device_map_policy=${TC_WP_TP_DEVICE_MAP_POLICY} max_concurrency=${TC_WP_MAX_CONCURRENCY}"
 echo "[wp-suite] receiver_timeout_s=${TC_RECEIVER_TIMEOUT_S} receiver_timeout_auto_adjust=${TC_WP_RECEIVER_TIMEOUT_AUTO_ADJUST} keep_last_auto_adjust=${TC_WP_KEEP_LAST_AUTO_ADJUST} max_publish_to_apply_auto_adjust=${TC_WP_MAX_PUBLISH_TO_APPLY_AUTO_ADJUST} pre_publish_trim_margin=${TC_WP_PRE_PUBLISH_TRIM_MARGIN}"
+echo "[wp-suite] progressive_enable=${TC_WP_PROGRESSIVE_ENABLE} progressive_report_interval=${TC_WP_PROGRESSIVE_REPORT_INTERVAL} progressive_min_report_delta_bytes=${TC_WP_PROGRESSIVE_MIN_REPORT_DELTA_BYTES}"
+echo "[wp-suite] failure_injection_enable=${TC_WP_FAILURE_INJECTION_ENABLE} mode=${TC_WP_FAILURE_INJECTION_MODE} target=${TC_WP_FAILURE_INJECTION_TARGET} delay_s=${TC_WP_FAILURE_INJECTION_DELAY_S}"
 STRICT_NO_SKIP="true"
 if [[ "${TC_ALLOW_RECEIVER_SKIPS}" == "1" ]]; then
   STRICT_NO_SKIP="false"
@@ -356,63 +385,6 @@ if [[ "${#SCALE_CASE_COUNTS[@]}" -eq 0 ]]; then
 fi
 echo "[wp-suite] staged_receiver_counts=${SCALE_CASE_COUNTS[*]} (available=${#RECEIVER_PROCS_ARR[@]})"
 
-declare -a TRANSPORT_GROUP_MODES=()
-IFS=',' read -r -a RAW_GROUP_MODES <<< "${TC_WP_TRANSPORT_GROUP_MODES}"
-for raw in "${RAW_GROUP_MODES[@]}"; do
-  mode="$(echo "${raw}" | xargs | tr '[:upper:]' '[:lower:]')"
-  if [[ -z "${mode}" ]]; then
-    continue
-  fi
-  if [[ "${mode}" != "none" && "${mode}" != "tp_version" ]]; then
-    echo "[wp-suite] skip unsupported transport-group-mode=${mode}" >&2
-    append_skip_manifest \
-      "suite_${TC_RUN_ID}_group_mode_${mode}" \
-      "unsupported_transport_group_mode" \
-      "mode=${mode} supported=none,tp_version"
-    continue
-  fi
-  if ! array_contains "${mode}" "${TRANSPORT_GROUP_MODES[@]}"; then
-    TRANSPORT_GROUP_MODES+=("${mode}")
-  fi
-done
-if [[ "${#TRANSPORT_GROUP_MODES[@]}" -eq 0 ]]; then
-  TRANSPORT_GROUP_MODES=("none")
-fi
-echo "[wp-suite] transport_group_modes=${TRANSPORT_GROUP_MODES[*]}"
-
-GROUP_PAIR_ORDER="$(echo "${TC_WP_GROUP_PAIR_ORDER}" | xargs | tr '[:upper:]' '[:lower:]')"
-GROUP_PAIR_ROUNDS="$(echo "${TC_WP_GROUP_PAIR_ROUNDS}" | xargs)"
-if [[ "${GROUP_PAIR_ORDER}" != "linear" && "${GROUP_PAIR_ORDER}" != "abba" ]]; then
-  echo "TC_WP_GROUP_PAIR_ORDER must be linear|abba, got '${TC_WP_GROUP_PAIR_ORDER}'" >&2
-  exit 1
-fi
-if ! [[ "${GROUP_PAIR_ROUNDS}" =~ ^[0-9]+$ ]] || [[ "${GROUP_PAIR_ROUNDS}" -lt 1 ]]; then
-  echo "TC_WP_GROUP_PAIR_ROUNDS must be >=1 integer, got '${TC_WP_GROUP_PAIR_ROUNDS}'" >&2
-  exit 1
-fi
-
-HAS_MODE_NONE=0
-HAS_MODE_TP_VERSION=0
-for mode in "${TRANSPORT_GROUP_MODES[@]}"; do
-  if [[ "${mode}" == "none" ]]; then
-    HAS_MODE_NONE=1
-  fi
-  if [[ "${mode}" == "tp_version" ]]; then
-    HAS_MODE_TP_VERSION=1
-  fi
-done
-
-GROUP_PAIR_EFFECTIVE_ORDER="${GROUP_PAIR_ORDER}"
-if [[ "${GROUP_PAIR_ORDER}" == "abba" && ( "${HAS_MODE_NONE}" -ne 1 || "${HAS_MODE_TP_VERSION}" -ne 1 ) ]]; then
-  GROUP_PAIR_EFFECTIVE_ORDER="linear_fallback_missing_modes"
-  echo "[wp-suite] requested ABBA but modes missing none/tp_version; fallback to linear order" >&2
-  append_skip_manifest \
-    "suite_${TC_RUN_ID}_group_pair_plan" \
-    "abba_fallback_missing_modes" \
-    "transport_group_modes=${TRANSPORT_GROUP_MODES[*]}"
-fi
-echo "[wp-suite] group_pair_order=${GROUP_PAIR_ORDER} group_pair_rounds=${GROUP_PAIR_ROUNDS} effective=${GROUP_PAIR_EFFECTIVE_ORDER}"
-
 declare -a EXECUTED_CASES=()
 
 if [[ "${TC_SINGLE_HOST_FUNCTIONAL_ENABLE}" == "1" ]]; then
@@ -424,43 +396,14 @@ else
     "TC_SINGLE_HOST_FUNCTIONAL_ENABLE=${TC_SINGLE_HOST_FUNCTIONAL_ENABLE}"
 fi
 for receiver_count in "${SCALE_CASE_COUNTS[@]}"; do
-  if [[ "${GROUP_PAIR_ORDER}" == "abba" && "${HAS_MODE_NONE}" -eq 1 && "${HAS_MODE_TP_VERSION}" -eq 1 ]]; then
-    for ((round_idx = 1; round_idx <= GROUP_PAIR_ROUNDS; ++round_idx)); do
-      order_slot=0
-      for group_mode in none tp_version tp_version none; do
-        order_slot=$((order_slot + 1))
-        case_name="suite_${TC_RUN_ID}_r${receiver_count}_${TC_WP_RECEIVER_APPLY_MODE}_${group_mode}_round${round_idx}_o${order_slot}"
-        run_case \
-          "${case_name}" \
-          "${receiver_count}" \
-          "${TC_SCALE_NUM_VERSIONS}" \
-          "${TC_SCALE_PUBLISH_INTERVAL_S}" \
-          "${TC_RECEIVER_TIMEOUT_S}" \
-          "${group_mode}"
-        EXECUTED_CASES+=("${case_name}")
-      done
-    done
-  else
-    for ((round_idx = 1; round_idx <= GROUP_PAIR_ROUNDS; ++round_idx)); do
-      order_slot=0
-      for group_mode in "${TRANSPORT_GROUP_MODES[@]}"; do
-        order_slot=$((order_slot + 1))
-        if [[ "${GROUP_PAIR_ROUNDS}" -eq 1 && "${GROUP_PAIR_ORDER}" == "linear" ]]; then
-          case_name="suite_${TC_RUN_ID}_r${receiver_count}_${TC_WP_RECEIVER_APPLY_MODE}_${group_mode}"
-        else
-          case_name="suite_${TC_RUN_ID}_r${receiver_count}_${TC_WP_RECEIVER_APPLY_MODE}_${group_mode}_round${round_idx}_o${order_slot}"
-        fi
-        run_case \
-          "${case_name}" \
-          "${receiver_count}" \
-          "${TC_SCALE_NUM_VERSIONS}" \
-          "${TC_SCALE_PUBLISH_INTERVAL_S}" \
-          "${TC_RECEIVER_TIMEOUT_S}" \
-          "${group_mode}"
-        EXECUTED_CASES+=("${case_name}")
-      done
-    done
-  fi
+  case_name="suite_${TC_RUN_ID}_r${receiver_count}_group_realization"
+  run_case \
+    "${case_name}" \
+    "${receiver_count}" \
+    "${TC_SCALE_NUM_VERSIONS}" \
+    "${TC_SCALE_PUBLISH_INTERVAL_S}" \
+    "${TC_RECEIVER_TIMEOUT_S}"
+  EXECUTED_CASES+=("${case_name}")
 done
 
 if [[ "${TC_LONG_RUN_ENABLE}" == "1" ]]; then
@@ -483,18 +426,15 @@ if [[ "${TC_LONG_RUN_ENABLE}" == "1" ]]; then
           'BEGIN { printf "%.2f", interval + 35.0; }'
       )"
     fi
-    for group_mode in "${TRANSPORT_GROUP_MODES[@]}"; do
-      long_case_name="suite_${TC_RUN_ID}_long_r${long_receiver_count}_v${TC_LONG_RUN_NUM_VERSIONS}_${group_mode}"
-      echo "[wp-suite] long-run target_duration_s=${TC_LONG_RUN_TARGET_DURATION_S} computed_publish_interval_s=${long_publish_interval_s} group_mode=${group_mode}"
-      run_case \
-        "${long_case_name}" \
-        "${long_receiver_count}" \
-        "${TC_LONG_RUN_NUM_VERSIONS}" \
-        "${long_publish_interval_s}" \
-        "${long_receiver_timeout_s}" \
-        "${group_mode}"
-      EXECUTED_CASES+=("${long_case_name}")
-    done
+    long_case_name="suite_${TC_RUN_ID}_long_r${long_receiver_count}_v${TC_LONG_RUN_NUM_VERSIONS}"
+    echo "[wp-suite] long-run target_duration_s=${TC_LONG_RUN_TARGET_DURATION_S} computed_publish_interval_s=${long_publish_interval_s}"
+    run_case \
+      "${long_case_name}" \
+      "${long_receiver_count}" \
+      "${TC_LONG_RUN_NUM_VERSIONS}" \
+      "${long_publish_interval_s}" \
+      "${long_receiver_timeout_s}"
+    EXECUTED_CASES+=("${long_case_name}")
   else
     echo "[wp-suite] skip long-run: no available receiver process"
     append_skip_manifest \
@@ -507,6 +447,37 @@ else
     "suite_${TC_RUN_ID}_long_run" \
     "long_run_disabled" \
     "TC_LONG_RUN_ENABLE=${TC_LONG_RUN_ENABLE}"
+fi
+
+if [[ "${TC_WP_FAILURE_INJECTION_ENABLE}" == "1" ]]; then
+  failure_receiver_count="${TC_WP_FAILURE_INJECTION_RECEIVER_COUNT}"
+  if [[ "${failure_receiver_count}" -eq 0 || "${failure_receiver_count}" -gt "${#RECEIVER_PROCS_ARR[@]}" ]]; then
+    failure_receiver_count="${#RECEIVER_PROCS_ARR[@]}"
+  fi
+  if [[ "${failure_receiver_count}" -ge 2 ]]; then
+    failure_case_name="suite_${TC_RUN_ID}_failure_injection_r${failure_receiver_count}"
+    run_case \
+      "${failure_case_name}" \
+      "${failure_receiver_count}" \
+      "${TC_SCALE_NUM_VERSIONS}" \
+      "${TC_SCALE_PUBLISH_INTERVAL_S}" \
+      "${TC_RECEIVER_TIMEOUT_S}" \
+      "${TC_WP_FAILURE_INJECTION_MODE}" \
+      "${TC_WP_FAILURE_INJECTION_TARGET}" \
+      "${TC_WP_FAILURE_INJECTION_DELAY_S}"
+    EXECUTED_CASES+=("${failure_case_name}")
+  else
+    echo "[wp-suite] skip failure-injection lane: at least two receiver processes are required"
+    append_skip_manifest \
+      "suite_${TC_RUN_ID}_failure_injection" \
+      "insufficient_receiver_processes" \
+      "requested=${TC_WP_FAILURE_INJECTION_RECEIVER_COUNT} available=${#RECEIVER_PROCS_ARR[@]}"
+  fi
+else
+  append_skip_manifest \
+    "suite_${TC_RUN_ID}_failure_injection" \
+    "failure_injection_disabled" \
+    "TC_WP_FAILURE_INJECTION_ENABLE=${TC_WP_FAILURE_INJECTION_ENABLE}"
 fi
 
 cat > "${RUN_DIR}/suite_meta.json" <<EOF
@@ -533,19 +504,23 @@ cat > "${RUN_DIR}/suite_meta.json" <<EOF
   "max_publish_to_apply_auto_adjust": ${TC_WP_MAX_PUBLISH_TO_APPLY_AUTO_ADJUST},
   "progress_poll_s": ${TC_PROGRESS_POLL_S},
   "scale_receiver_counts": $(json_array_from_bash_array SCALE_CASE_COUNTS),
-  "transport_group_modes": $(json_array_from_bash_array TRANSPORT_GROUP_MODES),
-  "group_pair_order": "${GROUP_PAIR_ORDER}",
-  "group_pair_rounds": ${GROUP_PAIR_ROUNDS},
-  "group_pair_effective_order": "${GROUP_PAIR_EFFECTIVE_ORDER}",
   "payload_mode": "${TC_WP_PAYLOAD_MODE}",
   "tp_world_size": ${TC_WP_TP_WORLD_SIZE},
   "tp_total_bytes": ${TC_WP_TP_TOTAL_BYTES},
   "tp_device_map_policy": "${TC_WP_TP_DEVICE_MAP_POLICY}",
-  "receiver_apply_mode": "${TC_WP_RECEIVER_APPLY_MODE}",
   "max_concurrency": ${TC_WP_MAX_CONCURRENCY},
   "receiver_preflight_transient_overlap": ${TC_WP_RECEIVER_PREFLIGHT_TRANSIENT_OVERLAP},
   "p0_early_stop": ${TC_WP_P0_EARLY_STOP},
   "p0_early_stop_grace_s": ${TC_WP_P0_EARLY_STOP_GRACE_S},
+  "progressive_enable": ${TC_WP_PROGRESSIVE_ENABLE},
+  "progressive_report_interval": "${TC_WP_PROGRESSIVE_REPORT_INTERVAL}",
+  "progressive_min_report_delta_bytes": ${TC_WP_PROGRESSIVE_MIN_REPORT_DELTA_BYTES},
+  "progressive_verify_before_report": ${TC_WP_PROGRESSIVE_VERIFY_BEFORE_REPORT},
+  "failure_injection_enable": ${TC_WP_FAILURE_INJECTION_ENABLE},
+  "failure_injection_mode": "${TC_WP_FAILURE_INJECTION_MODE}",
+  "failure_injection_target": "${TC_WP_FAILURE_INJECTION_TARGET}",
+  "failure_injection_delay_s": ${TC_WP_FAILURE_INJECTION_DELAY_S},
+  "failure_injection_receiver_count": ${TC_WP_FAILURE_INJECTION_RECEIVER_COUNT},
   "throughput_sample_interval_s": ${TC_WP_THROUGHPUT_SAMPLE_INTERVAL_S},
   "throughput_max_samples": ${TC_WP_THROUGHPUT_MAX_SAMPLES},
   "scale_num_versions": ${TC_SCALE_NUM_VERSIONS},

@@ -233,7 +233,7 @@ def main() -> int:
         print("direct RDMA requires --memory gpu", file=sys.stderr)
         return 2
 
-    repo_root = Path("/data/workspace/tensorcast-280")
+    repo_root = Path("./")
     bench_binary = repo_root / "bazel-bin/core/communicator/communicator_bench_binary"
     if not bench_binary.exists():
         print(f"bench binary does not exist: {bench_binary}", file=sys.stderr)

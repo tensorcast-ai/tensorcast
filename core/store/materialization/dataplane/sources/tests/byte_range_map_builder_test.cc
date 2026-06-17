@@ -48,6 +48,35 @@ TEST_CASE("build_byte_range_map_from_canonical_and_source_index_json maps offset
   CHECK(map.segments[2].src_offset == 0);
 }
 
+TEST_CASE("build_byte_range_map_from_canonical_index_json coalesces shared storage ranges", "[byte_range_map]") {
+  const std::string canonical = make_index_json({{"a", 0, 64}, {"b", 0, 64}, {"c", 32, 32}});
+
+  auto map_or = build_byte_range_map_from_canonical_index_json(canonical, /*total_size=*/64);
+  REQUIRE(map_or.ok());
+  const auto& map = *map_or;
+  REQUIRE(map.segments.size() == 1);
+  CHECK(map.segments[0].kind == ByteRangeSegment::Kind::kData);
+  CHECK(map.segments[0].dst_offset == 0);
+  CHECK(map.segments[0].src_offset == 0);
+  CHECK(map.segments[0].length == 64);
+}
+
+TEST_CASE(
+    "build_byte_range_map_from_canonical_and_source_index_json coalesces shared storage ranges",
+    "[byte_range_map]") {
+  const std::string canonical = make_index_json({{"a", 0, 64}, {"b", 0, 64}, {"c", 32, 32}});
+  const std::string source = make_index_json({{"a", 128, 64}, {"b", 128, 64}, {"c", 160, 32}});
+
+  auto map_or = build_byte_range_map_from_canonical_and_source_index_json(canonical, source, /*total_size=*/64);
+  REQUIRE(map_or.ok());
+  const auto& map = *map_or;
+  REQUIRE(map.segments.size() == 1);
+  CHECK(map.segments[0].kind == ByteRangeSegment::Kind::kData);
+  CHECK(map.segments[0].dst_offset == 0);
+  CHECK(map.segments[0].src_offset == 128);
+  CHECK(map.segments[0].length == 64);
+}
+
 TEST_CASE("compose_byte_range_maps builds view->source map", "[byte_range_map]") {
   ByteRangeMap view_map;
   view_map.total_bytes = 8;

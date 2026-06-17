@@ -13,6 +13,7 @@
 #include "absl/strings/match.h"
 #include "absl/strings/str_split.h"
 #include "absl/time/clock.h"
+#include "core/common/trace/trace_macros.h"
 #include "core/store/materialization/control/replica_registration_helper.h"
 
 namespace tensorcast::store::runtime::metadata {
@@ -68,6 +69,7 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
         max_concurrency_(std::max<uint32_t>(1, max_concurrency)) {}
 
   absl::Status publish_registration(const RegistrationPublication& publication) override {
+    SC_TRACE_SCOPE("registration_commit.publisher.publish_registration");
     auto client_or = get_connected_client();
     if (!client_or.ok()) {
       return client_or.status();
@@ -92,22 +94,26 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
               : tensorcast::common::v1::ArtifactIdKind::ARTIFACT_ID_KIND_MI2);
       descriptor = std::move(desc);
     }
-    auto reg_or = client->register_memory_replica_idempotent(
-        publication.artifact_id,
-        worker_id(),
-        publication.device,
-        publication.size_bytes,
-        publication.tensor_index_key,
-        publication.remote_memory_keys,
-        publication.buffer_sizes,
-        publication.tensor_index_data,
-        publication.encoding,
-        publication.schema_version,
-        max_concurrency_,
-        publication.verification_json,
-        publication.view_id ? std::optional<std::string_view>(*publication.view_id) : std::nullopt,
-        descriptor,
-        std::nullopt);
+    absl::StatusOr<std::string> reg_or = absl::UnknownError("uninitialized");
+    {
+      SC_TRACE_SCOPE("registration_commit.publisher.register_memory_replica");
+      reg_or = client->register_memory_replica_idempotent(
+          publication.artifact_id,
+          worker_id(),
+          publication.device,
+          publication.size_bytes,
+          publication.tensor_index_key,
+          publication.remote_memory_keys,
+          publication.buffer_sizes,
+          publication.tensor_index_data,
+          publication.encoding,
+          publication.schema_version,
+          max_concurrency_,
+          publication.verification_json,
+          publication.view_id ? std::optional<std::string_view>(*publication.view_id) : std::nullopt,
+          descriptor,
+          std::nullopt);
+    }
     if (!reg_or.ok()) {
       return reg_or.status();
     }
@@ -115,6 +121,7 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
   }
 
   absl::Status update_view_state(const components::ViewStateUpdate& update) override {
+    SC_TRACE_SCOPE("registration_commit.publisher.update_view_state");
     auto client_or = get_connected_client();
     if (!client_or.ok()) {
       return client_or.status();
@@ -309,7 +316,8 @@ absl::Status MetadataGateway::register_replica(
           verification_json,
           key.view_id.has_value() ? std::optional<std::string_view>(*key.view_id) : std::nullopt,
           descriptor,
-          publish_context_id.empty() ? std::nullopt : std::optional<std::string_view>(publish_context_id));
+          publish_context_id.empty() ? std::nullopt : std::optional<std::string_view>(publish_context_id),
+          transport_state.export_generation);
       register_status = register_or.ok() ? absl::OkStatus() : register_or.status();
       if (register_or.ok()) {
         replica_runtime_->set_replica_global_id(key, *register_or);

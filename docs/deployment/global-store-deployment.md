@@ -50,7 +50,7 @@ docker run -d \
   -p 8001:8001 \
   -v /var/lib/global_store:/data \
   -v $(pwd)/examples/config/global_store_config.yaml:/etc/tensorcast/global_store.yaml:ro \
-  hub.i.basemind.com/tensorcast/global-store:latest \
+  ghcr.io/tensorcast-ai/global-store:latest \
   uv run -m tensorcast.global_store --config=/etc/tensorcast/global_store.yaml
 ```
 
@@ -149,13 +149,13 @@ spec:
     spec:
       containers:
       - name: global-store
-        image: hub.i.basemind.com/tensorcast/global-store:latest
+        image: ghcr.io/tensorcast-ai/global-store:latest
         env:
         - name: GLOBAL_STORE_DB_PATH
-          value: /data/models.db
+          value: /var/lib/tensorcast/global-store/models.db
         volumeMounts:
         - name: data
-          mountPath: /data
+          mountPath: /var/lib/tensorcast/global-store
   volumeClaimTemplates:
   - metadata:
       name: data

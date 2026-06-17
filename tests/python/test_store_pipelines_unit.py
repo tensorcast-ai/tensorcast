@@ -6,13 +6,16 @@ import concurrent.futures
 import json
 import threading
 import time
+from collections.abc import Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 import torch
 
-from tensorcast.api._config import PlanType
+from tensorcast.api._config import GetArtifactOptions, PlanType, RegionBackedMode
 from tensorcast.api._materialize import (
     MaterializationPayload,
     TensorPayloadDescriptor,
@@ -30,6 +33,7 @@ from tensorcast.api.store.types import (
 )
 from tensorcast.api.store.views import ViewOrchestrator
 from tensorcast.daemon_ctl import KeyMappingResolution
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
 class _DummySpan:
@@ -95,7 +99,7 @@ class _DummyRuntime:
         self.leases: list[object] = []
         self.futures: list[object] = []
         self.client = _FakeClient()
-        self._key_cache: dict[str, str | None] = {}
+        self._key_cache: dict[str, tuple[str | None, str | None]] = {}
 
     def track_future(self, future: concurrent.futures.Future[object]) -> None:
         self.futures.append(future)
@@ -120,17 +124,21 @@ class _DummyRuntime:
 
     def resolve_key_mapping_cached(
         self, *, key: str
-    ) -> str | None:  # pragma: no cover - noop
+    ) -> tuple[str | None, str | None]:  # pragma: no cover - noop
         mapping = self.client.resolve_key_mapping(key)
-        return mapping.artifact_id or None
+        return mapping.artifact_id or None, None
 
     def invalidate_artifact(
-        self, artifact_id: str | None, *, key: str | None = None, reason: str | None = None
+        self,
+        artifact_id: str | None,
+        *,
+        key: str | None = None,
+        reason: str | None = None,
     ) -> None:  # pragma: no cover - noop
         # Mirror StoreRuntimeContext.invalidate_artifact enough for tests: clear cached key mappings.
         keys_to_remove: list[str] = []
         for cached_key, cached_artifact in self._key_cache.items():
-            matches_artifact = bool(artifact_id and cached_artifact == artifact_id)
+            matches_artifact = bool(artifact_id and cached_artifact[0] == artifact_id)
             matches_key = bool(key is not None and cached_key == key)
             if matches_artifact or matches_key:
                 keys_to_remove.append(cached_key)
@@ -161,10 +169,10 @@ def _registration_result(artifact_id: str = "aid") -> RegistrationResult:
     build = SimpleNamespace(device_id=0)
     return RegistrationResult(
         state_dict={"x": torch.zeros(1)},
-        descriptor=descriptor,
+        descriptor=cast(Any, descriptor),
         lease=None,
-        build=build,
-        layout=layout,
+        build=cast(Any, build),
+        layout=cast(Any, layout),
         index_bytes=index_bytes,
         plan=PlanType.VRAM_COALESCED,
     )
@@ -174,7 +182,16 @@ def _materialization_payload(replica_uuid: str = "r1") -> MaterializationPayload
     tensor = torch.zeros(1, device="cpu")
     size_bytes = int(tensor.element_size() * tensor.numel())
     index_bytes = json.dumps(
-        {"x": [0, size_bytes, [1], [1], str(tensor.dtype), int(tensor.storage_offset())]},
+        {
+            "x": [
+                0,
+                size_bytes,
+                [1],
+                [1],
+                str(tensor.dtype),
+                int(tensor.storage_offset()),
+            ]
+        },
         separators=(",", ":"),
     ).encode("utf-8")
     descriptor = TensorPayloadDescriptor(
@@ -202,17 +219,21 @@ def _materialization_payload(replica_uuid: str = "r1") -> MaterializationPayload
 
 def test_registration_retries_then_succeeds():
     runtime = _DummyRuntime()
-    views = ViewOrchestrator(runtime)
+    views = ViewOrchestrator(cast(Any, runtime))
 
     attempts: list[int] = []
 
     def fake_register(**_kwargs):
         attempts.append(1)
         if len(attempts) == 1:
-            raise ArtifactError("unavailable", status_code="UNAVAILABLE", retryable=True)
+            raise ArtifactError(
+                "unavailable", status_code="UNAVAILABLE", retryable=True
+            )
         return _registration_result()
 
-    pipeline = RegistrationPipeline(runtime, views, register_fn=fake_register)
+    pipeline = RegistrationPipeline(
+        cast(Any, runtime), views, register_fn=fake_register
+    )
 
     result = pipeline.register({"x": torch.zeros(1)}, key="k1")
     runtime.close()
@@ -229,7 +250,9 @@ def test_get_into_validates_targets(monkeypatch):
 
     runtime = _DummyRuntime()
     pipeline = MaterializationPipeline(
-        runtime, ViewOrchestrator(runtime), materialize_fn=lambda **_: _materialization_payload(replica_uuid="r2")
+        cast(Any, runtime),
+        ViewOrchestrator(cast(Any, runtime)),
+        materialize_fn=lambda **_: _materialization_payload(replica_uuid="r2"),
     )
 
     called_release: list[str] = []
@@ -248,9 +271,64 @@ def test_get_into_validates_targets(monkeypatch):
     assert called_release == ["r2"]
 
 
+def test_get_into_returns_fallback_result_and_unloads(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+
+    runtime = _DummyRuntime()
+    payload = replace(
+        _materialization_payload(replica_uuid="r3"),
+        source=store_daemon_pb2.MATERIALIZATION_SOURCE_DISK,
+    )
+    pipeline = MaterializationPipeline(
+        cast(Any, runtime),
+        ViewOrchestrator(cast(Any, runtime)),
+        materialize_fn=lambda **_: payload,
+    )
+
+    def fake_validate(
+        *,
+        canonical_index: object,
+        target: dict[str, torch.Tensor],
+        source: dict[str, torch.Tensor],
+        device_id: int,
+        required_names: Sequence[str] | None = None,
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        del canonical_index, device_id, required_names
+        return [(target["x"], source["x"])]
+
+    monkeypatch.setattr(
+        "tensorcast.api.store.materialization.validate_targets",
+        fake_validate,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_maybe_region_backed_into",
+        lambda **_: SimpleNamespace(used=False, fallback_reason="layout_mismatch"),
+    )
+
+    target = {"x": torch.empty(1)}
+    result = pipeline.get_into(
+        target,
+        artifact_id="aid",
+        device=torch.device("cuda", 0),
+        options=GetArtifactOptions(region_backed_mode=RegionBackedMode.AUTO),
+    )
+
+    runtime.close()
+    assert torch.equal(target["x"], torch.zeros(1))
+    assert result.used_region_backed is False
+    assert result.source == "disk"
+    assert result.source_code == int(store_daemon_pb2.MATERIALIZATION_SOURCE_DISK)
+    assert result.replica_uuid == "r3"
+    assert result.total_bytes == 4
+    assert result.fallback_reason_buckets == {"layout_mismatch": 1}
+    assert runtime.client.unloaded == ["r3:"]
+
+
 def test_tracked_executor_cancel_invokes_callback():
     runtime = _DummyRuntime()
-    executor = TrackedExecutor(runtime)
+    executor = TrackedExecutor(cast(Any, runtime))
     cancel_called = threading.Event()
 
     def work() -> int:
@@ -276,7 +354,9 @@ def test_store_import_dag_smoke():
     handles_mod = importlib.import_module("tensorcast.api.store.handles")
     runtime_mod = importlib.import_module("tensorcast.api.store.runtime")
     registration_mod = importlib.import_module("tensorcast.api.store.registration")
-    materialization_mod = importlib.import_module("tensorcast.api.store.materialization")
+    materialization_mod = importlib.import_module(
+        "tensorcast.api.store.materialization"
+    )
 
     assert hasattr(types_mod, "StoreOptions")
     assert hasattr(handles_mod, "RegisteredArtifact")

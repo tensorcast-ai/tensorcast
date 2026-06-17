@@ -9,7 +9,7 @@ import time
 import uuid
 import weakref
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, Mapping, Sequence, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Mapping, Sequence, TypeVar, cast
 
 from tensorcast.api._config import StorePolicy
 from tensorcast.api._device import CPU_DEVICE_ID
@@ -19,6 +19,7 @@ from tensorcast.api.errors import ArtifactError
 from tensorcast.api.operation import (
     Operation,
     OperationError,
+    OperationState,
     OperationStatus,
     OperationTimeoutError,
 )
@@ -38,6 +39,7 @@ from tensorcast.api.store.artifact import (
     PrefetchedReplica,
     _decode_capability_token,
 )
+from tensorcast.api.store.publication_builder import build_pure_transform_transform_spec
 from tensorcast.api.store.view_composer import compute_view_id
 from tensorcast.engine_adapter.artifact_api import (
     BatchOutcome,
@@ -45,17 +47,41 @@ from tensorcast.engine_adapter.artifact_api import (
     HydrateResult,
     ManifestArtifactSetBridge,
     ManifestResult,
+    PublishManifest,
     PublishResult,
 )
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.node_agent.v1 import node_agent_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
+from tensorcast.types import (
+    _SERVING_READINESS_TO_PROTO,
+    AssemblyCloseoutContract,
+    AssemblyContractFamily,
+    AssemblyReadinessPolicy,
+    AssemblyRequirementSetRef,
+    PrefetchHandoff,
+    PrefetchHandoffSet,
+    PrefetchRetentionPolicy,
+    RealizationTarget,
+    RealizationTargetSet,
+    RepresentationPublishContract,
+    RepresentationPublishSpec,
+    RuntimeArtifactManifest,
+    RuntimeBindingReadiness,
+)
 
 if TYPE_CHECKING:
     from tensorcast.api.store import Store
+    from tensorcast.types import RuntimeArtifactBuildIntent
 
 T = TypeVar("T")
-ArtifactActionResult = ManifestResult | PublishResult | HydrateResult | BatchResult
+ArtifactActionResult = (
+    ManifestResult
+    | PublishResult
+    | HydrateResult
+    | BatchResult
+    | RepresentationPublishSpec
+)
 PlanExecutionClass = str
 
 _TERMINAL_ONLY_EXECUTION_CLASS = "terminal_only"
@@ -112,6 +138,30 @@ class PlanResult:
 
     def step(self, ref: PlanStepRef[Any]) -> PlanStepResult:
         return self.steps[ref.step_id]
+
+    def require_representation_publish_spec(
+        self, ref: PlanStepRef[Any]
+    ) -> RepresentationPublishSpec:
+        step = self.steps.get(ref.step_id)
+        if step is None:
+            raise ArtifactError(
+                f"Unknown plan step id: {ref.step_id}",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if step.status.state != "success":
+            raise ArtifactError(
+                f"Plan step {ref.step_id} did not succeed; pure-transform publication is unavailable",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        if not isinstance(step.artifact_result, RepresentationPublishSpec):
+            raise ArtifactError(
+                f"Plan step {ref.step_id} does not carry a RepresentationPublishSpec",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        return step.artifact_result
 
     @classmethod
     def from_node_agent_response(
@@ -171,8 +221,11 @@ class _ArtifactSelection:
 @dataclass(frozen=True, slots=True)
 class _PrefetchAction:
     artifact: Artifact
-    device: str | int
+    device: str | int | None
     device_id: int
+    target: RealizationTarget | RealizationTargetSet | None = None
+    readiness: RuntimeBindingReadiness = "runtime_local_ready"
+    retention: PrefetchRetentionPolicy | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,7 +276,8 @@ class _PublishAction:
 
 @dataclass(frozen=True, slots=True)
 class _HydrateAction:
-    engine_request_id: str
+    engine_request_id: str | None
+    publish_manifest: PublishManifest | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,7 +339,7 @@ def _derive_action_idempotency_key(
     return f"tc.plan.action.v1:{digest.hexdigest()}"
 
 
-_NODE_AGENT_STATE_TO_OP_STATE = {
+_NODE_AGENT_STATE_TO_OP_STATE: dict[int, OperationState] = {
     node_agent_pb2.OPERATION_STATE_PENDING: "pending",
     node_agent_pb2.OPERATION_STATE_RUNNING: "running",
     node_agent_pb2.OPERATION_STATE_SUCCESS: "success",
@@ -314,20 +368,9 @@ def _batch_outcome_from_proto(
 
 
 def _manifest_result_from_proto(
-    result: node_agent_pb2.ArtifactManifestResult,
+    result: object,
 ) -> ManifestResult:
-    return ManifestResult(
-        engine_request_id=str(result.engine_request_id),
-        layout_id=str(result.layout_id),
-        artifact_ids=tuple(str(item) for item in result.artifact_ids),
-        key_set_digest_alg=str(result.key_set_digest_alg),
-        key_set_digest_hex=str(result.key_set_digest_hex),
-        artifact_set_bridge=(
-            ManifestArtifactSetBridge.from_proto(result.manifest_bridge)
-            if result.HasField("manifest_bridge")
-            else None
-        ),
-    )
+    return ManifestResult.from_proto(result)
 
 
 def _artifact_result_from_proto(
@@ -336,11 +379,18 @@ def _artifact_result_from_proto(
     kind = result.WhichOneof("result")
     if kind == "manifest":
         return _manifest_result_from_proto(result.manifest)
+    if kind == "representation_publish":
+        return RepresentationPublishSpec.from_proto(result.representation_publish)
     if kind == "publish":
         return PublishResult(
             manifest=_manifest_result_from_proto(result.publish.manifest),
             put_outcomes=tuple(
                 _batch_outcome_from_proto(item) for item in result.publish.put_outcomes
+            ),
+            publish_manifest=(
+                PublishManifest.from_proto(result.publish.publish_manifest)
+                if result.publish.HasField("publish_manifest")
+                else None
             ),
         )
     if kind == "hydrate":
@@ -366,6 +416,42 @@ def _artifact_result_from_proto(
             ),
             outcomes=tuple(
                 _batch_outcome_from_proto(item) for item in result.evict_local.outcomes
+            ),
+        )
+    if kind == "pure_transform_publication":
+        return RepresentationPublishSpec(
+            serving_artifact_id=(
+                str(result.pure_transform_publication.serving_artifact_id) or None
+            ),
+            serving_manifest_ref=str(
+                result.pure_transform_publication.serving_manifest_ref
+            ),
+            serving_manifest=RuntimeArtifactManifest.from_bytes(
+                bytes(result.pure_transform_publication.serving_manifest_bytes)
+            ),
+            serving_manifest_bytes=bytes(
+                result.pure_transform_publication.serving_manifest_bytes
+            ),
+            source_artifact_ref=(
+                str(result.pure_transform_publication.source_artifact_ref)
+                if result.pure_transform_publication.HasField("source_artifact_ref")
+                else None
+            ),
+            contract_family=cast(
+                AssemblyContractFamily | None,
+                str(result.pure_transform_publication.contract_family)
+                if result.pure_transform_publication.HasField("contract_family")
+                else None,
+            ),
+            structural_view_ids=tuple(
+                str(item)
+                for item in result.pure_transform_publication.structural_view_ids
+            ),
+            representation_publish_contract=RepresentationPublishContract.from_proto(
+                result.pure_transform_publication.representation_publish_contract
+            ),
+            closeout_contract=AssemblyCloseoutContract.from_proto(
+                result.pure_transform_publication.closeout_contract
             ),
         )
     return None
@@ -525,7 +611,7 @@ def _resolve_view_index_bytes(
 
 
 def _resolve_artifact_selection(artifact: Artifact) -> _ArtifactSelection:
-    selection = artifact._build_artifact_selection()
+    selection = artifact._resolve_realization_selection().proto
     view_subset_hash = (
         bytes(selection.view_subset_hash) if selection.view_subset_hash else None
     )
@@ -550,7 +636,6 @@ def _clone_artifact_for_store(artifact: Artifact, store: "Store") -> Artifact:
         store_ref=weakref.ref(store),
         artifact_id=artifact._artifact_id,
         key=artifact._key_hint,
-        fallback=artifact._fallback,
         canonical_index_bytes=artifact._canonical_index_bytes,
         canonical_index=artifact._canonical_index,
         generation=artifact._generation,
@@ -675,15 +760,37 @@ class WorkerStepBuilder:
         self,
         art: Artifact,
         *,
-        device: str | int,
+        device: str | int | None = None,
+        target: RealizationTarget | RealizationTargetSet | None = None,
+        readiness: RuntimeBindingReadiness = "runtime_local_ready",
+        retention: PrefetchRetentionPolicy | None = None,
         depends_on: Sequence[PlanStepRef[Any]] | None = None,
-    ) -> PlanStepRef[PrefetchedReplica]:
-        device_id = _resolve_device_id(device=device, allow_cpu=True)
-        device_input: str | int = device
+    ) -> PlanStepRef[PrefetchedReplica | PrefetchHandoff | PrefetchHandoffSet]:
+        if target is not None and device is not None:
+            raise ArtifactError(
+                "prefetch target and device are mutually exclusive",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if target is None:
+            if device is None:
+                raise ArtifactError(
+                    "prefetch requires device or target",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            device_id = _resolve_device_id(device=device, allow_cpu=True)
+        else:
+            device_id = -1
         return self._plan._add_step(
             target=self._worker,
             action=_PrefetchAction(
-                artifact=art, device=device_input, device_id=device_id
+                artifact=art,
+                device=device,
+                device_id=device_id,
+                target=target,
+                readiness=readiness,
+                retention=retention,
             ),
             depends_on=depends_on,
         )
@@ -811,6 +918,18 @@ class InstanceStepBuilder:
             )
         return value
 
+    @staticmethod
+    def _validated_publish_manifest(
+        publish_manifest: PublishManifest,
+    ) -> PublishManifest:
+        if not isinstance(publish_manifest, PublishManifest):
+            raise ArtifactError(
+                "publish_manifest must be a PublishManifest",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        return publish_manifest
+
     def transform_into(
         self,
         art: Artifact,
@@ -887,6 +1006,57 @@ class InstanceStepBuilder:
             depends_on=depends_on,
         )
 
+    def transform_register_pure_transform(
+        self,
+        art: Artifact,
+        *,
+        build_intent: "RuntimeArtifactBuildIntent",
+        contract_family: str | None = None,
+        out_key: str,
+        transform_name: str = "identity.v1",
+        source_version_key: str | None = None,
+        serving_version_key: str | None = None,
+        logical_topology_json: str | None = None,
+        serving_manifest_ref: str | None = None,
+        layout_id: str | None = None,
+        requirements: AssemblyRequirementSetRef | None = None,
+        readiness_policy: AssemblyReadinessPolicy | None = None,
+        structural_view_ids: Sequence[str] | None = None,
+        transform_args: dict[str, str | int] | None = None,
+        layout_hash: str | None = None,
+        policy: StorePolicy | None = None,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef[RepresentationPublishSpec]:
+        spec = build_pure_transform_transform_spec(
+            transform_name=transform_name,
+            build_intent=build_intent,
+            contract_family=contract_family,
+            source_version_key=source_version_key,
+            serving_version_key=serving_version_key,
+            logical_topology_json=logical_topology_json,
+            serving_manifest_ref=serving_manifest_ref,
+            layout_id=layout_id,
+            requirements=requirements,
+            readiness_policy=readiness_policy,
+            structural_view_ids=tuple(
+                str(view_id).strip()
+                for view_id in (structural_view_ids or ())
+                if str(view_id).strip()
+            ),
+            transform_args=transform_args,
+            layout_hash=layout_hash,
+        )
+        return cast(
+            PlanStepRef[RepresentationPublishSpec],
+            self.transform_register(
+                art,
+                spec=spec,
+                out_key=out_key,
+                policy=policy,
+                depends_on=depends_on,
+            ),
+        )
+
     def manifest(
         self,
         *,
@@ -913,10 +1083,15 @@ class InstanceStepBuilder:
     def hydrate(
         self,
         *,
-        engine_request_id: str,
+        engine_request_id: str | None = None,
+        publish_manifest: PublishManifest | None = None,
         depends_on: Sequence[PlanStepRef[Any]] | None = None,
     ) -> PlanStepRef[Any]:
-        return self._hydrate(engine_request_id=engine_request_id, depends_on=depends_on)
+        return self._hydrate(
+            engine_request_id=engine_request_id,
+            publish_manifest=publish_manifest,
+            depends_on=depends_on,
+        )
 
     def evict_local(
         self,
@@ -967,13 +1142,31 @@ class InstanceStepBuilder:
     def _hydrate(
         self,
         *,
-        engine_request_id: str,
+        engine_request_id: str | None,
+        publish_manifest: PublishManifest | None,
         depends_on: Sequence[PlanStepRef[Any]] | None,
     ) -> PlanStepRef[Any]:
+        resolved_engine_request_id = (
+            self._validated_engine_request_id(engine_request_id)
+            if engine_request_id is not None
+            else None
+        )
+        resolved_publish_manifest = (
+            self._validated_publish_manifest(publish_manifest)
+            if publish_manifest is not None
+            else None
+        )
+        if (resolved_engine_request_id is None) == (resolved_publish_manifest is None):
+            raise ArtifactError(
+                "exactly one of engine_request_id or publish_manifest is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
         return self._plan._add_step(
             target=self._inst,
             action=_HydrateAction(
-                engine_request_id=self._validated_engine_request_id(engine_request_id),
+                engine_request_id=resolved_engine_request_id,
+                publish_manifest=resolved_publish_manifest,
             ),
             depends_on=depends_on,
         )
@@ -1133,6 +1326,25 @@ class Plan:
                 prefetch_action = step_msg.action.prefetch
                 _fill_selection_proto(selection, prefetch_action.selection)
                 prefetch_action.device_id = int(step.action.device_id)
+                if step.action.target is not None:
+                    if isinstance(step.action.target, RealizationTarget):
+                        prefetch_action.serving_binding_target.CopyFrom(
+                            step.action.target.to_proto()
+                        )
+                    else:
+                        prefetch_action.serving_binding_set_target.CopyFrom(
+                            step.action.target.to_proto()
+                        )
+                    prefetch_action.requested_readiness = _SERVING_READINESS_TO_PROTO[
+                        step.action.readiness
+                    ]
+                    prefetch_action.retention_policy.CopyFrom(
+                        (
+                            step.action.retention
+                            if step.action.retention is not None
+                            else PrefetchRetentionPolicy()
+                        ).to_proto()
+                    )
             elif isinstance(step.action, _PrefetchSetAction):
                 prefetch_set_action = step_msg.action.prefetch_set
                 prefetch_set_action.artifact_set.CopyFrom(
@@ -1182,7 +1394,14 @@ class Plan:
                     publish_action.ttl_ms = int(step.action.ttl_ms)
             elif isinstance(step.action, _HydrateAction):
                 hydrate_action = step_msg.action.hydrate
-                hydrate_action.engine_request_id = str(step.action.engine_request_id)
+                if step.action.engine_request_id is not None:
+                    hydrate_action.engine_request_id = str(
+                        step.action.engine_request_id
+                    )
+                elif step.action.publish_manifest is not None:
+                    hydrate_action.publish_manifest.CopyFrom(
+                        step.action.publish_manifest.to_proto()
+                    )
             elif isinstance(step.action, _EvictLocalAction):
                 evict_action = step_msg.action.evict_local
                 if step.action.engine_request_id:
@@ -1268,14 +1487,33 @@ class Plan:
             if isinstance(step.action, _PrefetchAction):
                 selection = self._selection_for_artifact(step.action.artifact)
                 ctx = self._action_context(
-                    action="prefetch",
+                    action=(
+                        "prefetch_serving_binding"
+                        if step.action.target is not None
+                        else "prefetch"
+                    ),
                     target_id=target_id,
                     selection=selection,
                     device_id=step.action.device_id,
                     ttl_ms=None,
+                    extra=(
+                        hashlib.sha256(
+                            step.action.target.to_proto().SerializeToString(
+                                deterministic=True
+                            )
+                        ).hexdigest()
+                        if step.action.target is not None
+                        else None
+                    ),
                 )
                 bound = _clone_artifact_for_store(step.action.artifact, store)
-                prefetch_op = bound.prefetch(device=step.action.device, ctx=ctx)
+                prefetch_op = bound.prefetch(
+                    device=step.action.device,
+                    target=step.action.target,
+                    readiness=step.action.readiness,
+                    retention=step.action.retention,
+                    ctx=ctx,
+                )
                 with op_lock:
                     op_registry[step.step_id] = prefetch_op
                 prefetch_value = prefetch_op.wait()

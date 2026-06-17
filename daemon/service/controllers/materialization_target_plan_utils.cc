@@ -2,25 +2,30 @@
 
 #include "daemon/service/controllers/materialization_target_plan_utils.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
+#include "core/store/materialization/dataplane/metadata/canonical_index.h"
 #include "core/store/view_utils.h"
 #include "daemon/service/controllers/materialization_layout_utils.h"
-#include "daemon/service/controllers/materialization_mapped_copy_plan_utils.h"
 #include "daemon/service/controllers/materialization_mapped_target_layout_utils.h"
 #include "daemon/service/controllers/materialization_mapped_view_narrow_utils.h"
 #include "daemon/service/controllers/materialization_mapped_view_spec_utils.h"
 #include "daemon/service/controllers/materialization_policy_utils.h"
+#include "daemon/service/controllers/representation_transform_builder.h"
 #include "daemon/service/controllers/selection_validation_utils.h"
 #include "daemon/util/status_utils.h"
 
@@ -34,10 +39,9 @@ namespace {
 
 using materialization_layout::CanonicalIndexEntry;
 using materialization_layout::CanonicalIndexTable;
+using materialization_layout::dtype_element_size;
 using materialization_layout::parse_canonical_index;
 using materialization_layout::TargetOffsetEntry;
-using materialization_mapped_copy_plan::build_copy_plan;
-using materialization_mapped_copy_plan::ViewNarrowSpec;
 using materialization_mapped_target_layout::validate_mapped_target_layout;
 using materialization_mapped_target_layout::ValidatedMappedTargetLayout;
 using materialization_mapped_target_layout::validation_error_reason;
@@ -51,7 +55,294 @@ using materialization_mapped_view_spec::ResolveViewSpecErrorReason;
 using materialization_policy::build_view_spec_proto;
 using materialization_policy::compute_view_id_from_spec;
 using materialization_policy::convert_view_spec;
+using representation_layout::TensorLayoutSpec;
+using representation_layout::ViewNarrowSpec;
+using representation_transform_builder::build_representation_transform_contract;
 using store::loader::ViewSpec;
+
+store::runtime::ingestion::strategy::SourceBoundLoweringStats to_source_bound_lowering_stats(
+    const representation_transform_builder::TransformWorkLoweringStats& stats) {
+  return store::runtime::ingestion::strategy::SourceBoundLoweringStats{
+      .total_dst_tensors = stats.total_dst_tensors,
+      .collective_candidates = stats.collective_candidates,
+      .collective_bytes = stats.collective_bytes,
+      .concat_candidates = stats.concat_candidates,
+      .concat_bytes = stats.concat_bytes,
+      .rejected_mixed_src_or_dim = stats.rejected_mixed_src_or_dim,
+      .rejected_mixed_src_or_dim_bytes = stats.rejected_mixed_src_or_dim_bytes,
+      .rejected_non_contiguous = stats.rejected_non_contiguous,
+      .rejected_non_contiguous_bytes = stats.rejected_non_contiguous_bytes,
+      .rejected_unsupported_distribution = stats.rejected_unsupported_distribution,
+      .rejected_unsupported_distribution_bytes = stats.rejected_unsupported_distribution_bytes,
+  };
+}
+
+absl::StatusOr<std::string> build_mapped_target_selected_index_json(const ValidatedMappedTargetLayout& mapped_layout) {
+  std::vector<std::string> ordered_names;
+  ordered_names.reserve(mapped_layout.dst_specs.size());
+  std::unordered_map<std::string, uint64_t> offsets;
+  std::unordered_map<std::string, uint64_t> sizes;
+  std::unordered_map<std::string, store::loader::CanonicalTensorMeta> metas;
+  offsets.reserve(mapped_layout.dst_specs.size());
+  sizes.reserve(mapped_layout.dst_specs.size());
+  metas.reserve(mapped_layout.dst_specs.size());
+
+  for (const auto& [name, spec] : mapped_layout.dst_specs) {
+    auto offset_it = mapped_layout.dst_base_offsets.find(name);
+    if (offset_it == mapped_layout.dst_base_offsets.end()) {
+      return absl::InvalidArgumentError("mapped target layout missing dst base offset");
+    }
+    ordered_names.push_back(name);
+    offsets.emplace(name, offset_it->second);
+    sizes.emplace(name, spec.logical_length);
+    metas.emplace(
+        name,
+        store::loader::CanonicalTensorMeta{
+            .shape = spec.shape,
+            .stride = spec.stride,
+            .dtype = spec.dtype,
+            .storage_offset = spec.storage_offset,
+        });
+  }
+  std::sort(ordered_names.begin(), ordered_names.end());
+  return store::loader::build_canonical_index_json(ordered_names, offsets, sizes, metas);
+}
+
+tensorcast::common::v1::ByteSpaceRef build_source_byte_space(std::optional<std::string_view> view_id) {
+  tensorcast::common::v1::ByteSpaceRef byte_space;
+  if (view_id.has_value() && !view_id->empty()) {
+    byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_VIEW);
+    byte_space.set_id(std::string(*view_id));
+    return byte_space;
+  }
+  byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  return byte_space;
+}
+
+void patch_transform_contract_source_specs(
+    const CanonicalIndexTable& source_table,
+    store::materialization::contracts::RepresentationTransformContract* transform_contract) {
+  if (transform_contract == nullptr) {
+    return;
+  }
+  for (auto& binding : transform_contract->tensor_bindings) {
+    for (auto& source : binding.sources) {
+      auto it = source_table.entries.find(source.source_spec.name);
+      if (it == source_table.entries.end()) {
+        continue;
+      }
+      auto elem_or = materialization_layout::dtype_element_size(it->second.dtype);
+      if (!elem_or.ok()) {
+        continue;
+      }
+      source.source_spec.shape = it->second.shape;
+      source.source_spec.stride = it->second.stride;
+      source.source_spec.dtype = it->second.dtype;
+      source.source_spec.logical_offset = it->second.logical_offset;
+      source.source_spec.logical_length = it->second.logical_length;
+      source.source_spec.storage_offset = it->second.storage_offset;
+      source.source_spec.element_size = *elem_or;
+    }
+  }
+}
+
+absl::StatusOr<store::materialization::contracts::RepresentationWorkPlan> build_execution_representation_work_plan(
+    const store::materialization::contracts::RepresentationTransformContract& transform_contract,
+    const std::optional<CanonicalIndexTable>& physical_source_table,
+    std::optional<store::loader::ByteRangeMap> collective_lowered_map = std::nullopt) {
+  auto execution_contract = transform_contract;
+  if (physical_source_table.has_value()) {
+    patch_transform_contract_source_specs(*physical_source_table, &execution_contract);
+  }
+  auto work_plan_or = store::materialization::contracts::build_representation_work_plan(execution_contract);
+  if (!work_plan_or.ok()) {
+    return work_plan_or.status();
+  }
+  if (collective_lowered_map.has_value()) {
+    store::loader::ByteRangeMap pad_map;
+    pad_map.total_bytes = collective_lowered_map->total_bytes;
+    pad_map.num_sources = collective_lowered_map->num_sources;
+    for (const auto& segment : collective_lowered_map->segments) {
+      if (segment.kind == store::loader::ByteRangeSegment::Kind::kPad) {
+        pad_map.segments.push_back(segment);
+      }
+    }
+    if (!pad_map.segments.empty()) {
+      store::materialization::contracts::RepresentationWorkItem pad_item;
+      pad_item.kind = store::materialization::contracts::RepresentationWorkItemKind::kPadFill;
+      pad_item.partition_kind = store::materialization::contracts::WorkPartitionKind::kUnknown;
+      pad_item.byte_range_map = std::move(pad_map);
+      for (const auto& segment : pad_item.byte_range_map.segments) {
+        pad_item.committed_bytes += segment.length;
+      }
+      work_plan_or->committed_bytes += pad_item.committed_bytes;
+      work_plan_or->items.push_back(std::move(pad_item));
+    }
+  }
+  return std::move(*work_plan_or);
+}
+
+absl::StatusOr<store::loader::ByteRangeMap> filter_byte_range_map(
+    const store::loader::ByteRangeMap& map,
+    store::loader::ByteRangeSegment::Kind kind) {
+  store::loader::ByteRangeMap filtered;
+  filtered.total_bytes = map.total_bytes;
+  filtered.num_sources = map.num_sources;
+  bool sorted_by_dst = true;
+  std::optional<uint64_t> previous_end;
+  for (const auto& segment : map.segments) {
+    if (segment.kind == kind) {
+      if (previous_end.has_value() && segment.dst_offset < *previous_end) {
+        sorted_by_dst = false;
+      }
+      previous_end = segment.dst_offset + segment.length;
+      filtered.segments.push_back(segment);
+    }
+  }
+  if (!sorted_by_dst) {
+    std::sort(filtered.segments.begin(), filtered.segments.end(), [](const auto& lhs, const auto& rhs) {
+      return lhs.dst_offset < rhs.dst_offset;
+    });
+  }
+  for (size_t index = 1; index < filtered.segments.size(); ++index) {
+    const auto& previous = filtered.segments[index - 1];
+    const auto& current = filtered.segments[index];
+    if (current.dst_offset < previous.dst_offset + previous.length) {
+      return absl::InvalidArgumentError("filtered byte range map contains overlapping segments");
+    }
+  }
+  return filtered;
+}
+
+absl::StatusOr<store::loader::ByteRangeMap> merge_byte_range_maps(
+    const store::loader::ByteRangeMap& lhs,
+    const store::loader::ByteRangeMap& rhs) {
+  store::loader::ByteRangeMap merged;
+  merged.total_bytes = std::max(lhs.total_bytes, rhs.total_bytes);
+  merged.num_sources = std::max(lhs.num_sources, rhs.num_sources);
+  merged.segments.reserve(lhs.segments.size() + rhs.segments.size());
+  merged.segments.insert(merged.segments.end(), lhs.segments.begin(), lhs.segments.end());
+  merged.segments.insert(merged.segments.end(), rhs.segments.begin(), rhs.segments.end());
+  std::sort(merged.segments.begin(), merged.segments.end(), [](const auto& lhs, const auto& rhs) {
+    return lhs.dst_offset < rhs.dst_offset;
+  });
+  for (size_t index = 1; index < merged.segments.size(); ++index) {
+    const auto& previous = merged.segments[index - 1];
+    const auto& current = merged.segments[index];
+    if (current.dst_offset < previous.dst_offset + previous.length) {
+      return absl::InvalidArgumentError("merged byte range map contains overlapping segments");
+    }
+  }
+  return merged;
+}
+
+uint64_t byte_range_map_covered_bytes(const store::loader::ByteRangeMap& map) {
+  uint64_t total = 0;
+  for (const auto& segment : map.segments) {
+    total += segment.length;
+  }
+  return total;
+}
+
+bool work_item_has_collective_source_overlap(const store::materialization::contracts::RepresentationWorkItem& item) {
+  using RepresentationWorkItemKind = store::materialization::contracts::RepresentationWorkItemKind;
+  return item.kind == RepresentationWorkItemKind::kTensorCopy &&
+      item.partition_kind == store::materialization::contracts::WorkPartitionKind::kReplicated;
+}
+
+absl::StatusOr<std::vector<std::pair<uint64_t, uint64_t>>> build_collective_dst_ranges(
+    const store::materialization::contracts::RepresentationWorkPlan& work_plan) {
+  std::vector<std::pair<uint64_t, uint64_t>> ranges;
+  for (const auto& item : work_plan.items) {
+    if (!work_item_has_collective_source_overlap(item)) {
+      continue;
+    }
+    for (const auto& source : item.sources) {
+      auto spans_or = store::materialization::contracts::build_coordinate_byte_spans(
+          item.dst_spec, source.fragment.destination_range);
+      if (!spans_or.ok()) {
+        return spans_or.status();
+      }
+      for (const auto& span : *spans_or) {
+        if (span.length == 0) {
+          continue;
+        }
+        ranges.emplace_back(span.offset, span.offset + span.length);
+      }
+    }
+  }
+  std::sort(ranges.begin(), ranges.end(), [](const auto& lhs, const auto& rhs) {
+    if (lhs.first != rhs.first) {
+      return lhs.first < rhs.first;
+    }
+    return lhs.second < rhs.second;
+  });
+  std::vector<std::pair<uint64_t, uint64_t>> merged;
+  merged.reserve(ranges.size());
+  for (const auto& range : ranges) {
+    if (range.second <= range.first) {
+      continue;
+    }
+    if (merged.empty() || range.first > merged.back().second) {
+      merged.push_back(range);
+      continue;
+    }
+    merged.back().second = std::max<uint64_t>(merged.back().second, range.second);
+  }
+  return merged;
+}
+
+absl::StatusOr<store::loader::ByteRangeMap> filter_data_map_to_dst_ranges(
+    const store::loader::ByteRangeMap& data_map,
+    const std::vector<std::pair<uint64_t, uint64_t>>& dst_ranges) {
+  store::loader::ByteRangeMap filtered;
+  filtered.total_bytes = data_map.total_bytes;
+  filtered.num_sources = data_map.num_sources;
+  if (dst_ranges.empty()) {
+    return filtered;
+  }
+  size_t range_index = 0;
+  for (const auto& segment : data_map.segments) {
+    if (segment.kind != store::loader::ByteRangeSegment::Kind::kData || segment.length == 0) {
+      continue;
+    }
+    const uint64_t segment_begin = segment.dst_offset;
+    const uint64_t segment_end = segment.dst_offset + segment.length;
+    while (range_index < dst_ranges.size() && dst_ranges[range_index].second <= segment_begin) {
+      ++range_index;
+    }
+    for (size_t index = range_index; index < dst_ranges.size(); ++index) {
+      const auto& [range_begin, range_end] = dst_ranges[index];
+      if (range_begin >= segment_end) {
+        break;
+      }
+      const uint64_t overlap_begin = std::max<uint64_t>(segment_begin, range_begin);
+      const uint64_t overlap_end = std::min<uint64_t>(segment_end, range_end);
+      if (overlap_end <= overlap_begin) {
+        continue;
+      }
+      filtered.segments.push_back(
+          store::loader::ByteRangeSegment{
+              .kind = store::loader::ByteRangeSegment::Kind::kData,
+              .dst_offset = overlap_begin,
+              .length = overlap_end - overlap_begin,
+              .src_offset = segment.src_offset + (overlap_begin - segment_begin),
+              .source_index = segment.source_index,
+          });
+    }
+  }
+  std::sort(filtered.segments.begin(), filtered.segments.end(), [](const auto& lhs, const auto& rhs) {
+    return lhs.dst_offset < rhs.dst_offset;
+  });
+  for (size_t index = 1; index < filtered.segments.size(); ++index) {
+    const auto& previous = filtered.segments[index - 1];
+    const auto& current = filtered.segments[index];
+    if (current.dst_offset < previous.dst_offset + previous.length) {
+      return absl::InvalidArgumentError("collective overlap byte range map contains overlapping segments");
+    }
+  }
+  return filtered;
+}
 
 void record_error(RecordMaterializeResultFn record_result, std::string_view reason) {
   if (record_result == nullptr) {
@@ -297,6 +588,59 @@ Status validate_target_offsets_against_layout(
     }
   }
   return Status::OK;
+}
+
+absl::StatusOr<ValidatedMappedTargetLayout> build_mapped_layout_from_target_index(
+    std::string_view target_index_json,
+    const std::vector<TargetOffsetEntry>& offsets,
+    const absl::flat_hash_map<std::string, StorageRange>& storage_ranges) {
+  auto index_table_or = parse_canonical_index(target_index_json);
+  if (!index_table_or.ok()) {
+    return index_table_or.status();
+  }
+  const auto& index_table = *index_table_or;
+
+  ValidatedMappedTargetLayout result;
+  result.logical_total_size = index_table.logical_total_size;
+  result.dst_specs.reserve(index_table.entries.size());
+  result.dst_base_offsets.reserve(index_table.entries.size());
+
+  absl::flat_hash_map<std::string, TargetOffsetEntry> offsets_by_name;
+  offsets_by_name.reserve(offsets.size());
+  for (const auto& offset : offsets) {
+    offsets_by_name.emplace(offset.name, offset);
+  }
+
+  if (index_table.entries.size() != offsets_by_name.size()) {
+    return absl::InvalidArgumentError("target_index must match target_layout offsets");
+  }
+
+  for (const auto& [name, index_entry] : index_table.entries) {
+    const auto offset_it = offsets_by_name.find(name);
+    if (offset_it == offsets_by_name.end()) {
+      return absl::InvalidArgumentError("target_index includes unknown tensor name");
+    }
+    const auto storage_it = storage_ranges.find(offset_it->second.storage_id);
+    if (storage_it == storage_ranges.end()) {
+      return absl::InvalidArgumentError("target_layout references unknown storage_id");
+    }
+    auto elem_or = dtype_element_size(index_entry.dtype);
+    if (!elem_or.ok()) {
+      return elem_or.status();
+    }
+    result.dst_specs.emplace(
+        name,
+        TensorLayoutSpec{
+            .shape = index_entry.shape,
+            .stride = index_entry.stride,
+            .dtype = index_entry.dtype,
+            .storage_offset = index_entry.storage_offset,
+            .logical_length = index_entry.logical_length,
+            .element_size = *elem_or,
+        });
+    result.dst_base_offsets.emplace(name, storage_it->second.base_offset + offset_it->second.storage_offset);
+  }
+  return result;
 }
 
 struct TargetViewResolution {
@@ -810,7 +1154,10 @@ Status build_mapped_target_materialization_plan(
       resolved_view_id = *view_id_or;
     }
   } else if (request_view_id.has_value()) {
-    // selection.view_id without metadata-backed view_spec is treated as opaque mapped byte space identity.
+    // For mapped targets, selection.view_id may identify the target byte-space
+    // even when the source artifact has no metadata-backed view spec. Runtime
+    // source selection still decides whether those bytes arrive directly from a
+    // view-capable source or are reconstructed from canonical/disk fallback.
     resolved_view_id = *request_view_id;
   }
 
@@ -818,7 +1165,21 @@ Status build_mapped_target_materialization_plan(
   if (plan.view_plan.has_value() && !plan.view_plan->is_identity) {
     source_index_json = plan.view_plan->view_index_json;
   }
-  plan.selected_index_json = source_index_json;
+  auto target_index_json_or = build_mapped_target_selected_index_json(mapped_layout);
+  if (!target_index_json_or.ok()) {
+    record_error(record_result, "layout_mismatch");
+    return to_grpc_status(target_index_json_or.status());
+  }
+  // Mapped copy-plan execution reads from source_index_json above, but
+  // resolved_selection must describe the packed target byte-space that this RPC
+  // materializes and later publishes.
+  plan.selected_index_json = std::move(*target_index_json_or);
+  auto canonical_source_table_or = parse_canonical_index(plan.canonical_index_json);
+  if (!canonical_source_table_or.ok()) {
+    record_error(record_result, "index_parse_failed");
+    return to_grpc_status(canonical_source_table_or.status());
+  }
+  const CanonicalIndexTable& canonical_source_table = *canonical_source_table_or;
   auto source_table_or = parse_canonical_index(source_index_json);
   if (!source_table_or.ok()) {
     record_error(record_result, "index_parse_failed");
@@ -826,14 +1187,38 @@ Status build_mapped_target_materialization_plan(
   }
   const CanonicalIndexTable& source_table = *source_table_or;
 
-  auto copy_plan_or = build_copy_plan(
-      req.copy_plan(), source_table, mapped_layout.dst_specs, mapped_layout.dst_base_offsets, view_narrows);
-  if (!copy_plan_or.ok()) {
+  auto representation_or = build_representation_transform_contract(
+      req.copy_plan(),
+      source_table,
+      canonical_source_table,
+      mapped_layout.dst_specs,
+      mapped_layout.dst_base_offsets,
+      view_narrows,
+      build_source_byte_space(
+          resolved_view_id.has_value() ? std::optional<std::string_view>(*resolved_view_id) : std::nullopt),
+      "ephemeral_into_target");
+  if (!representation_or.ok()) {
     record_error(record_result, "mapping_invalid");
-    return to_grpc_status(copy_plan_or.status());
+    return to_grpc_status(representation_or.status());
   }
-  plan.copy_plan = std::move(*copy_plan_or);
-  plan.copy_plan.map.total_bytes = plan.logical_total_size;
+  plan.representation = std::move(*representation_or);
+  plan.representation.generic_fallback_map.total_bytes = plan.logical_total_size;
+  LOG(INFO) << "MaterializeIntoMappedTarget representation-work lowering"
+            << " copy_entries=" << req.copy_plan().entries_size() << " dst_tensors=" << mapped_layout.dst_specs.size()
+            << " collective_candidates=" << plan.representation.lowering_stats.collective_candidates
+            << " collective_bytes=" << plan.representation.lowering_stats.collective_bytes
+            << " concat_candidates=" << plan.representation.lowering_stats.concat_candidates
+            << " concat_bytes=" << plan.representation.lowering_stats.concat_bytes
+            << " rejected_mixed_src_or_dim=" << plan.representation.lowering_stats.rejected_mixed_src_or_dim
+            << " rejected_mixed_src_or_dim_bytes=" << plan.representation.lowering_stats.rejected_mixed_src_or_dim_bytes
+            << " rejected_non_contiguous=" << plan.representation.lowering_stats.rejected_non_contiguous
+            << " rejected_non_contiguous_bytes=" << plan.representation.lowering_stats.rejected_non_contiguous_bytes
+            << " rejected_unsupported_distribution="
+            << plan.representation.lowering_stats.rejected_unsupported_distribution
+            << " rejected_unsupported_distribution_bytes="
+            << plan.representation.lowering_stats.rejected_unsupported_distribution_bytes
+            << " representation_contract_hash="
+            << plan.representation.transform_contract.target_representation.representation_contract_hash;
 
   PreparedTargetStorageLayout prepared_storage_layout;
   auto storage_layout_status = build_target_storage_layout(req.target_layout(), record_result, prepared_storage_layout);
@@ -868,6 +1253,413 @@ Status build_mapped_target_materialization_plan(
   plan.publish_storages = std::move(prepared_storage_layout.publish_storages);
   plan.publish_segments = std::move(prepared_storage_layout.publish_segments);
   return Status::OK;
+}
+
+Status build_binding_realization_materialization_plan(
+    store::StoreEngine& engine,
+    const tensorcast::common::v1::ArtifactSelection& selection,
+    const v2::BindingRealizationPlan& realization_plan,
+    std::string_view resolved_artifact_id,
+    const v2::TargetLayout& target_layout,
+    std::string_view target_index_json,
+    const std::vector<TargetOffsetEntry>& offsets,
+    std::string canonical_index_json,
+    RecordMaterializeResultFn record_result,
+    MappedTargetMaterializationPlan& plan) {
+  const auto profile_start = std::chrono::steady_clock::now();
+  auto elapsed_sec = [](auto start, auto end) { return std::chrono::duration<double>(end - start).count(); };
+  double selection_names_sec = 0.0;
+  double subset_hash_sec = 0.0;
+  double storage_layout_sec = 0.0;
+  double mapped_layout_sec = 0.0;
+  double parse_target_index_sec = 0.0;
+  double validate_target_layout_sec = 0.0;
+  double resolve_view_sec = 0.0;
+  double view_narrows_sec = 0.0;
+  double view_plan_sec = 0.0;
+  double parse_source_tables_sec = 0.0;
+  double representation_contract_sec = 0.0;
+  double selection_identity_sec = 0.0;
+
+  if (selection.artifact_id().empty()) {
+    record_error(record_result, "selection_missing");
+    return {StatusCode::INVALID_ARGUMENT, "selection.artifact_id is required"};
+  }
+  if (realization_plan.entries_size() == 0) {
+    record_error(record_result, "mapping_invalid");
+    return {StatusCode::INVALID_ARGUMENT, "realization_plan.entries must be non-empty"};
+  }
+
+  plan = MappedTargetMaterializationPlan{};
+  plan.canonical_index_json = std::move(canonical_index_json);
+  plan.selected_index_json = std::string(target_index_json);
+
+  std::vector<std::string> ordered_selection_names;
+  ordered_selection_names.reserve(selection.tensor_names_size());
+  std::string_view selection_error_reason;
+  const auto selection_names_start = std::chrono::steady_clock::now();
+  auto tensor_name_status =
+      selection_validation::validate_request_tensor_names(selection, ordered_selection_names, &selection_error_reason);
+  selection_names_sec = elapsed_sec(selection_names_start, std::chrono::steady_clock::now());
+  if (!tensor_name_status.ok()) {
+    record_error(record_result, selection_error_reason.empty() ? "transfer_error" : selection_error_reason);
+    return tensor_name_status;
+  }
+  std::string view_subset_hash;
+  const auto subset_hash_start = std::chrono::steady_clock::now();
+  auto subset_hash_status = selection_validation::compute_and_validate_view_subset_hash(
+      selection, absl::MakeSpan(ordered_selection_names), view_subset_hash, &selection_error_reason);
+  subset_hash_sec = elapsed_sec(subset_hash_start, std::chrono::steady_clock::now());
+  if (!subset_hash_status.ok()) {
+    record_error(record_result, selection_error_reason.empty() ? "transfer_error" : selection_error_reason);
+    return subset_hash_status;
+  }
+
+  PreparedTargetStorageLayout prepared_storage_layout;
+  const auto storage_layout_start = std::chrono::steady_clock::now();
+  auto storage_layout_status = build_target_storage_layout(target_layout, record_result, prepared_storage_layout);
+  storage_layout_sec = elapsed_sec(storage_layout_start, std::chrono::steady_clock::now());
+  if (!storage_layout_status.ok()) {
+    return storage_layout_status;
+  }
+
+  const auto mapped_layout_start = std::chrono::steady_clock::now();
+  auto mapped_layout_or =
+      build_mapped_layout_from_target_index(plan.selected_index_json, offsets, prepared_storage_layout.storage_ranges);
+  mapped_layout_sec = elapsed_sec(mapped_layout_start, std::chrono::steady_clock::now());
+  if (!mapped_layout_or.ok()) {
+    record_error(record_result, "layout_mismatch");
+    return to_grpc_status(mapped_layout_or.status());
+  }
+  const auto parse_target_index_start = std::chrono::steady_clock::now();
+  auto target_index_table_or = parse_canonical_index(plan.selected_index_json);
+  parse_target_index_sec = elapsed_sec(parse_target_index_start, std::chrono::steady_clock::now());
+  if (!target_index_table_or.ok()) {
+    record_error(record_result, "index_parse_failed");
+    return to_grpc_status(target_index_table_or.status());
+  }
+  plan.logical_total_size = target_index_table_or->logical_total_size;
+  const auto validate_target_layout_start = std::chrono::steady_clock::now();
+  auto storage_span_status = validate_storage_span_matches_index(
+      prepared_storage_layout.total_storage_bytes, plan.logical_total_size, record_result);
+  if (!storage_span_status.ok()) {
+    return storage_span_status;
+  }
+  auto offset_validation_status = validate_target_offsets_against_layout(
+      offsets, *target_index_table_or, prepared_storage_layout.storage_ranges, record_result);
+  if (!offset_validation_status.ok()) {
+    return offset_validation_status;
+  }
+  validate_target_layout_sec = elapsed_sec(validate_target_layout_start, std::chrono::steady_clock::now());
+
+  v2::MaterializeIntoMappedTargetRequest view_request;
+  view_request.mutable_selection()->CopyFrom(selection);
+  ResolveViewSpecErrorReason resolve_view_reason = ResolveViewSpecErrorReason::kUnknown;
+  const auto resolve_view_start = std::chrono::steady_clock::now();
+  auto resolved_view_or = resolve_mapped_view_spec(view_request, resolved_artifact_id, engine, &resolve_view_reason);
+  resolve_view_sec = elapsed_sec(resolve_view_start, std::chrono::steady_clock::now());
+  if (!resolved_view_or.ok()) {
+    record_error(record_result, resolve_view_spec_error_reason(resolve_view_reason));
+    return to_grpc_status(resolved_view_or.status());
+  }
+  auto resolved_view = std::move(*resolved_view_or);
+  plan.view_spec = std::move(resolved_view.view_spec);
+  std::optional<std::string> request_view_id = std::move(resolved_view.request_view_id);
+  std::optional<tensorcast::common::v1::ViewSpec> view_spec_proto;
+  std::optional<std::string> resolved_view_id;
+
+  ViewNarrowErrorReason view_narrow_reason = ViewNarrowErrorReason::kUnknown;
+  const auto view_narrows_start = std::chrono::steady_clock::now();
+  auto view_narrows_or = build_view_narrows(plan.view_spec, &view_narrow_reason);
+  view_narrows_sec = elapsed_sec(view_narrows_start, std::chrono::steady_clock::now());
+  if (!view_narrows_or.ok()) {
+    record_error(record_result, view_narrow_error_reason(view_narrow_reason));
+    return to_grpc_status(view_narrows_or.status());
+  }
+  const auto view_narrows = std::move(*view_narrows_or);
+
+  if (plan.view_spec.has_value()) {
+    const auto view_plan_start = std::chrono::steady_clock::now();
+    view_spec_proto = build_view_spec_proto(*plan.view_spec);
+    auto view_plan_or = store::StoreEngine::compute_view_plan(plan.canonical_index_json, *plan.view_spec);
+    if (!view_plan_or.ok()) {
+      record_error(record_result, "view_plan_failed");
+      return to_grpc_status(view_plan_or.status());
+    }
+    plan.view_plan = std::move(*view_plan_or);
+    if (plan.view_plan->is_identity) {
+      if (request_view_id.has_value()) {
+        record_error(record_result, "view_identity_mismatch");
+        return {StatusCode::INVALID_ARGUMENT, "selection.view_id requires a non-identity view spec"};
+      }
+    } else {
+      auto view_id_or = compute_view_id_from_spec(*view_spec_proto, plan.canonical_index_json);
+      if (!view_id_or.ok()) {
+        return to_grpc_status(view_id_or.status());
+      }
+      if (request_view_id.has_value() && *request_view_id != *view_id_or) {
+        record_error(record_result, "view_id_mismatch");
+        return {StatusCode::INVALID_ARGUMENT, "selection.view_id does not match selection.view_spec"};
+      }
+      resolved_view_id = *view_id_or;
+    }
+    view_plan_sec = elapsed_sec(view_plan_start, std::chrono::steady_clock::now());
+  } else if (request_view_id.has_value()) {
+    resolved_view_id = *request_view_id;
+  }
+
+  std::string source_index_json = plan.canonical_index_json;
+  if (plan.view_plan.has_value() && !plan.view_plan->is_identity) {
+    source_index_json = plan.view_plan->view_index_json;
+  }
+  const auto parse_source_tables_start = std::chrono::steady_clock::now();
+  auto canonical_source_table_or = parse_canonical_index(plan.canonical_index_json);
+  if (!canonical_source_table_or.ok()) {
+    record_error(record_result, "index_parse_failed");
+    return to_grpc_status(canonical_source_table_or.status());
+  }
+  auto source_table_or = parse_canonical_index(source_index_json);
+  if (!source_table_or.ok()) {
+    record_error(record_result, "index_parse_failed");
+    return to_grpc_status(source_table_or.status());
+  }
+  parse_source_tables_sec = elapsed_sec(parse_source_tables_start, std::chrono::steady_clock::now());
+
+  const auto representation_contract_start = std::chrono::steady_clock::now();
+  auto representation_or = build_representation_transform_contract(
+      realization_plan,
+      *source_table_or,
+      *canonical_source_table_or,
+      mapped_layout_or->dst_specs,
+      mapped_layout_or->dst_base_offsets,
+      view_narrows,
+      build_source_byte_space(
+          resolved_view_id.has_value() ? std::optional<std::string_view>(*resolved_view_id) : std::nullopt),
+      "local_seal_then_promote",
+      /*compute_identity_hashes=*/false);
+  if (!representation_or.ok()) {
+    record_error(record_result, "mapping_invalid");
+    return to_grpc_status(representation_or.status());
+  }
+  plan.representation = std::move(*representation_or);
+  representation_contract_sec = elapsed_sec(representation_contract_start, std::chrono::steady_clock::now());
+
+  tensorcast::common::v1::ArtifactSelection validated_source_selection;
+  const auto selection_identity_start = std::chrono::steady_clock::now();
+  auto selection_identity_status = selection_validation::validate_hashes_and_build_resolved_selection(
+      selection,
+      resolved_artifact_id,
+      resolved_view_id.value_or(""),
+      source_index_json,
+      resolved_view_id.has_value(),
+      ordered_selection_names,
+      view_subset_hash,
+      (plan.view_plan.has_value() && !plan.view_plan->is_identity && view_spec_proto.has_value()) ? &*view_spec_proto
+                                                                                                  : nullptr,
+      validated_source_selection,
+      &selection_error_reason);
+  if (!selection_identity_status.ok()) {
+    record_error(record_result, selection_error_reason.empty() ? "transfer_error" : selection_error_reason);
+    return selection_identity_status;
+  }
+  selection_identity_sec = elapsed_sec(selection_identity_start, std::chrono::steady_clock::now());
+
+  plan.publish_storages = std::move(prepared_storage_layout.publish_storages);
+  plan.publish_segments = std::move(prepared_storage_layout.publish_segments);
+  const auto done = std::chrono::steady_clock::now();
+  LOG(INFO) << "tc_profile binding_realization_plan timings"
+            << " artifact_id=" << resolved_artifact_id << " entries=" << realization_plan.entries_size()
+            << " target_tensors=" << mapped_layout_or->dst_specs.size()
+            << " selected_index_bytes=" << plan.selected_index_json.size()
+            << " canonical_index_bytes=" << plan.canonical_index_json.size()
+            << " selection_names_sec=" << selection_names_sec << " subset_hash_sec=" << subset_hash_sec
+            << " storage_layout_sec=" << storage_layout_sec << " mapped_layout_sec=" << mapped_layout_sec
+            << " parse_target_index_sec=" << parse_target_index_sec
+            << " validate_target_layout_sec=" << validate_target_layout_sec << " resolve_view_sec=" << resolve_view_sec
+            << " view_narrows_sec=" << view_narrows_sec << " view_plan_sec=" << view_plan_sec
+            << " parse_source_tables_sec=" << parse_source_tables_sec
+            << " representation_contract_sec=" << representation_contract_sec
+            << " selection_identity_sec=" << selection_identity_sec
+            << " collective_segments=" << plan.representation.collective_lowered_map.segments.size()
+            << " fallback_segments=" << plan.representation.generic_fallback_map.segments.size()
+            << " tensor_bindings=" << plan.representation.transform_contract.tensor_bindings.size()
+            << " total_sec=" << elapsed_sec(profile_start, done);
+  return Status::OK;
+}
+
+absl::StatusOr<store::runtime::ingestion::strategy::PreparedSourceBoundExecutionPlan>
+build_resolved_mapped_materialization_plan(
+    std::string_view resolved_artifact_id,
+    uint64_t generation,
+    const store::loading::IntoTargetLayout& target_layout,
+    const MappedTargetMaterializationPlan& mapped_plan,
+    const std::optional<store::loading::VariantIdentity>& variant,
+    std::optional<std::string_view> source_index_json) {
+  const auto profile_start = std::chrono::steady_clock::now();
+  auto elapsed_sec = [](auto start, auto end) { return std::chrono::duration<double>(end - start).count(); };
+  double parse_source_index_sec = 0.0;
+  double init_plan_sec = 0.0;
+  double work_plan_sec = 0.0;
+  double filter_collective_candidate_sec = 0.0;
+  double collective_ranges_sec = 0.0;
+  double filter_collective_sec = 0.0;
+  double filter_generic_sec = 0.0;
+  double merge_executor_sec = 0.0;
+  bool generic_reused_collective_map = false;
+  bool executor_merge_skipped = false;
+  uint64_t collective_candidate_data_bytes = 0;
+
+  using PreparedExecutionPlan = store::runtime::ingestion::strategy::PreparedSourceBoundExecutionPlan;
+  using StrategyPlan = store::runtime::ingestion::strategy::ResolvedMaterializationPlan;
+
+  std::optional<CanonicalIndexTable> physical_source_table;
+  if (source_index_json.has_value()) {
+    const auto parse_source_index_start = std::chrono::steady_clock::now();
+    auto physical_source_table_or = parse_canonical_index(*source_index_json);
+    parse_source_index_sec = elapsed_sec(parse_source_index_start, std::chrono::steady_clock::now());
+    if (!physical_source_table_or.ok()) {
+      return physical_source_table_or.status();
+    }
+    physical_source_table = std::move(*physical_source_table_or);
+  }
+
+  PreparedExecutionPlan prepared_execution;
+  const auto init_plan_start = std::chrono::steady_clock::now();
+  StrategyPlan& resolved_plan = prepared_execution.resolved_plan;
+  resolved_plan.artifact_id = std::string(resolved_artifact_id);
+  resolved_plan.generation = generation;
+  resolved_plan.variant = variant;
+  resolved_plan.canonical_index_json = mapped_plan.canonical_index_json;
+  resolved_plan.target_layout = target_layout;
+  resolved_plan.representation_transform_contract = mapped_plan.representation.transform_contract;
+  init_plan_sec = elapsed_sec(init_plan_start, std::chrono::steady_clock::now());
+  if (resolved_plan.representation_transform_contract.has_value()) {
+    prepared_execution.lowering_artifacts = store::runtime::ingestion::strategy::SourceBoundLoweringArtifacts{
+        .lowering_stats = to_source_bound_lowering_stats(mapped_plan.representation.lowering_stats),
+    };
+    const store::loader::ByteRangeMap collective_candidate_map = [&]() {
+      if (!mapped_plan.representation.collective_lowered_map.segments.empty()) {
+        auto map = mapped_plan.representation.collective_lowered_map;
+        if (map.total_bytes == 0) {
+          map.total_bytes = target_layout.total_size > 0 ? target_layout.total_size : mapped_plan.logical_total_size;
+        }
+        return map;
+      }
+      auto map = mapped_plan.representation.generic_fallback_map;
+      if (!map.segments.empty() && map.total_bytes == 0) {
+        map.total_bytes = target_layout.total_size > 0 ? target_layout.total_size : mapped_plan.logical_total_size;
+      }
+      return map;
+    }();
+    const store::loader::ByteRangeMap generic_fallback_map = [&]() {
+      auto map = mapped_plan.representation.generic_fallback_map;
+      if (!map.segments.empty() && map.total_bytes == 0) {
+        map.total_bytes = target_layout.total_size > 0 ? target_layout.total_size : mapped_plan.logical_total_size;
+      }
+      return map;
+    }();
+    const auto work_plan_start = std::chrono::steady_clock::now();
+    auto work_plan_or = build_execution_representation_work_plan(
+        *resolved_plan.representation_transform_contract,
+        physical_source_table,
+        collective_candidate_map.segments.empty()
+            ? std::nullopt
+            : std::optional<store::loader::ByteRangeMap>(collective_candidate_map));
+    work_plan_sec = elapsed_sec(work_plan_start, std::chrono::steady_clock::now());
+    if (!work_plan_or.ok()) {
+      return work_plan_or.status();
+    }
+    resolved_plan.representation_work_plan = std::move(*work_plan_or);
+    const auto filter_collective_candidate_start = std::chrono::steady_clock::now();
+    auto collective_candidate_data_map_or =
+        filter_byte_range_map(collective_candidate_map, store::loader::ByteRangeSegment::Kind::kData);
+    filter_collective_candidate_sec = elapsed_sec(filter_collective_candidate_start, std::chrono::steady_clock::now());
+    if (!collective_candidate_data_map_or.ok()) {
+      return collective_candidate_data_map_or.status();
+    }
+    if (!collective_candidate_data_map_or->segments.empty()) {
+      collective_candidate_data_bytes = byte_range_map_covered_bytes(*collective_candidate_data_map_or);
+      const auto collective_ranges_start = std::chrono::steady_clock::now();
+      auto collective_dst_ranges_or = build_collective_dst_ranges(*resolved_plan.representation_work_plan);
+      collective_ranges_sec = elapsed_sec(collective_ranges_start, std::chrono::steady_clock::now());
+      if (!collective_dst_ranges_or.ok()) {
+        return collective_dst_ranges_or.status();
+      }
+      const auto filter_collective_start = std::chrono::steady_clock::now();
+      auto collective_data_map_or =
+          filter_data_map_to_dst_ranges(*collective_candidate_data_map_or, *collective_dst_ranges_or);
+      filter_collective_sec = elapsed_sec(filter_collective_start, std::chrono::steady_clock::now());
+      if (!collective_data_map_or.ok()) {
+        return collective_data_map_or.status();
+      }
+      if (!collective_data_map_or->segments.empty()) {
+        prepared_execution.lowering_artifacts->collective_data_map = *collective_data_map_or;
+      }
+    }
+    store::loader::ByteRangeMap collective_candidate_data_map;
+    if (!collective_candidate_data_map_or->segments.empty()) {
+      collective_candidate_data_map = *collective_candidate_data_map_or;
+    }
+    store::loader::ByteRangeMap generic_data_map;
+    if (!collective_candidate_data_map.segments.empty() &&
+        collective_candidate_data_bytes >= mapped_plan.representation.total_bytes_copied) {
+      generic_data_map = collective_candidate_data_map;
+      generic_reused_collective_map = true;
+    } else {
+      const auto filter_generic_start = std::chrono::steady_clock::now();
+      auto generic_data_map_or =
+          filter_byte_range_map(generic_fallback_map, store::loader::ByteRangeSegment::Kind::kData);
+      filter_generic_sec = elapsed_sec(filter_generic_start, std::chrono::steady_clock::now());
+      if (!generic_data_map_or.ok()) {
+        return generic_data_map_or.status();
+      }
+      if (!generic_data_map_or->segments.empty()) {
+        generic_data_map = *generic_data_map_or;
+      } else if (!collective_candidate_data_map.segments.empty()) {
+        generic_data_map = collective_candidate_data_map;
+      }
+    }
+    if (resolved_plan.representation_work_plan->residual_fallback_map.segments.empty()) {
+      executor_merge_skipped = true;
+      if (!generic_data_map.segments.empty()) {
+        prepared_execution.lowering_artifacts->executor_generic_data_map = generic_data_map;
+      }
+    } else {
+      const auto merge_executor_start = std::chrono::steady_clock::now();
+      auto executor_map_or =
+          merge_byte_range_maps(generic_data_map, resolved_plan.representation_work_plan->residual_fallback_map);
+      merge_executor_sec = elapsed_sec(merge_executor_start, std::chrono::steady_clock::now());
+      if (!executor_map_or.ok()) {
+        return executor_map_or.status();
+      }
+      if (!executor_map_or->segments.empty()) {
+        prepared_execution.lowering_artifacts->executor_generic_data_map = *executor_map_or;
+      }
+    }
+  }
+  const auto done = std::chrono::steady_clock::now();
+  LOG(INFO) << "tc_profile resolved_mapped_execution_plan timings"
+            << " artifact_id=" << resolved_artifact_id << " target_total_size=" << target_layout.total_size
+            << " source_index_bytes=" << (source_index_json.has_value() ? source_index_json->size() : 0)
+            << " tensor_bindings="
+            << (resolved_plan.representation_transform_contract.has_value()
+                    ? resolved_plan.representation_transform_contract->tensor_bindings.size()
+                    : 0)
+            << " work_items="
+            << (resolved_plan.representation_work_plan.has_value()
+                    ? resolved_plan.representation_work_plan->items.size()
+                    : 0)
+            << " parse_source_index_sec=" << parse_source_index_sec << " init_plan_sec=" << init_plan_sec
+            << " work_plan_sec=" << work_plan_sec
+            << " filter_collective_candidate_sec=" << filter_collective_candidate_sec
+            << " collective_ranges_sec=" << collective_ranges_sec << " filter_collective_sec=" << filter_collective_sec
+            << " filter_generic_sec=" << filter_generic_sec << " merge_executor_sec=" << merge_executor_sec
+            << " collective_candidate_data_bytes=" << collective_candidate_data_bytes
+            << " total_bytes_copied=" << mapped_plan.representation.total_bytes_copied
+            << " generic_reused_collective_map=" << (generic_reused_collective_map ? 1 : 0)
+            << " executor_merge_skipped=" << (executor_merge_skipped ? 1 : 0)
+            << " total_sec=" << elapsed_sec(profile_start, done);
+  return prepared_execution;
 }
 
 } // namespace tensorcast::daemon::materialization_target_plan

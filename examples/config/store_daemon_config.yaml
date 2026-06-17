@@ -42,7 +42,7 @@ server:
     port: 0
   # Optional default root for relative disk_path values.
   # When empty, disk materialization accepts absolute disk_path only.
-  storage_path: "/data/models"
+  storage_path: "/var/lib/tensorcast/models"
   # StoreEngine I/O worker threads; tune for disk/P2P parallelism vs CPU contention.
   num_threads: 16
   # gRPC server channel args and TLS.
@@ -71,6 +71,23 @@ server:
       # Optional client CA bundle for mTLS; empty disables client cert checks.
       client_ca_file: ""
 
+# Trusted mounted-source resolve policy for ResolvePublicDiskSource / msa1.
+public_disk_source:
+  # When omitted, the daemon derives one trusted root from server.storage_path.
+  # Relative paths resolve under that root; absolute paths outside it are rejected.
+  trusted_root_policies:
+    - policy_id: trusted_models_root
+      root_path: /var/lib/tensorcast/models
+      allowed_formats:
+        - PUBLIC_DISK_SOURCE_FORMAT_PARTITIONED
+        - PUBLIC_DISK_SOURCE_FORMAT_SAFETENSORS
+      allowed_metadata_capabilities:
+        - PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_TENSOR_AWARE
+        - PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_BYTE_ONLY
+      descriptor_reuse_mode: PUBLIC_DISK_SOURCE_DESCRIPTOR_REUSE_MODE_TRUSTED_HINT_ONLY
+      lightweight_attestation_enabled: true
+      validation_mode: PUBLIC_DISK_SOURCE_VALIDATION_MODE_VALIDATE_BEFORE_READ
+
 # StoreEngine and data-plane memory/transfer tuning.
 engine:
   # UMA chunk granularity; larger chunks reduce metadata but make eviction/leases coarser.
@@ -79,6 +96,26 @@ engine:
   streaming_buffer_chunks: 16
   # Enable external target verification for MaterializeIntoTarget (off by default).
   enable_external_target_verification: false
+  # Default 0108 materialization strategy: prefer local batched disk loads and
+  # keep the tensor-aware mapped executor available for eligible paths.
+  materialization_strategy:
+    enable_local_batched_disk_load: true
+    enable_tensor_aware_mapped_executor: true
+    allow_mixed_execution: true
+    enable_owner_file_collective: false
+    executor_preference: MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO
+    # Pre-109 typed budgets and thresholds for collective planning. Defaults are
+    # conservative and do not by themselves switch owner-file collective on.
+    owner_file_collective_peak_bytes_budget: 8GB
+    owner_file_collective_batch_bytes: 512MB
+    owner_file_collective_dim1_staging_bytes: 256MB
+    owner_file_collective_max_inflight_batches: 1
+    owner_file_collective_shared_fs_only: true
+    owner_file_collective_max_owner_skew_ratio: 1.5
+    owner_file_collective_min_dedup_saving_bytes: 64MB
+    owner_file_collective_group_assemble_timeout: 15s
+    owner_file_collective_allow_mixed_residual: false
+    owner_file_collective_planner_cache_entries: 256
   # Enable memfd-backed UMA CPU allocations for zero-copy CPU tensor materialization.
   cpu_shared_memory:
     enabled: true
@@ -340,6 +377,14 @@ observability:
   tracing:
     # Chrome trace output directory; empty disables.
     chrome_trace_dir: ""
+
+# Staged serving acquisition path used by final group realization.
+serving_prefetch:
+  enabled: true
+  same_daemon_acquire_enabled: true
+
+group_realization:
+  enabled: true
 
 # Compatibility toggles for legacy behavior.
 compatibility:

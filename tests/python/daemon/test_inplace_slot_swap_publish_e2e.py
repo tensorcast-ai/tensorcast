@@ -10,29 +10,36 @@ import os
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
+import textwrap
 import time
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import grpc
 import pytest
 import torch
 import yaml
 
-from tensorcast.api.store import FallbackOptions, Store
+from tensorcast.api import GetArtifactOptions
+from tensorcast.api.store import Store
+from tensorcast.api.store.runtime import StoreRuntimeContext
 from tensorcast.api.store.view_composer import compute_index_multihash
 from tensorcast.cli_utils.proc import build_daemon_process_env, ensure_cpp_daemon_binary
+from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
 from tensorcast.global_store.config.settings import GlobalStoreConfig, set_config
 from tensorcast.global_store.grpc_service import (
     GlobalStoreServicer,
     register_global_store_servicers,
 )
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2, store_daemon_pb2_grpc
 from tensorcast.proto.global_store.v1 import global_store_pb2
+from tests.python.utils.hardware import synchronize_cuda
 
 pytestmark = [pytest.mark.requires_cuda_or_fake, pytest.mark.integration]
 
@@ -262,6 +269,132 @@ def _wait_replica_retired(
     raise AssertionError(f"replica {replica_id} was not retired")
 
 
+def _request_replica_transport(
+    *,
+    gs_port: int,
+    artifact_id: str,
+    requester_daemon_id: str,
+    requester_p2p_port: int,
+) -> global_store_pb2.RequestReplicaTransportResponse:
+    channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    stub = GlobalStoreCompositeStub(channel)
+    try:
+        request = global_store_pb2.RequestReplicaTransportRequest(
+            artifact_id=artifact_id,
+            source_node_id=requester_daemon_id,
+            source_address="127.0.0.1",
+            source_port=requester_p2p_port,
+            request_id=f"pytest-{uuid4().hex}",
+        )
+        request.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_CANONICAL
+        response = stub.RequestReplicaTransport(request)
+        if response.status == global_store_pb2.Status.STATUS_OK:
+            complete = stub.CompleteReplicaTransport(
+                global_store_pb2.CompleteReplicaTransportRequest(
+                    transport_id=response.transport_id,
+                    outcome=global_store_pb2.TRANSPORT_COMPLETION_OUTCOME_SUCCESS,
+                    outcome_detail="pytest probe",
+                )
+            )
+            assert complete.status == global_store_pb2.Status.STATUS_OK
+        return response
+    finally:
+        channel.close()
+
+
+def _make_store(daemon_addr: str) -> Store:
+    return Store(
+        daemon_addr,
+        runtime=StoreRuntimeContext(daemon_addr, client_factory=DaemonCtl),
+    )
+
+
+def _wait_json_file(path: Path, *, timeout_s: float = 30.0) -> dict[str, object]:
+    deadline = time.time() + timeout_s
+    last_error: Exception | None = None
+    while time.time() < deadline:
+        if path.exists():
+            try:
+                return json.loads(path.read_text())
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+        time.sleep(0.2)
+    raise AssertionError(f"timed out waiting for {path}: {last_error}")
+
+
+def _start_published_binding_child(
+    *,
+    daemon_addr: str,
+    artifact_id: str,
+    ready_path: Path,
+    log_fd: object,
+    env: dict[str, str],
+) -> subprocess.Popen:
+    child_script = textwrap.dedent(
+        """
+        import json
+        import os
+        import sys
+        import time
+
+        from tensorcast.api import GetArtifactOptions
+        from tensorcast.api.store import Store
+        from tensorcast.api.store.runtime import StoreRuntimeContext
+        from tensorcast.daemon_ctl import DaemonCtl
+        from tests.python.utils.hardware import synchronize_cuda
+
+        daemon_addr, artifact_id, ready_path = sys.argv[1:4]
+        store = Store(
+            daemon_addr,
+            runtime=StoreRuntimeContext(daemon_addr, client_factory=DaemonCtl),
+        )
+        binding = None
+        try:
+            artifact = store.artifact(artifact_id=artifact_id)
+            binding = artifact.bind(
+                device="cuda:0",
+                packing="byte_space",
+                options=GetArtifactOptions(
+                    source="disk_only",
+                    verify_checksums=False,
+                ),
+            )
+            synchronize_cuda()
+            binding.publish_replica()
+            payload = {
+                "pid": os.getpid(),
+                "lease_id": binding._slot.published_lease_id,
+                "replica_id": binding._slot.published_replica_id,
+            }
+            tmp_path = ready_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as out:
+                json.dump(payload, out)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(tmp_path, ready_path)
+            while True:
+                time.sleep(1.0)
+        finally:
+            if binding is not None:
+                binding.close()
+            store.close()
+        """
+    )
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            child_script,
+            daemon_addr,
+            artifact_id,
+            str(ready_path),
+        ],
+        stdout=log_fd,
+        stderr=log_fd,
+        env=env,
+    )
+
+
 @pytest.fixture(scope="module")
 def gs_server() -> Iterator[tuple[grpc.Server, int, GlobalStoreServicer]]:
     set_config(GlobalStoreConfig())
@@ -291,8 +424,8 @@ def test_inplace_slot_swap_publish_e2e(
 
     _, gs_port, servicer = gs_server
     index_bytes = _make_index_bytes()
-    artifact_a_id = "artifact_a"
-    artifact_b_id = "artifact_b"
+    artifact_a_id = "cgid:artifact_a"
+    artifact_b_id = "cgid:artifact_b"
     _seed_global_store(servicer, artifact_id=artifact_a_id, index_bytes=index_bytes)
     _seed_global_store(servicer, artifact_id=artifact_b_id, index_bytes=index_bytes)
     storage_dir = tmp_path / "storage"
@@ -325,57 +458,94 @@ def test_inplace_slot_swap_publish_e2e(
     finally:
         channel.close()
 
-    listen_port = _get_free_port()
-    p2p_port = _get_free_port()
-    daemon_id = f"daemon_slot_{listen_port}"
-    cfg = _build_daemon_config(
-        listen_port=listen_port,
-        p2p_port=p2p_port,
+    producer_listen_port = _get_free_port()
+    producer_p2p_port = _get_free_port()
+    producer_daemon_id = f"daemon_slot_{producer_listen_port}"
+    producer_cfg = _build_daemon_config(
+        listen_port=producer_listen_port,
+        p2p_port=producer_p2p_port,
         storage_dir=storage_dir,
         gs_port=gs_port,
-        daemon_id=daemon_id,
+        daemon_id=producer_daemon_id,
+    )
+    consumer_listen_port = _get_free_port()
+    consumer_p2p_port = _get_free_port()
+    consumer_daemon_id = f"daemon_slot_consumer_{consumer_listen_port}"
+    consumer_cfg = _build_daemon_config(
+        listen_port=consumer_listen_port,
+        p2p_port=consumer_p2p_port,
+        storage_dir=storage_dir,
+        gs_port=gs_port,
+        daemon_id=consumer_daemon_id,
     )
 
     with tempfile.NamedTemporaryFile(
         prefix="tc_daemon_cfg_", suffix=".yaml", mode="w", delete=False
-    ) as cfg_file:
-        yaml.safe_dump(cfg, cfg_file, sort_keys=False)
-        cfg_path = Path(cfg_file.name)
+    ) as producer_cfg_file:
+        yaml.safe_dump(producer_cfg, producer_cfg_file, sort_keys=False)
+        producer_cfg_path = Path(producer_cfg_file.name)
+    with tempfile.NamedTemporaryFile(
+        prefix="tc_daemon_cfg_", suffix=".yaml", mode="w", delete=False
+    ) as consumer_cfg_file:
+        yaml.safe_dump(consumer_cfg, consumer_cfg_file, sort_keys=False)
+        consumer_cfg_path = Path(consumer_cfg_file.name)
 
     proc_log = storage_dir / "daemon_proc.log"
     env = build_daemon_process_env(os.environ)
     binding = None
     store = None
+    consumer_store = None
+    kill_owner_proc = None
     with proc_log.open("a") as log_fd:
-        proc = subprocess.Popen(
-            [str(bin_path), f"--config={cfg_path}"],
+        producer_proc = subprocess.Popen(
+            [str(bin_path), f"--config={producer_cfg_path}"],
+            stdout=log_fd,
+            stderr=log_fd,
+            env=env,
+        )
+        consumer_proc = subprocess.Popen(
+            [str(bin_path), f"--config={consumer_cfg_path}"],
             stdout=log_fd,
             stderr=log_fd,
             env=env,
         )
         try:
-            daemon_addr = f"127.0.0.1:{listen_port}"
-            _wait_ready(daemon_addr)
-            _wait_for_worker(gs_port, listen_port)
-            _wait_artifact_index_ready(daemon_addr, artifact_a_id)
+            producer_addr = f"127.0.0.1:{producer_listen_port}"
+            consumer_addr = f"127.0.0.1:{consumer_listen_port}"
+            _wait_ready(producer_addr)
+            _wait_ready(consumer_addr)
+            _wait_for_worker(gs_port, producer_listen_port)
+            _wait_for_worker(gs_port, consumer_listen_port)
+            _wait_artifact_index_ready(producer_addr, artifact_a_id)
+            _wait_artifact_index_ready(producer_addr, artifact_b_id)
+            _wait_artifact_index_ready(consumer_addr, artifact_a_id)
+            _wait_artifact_index_ready(consumer_addr, artifact_b_id)
 
-            store = Store(daemon_addr)
-            fallback_a = FallbackOptions(
-                prefer="disk",
-                allow_p2p=False,
+            store = _make_store(producer_addr)
+            consumer_store = _make_store(consumer_addr)
+            disk_only = GetArtifactOptions(
+                source="disk_only",
                 verify_checksums=False,
             )
-            fallback_b = FallbackOptions(
-                prefer="disk",
-                allow_p2p=False,
+            p2p_only = GetArtifactOptions(
+                source={
+                    "preference": "prefer_p2p",
+                    "allow_p2p": True,
+                    "allow_disk": False,
+                },
                 verify_checksums=False,
+                enable_verification=False,
             )
-            artifact_a = store.artifact(artifact_id=artifact_a_id, fallback=fallback_a)
-            artifact_b = store.artifact(artifact_id=artifact_b_id, fallback=fallback_b)
+            artifact_a = store.artifact(artifact_id=artifact_a_id)
+            artifact_b = store.artifact(artifact_id=artifact_b_id)
 
-            binding = artifact_a.bind(device="cuda:0", packing="byte_space")
+            binding = artifact_a.bind(
+                device="cuda:0",
+                packing="byte_space",
+                options=disk_only,
+            )
 
-            torch.cuda.synchronize()
+            synchronize_cuda()
             torch.testing.assert_close(
                 binding.tensors["alpha"].cpu(),
                 torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float32),
@@ -392,8 +562,49 @@ def test_inplace_slot_swap_publish_e2e(
                 servicer, old_replica_id, expected_available=True, timeout_s=15.0
             )
 
-            binding.swap(artifact_b, publish=True)
-            torch.cuda.synchronize()
+            transport_probe = _request_replica_transport(
+                gs_port=gs_port,
+                artifact_id=artifact_a_id,
+                requester_daemon_id=consumer_daemon_id,
+                requester_p2p_port=consumer_p2p_port,
+            )
+            assert transport_probe.status == global_store_pb2.Status.STATUS_OK
+            assert transport_probe.remote_memory_info.node_port == producer_p2p_port
+
+            mismatch_probe = _request_replica_transport(
+                gs_port=gs_port,
+                artifact_id=artifact_b_id,
+                requester_daemon_id=consumer_daemon_id,
+                requester_p2p_port=consumer_p2p_port,
+            )
+            assert (
+                mismatch_probe.status != global_store_pb2.Status.STATUS_OK
+                or mismatch_probe.remote_memory_info.node_port != producer_p2p_port
+            )
+
+            consumer_payload, _ = consumer_store._materialization.materialize_subset(
+                artifact_id=artifact_a_id,
+                key=None,
+                device="cuda:0",
+                tensor_names=None,
+                options=p2p_only,
+            )
+            try:
+                assert consumer_payload.source == (
+                    store_daemon_pb2.MATERIALIZATION_SOURCE_P2P
+                )
+                assert {desc.name for desc in consumer_payload.descriptors} == {
+                    "alpha",
+                    "beta",
+                }
+            finally:
+                consumer_store._materialization._release_materialized(
+                    consumer_payload,
+                    consumer_store._runtime.ensure_client(),
+                )
+
+            binding.swap(artifact_b, options=disk_only, publish=True)
+            synchronize_cuda()
             new_replica_id = binding._slot.published_replica_id
             assert new_replica_id is not None
             assert new_replica_id != old_replica_id
@@ -411,15 +622,104 @@ def test_inplace_slot_swap_publish_e2e(
                 servicer, new_replica_id, expected_available=True, timeout_s=15.0
             )
             _wait_replica_retired(servicer, old_replica_id, timeout_s=15.0)
+
+            retired_transport_probe = _request_replica_transport(
+                gs_port=gs_port,
+                artifact_id=artifact_a_id,
+                requester_daemon_id=consumer_daemon_id,
+                requester_p2p_port=consumer_p2p_port,
+            )
+            assert (
+                retired_transport_probe.status != global_store_pb2.Status.STATUS_OK
+                or retired_transport_probe.remote_memory_info.node_port
+                != producer_p2p_port
+            )
+
+            binding.close()
+            binding = None
+            _wait_replica_retired(servicer, new_replica_id, timeout_s=15.0)
+            closed_transport_probe = _request_replica_transport(
+                gs_port=gs_port,
+                artifact_id=artifact_b_id,
+                requester_daemon_id=consumer_daemon_id,
+                requester_p2p_port=consumer_p2p_port,
+            )
+            assert (
+                closed_transport_probe.status != global_store_pb2.Status.STATUS_OK
+                or closed_transport_probe.remote_memory_info.node_port
+                != producer_p2p_port
+            )
+
+            kill_owner_ready = storage_dir / "kill_owner_publish.json"
+            kill_owner_proc = _start_published_binding_child(
+                daemon_addr=producer_addr,
+                artifact_id=artifact_a_id,
+                ready_path=kill_owner_ready,
+                log_fd=log_fd,
+                env=env,
+            )
+            kill_owner_payload = _wait_json_file(
+                kill_owner_ready,
+                timeout_s=30.0,
+            )
+            kill_owner_replica_id = str(kill_owner_payload["replica_id"])
+            assert kill_owner_replica_id
+            assert int(kill_owner_payload["pid"]) == kill_owner_proc.pid
+            _wait_replica_state(
+                servicer,
+                kill_owner_replica_id,
+                expected_available=True,
+                timeout_s=15.0,
+            )
+            kill_owner_probe = _request_replica_transport(
+                gs_port=gs_port,
+                artifact_id=artifact_a_id,
+                requester_daemon_id=consumer_daemon_id,
+                requester_p2p_port=consumer_p2p_port,
+            )
+            assert kill_owner_probe.status == global_store_pb2.Status.STATUS_OK
+            assert kill_owner_probe.remote_memory_info.node_port == producer_p2p_port
+
+            kill_owner_proc.kill()
+            kill_owner_proc.wait(timeout=10)
+            kill_owner_proc = None
+            _wait_replica_retired(
+                servicer,
+                kill_owner_replica_id,
+                timeout_s=30.0,
+            )
+            killed_owner_probe = _request_replica_transport(
+                gs_port=gs_port,
+                artifact_id=artifact_a_id,
+                requester_daemon_id=consumer_daemon_id,
+                requester_p2p_port=consumer_p2p_port,
+            )
+            assert (
+                killed_owner_probe.status != global_store_pb2.Status.STATUS_OK
+                or killed_owner_probe.remote_memory_info.node_port
+                != producer_p2p_port
+            )
         finally:
+            if kill_owner_proc is not None:
+                kill_owner_proc.kill()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    kill_owner_proc.wait(timeout=5)
             with contextlib.suppress(Exception):
                 if binding is not None:
                     binding.close()
             with contextlib.suppress(Exception):
                 if store is not None:
                     store.close()
-            proc.terminate()
+            with contextlib.suppress(Exception):
+                if consumer_store is not None:
+                    consumer_store.close()
+            producer_proc.terminate()
+            consumer_proc.terminate()
             try:
-                proc.wait(timeout=5)
+                producer_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                producer_proc.kill()
+            try:
+                consumer_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                consumer_proc.kill()

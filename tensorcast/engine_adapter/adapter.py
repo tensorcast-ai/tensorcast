@@ -19,13 +19,20 @@ from tensorcast.api.errors import ArtifactError
 from tensorcast.api.plan.targets import TargetSpec
 from tensorcast.api.plan.transforms import TransformSpec
 from tensorcast.api.store import Artifact, Store
+from tensorcast.api.store.handles import RegisteredArtifact
+from tensorcast.api.store.publication_builder import (
+    build_pure_transform_publication_bundle_from_registered_artifact,
+    prepare_pure_transform_runtime_registration,
+)
 from tensorcast.engine_adapter.artifact_api import (
     BatchResult,
     HydrateResult,
     ManifestResult,
+    PublishManifest,
     PublishResult,
     SealedByteArtifact,
 )
+from tensorcast.types import RepresentationPublishSpec, RuntimeArtifactBuildIntent
 
 
 def _encode_token(token: bytes) -> str:
@@ -53,6 +60,58 @@ def _spec_payload_bytes(
     return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 
+def _pure_transform_build_intent(
+    ctx: "TransformContext",
+    *,
+    source_artifact: Artifact,
+) -> RuntimeArtifactBuildIntent | None:
+    publication_spec = ctx.spec.publication_spec
+    if publication_spec is None:
+        return None
+    return publication_spec.build_intent.model_copy(
+        update={"source_artifact_ref": source_artifact._ensure_identified()}
+    )
+
+
+def _maybe_build_pure_transform_publication_bundle(
+    ctx: "TransformContext",
+    registered_artifact: object,
+    *,
+    source_artifact: Artifact,
+    build_intent: RuntimeArtifactBuildIntent | None,
+) -> RepresentationPublishSpec | None:
+    if build_intent is None:
+        return None
+    if not isinstance(registered_artifact, RegisteredArtifact):
+        raise ArtifactError(
+            "PURE_TRANSFORM serving publication requires transform_register to return RegisteredArtifact",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
+
+    publication_spec = ctx.spec.publication_spec
+    if publication_spec is None:
+        raise ArtifactError(
+            "PURE_TRANSFORM serving publication requires TransformSpec.publication_spec",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+    return build_pure_transform_publication_bundle_from_registered_artifact(
+        build_intent=build_intent,
+        source_artifact=source_artifact,
+        contract_family=publication_spec.contract_family,
+        serving_artifact=registered_artifact,
+        source_version_key=publication_spec.source_version_key,
+        serving_version_key=publication_spec.serving_version_key,
+        logical_topology_json=publication_spec.logical_topology_json,
+        serving_manifest_ref=publication_spec.serving_manifest_ref,
+        layout_id=publication_spec.layout_id,
+        requirements=publication_spec.requirements,
+        readiness_policy=publication_spec.readiness_policy,
+        structural_view_ids=publication_spec.structural_view_ids,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class TransformContext:
     spec: TransformSpec
@@ -71,7 +130,9 @@ ManifestFn = Callable[[str, CallContext | None], ManifestResult]
 PublishFn = Callable[
     [str, int | None, tuple[SealedByteArtifact, ...], CallContext | None], PublishResult
 ]
-HydrateFn = Callable[[str, CallContext | None], HydrateResult]
+HydrateFn = Callable[
+    [str | None, PublishManifest | None, CallContext | None], HydrateResult
+]
 EvictLocalFn = Callable[[str | None, CallContext | None], BatchResult]
 
 
@@ -429,13 +490,30 @@ class EngineAdapter:
     def execute_hydrate(
         self,
         *,
-        engine_request_id: str,
+        engine_request_id: str | None = None,
+        publish_manifest: PublishManifest | None = None,
         ctx: CallContext | None = None,
     ) -> HydrateResult:
-        engine_request_id = str(engine_request_id).strip()
-        if not engine_request_id:
+        normalized_request_id = (
+            str(engine_request_id).strip() if engine_request_id is not None else None
+        )
+        if normalized_request_id == "":
             raise ArtifactError(
-                "engine_request_id is required",
+                "engine_request_id must be non-empty when provided",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if publish_manifest is not None and not isinstance(
+            publish_manifest, PublishManifest
+        ):
+            raise ArtifactError(
+                "publish_manifest must be a PublishManifest when provided",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if (normalized_request_id is None) == (publish_manifest is None):
+            raise ArtifactError(
+                "exactly one of engine_request_id or publish_manifest is required",
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
@@ -445,7 +523,7 @@ class EngineAdapter:
                 status_code="UNIMPLEMENTED",
                 retryable=False,
             )
-        return self._hydrate_fn(engine_request_id, ctx)
+        return self._hydrate_fn(normalized_request_id, publish_manifest, ctx)
 
     def execute_evict_local(
         self,
@@ -524,11 +602,43 @@ class EngineAdapter:
                 if ctx.tensor_names
                 else ctx.source
             )
+            build_intent = _pure_transform_build_intent(
+                ctx,
+                source_artifact=selected_source,
+            )
+            publication_spec = ctx.spec.publication_spec
             tensors = selected_source.tensor_dict(
                 device="cpu",
                 ctx=ctx.ctx,
             )
-            return ctx.store.register(tensors, key=ctx.out_key, policy=ctx.policy)
+            registration_tensors = dict(tensors)
+            if build_intent is not None:
+                if publication_spec is None:
+                    raise ArtifactError(
+                        "PURE_TRANSFORM serving registration requires TransformSpec.publication_spec",
+                        status_code="INVALID_ARGUMENT",
+                        retryable=False,
+                    )
+                prepared = prepare_pure_transform_runtime_registration(
+                    build_intent=build_intent,
+                    source_artifact=selected_source,
+                    tensors=registration_tensors,
+                    logical_topology_json=publication_spec.logical_topology_json,
+                    serving_manifest_ref=publication_spec.serving_manifest_ref,
+                )
+                registration_tensors = prepared.tensors
+            registered_artifact = ctx.store.register(
+                registration_tensors, key=ctx.out_key, policy=ctx.policy
+            )
+            return (
+                _maybe_build_pure_transform_publication_bundle(
+                    ctx,
+                    registered_artifact,
+                    source_artifact=selected_source,
+                    build_intent=build_intent,
+                )
+                or registered_artifact
+            )
 
         self.register_transform_fn("identity.v1", into=_into, register=_register)
 

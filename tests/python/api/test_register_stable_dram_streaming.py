@@ -8,8 +8,8 @@ import tempfile
 from dataclasses import dataclass
 from typing import Any
 
-import torch
 import pytest
+import torch
 
 from tensorcast.api._config import PlanType, RegisterArtifactOptions
 from tensorcast.api._errors import TensorCastError

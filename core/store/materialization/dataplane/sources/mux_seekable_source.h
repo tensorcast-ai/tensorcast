@@ -25,11 +25,13 @@ class MuxSeekableSource : public SeekableSource {
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override;
 
   [[nodiscard]] bool supports_direct_write_at() const override;
+  [[nodiscard]] bool supports_batched_direct_write_at() const override;
   absl::StatusOr<size_t> read_into_at(
       uint64_t src_offset,
       uint64_t dest_va_offset,
       size_t bytes,
       const DirectWriteGrant& grant) override;
+  absl::StatusOr<size_t> readv_into_at(absl::Span<const DirectWriteOp> ops, const DirectWriteGrant& grant) override;
 
  private:
   gsl::not_null<std::shared_ptr<SeekableSource>> primary_;

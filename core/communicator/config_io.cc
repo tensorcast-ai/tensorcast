@@ -99,6 +99,13 @@ void normalize_defaults(tc::CommunicatorConfig* cfg) {
     rd->set_qp_timeout(20);
   if (rd->qp_retry() <= 0)
     rd->set_qp_retry(7);
+  if (!rd->has_enable_stable_local_mr_reuse())
+    rd->set_enable_stable_local_mr_reuse(true);
+  if (rd->stable_local_mr_reuse_chunk_slots() == 0)
+    rd->set_stable_local_mr_reuse_chunk_slots(1);
+  if (!rd->has_stable_local_mr_reuse_prewarm_workers() && rd->has_stable_local_mr_reuse_eager_prereg_all_rails()) {
+    rd->set_stable_local_mr_reuse_prewarm_workers(rd->stable_local_mr_reuse_eager_prereg_all_rails() ? 1 : 0);
+  }
 
   // Transport defaults
   auto* tr = cfg->mutable_transport();
@@ -177,16 +184,15 @@ absl::StatusOr<tc::CommunicatorConfig> LoadCommunicatorConfigFromFile(const std:
   }
 
   // Handle boolean defaults that require presence checks on the original JSON
-  if (!(config_json->is_object()
-        && config_json->contains("stager") && (*config_json)["stager"].contains("stage_cpu_for_rdma"))) {
+  if (!(config_json->is_object() && config_json->contains("stager") &&
+        (*config_json)["stager"].contains("stage_cpu_for_rdma"))) {
     cfg.mutable_stager()->set_stage_cpu_for_rdma(true);
   }
-  if (!(config_json->is_object()
-        && config_json->contains("topology_discovery")
-        && (*config_json)["topology_discovery"].is_object()
-        && (*config_json)["topology_discovery"].contains("merge_policy")
-        && (*config_json)["topology_discovery"]["merge_policy"].is_object()
-        && (*config_json)["topology_discovery"]["merge_policy"].contains("emit_rail_switch_endpoints"))) {
+  if (!(config_json->is_object() && config_json->contains("topology_discovery") &&
+        (*config_json)["topology_discovery"].is_object() &&
+        (*config_json)["topology_discovery"].contains("merge_policy") &&
+        (*config_json)["topology_discovery"]["merge_policy"].is_object() &&
+        (*config_json)["topology_discovery"]["merge_policy"].contains("emit_rail_switch_endpoints"))) {
     cfg.mutable_topology_discovery()->mutable_merge_policy()->set_emit_rail_switch_endpoints(true);
   }
 

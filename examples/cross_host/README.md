@@ -10,17 +10,17 @@
 - `cross_host_put_once.py`：单轮 put helper。
 - `cross_host_get_once.py`：单轮 get helper（含可见性等待与 comm bytes delta 采样）。
 - `cross_host_deregister_once.py`：单轮 deregister helper（`wait=true`，用于验证释放收敛）。
-- `run_multihost_chaos_suite.sh`：统一 chaos 执行入口（含 brainctl preflight/predict/launch/cleanup 元数据输出）。
+- `run_multihost_chaos_suite.sh`：统一 chaos 执行入口（含 orchestratorctl preflight/predict/launch/cleanup 元数据输出）。
 - `run_multihost_weight_publisher_suite.sh`：WeightPublisher 多机套件入口（single-host 功能验证 -> 2 节点 -> 3 节点）。
 
 ## 1. 前置条件
 
 1. 本机（CPU 节点）启动 Global Store（blocking）。
-2. 两台 GPU worker 已通过 `brainctl` 启动，能拿到：
+2. 两台 GPU worker 已通过 `orchestratorctl` 启动，能拿到：
 - `put_proc` / `get_proc`（process id）
-- 两侧 daemon advertise IP（推荐使用 worker `Pod IP`，通常是 `100.x`，不要用节点 `Host IP` 的 `10.x`）
+- 两侧 daemon advertise IP（推荐使用 worker 的可路由 Pod IP，不要使用节点 Host IP）
 - 两侧 daemon gRPC 地址（`host:port`）
-3. 两侧 worker 都有同一份代码目录（默认 `/data/workspace/tensorcast-280`）和 `.venv`。
+3. 两侧 worker 都有同一份代码目录（默认 `./`）和 `.venv`。
 
 ## 2. 标准运行方式
 
@@ -41,7 +41,7 @@ python examples/cross_host/cross_host_matrix_runner.py \
   --get-daemon-addr <GET_WORKER_IP>:62011 \
   --gs-addr <GS_HOST_IP>:50051 \
   --daemon-config examples/config/store_daemon_config_cross_host_bench.yaml \
-  --out-dir /tmp/tc_cross_20260221/results
+  --out-dir /tmp/tensorcast/cross_host/results
 ```
 
 反向链路（reverse link）只需要交换 put/get 两侧参数（`--put-*` 与 `--get-*`）。
@@ -72,7 +72,7 @@ python examples/cross_host/cross_host_fanout_runner.py \
   --daemon-start-timeout-sec 600 \
   --remote-timeout-sec 900 \
   --stop-timeout-sec 240 \
-  --out-dir /tmp/tc_cross_20260221/results_multi_host
+  --out-dir /tmp/tensorcast/cross_host/results_multi_host
 ```
 
 如果你要做“严格 VRAM 源”验证（上一跳必须不可用），可以使用：
@@ -94,7 +94,7 @@ python examples/cross_host/cross_host_fanout_runner.py \
   --source-stop-settle-sec 2 \
   --require-p2p \
   --daemon-config examples/config/store_daemon_config_cross_host_bench.yaml \
-  --out-dir /tmp/tc_cross_20260222/results_multi_host
+  --out-dir /tmp/tensorcast/cross_host/results_multi_host
 ```
 
 说明：
@@ -123,7 +123,7 @@ python examples/cross_host/cross_host_fanout_runner.py \
   --daemon-start-timeout-sec 600 \
   --remote-timeout-sec 900 \
   --stop-timeout-sec 240 \
-  --out-dir /tmp/tc_cross_20260221/results_multi_host
+  --out-dir /tmp/tensorcast/cross_host/results_multi_host
 ```
 
 ## 2.2 标准化多机套件（一键跑）
@@ -143,8 +143,8 @@ export TC_GS_ADDR=<GS_IP>:50051
 # export TC_DAEMON_CONFIG=examples/config/store_daemon_config_cross_host_bench.yaml
 # 大负载（>=8GiB）建议：
 # export TC_DAEMON_CONFIG=examples/config/store_daemon_config_cross_host_bench_large_payload.yaml
-# export TC_OUT_DIR=/data/tc_cross_rerun/results_multi_host_scaleout
-# export TC_RUNTIME_ROOT=/data/tc_cross_rerun/runtime
+# export TC_OUT_DIR=/tmp/tensorcast/cross_host/results_multi_host_scaleout
+# export TC_RUNTIME_ROOT=/tmp/tensorcast/cross_host/runtime
 # export TC_FAILURE_DIAG=1
 # export TC_FAILURE_DIAG_TIMEOUT_SEC=45
 # export TC_VISIBILITY_TIMEOUT_SEC=120
@@ -160,7 +160,7 @@ export TC_GS_ADDR=<GS_IP>:50051
 # export TC_EARLY_GATE_BASELINE_LINK_GIBPS=<micro_baseline_gibps>
 # export TC_EARLY_GATE_MIN_BASELINE_RATIO=0.60
 # export TC_QUOTA_PREFLIGHT_ENABLE=1
-# export TC_QUOTA_CHARGED_GROUP=tensorcast_dev
+# export TC_QUOTA_CHARGED_GROUP=<charged-group>
 # export TC_XLARGE_STABLE_PREFLIGHT_ENABLE=1
 # export TC_XLARGE_STABLE_OVERLAP_VERSIONS=2
 # export TC_XLARGE_STABLE_PREFLIGHT_MARGIN_RATIO=1.05
@@ -220,15 +220,15 @@ bash examples/cross_host/run_multihost_benchmark_suite.sh --phase xlarge
 source .venv/bin/activate
 
 python examples/cross_host/scaleout_early_gate.py \
-  --fanout-dir /data/tc_cross_rerun/results_multi_host_scaleout \
+  --fanout-dir /tmp/tensorcast/cross_host/results_multi_host_scaleout \
   --run-id <run_id> \
   --round-workers 3,4 \
   --target-size-mib 1024 \
   --min-cluster-scale-ratio 1.10 \
   --baseline-link-gibps <micro_baseline_gibps> \
   --min-baseline-ratio 0.60 \
-  --out-json /data/tc_cross_rerun/results_multi_host_scaleout/suite_<run_id>_early_gate.json \
-  --out-md /data/tc_cross_rerun/results_multi_host_scaleout/suite_<run_id>_early_gate.md
+  --out-json /tmp/tensorcast/cross_host/results_multi_host_scaleout/suite_<run_id>_early_gate.json \
+  --out-md /tmp/tensorcast/cross_host/results_multi_host_scaleout/suite_<run_id>_early_gate.md
 ```
 
 ## 2.3 Chaos 套件（事件时间线 + expected-failure 门禁）
@@ -258,16 +258,16 @@ python examples/cross_host/scaleout_early_gate.py \
 source .venv/bin/activate
 
 export TC_CASE_SCHEMA=examples/cross_host/case_schemas/chaos_suite_example.json
-export TC_OUT_DIR=/tmp/tc_cross_20260222/results_chaos
+export TC_OUT_DIR=/tmp/tensorcast/cross_host/results_chaos
 export TC_RUN_ID=chaos-20260222
 
-# 可选：让脚本托管 brainctl 生命周期（技能默认 charged-group=tensorcast_dev）
-# export TC_BRAINCTL_ENABLE_LAUNCH=true
-# export TC_BRAINCTL_GPU=1
-# export TC_BRAINCTL_CPU=4
-# export TC_BRAINCTL_MEMORY=106400
-# export TC_BRAINCTL_POSITIVE_TAGS=L40S,H200,H800,H100
-# export TC_BRAINCTL_MOUNT='juicefs+s3://xxx:/mnt/xxx'
+# 可选：让脚本托管 orchestratorctl 生命周期（需要时显式设置 charged group）
+# export TC_ORCHESTRATOR_ENABLE_LAUNCH=true
+# export TC_ORCHESTRATOR_GPU=1
+# export TC_ORCHESTRATOR_CPU=4
+# export TC_ORCHESTRATOR_MEMORY=106400
+# export TC_ORCHESTRATOR_POSITIVE_TAGS=L40S,H200,H800,H100
+# export TC_ORCHESTRATOR_MOUNT='juicefs+s3://xxx:/mnt/xxx'
 # 可选：门禁评审阈值（默认开启 all_get_complete/source_cardinality/expected_failure/comm_errors gate）
 # export TC_GATE_MAX_RECOVER_TIME_SEC=180
 # export TC_GATE_REQUIRE_SOURCE_CARDINALITY=true
@@ -282,7 +282,7 @@ bash examples/cross_host/run_multihost_chaos_suite.sh
 - `<out_dir>/<run_id>/cases/<case_name>/result.json`
 - `<out_dir>/<run_id>/cases/<case_name>/metrics.json`
 - `<out_dir>/<run_id>/cases/<case_name>/classification.json`
-- `<out_dir>/<run_id>/meta/brainctl_steps.jsonl`
+- `<out_dir>/<run_id>/meta/orchestratorctl_steps.jsonl`
 - `<out_dir>/<run_id>/gate_review.json`
 - `<out_dir>/<run_id>/gate_review.md`
 
@@ -332,10 +332,10 @@ Common parameters:
 ```bash
 bash examples/cross_host/run_0081_multihost_chaos.sh \
   --phase all \
-  --gs-addr 100.97.246.95:50051 \
+  --gs-addr <GS_IP>:50051 \
   --run-label 0081-manual-$(date +%Y%m%d-%H%M%S) \
-  --out-root /tmp/tc_cross_20260222/results_chaos_0081_fixed \
-  --charged-group tensorcast_dev \
+  --out-root /tmp/tensorcast/cross_host/results_chaos_0081_fixed \
+  --charged-group <charged-group> \
   --private-machine group \
   --keep-workers
 ```
@@ -343,13 +343,13 @@ bash examples/cross_host/run_0081_multihost_chaos.sh \
 Notes:
 
 - If `--gs-addr` is not provided, the script resolves it from `tensorcast-cli global status --json`.
-- The script automatically handles: `brainctl predict`, worker launch/readiness wait, GPU + repo health checks, schema generation, phase execution, and phase-gate aggregation.
+- The script automatically handles: `orchestratorctl predict`, worker launch/readiness wait, GPU + repo health checks, schema generation, phase execution, and phase-gate aggregation.
 - Output layout:
   - `<out-root>/<run-label>/schemas/` (small/medium/large schemas)
   - `<out-root>/<run-label>/results/` (per-phase runs + gate artifacts + phase gate review)
   - `<out-root>/<run-label>/meta/launcher_meta.json` (full launcher metadata)
 
-## 2.5 WeightPublisher Multi-host (binding.swap)
+## 2.5 WeightPublisher Multi-host (staged group_realization)
 
 入口脚本：`examples/cross_host/run_multihost_weight_publisher_suite.sh`
 
@@ -359,7 +359,7 @@ source .venv/bin/activate
 export TC_WP_PUBLISHER_PROC=<PUBLISHER_PROCESS_ID>
 export TC_WP_RECEIVER_PROCS=<RECEIVER1_PROCESS_ID>,<RECEIVER2_PROCESS_ID>
 export TC_GS_ADDR=<GS_IP>:50051
-export TC_OUT_DIR=/data/tc_cross_rerun/results_weight_publisher
+export TC_OUT_DIR=/tmp/tensorcast/cross_host/results_weight_publisher
 export TC_RUN_AS_USER=$(id -un)
 export TC_PUBLISH_INTERVAL_S=60
 export TC_RECEIVER_TIMEOUT_S=95
@@ -367,13 +367,9 @@ export TC_MAX_PUBLISH_TO_APPLY_S=30
 export TC_WP_MAX_PUBLISH_TO_APPLY_AUTO_ADJUST=1
 export TC_WP_SCALE_RECEIVER_COUNTS=1,2,4,8,16,31
 export TC_SCALE_NUM_VERSIONS=10
-export TC_WP_TRANSPORT_GROUP_MODES=none,tp_version
-export TC_WP_GROUP_PAIR_ORDER=abba
-export TC_WP_GROUP_PAIR_ROUNDS=3
 export TC_WP_PAYLOAD_MODE=tp_ranked
 export TC_WP_TP_WORLD_SIZE=4
 export TC_WP_TP_TOTAL_BYTES=42949672960
-export TC_WP_RECEIVER_APPLY_MODE=tp_bind_into_swap
 export TC_WP_MAX_CONCURRENCY=1
 export TC_WP_PRE_PUBLISH_TRIM_MARGIN=1
 export TC_WP_RECEIVER_PREFLIGHT_TRANSIENT_OVERLAP=1
@@ -391,22 +387,18 @@ bash examples/cross_host/run_multihost_weight_publisher_suite.sh
 ```
 
 流程与判定：
-1. 在 publisher 节点先执行 single-host 功能烟测（`tensor_dict`）。
+1. 在 publisher 节点先执行 single-host staged group realization 功能烟测。
 2. 按 `TC_WP_SCALE_RECEIVER_COUNTS` 逐级执行 receiver 规模 case。
-3. 每个规模按 `TC_WP_TRANSPORT_GROUP_MODES` 做组模式循环。
-4. 组模式顺序由 `TC_WP_GROUP_PAIR_ORDER` 控制：
-- `linear`（默认）：按配置顺序执行（例如 `none -> tp_version`）。
-- `abba`：当模式包含 `none,tp_version` 时执行 `none -> tp_version -> tp_version -> none`。
-5. 重复轮次由 `TC_WP_GROUP_PAIR_ROUNDS` 控制（建议 `>=3`，用于抑制 run-order 偏差并支撑 paired 对照统计）。
-6. 验证点包括：
-- receiver 通过 `binding.swap` 连续更新，首版 `bind`，后续全是 `swap`；
-- pointer 稳定（swap 后 `data_ptr` 不变）；
+3. 每个规模固定执行 unified `group_realization` staged publish/acquire 路径。
+4. 验证点包括：
+- receiver 通过 staged publish/acquire 连续更新，接收操作为 `stage_acquire`；
+- pointer 稳定；
 - `keep_last=2` 时旧版本去注册后不可物化；
 - 通过 GS RPC `BatchGetReplicaCounts` 审计，旧版本副本计数回到 0，且有副本的版本数不超过 2。
 - runner 显式管理每台机器的 daemon 生命周期，role/probe 均通过 `tc.init(mode="connect", address=127.0.0.1:50052)` 仅连接本地 daemon。
 - 建议将 `TC_RECEIVER_TIMEOUT_S` 设为大于发布间隔（例如 `publish=60s` 时用 `timeout=95s`），并通过
   `TC_MAX_PUBLISH_TO_APPLY_S` 约束“发布到应用”的时延上限；在 TP 扩容场景建议保持
-  `TC_WP_MAX_PUBLISH_TO_APPLY_AUTO_ADJUST=1`，由 runner 按 receiver 数、TP 字节规模与 group 模式自动抬升阈值下限。
+  `TC_WP_MAX_PUBLISH_TO_APPLY_AUTO_ADJUST=1`，由 runner 按 receiver 数、TP 字节规模与 group realization staging 开销自动抬升阈值下限。
 - 当 `allow_receiver_skips` 生效时，runner 会基于 receiver 日志中的显式
   `[receiver] skipped version=...` 记录做缺失版本记账：仅将“未被显式 skip 覆盖”的缺失版本计为 sequence failure，
   并在输出中给出 `timeout_analysis.waiting_timeout_reason_counts` 与
@@ -414,10 +406,10 @@ bash examples/cross_host/run_multihost_weight_publisher_suite.sh
 - 深度压测可通过 `TC_WP_SCALE_RECEIVER_COUNTS` 扩大到 32 worker 规模（1 publisher + 31 receivers），并用
   `TC_SCALE_NUM_VERSIONS`/`TC_LONG_RUN_NUM_VERSIONS` 与 `TC_LONG_RUN_TARGET_DURATION_S`
   组合出 10/20 版本、最长约 15 分钟的长跑 case。
-- TP 场景可通过 `TC_WP_TP_WORLD_SIZE`、`TC_WP_TP_TOTAL_BYTES`、`TC_WP_RECEIVER_APPLY_MODE`
-  固定为 TP4/TP8 接收路径，并通过 `TC_WP_TRANSPORT_GROUP_MODES` 做 group/non-group A/B。
+- TP 场景可通过 `TC_WP_TP_WORLD_SIZE`、`TC_WP_TP_TOTAL_BYTES`
+  固定为 TP4/TP8 接收规模；接收路径固定为 staged group realization publish/acquire。
 - 运行中会周期打印 `[progress]` 聚合状态，便于外部 `tail -f`/log poll 观察实时进展。
-- suite 输出目录包含 `suite_skips.jsonl`，用于记录无效 receiver count、不支持 group mode、long-run 跳过等结构化原因。
+- suite 输出目录包含 `suite_skips.jsonl`，用于记录无效 receiver count、long-run 跳过等结构化原因。
 
 ## 3. 输出说明
 
@@ -470,11 +462,11 @@ chaos 报告模板：
 
 5. `No daemon found at <ip:port>`
 - 常见原因：误把节点 `Host IP(10.x)` 作为 `--seed-adv-ip/--get-adv-ips`。
-- 处理：统一改用 worker `Pod IP(100.x)`。
+- 处理：统一改用 worker 的可路由 Pod IP。
 
 6. `cannot exec into ... Stopped`
 - 表示 worker 被平台自动回收。
-- 处理：重新 `brainctl launch`，并更新 process id / pod ip 后重跑 case。
+- 处理：重新 `orchestratorctl launch`，并更新 process id / pod ip 后重跑 case。
 
 7. `cudaErrorNoDevice` / `device_count=0` 导致 daemon 首启崩溃
 - 这是 worker 运行时 GPU 不可用（常见于异常节点），不是 case 参数问题。

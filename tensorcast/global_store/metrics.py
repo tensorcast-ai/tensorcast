@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from time import monotonic
-from typing import Callable, Iterator
+from typing import Callable, Iterator, SupportsInt, cast
 
 import grpc
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
@@ -258,6 +258,58 @@ TRANSPORT_DISPATCH_EVENT_COUNTER = Counter(
     labelnames=("event",),
 )
 
+PROGRESSIVE_COVERAGE_REPORT_COUNTER = Counter(
+    "tc_progressive_coverage_reports_total",
+    "Progressive coverage reports accepted by the Global Store.",
+    labelnames=("state", "coverage_kind"),
+)
+
+PROGRESSIVE_ASSIGNMENT_COUNTER = Counter(
+    "tc_progressive_source_assignments_total",
+    "Progressive source assignment lifecycle events.",
+    labelnames=("assignment_state", "coverage_kind"),
+)
+
+PROGRESSIVE_ASSIGNMENT_ACTIVE_GAUGE = Gauge(
+    "tc_progressive_source_assignments_active",
+    "Active progressive assignments by source domain.",
+    labelnames=("source_domain",),
+)
+
+PROGRESSIVE_SKIPPED_SOURCE_COUNTER = Counter(
+    "tc_progressive_skipped_sources_total",
+    "Progressive source candidates skipped during claim.",
+    labelnames=("reason",),
+)
+
+PROGRESSIVE_VERIFIED_BYTES_GAUGE = Gauge(
+    "tc_progressive_verified_bytes",
+    "Latest reported verified progressive bytes.",
+    labelnames=("coverage_kind",),
+)
+
+PROGRESSIVE_REPORT_THROTTLED_COUNTER = Counter(
+    "tc_progressive_coverage_reports_throttled_total",
+    "Progressive coverage reports skipped by coalescing policy.",
+    labelnames=("reason",),
+)
+
+PROGRESSIVE_CLAIM_DB_CONFLICT_COUNTER = Counter(
+    "tc_progressive_claim_db_conflicts_total",
+    "Transient database conflicts during progressive claim operations.",
+    labelnames=("op",),
+)
+
+PROGRESSIVE_CLAIM_CANDIDATE_ROWS_GAUGE = Gauge(
+    "tc_progressive_claim_candidate_rows",
+    "Candidate rows inspected by the latest progressive claim.",
+)
+
+PROGRESSIVE_ASSIGNMENT_CLEANUP_BATCH_GAUGE = Gauge(
+    "tc_progressive_assignment_cleanup_batch_size",
+    "Assignment rows cleaned up by the latest progressive expiration sweep.",
+)
+
 _TRANSPORT_ASSIGNMENT_LOCK = threading.Lock()
 _TRANSPORT_SOURCE_ASSIGNMENTS: dict[str, dict[str, int]] = {}
 _TRANSPORT_SOURCE_FIRST_ASSIGNMENT: set[tuple[str, str]] = set()
@@ -448,6 +500,54 @@ IDEMPOTENCY_REPLAY_COUNTER = Counter(
     "tc_control_plane_idempotency_replay_total",
     "Total number of control-plane idempotency replay outcomes.",
     labelnames=("operation_kind", "result"),  # result=hit|payload_conflict
+)
+
+GROUP_REALIZATION_EVENT_COUNTER = Counter(
+    "tc_group_realization_events_total",
+    "Total number of group realization control-plane events.",
+    labelnames=("operation", "result"),
+)
+
+GROUP_REALIZATION_LATENCY_SECONDS = Histogram(
+    "tc_group_realization_operation_seconds",
+    "Latency of group realization control-plane operations.",
+    labelnames=("operation",),
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+)
+
+GROUP_REALIZATION_WAITER_POLLS_COUNTER = Counter(
+    "tc_group_realization_waiter_polls_total",
+    "Total number of bounded group realization waiter polls.",
+    labelnames=("result",),
+)
+
+GROUP_REALIZATION_ACTIVE_WAITERS_GAUGE = Gauge(
+    "tc_group_realization_active_waiters",
+    "Current number of active group realization waiters.",
+)
+
+GROUP_REALIZATION_CLEANUP_COUNTER = Counter(
+    "tc_group_realization_cleanup_total",
+    "Total number of group realization cleanup outcomes.",
+    labelnames=("operation", "result"),
+)
+
+GROUP_REALIZATION_DB_CONFLICT_RETRY_COUNTER = Counter(
+    "tc_group_realization_db_conflict_retries_total",
+    "Total number of group realization DB conflict retry observations.",
+    labelnames=("operation", "result"),
+)
+
+GROUP_REALIZATION_CONTROL_WRITES_COUNTER = Counter(
+    "tc_group_realization_control_writes_total",
+    "Total number of group realization control-plane writes by operation and table.",
+    labelnames=("operation", "table"),
+)
+
+GROUP_REALIZATION_COUNTER_RECONCILIATION_COUNTER = Counter(
+    "tc_group_realization_counter_reconciliation_total",
+    "Total number of group realization counter reconciliation outcomes.",
+    labelnames=("result",),
 )
 
 # Memory tier telemetry ------------------------------------------------------
@@ -712,6 +812,59 @@ def record_transport_source_assignment(
     )
 
 
+def inc_progressive_coverage_report(*, state: str, coverage_kind: str) -> None:
+    PROGRESSIVE_COVERAGE_REPORT_COUNTER.labels(
+        state=state, coverage_kind=coverage_kind
+    ).inc()
+
+
+def inc_progressive_assignment(*, assignment_state: str, coverage_kind: str) -> None:
+    PROGRESSIVE_ASSIGNMENT_COUNTER.labels(
+        assignment_state=assignment_state,
+        coverage_kind=coverage_kind,
+    ).inc()
+
+
+def inc_progressive_active_assignment(*, source_domain: str) -> None:
+    PROGRESSIVE_ASSIGNMENT_ACTIVE_GAUGE.labels(
+        source_domain=source_domain or "unknown"
+    ).inc()
+
+
+def dec_progressive_active_assignment(*, source_domain: str) -> None:
+    gauge = PROGRESSIVE_ASSIGNMENT_ACTIVE_GAUGE.labels(
+        source_domain=source_domain or "unknown"
+    )
+    if gauge._value.get() > 0:
+        gauge.dec()
+
+
+def inc_progressive_skipped_source(reason: str) -> None:
+    PROGRESSIVE_SKIPPED_SOURCE_COUNTER.labels(reason=reason or "unknown").inc()
+
+
+def set_progressive_verified_bytes(*, coverage_kind: str, value: int) -> None:
+    PROGRESSIVE_VERIFIED_BYTES_GAUGE.labels(coverage_kind=coverage_kind).set(
+        max(0, int(value))
+    )
+
+
+def inc_progressive_report_throttled(reason: str) -> None:
+    PROGRESSIVE_REPORT_THROTTLED_COUNTER.labels(reason=reason or "unknown").inc()
+
+
+def inc_progressive_claim_db_conflict(op: str) -> None:
+    PROGRESSIVE_CLAIM_DB_CONFLICT_COUNTER.labels(op=op or "unknown").inc()
+
+
+def set_progressive_claim_candidate_rows(count: int) -> None:
+    PROGRESSIVE_CLAIM_CANDIDATE_ROWS_GAUGE.set(max(0, int(count)))
+
+
+def set_progressive_assignment_cleanup_batch_size(count: int) -> None:
+    PROGRESSIVE_ASSIGNMENT_CLEANUP_BATCH_GAUGE.set(max(0, int(count)))
+
+
 # ---------------------------------------------------------------------------
 # Recovery helpers
 # ---------------------------------------------------------------------------
@@ -795,6 +948,70 @@ def inc_idempotency_replay_conflict(*, operation_kind: str, count: int = 1) -> N
     ).inc(count)
 
 
+def inc_group_realization_event(*, operation: str, result: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    GROUP_REALIZATION_EVENT_COUNTER.labels(operation=operation, result=result).inc(
+        count
+    )
+
+
+def observe_group_realization_latency(
+    *, operation: str, duration_seconds: float
+) -> None:
+    GROUP_REALIZATION_LATENCY_SECONDS.labels(operation=operation).observe(
+        max(0.0, duration_seconds)
+    )
+
+
+def inc_group_realization_waiter_poll(*, result: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    GROUP_REALIZATION_WAITER_POLLS_COUNTER.labels(result=result).inc(count)
+
+
+def set_group_realization_active_waiters(*, count: int) -> None:
+    GROUP_REALIZATION_ACTIVE_WAITERS_GAUGE.set(max(0, int(count)))
+
+
+def inc_group_realization_cleanup(
+    *, operation: str, result: str, count: int = 1
+) -> None:
+    if count <= 0:
+        return
+    GROUP_REALIZATION_CLEANUP_COUNTER.labels(operation=operation, result=result).inc(
+        count
+    )
+
+
+def inc_group_realization_db_conflict_retry(
+    *, operation: str, result: str, count: int = 1
+) -> None:
+    if count <= 0:
+        return
+    GROUP_REALIZATION_DB_CONFLICT_RETRY_COUNTER.labels(
+        operation=operation, result=result
+    ).inc(count)
+
+
+def inc_group_realization_control_write(
+    *, operation: str, table: str, count: int = 1
+) -> None:
+    if count <= 0:
+        return
+    GROUP_REALIZATION_CONTROL_WRITES_COUNTER.labels(
+        operation=operation, table=table
+    ).inc(count)
+
+
+def inc_group_realization_counter_reconciliation(
+    *, result: str, count: int = 1
+) -> None:
+    if count <= 0:
+        return
+    GROUP_REALIZATION_COUNTER_RECONCILIATION_COUNTER.labels(result=result).inc(count)
+
+
 # ---------------------------------------------------------------------------
 # Control-plane executor observability
 # ---------------------------------------------------------------------------
@@ -808,7 +1025,7 @@ def _safe_queue_size(work_queue: object) -> int:
             return max(0, int(work_queue.qsize()))
         qsize_fn = getattr(work_queue, "qsize", None)
         if callable(qsize_fn):
-            return max(0, int(qsize_fn()))
+            return max(0, int(cast(SupportsInt, qsize_fn())))
     except NotImplementedError:
         return 0
     except Exception:  # noqa: BLE001

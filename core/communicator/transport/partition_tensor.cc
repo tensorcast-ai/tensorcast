@@ -41,10 +41,17 @@ void PartitionTensor::add_dev_and_register(const net_dev_t& dev) {
 }
 
 void PartitionTensor::add_dev(const net_dev_t& dev) {
+  if (dev == nullptr) {
+    return;
+  }
+  const std::string& dev_name = dev->get_name();
+  if (registered_.contains(dev_name)) {
+    return;
+  }
   devs_.push_back(std::move(dev));
-  registered_[dev->get_name()] = std::make_shared<std::atomic_bool>(false);
-  mrs_[dev->get_name()] = nullptr;
-  owns_mr_[dev->get_name()] = false;
+  registered_[dev_name] = std::make_shared<std::atomic_bool>(false);
+  mrs_[dev_name] = nullptr;
+  owns_mr_[dev_name] = false;
 }
 
 void PartitionTensor::add_dev_list(const std::vector<net_dev_t>& devs) {

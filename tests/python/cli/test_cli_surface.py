@@ -11,6 +11,11 @@ from tensorcast import cli as cli_mod
 from tensorcast import runtime
 
 
+def test_cli_runtime_binding_uses_runtime_module() -> None:
+    assert hasattr(cli_mod.runtime, "status")
+    assert hasattr(cli_mod.runtime, "start")
+
+
 def test_daemon_status_json(monkeypatch):
     session = runtime.RuntimeSession(
         session_id="sess-1",

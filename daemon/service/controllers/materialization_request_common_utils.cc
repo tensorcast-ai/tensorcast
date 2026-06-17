@@ -239,6 +239,9 @@ absl::StatusOr<LeaseContext> validate_and_compute_lease_context(
     return lease_context;
   }
   if (lease_context.no_lease) {
+    // CPU prefetch / daemon-owned DRAM materialization intentionally avoids
+    // issuing local handle leases. In that mode there is no client-owned CPU
+    // handle to bind to a PID, so loopback-only CPU eligibility is sufficient.
     return lease_context;
   }
   if (!lease_context.loopback_peer) {
@@ -262,18 +265,67 @@ absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
     const std::filesystem::path& storage_path,
     std::string artifact_id,
     bool allow_disk,
-    bool allow_local_import_fallback,
+    bool allow_local_import_disk_source,
     bool loopback_peer,
-    std::optional<uint64_t> disk_expected_size) {
+    std::optional<uint64_t> disk_expected_size,
+    bool lightweight_msa1_validation) {
   ArtifactResolution resolution;
   resolution.resolved_artifact_id = std::move(artifact_id);
+
+  if (common::is_msa1_artifact_id(resolution.resolved_artifact_id)) {
+    if (source_registry == nullptr) {
+      materialization_disk_resolve::record_mounted_source_validation_outcome("registry_unavailable");
+      return absl::FailedPreconditionError("mounted-source registry unavailable");
+    }
+    auto entry = source_registry->lookup_binding(resolution.resolved_artifact_id);
+    if (!entry.has_value() || entry->source_kind != ArtifactSourceRegistry::SourceKind::kMountedSourceArtifact) {
+      materialization_disk_resolve::record_mounted_source_validation_outcome("stale_session");
+      return absl::FailedPreconditionError(
+          "mounted-source artifact_id is not valid in this daemon session; re-resolve the source path");
+    }
+    materialization_disk_resolve::SourceFingerprintMap expected_fingerprints;
+    expected_fingerprints.reserve(entry->file_fingerprints.size());
+    for (const auto& [relative_path, fingerprint] : entry->file_fingerprints) {
+      expected_fingerprints.insert_or_assign(
+          relative_path,
+          materialization_disk_resolve::SourceFileFingerprint{
+              .inode = fingerprint.inode,
+              .size = fingerprint.size,
+              .mtime_ns = fingerprint.mtime_ns,
+          });
+    }
+    const std::filesystem::path source_path(entry->canonical_source_path);
+    auto validation_status = lightweight_msa1_validation
+        ? materialization_disk_resolve::validate_source_fingerprints(source_path, expected_fingerprints)
+        : materialization_disk_resolve::validate_mounted_source_snapshot(
+              source_path, entry->canonical_index_json, entry->source_index_json, expected_fingerprints);
+    if (!validation_status.ok()) {
+      materialization_disk_resolve::record_mounted_source_validation_outcome("mismatch");
+      const bool erased = source_registry->erase_binding(resolution.resolved_artifact_id);
+      (void)erased;
+      return validation_status;
+    }
+    materialization_disk_resolve::record_mounted_source_validation_outcome("ok");
+
+    resolution.gs_connected = false;
+    resolution.local_import = entry;
+    if (allow_disk) {
+      resolution.normalized_disk_path = std::filesystem::path(entry->canonical_source_path);
+      resolution.disk_source = store::loading::DiskSource{
+          .path = *resolution.normalized_disk_path,
+          .expected_size = disk_expected_size,
+          .require_descriptor = false,
+      };
+    }
+    return resolution;
+  }
 
   auto binding_or = resolve_artifact_binding(global_store_client, resolution.resolved_artifact_id);
   if (!binding_or.ok()) {
     return binding_or.status();
   }
   if (binding_or->has_value()) {
-    resolution.fallback_artifact_id = resolution.resolved_artifact_id;
+    resolution.pre_binding_artifact_id = resolution.resolved_artifact_id;
     resolution.bound_artifact_id = binding_or->value();
     resolution.resolved_artifact_id = binding_or->value();
   }
@@ -292,9 +344,9 @@ absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
             .updated_at = absl::Now(),
         });
   }
-  // Managed shared-disk remains preferred. If unavailable, local imports can still provide
-  // a deterministic disk source even when Global Store is connected.
-  if (!resolution.normalized_disk_path.has_value() && allow_disk && allow_local_import_fallback &&
+  // Managed shared-disk remains preferred. If unavailable, local imports can
+  // still provide an explicit daemon-local disk source when requested.
+  if (!resolution.normalized_disk_path.has_value() && allow_disk && allow_local_import_disk_source &&
       source_registry != nullptr) {
     auto entry = source_registry->lookup_binding(resolution.resolved_artifact_id);
     if (entry.has_value()) {
@@ -303,7 +355,7 @@ absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
       }
       if (entry->source_kind != ArtifactSourceRegistry::SourceKind::kLocalImport) {
         return absl::FailedPreconditionError(
-            "SOURCE_MUTATED: unexpected source binding type for local import fallback");
+            "SOURCE_MUTATED: unexpected source binding type for local import disk source");
       }
       materialization_disk_resolve::SourceFingerprintMap expected_fingerprints;
       expected_fingerprints.reserve(entry->file_fingerprints.size());
@@ -340,13 +392,12 @@ absl::StatusOr<store::loading::ReplicaHandle> materialize_with_shared_disk_retry
     store::components::IGlobalStoreClient* global_store_client,
     const std::filesystem::path& storage_path,
     std::string_view resolved_artifact_id,
-    int wait_for_shared_disk_ms,
-    bool allow_disk,
+    const materialization_policy::NormalizedMaterializationRequestContext& request_context,
     const grpc::ServerContext& server_context,
     std::optional<std::filesystem::path>& normalized_disk_path,
     const MaterializeAttemptFn& materialize_retry_once,
     const PrepareRetryDiskSourceFn& prepare_retry_disk_source) {
-  if (wait_for_shared_disk_ms <= 0 || !allow_disk) {
+  if (request_context.wait_for_shared_disk_ms <= 0 || !request_context.retrieval_policy.allow_disk) {
     return initial_status;
   }
 
@@ -354,7 +405,7 @@ absl::StatusOr<store::loading::ReplicaHandle> materialize_with_shared_disk_retry
       global_store_client,
       storage_path,
       resolved_artifact_id,
-      std::chrono::milliseconds(wait_for_shared_disk_ms),
+      std::chrono::milliseconds(request_context.wait_for_shared_disk_ms),
       server_context);
   if (!wait_or.ok()) {
     if (absl::IsUnavailable(wait_or.status())) {

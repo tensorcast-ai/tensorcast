@@ -21,11 +21,17 @@ class NoGitTagException(Exception):
 
 
 def get_root_dir() -> Path:
-    return Path(
-        subprocess.check_output(["git", "rev-parse", "--show-toplevel"])
-        .decode("ascii")
-        .strip()
-    )
+    try:
+        return Path(
+            subprocess.check_output(
+                ["git", "rev-parse", "--show-toplevel"],
+                stderr=subprocess.DEVNULL,
+            )
+            .decode("ascii")
+            .strip()
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return Path(__file__).resolve().parent
 
 
 def get_tag() -> str:

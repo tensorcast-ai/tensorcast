@@ -26,6 +26,7 @@ from tensorcast.api.plan.artifact_set import (
 from tensorcast.api.plan.targets import TargetSpec
 from tensorcast.api.plan.transforms import TransformSpec
 from tensorcast.api.store import Artifact, Store
+from tensorcast.api.store.runtime import StoreRuntimeContext
 from tensorcast.daemon_ctl import DaemonCtl, get_daemon_client
 from tensorcast.engine_adapter import (
     BatchResult,
@@ -33,13 +34,27 @@ from tensorcast.engine_adapter import (
     HydrateResult,
     ManifestArtifactSetBridge,
     ManifestResult,
+    PublishManifest,
     PublishResult,
 )
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
+from tensorcast.types import (
+    _SERVING_READINESS_FROM_PROTO,
+    PrefetchRetentionPolicy,
+    RealizationTarget,
+    RealizationTargetSet,
+    RepresentationPublishSpec,
+)
 
-ArtifactActionResult = ManifestResult | PublishResult | HydrateResult | BatchResult
+ArtifactActionResult = (
+    ManifestResult
+    | PublishResult
+    | HydrateResult
+    | BatchResult
+    | RepresentationPublishSpec
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +298,7 @@ class NodeAgentExecutor:
         self._agent_id = agent_id or uuid.uuid4().hex
         self._version = version or "unknown"
         self._engine_adapter = engine_adapter
+        self._client_factory = client_factory
         self._client = client_factory(daemon_address)
         self._store: Store | None = None
 
@@ -308,7 +324,13 @@ class NodeAgentExecutor:
 
     def _store_for_daemon(self) -> Store:
         if self._store is None:
-            self._store = Store(self._daemon_address)
+            self._store = Store(
+                self._daemon_address,
+                runtime=StoreRuntimeContext(
+                    self._daemon_address,
+                    client_factory=lambda _addr: self._client,
+                ),
+            )
         return self._store
 
     def execute_plan(
@@ -676,7 +698,7 @@ class NodeAgentExecutor:
                 extra=spec.fingerprint(),
                 call_ctx=call_ctx,
             )
-            engine_adapter.execute_transform_register(
+            register_result = engine_adapter.execute_transform_register(
                 spec=spec,
                 source=artifact,
                 out_key=action.out_key,
@@ -701,6 +723,11 @@ class NodeAgentExecutor:
             target_id=target_id,
             action="transform_register",
             status=_status_success("transform_register completed"),
+            artifact_result=(
+                register_result
+                if isinstance(register_result, RepresentationPublishSpec)
+                else None
+            ),
         )
 
     def _manifest(
@@ -845,10 +872,25 @@ class NodeAgentExecutor:
                 ttl_ms=None,
                 call_ctx=call_ctx,
             )
-            hydrate_result = engine_adapter.execute_hydrate(
-                engine_request_id=action.engine_request_id,
-                ctx=scoped_ctx,
-            )
+            request_source = action.WhichOneof("request_source")
+            if request_source == "engine_request_id":
+                hydrate_result = engine_adapter.execute_hydrate(
+                    engine_request_id=str(action.engine_request_id),
+                    ctx=scoped_ctx,
+                )
+            elif request_source == "publish_manifest":
+                hydrate_result = engine_adapter.execute_hydrate(
+                    publish_manifest=PublishManifest.from_proto(
+                        action.publish_manifest
+                    ),
+                    ctx=scoped_ctx,
+                )
+            else:
+                raise ArtifactError(
+                    "hydrate requires exactly one request source",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
         except ArtifactError as exc:
             return NodeAgentStepResult(
                 step_id=step.step_id,
@@ -950,15 +992,32 @@ class NodeAgentExecutor:
     ) -> NodeAgentStepResult:
         selection = action.selection
         target_id = step.target.target_id
+        serving_target_kind = action.WhichOneof("serving_target")
         base_key = plan.context.idempotency_key
         if base_key:
+            extra = None
+            if serving_target_kind == "serving_binding_target":
+                extra = hashlib.sha256(
+                    action.serving_binding_target.SerializeToString(deterministic=True)
+                ).hexdigest()
+            elif serving_target_kind == "serving_binding_set_target":
+                extra = hashlib.sha256(
+                    action.serving_binding_set_target.SerializeToString(
+                        deterministic=True
+                    )
+                ).hexdigest()
             action_key = _derive_action_idempotency_key(
                 base_key=base_key,
-                action="prefetch",
+                action=(
+                    "prefetch_serving_binding"
+                    if serving_target_kind is not None
+                    else "prefetch"
+                ),
                 target_id=target_id,
                 selection=selection,
                 device_id=action.device_id,
                 ttl_ms=None,
+                extra=extra,
             )
             ns = uuid.uuid5(uuid.NAMESPACE_DNS, "tensorcast.op.v1")
             replica_uuid = str(uuid.uuid5(ns, action_key))
@@ -977,13 +1036,38 @@ class NodeAgentExecutor:
                 ),
             )
         try:
-            self._materialize_selection(
-                selection=selection,
-                device_id=int(action.device_id),
-                replica_uuid=replica_uuid,
-                timeout_s=timeout_s,
-                wait_for_completion=False,
-            )
+            if serving_target_kind is not None:
+                artifact, _ = self._artifact_from_selection(selection)
+                readiness = _SERVING_READINESS_FROM_PROTO.get(
+                    int(action.requested_readiness),
+                    "runtime_local_ready",
+                )
+                retention = (
+                    PrefetchRetentionPolicy.from_proto(action.retention_policy)
+                    if action.HasField("retention_policy")
+                    else None
+                )
+                if serving_target_kind == "serving_binding_target":
+                    target = RealizationTarget.from_proto(action.serving_binding_target)
+                else:
+                    target = RealizationTargetSet.from_proto(
+                        action.serving_binding_set_target
+                    )
+                op = artifact.prefetch(
+                    target=target,
+                    readiness=readiness,
+                    retention=retention,
+                    ctx=call_ctx,
+                )
+                op.wait(timeout_s=timeout_s)
+            else:
+                self._materialize_selection(
+                    selection=selection,
+                    device_id=int(action.device_id),
+                    replica_uuid=replica_uuid,
+                    timeout_s=timeout_s,
+                    wait_for_completion=False,
+                )
         except DeviceMismatch as exc:
             return NodeAgentStepResult(
                 step_id=step.step_id,
@@ -1151,7 +1235,7 @@ class NodeAgentExecutor:
         else:
             target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU
             device_uuid = device_uuid_for(device_id)
-        self._client.materialize_by_artifact_id_v2(
+        self._client.materialize_by_artifact_id(
             selection=selection,
             replica_uuid=replica_uuid,
             device_uuid=device_uuid,

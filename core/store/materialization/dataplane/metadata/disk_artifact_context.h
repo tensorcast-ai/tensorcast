@@ -83,6 +83,9 @@ class DiskArtifactContext {
     return partition_paths_;
   }
 
+  // Standard tensor.data_N artifacts may have physical tail padding (for example
+  // 4K O_DIRECT flush alignment). Expose the logical partition sizes and logical
+  // total size that the artifact index defines rather than raw file lengths.
   [[nodiscard]] const std::vector<size_t>& partition_sizes() const {
     return partition_sizes_;
   }
@@ -129,6 +132,9 @@ class DiskArtifactContext {
 };
 
 absl::StatusOr<std::shared_ptr<const DiskArtifactContext>> get_disk_artifact_context(
+    const std::filesystem::path& artifact_path);
+
+absl::StatusOr<std::shared_ptr<const DiskArtifactContext>> get_uncached_disk_artifact_context(
     const std::filesystem::path& artifact_path);
 
 DiskArtifactContextCacheStats get_disk_artifact_context_cache_stats();

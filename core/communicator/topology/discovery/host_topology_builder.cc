@@ -17,9 +17,9 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
-#include "core/cuda/cuda_api.h"
 #include "core/communicator/topology/discovery/lldp_source.h"
 #include "core/communicator/topology/discovery/nvlink_source.h"
+#include "core/cuda/cuda_api.h"
 
 namespace tc = tensorcast::communicator::v1;
 
@@ -49,8 +49,8 @@ struct AffinityInferenceStats {
 int longest_common_prefix_len(std::string_view lhs, std::string_view rhs) {
   int prefix_len = 0;
   const size_t max_len = std::min(lhs.size(), rhs.size());
-  while (static_cast<size_t>(prefix_len) < max_len && lhs[static_cast<size_t>(prefix_len)] == rhs[static_cast<size_t>(
-                                                                   prefix_len)]) {
+  while (static_cast<size_t>(prefix_len) < max_len &&
+         lhs[static_cast<size_t>(prefix_len)] == rhs[static_cast<size_t>(prefix_len)]) {
     prefix_len += 1;
   }
   return prefix_len;
@@ -92,9 +92,7 @@ std::string gpu_pci_bdf(const cudaDeviceProp& props) {
       static_cast<unsigned int>(props.pciDeviceID));
 }
 
-absl::StatusOr<std::string> resolve_gpu_pci_path(
-    int gpu_index,
-    const HostTopologyBuilderOptions& options) {
+absl::StatusOr<std::string> resolve_gpu_pci_path(int gpu_index, const HostTopologyBuilderOptions& options) {
   const auto override_it = options.gpu_pci_path_overrides.find(gpu_index);
   if (override_it != options.gpu_pci_path_overrides.end()) {
     if (override_it->second.empty()) {
@@ -154,12 +152,10 @@ absl::StatusOr<std::string> resolve_nic_pci_path(
 std::string build_affinity_degrade_reason(const AffinityInferenceStats& stats) {
   std::vector<std::string> parts;
   if (stats.gpu_candidate_count > stats.gpu_path_resolved_count) {
-    parts.push_back(
-        std::format("gpu_paths_resolved={}/{}", stats.gpu_path_resolved_count, stats.gpu_candidate_count));
+    parts.push_back(std::format("gpu_paths_resolved={}/{}", stats.gpu_path_resolved_count, stats.gpu_candidate_count));
   }
   if (stats.nic_candidate_count > stats.nic_path_resolved_count) {
-    parts.push_back(
-        std::format("nic_paths_resolved={}/{}", stats.nic_path_resolved_count, stats.nic_candidate_count));
+    parts.push_back(std::format("nic_paths_resolved={}/{}", stats.nic_path_resolved_count, stats.nic_candidate_count));
   }
   if (stats.nic_candidate_count > stats.nic_scored_count) {
     parts.push_back(std::format("nic_scored={}/{}", stats.nic_scored_count, stats.nic_candidate_count));
@@ -190,15 +186,16 @@ AffinityInferenceStats infer_nic_gpu_affinity(
     all_gpu_pool_ids.insert(pool_id);
     auto gpu_path_or = resolve_gpu_pci_path(gpu_index, options);
     if (!gpu_path_or.ok()) {
-      VLOG(1) << "Skipping GPU in NIC-GPU affinity inference due to missing PCI path: gpu="
-              << gpu_index << " status=" << gpu_path_or.status();
+      VLOG(1) << "Skipping GPU in NIC-GPU affinity inference due to missing PCI path: gpu=" << gpu_index
+              << " status=" << gpu_path_or.status();
       continue;
     }
     stats.gpu_path_resolved_count += 1;
-    gpu_records.push_back(PciGpuRecord{
-        .pool_id = pool_id,
-        .pci_path = std::move(gpu_path_or).value(),
-    });
+    gpu_records.push_back(
+        PciGpuRecord{
+            .pool_id = pool_id,
+            .pci_path = std::move(gpu_path_or).value(),
+        });
   }
 
   for (auto& endpoint : *endpoints) {
@@ -209,8 +206,8 @@ AffinityInferenceStats infer_nic_gpu_affinity(
 
     auto nic_path_or = resolve_nic_pci_path(endpoint.name, lldp_records, options);
     if (!nic_path_or.ok()) {
-      VLOG(1) << "Skipping NIC in NIC-GPU affinity inference due to missing PCI path: nic="
-              << endpoint.name << " status=" << nic_path_or.status();
+      VLOG(1) << "Skipping NIC in NIC-GPU affinity inference due to missing PCI path: nic=" << endpoint.name
+              << " status=" << nic_path_or.status();
       continue;
     }
     stats.nic_path_resolved_count += 1;
@@ -288,7 +285,7 @@ std::string nic_endpoint_id(const std::string& nic_name) {
 
 bool source_is_enabled(tc::NvlinkDiscoveryConfig::Source source) {
   return source == tc::NvlinkDiscoveryConfig::SOURCE_SNAPSHOT_FILE ||
-         source == tc::NvlinkDiscoveryConfig::SOURCE_RUNTIME_PROBE;
+      source == tc::NvlinkDiscoveryConfig::SOURCE_RUNTIME_PROBE;
 }
 
 std::string nvlink_source_to_string(tc::NvlinkDiscoveryConfig::Source source) {
@@ -306,8 +303,7 @@ std::string nvlink_source_to_string(tc::NvlinkDiscoveryConfig::Source source) {
   }
 }
 
-absl::StatusOr<BaselineBuildResult> build_baseline_from_simple_numa(
-    const tc::CommunicatorConfig& config) {
+absl::StatusOr<BaselineBuildResult> build_baseline_from_simple_numa(const tc::CommunicatorConfig& config) {
   const auto& simple = config.simple_numa();
   if (!simple.enable()) {
     return absl::InvalidArgumentError("simple_numa is disabled");
@@ -343,8 +339,7 @@ absl::StatusOr<BaselineBuildResult> build_baseline_from_simple_numa(
 
     for (int gpu_id : node.gpus()) {
       if (!seen_gpus.insert(gpu_id).second) {
-        return absl::InvalidArgumentError(
-            std::format("duplicate simple_numa gpu id: {}", gpu_id));
+        return absl::InvalidArgumentError(std::format("duplicate simple_numa gpu id: {}", gpu_id));
       }
       const std::string gpu_id_str = gpu_pool_id(gpu_id);
       baseline.pools.push_back(Pool{gpu_id_str, gpu_id_str, PoolType::kGpu});
@@ -356,8 +351,7 @@ absl::StatusOr<BaselineBuildResult> build_baseline_from_simple_numa(
 
     for (const auto& nic_name : node.nics()) {
       if (nic_name.empty()) {
-        return absl::InvalidArgumentError(
-            std::format("simple_numa node {} has empty nic name", node.id()));
+        return absl::InvalidArgumentError(std::format("simple_numa node {} has empty nic name", node.id()));
       }
       const std::string endpoint_id = nic_endpoint_id(nic_name);
       if (!seen_nics.insert(endpoint_id).second) {
@@ -415,8 +409,7 @@ void add_nvlink_topology(
     if (src_gpu_it == gpu_index_by_uuid.end() || dst_gpu_it == gpu_index_by_uuid.end()) {
       continue;
     }
-    if (!gpu_pool_by_index.contains(src_gpu_it->second) ||
-        !gpu_pool_by_index.contains(dst_gpu_it->second)) {
+    if (!gpu_pool_by_index.contains(src_gpu_it->second) || !gpu_pool_by_index.contains(dst_gpu_it->second)) {
       continue;
     }
     edge_gpu_uuids.insert(edge.src_gpu_uuid);
@@ -471,8 +464,8 @@ void add_nvlink_topology(
     auto src_it = endpoint_id_by_gpu_uuid.find(edge.src_gpu_uuid);
     auto dst_it = endpoint_id_by_gpu_uuid.find(edge.dst_gpu_uuid);
     if (src_it == endpoint_id_by_gpu_uuid.end() || dst_it == endpoint_id_by_gpu_uuid.end()) {
-      VLOG(1) << "Skipping NVLINK edge due to missing GPU endpoints: "
-              << edge.src_gpu_uuid << " <-> " << edge.dst_gpu_uuid;
+      VLOG(1) << "Skipping NVLINK edge due to missing GPU endpoints: " << edge.src_gpu_uuid << " <-> "
+              << edge.dst_gpu_uuid;
       continue;
     }
 
@@ -528,9 +521,7 @@ absl::StatusOr<HostTopologyBuildResult> build_topology_from_discovery_with_obser
   observability.nic_endpoint_count = static_cast<int>(endpoints.size());
   observability.lldp_source = discovery_enabled ? lldp_source_description(config) : "disabled";
   const bool emit_rail_switch_endpoints =
-      discovery_enabled
-          ? config.topology_discovery().merge_policy().emit_rail_switch_endpoints()
-          : false;
+      discovery_enabled ? config.topology_discovery().merge_policy().emit_rail_switch_endpoints() : false;
 
   absl::flat_hash_map<std::string, LldpNicRecord> lldp_records;
   if (discovery_enabled) {
@@ -560,15 +551,13 @@ absl::StatusOr<HostTopologyBuildResult> build_topology_from_discovery_with_obser
     observability.affinity_nic_candidate_count = affinity_stats.nic_candidate_count;
     observability.affinity_nic_scored_count = affinity_stats.nic_scored_count;
     observability.affinity_nic_narrowed_count = affinity_stats.nic_narrowed_count;
-    const bool affinity_degraded =
-        affinity_stats.nic_candidate_count > 0 &&
+    const bool affinity_degraded = affinity_stats.nic_candidate_count > 0 &&
         (affinity_stats.nic_candidate_count > affinity_stats.nic_scored_count ||
          affinity_stats.gpu_candidate_count > affinity_stats.gpu_path_resolved_count);
     observability.affinity_degraded = affinity_degraded;
     if (affinity_degraded) {
       observability.affinity_degrade_reason = build_affinity_degrade_reason(affinity_stats);
-      LOG(WARNING) << "NIC-GPU affinity inference degraded: "
-                   << observability.affinity_degrade_reason;
+      LOG(WARNING) << "NIC-GPU affinity inference degraded: " << observability.affinity_degrade_reason;
     }
   }
 
@@ -642,14 +631,11 @@ absl::StatusOr<HostTopologyBuildResult> build_topology_from_discovery_with_obser
           if (nvlink_required) {
             return absl::Status(
                 snapshot_or.status().code(),
-                absl::StrCat(
-                    "failed to run required NVLINK runtime probe: ",
-                    snapshot_or.status().message()));
+                absl::StrCat("failed to run required NVLINK runtime probe: ", snapshot_or.status().message()));
           }
           observability.nvlink_degraded = true;
           observability.nvlink_degrade_reason = snapshot_or.status().ToString();
-          LOG(WARNING) << "NVLINK runtime probe unavailable, skipping NVLINK links: "
-                       << snapshot_or.status();
+          LOG(WARNING) << "NVLINK runtime probe unavailable, skipping NVLINK links: " << snapshot_or.status();
         } else {
           const NvlinkSnapshot& snapshot = snapshot_or.value();
           observability.nvlink_gpu_count = static_cast<int>(snapshot.gpus.size());
@@ -693,16 +679,10 @@ absl::StatusOr<HostTopologyBuildResult> build_topology_from_discovery_with_obser
 
   ValidationOptions validation;
   validation.require_endpoint_links = true;
-  validation.require_connected =
-      discovery_enabled
-          ? config.topology_discovery().merge_policy().require_connected()
-          : options.require_connected_when_discovery_disabled;
+  validation.require_connected = discovery_enabled ? config.topology_discovery().merge_policy().require_connected()
+                                                   : options.require_connected_when_discovery_disabled;
 
-  auto topology_or = Topology::Build(
-      std::move(baseline.pools),
-      std::move(endpoints),
-      std::move(links),
-      validation);
+  auto topology_or = Topology::Build(std::move(baseline.pools), std::move(endpoints), std::move(links), validation);
   if (!topology_or.ok()) {
     return topology_or.status();
   }

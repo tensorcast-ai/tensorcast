@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <string>
 
 #include "core/common/async_runtime.h"
 #include "core/store/components/global_store_client.h"
@@ -19,6 +20,7 @@
 #include "daemon/state/session_lifecycle.h"
 #include "daemon/state/sessions_service.h"
 #include "daemon/state/shutdown_signal.h"
+#include "daemon/state/worker_identity_store.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
 
 namespace tensorcast::daemon {
@@ -35,11 +37,15 @@ class ReplicaMaterializationService {
     ShutdownSignal& shutdown_signal;
     common::AsyncRuntime* async_runtime{nullptr};
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
+    WorkerIdentityStore* identity{nullptr};
     SessionLifecycleManager* lifecycle{nullptr};
     DerivedViewExportManager* derived_view_exports{nullptr};
     HandleLeaseRegistry* handle_leases{nullptr};
     bool cpu_shared_memory_enabled{true};
     DaemonOptions::PostSealPolicy post_seal_policy{};
+    DaemonOptions::ProgressiveReplication progressive_replication{};
+    std::string daemon_id;
+    std::string daemon_session_id;
     std::filesystem::path storage_path;
   };
 

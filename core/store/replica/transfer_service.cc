@@ -182,6 +182,16 @@ size_t TransferService::get_pool_chunk_size() const {
   return pinned_pool_->slice_bytes();
 }
 
+size_t TransferService::get_session_chunk_count(uint64_t total_bytes) const {
+  const size_t configured_chunks = std::max<size_t>(1, cfg_.streaming_buffer_chunks);
+  const size_t slice_bytes = get_pool_chunk_size();
+  if (slice_bytes == 0 || total_bytes == 0) {
+    return configured_chunks;
+  }
+  const uint64_t chunks_needed_u64 = (total_bytes + slice_bytes - 1) / slice_bytes;
+  return static_cast<size_t>(std::max<uint64_t>(1, std::min<uint64_t>(chunks_needed_u64, configured_chunks)));
+}
+
 absl::Status TransferService::copy_cpu_to_gpu_streaming(
     uint32_t device_id,
     gsl::not_null<void*> gpu_ptr,
@@ -199,8 +209,9 @@ absl::Status TransferService::copy_cpu_to_gpu_streaming(
   std::unique_ptr<GpuSchedHandle> sched = std::make_unique<GpuSchedHandle>(static_cast<int>(device_id));
   // Create a per-session streaming buffer backed by the shared pinned pool
   const size_t slice_bytes = get_pool_chunk_size();
+  const size_t session_chunks = get_session_chunk_count(total_bytes);
   auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
-      /*num_chunks=*/std::max<size_t>(1, cfg_.streaming_buffer_chunks), slice_bytes, pinned_pool_);
+      /*num_chunks=*/session_chunks, slice_bytes, pinned_pool_);
   auto init_status = session_spb->initialize(
       cfg_.pinned_memory_timeout,
       make_pinned_wait_context(
@@ -208,7 +219,7 @@ absl::Status TransferService::copy_cpu_to_gpu_streaming(
           replica_key_.artifact_id,
           std::nullopt,
           static_cast<int>(device_id),
-          std::max<size_t>(1, cfg_.streaming_buffer_chunks),
+          session_chunks,
           slice_bytes));
   if (!init_status.ok()) {
     return init_status;
@@ -399,17 +410,18 @@ absl::Status TransferService::load_from_source(
             slice_bytes,
             layout_chunk_size));
   }
+  auto ranges = build_ranges_(chunk_indices, layout_chunk_size, total_size);
+  uint64_t transfer_bytes = 0;
+  for (const auto& range : ranges) {
+    transfer_bytes += range.second;
+  }
+  const size_t session_chunks = get_session_chunk_count(transfer_bytes);
   auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
-      /*num_chunks=*/std::max<size_t>(1, cfg_.streaming_buffer_chunks), slice_bytes, pinned_pool_);
+      /*num_chunks=*/session_chunks, slice_bytes, pinned_pool_);
   auto init_status = session_spb->initialize(
       cfg_.pinned_memory_timeout,
       make_pinned_wait_context(
-          "load_from_source",
-          replica_key_.artifact_id,
-          std::nullopt,
-          device_id,
-          std::max<size_t>(1, cfg_.streaming_buffer_chunks),
-          slice_bytes));
+          "load_from_source", replica_key_.artifact_id, std::nullopt, device_id, session_chunks, slice_bytes));
   if (!init_status.ok()) {
     return init_status;
   }
@@ -420,7 +432,6 @@ absl::Status TransferService::load_from_source(
     return absl::FailedPreconditionError("Failed to construct sink for target location");
   }
 
-  auto ranges = build_ranges_(chunk_indices, layout_chunk_size, total_size);
   const auto start_tp = std::chrono::steady_clock::now();
   absl::Status pump_status =
       loader::pump_ranges(*source, *sink, adapter, absl::MakeSpan(ranges), concurrency, executor);
@@ -437,9 +448,7 @@ absl::Status TransferService::load_from_source(
   const auto end_tp = std::chrono::steady_clock::now();
   const uint64_t dur_ms =
       static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(end_tp - start_tp).count());
-  uint64_t total_bytes = 0;
-  for (const auto& r : ranges)
-    total_bytes += r.second;
+  uint64_t total_bytes = transfer_bytes;
   if (target_location == MemoryLocation::GPU && total_bytes > 0) {
     auto sync_status = synchronize_gpu_after_transfer(device_id, "TransferService::load_from_source", total_bytes);
     if (!sync_status.ok()) {
@@ -505,17 +514,17 @@ absl::Status TransferService::execute(
             slice_bytes,
             layout_chunk_size));
   }
+  uint64_t total_bytes = 0;
+  for (const auto& range : plan.ranges) {
+    total_bytes += range.second;
+  }
+  const size_t session_chunks = get_session_chunk_count(total_bytes);
   auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
-      /*num_chunks=*/std::max<size_t>(1, cfg_.streaming_buffer_chunks), slice_bytes, pinned_pool_);
+      /*num_chunks=*/session_chunks, slice_bytes, pinned_pool_);
   auto init_status = session_spb->initialize(
       cfg_.pinned_memory_timeout,
       make_pinned_wait_context(
-          "execute",
-          replica_key_.artifact_id,
-          plan.session_id,
-          device_id,
-          std::max<size_t>(1, cfg_.streaming_buffer_chunks),
-          slice_bytes));
+          "execute", replica_key_.artifact_id, plan.session_id, device_id, session_chunks, slice_bytes));
   if (!init_status.ok()) {
     return init_status;
   }
@@ -539,9 +548,6 @@ absl::Status TransferService::execute(
   const auto end_tp = std::chrono::steady_clock::now();
   const uint64_t dur_ms =
       static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(end_tp - start_tp).count());
-  uint64_t total_bytes = 0;
-  for (const auto& r : plan.ranges)
-    total_bytes += r.second;
   if (target_location == MemoryLocation::GPU && total_bytes > 0) {
     auto sync_status = synchronize_gpu_after_transfer(device_id, "TransferService::execute", total_bytes);
     if (!sync_status.ok()) {

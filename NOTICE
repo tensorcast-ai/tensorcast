@@ -1,0 +1,16 @@
+TensorCast
+
+TensorCast-owned code is licensed under MIT unless otherwise noted. Portions derived from ServerlessLLM remain licensed under Apache-2.0. Third-party dependencies are licensed under their respective licenses.
+
+Copyright (c) 2025-2026 TensorCast Team
+
+ServerlessLLM
+Copyright (c) ServerlessLLM Team 2024
+
+ServerlessLLM-derived TensorCast files retain the upstream Apache-2.0 header and
+include the modification statement:
+
+Modified by TensorCast Team, 2025-2026.
+
+See LICENSES/Apache-2.0.txt for the Apache-2.0 license text and
+THIRD_PARTY_NOTICES.md for third-party notices.

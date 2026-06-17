@@ -213,7 +213,9 @@ TEST_CASE("Streaming Disk Load to GPU", "[replica][disk][streaming]") {
   REQUIRE(replica->get_memory_state(MemoryLocation::GPU) <= MemoryState::UNALLOCATED);
   auto fut = replica->ensure_loaded_async(MemoryLocation::GPU);
   REQUIRE(fut.valid());
-  replica->wait_until_loaded(MemoryLocation::GPU, absl::Seconds(30)).IgnoreError();
+  absl::Status load_status = std::move(fut).get();
+  REQUIRE(load_status.ok());
+  REQUIRE(replica->wait_until_loaded(MemoryLocation::GPU, absl::Seconds(30)).ok());
   REQUIRE(replica->get_memory_state(MemoryLocation::GPU) == MemoryState::LOADED);
 
   // Get GPU data pointer and copy back

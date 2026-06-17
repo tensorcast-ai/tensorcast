@@ -1,5 +1,6 @@
 #  Copyright (c) 2025, TensorCast Team.
 
+import os
 import time
 
 import torch
@@ -9,7 +10,7 @@ import tensorcast as tc
 from tensorcast import PlanType, RegisterArtifactOptions
 from tensorcast.testing.dict import assert_state_dict_equal
 
-hf_model_name = "Qwen/Qwen3-0.6B"
+hf_model_name = os.environ.get("TENSORCAST_EXAMPLE_HF_MODEL", "sshleifer/tiny-gpt2")
 
 model = AutoModelForCausalLM.from_pretrained(
     hf_model_name,

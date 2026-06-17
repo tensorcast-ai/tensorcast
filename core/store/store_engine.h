@@ -29,6 +29,7 @@
 #include "core/store/runtime/context/runtime_context_events.h"
 #include "core/store/runtime/ingestion/artifact_lowering_plan.h"
 #include "core/store/runtime/ingestion/ingestion_runtime.h"
+#include "core/store/runtime/ingestion/materialization_strategy_types.h"
 #include "core/store/runtime/metadata/metadata_gateway.h"
 #include "core/store/runtime/metadata/metadata_types.h"
 #include "core/store/runtime/replica/replica_info.h"
@@ -53,6 +54,12 @@ class StoreEngine {
   using ReplicaInfo = runtime::ReplicaInfo;
   using ReplicaInventoryEntry = runtime::ReplicaInventoryEntry;
   using ReplicaPublishState = runtime::ReplicaPublishState;
+
+  struct ReplicaBasePointer {
+    void* ptr{nullptr};
+    common::memory::MemoryLocation location{common::memory::MemoryLocation::CPU};
+    int device_id{-1};
+  };
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Construction and Initialization
@@ -95,31 +102,32 @@ class StoreEngine {
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
       const DeviceKey& target_device,
-      const loading::IntoTargetLayout& target_layout,
-      const loader::ByteRangeMap& mapping,
-      std::string_view canonical_index_json,
-      uint64_t generation,
+      const runtime::ingestion::strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
       const loading::MaterializeHints& hints,
       std::optional<loading::DiskSource> disk_source);
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
       const DeviceKey& target_device,
-      const loading::IntoTargetLayout& target_layout,
-      const loader::ByteRangeMap& mapping,
-      std::string_view canonical_index_json,
-      uint64_t generation,
+      const runtime::ingestion::strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
       const loading::MaterializeHints& hints = {});
-
-  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_loader_into_target(
+  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_sources_into_target(
       const DeviceKey& target_device,
       const loading::IntoTargetLayout& target_layout,
-      std::unique_ptr<IArtifactLoader> loader,
+      std::vector<std::shared_ptr<loader::SeekableSource>> sources,
       const loader::ByteRangeMap& mapping,
       const loading::MaterializeHints& hints,
       loading::MaterializationSource source_kind = loading::MaterializationSource::kLocalReplica);
 
   absl::StatusOr<runtime::ingestion::ArtifactLoweringResult> execute_artifact_lowering_plan(
       runtime::ingestion::ArtifactLoweringPlan plan);
+
+  [[nodiscard]] runtime::IngestionRuntime& ingestion_runtime() {
+    return *ingestion_runtime_;
+  }
+
+  [[nodiscard]] const runtime::IngestionRuntime& ingestion_runtime() const {
+    return *ingestion_runtime_;
+  }
 
   absl::StatusOr<loading::ReplicaHandle> materialize_view_from_assembly(
       std::string_view assembly_id,
@@ -387,6 +395,7 @@ class StoreEngine {
       std::string_view new_artifact_id,
       std::optional<std::string_view> expected_artifact_id = std::nullopt,
       std::optional<uint64_t> expected_generation = std::nullopt);
+  absl::StatusOr<tensorcast::common::v1::ArtifactDescriptor> get_artifact_descriptor(std::string_view artifact_id);
   absl::StatusOr<std::string> get_canonical_index_by_id(std::string_view artifact_id);
   absl::StatusOr<components::ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id);
   absl::Status revoke_key_mapping(std::string_view key);
@@ -442,6 +451,11 @@ class StoreEngine {
 
   // Returns base pointer for the CPU replica if loaded.
   [[nodiscard]] absl::StatusOr<void*> get_replica_cpu_base_ptr(std::string_view artifact_id) const;
+
+  // Returns a loaded CPU or GPU base pointer for a replica of this artifact.
+  // CPU is preferred so disk persistence can stay on the host fast path when
+  // a stable DRAM copy is already resident.
+  [[nodiscard]] absl::StatusOr<ReplicaBasePointer> get_loaded_replica_base_ptr(std::string_view artifact_id) const;
 
   // VS chunk locking APIs have been removed in UMA V3 final state.
 

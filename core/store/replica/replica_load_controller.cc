@@ -31,11 +31,11 @@
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/communicator/engine/engine.h"
 #include "core/cuda/cuda_api.h"
-#include "core/store/device_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/dataplane/sources/multi_safetensors_source.h"
 #include "core/store/replica/collective_disk_loader.h"
 #include "core/store/replica/memory_export_registry.h"
+#include "core/store/replica/replica_placement.h"
 #include "core/store/replica/transfer_service.h"
 #include "core/store/replica/types/direct_write_grant.h"
 #include "gsl/pointers"
@@ -48,17 +48,6 @@ using common::memory::PinnedBufferPool;
 using loading::ReplicaKey;
 
 namespace {
-
-DeviceKey normalize_device_key(DeviceKey key) {
-  if (key.type == DeviceType::GPU) {
-    key.ordinal = (key.ordinal >= 0) ? key.ordinal : 0;
-    return DeviceRegistry::instance().normalize(key);
-  }
-  key.type = DeviceType::CPU;
-  key.ordinal = -1;
-  key.uuid.clear();
-  return key;
-}
 
 struct GpuTransferGateState {
   bool active{false};
@@ -119,6 +108,25 @@ class GpuTransferGateLease {
   int device_id_{-1};
 };
 
+std::string format_strategy_candidates(
+    const std::vector<runtime::ingestion::strategy::ExecutionStrategyCandidate>& candidates) {
+  std::string out;
+  for (size_t index = 0; index < candidates.size(); ++index) {
+    const auto& candidate = candidates[index];
+    if (index > 0) {
+      out.append(" | ");
+    }
+    absl::StrAppend(
+        &out,
+        runtime::ingestion::strategy::execution_strategy_executor_name(candidate.executor),
+        ":eligible=",
+        candidate.eligible ? 1 : 0,
+        ":reason=",
+        candidate.reason);
+  }
+  return out;
+}
+
 } // namespace
 
 // V3 final cutover: plan/execute/commit path is always enabled (no flags)
@@ -155,7 +163,7 @@ ReplicaLoadController::ReplicaLoadController(
               ReplicaKey{
                   .artifact_id = artifact_identifier,
                   .view_id = view_id,
-                  .device = normalize_device_key(device_key),
+                  .device = normalize_replica_device_key(device_key),
                   .replica = 0},
               TransferService::Config{
                   .max_buffer_bytes = max_buffer_bytes_,
@@ -165,7 +173,7 @@ ReplicaLoadController::ReplicaLoadController(
           std::make_shared<MemoryExportRegistry>(
               gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>>{memory_coordinator_})) {
   // Populate replica_key_ using constructor inputs
-  const DeviceKey normalized_device = normalize_device_key(device_key);
+  const DeviceKey normalized_device = normalize_replica_device_key(device_key);
   replica_key_.artifact_id = std::move(artifact_identifier);
   replica_key_.view_id = std::move(view_id);
   replica_key_.device = normalized_device;
@@ -187,7 +195,7 @@ ReplicaLoadController::ReplicaLoadController(
   }
 
   // Initialise CUDA context and non-blocking stream if a valid device id was provided at construction.
-  if (replica_key_.device.ordinal >= 0) {
+  if (replica_key_.device.type == DeviceType::GPU && replica_key_.device.ordinal >= 0) {
     absl::MutexLock lock(&mutex_);
     auto stream_status = ensure_gpu_stream_initialized_locked_();
     if (!stream_status.ok()) {
@@ -1356,7 +1364,9 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
     int concurrency,
     std::optional<absl::Span<const uint32_t>> chunk_indices,
     std::function<absl::Status()> post_load_fn,
-    std::optional<CollectiveDiskLoadInput> collective_disk_load) {
+    std::optional<runtime::ingestion::strategy::ExecutionStrategyPlan> execution_strategy_plan,
+    std::optional<CollectiveDiskLoadInput> collective_disk_load,
+    std::optional<LocalBatchedDiskLoadInput> local_batched_disk_load) {
   // Phase 1: capture state under lock and ensure allocation + LOADING
   bool need_allocate = false;
   {
@@ -1407,7 +1417,9 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
            concurrency,
            chunk_indices,
            post_load_fn = std::move(post_load_fn),
+           execution_strategy_plan = std::move(execution_strategy_plan),
            collective_disk_load = std::move(collective_disk_load),
+           local_batched_disk_load = std::move(local_batched_disk_load),
            local_device_id](auto&&) mutable -> absl::Status {
             std::optional<GpuTransferGateLease> lease;
             if (target_location == MemoryLocation::GPU && local_device_id >= 0) {
@@ -1464,16 +1476,32 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
                         << "): plan ranges device=" << device_id << " target=" << static_cast<int>(target_location)
                         << " ranges=" << range_str;
             }
+            const std::string requested_executor = execution_strategy_plan.has_value()
+                ? std::string(
+                      runtime::ingestion::strategy::execution_strategy_executor_name(execution_strategy_plan->executor))
+                : (collective_disk_load.has_value()
+                       ? "OwnerFileCollectiveExecutor"
+                       : (local_batched_disk_load.has_value() ? "TensorBatchedLocalExecutor"
+                                                              : "GenericByteRangeExecutor"));
+            if (execution_strategy_plan.has_value()) {
+              LOG(INFO) << "ReplicaLoadController(" << self->replica_key_.artifact_id << "): execution_strategy_plan"
+                        << " executor=" << requested_executor
+                        << " selection_reason=" << execution_strategy_plan->selection_reason
+                        << " candidates=" << format_strategy_candidates(execution_strategy_plan->candidates);
+            }
             absl::Status exec_status;
+            std::string actual_executor = requested_executor;
+            std::string runtime_fallback_reason;
+            runtime::ingestion::strategy::CollectiveExecutionMetrics collective_metrics;
+            auto transfer_fanout_executor = self->async_runtime_->cpu_executor();
             if (collective_disk_load.has_value()) {
               auto collective_result = try_collective_disk_load(
                   CollectiveDiskLoadRequest{
                       .replica_key = self->replica_key_,
                       .group = collective_disk_load->group,
                       .disk_context = collective_disk_load->disk_context,
-                      .source_index_json = collective_disk_load->source_index_json,
-                      .view_index_json = collective_disk_load->view_index_json,
-                      .variant_identity = collective_disk_load->variant_identity,
+                      .representation_work_plan = collective_disk_load->representation_work_plan,
+                      .strategy_config = collective_disk_load->materialization_strategy,
                       .gpu_ptr = gpu_ptr,
                       .device_id = device_id,
                       .gpu_allocation = gpu_allocation,
@@ -1482,16 +1510,42 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
                   self->pinned_memory_timeout_);
               if (collective_result.handled) {
                 exec_status = collective_result.status;
+                collective_metrics = collective_result.metrics;
               } else {
+                actual_executor = "GenericByteRangeExecutor";
+                runtime_fallback_reason =
+                    collective_result.skip_reason.empty() ? "collective_not_handled" : collective_result.skip_reason;
                 exec_status = self->transfer_service_->execute(
                     plan,
                     target_location,
                     *source,
                     concurrency,
-                    self->async_runtime_->blocking_executor(),
+                    transfer_fanout_executor.copy(),
                     gpu_ptr,
                     gpu_allocation,
                     device_id);
+              }
+            } else if (local_batched_disk_load.has_value()) {
+              auto local_result = try_local_batched_disk_load(
+                  LocalBatchedDiskLoadRequest{
+                      .replica_key = self->replica_key_,
+                      .disk_context = local_batched_disk_load->disk_context,
+                      .representation_work_plan = local_batched_disk_load->representation_work_plan,
+                      .strategy_config = local_batched_disk_load->materialization_strategy,
+                      .gpu_ptr = gpu_ptr,
+                      .device_id = device_id,
+                      .gpu_allocation = gpu_allocation,
+                  },
+                  self->pinned_pool_,
+                  self->pinned_memory_timeout_);
+              if (local_result.handled) {
+                exec_status = local_result.status;
+              } else {
+                runtime_fallback_reason =
+                    local_result.skip_reason.empty() ? "local_batched_not_handled" : local_result.skip_reason;
+                exec_status = absl::FailedPreconditionError(
+                    absl::StrCat(
+                        "selected local batched executor was not admitted at runtime: ", runtime_fallback_reason));
               }
             } else {
               exec_status = self->transfer_service_->execute(
@@ -1499,7 +1553,7 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
                   target_location,
                   *source,
                   concurrency,
-                  self->async_runtime_->blocking_executor(),
+                  transfer_fanout_executor.copy(),
                   gpu_ptr,
                   gpu_allocation,
                   device_id);
@@ -1549,7 +1603,46 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
             }
             // Facade state LOADED
             LOG(INFO) << "ReplicaLoadController(" << self->replica_key_.artifact_id << "): setting final LOADED state";
-            return self->set_state(target_location, MemoryState::LOADED);
+            absl::Status final_state = self->set_state(target_location, MemoryState::LOADED);
+            if (!final_state.ok()) {
+              return final_state;
+            }
+            runtime::ingestion::strategy::ExecutionCommitReport commit_report;
+            commit_report.source = (execution_strategy_plan.has_value() || collective_disk_load.has_value() ||
+                                    local_batched_disk_load.has_value())
+                ? loading::MaterializationSource::kDisk
+                : loading::MaterializationSource::kUnspecified;
+            commit_report.requested_bytes =
+                execution_strategy_plan.has_value() && execution_strategy_plan->environment.requested_bytes > 0
+                ? execution_strategy_plan->environment.requested_bytes
+                : self->artifact_size_;
+            commit_report.committed_bytes = commit_report.requested_bytes;
+            commit_report.fallback_bytes =
+                actual_executor == "GenericByteRangeExecutor" ? commit_report.requested_bytes : 0;
+            commit_report.residual_bytes = execution_strategy_plan.has_value()
+                ? execution_strategy_plan->environment.residual_bytes
+                : commit_report.fallback_bytes;
+            if (actual_executor == "GenericByteRangeExecutor") {
+              commit_report.residual_bytes = commit_report.fallback_bytes;
+            }
+            commit_report.collective_handled = actual_executor == "OwnerFileCollectiveExecutor";
+            commit_report.collective_metrics = collective_metrics;
+            commit_report.dominant_executor = actual_executor;
+            commit_report.selection_reason = execution_strategy_plan.has_value()
+                ? execution_strategy_plan->selection_reason
+                : std::string("replica_executor_dispatch");
+            if (!runtime_fallback_reason.empty()) {
+              absl::StrAppend(&commit_report.selection_reason, ";runtime_fallback=", runtime_fallback_reason);
+            }
+            LOG(INFO) << "ReplicaLoadController(" << self->replica_key_.artifact_id << "): execution_commit"
+                      << " requested_executor=" << requested_executor
+                      << " actual_executor=" << commit_report.dominant_executor
+                      << " requested_bytes=" << commit_report.requested_bytes
+                      << " committed_bytes=" << commit_report.committed_bytes
+                      << " fallback_bytes=" << commit_report.fallback_bytes
+                      << " residual_bytes=" << commit_report.residual_bytes
+                      << " selection_reason=" << commit_report.selection_reason;
+            return final_state;
           })
       .semi();
 }

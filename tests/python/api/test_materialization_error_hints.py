@@ -9,15 +9,25 @@ from tensorcast.api.store.retry import (
 
 
 class _DummyRpcError(grpc.RpcError):
-    def __init__(self, code: grpc.StatusCode, details: str) -> None:
+    def __init__(
+        self,
+        code: grpc.StatusCode,
+        details: str,
+        *,
+        trailing_metadata: tuple[tuple[str, str], ...] = (),
+    ) -> None:
         self._code = code
         self._details = details
+        self._trailing_metadata = trailing_metadata
 
     def code(self) -> grpc.StatusCode:
         return self._code
 
     def details(self) -> str:
         return self._details
+
+    def trailing_metadata(self) -> tuple[tuple[str, str], ...]:
+        return self._trailing_metadata
 
 
 def test_materialization_error_global_store_not_connected_adds_hint() -> None:
@@ -66,3 +76,18 @@ def test_materialization_runtime_error_transport_timeout_is_retryable() -> None:
     assert mapped.status_code == "UNAVAILABLE"
     assert mapped.retryable is True
     assert retry_reason_bucket(mapped) in {"transport_unavailable", "unavailable"}
+
+
+def test_materialization_error_extracts_collective_failure_class_from_metadata() -> (
+    None
+):
+    err = _DummyRpcError(
+        grpc.StatusCode.FAILED_PRECONDITION,
+        "collective execution failed",
+        trailing_metadata=(("tc.collective_failure_class", "execution_failed"),),
+    )
+    mapped = map_materialization_error(err)
+    assert mapped.status_code == "FAILED_PRECONDITION"
+    assert mapped.retryable is False
+    assert mapped.collective_failure_class == "execution_failed"
+    assert "tc.collective_failure_class" not in str(mapped)

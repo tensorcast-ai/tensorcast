@@ -5,9 +5,11 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
 #include "core/common/async_runtime.h"
@@ -71,7 +73,12 @@ class MaterializationController {
     bool cpu_shared_memory_enabled{true};
     bool external_target_verification_enabled{false};
     std::filesystem::path storage_path;
+    DaemonOptions::PublicDiskSourcePolicy public_disk_source_policy{};
     DaemonOptions::PostSealPolicy post_seal_policy{};
+    DaemonOptions::ServingPrefetch serving_prefetch{};
+    DaemonOptions::ProgressiveReplication progressive_replication{};
+    std::string daemon_id;
+    std::function<absl::Status()> await_state_sync_barrier;
   };
 
   explicit MaterializationController(Dep d);
@@ -96,6 +103,16 @@ class MaterializationController {
       const v2::CreateOwnedBindingRequest& req,
       v2::CreateOwnedBindingResponse& resp);
 
+  grpc::Status prefetch_serving_binding(
+      RpcContext& rctx,
+      const v2::PrefetchServingBindingRequest& req,
+      v2::PrefetchServingBindingResponse& resp);
+
+  grpc::Status acquire_binding_value(
+      RpcContext& rctx,
+      const v2::AcquireBindingValueRequest& req,
+      v2::AcquireBindingValueResponse& resp);
+
   grpc::Status create_binding(RpcContext& rctx, const v2::CreateBindingRequest& req, v2::CreateBindingResponse& resp);
 
   grpc::Status commit_binding_artifact(
@@ -113,7 +130,27 @@ class MaterializationController {
       const v2::SubmitBindingContributionRequest& req,
       v2::SubmitBindingContributionResponse& resp);
 
+  grpc::Status freeze_binding_current_value(
+      RpcContext& rctx,
+      const v2::FreezeBindingCurrentValueRequest& req,
+      v2::FreezeBindingCurrentValueResponse& resp);
+
   grpc::Status seal_binding(RpcContext& rctx, const v2::SealBindingRequest& req, v2::SealBindingResponse& resp);
+
+  grpc::Status promote_binding_current_value(
+      RpcContext& rctx,
+      const v2::PromoteBindingCurrentValueRequest& req,
+      v2::PromoteBindingCurrentValueResponse& resp);
+
+  grpc::Status start_promote_binding_current_value(
+      RpcContext& rctx,
+      const v2::StartPromoteBindingCurrentValueRequest& req,
+      v2::StartPromoteBindingCurrentValueResponse& resp);
+
+  grpc::Status get_binding_promotion_status(
+      RpcContext& rctx,
+      const v2::GetBindingPromotionStatusRequest& req,
+      v2::GetBindingPromotionStatusResponse& resp);
 
   grpc::Status refill_owned_binding(
       RpcContext& rctx,
@@ -134,6 +171,11 @@ class MaterializationController {
       RpcContext& rctx,
       const v2::PublishTargetReplicaRequest& req,
       v2::StartPublishTargetReplicaResponse& resp);
+
+  [[nodiscard]] absl::Status terminalize_target_publication(
+      std::string_view publication_id,
+      std::string_view reason,
+      bool release_published_lifecycle_lease);
 
   [[nodiscard]] absl::StatusOr<TargetPublishService::TargetPublicationFrontDoorContext>
   inspect_target_publication_context_for_testing(const v2::PublishTargetReplicaRequest& req, absl::Time now);
@@ -156,6 +198,16 @@ class MaterializationController {
       const v2::ImportArtifactFromPathRequest& req,
       v2::ImportArtifactFromPathResponse& resp);
 
+  grpc::Status resolve_public_disk_source(
+      RpcContext& rctx,
+      const v2::ResolvePublicDiskSourceRequest& req,
+      v2::ResolvePublicDiskSourceResponse& resp);
+
+  grpc::Status promote_mounted_source_artifact(
+      RpcContext& rctx,
+      const v2::PromoteMountedSourceArtifactRequest& req,
+      v2::PromoteMountedSourceArtifactResponse& resp);
+
   grpc::Status import_artifact_from_path_stream(
       RpcContext& rctx,
       const v2::ImportArtifactFromPathRequest& req,
@@ -165,6 +217,16 @@ class MaterializationController {
       RpcContext& rctx,
       const v2::GetArtifactIndexByIdRequest& req,
       v2::GetArtifactIndexByIdResponse& resp);
+
+  grpc::Status list_artifact_layouts(
+      RpcContext& rctx,
+      const v2::ListArtifactLayoutsRequest& req,
+      v2::ListArtifactLayoutsResponse& resp);
+
+  grpc::Status ensure_canonical_layout(
+      RpcContext& rctx,
+      const v2::EnsureCanonicalLayoutRequest& req,
+      v2::EnsureCanonicalLayoutResponse& resp);
 
   grpc::Status seal_assembly(RpcContext& rctx, const v2::SealAssemblyRequest& req, v2::SealAssemblyResponse& resp);
 
@@ -206,6 +268,11 @@ class MaterializationController {
  private:
   std::shared_ptr<store::components::IGlobalStoreClient> global_store_client_;
   ShutdownSignal* shutdown_signal_{nullptr};
+  BindingRegistry* binding_registry_{nullptr};
+  HandleLeaseRegistry* handle_leases_{nullptr};
+  DaemonOptions::ServingPrefetch serving_prefetch_;
+  std::string daemon_id_;
+  std::string daemon_session_id_;
   AssemblyOperationService assembly_operation_service_;
   DiskArtifactService disk_artifact_service_;
   ReplicaMaterializationService replica_materialization_service_;

@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "absl/status/status.h"
+#include "core/store/materialization/dataplane/metadata/index_reader.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "core/store/testing/global_store_client_stub.h"
@@ -34,7 +35,7 @@ tensorcast::store::StoreEngineOptions make_opts() {
   tensorcast::store::StoreEngineOptions opts;
   opts.storage_path = (test_tmpdir() / "engine").string();
   std::filesystem::create_directories(opts.storage_path);
-  opts.p2p_port = 47022;
+  opts.p2p_port = 0;
   opts.memory_pool_size = 32ULL << 20;
   opts.tx_slice_bytes = 1ULL << 20;
   opts.num_thread = 2;
@@ -50,12 +51,19 @@ std::string read_artifact_id(const std::filesystem::path& artifact_dir) {
   return j.at("artifact_id").get<std::string>();
 }
 
+std::string read_canonical_index_json(const std::filesystem::path& artifact_dir) {
+  auto index_or = tensorcast::store::loader::read_from_artifact_dir(artifact_dir, /*target_device_id=*/0);
+  REQUIRE(index_or.ok());
+  return index_or->canonical_index_json;
+}
+
 class NoLeaseKeyMappingGlobalStoreClient final : public tensorcast::store::testing::GlobalStoreClientStub {
  public:
   bool connected{true};
   std::string cluster_id{"cluster-test"};
   std::unordered_map<std::string, std::string> key_to_artifact;
   std::vector<tensorcast::store::components::ArtifactDiskLocation> disk_locations;
+  std::optional<std::string> canonical_index_json;
   int list_locations_calls{0};
 
   bool is_connected() const override {
@@ -99,6 +107,13 @@ class NoLeaseKeyMappingGlobalStoreClient final : public tensorcast::store::testi
     }
     return out;
   }
+
+  absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view) override {
+    if (canonical_index_json.has_value()) {
+      return *canonical_index_json;
+    }
+    return absl::NotFoundError("canonical index not found");
+  }
 };
 
 } // namespace
@@ -114,6 +129,7 @@ TEST_CASE("lease_mode=NO_LEASE omits mem_handle and skips PID guards", "[daemon]
   REQUIRE(tensorcast::testing::create_dummy_file(data_path, 64));
   REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
   const std::string artifact_id = read_artifact_id(artifact_dir);
+  gs_client->canonical_index_json = read_canonical_index_json(artifact_dir);
   tensorcast::store::components::ArtifactDiskLocation loc;
   loc.artifact_id = artifact_id;
   loc.cluster_id = gs_client->cluster_id;
@@ -140,7 +156,8 @@ TEST_CASE("lease_mode=NO_LEASE omits mem_handle and skips PID guards", "[daemon]
     tensorcast::daemon::v2::MaterializeReplicaRequest req;
     req.mutable_selection()->set_artifact_id(artifact_id);
     req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
-    req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+    req.mutable_source_policy()->set_preference(
+        tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
     req.set_wait_for_completion(true);
     req.set_pid(pid);
     req.set_replica_uuid("op-no-lease");
@@ -157,7 +174,8 @@ TEST_CASE("lease_mode=NO_LEASE omits mem_handle and skips PID guards", "[daemon]
     tensorcast::daemon::v2::MaterializeReplicaRequest req;
     req.mutable_selection()->set_artifact_id(artifact_id);
     req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
-    req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+    req.mutable_source_policy()->set_preference(
+        tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
     req.set_wait_for_completion(false);
     req.set_pid(pid);
     req.set_replica_uuid("op-no-lease");
@@ -186,6 +204,7 @@ TEST_CASE("MaterializeReplica honors NO_LEASE semantics", "[daemon][materialize]
   REQUIRE(tensorcast::testing::create_dummy_file(data_path, 64));
   REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
   const std::string artifact_id = read_artifact_id(artifact_dir);
+  gs_client->canonical_index_json = read_canonical_index_json(artifact_dir);
   tensorcast::store::components::ArtifactDiskLocation loc;
   loc.artifact_id = artifact_id;
   loc.cluster_id = gs_client->cluster_id;
@@ -210,7 +229,8 @@ TEST_CASE("MaterializeReplica honors NO_LEASE semantics", "[daemon][materialize]
     tensorcast::daemon::v2::MaterializeReplicaRequest req;
     req.mutable_selection()->set_artifact_id(artifact_id);
     req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
-    req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+    req.mutable_source_policy()->set_preference(
+        tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
     req.set_wait_for_completion(true);
     req.set_replica_uuid("op-by-key-no-lease");
     req.set_pid(0);
@@ -226,7 +246,8 @@ TEST_CASE("MaterializeReplica honors NO_LEASE semantics", "[daemon][materialize]
     tensorcast::daemon::v2::MaterializeReplicaRequest req;
     req.mutable_selection()->set_artifact_id(artifact_id);
     req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
-    req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+    req.mutable_source_policy()->set_preference(
+        tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
     req.set_wait_for_completion(false);
     req.set_replica_uuid("op-by-key-no-lease");
     req.set_pid(0);
@@ -253,6 +274,7 @@ TEST_CASE("MaterializeReplica short-circuits local cache before disk resolution"
   REQUIRE(tensorcast::testing::create_dummy_file(data_path, 64));
   REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
   const std::string artifact_id = read_artifact_id(artifact_dir);
+  gs_client->canonical_index_json = read_canonical_index_json(artifact_dir);
   tensorcast::store::components::ArtifactDiskLocation loc;
   loc.artifact_id = artifact_id;
   loc.cluster_id = gs_client->cluster_id;
@@ -276,7 +298,7 @@ TEST_CASE("MaterializeReplica short-circuits local cache before disk resolution"
   tensorcast::daemon::v2::MaterializeReplicaRequest req;
   req.mutable_selection()->set_artifact_id(artifact_id);
   req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
-  req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_AUTO);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_AUTO);
   req.set_wait_for_completion(true);
   req.set_pid(static_cast<int>(::getpid()));
   req.set_replica_uuid("op-local-short-1");

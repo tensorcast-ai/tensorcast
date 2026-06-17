@@ -3,6 +3,8 @@ syntax = "proto3";
 package tensorcast.plan.v1;
 
 import "tensorcast/common/v1/common.proto";
+import "tensorcast/operation/v1/operation.proto";
+import "tensorcast/publication/v1/publication.proto";
 
 message CallContext {
   string request_id = 1;
@@ -101,6 +103,12 @@ message TargetRef {
 message PrefetchAction {
   tensorcast.common.v1.ArtifactSelection selection = 1;
   int32 device_id = 2;
+  oneof serving_target {
+    tensorcast.operation.v1.ServingBindingTarget serving_binding_target = 10;
+    tensorcast.operation.v1.ServingBindingSetTarget serving_binding_set_target = 11;
+  }
+  tensorcast.operation.v1.ServingBindingReadiness requested_readiness = 12;
+  tensorcast.operation.v1.PrefetchRetentionPolicy retention_policy = 13;
 }
 
 message ArtifactSetRef {
@@ -116,6 +124,33 @@ message ManifestArtifactSetBridge {
   uint32 bridge_version = 2;
   ArtifactSetRef artifact_set_ref = 3;
   repeated tensorcast.common.v1.ArtifactSelection resolved_items = 4;
+}
+
+message ArtifactManifest {
+  string engine_request_id = 1;
+  string layout_id = 2;
+  repeated string artifact_ids = 3;
+  string key_set_digest_alg = 4;
+  string key_set_digest_hex = 5;
+  ManifestArtifactSetBridge manifest_bridge = 6;
+}
+
+message EngineOwnedManifest {
+  string engine = 1;
+  string schema = 2;
+  uint32 version = 3;
+  string encoding = 4;
+  uint64 created_at_ms = 5;
+  optional uint64 expires_at_ms = 6;
+  string artifact_manifest_digest = 7;
+  optional string payload_sha256 = 8;
+  bytes payload = 9;
+}
+
+message PublishManifest {
+  string schema = 1;
+  ArtifactManifest artifact_manifest = 2;
+  EngineOwnedManifest engine_owned_manifest = 3;
 }
 
 message PrefetchSetAction {
@@ -147,6 +182,7 @@ message TransformSpec {
   string name = 1;
   repeated TransformArg args = 2;
   string layout_hash = 3;
+  tensorcast.publication.v1.PureTransformPublicationSpec publication_spec = 4;
 }
 
 message TargetSpec {
@@ -185,9 +221,12 @@ message PublishAction {
 }
 
 message HydrateAction {
-  // Engine-local correlation handle for adapter inspection.
-  // This is compatibility context, not framework artifact or set identity.
-  string engine_request_id = 1;
+  oneof request_source {
+    // Engine-local correlation handle for adapter inspection.
+    // This is compatibility context, not framework artifact or set identity.
+    string engine_request_id = 1;
+    PublishManifest publish_manifest = 2;
+  }
 }
 
 message EvictLocalAction {

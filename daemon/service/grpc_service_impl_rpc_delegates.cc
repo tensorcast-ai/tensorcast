@@ -2,10 +2,96 @@
 
 #include "daemon/service/grpc_service_impl.h"
 
+#include <string>
+
+#include "daemon/util/status_utils.h"
+#include "tensorcast/global_store/v1/global_store.pb.h"
+
 namespace tensorcast::daemon {
 
 using ::grpc::Status;
 using ::grpc::StatusCode;
+using status_utils::to_grpc_status;
+
+namespace {
+
+namespace global_store = ::tensorcast::global_store::v1;
+
+global_store::GroupRealizationKind to_global_kind(const v2::GroupRealizationKind kind) {
+  switch (kind) {
+    case v2::GROUP_REALIZATION_KIND_SAME_SELECTION:
+      return global_store::GROUP_REALIZATION_KIND_SAME_SELECTION;
+    case v2::GROUP_REALIZATION_KIND_PER_PART_SELECTION:
+      return global_store::GROUP_REALIZATION_KIND_PER_PART_SELECTION;
+    case v2::GROUP_REALIZATION_KIND_UNSPECIFIED:
+    default:
+      return global_store::GROUP_REALIZATION_KIND_UNSPECIFIED;
+  }
+}
+
+v2::GroupRealizationKind to_daemon_kind(const global_store::GroupRealizationKind kind) {
+  switch (kind) {
+    case global_store::GROUP_REALIZATION_KIND_SAME_SELECTION:
+      return v2::GROUP_REALIZATION_KIND_SAME_SELECTION;
+    case global_store::GROUP_REALIZATION_KIND_PER_PART_SELECTION:
+      return v2::GROUP_REALIZATION_KIND_PER_PART_SELECTION;
+    case global_store::GROUP_REALIZATION_KIND_UNSPECIFIED:
+    default:
+      return v2::GROUP_REALIZATION_KIND_UNSPECIFIED;
+  }
+}
+
+grpc::Status group_registration_status_to_grpc(const global_store::Status status) {
+  if (status == global_store::STATUS_OK) {
+    return grpc::Status::OK;
+  }
+  const std::string status_name = global_store::Status_Name(status);
+  const std::string message = status_name.empty() ? "RegisterGroupVersionSet failed" : status_name;
+  switch (status) {
+    case global_store::STATUS_NOT_FOUND:
+      return {StatusCode::NOT_FOUND, message};
+    case global_store::STATUS_TIMED_OUT:
+      return {StatusCode::DEADLINE_EXCEEDED, message};
+    case global_store::STATUS_TOO_MANY_REQUESTS:
+      return {StatusCode::RESOURCE_EXHAUSTED, message};
+    case global_store::STATUS_STATE_SYNC_REQUIRED:
+      return {StatusCode::FAILED_PRECONDITION, message};
+    case global_store::STATUS_ERROR:
+    case global_store::STATUS_UNSPECIFIED:
+    default:
+      return {StatusCode::UNKNOWN, message};
+  }
+}
+
+void copy_group_version_set_ref(const global_store::GroupVersionSetRef& source, v2::GroupVersionSetRef* destination) {
+  destination->set_version_set_id(source.version_set_id());
+  destination->set_manifest_hash(source.manifest_hash());
+  destination->set_manifest_generation(source.manifest_generation());
+}
+
+void copy_group_version_set_part(
+    const global_store::GroupVersionSetPart& source,
+    v2::GroupVersionSetPart* destination) {
+  destination->set_part_id(source.part_id());
+  destination->mutable_selection()->CopyFrom(source.selection());
+  destination->mutable_requested_byte_space()->CopyFrom(source.requested_byte_space());
+  destination->set_selection_hash(source.selection_hash());
+  destination->set_logical_layout_hash(source.logical_layout_hash());
+  destination->set_part_metadata_json(source.part_metadata_json());
+}
+
+void copy_group_version_set_part(
+    const v2::GroupVersionSetPart& source,
+    global_store::GroupVersionSetPart* destination) {
+  destination->set_part_id(source.part_id());
+  destination->mutable_selection()->CopyFrom(source.selection());
+  destination->mutable_requested_byte_space()->CopyFrom(source.requested_byte_space());
+  destination->set_selection_hash(source.selection_hash());
+  destination->set_logical_layout_hash(source.logical_layout_hash());
+  destination->set_part_metadata_json(source.part_metadata_json());
+}
+
+} // namespace
 
 Status StoreDaemonServiceImpl::MaterializeReplica(
     grpc::ServerContext* ctx,
@@ -51,6 +137,84 @@ Status StoreDaemonServiceImpl::CreateOwnedBinding(
   return materialization_controller_->create_owned_binding(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::PrefetchServingBinding(
+    grpc::ServerContext* ctx,
+    const v2::PrefetchServingBindingRequest* req,
+    v2::PrefetchServingBindingResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  (void)req;
+  (void)resp;
+  if (!opts_.serving_prefetch_enabled) {
+    return {StatusCode::FAILED_PRECONDITION, "serving binding prefetch feature is disabled"};
+  }
+  RpcContext rctx{"PrefetchServingBinding", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->prefetch_serving_binding(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::AcquireBindingValue(
+    grpc::ServerContext* ctx,
+    const v2::AcquireBindingValueRequest* req,
+    v2::AcquireBindingValueResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  (void)req;
+  (void)resp;
+  if (!opts_.serving_prefetch_enabled) {
+    return {StatusCode::FAILED_PRECONDITION, "serving binding acquire feature is disabled"};
+  }
+  if (!opts_.serving_same_daemon_acquire_enabled) {
+    return {StatusCode::FAILED_PRECONDITION, "same-daemon serving binding acquire is disabled"};
+  }
+  RpcContext rctx{"AcquireBindingValue", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->acquire_binding_value(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::RegisterGroupVersionSet(
+    grpc::ServerContext* ctx,
+    const v2::RegisterGroupVersionSetRequest* req,
+    v2::RegisterGroupVersionSetResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"RegisterGroupVersionSet", *ctx, opts_.allow_high_card_attrs};
+  if (!global_store_client_) {
+    return {StatusCode::FAILED_PRECONDITION, "Global Store client is not configured"};
+  }
+  if (req->realization_kind() == v2::GROUP_REALIZATION_KIND_UNSPECIFIED) {
+    return {StatusCode::INVALID_ARGUMENT, "realization_kind is required"};
+  }
+  if (req->parts().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "parts must not be empty"};
+  }
+  global_store::RegisterGroupVersionSetRequest global_req;
+  global_req.set_realization_kind(to_global_kind(req->realization_kind()));
+  for (const auto& part : req->parts()) {
+    copy_group_version_set_part(part, global_req.add_parts());
+  }
+  global_req.set_namespace_(req->namespace_());
+  global_req.set_key(req->key());
+  if (req->has_key_generation()) {
+    global_req.set_key_generation(req->key_generation());
+  }
+  auto response_or = global_store_client_->register_group_version_set(global_req);
+  if (!response_or.ok()) {
+    return to_grpc_status(response_or.status());
+  }
+  const grpc::Status status = group_registration_status_to_grpc(response_or->status());
+  if (!status.ok()) {
+    return status;
+  }
+  copy_group_version_set_ref(response_or->version_set(), resp->mutable_version_set());
+  resp->set_realization_kind(to_daemon_kind(response_or->realization_kind()));
+  for (const auto& part : response_or->parts()) {
+    copy_group_version_set_part(part, resp->add_parts());
+  }
+  return grpc::Status::OK;
+}
+
 Status StoreDaemonServiceImpl::CreateBinding(
     grpc::ServerContext* ctx,
     const v2::CreateBindingRequest* req,
@@ -93,6 +257,50 @@ Status StoreDaemonServiceImpl::SealBinding(
   }
   RpcContext rctx{"SealBinding", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->seal_binding(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::FreezeBindingCurrentValue(
+    grpc::ServerContext* ctx,
+    const v2::FreezeBindingCurrentValueRequest* req,
+    v2::FreezeBindingCurrentValueResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"FreezeBindingCurrentValue", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->freeze_binding_current_value(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::PromoteBindingCurrentValue(
+    grpc::ServerContext* ctx,
+    const v2::PromoteBindingCurrentValueRequest* req,
+    v2::PromoteBindingCurrentValueResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"PromoteBindingCurrentValue", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->promote_binding_current_value(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::StartPromoteBindingCurrentValue(
+    grpc::ServerContext* ctx,
+    const v2::StartPromoteBindingCurrentValueRequest* req,
+    v2::StartPromoteBindingCurrentValueResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"StartPromoteBindingCurrentValue", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->start_promote_binding_current_value(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::GetBindingPromotionStatus(
+    grpc::ServerContext* ctx,
+    const v2::GetBindingPromotionStatusRequest* req,
+    v2::GetBindingPromotionStatusResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"GetBindingPromotionStatus", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->get_binding_promotion_status(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::SubmitBindingContribution(
@@ -173,6 +381,28 @@ Status StoreDaemonServiceImpl::ImportArtifactFromPath(
   }
   RpcContext rctx{"ImportArtifactFromPath", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->import_artifact_from_path(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::ResolvePublicDiskSource(
+    grpc::ServerContext* ctx,
+    const v2::ResolvePublicDiskSourceRequest* req,
+    v2::ResolvePublicDiskSourceResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"ResolvePublicDiskSource", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->resolve_public_disk_source(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::PromoteMountedSourceArtifact(
+    grpc::ServerContext* ctx,
+    const v2::PromoteMountedSourceArtifactRequest* req,
+    v2::PromoteMountedSourceArtifactResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"PromoteMountedSourceArtifact", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->promote_mounted_source_artifact(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::ImportArtifactFromPathStream(
@@ -329,6 +559,28 @@ Status StoreDaemonServiceImpl::GetArtifactIndexById(
   return materialization_controller_->get_artifact_index_by_id(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::ListArtifactLayouts(
+    grpc::ServerContext* ctx,
+    const v2::ListArtifactLayoutsRequest* req,
+    v2::ListArtifactLayoutsResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"ListArtifactLayouts", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->list_artifact_layouts(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::EnsureCanonicalLayout(
+    grpc::ServerContext* ctx,
+    const v2::EnsureCanonicalLayoutRequest* req,
+    v2::EnsureCanonicalLayoutResponse* resp) {
+  if (auto startup_status = block_if_startup_pending(); !startup_status.ok()) {
+    return startup_status;
+  }
+  RpcContext rctx{"EnsureCanonicalLayout", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->ensure_canonical_layout(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::BatchExists(
     grpc::ServerContext* ctx,
     const v2::BatchExistsRequest* req,
@@ -391,6 +643,14 @@ Status StoreDaemonServiceImpl::FetchPayloadRefChunk(
     v2::FetchPayloadRefChunkResponse* resp) {
   RpcContext rctx{"FetchPayloadRefChunk", *ctx, opts_.allow_high_card_attrs};
   return transport_controller_->fetch_payload_ref_chunk(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::FetchBatchPayloadRefChunk(
+    grpc::ServerContext* ctx,
+    const v2::FetchBatchPayloadRefChunkRequest* req,
+    v2::FetchBatchPayloadRefChunkResponse* resp) {
+  RpcContext rctx{"FetchBatchPayloadRefChunk", *ctx, opts_.allow_high_card_attrs};
+  return transport_controller_->fetch_batch_payload_ref_chunk(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::RouteAuthorityStage(
@@ -674,12 +934,12 @@ Status StoreDaemonServiceImpl::GetDetailedStatus(
   return status_controller_->get_detailed_status(rctx, *resp);
 }
 
-Status StoreDaemonServiceImpl::GetLoadedReplicasV2(
+Status StoreDaemonServiceImpl::GetLoadedReplicas(
     grpc::ServerContext* ctx,
-    const v2::GetLoadedReplicasV2Request* req,
-    v2::GetLoadedReplicasV2Response* resp) {
-  RpcContext rctx{"GetLoadedReplicasV2", *ctx, opts_.allow_high_card_attrs};
-  return status_controller_->get_loaded_replicas_v2(rctx, *req, *resp, opts_.use_cursor_pagination);
+    const v2::GetLoadedReplicasRequest* req,
+    v2::GetLoadedReplicasResponse* resp) {
+  RpcContext rctx{"GetLoadedReplicas", *ctx, opts_.allow_high_card_attrs};
+  return status_controller_->get_loaded_replicas(rctx, *req, *resp, opts_.use_cursor_pagination);
 }
 
 } // namespace tensorcast::daemon

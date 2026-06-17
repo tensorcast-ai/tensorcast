@@ -43,7 +43,7 @@ enum class ViewRegistrationKind : uint8_t { kUnspecified = 0, kCanonical = 1, kP
 enum class RegistrationPlan : uint8_t { kCoalesced = 0, kStableDram = 1 };
 
 struct StableDramOptions {
-  bool stage_on_gpu{true};
+  bool stage_on_gpu{false};
   bool release_gpu_on_commit{true};
 };
 

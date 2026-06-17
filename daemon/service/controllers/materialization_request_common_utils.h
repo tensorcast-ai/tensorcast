@@ -14,6 +14,7 @@
 #include "absl/status/statusor.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "daemon/service/controllers/materialization_policy_utils.h"
 #include "daemon/state/artifact_source_registry.h"
 #include "daemon/state/handle_lease_registry.h"
 #include "daemon/state/lip_bridge.h"
@@ -42,7 +43,7 @@ absl::StatusOr<LeaseContext> validate_and_compute_lease_context(
 
 struct ArtifactResolution {
   std::string resolved_artifact_id;
-  std::optional<std::string> fallback_artifact_id;
+  std::optional<std::string> pre_binding_artifact_id;
   std::optional<std::string> bound_artifact_id;
   bool gs_connected{false};
   std::optional<std::filesystem::path> normalized_disk_path;
@@ -73,9 +74,10 @@ absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
     const std::filesystem::path& storage_path,
     std::string artifact_id,
     bool allow_disk,
-    bool allow_local_import_fallback,
+    bool allow_local_import_disk_source,
     bool loopback_peer,
-    std::optional<uint64_t> disk_expected_size = std::nullopt);
+    std::optional<uint64_t> disk_expected_size = std::nullopt,
+    bool lightweight_msa1_validation = false);
 
 using MaterializeAttemptFn =
     std::function<absl::StatusOr<store::loading::ReplicaHandle>(const std::optional<store::loading::DiskSource>&)>;
@@ -87,8 +89,7 @@ absl::StatusOr<store::loading::ReplicaHandle> materialize_with_shared_disk_retry
     store::components::IGlobalStoreClient* global_store_client,
     const std::filesystem::path& storage_path,
     std::string_view resolved_artifact_id,
-    int wait_for_shared_disk_ms,
-    bool allow_disk,
+    const materialization_policy::NormalizedMaterializationRequestContext& request_context,
     const grpc::ServerContext& server_context,
     std::optional<std::filesystem::path>& normalized_disk_path,
     const MaterializeAttemptFn& materialize_retry_once,

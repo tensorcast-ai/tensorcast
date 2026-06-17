@@ -25,6 +25,7 @@
 #include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
 #include "core/store/testing/recording_global_store_client.h"
+#include "daemon/service/controllers/materialization_disk_resolve_utils.h"
 #include "daemon/service/rpc_context.h"
 #include "daemon/state/background_scheduler.h"
 #include "daemon/state/device_resolver.h"
@@ -85,6 +86,44 @@ bool write_file(const std::filesystem::path& path, std::string_view payload) {
   return out.good();
 }
 
+tensorcast::daemon::ArtifactSourceRegistry::FingerprintMap to_registry_fingerprints(
+    const tensorcast::daemon::materialization_disk_resolve::SourceFingerprintMap& fingerprints) {
+  tensorcast::daemon::ArtifactSourceRegistry::FingerprintMap out;
+  for (const auto& [relative_path, fingerprint] : fingerprints) {
+    out.insert_or_assign(
+        relative_path,
+        tensorcast::daemon::ArtifactSourceRegistry::SourceFileFingerprint{
+            .inode = fingerprint.inode,
+            .size = fingerprint.size,
+            .mtime_ns = fingerprint.mtime_ns,
+        });
+  }
+  return out;
+}
+
+struct ValidationTargetLease {
+  tensorcast::daemon::IpcRegionRegistry* regions{nullptr};
+  tensorcast::daemon::testing::CudaIpcChild child;
+  std::string device_uuid;
+  int owner_pid{-1};
+  std::vector<std::string> region_ids;
+
+  ValidationTargetLease() = default;
+  ValidationTargetLease(const ValidationTargetLease&) = delete;
+  ValidationTargetLease& operator=(const ValidationTargetLease&) = delete;
+  ValidationTargetLease(ValidationTargetLease&&) noexcept = default;
+  ValidationTargetLease& operator=(ValidationTargetLease&&) noexcept = default;
+
+  ~ValidationTargetLease() {
+    for (const auto& region_id : region_ids) {
+      if (regions != nullptr && !region_id.empty() && owner_pid > 0) {
+        regions->unregister_region(region_id, owner_pid, /*force=*/true).IgnoreError();
+      }
+    }
+    child.Shutdown().IgnoreError();
+  }
+};
+
 tensorcast::store::StoreEngineOptions make_opts() {
   tensorcast::store::StoreEngineOptions opts;
   opts.storage_path = (test_tmpdir() / "engine").string();
@@ -110,7 +149,9 @@ struct MappedFixture {
   tensorcast::daemon::SessionLifecycleManager lifecycle_mgr;
   tensorcast::daemon::LifecycleKernel lifecycle_kernel;
   tensorcast::daemon::SessionsService sessions_svc;
+  tensorcast::daemon::RegistrationManager registration_mgr;
   tensorcast::daemon::DeviceResolver devices;
+  tensorcast::daemon::ExternalTargetAccessService external_target_access_service;
   tensorcast::daemon::ArtifactSourceRegistry disk_imports;
   tensorcast::daemon::BindingRegistry binding_registry;
   tensorcast::daemon::ShutdownSignal shutdown_signal;
@@ -133,6 +174,8 @@ struct MappedFixture {
         lifecycle_kernel("daemon-mapped-test"),
         sessions_svc(session_mgr, verif_tracker, &scheduler, &lifecycle_mgr, absl::Seconds(60)),
         devices(tensorcast::store::DeviceRegistry::instance()),
+        external_target_access_service(
+            tensorcast::daemon::ExternalTargetAccessService::Dep{.devices = devices, .regions = regions}),
         binding_registry(),
         capability_tokens(
             tensorcast::common::CapabilityTokenConfig{
@@ -145,6 +188,7 @@ struct MappedFixture {
                 .sessions = sessions_svc,
                 .lip = lip_bridge,
                 .lip_manager = lip_mgr,
+                .registration_manager = registration_mgr,
                 .devices = devices,
                 .regions = regions,
                 .disk_imports = disk_imports,
@@ -152,6 +196,7 @@ struct MappedFixture {
                 .shutdown_signal = shutdown_signal,
                 .async_runtime = async_runtime,
                 .identity = identity,
+                .external_target_access_service = external_target_access_service,
                 .global_store_client = global_store_client,
                 .lifecycle = &lifecycle_mgr,
                 .lifecycle_kernel = &lifecycle_kernel,
@@ -163,6 +208,67 @@ struct MappedFixture {
     identity.set_daemon_id("daemon-mapped-test");
   }
 };
+
+absl::StatusOr<ValidationTargetLease> create_validation_target_lease(
+    MappedFixture& fix,
+    std::initializer_list<std::size_t> storage_lengths) {
+  int device_count = 0;
+  auto device_count_status = tensorcast::cuda::get_device_count(&device_count);
+  if (!device_count_status.ok()) {
+    return device_count_status;
+  }
+  if (device_count <= 0) {
+    return absl::FailedPreconditionError("validation target lease requires at least one CUDA device");
+  }
+  tensorcast::cuda::DeviceGuard guard(0);
+  if (!guard.status().ok()) {
+    return guard.status();
+  }
+
+  auto helper_path_or = tensorcast::daemon::testing::resolve_cuda_ipc_helper_path();
+  if (!helper_path_or.ok()) {
+    return helper_path_or.status();
+  }
+
+  std::vector<tensorcast::daemon::testing::CudaIpcBufferSpec> buffers;
+  buffers.reserve(storage_lengths.size());
+  for (const std::size_t length : storage_lengths) {
+    buffers.push_back({.size_bytes = length, .fill_byte = -1});
+  }
+
+  auto child_or = tensorcast::daemon::testing::CudaIpcChild::Spawn(*helper_path_or, 0, buffers);
+  if (!child_or.ok()) {
+    return child_or.status();
+  }
+
+  auto device_key = tensorcast::store::DeviceRegistry::instance().gpu_key(0);
+  if (device_key.uuid.empty()) {
+    return absl::FailedPreconditionError("validation target lease requires a resolved GPU UUID");
+  }
+
+  ValidationTargetLease lease;
+  lease.regions = &fix.regions;
+  lease.child = std::move(*child_or);
+  lease.device_uuid = device_key.uuid;
+  lease.owner_pid = lease.child.pid();
+  lease.region_ids.reserve(buffers.size());
+
+  for (std::size_t idx = 0; idx < buffers.size(); ++idx) {
+    tensorcast::daemon::IpcRegionRegistry::RegisterParams params;
+    params.device_id = 0;
+    params.owner_pid = lease.owner_pid;
+    params.size_bytes = buffers[idx].size_bytes;
+    params.ttl_ms = 10'000;
+    params.handle_bytes = lease.child.handle_bytes()[idx];
+    auto region_or = fix.regions.register_region(params);
+    if (!region_or.ok()) {
+      return region_or.status();
+    }
+    lease.region_ids.push_back(region_or->region_id);
+  }
+
+  return lease;
+}
 
 grpc::Status run_request(
     MaterializationController& controller,
@@ -261,7 +367,7 @@ TEST_CASE("MaterializeIntoMappedTarget maps slices into target regions", "[daemo
   req.mutable_selection()->set_artifact_id("artifact_mapped");
   req.set_device_uuid(device_key.uuid);
   req.set_pid(owner_pid);
-  req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -318,7 +424,6 @@ TEST_CASE("MaterializeIntoMappedTarget maps slices into target regions", "[daemo
   REQUIRE(status.ok());
   REQUIRE(resp.status() == tensorcast::daemon::v2::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   REQUIRE(resp.source() == tensorcast::daemon::v2::MATERIALIZATION_SOURCE_DISK);
-  REQUIRE(!resp.target_publication_token().empty());
 
   std::array<char, 4> out0{};
   std::array<char, 4> out1{};
@@ -343,14 +448,17 @@ TEST_CASE("MaterializeIntoMappedTarget maps slices into target regions", "[daemo
 
 TEST_CASE("MaterializeIntoMappedTarget rejects dst coverage gaps", "[daemon][materialize][mapped_target][validation]") {
   MappedFixture fix;
+  auto lease_or = create_validation_target_lease(fix, {4, 4});
+  REQUIRE(lease_or.ok());
+  auto lease = std::move(*lease_or);
 
   const std::string canonical_index_json = R"({"src":[0,8,[8],[1],"torch.uint8",0]})";
   fix.global_store_client->canonical_index_json = canonical_index_json;
 
   MaterializeIntoMappedTargetRequest req;
   req.mutable_selection()->set_artifact_id("artifact_mapped_gap");
-  req.set_device_uuid("gpu-0");
-  req.set_pid(123);
+  req.set_device_uuid(lease.device_uuid);
+  req.set_pid(lease.owner_pid);
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -361,14 +469,14 @@ TEST_CASE("MaterializeIntoMappedTarget rejects dst coverage gaps", "[daemon][mat
   storage0->set_storage_id("storage-0");
   storage0->set_device_id(0);
   storage0->set_storage_length(4);
-  storage0->set_vram_region_id("region-0");
+  storage0->set_vram_region_id(lease.region_ids[0]);
   storage0->set_mapping_base_offset(0);
 
   auto* storage1 = layout->add_storages();
   storage1->set_storage_id("storage-1");
   storage1->set_device_id(0);
   storage1->set_storage_length(4);
-  storage1->set_vram_region_id("region-1");
+  storage1->set_vram_region_id(lease.region_ids[1]);
   storage1->set_mapping_base_offset(0);
 
   auto* offset0 = layout->add_offsets();
@@ -433,14 +541,17 @@ TEST_CASE(
     "MaterializeIntoMappedTarget rejects overlapping dst ranges",
     "[daemon][materialize][mapped_target][validation]") {
   MappedFixture fix;
+  auto lease_or = create_validation_target_lease(fix, {4});
+  REQUIRE(lease_or.ok());
+  auto lease = std::move(*lease_or);
 
   const std::string canonical_index_json = R"({"src":[0,4,[4],[1],"torch.uint8",0]})";
   fix.global_store_client->canonical_index_json = canonical_index_json;
 
   MaterializeIntoMappedTargetRequest req;
   req.mutable_selection()->set_artifact_id("artifact_mapped_overlap");
-  req.set_device_uuid("gpu-0");
-  req.set_pid(123);
+  req.set_device_uuid(lease.device_uuid);
+  req.set_pid(lease.owner_pid);
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -451,7 +562,7 @@ TEST_CASE(
   storage0->set_storage_id("storage-0");
   storage0->set_device_id(0);
   storage0->set_storage_length(4);
-  storage0->set_vram_region_id("region-0");
+  storage0->set_vram_region_id(lease.region_ids[0]);
   storage0->set_mapping_base_offset(0);
 
   auto* offset0 = layout->add_offsets();
@@ -504,14 +615,17 @@ TEST_CASE(
     "MaterializeIntoMappedTarget rejects mixed slice dimensions for the same dst tensor",
     "[daemon][materialize][mapped_target][validation]") {
   MappedFixture fix;
+  auto lease_or = create_validation_target_lease(fix, {4});
+  REQUIRE(lease_or.ok());
+  auto lease = std::move(*lease_or);
 
   const std::string canonical_index_json = R"({"src":[0,4,[2,2],[2,1],"torch.uint8",0]})";
   fix.global_store_client->canonical_index_json = canonical_index_json;
 
   MaterializeIntoMappedTargetRequest req;
   req.mutable_selection()->set_artifact_id("artifact_mapped_mixed_dim");
-  req.set_device_uuid("gpu-0");
-  req.set_pid(123);
+  req.set_device_uuid(lease.device_uuid);
+  req.set_pid(lease.owner_pid);
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -522,7 +636,7 @@ TEST_CASE(
   storage0->set_storage_id("storage-0");
   storage0->set_device_id(0);
   storage0->set_storage_length(4);
-  storage0->set_vram_region_id("region-0");
+  storage0->set_vram_region_id(lease.region_ids[0]);
   storage0->set_mapping_base_offset(0);
 
   auto* offset0 = layout->add_offsets();
@@ -577,11 +691,14 @@ TEST_CASE(
     "MaterializeIntoMappedTarget rejects unsupported copy-plan version",
     "[daemon][materialize][mapped_target][validation]") {
   MappedFixture fix;
+  auto lease_or = create_validation_target_lease(fix, {1});
+  REQUIRE(lease_or.ok());
+  auto lease = std::move(*lease_or);
 
   MaterializeIntoMappedTargetRequest req;
   req.mutable_selection()->set_artifact_id("artifact_mapped_bad_version");
-  req.set_device_uuid("gpu-0");
-  req.set_pid(123);
+  req.set_device_uuid(lease.device_uuid);
+  req.set_pid(lease.owner_pid);
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -591,7 +708,7 @@ TEST_CASE(
   storage->set_storage_id("storage-0");
   storage->set_device_id(0);
   storage->set_storage_length(1);
-  storage->set_vram_region_id("region-0");
+  storage->set_vram_region_id(lease.region_ids[0]);
   storage->set_mapping_base_offset(0);
 
   auto* offset = layout->add_offsets();
@@ -624,14 +741,17 @@ TEST_CASE(
     "MaterializeIntoMappedTarget rejects non-contiguous dst tensor specs",
     "[daemon][materialize][mapped_target][validation]") {
   MappedFixture fix;
+  auto lease_or = create_validation_target_lease(fix, {4});
+  REQUIRE(lease_or.ok());
+  auto lease = std::move(*lease_or);
 
   const std::string canonical_index_json = R"({"src":[0,4,[2,2],[2,1],"torch.uint8",0]})";
   fix.global_store_client->canonical_index_json = canonical_index_json;
 
   MaterializeIntoMappedTargetRequest req;
   req.mutable_selection()->set_artifact_id("artifact_mapped_non_contig");
-  req.set_device_uuid("gpu-0");
-  req.set_pid(123);
+  req.set_device_uuid(lease.device_uuid);
+  req.set_pid(lease.owner_pid);
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -642,7 +762,7 @@ TEST_CASE(
   storage0->set_storage_id("storage-0");
   storage0->set_device_id(0);
   storage0->set_storage_length(4);
-  storage0->set_vram_region_id("region-0");
+  storage0->set_vram_region_id(lease.region_ids[0]);
   storage0->set_mapping_base_offset(0);
 
   auto* offset0 = layout->add_offsets();
@@ -683,14 +803,17 @@ TEST_CASE(
     "MaterializeIntoMappedTarget rejects dst storage offset mismatch",
     "[daemon][materialize][mapped_target][validation]") {
   MappedFixture fix;
+  auto lease_or = create_validation_target_lease(fix, {5});
+  REQUIRE(lease_or.ok());
+  auto lease = std::move(*lease_or);
 
   const std::string canonical_index_json = R"({"src":[0,4,[4],[1],"torch.uint8",0]})";
   fix.global_store_client->canonical_index_json = canonical_index_json;
 
   MaterializeIntoMappedTargetRequest req;
   req.mutable_selection()->set_artifact_id("artifact_mapped_offset_mismatch");
-  req.set_device_uuid("gpu-0");
-  req.set_pid(123);
+  req.set_device_uuid(lease.device_uuid);
+  req.set_pid(lease.owner_pid);
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -701,7 +824,7 @@ TEST_CASE(
   storage0->set_storage_id("storage-0");
   storage0->set_device_id(0);
   storage0->set_storage_length(5);
-  storage0->set_vram_region_id("region-0");
+  storage0->set_vram_region_id(lease.region_ids[0]);
   storage0->set_mapping_base_offset(0);
 
   auto* offset0 = layout->add_offsets();
@@ -740,14 +863,17 @@ TEST_CASE(
     "MaterializeIntoMappedTarget rejects copy-plan missing dst coverage",
     "[daemon][materialize][mapped_target][validation]") {
   MappedFixture fix;
+  auto lease_or = create_validation_target_lease(fix, {4, 4});
+  REQUIRE(lease_or.ok());
+  auto lease = std::move(*lease_or);
 
   const std::string canonical_index_json = R"({"src":[0,8,[8],[1],"torch.uint8",0]})";
   fix.global_store_client->canonical_index_json = canonical_index_json;
 
   MaterializeIntoMappedTargetRequest req;
   req.mutable_selection()->set_artifact_id("artifact_mapped_missing_dst_coverage");
-  req.set_device_uuid("gpu-0");
-  req.set_pid(123);
+  req.set_device_uuid(lease.device_uuid);
+  req.set_pid(lease.owner_pid);
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -758,13 +884,13 @@ TEST_CASE(
   storage0->set_storage_id("storage-0");
   storage0->set_device_id(0);
   storage0->set_storage_length(4);
-  storage0->set_vram_region_id("region-0");
+  storage0->set_vram_region_id(lease.region_ids[0]);
   storage0->set_mapping_base_offset(0);
   auto* storage1 = layout->add_storages();
   storage1->set_storage_id("storage-1");
   storage1->set_device_id(0);
   storage1->set_storage_length(4);
-  storage1->set_vram_region_id("region-1");
+  storage1->set_vram_region_id(lease.region_ids[1]);
   storage1->set_mapping_base_offset(0);
 
   auto* offset0 = layout->add_offsets();
@@ -817,14 +943,17 @@ TEST_CASE(
     "MaterializeIntoMappedTarget rejects transpose view ops",
     "[daemon][materialize][mapped_target][validation]") {
   MappedFixture fix;
+  auto lease_or = create_validation_target_lease(fix, {4});
+  REQUIRE(lease_or.ok());
+  auto lease = std::move(*lease_or);
 
   const std::string canonical_index_json = R"({"src":[0,4,[2,2],[2,1],"torch.uint8",0]})";
   fix.global_store_client->canonical_index_json = canonical_index_json;
 
   MaterializeIntoMappedTargetRequest req;
   req.mutable_selection()->set_artifact_id("artifact_mapped_view_transpose");
-  req.set_device_uuid("gpu-0");
-  req.set_pid(123);
+  req.set_device_uuid(lease.device_uuid);
+  req.set_pid(lease.owner_pid);
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -835,7 +964,7 @@ TEST_CASE(
   storage0->set_storage_id("storage-0");
   storage0->set_device_id(0);
   storage0->set_storage_length(4);
-  storage0->set_vram_region_id("region-0");
+  storage0->set_vram_region_id(lease.region_ids[0]);
   storage0->set_mapping_base_offset(0);
 
   auto* offset0 = layout->add_offsets();
@@ -884,14 +1013,17 @@ TEST_CASE(
     "MaterializeIntoMappedTarget rejects multiple narrow ops per tensor",
     "[daemon][materialize][mapped_target][validation]") {
   MappedFixture fix;
+  auto lease_or = create_validation_target_lease(fix, {8});
+  REQUIRE(lease_or.ok());
+  auto lease = std::move(*lease_or);
 
   const std::string canonical_index_json = R"({"src":[0,8,[8],[1],"torch.uint8",0]})";
   fix.global_store_client->canonical_index_json = canonical_index_json;
 
   MaterializeIntoMappedTargetRequest req;
   req.mutable_selection()->set_artifact_id("artifact_mapped_multiple_narrow");
-  req.set_device_uuid("gpu-0");
-  req.set_pid(123);
+  req.set_device_uuid(lease.device_uuid);
+  req.set_pid(lease.owner_pid);
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -902,7 +1034,7 @@ TEST_CASE(
   storage0->set_storage_id("storage-0");
   storage0->set_device_id(0);
   storage0->set_storage_length(8);
-  storage0->set_vram_region_id("region-0");
+  storage0->set_vram_region_id(lease.region_ids[0]);
   storage0->set_mapping_base_offset(0);
 
   auto* offset0 = layout->add_offsets();
@@ -954,14 +1086,17 @@ TEST_CASE(
     "MaterializeIntoMappedTarget accepts opaque view_id without metadata lookup hard failure",
     "[daemon][materialize][mapped_target][validation]") {
   MappedFixture fix;
+  auto lease_or = create_validation_target_lease(fix, {4});
+  REQUIRE(lease_or.ok());
+  auto lease = std::move(*lease_or);
 
   const std::string canonical_index_json = R"({"src":[0,4,[4],[1],"torch.uint8",0]})";
   fix.global_store_client->canonical_index_json = canonical_index_json;
 
   MaterializeIntoMappedTargetRequest req;
   req.mutable_selection()->set_artifact_id("artifact_mapped_unknown_view");
-  req.set_device_uuid("gpu-0");
-  req.set_pid(123);
+  req.set_device_uuid(lease.device_uuid);
+  req.set_pid(lease.owner_pid);
   req.mutable_selection()->set_view_id("missing-view-id");
 
   auto* layout = req.mutable_target_layout();
@@ -973,7 +1108,7 @@ TEST_CASE(
   storage0->set_storage_id("storage-0");
   storage0->set_device_id(0);
   storage0->set_storage_length(4);
-  storage0->set_vram_region_id("region-0");
+  storage0->set_vram_region_id(lease.region_ids[0]);
   storage0->set_mapping_base_offset(0);
 
   auto* offset0 = layout->add_offsets();
@@ -1007,4 +1142,86 @@ TEST_CASE(
   auto status = run_request(fix.controller, req, resp);
   REQUIRE_FALSE(status.ok());
   REQUIRE(status.error_code() != grpc::StatusCode::UNIMPLEMENTED);
+}
+
+TEST_CASE(
+    "MaterializeIntoMappedTarget rejects stale msa1 after mounted source mutation",
+    "[daemon][materialize][mapped_target][msa1][mutation]") {
+  MappedFixture fix;
+  auto lease_or = create_validation_target_lease(fix, {8});
+  REQUIRE(lease_or.ok());
+  auto lease = std::move(*lease_or);
+
+  const auto artifact_id = "msa1:test-session~policy~partitioned~mapped";
+  const auto artifact_dir = test_tmpdir() / "artifact_mapped_target_mutated_msa1";
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  REQUIRE(write_file(artifact_dir / "tensor.data", "ABCDEFGH"));
+
+  auto metadata_or = tensorcast::daemon::materialization_disk_resolve::build_mounted_source_metadata(artifact_dir);
+  REQUIRE(metadata_or.ok());
+  fix.disk_imports.upsert_binding(
+      artifact_id,
+      tensorcast::daemon::ArtifactSourceRegistry::Entry{
+          .source_kind = tensorcast::daemon::ArtifactSourceRegistry::SourceKind::kMountedSourceArtifact,
+          .canonical_source_path = artifact_dir.string(),
+          .canonical_index_json = metadata_or->index_info.canonical_index_json,
+          .source_index_json = metadata_or->index_info.source_index_json,
+          .source_disk_path = artifact_dir.string(),
+          .tensor_aware_metadata = false,
+          .validate_before_read = true,
+          .file_fingerprints = to_registry_fingerprints(metadata_or->file_fingerprints),
+      });
+
+  REQUIRE(std::filesystem::remove(artifact_dir / "tensor.data"));
+
+  MaterializeIntoMappedTargetRequest req;
+  req.mutable_selection()->set_artifact_id(artifact_id);
+  req.set_device_uuid(lease.device_uuid);
+  req.set_pid(lease.owner_pid);
+  req.mutable_source_policy()->set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage0 = layout->add_storages();
+  storage0->set_storage_id("storage-0");
+  storage0->set_device_id(0);
+  storage0->set_storage_length(8);
+  storage0->set_vram_region_id(lease.region_ids[0]);
+  storage0->set_mapping_base_offset(0);
+
+  auto* offset0 = layout->add_offsets();
+  offset0->set_name("payload");
+  offset0->set_storage_id("storage-0");
+  offset0->set_storage_offset(0);
+  offset0->set_logical_length(8);
+
+  auto* spec0 = req.add_dst_tensors();
+  spec0->set_name("payload");
+  spec0->add_shape(8);
+  spec0->add_stride(1);
+  spec0->set_dtype("torch.uint8");
+  spec0->set_storage_offset(0);
+  spec0->set_logical_length(8);
+
+  CopyPlan plan;
+  plan.set_version(1);
+  auto* entry = plan.add_entries();
+  entry->set_ckpt_name("payload");
+  entry->set_dst_name("payload");
+  entry->mutable_ckpt_range()->set_dim(0);
+  entry->mutable_ckpt_range()->set_start(0);
+  entry->mutable_ckpt_range()->set_end(8);
+  entry->mutable_dst_range()->set_dim(0);
+  entry->mutable_dst_range()->set_start(0);
+  entry->mutable_dst_range()->set_end(8);
+  req.mutable_copy_plan()->CopyFrom(plan);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+  REQUIRE(status.error_message().find("SOURCE_MUTATED") != std::string::npos);
 }

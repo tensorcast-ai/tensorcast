@@ -22,11 +22,14 @@
 #include "core/store/materialization/contracts/byte_range/byte_range_map.h"
 #include "core/store/materialization/control/materialization_backend.h"
 #include "core/store/materialization/dataplane/contracts/loader.h"
+#include "core/store/materialization/dataplane/contracts/source.h"
 #include "core/store/materialization/runtime/pipeline/ingestion_pipeline.h"
+#include "core/store/replica/collective_disk_loader.h"
 #include "core/store/runtime/context/runtime_context.h"
 #include "core/store/runtime/ingestion/artifact_lowering_plan.h"
 #include "core/store/runtime/ingestion/ingestion_event_hub.h"
 #include "core/store/runtime/ingestion/materialization_service.h"
+#include "core/store/runtime/ingestion/materialization_strategy_types.h"
 #include "core/store/runtime/ingestion_events.h"
 #include "core/store/runtime/metadata/metadata_gateway.h"
 #include "core/store/runtime/replica/replica_runtime.h"
@@ -56,10 +59,16 @@ struct MaterializationHooks {
       const loading::ReplicaKey& key,
       std::string_view artifact_override,
       std::string_view publish_context_id)>;
+  using CollectiveMappedTargetLoadOverride = std::function<tensorcast::store::replica::CollectiveMappedTargetLoadResult(
+      const tensorcast::store::replica::CollectiveMappedTargetLoadRequest& request,
+      const std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>& pinned_pool,
+      std::chrono::milliseconds pinned_timeout,
+      const tensorcast::store::replica::CollectiveMappedTargetLoadOptions& options)>;
 
   PipelineFactory pipeline_factory;
   ServiceFactory materialization_service_factory;
   RegisterReplicaOverride register_replica_override;
+  CollectiveMappedTargetLoadOverride collective_mapped_target_load_override;
   std::function<void(const IngestionRequestMetadata&)> before_pipeline_start;
   std::function<void(IngestionResultEvent&)> mutate_completion_event;
   std::function<std::optional<absl::StatusOr<loading::ReplicaHandle>>()> override_result;
@@ -72,13 +81,40 @@ namespace tensorcast::store::runtime::ingestion {
 namespace metadata = tensorcast::store::runtime::metadata;
 namespace store = tensorcast::store;
 
+class MaterializationFacadeTestPeer;
+
 class MaterializationFacade : public materialization::control::MaterializationBackend {
  public:
   using SealProgressCallback = std::function<void(uint64_t hashed_leaf_count, uint64_t total_hash_leaves)>;
 
+  struct MappedReplicaTarget {
+    std::string logical_artifact_id;
+    std::string physical_artifact_id;
+    DeviceKey target_device;
+    loading::ReplicaTarget target;
+    std::uint64_t size_bytes{0};
+  };
+
+  struct IngestMappedSourcesIntoReplicasResult {
+    std::vector<loading::ReplicaHandle> replica_handles;
+    loading::MaterializeIntoTargetResult materialize_result;
+  };
+
   struct SealAssemblyCutInput {
+    struct BoundCanonicalSpan {
+      int device_id{-1};
+      uint64_t base_ptr{0};
+      uint64_t mapping_base_offset{0};
+      uint64_t storage_offset{0};
+      uint64_t logical_offset{0};
+      uint64_t logical_length{0};
+    };
+
     std::vector<components::ViewInfo> structural_views;
     bool canonical_full{false};
+    std::string canonical_artifact_id;
+    std::string canonical_index_json;
+    std::vector<BoundCanonicalSpan> bound_canonical_spans;
   };
 
   struct Config {
@@ -115,25 +151,24 @@ class MaterializationFacade : public materialization::control::MaterializationBa
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
       const DeviceKey& target_device,
-      const loading::IntoTargetLayout& target_layout,
-      const loader::ByteRangeMap& mapping,
-      std::string_view canonical_index_json,
-      uint64_t generation,
+      const strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
       const loading::MaterializeHints& hints,
       std::optional<loading::DiskSource> disk_source);
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
       const DeviceKey& target_device,
-      const loading::IntoTargetLayout& target_layout,
-      const loader::ByteRangeMap& mapping,
-      std::string_view canonical_index_json,
-      uint64_t generation,
+      const strategy::PreparedSourceBoundExecutionPlan& prepared_execution,
       const loading::MaterializeHints& hints);
-
-  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_loader_into_target(
+  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_sources_into_target(
       const DeviceKey& target_device,
       const loading::IntoTargetLayout& target_layout,
-      std::unique_ptr<IArtifactLoader> loader,
+      std::vector<std::shared_ptr<loader::SeekableSource>> sources,
+      const loader::ByteRangeMap& mapping,
+      const loading::MaterializeHints& hints,
+      loading::MaterializationSource source_kind);
+  absl::StatusOr<IngestMappedSourcesIntoReplicasResult> ingest_mapped_sources_into_replicas(
+      std::vector<MappedReplicaTarget> targets,
+      std::vector<std::shared_ptr<loader::SeekableSource>> sources,
       const loader::ByteRangeMap& mapping,
       const loading::MaterializeHints& hints,
       loading::MaterializationSource source_kind);
@@ -193,6 +228,11 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       bool publish_canonical,
       SealProgressCallback progress_cb = {});
 
+  absl::StatusOr<strategy::ExecutionStrategyPlan> build_ordinary_disk_execution_strategy_plan_for_testing(
+      const materialization::runtime::pipeline::IngestionContext& ctx) const {
+    return build_ordinary_disk_execution_strategy_plan(ctx);
+  }
+
  private:
   absl::StatusOr<loading::ReplicaHandle> assemble_from_pieces(const loading::MaterializationRequest& request);
 
@@ -223,15 +263,8 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       const loading::MaterializeHints& hints,
       bool publish_to_global_store);
 
-  absl::StatusOr<loading::ReplicaHandle> ingest_mapped_loader_into_replica(
-      std::string_view logical_artifact_id,
-      std::string_view physical_artifact_id,
-      const DeviceKey& target_device,
-      const loading::ReplicaTarget& target,
-      std::unique_ptr<IArtifactLoader> loader,
-      const loader::ByteRangeMap& mapping,
-      const loading::MaterializeHints& hints,
-      loading::MaterializationSource source_kind);
+  absl::StatusOr<strategy::ExecutionStrategyPlan> build_ordinary_disk_execution_strategy_plan(
+      const materialization::runtime::pipeline::IngestionContext& ctx) const;
 
   std::string make_request_id(std::string_view prefix);
   [[nodiscard]] IngestionStartedEvent make_started_event(

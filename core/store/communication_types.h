@@ -58,6 +58,8 @@ struct P2PSource {
   std::chrono::milliseconds request_budget{0};
   // Optional artifact id used for diagnostics in remote source logs.
   std::string artifact_id;
+  // Optional transport request id used only for diagnostics/correlation.
+  std::string transport_request_id;
   std::shared_ptr<communicator::engine::Communicator> comm_engine;
 };
 

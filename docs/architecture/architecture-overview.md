@@ -14,6 +14,8 @@ Related architecture docs:
 
 ## System Architecture
 
+![](../assets/images/tensorcast-overview.png)
+
 The system comprises a control plane (Global Store), a data plane (Store Daemons), and clients (User Process Workers) working together to provide efficient artifact storage and serving across a cluster:
 
 ```mermaid

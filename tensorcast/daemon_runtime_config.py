@@ -10,6 +10,7 @@ and byte-size fields.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 from typing import Any, Iterable
@@ -34,6 +35,120 @@ _BYTE_SUFFIXES = {
     "gb": 1024**3,
     "tb": 1024**4,
 }
+
+
+def _default_public_disk_source_policy_id(root_path: str) -> str:
+    normalized = str(root_path or "").strip()
+    if not normalized:
+        return "trusted_absolute_local_path"
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return f"trusted_storage_root_{digest[:16]}"
+
+
+def _path_has_prefix(path: Path, prefix: Path) -> bool:
+    path_parts = path.parts
+    prefix_parts = prefix.parts
+    return (
+        len(path_parts) >= len(prefix_parts)
+        and path_parts[: len(prefix_parts)] == prefix_parts
+    )
+
+
+def _validate_public_disk_source_config(msg: cfg_pb.DaemonConfig) -> None:
+    policy_ids: set[str] = set()
+    normalized_roots: list[Path] = []
+    for trusted_root in msg.public_disk_source.trusted_root_policies:
+        root_path = str(trusted_root.root_path or "").strip()
+        if not root_path:
+            raise ValueError(
+                "public_disk_source.trusted_root_policies.root_path is required"
+            )
+        normalized_root = Path(root_path).expanduser()
+        normalized_roots.append(normalized_root)
+        policy_id = (
+            str(trusted_root.policy_id)
+            if str(trusted_root.policy_id or "").strip()
+            else _default_public_disk_source_policy_id(str(normalized_root))
+        )
+        if policy_id in policy_ids:
+            raise ValueError(
+                "public_disk_source.trusted_root_policies.policy_id must be unique: "
+                f"{policy_id}"
+            )
+        policy_ids.add(policy_id)
+        if any(
+            value == cfg_pb.DaemonConfig.PUBLIC_DISK_SOURCE_FORMAT_UNSPECIFIED
+            for value in trusted_root.allowed_formats
+        ):
+            raise ValueError(
+                "public_disk_source.trusted_root_policies.allowed_formats contains "
+                f"UNSPECIFIED for policy {policy_id}"
+            )
+        if any(
+            value
+            == cfg_pb.DaemonConfig.PUBLIC_DISK_SOURCE_METADATA_CAPABILITY_UNSPECIFIED
+            for value in trusted_root.allowed_metadata_capabilities
+        ):
+            raise ValueError(
+                "public_disk_source.trusted_root_policies."
+                "allowed_metadata_capabilities contains UNSPECIFIED for policy "
+                f"{policy_id}"
+            )
+    for idx, root_a in enumerate(normalized_roots):
+        for root_b in normalized_roots[idx + 1 :]:
+            if _path_has_prefix(root_a, root_b) or _path_has_prefix(root_b, root_a):
+                raise ValueError(
+                    "public_disk_source.trusted_root_policies must not overlap: "
+                    f"{root_a} vs {root_b}"
+                )
+
+
+def _validate_optimistic_local_ready_config(msg: cfg_pb.DaemonConfig) -> None:
+    if not hasattr(msg, "optimistic_local_ready") or not hasattr(
+        cfg_pb, "OptimisticLocalReady"
+    ):
+        return
+    optimistic = msg.optimistic_local_ready
+    if optimistic.mode in (
+        cfg_pb.OptimisticLocalReady.MODE_OPTIMISTIC_ASYNC_MI2,
+        cfg_pb.OptimisticLocalReady.MODE_OPTIMISTIC_LOCAL_ONLY,
+    ):
+        public_policy_ids = {
+            str(policy.policy_id)
+            for policy in msg.public_disk_source.trusted_root_policies
+            if str(policy.policy_id or "").strip()
+        }
+        missing = [
+            str(policy_id)
+            for policy_id in optimistic.trusted_root_policy_ids
+            if str(policy_id) not in public_policy_ids
+        ]
+        if missing:
+            raise ValueError(
+                "optimistic_local_ready.trusted_root_policy_ids contains unknown "
+                f"policy ids: {', '.join(missing)}"
+            )
+        if not optimistic.trusted_root_policy_ids:
+            raise ValueError(
+                "optimistic_local_ready.trusted_root_policy_ids is required "
+                "when optimistic mode is enabled"
+            )
+        if not optimistic.model_families:
+            raise ValueError(
+                "optimistic_local_ready.model_families is required when "
+                "optimistic mode is enabled"
+            )
+    if optimistic.mode == cfg_pb.OptimisticLocalReady.MODE_OPTIMISTIC_LOCAL_ONLY and (
+        optimistic.failure_action
+        not in (
+            cfg_pb.OptimisticLocalReady.FAILURE_ACTION_MARK_UNVERIFIED,
+            cfg_pb.OptimisticLocalReady.FAILURE_ACTION_WARN_ONLY,
+        )
+    ):
+        raise ValueError(
+            "optimistic_local_only cannot use health/drain failure actions "
+            "because no canonical verification job is expected"
+        )
 
 
 def _to_seconds_string(value: Any) -> str:
@@ -165,11 +280,14 @@ def _normalize_units_inplace(data: Any, desc) -> None:
                     else:
                         _normalize_units_inplace(v, f.message_type)
             else:
-                # Byte-size fields by naming convention *_bytes
+                # Byte-size fields by naming convention. Most fields end in
+                # `_bytes`; a few embed `_bytes_` mid-name (e.g.
+                # `owner_file_collective_peak_bytes_budget`), and still mean a
+                # byte count. Treat both as byte fields.
                 if f.type in (
                     FieldDescriptor.TYPE_UINT32,
                     FieldDescriptor.TYPE_UINT64,
-                ) and k.endswith("_bytes"):
+                ) and (k.endswith("_bytes") or "_bytes_" in k):
                     data[k] = _to_num_bytes(v)
     elif isinstance(data, list):
         for item in data:
@@ -217,6 +335,57 @@ def _normalize_defaults_inplace(msg: cfg_pb.DaemonConfig) -> None:
     if not retention_handles.HasField("max_ttl"):
         retention_handles.max_ttl.seconds = 24 * 60 * 60
         retention_handles.max_ttl.nanos = 0
+
+    public_disk_source = msg.public_disk_source
+    if (
+        len(public_disk_source.trusted_root_policies) == 0
+        and str(msg.server.storage_path or "").strip()
+    ):
+        trusted_root = public_disk_source.trusted_root_policies.add()
+        trusted_root.root_path = str(msg.server.storage_path)
+    for trusted_root in public_disk_source.trusted_root_policies:
+        if (
+            str(trusted_root.root_path or "").strip()
+            and not str(trusted_root.policy_id or "").strip()
+        ):
+            trusted_root.policy_id = _default_public_disk_source_policy_id(
+                str(trusted_root.root_path)
+            )
+        if (
+            trusted_root.descriptor_reuse_mode
+            == cfg_pb.DaemonConfig.PUBLIC_DISK_SOURCE_DESCRIPTOR_REUSE_MODE_UNSPECIFIED
+        ):
+            trusted_root.descriptor_reuse_mode = cfg_pb.DaemonConfig.PUBLIC_DISK_SOURCE_DESCRIPTOR_REUSE_MODE_TRUSTED_HINT_ONLY
+        if (
+            trusted_root.validation_mode
+            == cfg_pb.DaemonConfig.PUBLIC_DISK_SOURCE_VALIDATION_MODE_UNSPECIFIED
+        ):
+            trusted_root.validation_mode = cfg_pb.DaemonConfig.PUBLIC_DISK_SOURCE_VALIDATION_MODE_VALIDATE_BEFORE_READ
+        if not trusted_root.HasField("lightweight_attestation_enabled"):
+            trusted_root.lightweight_attestation_enabled = True
+
+    if hasattr(msg, "optimistic_local_ready") and hasattr(
+        cfg_pb, "OptimisticLocalReady"
+    ):
+        optimistic = msg.optimistic_local_ready
+        if optimistic.mode == cfg_pb.OptimisticLocalReady.MODE_UNSPECIFIED:
+            optimistic.mode = cfg_pb.OptimisticLocalReady.MODE_DISABLED
+        if (
+            optimistic.promotion_trigger
+            == cfg_pb.OptimisticLocalReady.PROMOTION_TRIGGER_UNSPECIFIED
+        ):
+            optimistic.promotion_trigger = (
+                cfg_pb.OptimisticLocalReady.PROMOTION_TRIGGER_AFTER_FREEZE
+            )
+        if optimistic.per_device_promotion_concurrency == 0:
+            optimistic.per_device_promotion_concurrency = 1
+        if (
+            optimistic.failure_action
+            == cfg_pb.OptimisticLocalReady.FAILURE_ACTION_UNSPECIFIED
+        ):
+            optimistic.failure_action = (
+                cfg_pb.OptimisticLocalReady.FAILURE_ACTION_MARK_UNVERIFIED
+            )
 
 
 def _parse_override_value(value: str) -> Any:
@@ -326,6 +495,7 @@ def apply_daemon_config_overrides(
     _normalize_units_inplace(overlay, cfg_pb.DaemonConfig.DESCRIPTOR)
     ParseDict(overlay, msg, ignore_unknown_fields=False)
     _normalize_defaults_inplace(msg)
+    _validate_public_disk_source_config(msg)
 
 
 def load_daemon_config(path: str | Path) -> cfg_pb.DaemonConfig:
@@ -346,6 +516,8 @@ def load_daemon_config(path: str | Path) -> cfg_pb.DaemonConfig:
     msg = cfg_pb.DaemonConfig()
     ParseDict(raw, msg, ignore_unknown_fields=False)
     _normalize_defaults_inplace(msg)
+    _validate_public_disk_source_config(msg)
+    _validate_optimistic_local_ready_config(msg)
     return msg
 
 

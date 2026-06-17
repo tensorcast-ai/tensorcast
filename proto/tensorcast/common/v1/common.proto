@@ -77,26 +77,28 @@ message HashSpaceRef {
 }
 
 message MemoryInfo {
+  reserved 8, 9, 14;
+  reserved "remote_memory_keys", "buffer_sizes", "verification_json";
+
   string node_id = 1;
   string node_address = 2;
   uint32 node_port = 3;
   uint64 memory_size = 5;
   MemoryType memory_type = 6;
   uint32 device_id = 7;
-  repeated string remote_memory_keys = 8;
-  repeated uint64 buffer_sizes = 9;
   bool is_memory_replica = 10;
   string tensor_index_key = 11;
   google.protobuf.Timestamp creation_ts = 12;
   string source_process_id = 13;
-  // Optional verification metadata (JSON). When present, receivers may perform
-  // integrity verification (e.g., KEY_POINTS or SEGMENT_HASHES) after transfer.
-  string verification_json = 14;
   google.protobuf.Timestamp expires_at = 15;
   ByteSpaceRef byte_space = 16;
   // Presence is critical: when present, the payload is authoritative even if
   // keys/sizes are empty (intentional withdraw/clear).
   optional ReplicaTransportMetadata transport = 17;
+  // Stable Global Store identity for this replica when MemoryInfo is used as a
+  // selected or listed replica descriptor. Registration RPCs still assign
+  // identity server-side and must not trust caller-provided values.
+  string replica_id = 18;
 }
 
 message ReplicaRef {

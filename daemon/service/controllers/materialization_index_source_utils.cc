@@ -17,6 +17,8 @@
 #include "absl/strings/str_cat.h"
 #include "core/common/artifact_hash.h"
 #include "core/cuda/cuda_api.h"
+#include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/materialization/dataplane/metadata/disk_artifact_context.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
 #include "nlohmann/json.hpp"
 
@@ -136,37 +138,45 @@ absl::Status ensure_tensor_index_present(const std::filesystem::path& artifact_d
   return absl::OkStatus();
 }
 
-absl::StatusOr<std::string> load_canonical_index_with_disk_fallback(
+CanonicalIndexAuthority canonical_index_authority_for_resolution(bool gs_connected, bool has_local_import) {
+  if (has_local_import || !gs_connected) {
+    return CanonicalIndexAuthority::kDiskSource;
+  }
+  return CanonicalIndexAuthority::kEngineMetadata;
+}
+
+absl::StatusOr<std::string> load_canonical_index_from_authority(
     store::StoreEngine& engine,
     std::string_view resolved_artifact_id,
     const std::optional<std::filesystem::path>& normalized_disk_path,
     int device_ordinal,
-    bool gs_connected) {
+    CanonicalIndexAuthority authority) {
   auto read_canonical_from_disk = [&]() -> absl::StatusOr<std::string> {
     if (!normalized_disk_path.has_value()) {
-      return absl::FailedPreconditionError("disk source path required when Global Store is unavailable");
+      return absl::FailedPreconditionError("disk source path required for disk-authoritative canonical index");
     }
-    auto idx_status = ensure_tensor_index_present(*normalized_disk_path);
-    if (!idx_status.ok()) {
-      return idx_status;
+    auto context_or = store::loader::get_disk_artifact_context(*normalized_disk_path);
+    if (!context_or.ok()) {
+      return context_or.status();
     }
-    auto local_or = store::loader::read_from_artifact_dir(*normalized_disk_path, device_ordinal);
-    if (!local_or.ok()) {
-      return local_or.status();
+    if (!(*context_or)->is_safetensors() && !(*context_or)->tensor_index_json_present() &&
+        !(*context_or)->tensor_index_cbor_present()) {
+      return store::loading::build_synthetic_payload_canonical_index_json((*context_or)->total_size());
     }
-    return local_or->canonical_index_json;
+    auto index_or = (*context_or)->get_index_info(device_ordinal);
+    if (!index_or.ok()) {
+      return index_or.status();
+    }
+    return index_or->canonical_index_json;
   };
 
-  const bool prefer_disk_index = normalized_disk_path.has_value() && !gs_connected;
-  absl::StatusOr<std::string> canonical_json_or =
-      prefer_disk_index ? read_canonical_from_disk() : engine.get_canonical_index_by_id(resolved_artifact_id);
-  if (!canonical_json_or.ok() && normalized_disk_path.has_value() && !prefer_disk_index) {
-    auto disk_or = read_canonical_from_disk();
-    if (disk_or.ok()) {
-      canonical_json_or = std::move(disk_or);
-    }
+  switch (authority) {
+    case CanonicalIndexAuthority::kDiskSource:
+      return read_canonical_from_disk();
+    case CanonicalIndexAuthority::kEngineMetadata:
+      return engine.get_canonical_index_by_id(resolved_artifact_id);
   }
-  return canonical_json_or;
+  return absl::InternalError("unknown canonical index authority");
 }
 
 std::optional<std::string> parse_mi2_data_multihash(std::string_view artifact_id) {

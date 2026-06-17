@@ -32,6 +32,7 @@ class RoutingContext : public std::enable_shared_from_this<RoutingContext> {
   class Communicator {
    public:
     transport::future_read_result_t read_tensor(const ReadRequest& request);
+    transport::future_read_result_t read_plan(const ReadPlan& plan);
     absl::StatusOr<std::shared_ptr<RouteChannel>> primary_channel();
 
     const std::string& src_endpoint_id() const {
@@ -45,10 +46,7 @@ class RoutingContext : public std::enable_shared_from_this<RoutingContext> {
    private:
     friend class RoutingContext;
 
-    Communicator(
-        std::string src_endpoint_id,
-        std::string dst_endpoint_id,
-        std::shared_ptr<RoutingContext> context);
+    Communicator(std::string src_endpoint_id, std::string dst_endpoint_id, std::shared_ptr<RoutingContext> context);
 
     std::string src_endpoint_id_;
     std::string dst_endpoint_id_;
@@ -128,19 +126,17 @@ class RoutingContext : public std::enable_shared_from_this<RoutingContext> {
       const EndpointBinding& local_binding,
       const EndpointBinding& remote_binding) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
-  const topology::Link* find_link_locked(
-      const std::string& src_endpoint_id,
-      const std::string& dst_endpoint_id) const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  const topology::Link* find_link_locked(const std::string& src_endpoint_id, const std::string& dst_endpoint_id) const
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
-  const topology::Link* find_any_link_for_endpoint_locked(
-      const std::string& endpoint_id) const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  const topology::Link* find_any_link_for_endpoint_locked(const std::string& endpoint_id) const
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   absl::StatusOr<LocalNicSelection> select_local_nic_for_source_locked(
       const std::string& src_endpoint_id,
       const EndpointBinding& src_binding) const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
-  int infer_nic_rail_id_locked(
-      const std::string& nic_endpoint_id) const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  int infer_nic_rail_id_locked(const std::string& nic_endpoint_id) const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   absl::StatusOr<EndpointBinding> select_remote_binding_for_rail_locked(
       const EndpointBinding& dst_binding,
@@ -158,12 +154,10 @@ class RoutingContext : public std::enable_shared_from_this<RoutingContext> {
       const EndpointBinding& local_binding,
       const EndpointBinding& remote_binding) const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
-  std::shared_ptr<LinkState> get_or_create_link_state_locked(
-      const topology::Link* link) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  std::shared_ptr<LinkState> get_or_create_link_state_locked(const topology::Link* link)
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
-  static std::string make_peer_key(
-      const std::string& src_endpoint_id,
-      const std::string& dst_endpoint_id);
+  static std::string make_peer_key(const std::string& src_endpoint_id, const std::string& dst_endpoint_id);
 
   Options options_;
   std::shared_ptr<engine::Communicator> engine_;

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Mapping, Sequence, SupportsIndex, SupportsInt, TypedDict, cast
 
 import torch
 
@@ -42,6 +42,27 @@ TargetTensors = Mapping[str, torch.Tensor]
 
 _COPY_PLAN_VERSION = 1
 _MAPPED_VIEW_ID_VERSION = 1
+
+
+class _RangePayload(TypedDict):
+    dim: int
+    start: int
+    end: int
+
+
+class _CopyPlanEntryPayload(TypedDict):
+    ckpt_name: str
+    ckpt_range: _RangePayload | None
+    dst_name: str
+    dst_range: _RangePayload | None
+
+
+class _TargetSpecPayload(TypedDict):
+    name: str
+    dtype: str
+    shape: tuple[int, ...]
+    stride: tuple[int, ...]
+    logical_length: int
 
 
 def copy_plan_to_json(plan: CopyPlan) -> str:
@@ -164,6 +185,9 @@ def compute_mapped_view_id_from_specs(
         )
 
     normalized = normalize_copy_plan(plan)
+    normalized_target_specs = tuple(
+        _coerce_target_spec_payload(spec) for spec in target_specs
+    )
     copy_plan_payload = sorted(
         (_entry_to_dict(entry) for entry in normalized),
         key=lambda item: (
@@ -193,7 +217,7 @@ def compute_mapped_view_id_from_specs(
                     "stride": [int(v) for v in spec["stride"]],
                     "logical_length": int(spec["logical_length"]),
                 }
-                for spec in target_specs
+                for spec in normalized_target_specs
             ),
             key=lambda item: str(item["name"]),
         ),
@@ -431,7 +455,7 @@ def view_narrow_ranges(view_spec: ViewSpecBuildResult | None) -> dict[str, Range
     return narrows
 
 
-def _entry_to_dict(entry: CopyPlanEntry) -> dict[str, object]:
+def _entry_to_dict(entry: CopyPlanEntry) -> _CopyPlanEntryPayload:
     return {
         "ckpt_name": entry.ckpt_name,
         "ckpt_range": _range_to_dict(entry.ckpt_range),
@@ -469,7 +493,7 @@ def _range_from_dict(data: object) -> Range | None:
     )
 
 
-def _range_to_dict(rng: Range | None) -> dict[str, int] | None:
+def _range_to_dict(rng: Range | None) -> _RangePayload | None:
     if rng is None:
         return None
     return {"dim": int(rng.dim), "start": int(rng.start), "end": int(rng.end)}
@@ -489,10 +513,10 @@ def _coerce_range(value: object) -> Range | None:
 
 def _target_spec_payloads_from_tensors(
     target_tensors: TargetTensors,
-) -> list[dict[str, object]]:
+) -> list[_TargetSpecPayload]:
     if not target_tensors:
         return []
-    payloads: list[dict[str, object]] = []
+    payloads: list[_TargetSpecPayload] = []
     normalized_targets = {str(name): tensor for name, tensor in target_tensors.items()}
     for name in sorted(normalized_targets):
         tensor = normalized_targets[name]
@@ -512,6 +536,27 @@ def _target_spec_payloads_from_tensors(
             }
         )
     return payloads
+
+
+def _coerce_target_spec_payload(spec: Mapping[str, object]) -> _TargetSpecPayload:
+    return {
+        "name": str(spec["name"]),
+        "dtype": str(spec["dtype"]),
+        "shape": tuple(
+            int(cast(SupportsInt | SupportsIndex | str | bytes | bytearray, v))
+            for v in cast(Sequence[object], spec["shape"])
+        ),
+        "stride": tuple(
+            int(cast(SupportsInt | SupportsIndex | str | bytes | bytearray, v))
+            for v in cast(Sequence[object], spec["stride"])
+        ),
+        "logical_length": int(
+            cast(
+                SupportsInt | SupportsIndex | str | bytes | bytearray,
+                spec["logical_length"],
+            )
+        ),
+    }
 
 
 def _group_entries_by_dst(
@@ -570,6 +615,10 @@ def _infer_target_entry(
 
     resolved_dim: int | None = None
     max_end = 0
+    saw_explicit_dst_range = False
+    effective_entries: list[
+        tuple[CopyPlanEntry, CanonicalIndexEntry, tuple[int, ...], Range | None]
+    ] = []
     for idx, plan_entry in enumerate(entries):
         src_entry = canonical_by_name.get(str(plan_entry.ckpt_name))
         if src_entry is None:
@@ -582,12 +631,6 @@ def _infer_target_entry(
             src_entry,
             view_narrows.get(src_entry.name),
         )
-        if tuple(int(v) for v in effective_shape) != tuple(int(v) for v in base_shape):
-            raise ArtifactError(
-                f"mapping target '{dst_name}' has ambiguous source shape",
-                status_code="INVALID_ARGUMENT",
-                retryable=False,
-            )
         if src_entry.dtype != first_src.dtype:
             raise ArtifactError(
                 f"mapping target '{dst_name}' mixes dtypes",
@@ -605,7 +648,11 @@ def _infer_target_entry(
                     retryable=False,
                 )
         if plan_entry.dst_range is not None:
+            saw_explicit_dst_range = True
             max_end = max(max_end, int(plan_entry.dst_range.end))
+        effective_entries.append(
+            (plan_entry, src_entry, effective_shape, view_narrows.get(src_entry.name))
+        )
     if resolved_dim is None:
         resolved_dim = 0
     if resolved_dim < 0 or resolved_dim >= len(base_shape):
@@ -614,9 +661,45 @@ def _infer_target_entry(
             status_code="INVALID_ARGUMENT",
             retryable=False,
         )
+
+    for _, _, effective_shape, _ in effective_entries:
+        if len(effective_shape) != len(base_shape):
+            raise ArtifactError(
+                f"mapping target '{dst_name}' has ambiguous source rank",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        for dim_idx, dim_size in enumerate(effective_shape):
+            if dim_idx == resolved_dim:
+                continue
+            if int(dim_size) != int(base_shape[dim_idx]):
+                raise ArtifactError(
+                    f"mapping target '{dst_name}' has ambiguous source shape",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+
+    target_dim_size = int(max_end) if saw_explicit_dst_range else None
+    if target_dim_size is None:
+        inferred_lengths = {
+            _effective_range_length(
+                shape=effective_shape,
+                rng=plan_entry.ckpt_range,
+                view_narrow=view_narrow,
+                dim=resolved_dim,
+            )
+            for plan_entry, _, effective_shape, view_narrow in effective_entries
+        }
+        if len(inferred_lengths) != 1:
+            raise ArtifactError(
+                f"mapping target '{dst_name}' has ambiguous target extent",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        target_dim_size = int(next(iter(inferred_lengths)))
+
     inferred_shape = list(base_shape)
-    if max_end > 0:
-        inferred_shape[resolved_dim] = int(max_end)
+    inferred_shape[resolved_dim] = int(target_dim_size)
     stride = _compact_stride(tuple(int(v) for v in inferred_shape))
     logical_length = int(torch.empty((), dtype=first_src.dtype).element_size())
     for dim_size in inferred_shape:
@@ -648,6 +731,31 @@ def _effective_source_shape(
         )
     shape[dim] = int(view_narrow.length)
     return tuple(shape)
+
+
+def _effective_range_length(
+    *,
+    shape: tuple[int, ...],
+    rng: Range | None,
+    view_narrow: Range | None,
+    dim: int,
+) -> int:
+    if not shape:
+        return 1
+    if rng is None:
+        return int(shape[dim])
+    start = int(rng.start)
+    end = int(rng.end)
+    if view_narrow is not None:
+        if int(rng.dim) != int(view_narrow.dim):
+            raise ArtifactError(
+                f"mapping range dim {rng.dim} does not match view narrow dim {view_narrow.dim}",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        start -= int(view_narrow.start)
+        end -= int(view_narrow.start)
+    return int(end - start)
 
 
 def _resolve_dim(src_range: Range | None, dst_range: Range | None) -> int | None:

@@ -15,10 +15,12 @@ enum class ArtifactIdKind {
   kUnspecified = 0,
   kMi2 = 1,
   kCgid = 2,
+  kMsa1 = 3,
 };
 
 constexpr absl::string_view kMi2Prefix = "mi2:";
 constexpr absl::string_view kCgidPrefix = "cgid:";
+constexpr absl::string_view kMsa1Prefix = "msa1:";
 constexpr absl::string_view kByteArtifactCgidNamespace = "byte_artifact";
 
 // Returns true when artifact_id begins with the mi2 prefix.
@@ -27,6 +29,9 @@ bool is_mi2_artifact_id(absl::string_view artifact_id);
 // Returns true when artifact_id begins with the CGID prefix.
 bool is_cgid_artifact_id(absl::string_view artifact_id);
 
+// Returns true when artifact_id begins with the MSA1 prefix.
+bool is_msa1_artifact_id(absl::string_view artifact_id);
+
 // Validate a client-generated artifact identity (cgid prefix and grammar).
 absl::Status validate_client_generated_id(absl::string_view artifact_id);
 
@@ -34,6 +39,7 @@ struct ByteArtifactCgidParts {
   std::string namespace_name;
   std::string engine;
   std::string model_id_enc;
+  std::string model_version_enc;
   std::string layout_id;
   std::string engine_key_enc;
 };

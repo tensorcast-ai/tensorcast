@@ -28,6 +28,9 @@ from tensorcast.global_store.rpc.assembly_slot_occupancy_rpc_handler import (
 )
 from tensorcast.global_store.rpc.chunk_rpc_handler import ChunkRpcHandler
 from tensorcast.global_store.rpc.disk_location_rpc_handler import DiskLocationRpcHandler
+from tensorcast.global_store.rpc.group_realization_rpc_handler import (
+    GroupRealizationRpcHandler,
+)
 from tensorcast.global_store.rpc.instance_rpc_handler import InstanceRpcHandler
 from tensorcast.global_store.rpc.key_mapping_rpc_handler import KeyMappingRpcHandler
 from tensorcast.global_store.rpc.layout_binding_rpc_handler import (
@@ -212,6 +215,7 @@ class ArtifactCatalogRpcServicerMixin:
     artifact_binding_rpc_handler: ArtifactBindingRpcHandler
     artifact_index_rpc_handler: ArtifactIndexRpcHandler
     key_mapping_rpc_handler: KeyMappingRpcHandler
+    group_realization_rpc_handler: GroupRealizationRpcHandler
     disk_location_rpc_handler: DiskLocationRpcHandler
 
     def GetArtifactBinding(self, request: Any, context: grpc.ServicerContext) -> Any:
@@ -249,6 +253,51 @@ class ArtifactCatalogRpcServicerMixin:
     def RevokeKeyMapping(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.key_mapping_rpc_handler.revoke_key_mapping(request, context)
 
+    def RegisterGroupVersionSet(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.group_realization_rpc_handler.register_group_version_set(
+            request, context
+        )
+
+    def BeginOrJoinGroupRealization(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.group_realization_rpc_handler.begin_or_join_group_realization(
+            request, context
+        )
+
+    def ReportGroupRealizationPrepared(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.group_realization_rpc_handler.report_group_realization_prepared(
+            request, context
+        )
+
+    def PublishGroupRealization(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.group_realization_rpc_handler.publish_group_realization(
+            request, context
+        )
+
+    def WaitGroupRealizationPublished(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.group_realization_rpc_handler.wait_group_realization_published(
+            request, context
+        )
+
+    def AbortGroupRealization(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.group_realization_rpc_handler.abort_group_realization(
+            request, context
+        )
+
+    def GetGroupRealization(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.group_realization_rpc_handler.get_group_realization(
+            request, context
+        )
+
     def UpsertArtifactDiskLocation(
         self, request: Any, context: grpc.ServicerContext
     ) -> Any:
@@ -270,6 +319,7 @@ class ClusterRuntimeRpcServicerMixin:
     replica_registration_rpc_handler: ReplicaRegistrationRpcHandler
     replica_lifecycle_rpc_handler: ReplicaLifecycleRpcHandler
     transport_rpc_handler: TransportRpcHandler
+    progressive_rpc_handler: Any
     worker_rpc_handler: WorkerRpcHandler
     instance_rpc_handler: InstanceRpcHandler
     worker_state_sync_rpc_handler: WorkerStateSyncRpcHandler
@@ -322,6 +372,35 @@ class ClusterRuntimeRpcServicerMixin:
 
     def QueryTransportWindow(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.transport_rpc_handler.query_transport_window(request, context)
+
+    def ReportProgressiveCoverage(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.progressive_rpc_handler.report_progressive_coverage(
+            request, context
+        )
+
+    def FindProgressiveSource(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.progressive_rpc_handler.find_progressive_source(request, context)
+
+    def CompleteProgressiveAssignment(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.progressive_rpc_handler.complete_progressive_assignment(
+            request, context
+        )
+
+    def RetireProgressiveCoverage(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.progressive_rpc_handler.retire_progressive_coverage(
+            request, context
+        )
+
+    def ExpireProgressiveState(
+        self, request: Any, context: grpc.ServicerContext
+    ) -> Any:
+        return self.progressive_rpc_handler.expire_progressive_state(request, context)
 
     def RegisterWorker(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.worker_rpc_handler.register_worker(request, context)

@@ -11,6 +11,7 @@
 #include "absl/status/statusor.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "core/common/artifact_identity.h"
 #include "daemon/util/status_utils.h"
 
 namespace tensorcast::daemon {
@@ -176,6 +177,9 @@ grpc::Status KeyMappingController::publish_replica_key(
   if (req.key().empty() || !req.has_artifact_descriptor() || req.artifact_descriptor().artifact_id().empty()) {
     return {grpc::StatusCode::INVALID_ARGUMENT, "key and artifact_descriptor.artifact_id are required"};
   }
+  if (common::is_msa1_artifact_id(req.artifact_descriptor().artifact_id())) {
+    return {grpc::StatusCode::FAILED_PRECONDITION, "msa1 artifact_id cannot be published into durable key mapping"};
+  }
   if (d_.shutdown_signal.is_shutting_down()) {
     return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
@@ -275,6 +279,9 @@ grpc::Status KeyMappingController::swap_key_mapping(
   }
   if (req.new_artifact_id().empty()) {
     return {grpc::StatusCode::INVALID_ARGUMENT, "new_artifact_id is required"};
+  }
+  if (common::is_msa1_artifact_id(req.new_artifact_id())) {
+    return {grpc::StatusCode::FAILED_PRECONDITION, "msa1 artifact_id cannot be stored in durable key mapping"};
   }
   if (d_.shutdown_signal.is_shutting_down()) {
     return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};

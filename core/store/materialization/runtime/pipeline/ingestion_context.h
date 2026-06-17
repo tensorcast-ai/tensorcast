@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -15,6 +16,7 @@
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/replica/replica.h"
 #include "core/store/runtime/context/runtime_context.h"
+#include "core/store/runtime/ingestion/materialization_strategy_types.h"
 #include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/store_engine_options.h"
 
@@ -69,6 +71,8 @@ struct IngestionContext {
   const StoreEngineOptions* options{nullptr};
   store_runtime::ReplicaRuntime* replica_runtime{nullptr};
   store_runtime::RuntimeContext* runtime_context{nullptr};
+  std::function<absl::StatusOr<store_runtime::ingestion::strategy::ExecutionStrategyPlan>(const IngestionContext&)>
+      ordinary_disk_strategy_planner;
 
   DiskSourceMetadata disk;
   P2PSourceMetadata p2p;

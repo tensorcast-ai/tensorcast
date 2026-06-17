@@ -3,16 +3,21 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "core/common/memory/cuda_memory.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/materialization/contracts/view/view_plan.h"
 #include "core/store/materialization/dataplane/metadata/disk_artifact_context.h"
+#include "core/store/runtime/ingestion/materialization_strategy_types.h"
+#include "core/store/store_engine_options.h"
 
 namespace tensorcast::store::replica {
 
@@ -20,9 +25,8 @@ struct CollectiveDiskLoadRequest {
   loading::ReplicaKey replica_key;
   loading::CollectiveLoadGroupHint group;
   std::shared_ptr<const loader::DiskArtifactContext> disk_context;
-  std::string source_index_json;
-  std::string view_index_json;
-  std::optional<loading::VariantIdentity> variant_identity;
+  materialization::contracts::RepresentationWorkPlan representation_work_plan;
+  StoreEngineOptions::MaterializationStrategyConfig strategy_config;
   void* gpu_ptr{nullptr};
   int device_id{-1};
   std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation;
@@ -31,10 +35,107 @@ struct CollectiveDiskLoadRequest {
 struct CollectiveDiskLoadResult {
   bool handled{false};
   absl::Status status{absl::OkStatus()};
+  runtime::ingestion::strategy::CollectiveExecutionMetrics metrics;
+  std::string skip_reason;
 };
+
+struct CollectiveMappedTargetLoadOptions {
+  uint64_t chunk_bytes{128ULL * 1024ULL * 1024ULL};
+  uint32_t streaming_buffer_chunks{1};
+  uint64_t merge_max_gap_bytes{256ULL * 1024ULL};
+  uint64_t merge_max_amplification{4};
+  StoreEngineOptions::MaterializationStrategyConfig strategy_config;
+};
+
+struct CollectiveMappedTargetLoadRequest {
+  std::string artifact_id;
+  loading::CollectiveLoadGroupHint group;
+  std::shared_ptr<const loader::DiskArtifactContext> disk_context;
+  materialization::contracts::RepresentationWorkPlan representation_work_plan;
+  loader::ByteRangeMap collective_lane_map;
+  loading::IntoTargetLayout target_layout;
+  int device_id{-1};
+};
+
+struct CollectiveMappedTargetLoadResult {
+  bool handled{false};
+  absl::Status status{absl::OkStatus()};
+  runtime::ingestion::strategy::CollectiveExecutionMetrics metrics;
+  std::string skip_reason;
+};
+
+struct LocalMappedTargetLoadRequest {
+  std::string artifact_id;
+  std::shared_ptr<const loader::DiskArtifactContext> disk_context;
+  materialization::contracts::RepresentationWorkPlan representation_work_plan;
+  loader::ByteRangeMap data_lane_map;
+  loading::IntoTargetLayout target_layout;
+  StoreEngineOptions::MaterializationStrategyConfig strategy_config;
+  int device_id{-1};
+};
+
+struct LocalMappedTargetLoadResult {
+  bool handled{false};
+  absl::Status status{absl::OkStatus()};
+  runtime::ingestion::strategy::CollectiveExecutionMetrics metrics;
+  loader::ByteRangeMap residual_data_map;
+  uint64_t handled_bytes{0};
+  std::string skip_reason;
+};
+
+struct LocalBatchedDiskLoadRequest {
+  loading::ReplicaKey replica_key;
+  std::shared_ptr<const loader::DiskArtifactContext> disk_context;
+  materialization::contracts::RepresentationWorkPlan representation_work_plan;
+  StoreEngineOptions::MaterializationStrategyConfig strategy_config;
+  void* gpu_ptr{nullptr};
+  int device_id{-1};
+  std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation;
+};
+
+struct LocalBatchedDiskLoadResult {
+  bool handled{false};
+  absl::Status status{absl::OkStatus()};
+  std::string skip_reason;
+};
+
+struct LocalBatchedPlanSummary {
+  bool eligible{false};
+  std::string reason;
+  uint64_t requested_source_bytes{0};
+  uint64_t unique_source_bytes{0};
+  uint64_t peak_temporary_bytes{0};
+  uint64_t batch_count{0};
+  uint64_t dedup_saving_bytes{0};
+  uint64_t direct_dedup_copy_bytes{0};
+  size_t replicated_jobs{0};
+  size_t dim0_jobs{0};
+  size_t dim1_jobs{0};
+};
+
+absl::StatusOr<LocalBatchedPlanSummary> summarize_local_batched_disk_load(
+    const materialization::contracts::RepresentationWorkPlan& representation_work_plan,
+    const StoreEngineOptions::MaterializationStrategyConfig& strategy_config);
 
 CollectiveDiskLoadResult try_collective_disk_load(
     const CollectiveDiskLoadRequest& request,
+    const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
+    std::chrono::milliseconds pinned_timeout);
+
+CollectiveMappedTargetLoadResult try_collective_mapped_target_load(
+    const CollectiveMappedTargetLoadRequest& request,
+    const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
+    std::chrono::milliseconds pinned_timeout,
+    const CollectiveMappedTargetLoadOptions& options);
+
+LocalMappedTargetLoadResult try_local_mapped_target_load(
+    const LocalMappedTargetLoadRequest& request,
+    const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
+    std::chrono::milliseconds pinned_timeout,
+    const CollectiveMappedTargetLoadOptions& options);
+
+LocalBatchedDiskLoadResult try_local_batched_disk_load(
+    const LocalBatchedDiskLoadRequest& request,
     const std::shared_ptr<common::memory::PinnedBufferPool>& pinned_pool,
     std::chrono::milliseconds pinned_timeout);
 

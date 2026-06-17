@@ -29,10 +29,6 @@ from tensorcast.api._errors import DaemonUnavailable, IndexParseError
 from tensorcast.api._runtime import apply_client_load_defaults_if_present
 from tensorcast.api._utils import new_uuid
 from tensorcast.api.context import CallContext, CollectiveLoadGroup
-from tensorcast.common.selection_contract import (
-    build_artifact_selection,
-    compute_selected_index_bytes,
-)
 from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.observability.otel import ensure_client_otel
 from tensorcast.proto.common.v1 import common_pb2
@@ -208,7 +204,7 @@ def _resolve_collective_load_group(
     return group
 
 
-def _build_artifact_selection(
+def _resolve_materialization_selection(
     *,
     artifact_id: str,
     view: common_pb2.ViewSpec | None,
@@ -218,33 +214,23 @@ def _build_artifact_selection(
     canonical_index_hint: bytes | None,
     view_index_hint: bytes | None,
 ) -> common_pb2.ArtifactSelection:
-    ordered_names: tuple[str, ...] = tuple(str(name) for name in (tensor_names or ()))
-    has_subset = bool(ordered_names)
+    from tensorcast.api.store.realization_kernel import resolve_artifact_selection
+
+    ordered_names = tuple(str(name) for name in (tensor_names or ()))
     has_transform = bool(view is not None and view.tensors)
-    resolved_view_index_hint = bytes(view_index_hint or b"")
-
-    if (has_transform or has_subset) and not resolved_view_index_hint:
-        canonical_bytes = bytes(canonical_index_hint or b"")
-        if canonical_bytes:
-            resolved_view_index_hint = compute_selected_index_bytes(
-                canonical_index_bytes=canonical_bytes,
-                view_spec=view if has_transform else None,
-                tensor_names=ordered_names if has_subset else None,
-            )
-
-    return build_artifact_selection(
+    return resolve_artifact_selection(
         artifact_id=artifact_id,
-        canonical_index_bytes=bytes(canonical_index_hint or b""),
-        layout_index_bytes=resolved_view_index_hint,
+        canonical_index_bytes=canonical_index_hint,
         view_spec=view,
         tensor_names=ordered_names,
         view_subset_hash=view_subset_hash,
         view_id=view_id,
+        view_index_hint=view_index_hint,
         allow_view_id_without_spec=bool(view_id and not has_transform),
-    )
+    ).proto
 
 
-def materialize_artifact_v2(
+def materialize_artifact(
     *,
     client: DaemonCtl,
     daemon_address: str,
@@ -257,7 +243,6 @@ def materialize_artifact_v2(
     view_id: str | None = None,
     placement: store_daemon_pb2.TransformPlacement | None = None,
     canonical_index_hint: bytes | None = None,
-    preference: store_daemon_pb2.SourcePreference | None = None,
     source_policy: store_daemon_pb2.SourcePolicy | None = None,
     tensor_names: Sequence[str] | None = None,
     verify_checksums: bool = True,
@@ -314,7 +299,7 @@ def materialize_artifact_v2(
     materialize_timing: dict[str, float] = {}
 
     with tracer.start_as_current_span(
-        "Client/MaterializeArtifactV2", kind=SpanKind.INTERNAL
+        "Client/MaterializeArtifact", kind=SpanKind.INTERNAL
     ) as span:
         if ctx is not None:
             if ctx.request_id:
@@ -335,23 +320,12 @@ def materialize_artifact_v2(
         ):
             effective_timeout_s = max(0.001, float(ctx.deadline_ms) / 1000.0)
 
-        if preference is not None:
-            preference_value = preference
-        elif source_policy is not None:
-            preference_value = (
-                source_policy.preference
-                if source_policy.preference
-                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
-                else store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-            )
-        else:
-            preference_value = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
         export_policy = _export_policy_to_proto(opts.export_policy)
         resolved_artifact_id = artifact_id
         if resolved_artifact_id is None:
             if key is None:
                 raise ValueError(
-                    "artifact_id or key is required for materialize_artifact_v2"
+                    "artifact_id or key is required for materialize_artifact"
                 )
             mapping = client.resolve_key_mapping(key)
             if not mapping.artifact_id:
@@ -367,7 +341,7 @@ def materialize_artifact_v2(
             )
 
         selection_start = time.perf_counter()
-        selection = _build_artifact_selection(
+        selection = _resolve_materialization_selection(
             artifact_id=resolved_artifact_id,
             view=view,
             view_id=view_id,
@@ -388,7 +362,7 @@ def materialize_artifact_v2(
             else device_uuid_for(dev_id)
         )
         rpc_start = time.perf_counter()
-        response = client.materialize_by_artifact_id_v2(
+        response = client.materialize_by_artifact_id(
             selection=selection,
             replica_uuid=replica_uuid_value,
             device_uuid=request_device_uuid,
@@ -397,20 +371,20 @@ def materialize_artifact_v2(
             wait_for_shared_disk_ms=opts.wait_for_shared_disk_ms,
             placement=placement,
             return_response=True,
-            preference=preference_value,
             source_policy=source_policy,
             export_policy=export_policy,
             need_view_data_hash=bool(opts.need_view_data_hash),
             target_device_type=target_device_type,
             lease_mode=lease_mode,
             collective_load_group=collective_load_group,
+            group_realization=ctx.group_realization if ctx is not None else None,
             timeout_s=effective_timeout_s,
             timing_out=materialize_timing,
         )
         materialize_timing["materialize_call_sec"] = time.perf_counter() - rpc_start
         if not isinstance(response, store_daemon_pb2.MaterializeReplicaResponse):
             raise DaemonUnavailable(
-                "Daemon returned unexpected response type for materialization v2"
+                "Daemon returned unexpected response type for artifact materialization"
             )
         disk_path = response.disk_path or disk_path
         materialized_source = response.source
@@ -459,42 +433,42 @@ def materialize_artifact_v2(
     if wait_for_completion:
         if mem_handle is None or handle_kind is None:
             raise DaemonUnavailable(
-                "Daemon returned empty mem_handle for materialization v2"
+                "Daemon returned empty mem_handle for artifact materialization"
             )
         if (
             target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
             and handle_kind != "cpu_memfd"
         ):
             raise DaemonUnavailable(
-                "Daemon returned non-CPU handle for CPU materialization v2"
+                "Daemon returned non-CPU handle for CPU artifact materialization"
             )
         if (
             target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU
             and handle_kind != "cuda_ipc_handle"
         ):
             raise DaemonUnavailable(
-                "Daemon returned non-GPU handle for GPU materialization v2"
+                "Daemon returned non-GPU handle for GPU artifact materialization"
             )
         if handle_kind == "cuda_ipc_handle" and not cuda_ipc_handle:
             raise DaemonUnavailable(
-                "Daemon returned empty cuda_ipc_handle for materialization v2"
+                "Daemon returned empty cuda_ipc_handle for artifact materialization"
             )
         if handle_kind == "cpu_memfd":
             if not cpu_shared_memory_enabled:
                 raise DaemonUnavailable(
-                    "Daemon cpu_shared_memory_enabled is false for CPU materialization v2"
+                    "Daemon cpu_shared_memory_enabled is false for CPU artifact materialization"
                 )
             if not local_handle_socket_path:
                 raise DaemonUnavailable(
-                    "Daemon local_handle_socket_path is missing for CPU materialization v2"
+                    "Daemon local_handle_socket_path is missing for CPU artifact materialization"
                 )
             if not lease_token:
                 raise DaemonUnavailable(
-                    "Daemon returned empty lease_token for CPU materialization v2"
+                    "Daemon returned empty lease_token for CPU artifact materialization"
                 )
             if cpu_memfd_size_bytes <= 0:
                 raise DaemonUnavailable(
-                    "Daemon returned empty cpu_memfd handle for CPU materialization v2"
+                    "Daemon returned empty cpu_memfd handle for CPU artifact materialization"
                 )
 
     view_data_hash = getattr(response, "view_data_hash", "") or None
@@ -507,17 +481,12 @@ def materialize_artifact_v2(
     if canonical_index_bytes:
         resolved_artifact_id = response.artifact_id or resolved_artifact_id
     else:
-        fallback_hint = resolved_canonical_index_hint
-        if fallback_hint is not None:
-            canonical_index_bytes = fallback_hint
-            if generation_value is None and generation_hint is not None:
-                generation_value = generation_hint
-        else:
-            raise IndexParseError(
-                f"Failed to fetch canonical index for artifact_id={resolved_artifact_id}"
-            )
+        raise IndexParseError(
+            "Daemon MaterializeReplicaResponse missing canonical_index_bytes "
+            f"for artifact_id={resolved_artifact_id}"
+        )
 
-    if hasattr(response, "view_index_bytes") and response.view_index_bytes:
+    if response.view_index_bytes:
         view_index_bytes = bytes(response.view_index_bytes)
     elif view_index_hint is not None:
         view_index_bytes = view_index_hint
@@ -693,5 +662,5 @@ def _monitor_verification(
 __all__ = [
     "MaterializationPayload",
     "TensorPayloadDescriptor",
-    "materialize_artifact_v2",
+    "materialize_artifact",
 ]

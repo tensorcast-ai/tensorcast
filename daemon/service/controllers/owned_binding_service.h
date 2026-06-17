@@ -4,14 +4,19 @@
 
 #include <atomic>
 #include <filesystem>
+#include <functional>
 #include <memory>
+#include <string>
+#include <string_view>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
 #include "core/common/async_runtime.h"
 #include "core/common/capability_token.h"
 #include "core/store/components/global_store_client.h"
+#include "core/store/runtime/ingestion/materialization_strategy_types.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/controllers/target_materialization_service.h"
 #include "daemon/service/rpc_context.h"
@@ -50,7 +55,10 @@ class OwnedBindingService {
     uint32_t max_concurrency{4};
     common::CapabilityTokenManager* capability_tokens{nullptr};
     TargetMaterializationService* target_materialization_service{nullptr};
+    std::string daemon_id;
+    std::string daemon_session_id;
     std::filesystem::path storage_path;
+    std::function<absl::Status()> await_state_sync_barrier;
   };
 
   explicit OwnedBindingService(Dep d);
@@ -77,7 +85,27 @@ class OwnedBindingService {
       const v2::SubmitBindingContributionRequest& req,
       v2::SubmitBindingContributionResponse& resp);
 
+  grpc::Status freeze_binding_current_value(
+      RpcContext& rctx,
+      const v2::FreezeBindingCurrentValueRequest& req,
+      v2::FreezeBindingCurrentValueResponse& resp);
+
   grpc::Status seal_binding(RpcContext& rctx, const v2::SealBindingRequest& req, v2::SealBindingResponse& resp);
+
+  grpc::Status promote_binding_current_value(
+      RpcContext& rctx,
+      const v2::PromoteBindingCurrentValueRequest& req,
+      v2::PromoteBindingCurrentValueResponse& resp);
+
+  grpc::Status start_promote_binding_current_value(
+      RpcContext& rctx,
+      const v2::StartPromoteBindingCurrentValueRequest& req,
+      v2::StartPromoteBindingCurrentValueResponse& resp);
+
+  grpc::Status get_binding_promotion_status(
+      RpcContext& rctx,
+      const v2::GetBindingPromotionStatusRequest& req,
+      v2::GetBindingPromotionStatusResponse& resp);
 
   grpc::Status refill_owned_binding(
       RpcContext& rctx,
@@ -95,8 +123,46 @@ class OwnedBindingService {
     absl::flat_hash_map<std::string, std::shared_ptr<std::atomic<bool>>> stop_flags ABSL_GUARDED_BY(mu);
   };
 
+  struct PromotionJobRecord {
+    v2::BindingPromotionStatus status;
+  };
+
+  grpc::Status promote_binding_current_value_impl(
+      const v2::PromoteBindingCurrentValueRequest& req,
+      v2::PromoteBindingCurrentValueResponse& resp);
+
+  void run_async_promotion_job(std::string job_id, v2::PromoteBindingCurrentValueRequest req);
+
+  void cancel_promotion_jobs_for_value(
+      std::string_view binding_id,
+      std::string_view binding_value_id,
+      std::string_view reason);
+
+  [[nodiscard]] std::string promotion_job_key(std::string_view binding_id, std::string_view binding_value_id) const;
+
+  void fill_promotion_status_from_job(
+      const std::shared_ptr<PromotionJobRecord>& job,
+      v2::BindingPromotionStatus& status) const;
+
   Dep d_;
   std::shared_ptr<ContributionLeaseKeepaliveTracker> contribution_keepalive_tracker_;
+  mutable absl::Mutex promotion_jobs_mu_;
+  absl::flat_hash_map<std::string, std::shared_ptr<PromotionJobRecord>> promotion_jobs_by_id_
+      ABSL_GUARDED_BY(promotion_jobs_mu_);
+  absl::flat_hash_map<std::string, std::string> promotion_job_ids_by_value_ ABSL_GUARDED_BY(promotion_jobs_mu_);
 };
+
+grpc::Status evaluate_strict_collective_preflight_for_testing(
+    RpcContext* rctx,
+    const store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary* plan_summary,
+    v2::CollectivePolicy collective_policy);
+
+store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary summarize_source_bound_plan_for_testing(
+    const store::runtime::ingestion::strategy::ResolvedMaterializationPlan& resolved_plan,
+    const std::optional<store::runtime::ingestion::strategy::SourceBoundLoweringArtifacts>& lowering_artifacts,
+    const store::StoreEngineOptions::MaterializationStrategyConfig& strategy_config,
+    const store::loading::ExecutionTopologyContext& execution_topology,
+    v2::CollectivePolicy collective_policy,
+    bool disk_source_available);
 
 } // namespace tensorcast::daemon

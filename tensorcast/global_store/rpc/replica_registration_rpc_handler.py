@@ -4,12 +4,15 @@
 
 from __future__ import annotations
 
-from contextlib import suppress
 from typing import Callable
 
 import grpc
 
-from tensorcast.common.identity import ArtifactIdKind, infer_artifact_id_kind
+from tensorcast.common.identity import (
+    ArtifactIdKind,
+    infer_artifact_id_kind,
+    is_msa1_artifact_id,
+)
 from tensorcast.global_store import metrics as gs_metrics
 from tensorcast.global_store.exceptions import ValidationError
 from tensorcast.global_store.models import Replica
@@ -189,11 +192,14 @@ class ReplicaRegistrationRpcHandler:
                     request.max_concurrency,
                     request.worker_id,
                 )
-                preserve_transport = not request.mem_info.HasField("transport")
                 artifact_id = resolved_artifact_id
                 descriptor = (
                     request.descriptor if request.HasField("descriptor") else None
                 )
+                if artifact_id and is_msa1_artifact_id(artifact_id):
+                    raise ValidationError(
+                        "msa1 artifact_id is daemon-session-local and cannot be registered in Global Store replica metadata"
+                    )
 
                 kind = infer_artifact_id_kind(artifact_id) if artifact_id else None
                 if descriptor is not None and descriptor.id_kind:
@@ -273,7 +279,6 @@ class ReplicaRegistrationRpcHandler:
                             )
                         return self._artifact_service.register_replica(
                             replica,
-                            preserve_transport=preserve_transport,
                             cursor=cursor,
                         )
 
@@ -294,7 +299,6 @@ class ReplicaRegistrationRpcHandler:
                         )
                     return self._artifact_service.register_replica(
                         replica,
-                        preserve_transport=preserve_transport,
                         cursor=cursor,
                     )
 
@@ -313,18 +317,17 @@ class ReplicaRegistrationRpcHandler:
             else:
                 registered = _register_impl()
 
-            with suppress(Exception):
-                span_attrs: dict[str, bool | int | float | str] = {
-                    "tc.artifact.id": registered.artifact_id,
-                    "tc.replica.id": str(registered.replica_id),
-                    "tc.memory.type": str(registered.memory_type.value),
-                    "tc.memory.size": int(registered.memory_size),
-                    "tc.device.id": int(registered.device_id),
-                }
-                worker_id = registered.worker_id
-                if worker_id:
-                    span_attrs["tc.worker.id"] = worker_id
-                set_span_attributes(span_attrs)
+            span_attrs: dict[str, bool | int | float | str] = {
+                "tc.artifact.id": registered.artifact_id,
+                "tc.replica.id": str(registered.replica_id),
+                "tc.memory.type": str(registered.memory_type.value),
+                "tc.memory.size": int(registered.memory_size),
+                "tc.device.id": int(registered.device_id),
+            }
+            worker_id = registered.worker_id
+            if worker_id:
+                span_attrs["tc.worker.id"] = worker_id
+            set_span_attributes(span_attrs)
 
             response = global_store_pb2.RegisterReplicaResponse(
                 status=global_store_pb2.Status.STATUS_OK,
@@ -335,7 +338,11 @@ class ReplicaRegistrationRpcHandler:
 
         except ValidationError as exc:
             self._logger.error("Validation error: %s", exc)
-            grpc_code = grpc.StatusCode.INVALID_ARGUMENT
+            grpc_code = (
+                grpc.StatusCode.FAILED_PRECONDITION
+                if "daemon-session-local" in str(exc)
+                else grpc.StatusCode.INVALID_ARGUMENT
+            )
             grpc_details = str(exc)
             self._apply_grpc_status(
                 context=context,

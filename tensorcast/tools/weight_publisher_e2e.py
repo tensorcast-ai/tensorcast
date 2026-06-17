@@ -26,37 +26,49 @@ from typing import Any, Callable
 import torch
 
 import tensorcast as tc
-from tensorcast import FallbackOptions
+import tensorcast.startup as tc_startup
+from tensorcast import GetArtifactOptions
+from tensorcast.api._config import (
+    RetrievalPolicy,
+    RetrievalPreference,
+    RetrievalPreset,
+)
 from tensorcast.api.store import CopyPlanEntry, Range
 from tensorcast.api.store import artifact as resolve_artifact
 from tensorcast.api.store.runtime import get_context as get_store_context
+from tensorcast.cli_utils.health import wait_for_daemon
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.tools.weight_publisher import WeightPublisher, WeightPublisherConfig
 
 SUPPORTED_PAYLOAD_MODES = {"probe", "version_fill", "tp_ranked"}
-SUPPORTED_RECEIVER_APPLY_MODES = {
-    "tensor_dict",
-    "binding_swap",
-    "tp_bind_into_swap",
-    "tp4_bind_into_swap",
-}
-SUPPORTED_TRANSPORT_GROUP_MODES = {"none", "tp_version"}
+DEFAULT_TRANSPORT_GROUP_KIND = "group_realization_transport"
 SUPPORTED_TP_DEVICE_MAP_POLICIES = {"auto", "strict", "modulo"}
 
-TP4_COL_BLOCK_ROWS = 4
-TP4_COL_WIDTH = 8
-TP4_ROW_HEIGHT = 8
-TP4_ROW_BLOCK_COLS = 4
+TP_RANK_COL_BLOCK_ROWS = 4
+TP_RANK_COL_WIDTH = 8
+TP_RANK_ROW_HEIGHT = 8
+TP_RANK_ROW_BLOCK_COLS = 4
 FLOAT32_BYTES = 4
 TP_RANKED_SOURCE_ELEMS_LIMIT = (1 << 31) - 1
 TP_FULL_VALIDATION_MAX_BYTES = 4 * 1024**3
 TP_SAMPLED_VALIDATION_POINTS = 4096
 RECEIVER_PROGRESS_LOG_INTERVAL_S = 10.0
 RECEIVER_RESOLVE_SLOW_THRESHOLD_MS = 1000.0
-RECEIVER_TENSOR_DICT_UNLOAD_RETRIES = 3
-RECEIVER_TENSOR_DICT_UNLOAD_RETRY_INTERVAL_S = 0.05
 TP_BIND_PER_RANK_TIMEOUT_MIN_S = 20.0
 TP_BIND_PER_RANK_TIMEOUT_FLOOR_S = 8.0
 TP_BIND_PER_RANK_TIMEOUT_GIB_FACTOR = 12.0
+DEFAULT_RECEIVER_MATERIALIZE_OPTIONS = GetArtifactOptions(
+    source=RetrievalPolicy(
+        preference=RetrievalPreference.PREFER_P2P,
+        allow_p2p=True,
+        allow_disk=False,
+    ),
+    verify_checksums=False,
+)
+
+
+def _monotonic() -> float:
+    return time.monotonic()
 
 
 def _is_not_found_error(exc: Exception) -> bool:
@@ -77,32 +89,17 @@ def _is_version_unavailable_during_apply_error(exc: Exception) -> bool:
     return (
         "region is poisoned" in msg
         or "tensor not found" in msg
-        or (
-            "artifact id" in msg
-            and ("not found" in msg or "was not found" in msg)
-        )
+        or ("artifact id" in msg and ("not found" in msg or "was not found" in msg))
     )
 
 
-def _is_non_retryable_transport_group_error(exc: Exception) -> bool:
+def _is_non_retryable_group_realization_error(exc: Exception) -> bool:
     msg = str(exc).lower()
-    if "group contract violation" in msg:
-        return True
     return (
-        "duplicate part_id in transport history" in msg
-        or "artifact/view/total_parts mismatch" in msg
-    )
-
-
-def _should_clear_tp_pending_target_on_apply_failure(exc: Exception) -> bool:
-    msg = str(exc).lower()
-    if "region is poisoned" in msg:
-        return True
-    if "deadline exceeded" in msg:
-        return True
-    return (
-        "already used with different payload" in msg
-        or "client_request_id already used with a different payload" in msg
+        "terminal but not published" in msg
+        or "transaction is aborted" in msg
+        or "transaction is expired" in msg
+        or "source visibility fence failed" in msg
     )
 
 
@@ -142,7 +139,6 @@ class ReceiveEvent:
     artifact_id: str
     received_at_s: float
     materialize_latency_s: float
-    apply_mode: str
     apply_operation: str
     pointer_stable: bool | None
 
@@ -244,6 +240,30 @@ def _sanitize_group_token(raw: str) -> str:
     return "".join(ch if ch in allowed else "_" for ch in value)
 
 
+def _tp_group_part_id(*, receiver_index: int, rank: int) -> str:
+    return _sanitize_group_token(f"rx{int(receiver_index)}:r{int(rank)}")
+
+
+def _tp_group_required_part_ids(
+    *, total_parts: int, tp_world_size: int
+) -> tuple[str, ...]:
+    if int(total_parts) <= 0:
+        raise ValueError("transport_group_total_parts must be > 0")
+    if int(tp_world_size) <= 0:
+        raise ValueError("tp_world_size must be > 0")
+    if int(total_parts) % int(tp_world_size) != 0:
+        raise ValueError(
+            "transport_group_total_parts must be divisible by tp_world_size "
+            "for group_realization"
+        )
+    receiver_count = int(total_parts) // int(tp_world_size)
+    return tuple(
+        _tp_group_part_id(receiver_index=receiver_index, rank=rank)
+        for receiver_index in range(receiver_count)
+        for rank in range(int(tp_world_size))
+    )
+
+
 def _build_key(*, model_name: str, key_template: str, version: int) -> str:
     key = key_template.format(
         model_name=model_name,
@@ -282,13 +302,12 @@ def _resolve_tp_rank_devices(
 ) -> tuple[dict[int, str], str]:
     if visible_device_count <= 0:
         raise ValueError(
-            "tp_bind_into_swap requires at least one visible CUDA device, "
+            "group_realization receiver requires at least one visible CUDA device, "
             f"got {visible_device_count}"
         )
     if tp_device_base_index < 0:
         raise ValueError(
-            "tp_device_base_index must be >= 0, "
-            f"got {tp_device_base_index}"
+            f"tp_device_base_index must be >= 0, got {tp_device_base_index}"
         )
     if tp_device_base_index >= visible_device_count:
         raise ValueError(
@@ -311,9 +330,7 @@ def _resolve_tp_rank_devices(
             f"visible={visible_device_count}, available_from_base={available_from_base}"
         )
     if map_policy not in {"auto", "modulo"}:
-        raise ValueError(
-            f"unsupported tp device map policy: {map_policy!r}"
-        )
+        raise ValueError(f"unsupported tp device map policy: {map_policy!r}")
     return (
         {
             rank: f"cuda:{tp_device_base_index + (rank % available_from_base)}"
@@ -429,21 +446,21 @@ def _build_tp_ranked_publish_tensors(
         return tensors
 
     tp_col_weight = torch.empty(
-        (tp_world_size * TP4_COL_BLOCK_ROWS, TP4_COL_WIDTH),
+        (tp_world_size * TP_RANK_COL_BLOCK_ROWS, TP_RANK_COL_WIDTH),
         dtype=torch.float32,
         device=device,
     )
     tp_row_weight = torch.empty(
-        (TP4_ROW_HEIGHT, tp_world_size * TP4_ROW_BLOCK_COLS),
+        (TP_RANK_ROW_HEIGHT, tp_world_size * TP_RANK_ROW_BLOCK_COLS),
         dtype=torch.float32,
         device=device,
     )
     for rank in range(tp_world_size):
         expected = _tp_rank_value(version=version, rank=rank)
-        col_start = rank * TP4_COL_BLOCK_ROWS
-        col_end = col_start + TP4_COL_BLOCK_ROWS
-        row_start = rank * TP4_ROW_BLOCK_COLS
-        row_end = row_start + TP4_ROW_BLOCK_COLS
+        col_start = rank * TP_RANK_COL_BLOCK_ROWS
+        col_end = col_start + TP_RANK_COL_BLOCK_ROWS
+        row_start = rank * TP_RANK_ROW_BLOCK_COLS
+        row_end = row_start + TP_RANK_ROW_BLOCK_COLS
         tp_col_weight[col_start:col_end, :].fill_(expected)
         tp_row_weight[:, row_start:row_end].fill_(expected)
     return {
@@ -669,8 +686,8 @@ def _validate_tp_ranked_payload(
         raise AssertionError(f"missing tensors in tp_ranked payload: {sorted(missing)}")
     tp_col_weight = tensors["tp_col_weight"]
     tp_row_weight = tensors["tp_row_weight"]
-    expected_col_shape = (tp_world_size * TP4_COL_BLOCK_ROWS, TP4_COL_WIDTH)
-    expected_row_shape = (TP4_ROW_HEIGHT, tp_world_size * TP4_ROW_BLOCK_COLS)
+    expected_col_shape = (tp_world_size * TP_RANK_COL_BLOCK_ROWS, TP_RANK_COL_WIDTH)
+    expected_row_shape = (TP_RANK_ROW_HEIGHT, tp_world_size * TP_RANK_ROW_BLOCK_COLS)
     if tuple(tp_col_weight.shape) != expected_col_shape:
         raise AssertionError(
             "tp_col_weight shape mismatch: "
@@ -683,10 +700,10 @@ def _validate_tp_ranked_payload(
         )
     for rank in range(tp_world_size):
         expected_value = _tp_rank_value(version=version, rank=rank)
-        col_start = rank * TP4_COL_BLOCK_ROWS
-        col_end = col_start + TP4_COL_BLOCK_ROWS
-        row_start = rank * TP4_ROW_BLOCK_COLS
-        row_end = row_start + TP4_ROW_BLOCK_COLS
+        col_start = rank * TP_RANK_COL_BLOCK_ROWS
+        col_end = col_start + TP_RANK_COL_BLOCK_ROWS
+        row_start = rank * TP_RANK_ROW_BLOCK_COLS
+        row_end = row_start + TP_RANK_ROW_BLOCK_COLS
         _assert_tensor_allclose_scalar(
             name=f"tp_col_weight[rank={rank}]",
             tensor=tp_col_weight[col_start:col_end, :],
@@ -699,7 +716,7 @@ def _validate_tp_ranked_payload(
         )
 
 
-def _build_tp4_rank_copy_plan(
+def _build_tp_rank_copy_plan(
     *,
     rank: int,
     tp_world_size: int,
@@ -733,67 +750,27 @@ def _build_tp4_rank_copy_plan(
             )
         return tuple(entries)
 
-    col_start = rank * TP4_COL_BLOCK_ROWS
-    col_end = col_start + TP4_COL_BLOCK_ROWS
-    row_start = rank * TP4_ROW_BLOCK_COLS
-    row_end = row_start + TP4_ROW_BLOCK_COLS
+    col_start = rank * TP_RANK_COL_BLOCK_ROWS
+    col_end = col_start + TP_RANK_COL_BLOCK_ROWS
+    row_start = rank * TP_RANK_ROW_BLOCK_COLS
+    row_end = row_start + TP_RANK_ROW_BLOCK_COLS
     return (
         CopyPlanEntry(
             ckpt_name="tp_col_weight",
             ckpt_range=Range(dim=0, start=col_start, end=col_end),
             dst_name="rank_col_weight",
-            dst_range=Range(dim=0, start=0, end=TP4_COL_BLOCK_ROWS),
+            dst_range=Range(dim=0, start=0, end=TP_RANK_COL_BLOCK_ROWS),
         ),
         CopyPlanEntry(
             ckpt_name="tp_row_weight",
             ckpt_range=Range(dim=1, start=row_start, end=row_end),
             dst_name="rank_row_weight",
-            dst_range=Range(dim=1, start=0, end=TP4_ROW_BLOCK_COLS),
+            dst_range=Range(dim=1, start=0, end=TP_RANK_ROW_BLOCK_COLS),
         ),
     )
 
 
-def _allocate_tp4_rank_targets(
-    *,
-    device: str,
-    tp_world_size: int,
-    tp_total_bytes: int,
-) -> dict[str, torch.Tensor]:
-    normalized_total_bytes = _normalize_tp_total_bytes(tp_total_bytes)
-    if normalized_total_bytes > 0:
-        targets: dict[str, torch.Tensor] = {}
-        chunk_elems = _tp_ranked_chunk_elems(
-            tp_world_size=tp_world_size,
-            tp_total_bytes=normalized_total_bytes,
-        )
-        for chunk_index, rank_block_elems in enumerate(chunk_elems):
-            targets[_tp_rank_col_target_name(chunk_index)] = torch.empty(
-                (1, rank_block_elems),
-                dtype=torch.float32,
-                device=device,
-            )
-            targets[_tp_rank_row_target_name(chunk_index)] = torch.empty(
-                (1, rank_block_elems),
-                dtype=torch.float32,
-                device=device,
-            )
-        return targets
-
-    return {
-        "rank_col_weight": torch.empty(
-            (TP4_COL_BLOCK_ROWS, TP4_COL_WIDTH),
-            dtype=torch.float32,
-            device=device,
-        ),
-        "rank_row_weight": torch.empty(
-            (TP4_ROW_HEIGHT, TP4_ROW_BLOCK_COLS),
-            dtype=torch.float32,
-            device=device,
-        ),
-    }
-
-
-def _validate_tp4_rank_targets(
+def _validate_tp_rank_targets(
     *,
     version: int,
     rank: int,
@@ -949,7 +926,7 @@ class WeightUpdatePublisher:
         model_name: str,
         key_template: str,
         keep_last: int,
-        pre_publish_trim_margin: int,
+        pre_publish_trim_margin: int = 1,
         history_path: Path,
         run_root: Path,
         check_poll_interval_s: float,
@@ -1044,9 +1021,9 @@ class WeightUpdatePublisher:
             publish_device=publish_device,
         )
         publish_payload_bytes = _estimate_tensor_payload_bytes(tensors)
-        publish_start = time.monotonic()
+        publish_start = _monotonic()
         artifact_id = self._publisher.publish(tensors, version=version)
-        publish_latency_s = time.monotonic() - publish_start
+        publish_latency_s = _monotonic() - publish_start
         publish_breakdown_s = self._publisher.last_publish_breakdown_s()
         put_s = float(publish_breakdown_s.get("put_s", 0.0))
         publish_throughput_gib_s = _bytes_throughput_gib_s(
@@ -1095,7 +1072,7 @@ class WeightUpdatePublisher:
             f"key={key}",
             f"artifact_id={artifact_id}",
             f"publish_latency_s={publish_latency_s:.3f}",
-            f"payload_gib={float(publish_payload_bytes)/float(1024**3):.3f}",
+            f"payload_gib={float(publish_payload_bytes) / float(1024**3):.3f}",
             f"publish_bw_gib_s={publish_throughput_gib_s:.3f}",
             f"put_bw_gib_s={put_throughput_gib_s:.3f}",
             flush=True,
@@ -1166,10 +1143,11 @@ class WeightUpdatePublisher:
 
     def _probe_materializable(self, *, key: str, version: int) -> bool:
         try:
-            artifact = resolve_artifact(key=key).with_fallback(
-                self._fallback_for_checks()
+            artifact = resolve_artifact(key=key)
+            tensors = artifact.tensor_dict(
+                device=self._check_device,
+                options=self._check_options(),
             )
-            tensors = artifact.tensor_dict(device=self._check_device)
             _validate_payload(
                 version=version,
                 tensors=tensors,
@@ -1181,8 +1159,10 @@ class WeightUpdatePublisher:
         except Exception:
             return False
 
-    def _fallback_for_checks(self) -> FallbackOptions:
-        return FallbackOptions.local_only()
+    def _check_options(self) -> GetArtifactOptions:
+        return GetArtifactOptions(
+            source=RetrievalPolicy.from_preset(RetrievalPreset.LOCAL_ONLY)
+        )
 
     def _wait_materialization_state(
         self,
@@ -1225,6 +1205,8 @@ class WeightUpdatePublisher:
 
 
 class WeightUpdateReceiver:
+    _materialize_options = DEFAULT_RECEIVER_MATERIALIZE_OPTIONS
+
     def __init__(
         self,
         *,
@@ -1233,7 +1215,6 @@ class WeightUpdateReceiver:
         poll_interval_s: float,
         per_version_timeout_s: float,
         materialize_device: str,
-        apply_mode: str,
         allow_version_skip: bool,
         payload_mode: str,
         tp_world_size: int,
@@ -1241,7 +1222,6 @@ class WeightUpdateReceiver:
         tp_device_map_policy: str,
         tp_total_bytes: int,
         tp_materialize_deadline_s: float,
-        transport_group_mode: str,
         transport_group_kind: str,
         transport_group_namespace: str,
         transport_group_total_parts: int,
@@ -1253,14 +1233,8 @@ class WeightUpdateReceiver:
         self._key_template = key_template
         self._poll_interval_s = poll_interval_s
         self._per_version_timeout_s = per_version_timeout_s
-        self._fallback = FallbackOptions(
-            prefer="p2p",
-            allow_p2p=True,
-            allow_disk=False,
-            verify_checksums=False,
-        )
+        self._materialize_options = DEFAULT_RECEIVER_MATERIALIZE_OPTIONS
         self._materialize_device = _materialization_device(materialize_device)
-        self._apply_mode = str(apply_mode).strip()
         self._allow_version_skip = bool(allow_version_skip)
         self._payload_mode = _normalize_payload_mode(payload_mode)
         self._tp_world_size = _ensure_positive("tp_world_size", tp_world_size)
@@ -1269,21 +1243,18 @@ class WeightUpdateReceiver:
             "tp_materialize_deadline_s",
             float(tp_materialize_deadline_s),
         )
-        self._transport_group_mode = str(transport_group_mode).strip().lower()
-        if self._transport_group_mode not in SUPPORTED_TRANSPORT_GROUP_MODES:
-            raise ValueError(
-                "unsupported transport_group_mode="
-                f"{self._transport_group_mode!r}, "
-                f"allowed={sorted(SUPPORTED_TRANSPORT_GROUP_MODES)}"
-            )
-        self._transport_group_kind = _sanitize_group_token(transport_group_kind)
+        self._transport_group_kind = (
+            _sanitize_group_token(transport_group_kind) or DEFAULT_TRANSPORT_GROUP_KIND
+        )
         self._transport_group_namespace = _sanitize_group_token(
             transport_group_namespace
-        )
+        ) or _sanitize_group_token(f"{model_name}:group_realization")
         self._transport_group_total_parts = _ensure_non_negative(
             "transport_group_total_parts",
             int(transport_group_total_parts),
         )
+        if self._transport_group_total_parts <= 0:
+            self._transport_group_total_parts = self._tp_world_size
         self._transport_group_receiver_index = _ensure_non_negative(
             "transport_group_receiver_index",
             int(transport_group_receiver_index),
@@ -1312,77 +1283,64 @@ class WeightUpdateReceiver:
         self._tp_rank_devices: dict[int, str] = {}
         if self._tp_total_bytes > 0 and self._payload_mode != "tp_ranked":
             raise ValueError("tp_total_bytes requires payload_mode=tp_ranked")
-        if self._apply_mode not in SUPPORTED_RECEIVER_APPLY_MODES:
-            raise ValueError(f"unsupported receiver apply mode: {self._apply_mode}")
-        if (
-            self._apply_mode == "binding_swap"
-            and not self._materialize_device.startswith("cuda:")
-        ):
-            raise ValueError("binding_swap mode requires a CUDA materialization device")
-        if self._apply_mode in {"tp_bind_into_swap", "tp4_bind_into_swap"}:
-            if self._apply_mode == "tp4_bind_into_swap" and self._tp_world_size != 4:
-                raise ValueError(
-                    f"tp4_bind_into_swap requires tp_world_size=4, got {self._tp_world_size}"
-                )
-            if self._payload_mode != "tp_ranked":
-                raise ValueError(f"{self._apply_mode} requires payload_mode=tp_ranked")
-            if os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake":
-                raise ValueError(f"{self._apply_mode} requires real CUDA backend")
-            if not torch.cuda.is_available():
-                raise ValueError(f"{self._apply_mode} requires CUDA devices")
-            self._tp_visible_device_count = int(torch.cuda.device_count())
-            (
-                self._tp_rank_devices,
-                self._tp_device_map_effective_mode,
-            ) = _resolve_tp_rank_devices(
-                tp_world_size=self._tp_world_size,
-                tp_device_base_index=self._tp_device_base_index,
-                visible_device_count=self._tp_visible_device_count,
-                map_policy=self._tp_device_map_policy,
+        if self._payload_mode != "tp_ranked":
+            raise ValueError(
+                "group_realization receiver requires payload_mode=tp_ranked"
             )
-            map_tokens = " ".join(
-                f"r{rank}->{device}"
-                for rank, device in self._tp_rank_devices.items()
+        if os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake":
+            raise ValueError("group_realization receiver requires real CUDA backend")
+        if not torch.cuda.is_available():
+            raise ValueError("group_realization receiver requires CUDA devices")
+        if self._tp_materialize_deadline_s <= 0.0:
+            raise ValueError(
+                "group_realization receiver requires tp_materialize_deadline_s > 0"
             )
+        self._tp_visible_device_count = int(torch.cuda.device_count())
+        (
+            self._tp_rank_devices,
+            self._tp_device_map_effective_mode,
+        ) = _resolve_tp_rank_devices(
+            tp_world_size=self._tp_world_size,
+            tp_device_base_index=self._tp_device_base_index,
+            visible_device_count=self._tp_visible_device_count,
+            map_policy=self._tp_device_map_policy,
+        )
+        map_tokens = " ".join(
+            f"r{rank}->{device}" for rank, device in self._tp_rank_devices.items()
+        )
+        print(
+            "[receiver][tp-device-map]",
+            f"policy={self._tp_device_map_policy}",
+            f"effective_mode={self._tp_device_map_effective_mode}",
+            f"tp_world_size={self._tp_world_size}",
+            f"visible_cuda_devices={self._tp_visible_device_count}",
+            f"base_index={self._tp_device_base_index}",
+            map_tokens,
+            flush=True,
+        )
+        if self._tp_device_map_effective_mode == "modulo":
             print(
                 "[receiver][tp-device-map]",
-                f"policy={self._tp_device_map_policy}",
-                f"effective_mode={self._tp_device_map_effective_mode}",
-                f"tp_world_size={self._tp_world_size}",
-                f"visible_cuda_devices={self._tp_visible_device_count}",
-                f"base_index={self._tp_device_base_index}",
-                map_tokens,
+                "fallback=modulo",
+                "reason=insufficient_visible_cuda_devices_for_contiguous_rank_map",
+                f"available_from_base={self._tp_visible_device_count - self._tp_device_base_index}",
                 flush=True,
             )
-            if self._tp_device_map_effective_mode == "modulo":
-                print(
-                    "[receiver][tp-device-map]",
-                    "fallback=modulo",
-                    "reason=insufficient_visible_cuda_devices_for_contiguous_rank_map",
-                    f"available_from_base={self._tp_visible_device_count - self._tp_device_base_index}",
-                    flush=True,
-                )
-        if self._transport_group_mode == "tp_version":
-            if self._transport_group_total_parts <= 0:
-                raise ValueError(
-                    "transport_group_total_parts must be > 0 when "
-                    "transport_group_mode=tp_version"
-                )
-            if not self._transport_group_kind:
-                raise ValueError(
-                    "transport_group_kind must be non-empty when "
-                    "transport_group_mode=tp_version"
-                )
-            if not self._transport_group_namespace:
-                raise ValueError(
-                    "transport_group_namespace must be non-empty when "
-                    "transport_group_mode=tp_version"
-                )
-        self._binding: Any | None = None
-        self._binding_ptrs: dict[str, int] | None = None
+        if self._transport_group_total_parts <= 0:
+            raise ValueError(
+                "transport_group_total_parts must be > 0 for group_realization"
+            )
+        if not self._transport_group_kind:
+            raise ValueError("transport_group_kind must be non-empty")
+        if not self._transport_group_namespace:
+            raise ValueError("transport_group_namespace must be non-empty")
+        _tp_group_required_part_ids(
+            total_parts=self._transport_group_total_parts,
+            tp_world_size=self._tp_world_size,
+        )
         self._tp_bindings: dict[int, Any] = {}
         self._tp_binding_ptrs: dict[int, dict[str, int]] = {}
-        self._tp_pending_targets: dict[int, dict[str, torch.Tensor]] = {}
+        self._group_version_set_refs: dict[tuple[int, str], Any] = {}
         self._progress_log_interval_s = RECEIVER_PROGRESS_LOG_INTERVAL_S
         self._resolve_slow_threshold_ms = RECEIVER_RESOLVE_SLOW_THRESHOLD_MS
         self._last_resolve_log_state = ""
@@ -1390,9 +1348,7 @@ class WeightUpdateReceiver:
 
     def tp_device_map_info(self) -> dict[str, Any]:
         policy = str(getattr(self, "_tp_device_map_policy", "auto"))
-        effective_mode = str(
-            getattr(self, "_tp_device_map_effective_mode", "inactive")
-        )
+        effective_mode = str(getattr(self, "_tp_device_map_effective_mode", "inactive"))
         visible_device_count = int(getattr(self, "_tp_visible_device_count", 0))
         rank_device_map = dict(getattr(self, "_tp_rank_devices", {}))
         return {
@@ -1463,7 +1419,6 @@ class WeightUpdateReceiver:
                 f"key={key}",
                 f"artifact_id={event.artifact_id}",
                 f"latency_s={event.materialize_latency_s:.3f}",
-                f"mode={event.apply_mode}",
                 f"op={event.apply_operation}",
                 (
                     f"pointer_stable={event.pointer_stable}"
@@ -1475,18 +1430,10 @@ class WeightUpdateReceiver:
         return events
 
     def _wait_one(self, *, version: int, key: str, max_version: int) -> ReceiveEvent:
-        if self._apply_mode in {"tp_bind_into_swap", "tp4_bind_into_swap"}:
-            return self._wait_one_tp4_binding(
-                version=version,
-                key=key,
-                max_version=max_version,
-            )
-        if self._apply_mode == "binding_swap":
-            return self._wait_one_binding(
-                version=version, key=key, max_version=max_version
-            )
-        return self._wait_one_tensor_dict(
-            version=version, key=key, max_version=max_version
+        return self._wait_one_tp_binding(
+            version=version,
+            key=key,
+            max_version=max_version,
         )
 
     def _maybe_log_resolve(
@@ -1556,7 +1503,7 @@ class WeightUpdateReceiver:
         artifact_id = self._resolve_artifact_id_for_key(key=key)
         if not artifact_id:
             return None
-        return resolve_artifact(artifact_id=artifact_id).with_fallback(self._fallback)
+        return resolve_artifact(artifact_id=artifact_id)
 
     def _resolve_artifact_id_for_key(self, *, key: str) -> str | None:
         started = time.monotonic()
@@ -1619,7 +1566,10 @@ class WeightUpdateReceiver:
             artifact = self._resolve_artifact_for_key(key=key)
             if artifact is None:
                 return False
-            tensors = artifact.tensor_dict(device=self._materialize_device)
+            tensors = artifact.tensor_dict(
+                device=self._materialize_device,
+                options=self._materialize_options,
+            )
             _validate_payload(
                 version=version,
                 tensors=tensors,
@@ -1670,8 +1620,8 @@ class WeightUpdateReceiver:
     ) -> None:
         looks_unavailable = _is_not_found_error(exc)
         if treat_apply_unavailable_error_as_dropped:
-            looks_unavailable = looks_unavailable or _is_version_unavailable_during_apply_error(
-                exc
+            looks_unavailable = (
+                looks_unavailable or _is_version_unavailable_during_apply_error(exc)
             )
         if not looks_unavailable:
             return
@@ -1698,270 +1648,61 @@ class WeightUpdateReceiver:
                 newer_version=newer_version,
             ) from exc
 
-    def _wait_one_tensor_dict(
-        self,
-        *,
-        version: int,
-        key: str,
-        max_version: int,
-    ) -> ReceiveEvent:
-        start_monotonic = time.monotonic()
-        deadline = start_monotonic + self._per_version_timeout_s
-        last_error: str | None = None
-        last_state = "key_mapping_absent"
-        next_log_at = start_monotonic
-
-        while time.monotonic() < deadline:
-            try:
-                artifact = self._resolve_artifact_for_key(key=key)
-                if artifact is None:
-                    last_state = "key_mapping_absent"
-                    next_log_at = self._maybe_log_wait_progress(
-                        mode="tensor_dict",
-                        version=version,
-                        key=key,
-                        start_monotonic=start_monotonic,
-                        deadline=deadline,
-                        last_state=last_state,
-                        last_error=last_error,
-                        next_log_at=next_log_at,
-                    )
-                    time.sleep(self._poll_interval_s)
-                    continue
-                start = time.monotonic()
-                materialized = artifact.tensor_dict_with_diagnostics(
-                    device=self._materialize_device
-                )
-                latency_s = time.monotonic() - start
-                tensors = materialized.tensors
-                diagnostics = materialized.diagnostics
-                try:
-                    _validate_payload(
-                        version=version,
-                        tensors=tensors,
-                        payload_mode=self._payload_mode,
-                        tp_world_size=self._tp_world_size,
-                        tp_total_bytes=self._tp_total_bytes,
-                    )
-                finally:
-                    self._release_tensor_dict_replica_after_apply(
-                        replica_uuid=str(diagnostics.replica_uuid),
-                        disk_path=(
-                            str(diagnostics.disk_path)
-                            if diagnostics.disk_path is not None
-                            else ""
-                        ),
-                        tensors=tensors,
-                    )
-                    materialized = None
-                return ReceiveEvent(
-                    version=version,
-                    key=key,
-                    artifact_id=artifact.artifact_id,
-                    received_at_s=time.time(),
-                    materialize_latency_s=latency_s,
-                    apply_mode="tensor_dict",
-                    apply_operation="materialize",
-                    pointer_stable=None,
-                )
-            except Exception as exc:  # noqa: BLE001
-                if isinstance(
-                    exc, RuntimeError
-                ) and "failed to unload tensor_dict replica after apply" in str(exc):
-                    raise
-                last_error = _compact_error_text(exc)
-                if _is_cuda_oom_error(exc):
-                    raise RuntimeError(
-                        "receiver encountered CUDA OOM in tensor_dict path "
-                        f"version={version}, key={key}, detail={last_error}"
-                    ) from exc
-                self._maybe_raise_version_dropped(
-                    version=version,
-                    key=key,
-                    max_version=max_version,
-                    exc=exc,
-                )
-                last_state = "materialize_failed"
-                next_log_at = self._maybe_log_wait_progress(
-                    mode="tensor_dict",
-                    version=version,
-                    key=key,
-                    start_monotonic=start_monotonic,
-                    deadline=deadline,
-                    last_state=last_state,
-                    last_error=last_error,
-                    next_log_at=next_log_at,
-                )
-                time.sleep(self._poll_interval_s)
-
-        raise TimeoutError(
-            "receiver timeout "
-            f"version={version}, key={key}, last_state={last_state}, last_error={last_error}"
-        )
-
-    def _release_tensor_dict_replica_after_apply(
-        self,
-        *,
-        replica_uuid: str,
-        disk_path: str,
-        tensors: dict[str, torch.Tensor],
-    ) -> None:
-        if not replica_uuid:
-            return
-        tensors.clear()
-        gc.collect()
-        client = get_store_context().ensure_client()
-        unloaded = False
-        for _ in range(RECEIVER_TENSOR_DICT_UNLOAD_RETRIES):
-            if client.unload_replica(replica_uuid, disk_path=disk_path):
-                unloaded = True
-                break
-            gc.collect()
-            time.sleep(RECEIVER_TENSOR_DICT_UNLOAD_RETRY_INTERVAL_S)
-        if unloaded:
-            return
-        raise RuntimeError(
-            "receiver failed to unload tensor_dict replica after apply "
-            f"replica_uuid={replica_uuid}, disk_path={disk_path or '<memory>'}"
-        )
-
-    def _wait_one_binding(
-        self,
-        *,
-        version: int,
-        key: str,
-        max_version: int,
-    ) -> ReceiveEvent:
-        start_monotonic = time.monotonic()
-        deadline = start_monotonic + self._per_version_timeout_s
-        attempt_seq = 0
-        last_error: str | None = None
-        last_state = "key_mapping_absent"
-        next_log_at = start_monotonic
-
-        while time.monotonic() < deadline:
-            try:
-                artifact = self._resolve_artifact_for_key(key=key)
-                if artifact is None:
-                    last_state = "key_mapping_absent"
-                    next_log_at = self._maybe_log_wait_progress(
-                        mode="binding_swap",
-                        version=version,
-                        key=key,
-                        start_monotonic=start_monotonic,
-                        deadline=deadline,
-                        last_state=last_state,
-                        last_error=last_error,
-                        next_log_at=next_log_at,
-                    )
-                    time.sleep(self._poll_interval_s)
-                    continue
-                start = time.monotonic()
-                pointer_stable: bool | None = None
-                apply_operation = "swap"
-                remaining_s = max(0.001, deadline - time.monotonic())
-                materialize_ctx = self._make_tp_materialize_ctx(
-                    version=version,
-                    rank=0,
-                    remaining_s=remaining_s,
-                    attempt=attempt_seq,
-                )
-                attempt_seq += 1
-                if self._binding is None:
-                    self._binding = artifact.bind(
-                        device=self._materialize_device,
-                        packing="byte_space",
-                        ctx=materialize_ctx,
-                    )
-                    self._binding_ptrs = {
-                        name: tensor.data_ptr()
-                        for name, tensor in self._binding.tensors.items()
-                    }
-                    pointer_stable = True
-                    apply_operation = "bind"
-                else:
-                    if self._binding_ptrs is None:
-                        raise AssertionError("binding pointer baseline is missing")
-                    self._binding.swap(artifact, ctx=materialize_ctx)
-                    latest_ptrs = {
-                        name: tensor.data_ptr()
-                        for name, tensor in self._binding.tensors.items()
-                    }
-                    if set(latest_ptrs) != set(self._binding_ptrs):
-                        raise AssertionError(
-                            "binding tensor set changed across swap: "
-                            f"before={sorted(self._binding_ptrs.keys())}, "
-                            f"after={sorted(latest_ptrs.keys())}"
-                        )
-                    pointer_stable = True
-                    for name, expected_ptr in self._binding_ptrs.items():
-                        actual_ptr = latest_ptrs.get(name)
-                        if actual_ptr != expected_ptr:
-                            pointer_stable = False
-                            raise AssertionError(
-                                "binding pointer changed across swap: "
-                                f"name={name}, before={expected_ptr}, after={actual_ptr}"
-                            )
-                latency_s = time.monotonic() - start
-                active_tensors = dict(self._binding.tensors)
-                _validate_payload(
-                    version=version,
-                    tensors=active_tensors,
-                    payload_mode=self._payload_mode,
-                    tp_world_size=self._tp_world_size,
-                    tp_total_bytes=self._tp_total_bytes,
-                )
-                return ReceiveEvent(
-                    version=version,
-                    key=key,
-                    artifact_id=str(self._binding.artifact_id),
-                    received_at_s=time.time(),
-                    materialize_latency_s=latency_s,
-                    apply_mode="binding_swap",
-                    apply_operation=apply_operation,
-                    pointer_stable=pointer_stable,
-                )
-            except Exception as exc:  # noqa: BLE001
-                last_error = _compact_error_text(exc)
-                if _is_cuda_oom_error(exc):
-                    raise RuntimeError(
-                        "receiver encountered CUDA OOM in binding_swap path "
-                        f"version={version}, key={key}, detail={last_error}"
-                    ) from exc
-                self._maybe_raise_version_dropped(
-                    version=version,
-                    key=key,
-                    max_version=max_version,
-                    exc=exc,
-                )
-                last_state = "binding_apply_failed"
-                next_log_at = self._maybe_log_wait_progress(
-                    mode="binding_swap",
-                    version=version,
-                    key=key,
-                    start_monotonic=start_monotonic,
-                    deadline=deadline,
-                    last_state=last_state,
-                    last_error=last_error,
-                    next_log_at=next_log_at,
-                )
-                time.sleep(self._poll_interval_s)
-
-        raise TimeoutError(
-            "receiver timeout for binding mode "
-            f"version={version}, key={key}, last_state={last_state}, last_error={last_error}"
-        )
-
     def _tp_rank_device(self, rank: int) -> str:
         rank_devices = getattr(self, "_tp_rank_devices", None)
-        resolved = (
-            rank_devices.get(rank)
-            if isinstance(rank_devices, dict)
-            else None
-        )
+        resolved = rank_devices.get(rank) if isinstance(rank_devices, dict) else None
         if resolved is not None:
             return resolved
         return f"cuda:{self._tp_device_base_index + rank}"
+
+    def _tp_group_id(self, *, version: int) -> str:
+        return _sanitize_group_token(
+            f"{self._transport_group_namespace}:v{int(version)}"
+        )
+
+    def _ensure_tp_group_version_set(
+        self,
+        *,
+        version: int,
+        key: str,
+        artifact_id: str,
+    ) -> Any:
+        if not artifact_id:
+            raise RuntimeError("group_realization requires a resolved artifact_id")
+        cache_key = (int(version), str(artifact_id))
+        cached = self._group_version_set_refs.get(cache_key)
+        if cached is not None:
+            return cached
+        required_part_ids = _tp_group_required_part_ids(
+            total_parts=self._transport_group_total_parts,
+            tp_world_size=self._tp_world_size,
+        )
+        selection = common_pb2.ArtifactSelection(artifact_id=str(artifact_id))
+        parts = [
+            {
+                "part_id": part_id,
+                "selection": selection,
+            }
+            for part_id in required_part_ids
+        ]
+        client = get_store_context().ensure_client()
+        response = client.register_group_version_set(
+            realization_kind="per_part_selection",
+            parts=parts,
+            namespace=self._transport_group_namespace,
+            key=key,
+            timeout_s=max(1.0, float(self._tp_materialize_deadline_s or 10.0)),
+        )
+        version_set = response.version_set
+        if not version_set.version_set_id:
+            raise RuntimeError("RegisterGroupVersionSet returned empty version_set_id")
+        ref = tc.GroupVersionSetRef(
+            version_set_id=str(version_set.version_set_id),
+            manifest_hash=bytes(version_set.manifest_hash),
+            manifest_generation=int(version_set.manifest_generation),
+        )
+        self._group_version_set_refs[cache_key] = ref
+        return ref
 
     def _make_tp_materialize_ctx(
         self,
@@ -1970,42 +1711,50 @@ class WeightUpdateReceiver:
         rank: int,
         remaining_s: float,
         attempt: int = 0,
+        version_set: Any | None = None,
     ) -> Any | None:
         if self._tp_materialize_deadline_s <= 0.0:
-            return None
+            raise ValueError(
+                "tp_materialize_deadline_s must be > 0 for staged group_realization"
+            )
         bounded_s = max(
             0.001,
             min(float(self._tp_materialize_deadline_s), float(remaining_s)),
         )
         safe_attempt = max(0, int(attempt))
-        tags: dict[str, bool | int | float | str] | None = None
-        if self._transport_group_mode == "tp_version":
-            group_id = _sanitize_group_token(
-                f"{self._transport_group_namespace}:v{int(version)}"
-            )
-            part_id = _sanitize_group_token(
-                f"rx{self._transport_group_receiver_index}:r{int(rank)}"
-            )
-            # Keep request_id stable across retries so transport-group idempotency
-            # deduplicates replays for the same logical part.
-            request_id = _sanitize_group_token(f"{group_id}:{part_id}")
-            tags = {
-                "tc.transport.group.kind": self._transport_group_kind,
-                "tc.transport.group.id": group_id,
-                "tc.transport.group.total_parts": int(
-                    self._transport_group_total_parts
-                ),
-                "tc.transport.group.part_id": part_id,
-                "tc.transport.group.priority": int(self._transport_group_priority),
-                "tc.transport.group.epoch": int(self._transport_group_epoch),
-                "tc.transport.request_id": request_id,
-                "tc.transport.request_attempt": safe_attempt,
-                "tc.tp.no_progress_remaining_s": float(max(0.0, remaining_s)),
-            }
+        group_id = self._tp_group_id(version=version)
+        part_id = _tp_group_part_id(
+            receiver_index=self._transport_group_receiver_index,
+            rank=rank,
+        )
+        required_part_ids = _tp_group_required_part_ids(
+            total_parts=self._transport_group_total_parts,
+            tp_world_size=self._tp_world_size,
+        )
+        group_realization = tc.GroupRealization(
+            group_kind=self._transport_group_kind,
+            group_id=group_id,
+            epoch=int(self._transport_group_epoch),
+            total_parts=int(self._transport_group_total_parts),
+            part_id=part_id,
+            required_part_ids=required_part_ids,
+            require_staged_publish=True,
+            version_set=version_set,
+        )
+        tags: dict[str, bool | int | float | str] = {
+            "tc.group_realization.mode": "per_part_selection",
+            "tc.group_realization.group_kind": self._transport_group_kind,
+            "tc.group_realization.group_id": group_id,
+            "tc.group_realization.total_parts": int(self._transport_group_total_parts),
+            "tc.group_realization.part_id": part_id,
+            "tc.transport.request_attempt": safe_attempt,
+            "tc.tp.no_progress_remaining_s": float(max(0.0, remaining_s)),
+        }
         return tc.context(
             qos="interactive",
             deadline_ms=max(1, int(bounded_s * 1000.0)),
             tags=tags,
+            group_realization=group_realization,
         )
 
     def _tp_rank_attempt_timeout_s(
@@ -2029,8 +1778,6 @@ class WeightUpdateReceiver:
             tp_world_size = max(1, int(self._tp_world_size))
             tail_ratio = min(1.0, float(completed) / float(tp_world_size))
             budget_s *= 1.0 + 0.75 * tail_ratio
-            if self._transport_group_mode == "tp_version":
-                budget_s *= 1.1
         return max(0.001, min(float(remaining_s), float(budget_s)))
 
     def _reset_tp_bindings_after_apply_failure(
@@ -2039,35 +1786,41 @@ class WeightUpdateReceiver:
         version: int,
         clear_pending_targets: bool = False,
     ) -> None:
-        if not self._tp_bindings and (
-            not clear_pending_targets or not self._tp_pending_targets
-        ):
+        _ = clear_pending_targets
+        if not self._tp_bindings:
             return
-        recycled = 0
-        for rank, binding in list(self._tp_bindings.items()):
-            tensors = getattr(binding, "tensors", None)
-            if isinstance(tensors, dict) and tensors:
-                self._tp_pending_targets[rank] = dict(tensors)
-                recycled += 1
+        closed = 0
+        for binding in list(self._tp_bindings.values()):
             with contextlib.suppress(Exception):
                 binding.close()
+            closed += 1
         self._tp_bindings.clear()
         self._tp_binding_ptrs.clear()
-        cleared_pending = 0
-        if clear_pending_targets and self._tp_pending_targets:
-            pending_targets = list(self._tp_pending_targets.values())
-            cleared_pending = len(pending_targets)
-            self._tp_pending_targets.clear()
-            for tensors in pending_targets:
-                tensors.clear()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         print(
             "[receiver][tp]",
             f"version={version}",
             "phase=reset_after_failure",
-            f"recycled_ranks={recycled}",
-            f"cleared_pending_ranks={cleared_pending}",
+            f"closed_staged_ranks={closed}",
+            flush=True,
+        )
+
+    def _reset_tp_bindings_for_group_realization_version(self, *, version: int) -> None:
+        if not self._tp_bindings:
+            return
+        closed = 0
+        for binding in list(self._tp_bindings.values()):
+            with contextlib.suppress(Exception):
+                binding.close()
+            closed += 1
+        self._tp_bindings.clear()
+        self._tp_binding_ptrs.clear()
+        print(
+            "[receiver][tp]",
+            f"version={version}",
+            "phase=reset_for_group_realization",
+            f"closed_staged_ranks={closed}",
             flush=True,
         )
 
@@ -2078,60 +1831,26 @@ class WeightUpdateReceiver:
         rank: int,
         clear_pending_target: bool = False,
     ) -> None:
+        _ = clear_pending_target
         binding = self._tp_bindings.pop(rank, None)
         self._tp_binding_ptrs.pop(rank, None)
-        recycled = 0
+        closed = 0
         if binding is not None:
-            tensors = getattr(binding, "tensors", None)
-            if isinstance(tensors, dict) and tensors:
-                self._tp_pending_targets[rank] = dict(tensors)
-                recycled = 1
             with contextlib.suppress(Exception):
                 binding.close()
-        cleared_pending = 0
-        if clear_pending_target:
-            pending = self._tp_pending_targets.pop(rank, None)
-            if isinstance(pending, dict):
-                pending.clear()
-                cleared_pending = 1
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            closed = 1
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         print(
             "[receiver][tp]",
             f"version={version}",
             "phase=reset_rank_after_failure",
             f"rank={rank}",
-            f"recycled={recycled}",
-            f"cleared_pending_target={cleared_pending}",
+            f"closed_staged={closed}",
             flush=True,
         )
 
-    def _maybe_publish_tp_binding(
-        self,
-        *,
-        binding: Any,
-        version: int,
-        rank: int,
-        phase: str,
-        ctx: Any | None,
-    ) -> None:
-        publish_kwargs: dict[str, Any] = {}
-        if ctx is not None:
-            publish_kwargs["ctx"] = ctx
-        try:
-            binding.publish_replica(**publish_kwargs)
-        except Exception as exc:  # noqa: BLE001
-            print(
-                "[receiver][tp]",
-                f"version={version}",
-                f"rank={rank}",
-                f"phase={phase}",
-                "publish=skipped",
-                f"reason={_compact_error_text(exc)}",
-                flush=True,
-            )
-
-    def _apply_tp4_rank(
+    def _apply_tp_rank(
         self,
         *,
         version: int,
@@ -2140,100 +1859,71 @@ class WeightUpdateReceiver:
         ctx: Any | None,
     ) -> tuple[str, bool]:
         binding = self._tp_bindings.get(rank)
-        if binding is None:
-            target_tensors = self._tp_pending_targets.get(rank)
-            if target_tensors is None:
-                try:
-                    target_tensors = _allocate_tp4_rank_targets(
-                        device=self._tp_rank_device(rank),
-                        tp_world_size=self._tp_world_size,
-                        tp_total_bytes=self._tp_total_bytes,
-                    )
-                except Exception:
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    raise
-                self._tp_pending_targets[rank] = target_tensors
-            bind_kwargs: dict[str, Any] = {}
-            if ctx is not None:
-                bind_kwargs["ctx"] = ctx
-            try:
-                binding = artifact.bind_into(
-                    target_tensors=target_tensors,
-                    mapping=_build_tp4_rank_copy_plan(
-                        rank=rank,
-                        tp_world_size=self._tp_world_size,
-                        tp_total_bytes=self._tp_total_bytes,
-                    ),
-                    packing="byte_space",
-                    **bind_kwargs,
-                )
-            except Exception:
-                # Keep preallocated rank targets across retries so transient
-                # resolve/materialize races do not repeatedly allocate tens of
-                # GiBs and trigger allocator-driven OOM.
-                raise
-            self._tp_bindings[rank] = binding
-            self._tp_binding_ptrs[rank] = {
-                name: tensor.data_ptr() for name, tensor in binding.tensors.items()
-            }
-            self._tp_pending_targets.pop(rank, None)
-            _validate_tp4_rank_targets(
-                version=version,
-                rank=rank,
-                tensors=dict(binding.tensors),
-                tp_world_size=self._tp_world_size,
-                tp_total_bytes=self._tp_total_bytes,
+        if binding is not None:
+            raise RuntimeError(
+                "group_realization TP rank already has a staged binding; "
+                f"version={version}, rank={rank}"
             )
-            self._maybe_publish_tp_binding(
-                binding=binding,
-                version=version,
-                rank=rank,
-                phase="bind_into",
-                ctx=ctx,
-            )
-            return ("bind_into", True)
-
-        pointer_baseline = self._tp_binding_ptrs.get(rank)
-        if pointer_baseline is None:
-            raise AssertionError(f"missing pointer baseline for rank={rank}")
-        swap_kwargs: dict[str, Any] = {"publish": False}
+        bind_kwargs: dict[str, Any] = {}
         if ctx is not None:
-            swap_kwargs["ctx"] = ctx
-        binding.swap(artifact, **swap_kwargs)
-        latest_ptrs = {
+            bind_kwargs["ctx"] = ctx
+        copy_plan = _build_tp_rank_copy_plan(
+            rank=rank,
+            tp_world_size=self._tp_world_size,
+            tp_total_bytes=self._tp_total_bytes,
+        )
+        binding = artifact.bind(
+            self._tp_rank_device(rank),
+            mapping=copy_plan,
+            packing="byte_space",
+            options=self._materialize_options,
+            publish=False,
+            **bind_kwargs,
+        )
+        self._tp_bindings[rank] = binding
+        self._tp_binding_ptrs[rank] = {
             name: tensor.data_ptr() for name, tensor in binding.tensors.items()
         }
-        if set(latest_ptrs) != set(pointer_baseline):
-            raise AssertionError(
-                "tp4 tensor set changed across swap: "
-                f"rank={rank}, before={sorted(pointer_baseline.keys())}, "
-                f"after={sorted(latest_ptrs.keys())}"
+        staged_value = getattr(binding, "staged_value", None)
+        if staged_value is None:
+            raise RuntimeError(
+                "group_realization CreateOwnedBinding did not return a staged value"
             )
-        for name, expected_ptr in pointer_baseline.items():
-            actual_ptr = latest_ptrs.get(name)
-            if actual_ptr != expected_ptr:
-                raise AssertionError(
-                    "tp4 pointer changed across swap: "
-                    f"rank={rank}, name={name}, before={expected_ptr}, after={actual_ptr}"
-                )
-        _validate_tp4_rank_targets(
+        _validate_tp_rank_targets(
             version=version,
             rank=rank,
             tensors=dict(binding.tensors),
             tp_world_size=self._tp_world_size,
             tp_total_bytes=self._tp_total_bytes,
         )
-        self._maybe_publish_tp_binding(
-            binding=binding,
-            version=version,
-            rank=rank,
-            phase="swap",
-            ctx=ctx,
-        )
-        return ("swap", True)
+        return ("stage", True)
 
-    def _wait_one_tp4_binding(
+    def _acquire_tp_group_realization_bindings(
+        self,
+        *,
+        version: int,
+        deadline: float,
+    ) -> None:
+        for rank in range(self._tp_world_size):
+            binding = self._tp_bindings.get(rank)
+            if binding is None:
+                raise AssertionError(f"tp staged binding missing for rank={rank}")
+            acquire = getattr(binding, "acquire_staged_value", None)
+            if not callable(acquire):
+                raise RuntimeError(
+                    "group_realization staged binding is missing acquire_staged_value"
+                )
+            remaining_s = max(0.001, float(deadline) - time.monotonic())
+            acquire(wait_for_publish=True, wait_timeout_s=remaining_s)
+            _validate_tp_rank_targets(
+                version=version,
+                rank=rank,
+                tensors=dict(binding.tensors),
+                tp_world_size=self._tp_world_size,
+                tp_total_bytes=self._tp_total_bytes,
+            )
+
+    def _wait_one_tp_binding(
         self,
         *,
         version: int,
@@ -2246,14 +1936,12 @@ class WeightUpdateReceiver:
         last_error: str | None = None
         last_state = "key_mapping_absent"
         next_log_at = start_monotonic
-        rank_attempt_seq: dict[int, int] = {
-            rank: 0 for rank in range(self._tp_world_size)
-        }
+        rank_attempt_seq: dict[int, int] = dict.fromkeys(range(self._tp_world_size), 0)
         completed_ranks: set[int] = set()
         active_rank: int | None = None
         pointer_stable = True
-        operation = "swap"
-        cold_start_bindings = not self._tp_bindings
+        operation = "stage_acquire"
+        self._reset_tp_bindings_for_group_realization_version(version=version)
         artifact_id: str | None = None
 
         while time.monotonic() < no_progress_deadline:
@@ -2262,7 +1950,7 @@ class WeightUpdateReceiver:
                 if artifact is None:
                     last_state = "key_mapping_absent"
                     next_log_at = self._maybe_log_wait_progress(
-                        mode=self._apply_mode,
+                        mode="tp_bind_into_swap",
                         version=version,
                         key=key,
                         start_monotonic=start_monotonic,
@@ -2273,6 +1961,11 @@ class WeightUpdateReceiver:
                     )
                     time.sleep(self._poll_interval_s)
                     continue
+                group_version_set = self._ensure_tp_group_version_set(
+                    version=version,
+                    key=key,
+                    artifact_id=str(getattr(artifact, "artifact_id", "") or ""),
+                )
                 for rank in range(self._tp_world_size):
                     if rank in completed_ranks:
                         binding = self._tp_bindings.get(rank)
@@ -2284,7 +1977,7 @@ class WeightUpdateReceiver:
                             artifact_id = current_artifact_id
                         elif artifact_id != current_artifact_id:
                             raise AssertionError(
-                                "tp4 ranks resolved different artifact ids: "
+                                "tp ranks resolved different artifact ids: "
                                 f"first={artifact_id}, rank={rank}, current={current_artifact_id}"
                             )
                         continue
@@ -2305,6 +1998,7 @@ class WeightUpdateReceiver:
                         rank=rank,
                         remaining_s=rank_attempt_timeout_s,
                         attempt=rank_attempt,
+                        version_set=group_version_set,
                     )
                     print(
                         "[receiver][tp]",
@@ -2316,14 +2010,14 @@ class WeightUpdateReceiver:
                         f"deadline_s={rank_attempt_timeout_s:.3f}",
                         flush=True,
                     )
-                    rank_operation, rank_pointer_stable = self._apply_tp4_rank(
+                    rank_operation, rank_pointer_stable = self._apply_tp_rank(
                         version=version,
                         rank=rank,
                         artifact=artifact,
                         ctx=rank_ctx,
                     )
-                    if rank_operation == "bind_into" and cold_start_bindings:
-                        operation = "bind_into"
+                    if rank_operation == "stage":
+                        operation = "stage_acquire"
                     if not rank_pointer_stable:
                         pointer_stable = False
                     last_progress_monotonic = time.monotonic()
@@ -2333,13 +2027,13 @@ class WeightUpdateReceiver:
                     completed_ranks.add(rank)
                     binding = self._tp_bindings.get(rank)
                     if binding is None:
-                        raise AssertionError(f"tp4 binding missing for rank={rank}")
+                        raise AssertionError(f"tp binding missing for rank={rank}")
                     current_artifact_id = str(binding.artifact_id)
                     if artifact_id is None:
                         artifact_id = current_artifact_id
                     elif artifact_id != current_artifact_id:
                         raise AssertionError(
-                            "tp4 ranks resolved different artifact ids: "
+                            "tp ranks resolved different artifact ids: "
                             f"first={artifact_id}, rank={rank}, current={current_artifact_id}"
                         )
                     print(
@@ -2356,24 +2050,24 @@ class WeightUpdateReceiver:
                     active_rank = None
                 if len(completed_ranks) != self._tp_world_size:
                     continue
+                self._acquire_tp_group_realization_bindings(
+                    version=version,
+                    deadline=no_progress_deadline,
+                )
                 latency_s = time.monotonic() - start_monotonic
                 if artifact_id is None:
-                    raise AssertionError("tp4 artifact_id is empty after apply")
+                    raise AssertionError("tp artifact_id is empty after apply")
                 return ReceiveEvent(
                     version=version,
                     key=key,
                     artifact_id=artifact_id,
                     received_at_s=time.time(),
                     materialize_latency_s=latency_s,
-                    apply_mode=self._apply_mode,
                     apply_operation=operation,
                     pointer_stable=pointer_stable,
                 )
             except Exception as exc:  # noqa: BLE001
                 last_error = _compact_error_text(exc)
-                clear_pending_target = _should_clear_tp_pending_target_on_apply_failure(
-                    exc
-                )
                 if _is_cuda_oom_error(exc):
                     raise RuntimeError(
                         "receiver encountered CUDA OOM in tp_bind_into_swap path "
@@ -2395,10 +2089,7 @@ class WeightUpdateReceiver:
                     )
                     completed_ranks.clear()
                     raise
-                if (
-                    self._transport_group_mode == "tp_version"
-                    and _is_non_retryable_transport_group_error(exc)
-                ):
+                if _is_non_retryable_group_realization_error(exc):
                     artifact_id = self._resolve_artifact_id_for_key(key=key)
                     self._reset_tp_bindings_after_apply_failure(
                         version=version,
@@ -2408,9 +2099,9 @@ class WeightUpdateReceiver:
                     raise VersionDroppedError(
                         version=version,
                         key=key,
-                        artifact_id=artifact_id,
+                        artifact_id=str(artifact_id),
                         message=(
-                            "non-retryable tp transport-group apply failure "
+                            "non-retryable group-realization apply failure "
                             f"version={version}, key={key}, artifact_id={artifact_id}, "
                             f"detail={last_error}"
                         ),
@@ -2420,7 +2111,6 @@ class WeightUpdateReceiver:
                     self._reset_tp_rank_after_apply_failure(
                         version=version,
                         rank=active_rank,
-                        clear_pending_target=clear_pending_target,
                     )
                     completed_ranks.discard(active_rank)
                     active_rank = None
@@ -2436,15 +2126,14 @@ class WeightUpdateReceiver:
                 else:
                     self._reset_tp_bindings_after_apply_failure(
                         version=version,
-                        clear_pending_targets=clear_pending_target,
                     )
                     completed_ranks.clear()
                     pointer_stable = True
-                    operation = "swap"
+                    operation = "stage_acquire"
                     artifact_id = None
                 last_state = "tp_binding_apply_failed"
                 next_log_at = self._maybe_log_wait_progress(
-                    mode=self._apply_mode,
+                    mode="tp_bind_into_swap",
                     version=version,
                     key=key,
                     start_monotonic=start_monotonic,
@@ -2456,6 +2145,10 @@ class WeightUpdateReceiver:
                 time.sleep(self._poll_interval_s)
 
         no_progress_elapsed_s = max(0.0, time.monotonic() - last_progress_monotonic)
+        self._reset_tp_bindings_after_apply_failure(
+            version=version,
+            clear_pending_targets=True,
+        )
         raise TimeoutError(
             "receiver timeout for tp binding mode "
             f"version={version}, key={key}, last_state={last_state}, "
@@ -2463,22 +2156,11 @@ class WeightUpdateReceiver:
         )
 
     def close(self) -> None:
-        binding = self._binding
-        self._binding = None
-        self._binding_ptrs = None
-        if binding is not None:
-            binding.close()
         tp_bindings = list(self._tp_bindings.values())
         self._tp_bindings.clear()
         self._tp_binding_ptrs.clear()
         for rank_binding in tp_bindings:
             rank_binding.close()
-        pending_targets = list(self._tp_pending_targets.values())
-        self._tp_pending_targets.clear()
-        for tensors in pending_targets:
-            tensors.clear()
-        if pending_targets and torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
 
 def _init_tensorcast(args: argparse.Namespace) -> None:
@@ -2488,6 +2170,7 @@ def _init_tensorcast(args: argparse.Namespace) -> None:
             tc.init(mode="connect", address=str(args.connect_address))
         else:
             tc.init(mode="connect")
+        _wait_for_daemon_ready(args)
         return
     tc.init(
         mode=init_mode,  # pyright: ignore[reportArgumentType]
@@ -2503,6 +2186,19 @@ def _init_tensorcast(args: argparse.Namespace) -> None:
         else None,
         cluster_id=str(args.cluster_id) if args.cluster_id else None,
         allow_gs_fallback=False,
+    )
+    _wait_for_daemon_ready(args)
+
+
+def _wait_for_daemon_ready(args: argparse.Namespace) -> None:
+    timeout_s = float(getattr(args, "daemon_ready_timeout_s", 0.0))
+    if timeout_s <= 0.0:
+        return
+    address = tc_startup.require_initialized().address
+    if wait_for_daemon(address, timeout=timeout_s, interval=0.2):
+        return
+    raise TimeoutError(
+        f"daemon at {address} did not reach READY within {timeout_s:.1f}s"
     )
 
 
@@ -2605,7 +2301,6 @@ def _build_receiver_runner(
         poll_interval_s=float(args.poll_interval_s),
         per_version_timeout_s=float(args.receiver_timeout_s),
         materialize_device=str(args.materialize_device),
-        apply_mode=str(args.receiver_apply_mode),
         allow_version_skip=bool(args.allow_version_skip),
         payload_mode=str(args.payload_mode),
         tp_world_size=int(args.tp_world_size),
@@ -2613,7 +2308,6 @@ def _build_receiver_runner(
         tp_device_map_policy=str(args.tp_device_map_policy),
         tp_total_bytes=int(args.tp_total_bytes),
         tp_materialize_deadline_s=float(args.tp_materialize_deadline_s),
-        transport_group_mode=str(args.transport_group_mode),
         transport_group_kind=str(args.transport_group_kind),
         transport_group_namespace=str(args.transport_group_namespace),
         transport_group_total_parts=int(args.transport_group_total_parts),
@@ -2675,7 +2369,6 @@ def _run_receiver(args: argparse.Namespace) -> int:
             {
                 "mode": "receiver",
                 "model_name": model_name,
-                "receiver_apply_mode": str(args.receiver_apply_mode),
                 "payload_mode": str(args.payload_mode),
                 "tp_world_size": int(args.tp_world_size),
                 "tp_total_bytes": int(args.tp_total_bytes),
@@ -2689,7 +2382,6 @@ def _run_receiver(args: argparse.Namespace) -> int:
                 ),
                 "tp_rank_device_map": tp_device_map_info.get("rank_device_map", {}),
                 "tp_materialize_deadline_s": float(args.tp_materialize_deadline_s),
-                "transport_group_mode": str(args.transport_group_mode),
                 "transport_group_kind": str(args.transport_group_kind),
                 "transport_group_namespace": str(args.transport_group_namespace),
                 "transport_group_total_parts": int(args.transport_group_total_parts),
@@ -2712,7 +2404,6 @@ def _run_receiver(args: argparse.Namespace) -> int:
             "start_version": int(args.start_version),
             "num_versions": int(args.num_versions),
             "materialize_device": _materialization_device(str(args.materialize_device)),
-            "receiver_apply_mode": str(args.receiver_apply_mode),
             "payload_mode": str(args.payload_mode),
             "tp_world_size": int(args.tp_world_size),
             "tp_total_bytes": int(args.tp_total_bytes),
@@ -2726,7 +2417,6 @@ def _run_receiver(args: argparse.Namespace) -> int:
             ),
             "tp_rank_device_map": tp_device_map_info.get("rank_device_map", {}),
             "tp_materialize_deadline_s": float(args.tp_materialize_deadline_s),
-            "transport_group_mode": str(args.transport_group_mode),
             "transport_group_kind": str(args.transport_group_kind),
             "transport_group_namespace": str(args.transport_group_namespace),
             "transport_group_total_parts": int(args.transport_group_total_parts),
@@ -2765,7 +2455,6 @@ def _run_single_host(args: argparse.Namespace) -> int:
             {
                 "mode": "single-host",
                 "model_name": model_name,
-                "receiver_apply_mode": str(args.receiver_apply_mode),
                 "payload_mode": str(args.payload_mode),
                 "tp_world_size": int(args.tp_world_size),
                 "tp_total_bytes": int(args.tp_total_bytes),
@@ -2873,7 +2562,6 @@ def _run_single_host(args: argparse.Namespace) -> int:
             "keep_last": int(args.keep_last),
             "pre_publish_trim_margin": int(args.pre_publish_trim_margin),
             "strict_retention_drop_check": bool(args.strict_retention_drop_check),
-            "receiver_apply_mode": str(args.receiver_apply_mode),
             "payload_mode": str(args.payload_mode),
             "tp_world_size": int(args.tp_world_size),
             "tp_total_bytes": int(args.tp_total_bytes),
@@ -2949,6 +2637,17 @@ def _add_runtime_args(
         default=None,
         help="Optional cluster token to enforce for Global Store.",
     )
+    parser.add_argument(
+        "--daemon-ready-timeout-s",
+        type=float,
+        default=120.0,
+        help=(
+            "Wait budget for Store Daemon data-plane readiness after TensorCast "
+            "initialization. Set to 0 to skip the readiness wait."
+        ),
+    )
+
+
 def _add_common_stream_args(
     parser: argparse.ArgumentParser,
     *,
@@ -2971,7 +2670,7 @@ def _add_common_stream_args(
     parser.add_argument(
         "--payload-mode",
         choices=sorted(SUPPORTED_PAYLOAD_MODES),
-        default="probe",
+        default="tp_ranked",
         help=(
             "Payload generator/validator mode. "
             "'version_fill' enforces all tensor elements equal to version. "
@@ -2984,21 +2683,10 @@ def _add_common_stream_args(
         help="Receiver materialization device: auto/cpu/cuda:0...",
     )
     parser.add_argument(
-        "--receiver-apply-mode",
-        choices=sorted(SUPPORTED_RECEIVER_APPLY_MODES),
-        default="tensor_dict",
-        help=(
-            "Receiver apply path: tensor_dict materialization, or "
-            "Binding-based in-place update via binding.swap. "
-            "'tp_bind_into_swap' runs TP rank-local bind_into/swap updates with copy plans. "
-            "'tp4_bind_into_swap' is kept as a strict tp_world_size=4 alias."
-        ),
-    )
-    parser.add_argument(
         "--tp-world-size",
         type=int,
         default=1,
-        help="Tensor-parallel world size for tp_ranked/tp_bind_into_swap modes.",
+        help="Tensor-parallel world size for tp_ranked group_realization receive.",
     )
     parser.add_argument(
         "--tp-total-bytes",
@@ -3031,29 +2719,20 @@ def _add_common_stream_args(
         type=float,
         default=600.0,
         help=(
-            "RPC deadline for TP bind_into/swap path in seconds. "
+            "RPC deadline for TP staged group_realization path in seconds. "
             "Use larger values for large multi-node payloads."
         ),
     )
     parser.add_argument(
-        "--transport-group-mode",
-        choices=sorted(SUPPORTED_TRANSPORT_GROUP_MODES),
-        default="none",
-        help=(
-            "Transport scheduling-group hint mode for TP receive path. "
-            "'tp_version' tags each TP rank request into one per-version group."
-        ),
-    )
-    parser.add_argument(
         "--transport-group-kind",
-        default="tp_version",
-        help="Group kind label used when --transport-group-mode=tp_version.",
+        default="group_realization_transport",
+        help="Group kind label for staged group_realization receive.",
     )
     parser.add_argument(
         "--transport-group-namespace",
         default="",
         help=(
-            "Group id namespace prefix used when --transport-group-mode=tp_version. "
+            "Group id namespace prefix for staged group_realization receive. "
             "Should be unique per benchmark run."
         ),
     )
@@ -3061,7 +2740,7 @@ def _add_common_stream_args(
         "--transport-group-total-parts",
         type=int,
         default=0,
-        help=("Expected total parts per group when --transport-group-mode=tp_version."),
+        help="Expected total parts per group_realization transaction.",
     )
     parser.add_argument(
         "--transport-group-receiver-index",

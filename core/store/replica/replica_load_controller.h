@@ -34,6 +34,8 @@
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/types/direct_write_grant.h"
 #include "core/store/replica/unified_memory_authority.h"
+#include "core/store/runtime/ingestion/materialization_strategy_types.h"
+#include "core/store/store_engine_options.h"
 
 namespace tensorcast::store::replica {
 
@@ -49,9 +51,14 @@ class ReplicaLoadController : public std::enable_shared_from_this<ReplicaLoadCon
   struct CollectiveDiskLoadInput {
     loading::CollectiveLoadGroupHint group;
     std::shared_ptr<const loader::DiskArtifactContext> disk_context;
-    std::string source_index_json;
-    std::string view_index_json;
-    std::optional<loading::VariantIdentity> variant_identity;
+    materialization::contracts::RepresentationWorkPlan representation_work_plan;
+    StoreEngineOptions::MaterializationStrategyConfig materialization_strategy;
+  };
+
+  struct LocalBatchedDiskLoadInput {
+    std::shared_ptr<const loader::DiskArtifactContext> disk_context;
+    materialization::contracts::RepresentationWorkPlan representation_work_plan;
+    StoreEngineOptions::MaterializationStrategyConfig materialization_strategy;
   };
 
   /**
@@ -205,7 +212,9 @@ class ReplicaLoadController : public std::enable_shared_from_this<ReplicaLoadCon
       int concurrency,
       std::optional<absl::Span<const uint32_t>> chunk_indices = std::nullopt,
       std::function<absl::Status()> post_load_fn = {},
-      std::optional<CollectiveDiskLoadInput> collective_disk_load = std::nullopt) ABSL_LOCKS_EXCLUDED(mutex_);
+      std::optional<runtime::ingestion::strategy::ExecutionStrategyPlan> execution_strategy_plan = std::nullopt,
+      std::optional<CollectiveDiskLoadInput> collective_disk_load = std::nullopt,
+      std::optional<LocalBatchedDiskLoadInput> local_batched_disk_load = std::nullopt) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Waits for the memory at the specified location to reach the LOADED state.

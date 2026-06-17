@@ -2,6 +2,7 @@
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
+//  Modified by TensorCast Team, 2025-2026.
 //
 //   Licensed under the Apache License, Version 2.0 (the "License");
 //   you may not use this file except in compliance with the License.
@@ -148,9 +149,6 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_disk(
 
 // Allocate a single contiguous CUDA buffer on the specified device and return its base address.
 std::uint64_t allocate_cuda_memory(int device_id, size_t tensor_size);
-
-// Obtain a CUDA-IPC handle for a single allocation.
-std::string get_cuda_memory_handle(int device_id, std::uint64_t memory_ptr);
 
 // Obtain a CUDA-IPC handle for the allocation that backs memory_ptr and return
 // (handle_bytes, base_offset_bytes) where base_offset_bytes is the byte offset

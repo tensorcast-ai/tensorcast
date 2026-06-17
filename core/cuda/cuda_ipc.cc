@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "absl/log/log.h"
+#include "core/cuda/device_guard.h"
 
 namespace tensorcast::cuda {
 
@@ -35,15 +36,20 @@ absl::string_view IpcHandleBytes::as_string_view() const {
 
 IpcMapping::IpcMapping(void* ptr) : ptr_(ptr) {}
 
-IpcMapping::IpcMapping(IpcMapping&& other) noexcept : ptr_(other.ptr_) {
+IpcMapping::IpcMapping(void* ptr, int device_id) : ptr_(ptr), device_id_(device_id) {}
+
+IpcMapping::IpcMapping(IpcMapping&& other) noexcept : ptr_(other.ptr_), device_id_(other.device_id_) {
   other.ptr_ = nullptr;
+  other.device_id_ = -1;
 }
 
 IpcMapping& IpcMapping::operator=(IpcMapping&& other) noexcept {
   if (this != &other) {
     reset();
     ptr_ = other.ptr_;
+    device_id_ = other.device_id_;
     other.ptr_ = nullptr;
+    other.device_id_ = -1;
   }
   return *this;
 }
@@ -56,15 +62,31 @@ void* IpcMapping::get() const {
   return ptr_;
 }
 
-void IpcMapping::reset() {
+absl::Status IpcMapping::close() {
   if (ptr_ == nullptr) {
-    return;
+    return absl::OkStatus();
   }
-  absl::Status status = cuda::close_ipc_mem_handle(ptr_);
+  void* ptr = ptr_;
+  const int device_id = device_id_;
+  ptr_ = nullptr;
+  device_id_ = -1;
+
+  if (device_id >= 0) {
+    CudaDeviceGuard guard(device_id);
+    absl::Status close_status = cuda::close_ipc_mem_handle(ptr);
+    if (!close_status.ok()) {
+      return close_status;
+    }
+    return guard.status();
+  }
+  return cuda::close_ipc_mem_handle(ptr);
+}
+
+void IpcMapping::reset() {
+  absl::Status status = close();
   if (!status.ok()) {
     LOG(WARNING) << "IpcMapping: close_ipc_mem_handle failed: " << status;
   }
-  ptr_ = nullptr;
 }
 
 absl::StatusOr<IpcMapping> IpcMapping::open(const IpcHandleBytes& handle, OpenOptions opts) {
@@ -72,15 +94,20 @@ absl::StatusOr<IpcMapping> IpcMapping::open(const IpcHandleBytes& handle, OpenOp
 }
 
 absl::StatusOr<IpcMapping> IpcMapping::open(cudaIpcMemHandle_t handle, OpenOptions opts) {
+  int current_device = -1;
+  absl::Status status = cuda::get_device(&current_device);
+  if (!status.ok()) {
+    return status;
+  }
   void* ptr = nullptr;
-  absl::Status status = cuda::open_ipc_mem_handle(&ptr, handle, opts.flags);
+  status = cuda::open_ipc_mem_handle(&ptr, handle, opts.flags);
   if (!status.ok()) {
     return status;
   }
   if (ptr == nullptr) {
     return absl::InternalError("cudaIpcOpenMemHandle returned nullptr");
   }
-  return IpcMapping(ptr);
+  return IpcMapping(ptr, current_device);
 }
 
 absl::StatusOr<IpcMapping> IpcMapping::open(absl::Span<const std::uint8_t> bytes, OpenOptions opts) {

@@ -18,7 +18,7 @@ from shutil import copyfile, copytree, ignore_patterns, rmtree, which
 
 import torch  # Import torch to get version info
 import yaml
-from setuptools import find_packages, setup
+from setuptools import find_namespace_packages, setup
 from setuptools.command.build_py import build_py
 from setuptools.command.develop import develop
 from setuptools.command.editable_wheel import editable_wheel
@@ -27,7 +27,7 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension  # noqa: E40
 from wheel.bdist_wheel import bdist_wheel
 
 # Import torch version validation utilities
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tools'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "tools"))
 from torch_version_manager import validate_torch_versions
 
 __version__: str = "0.0.0"
@@ -35,19 +35,35 @@ __cuda_version__: str = "0.0"
 
 
 def get_root_dir() -> Path:
-    return Path(
-        subprocess.check_output(["git", "rev-parse", "--show-toplevel"])
-        .decode("ascii")
-        .strip()
-    )
+    try:
+        return Path(
+            subprocess.check_output(
+                ["git", "rev-parse", "--show-toplevel"],
+                stderr=subprocess.DEVNULL,
+            )
+            .decode("ascii")
+            .strip()
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return Path(__file__).resolve().parent
 
 
 def get_git_revision_short_hash() -> str:
-    return (
-        subprocess.check_output(["git", "rev-parse", "--short", "HEAD"])
-        .decode("ascii")
-        .strip()
-    )
+    for env_name in ("TENSORCAST_BUILD_COMMIT", "BUILD_COMMIT", "GITHUB_SHA"):
+        value = os.environ.get(env_name)
+        if value:
+            return value.strip()[:12]
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                stderr=subprocess.DEVNULL,
+            )
+            .decode("ascii")
+            .strip()
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return "nogit"
 
 
 def get_base_version() -> str:
@@ -58,15 +74,58 @@ def get_base_version() -> str:
 
 
 def load_dep_info():
+    """Determine the CUDA major.minor this build targets.
+
+    Ground truth is ``torch.version.cuda`` — that's the CUDA the wheel will
+    actually link against. ``CU_VERSION`` env and ``dev_dep_versions.yml``
+    are *intent declarations*: if set, they MUST match the installed torch,
+    otherwise the build fails loudly. This prevents the silent skew where
+    ``_version.py`` claims one CUDA major while the compiled bits use another,
+    which would then either bypass or wrongly trip the runtime ABI check in
+    ``tensorcast/__init__.py``.
+    """
     global __cuda_version__
-    with open("dev_dep_versions.yml", "r") as stream:
-        versions = yaml.safe_load(stream)
-        if (gpu_arch_version := os.environ.get("CU_VERSION")) is not None:
-            __cuda_version__ = (
-                (gpu_arch_version[2:])[:-1] + "." + (gpu_arch_version[2:])[-1:]
-            )
-        else:
-            __cuda_version__ = versions["__cuda_version__"]
+
+    torch_cuda = torch.version.cuda  # e.g. "12.8", "13.0", or None for CPU build
+    if not torch_cuda:
+        raise RuntimeError(
+            "tensorcast build requires a CUDA-enabled torch, but "
+            "torch.version.cuda is None. Install torch from a CUDA index, e.g. "
+            "pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128"
+        )
+
+    declared: str | None = None
+    declared_source: str | None = None
+
+    if (env_cu := os.environ.get("CU_VERSION")) is not None:
+        # CU_VERSION format: "cuXXX" -> "X.Y"
+        digits = env_cu[2:]
+        declared = f"{digits[:-1]}.{digits[-1:]}"
+        declared_source = f"CU_VERSION={env_cu}"
+    else:
+        try:
+            with open("dev_dep_versions.yml", "r") as stream:
+                versions = yaml.safe_load(stream) or {}
+        except FileNotFoundError:
+            versions = {}
+        yml_cu = versions.get("__cuda_version__")
+        if yml_cu:
+            declared = str(yml_cu)
+            declared_source = "dev_dep_versions.yml:__cuda_version__"
+
+    if declared is not None and declared != torch_cuda:
+        raise RuntimeError(
+            f"Declared CUDA version mismatch:\n"
+            f"  declared ({declared_source}): {declared}\n"
+            f"  installed torch.version.cuda: {torch_cuda}\n"
+            f"The wheel would link against CUDA {torch_cuda}, but the declaration "
+            f"says CUDA {declared}. Either update the declaration to match, or "
+            f"reinstall torch from the matching CUDA index (e.g. "
+            f"pip install torch==2.11.0 --index-url "
+            f"https://download.pytorch.org/whl/cu{torch_cuda.replace('.', '')})."
+        )
+
+    __cuda_version__ = torch_cuda
 
 # Validate torch versions early in setup.py
 def validate_build_environment():
@@ -80,17 +139,23 @@ def validate_build_environment():
         is_consistent, versions = validate_torch_versions(raise_on_error=False)
 
         if not is_consistent:
-            print("\n" + "="*60, file=sys.stderr)
+            print("\n" + "=" * 60, file=sys.stderr)
             print("ERROR: Torch version mismatch detected!", file=sys.stderr)
-            print("="*60, file=sys.stderr)
+            print("=" * 60, file=sys.stderr)
             print("\nFound versions:", file=sys.stderr)
             for source, version in sorted(versions.items()):
                 print(f"  {source}: {version}", file=sys.stderr)
             print("\nPlease ensure all torch versions are consistent:", file=sys.stderr)
-            print("1. Run 'uv sync' to update .venv based on pyproject.toml", file=sys.stderr)
+            print(
+                "1. Run 'uv sync' to update .venv based on pyproject.toml",
+                file=sys.stderr,
+            )
             print("2. Update pyproject.toml if needed", file=sys.stderr)
-            print("3. Ensure MODULE.bazel points to the correct .venv path", file=sys.stderr)
-            print("="*60 + "\n", file=sys.stderr)
+            print(
+                "3. Ensure MODULE.bazel points to the correct .venv path",
+                file=sys.stderr,
+            )
+            print("=" * 60 + "\n", file=sys.stderr)
 
             # Only fail if we're actually building
             if BUILD_EXTENSION or BUILD_CORE:
@@ -111,8 +176,8 @@ load_dep_info()
 
 dir_path = str(get_root_dir())
 
-PRE_CXX11_ABI = True
 RELEASE = False
+RELEASE_PYPI = False
 BUILD_EXTENSION = False
 BUILD_CORE = False
 USE_REMOTE = False
@@ -123,6 +188,12 @@ if os.environ.get("RELEASE") == "1":
 if "--release" in sys.argv:
     RELEASE = True
     sys.argv.remove("--release")
+
+if os.environ.get("RELEASE_PYPI") == "1":
+    # PyPI uploads reject `+local` version strings (PEP 440), so this mode
+    # produces a clean public version string. Implies RELEASE.
+    RELEASE_PYPI = True
+    RELEASE = True
 
 if os.environ.get("BUILD_EXTENSION") == "1":
     BUILD_EXTENSION = True
@@ -150,11 +221,12 @@ if (release_env_var := os.environ.get("RELEASE")) is not None:
         RELEASE = True
 
 if (gpu_arch_version := os.environ.get("CU_VERSION")) is None:
-    gpu_arch_version = f"cu{__cuda_version__.replace('.','')}"
+    gpu_arch_version = f"cu{__cuda_version__.replace('.', '')}"
 
 # Validate environment before proceeding with build
 if BUILD_EXTENSION or BUILD_CORE:
     validate_build_environment()
+
 
 def _format_cuda_suffix(cuda_version: str | None) -> str | None:
     if not cuda_version:
@@ -168,8 +240,8 @@ def _format_cuda_suffix(cuda_version: str | None) -> str | None:
 def get_torch_version_suffix() -> str:
     """Get torch version suffix for package versioning."""
     # Get PyTorch version
-    torch_version = torch.__version__.split('+')[0]  # Remove +cu118 etc.
-    torch_major_minor = '.'.join(torch_version.split('.')[:2])  # Get major.minor
+    torch_version = torch.__version__.split("+")[0]  # Remove +cu118 etc.
+    torch_major_minor = ".".join(torch_version.split(".")[:2])  # Get major.minor
 
     # Get CUDA version from torch even when no GPU is present.
     cuda_suffix = ""
@@ -189,14 +261,25 @@ def get_torch_version_suffix() -> str:
 # Get torch version suffix after configuration is defined
 torch_suffix = get_torch_version_suffix()
 
-if RELEASE:
+if RELEASE_PYPI:
+    base_version = os.environ.get("BUILD_VERSION") or get_base_version()
+    if not base_version:
+        raise ValueError(
+            "BUILD_VERSION or version.txt must be set for PyPI release builds"
+        )
+    __version__ = base_version
+elif RELEASE:
     base_version = os.environ.get("BUILD_VERSION")
     if base_version:
         __version__ = f"{base_version}+{torch_suffix}"
     else:
-        raise ValueError("BUILD_VERSION environment variable must be set for release builds")
+        raise ValueError(
+            "BUILD_VERSION environment variable must be set for release builds"
+        )
 else:
-    __version__ = f"{get_base_version()}.dev0+{get_git_revision_short_hash()}.{torch_suffix}"
+    __version__ = (
+        f"{get_base_version()}.dev0+{get_git_revision_short_hash()}.{torch_suffix}"
+    )
 
 
 # Resolve bazel from PATH; do not use repo-local bazel wrapper
@@ -255,7 +338,9 @@ def ensure_external_symlink() -> None:
                 output_base_path = None
         if output_base_path is None and BAZEL_EXE is not None:
             output_base_path = Path(
-                subprocess.check_output([BAZEL_EXE, "info", "output_base"]).decode("utf-8").strip()
+                subprocess.check_output([BAZEL_EXE, "info", "output_base"])
+                .decode("utf-8")
+                .strip()
             )
 
         if output_base_path is None:
@@ -269,7 +354,9 @@ def ensure_external_symlink() -> None:
                 current_target = (link_path.parent / current_target).resolve()
 
             expected = target_path.resolve() if target_path.exists() else target_path
-            current = current_target.resolve() if current_target.exists() else current_target
+            current = (
+                current_target.resolve() if current_target.exists() else current_target
+            )
             if current == expected:
                 return
 
@@ -329,16 +416,29 @@ def build_checkpoint_runtime_and_daemon(
     if use_remote:
         api_key = os.environ.get("BUILDBUDDY_API_KEY")
         if not api_key:
-            sys.exit("BUILDBUDDY_API_KEY environment variable must be set when USE_REMOTE=1")
+            sys.exit(
+                "BUILDBUDDY_API_KEY environment variable must be set when USE_REMOTE=1"
+            )
         cmd.append("--config=remote")
         cmd.append(f"--remote_header=x-buildbuddy-api-key={api_key}")
         cmd.append("--build_metadata=ROLE=CI")
         cmd.append("--jobs=16")
 
+    # Allow callers (e.g. tools/release.sh) to forward extra Bazel flags so
+    # interactive builds can crank up logging without us hard-coding it:
+    #   BAZEL_BUILD_FLAGS="--curses=no --show_progress_rate_limit=0 ..."
+    extra_flags = os.environ.get("BAZEL_BUILD_FLAGS", "").strip()
+    if extra_flags:
+        import shlex as _shlex
+
+        cmd.extend(_shlex.split(extra_flags))
+
     display_cmd = list(cmd)
     if use_remote:
         for i, arg in enumerate(display_cmd):
-            if isinstance(arg, str) and arg.startswith("--remote_header=x-buildbuddy-api-key="):
+            if isinstance(arg, str) and arg.startswith(
+                "--remote_header=x-buildbuddy-api-key="
+            ):
                 display_cmd[i] = "--remote_header=x-buildbuddy-api-key=***REDACTED***"
     print(f"building checkpoint runtime and daemon cmd={display_cmd}")
 
@@ -357,9 +457,17 @@ def gen_version_file():
         print("creating version file")
         f.write('__version__ = "' + __version__ + '"\n')
         f.write('__cuda_version__ = "' + __cuda_version__ + '"\n')
+        # Persist the build-time torch version so the runtime ABI guard in
+        # tensorcast/__init__.py can compare against it. Picking up the
+        # currently-installed torch is correct here: setup.py imports torch
+        # to compile the C++ extension, so this is exactly the version the
+        # bits in this wheel were built against.
+        f.write(f'__torch_version__ = "{torch.__version__}"\n')
 
 
-def _place_artifact(src: Path, dst: Path, *, prefer_copy: bool, name: str, make_executable: bool = False) -> None:
+def _place_artifact(
+    src: Path, dst: Path, *, prefer_copy: bool, name: str, make_executable: bool = False
+) -> None:
     """Create dst from src using either copy or symlink depending on prefer_copy.
 
     - If dst exists and the existing type (file vs symlink) differs from the desired
@@ -411,7 +519,13 @@ def copy_checkpoint_extension_lib() -> None:
     src = Path(dir_path) / "bazel-bin" / "core" / "libcheckpoint_ext.so"
     dst = Path(dir_path) / "tensorcast" / "lib" / "libcheckpoint_ext.so"
 
-    _place_artifact(src, dst, prefer_copy=prefer_copy, name="libcheckpoint_ext.so", make_executable=False)
+    _place_artifact(
+        src,
+        dst,
+        prefer_copy=prefer_copy,
+        name="libcheckpoint_ext.so",
+        make_executable=False,
+    )
 
 
 def copy_schema_sql() -> None:
@@ -422,7 +536,9 @@ def copy_schema_sql() -> None:
     src = Path(dir_path) / "schema.sql"
     dst = Path(dir_path) / "tensorcast" / "schema.sql"
     if not src.exists():
-        print("Warning: schema.sql not found at repo root; package will not include schema.")
+        print(
+            "Warning: schema.sql not found at repo root; package will not include schema."
+        )
         return
     try:
         if dst.exists() or dst.is_symlink():
@@ -434,6 +550,42 @@ def copy_schema_sql() -> None:
         print(f"Copied schema.sql to {dst}")
     except Exception as e:
         print(f"Warning: Failed to copy schema.sql into package: {e}")
+
+
+# Canonical fallback configs that the SDK / CLI look up via
+# `_discover_packaged_example_config()` when the user does not pass an explicit
+# `--config` (or the corresponding env var). The repo-root `examples/config/`
+# tree contains many bench / cross-host variants too; we only ship the
+# canonical defaults inside the wheel to keep the install lean.
+_PACKAGED_EXAMPLE_CONFIGS = (
+    "store_daemon_config.yaml",
+    "global_store_config.yaml",
+    "node_agent_config.yaml",
+)
+
+
+def copy_example_configs() -> None:
+    """Copy the canonical default configs into `tensorcast/examples/config/`.
+
+    Discovery uses `importlib.resources.files("tensorcast") / "examples/config" /
+    <name>`, so the wheel must carry these yamls under that exact path.
+    """
+    src_dir = Path(dir_path) / "examples" / "config"
+    dst_dir = Path(dir_path) / "tensorcast" / "examples" / "config"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for name in _PACKAGED_EXAMPLE_CONFIGS:
+        src = src_dir / name
+        if not src.exists():
+            print(f"Warning: example config not found at {src}; skipping")
+            continue
+        dst = dst_dir / name
+        if dst.exists() or dst.is_symlink():
+            try:
+                dst.unlink()
+            except Exception:
+                pass
+        copyfile(str(src), str(dst))
+        print(f"Copied {name} to {dst}")
 
 
 def ensure_proto_python_generated() -> None:
@@ -500,6 +652,7 @@ def find_bazel_daemon_binary() -> Path | None:
     candidate = Path(dir_path) / "bazel-bin" / "daemon" / "tensorcast_daemon"
     return candidate if candidate.exists() else None
 
+
 def copy_daemon_binary() -> None:
     """Place daemon binary into package at tensorcast/bin/tensorcast_daemon.
 
@@ -515,21 +668,37 @@ def copy_daemon_binary() -> None:
     src_env = os.environ.get("TENSORCAST_DAEMON_BIN")
     if src_env and Path(src_env).exists():
         src = Path(src_env)
-        _place_artifact(src, target, prefer_copy=prefer_copy, name="tensorcast_daemon", make_executable=True)
+        _place_artifact(
+            src,
+            target,
+            prefer_copy=prefer_copy,
+            name="tensorcast_daemon",
+            make_executable=True,
+        )
         return
 
     bazel_bin = find_bazel_daemon_binary()
     if bazel_bin is not None:
-        _place_artifact(bazel_bin, target, prefer_copy=prefer_copy, name="tensorcast_daemon", make_executable=True)
+        _place_artifact(
+            bazel_bin,
+            target,
+            prefer_copy=prefer_copy,
+            name="tensorcast_daemon",
+            make_executable=True,
+        )
         return
 
-    print("Warning: tensorcast_daemon binary not found; package will not include daemon binary.")
+    print(
+        "Warning: tensorcast_daemon binary not found; package will not include daemon binary."
+    )
+
 
 def copy_extensions():
     files = glob.glob(dir_path + "/build/lib.linux-*/tensorcast/*.so")
     for file in files:
         print(f"Copying {file} to {dir_path}/tensorcast/")
         copyfile(file, dir_path + "/tensorcast/" + os.path.basename(file))
+
 
 class DevelopCommand(develop):
     description = "Builds the package and symlinks it into the PYTHONPATH"
@@ -541,7 +710,6 @@ class DevelopCommand(develop):
         develop.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=True,
             use_remote=USE_REMOTE,
@@ -549,12 +717,15 @@ class DevelopCommand(develop):
         copy_checkpoint_extension_lib()
         copy_daemon_binary()
         copy_schema_sql()
+        copy_example_configs()
 
         gen_version_file()
         develop.run(self)
 
+
 class BuildExtensionCommand(BuildExtension):
     description = "Builds the package extension"
+
     def initialize_options(self):
         BuildExtension.initialize_options(self)
 
@@ -562,7 +733,6 @@ class BuildExtensionCommand(BuildExtension):
         BuildExtension.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=True,
             use_remote=USE_REMOTE,
@@ -573,6 +743,8 @@ class BuildExtensionCommand(BuildExtension):
         copy_extensions()
         copy_daemon_binary()
         copy_schema_sql()
+        copy_example_configs()
+        gen_version_file()
 
 
 class InstallCommand(install):
@@ -585,7 +757,6 @@ class InstallCommand(install):
         install.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=False,
             use_remote=USE_REMOTE,
@@ -593,6 +764,7 @@ class InstallCommand(install):
         copy_checkpoint_extension_lib()
         copy_daemon_binary()
         copy_schema_sql()
+        copy_example_configs()
 
         gen_version_file()
         install.run(self)
@@ -608,7 +780,6 @@ class BdistCommand(bdist_wheel):
         bdist_wheel.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=False,
             use_remote=USE_REMOTE,
@@ -616,6 +787,7 @@ class BdistCommand(bdist_wheel):
         copy_checkpoint_extension_lib()
         copy_daemon_binary()
         copy_schema_sql()
+        copy_example_configs()
 
         gen_version_file()
         bdist_wheel.run(self)
@@ -631,7 +803,6 @@ class EditableWheelCommand(editable_wheel):
         editable_wheel.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=True,
             use_remote=USE_REMOTE,
@@ -640,7 +811,9 @@ class EditableWheelCommand(editable_wheel):
         copy_checkpoint_extension_lib()
         copy_daemon_binary()
         copy_schema_sql()
+        copy_example_configs()
         editable_wheel.run(self)
+
 
 class CleanCommand(Command):
     """Custom clean command to tidy up the project root."""
@@ -650,6 +823,7 @@ class CleanCommand(Command):
         os.path.join(".", "dist"),
         os.path.join(".", "tensorcast", "__pycache__"),
         os.path.join(".", "tensorcast", "lib"),
+        os.path.join(".", "tensorcast", "examples"),
         os.path.join(".", "*.pyc"),
         os.path.join(".", "*.tgz"),
         os.path.join(".", "*.egg-info"),
@@ -710,8 +884,12 @@ def find_cuda_runtime_lib_dir():
 
     Order of precedence:
     1. CUDA_RUNTIME_LIB_DIR env var if it points to an existing dir
-    2. nvidia.cuda_runtime Python package's bundled lib dir
-    3. Best-effort scan of sys.path for nvidia/cuda_runtime/lib
+    2. nvidia.cuda_runtime Python package's bundled lib dir (cu12 layout)
+    3. Best-effort scan of sys.path for nvidia/{cu13,cuda_runtime}/lib
+
+    cu13 wheels collapse all core CUDA libs under nvidia/cu13/{lib,include}/;
+    cu12 wheels keep the per-library nvidia/<libname>/{lib,include}/ layout.
+    Try cu13 first since that's what current torch+cu130 ships.
     """
     if (env_dir := os.environ.get("CUDA_RUNTIME_LIB_DIR")) is not None:
         candidate = Path(env_dir)
@@ -719,19 +897,22 @@ def find_cuda_runtime_lib_dir():
             return str(candidate)
 
     try:
-        # Use the installed Python package
+        # cu12 path: nvidia.cuda_runtime is a real package with __init__.py.
         import nvidia.cuda_runtime as nvidia_cuda_runtime  # type: ignore
 
         pkg_lib = Path(nvidia_cuda_runtime.__file__).parent / "lib"
-        if pkg_lib.is_dir():
+        if pkg_lib.is_dir() and any(pkg_lib.glob("libcudart.so*")):
             return str(pkg_lib)
     except Exception:
         pass
 
+    # cu13 path: nvidia/cu13/ is just a data dir without __init__.py, so we can't
+    # import it. Walk sys.path instead.
     for base in sys.path:
-        candidate = Path(base) / "nvidia" / "cuda_runtime" / "lib"
-        if candidate.is_dir():
-            return str(candidate)
+        for subdir in ("cu13", "cuda_runtime"):
+            candidate = Path(base) / "nvidia" / subdir / "lib"
+            if candidate.is_dir() and any(candidate.glob("libcudart.so*")):
+                return str(candidate)
 
     return None
 
@@ -759,14 +940,20 @@ def find_cuda_include_dirs() -> list[str]:
 
     for base in sys.path:
         candidates.append(Path(base) / "triton" / "backends" / "nvidia" / "include")
+        # cu12 layout (nvidia/cuda_runtime/include/) and cu13 layout
+        # (nvidia/cu13/include/, shared umbrella across all core CUDA libs).
         candidates.append(Path(base) / "nvidia" / "cuda_runtime" / "include")
+        candidates.append(Path(base) / "nvidia" / "cu13" / "include")
 
     include_dirs: list[str] = []
     seen: set[str] = set()
     for candidate in candidates:
         if not candidate.is_dir():
             continue
-        if not ((candidate / "cuda.h").is_file() and (candidate / "cuda_runtime_api.h").is_file()):
+        if not (
+            (candidate / "cuda.h").is_file()
+            and (candidate / "cuda_runtime_api.h").is_file()
+        ):
             continue
         path_str = str(candidate)
         if path_str in seen:
@@ -804,6 +991,7 @@ def ensure_cudart_unversioned_symlink(lib_dir: str) -> None:
         # Non-fatal; build may still succeed if system CUDA provides libcudart.so
         print(f"Warning: could not create libcudart.so symlink in {lib_dir}: {e}")
 
+
 if BUILD_EXTENSION:
     CUDA_RUNTIME_LIB_DIR = find_cuda_runtime_lib_dir()
     CUDA_INCLUDE_DIRS = find_cuda_include_dirs()
@@ -832,10 +1020,10 @@ if BUILD_EXTENSION:
             dir_path + "/external/nlohmann_json+/include",
             dir_path + "/external/opentelemetry-cpp+/api/include",
             dir_path + "/external/opentelemetry-cpp+/exporters/otlp/include",
-            dir_path + '/external/fmt+/include',
-            dir_path + '/external/double-conversion+',
-            dir_path + '/external/folly+',
-            dir_path + '/bazel-bin/external/folly+',
+            dir_path + "/external/fmt+/include",
+            dir_path + "/external/double-conversion+",
+            dir_path + "/external/folly+",
+            dir_path + "/bazel-bin/external/folly+",
             dir_path + "/proto/gen/cc",
             dir_path + "/external/yaml-cpp+/include",
             dir_path + "/external/fast_float+/include",
@@ -879,9 +1067,9 @@ if BUILD_EXTENSION:
                         "-Wno-pragmas",
                     ]
                     + [
-                        '-DGLOG_DEPRECATED=__attribute__((deprecated))',
+                        "-DGLOG_DEPRECATED=__attribute__((deprecated))",
                         '-DGLOG_EXPORT=__attribute__((visibility("default")))',
-                        '-DGLOG_NO_EXPORT=__attribute__((visibility("default")))'
+                        '-DGLOG_NO_EXPORT=__attribute__((visibility("default")))',
                     ]
                 ),
                 extra_link_args=(
@@ -901,22 +1089,49 @@ if BUILD_EXTENSION:
                     + rpath_flags
                 ),
                 undef_macros=["NDEBUG"],
-        )
-    ]
+            )
+        ]
 else:
     BuildExtension = None
 
 
+def _rewrite_relative_links(text: str, base_url: str) -> str:
+    """Rewrite Markdown relative links to absolute GitHub URLs.
+
+    PyPI renders the README outside the repo, so relative links like
+    `[docs](docs/README.md)` would be broken. We rewrite them to
+    `[docs]({base_url}/docs/README.md)` in-memory before passing to
+    `setup(long_description=...)`. The repo's README.md on disk is unchanged.
+
+    Skips links that already point at an absolute URL or anchor (`http`,
+    `https`, `mailto`, or starting with `#`).
+    """
+    import re as _re
+
+    pattern = _re.compile(r"\]\(([^)]+)\)")
+
+    def replace(match: "_re.Match[str]") -> str:
+        target = match.group(1).strip()
+        if target.startswith(("http://", "https://", "mailto:", "#", "/")):
+            return match.group(0)
+        # Drop fragment/query for the URL fold; pyPI doesn't need them on the
+        # GitHub side either, but keep them in the output to preserve intent.
+        return f"]({base_url.rstrip('/')}/{target})"
+
+    return pattern.sub(replace, text)
+
+
+_GITHUB_BLOB_BASE = "https://github.com/tensorcast-ai/tensorcast/blob/main"
 with open(os.path.join(get_root_dir(), "README.md"), "r", encoding="utf-8") as fh:
-    long_description = fh.read()
+    long_description = _rewrite_relative_links(fh.read(), _GITHUB_BLOB_BASE)
 
 cmd_class = {
-        "install": InstallCommand,
-        "clean": CleanCommand,
-        "develop": DevelopCommand,
-        "bdist_wheel": BdistCommand,
-        "editable_wheel": EditableWheelCommand,
-        "build_py": BuildPyCommand,
+    "install": InstallCommand,
+    "clean": CleanCommand,
+    "develop": DevelopCommand,
+    "bdist_wheel": BdistCommand,
+    "editable_wheel": EditableWheelCommand,
+    "build_py": BuildPyCommand,
 }
 
 if BuildExtension is not None:
@@ -926,22 +1141,34 @@ setup(
     name="tensorcast",
     ext_modules=ext_modules,
     version=__version__,
+    long_description=long_description,
+    long_description_content_type="text/markdown",
     cmdclass=cmd_class,
     zip_safe=False,
-    packages=find_packages(exclude=["*.csrc.*"]),
+    packages=find_namespace_packages(
+        include=["tensorcast", "tensorcast.*"],
+        exclude=[
+            "tensorcast.csrc",
+            "tensorcast.csrc.*",
+            "tensorcast.dashboard.webui*",
+            "tensorcast.lib",
+        ],
+    ),
     package_data={
         "tensorcast": [
             "schema.sql",
+            "py.typed",
             "*.so",
             "lib/*.so",
+            "lib/*.so.*",
             "bin/*",
-        ]
-    },
-    exclude_package_data={
-        "tensorcast": [
-            "proto",
-            "proto/*",
-            "proto/**/*",
+            "examples/config/*.yaml",
+            "config/profiles/*/*.yaml",
         ],
+        "tensorcast.proto": ["**/*.py", "**/*.pyi"],
+    },
+    include_package_data=True,
+    exclude_package_data={
+        "tensorcast.csrc": ["*"],
     },
 )

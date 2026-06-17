@@ -8,6 +8,7 @@ from typing import Callable
 
 import grpc
 
+from tensorcast.common.identity import is_msa1_artifact_id
 from tensorcast.global_store.repositories.artifact_index_repository import (
     ArtifactIndexRepository,
 )
@@ -64,6 +65,14 @@ class KeyMappingRpcHandler:
             if not key or not artifact_id:
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details("key and artifact_id are required")
+                return global_store_pb2.UpsertKeyMappingResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+            if is_msa1_artifact_id(artifact_id):
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                context.set_details(
+                    "msa1 artifact_id is daemon-session-local and cannot be stored in durable key mapping"
+                )
                 return global_store_pb2.UpsertKeyMappingResponse(
                     status=global_store_pb2.Status.STATUS_ERROR
                 )
@@ -166,6 +175,14 @@ class KeyMappingRpcHandler:
             if not key or not new_artifact_id:
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details("key and new_artifact_id are required")
+                return global_store_pb2.SwapKeyMappingResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+            if is_msa1_artifact_id(new_artifact_id):
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                context.set_details(
+                    "msa1 artifact_id is daemon-session-local and cannot be stored in durable key mapping"
+                )
                 return global_store_pb2.SwapKeyMappingResponse(
                     status=global_store_pb2.Status.STATUS_ERROR
                 )

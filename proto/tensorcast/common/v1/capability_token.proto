@@ -6,12 +6,16 @@ import "tensorcast/common/v1/common.proto";
 
 // Capability audiences prevent token type confusion.
 enum CapabilityAudience {
+  reserved 4;
+  reserved "CAPABILITY_AUDIENCE_TARGET_PUBLICATION";
+
   CAPABILITY_AUDIENCE_UNSPECIFIED = 0;
   CAPABILITY_AUDIENCE_PLACEMENT_LEASE = 1;
   CAPABILITY_AUDIENCE_RETENTION_HANDLE = 2;
   CAPABILITY_AUDIENCE_QUEUE_WORK_LEASE = 3;
-  CAPABILITY_AUDIENCE_TARGET_PUBLICATION = 4;
   CAPABILITY_AUDIENCE_PAYLOAD_REF = 5;
+  CAPABILITY_AUDIENCE_BATCH_PAYLOAD_REF = 6;
+  CAPABILITY_AUDIENCE_BINDING_CURRENT_VALUE_PUBLICATION = 7;
 }
 
 // Scope for placement lease capability tokens.
@@ -24,7 +28,7 @@ message RetentionHandleScope {
   string handle_id = 1;
 }
 
-message TargetPublicationScope {
+message BindingCurrentValuePublicationScope {
   string publication_id = 1;
   tensorcast.common.v1.ArtifactSelection selection = 2;
   tensorcast.common.v1.ByteSpaceRef byte_space = 3;
@@ -32,6 +36,12 @@ message TargetPublicationScope {
   int32 owner_pid = 5;
   bytes target_layout_hash = 6;
   string operation_id = 7;
+  string binding_id = 8;
+  string binding_layout_id = 9;
+  string binding_value_id = 10;
+  uint64 seal_generation = 11;
+  string daemon_id = 12;
+  string daemon_session_id = 13;
 }
 
 enum PayloadRefDirection {
@@ -48,6 +58,15 @@ message PayloadRefScope {
   string digest_hex = 5;
   PayloadRefDirection direction = 6;
   string operation_id = 7;
+}
+
+message BatchPayloadRefScope {
+  string transport_id = 1;
+  uint64 payload_size = 2;
+  PayloadRefDirection direction = 3;
+  string operation_id = 4;
+  string manifest_digest_hex = 5;
+  string consumer_daemon_id = 6;
 }
 
 // Optional fencing for volatile control-plane operations.

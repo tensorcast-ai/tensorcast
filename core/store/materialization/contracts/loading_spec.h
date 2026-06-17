@@ -11,6 +11,7 @@
 #include <optional>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -22,6 +23,7 @@
 #include "core/common/ready_signal.h"
 #include "core/store/communication_types.h"
 #include "core/store/device_types.h"
+#include "core/store/materialization/contracts/stable_local_backing.h"
 #include "core/store/materialization/contracts/view/view_id.h"
 #include "core/store/replica/memory_state.h"
 #include "gsl/pointers"
@@ -41,14 +43,48 @@ enum class MaterializationSource : uint8_t { kUnspecified, kDisk, kP2P, kLocalRe
 
 enum class ExportPolicy : uint8_t { kUnspecified, kNever, kAuto, kForce };
 enum class SourceMutationPolicy : uint8_t { kUnspecified, kReadWrite, kReadOnly };
+enum class SourceLocalityHint : uint8_t { kAuto, kHostLocal, kSharedSource };
 
 struct MaterializeIntoTargetResult {
   MaterializationSource source{MaterializationSource::kUnspecified};
+  uint64_t requested_bytes{0};
+  uint64_t committed_bytes{0};
+  uint64_t fallback_bytes{0};
+  uint64_t residual_bytes{0};
+  uint64_t actual_collective_committed_bytes{0};
+  uint64_t actual_local_typed_bytes{0};
+  uint64_t actual_generic_backend_bytes{0};
+  uint64_t collective_unique_source_bytes{0};
+  uint64_t collective_peer_transfer_bytes{0};
+  uint64_t collective_peak_temporary_bytes{0};
+  uint64_t collective_batch_count{0};
+  uint64_t collective_dedup_saving_bytes{0};
+  std::string collective_skip_reason;
+  bool collective_handled{false};
+  bool direct_write_supported{false};
+  bool source_ordered{false};
+  std::string dominant_executor;
+  std::string selection_reason;
+  std::string selected_source_replica_id;
+  std::string selected_source_transport_id;
+
+  struct DebugStats {
+    std::uint64_t produced_chunks{0};
+    std::uint64_t produced_bytes{0};
+    std::uint64_t source_read_at_us_total{0};
+    std::uint64_t gpu_write_wait_us_total{0};
+    std::uint64_t gpu_write_bytes_total{0};
+  };
+
+  std::optional<DebugStats> debug_stats;
 };
 
 struct IntoTargetStorage {
   gsl::not_null<void*> base_ptr;
   uint64_t length{0};
+  std::optional<StableLocalBackingRef> stable_backing;
+  std::shared_ptr<void> stable_backing_keepalive;
+  std::shared_ptr<void> keepalive;
 };
 
 struct IntoTargetLayout {
@@ -120,6 +156,7 @@ struct DiskMetadata {
   std::optional<uint64_t> logical_total_size;
   std::optional<uint64_t> source_total_size_bytes;
   std::optional<bool> is_safetensors;
+  std::optional<bool> tensor_aware;
 };
 
 struct TransportSchedulingGroupHint {
@@ -137,6 +174,32 @@ struct CollectiveLoadGroupHint {
   uint32_t rank{0};
 };
 
+struct RetrievalPolicy {
+  SourcePreference preference{SourcePreference::kAuto};
+  bool allow_p2p{true};
+  bool allow_disk{true};
+};
+
+struct ExecutionTopologyContext {
+  std::optional<CollectiveLoadGroupHint> collective_load_group;
+  SourceLocalityHint source_locality{SourceLocalityHint::kAuto};
+  std::optional<std::string> source_sharing_domain;
+};
+
+inline absl::Status validate_retrieval_policy(
+    const RetrievalPolicy& policy,
+    std::string_view policy_name = "source_policy") {
+  if (!policy.allow_p2p && policy.preference == SourcePreference::kPreferP2P) {
+    return absl::InvalidArgumentError(
+        std::string(policy_name) + " disallows P2P but preference=PREFER_P2P was requested");
+  }
+  if (!policy.allow_disk && policy.preference == SourcePreference::kPreferDisk) {
+    return absl::InvalidArgumentError(
+        std::string(policy_name) + " disallows disk but preference=PREFER_DISK was requested");
+  }
+  return absl::OkStatus();
+}
+
 struct MaterializeHints {
   size_t max_buffer_bytes = 256ULL << 20; // 256 MB default
   std::chrono::milliseconds pinned_timeout{0};
@@ -153,6 +216,11 @@ struct MaterializeHints {
   std::optional<TransportSchedulingGroupHint> transport_scheduling_group;
   // Optional same-host multi-rank hint for shared-window disk loading.
   std::optional<CollectiveLoadGroupHint> collective_load_group;
+  // Optional topology-locality hint. This remains distinct from retrieval
+  // policy so the strategy plane can reason about source sharing without
+  // rewriting semantic or transport policy.
+  SourceLocalityHint source_locality{SourceLocalityHint::kAuto};
+  std::optional<std::string> source_sharing_domain;
   uint32_t pipeline_concurrency = 4;
   std::string artifact_id;
   bool prefer_pageable_cpu{false};
@@ -166,8 +234,37 @@ struct MaterializeHints {
   ExportPolicy export_policy{ExportPolicy::kNever};
   bool need_view_data_hash{true};
   SourceMutationPolicy source_mutation_policy{SourceMutationPolicy::kReadWrite};
+  bool require_collective_execution{false};
 
   std::optional<VariantIdentity> variant;
+
+  [[nodiscard]] RetrievalPolicy retrieval_policy() const {
+    return RetrievalPolicy{
+        .preference = source_preference,
+        .allow_p2p = allow_p2p,
+        .allow_disk = allow_disk,
+    };
+  }
+
+  void set_retrieval_policy(const RetrievalPolicy& policy) {
+    source_preference = policy.preference;
+    allow_p2p = policy.allow_p2p;
+    allow_disk = policy.allow_disk;
+  }
+
+  [[nodiscard]] ExecutionTopologyContext execution_topology() const {
+    return ExecutionTopologyContext{
+        .collective_load_group = collective_load_group,
+        .source_locality = source_locality,
+        .source_sharing_domain = source_sharing_domain,
+    };
+  }
+
+  void set_execution_topology(const ExecutionTopologyContext& topology) {
+    collective_load_group = topology.collective_load_group;
+    source_locality = topology.source_locality;
+    source_sharing_domain = topology.source_sharing_domain;
+  }
 };
 
 inline int resolve_materialization_concurrency(int daemon_num_threads, const MaterializeHints& hints) {

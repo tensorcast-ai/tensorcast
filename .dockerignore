@@ -1,0 +1,17 @@
+.git
+.venv
+bazel-*
+external
+build
+dist
+*.egg-info
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.hypothesis
+__pycache__
+*.pyc
+*.pyo
+*.so
+tensorcast/lib/*.so
+docs/benchmarks

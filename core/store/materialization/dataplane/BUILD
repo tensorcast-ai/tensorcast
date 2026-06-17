@@ -75,10 +75,10 @@ sc_cc_library(
     hdrs = ["metadata/disk_dir_hash.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":disk_artifact_context",
         ":file_partition_source",
         ":multi_safetensors_source",
         ":source_hash",
-        "@nlohmann_json//:json",
     ],
 )
 
@@ -113,9 +113,12 @@ sc_cc_library(
     deps = [
         ":index_reader",
         ":safetensors_util",
+        "//core/checkpoint:tensor_writer_lib",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
+        "@nlohmann_json//:json",
     ],
 )
 
@@ -400,6 +403,19 @@ sc_cc_library(
     ],
 )
 
+sc_cc_library(
+    name = "target_layout_host_sink",
+    srcs = ["sinks/target_layout_host_sink.cc"],
+    hdrs = ["sinks/target_layout_host_sink.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":sink",
+        "//core/store/materialization/contracts:stable_local_backing",
+        "@abseil-cpp//absl/types:span",
+        "@gsl",
+    ],
+)
+
 ## Removed separate in-memory source targets in favor of local classes in source_hash.cc
 
 sc_cc_library(
@@ -632,6 +648,16 @@ cc_test(
 )
 
 cc_test(
+    name = "byte_range_mapped_source_direct_test",
+    srcs = ["sources/tests/byte_range_mapped_source_direct_test.cc"],
+    deps = [
+        ":byte_range_mapped_source",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "source_window_scheduler_test",
     srcs = ["sources/tests/source_window_scheduler_test.cc"],
     deps = [
@@ -807,6 +833,16 @@ cc_test(
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
         "@gsl",
+    ],
+)
+
+cc_test(
+    name = "target_layout_host_sink_test",
+    srcs = ["sinks/tests/target_layout_host_sink_test.cc"],
+    deps = [
+        ":target_layout_host_sink",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
     ],
 )
 

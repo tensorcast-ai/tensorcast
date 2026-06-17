@@ -23,8 +23,8 @@ Options:
   --help                     Show this help
 
 Examples:
-  bash tools/backfill_from_disk_import.sh /mnt/models/my_hf_dir
-  bash tools/backfill_from_disk_import.sh --sudo=always /mnt/models/root_owned_dir
+  bash tools/backfill_from_disk_import.sh /shared/tensorcast/models/my_hf_dir
+  bash tools/backfill_from_disk_import.sh --sudo=always /shared/tensorcast/models/root_owned_dir
 EOF
 }
 

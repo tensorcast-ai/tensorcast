@@ -104,7 +104,7 @@ Supported fields:
 
 | Field | Type | Default | What it does | Why it exists |
 |---|---|---:|---|---|
-| `fallback` | `FallbackOptions \| str \| None` | `None` | Default fallback hints applied by the store runtime when materializing artifacts. | Provide consistent source preference for a whole process (e.g. “local-only”). |
+| `get` | `GetArtifactOptions \| None` | `None` | Default execution-scoped retrieval options applied by the store runtime. | Provide consistent source/topology defaults for a whole process. |
 | `retry_overrides` | `Mapping[str, RetryPolicy] \| None` | `None` | Override the built-in retry policies per verb (keys: `register`, `put`, `get`, `get_into`). | Tune latency vs. resilience for different deployments. |
 
 Example:
@@ -116,7 +116,7 @@ from tensorcast.api.store.types import RetryPolicy
 tensorcast.init(mode="connect", address="127.0.0.1:50051")
 store = tensorcast.store(
     opts=tensorcast.StoreOptions(
-        fallback="local",
+        get=tensorcast.GetArtifactOptions(source="local_only"),
         retry_overrides={"get": RetryPolicy(20.0, 2, 0.1, 2.0, 0.5)},
     )
 )
@@ -315,7 +315,8 @@ Retrieval is centered on Artifact handles, not on `Store.get` or `Store.get_into
   primary read surface.
 - `tensorcast.from_disk(path)` resolves an artifact id and canonical index from
   a disk directory (explicit import) and seeds the metadata cache. It does not
-  inject disk fallback hints into later materializations.
+  attach retrieval policy to the handle; later reads still use
+  `GetArtifactOptions`.
 
 ### Why handles?
 
@@ -323,27 +324,26 @@ Handles separate **identity** (artifact id/key) from **execution**
 (materialize local/P2P/disk, batch, prefetch, verify). This makes it possible to:
 
 - add new materialization sources without changing call sites
-- attach per-artifact fallbacks (`with_fallback(...)`)
+- keep retrieval policy execution-scoped on `GetArtifactOptions`
 - preserve cached canonical index metadata across calls
 
-## Fallback Selection
+## Retrieval Selection
 
-Materialization behavior is controlled by `FallbackOptions` and
-`GetArtifactOptions` (advanced):
+Materialization behavior is controlled by `GetArtifactOptions`:
 
-- `FallbackOptions.prefer` selects `auto`, `local`, `p2p`, or `disk`.
-- `allow_p2p` / `allow_disk` gate source selection.
+- `source` accepts a structured `RetrievalPolicy` or preset sugar such as
+  `auto`, `local_only`, `disk_first`, or `disk_only`.
 - `replica_uuid` hints the daemon to reuse a prefetched replica.
 - `verify_checksums` controls descriptor validation on disk reads.
+- `execution_topology` carries collective/source-sharing hints separately from
+  retrieval policy.
 
 Disk paths are not supplied by the SDK; when disk fallback is enabled the daemon
 resolves managed disk locations via Global Store.
 
-`GetArtifactOptions` is execution-only. It does not control source selection;
-that remains the responsibility of `FallbackOptions`. Most applications won’t
-pass `GetArtifactOptions` directly today, but it is important for understanding
-behavior like region-backed `get_into`, pinned allocation timeouts, and “wait
-for completion”.
+`GetArtifactOptions` is the execution-only contract for materialization,
+including source selection, topology, region-backed `get_into`, pinned
+allocation timeouts, and “wait for completion”.
 
 - Type: [tensorcast/api/_config.py](../../../tensorcast/api/_config.py) (`GetArtifactOptions`, `RegionBackedMode`)
 
@@ -353,24 +353,29 @@ Examples:
 import tensorcast
 
 # Import metadata from disk (explicit import).
-handle = tensorcast.from_disk("/mnt/models/model_a")
+handle = tensorcast.from_disk("/shared/tensorcast/models/model_a")
 weights = handle.tensor_dict(device="cuda:0")  # requires managed disk locations or existing replicas
 
 # Local-only reads (no P2P, no disk fallback).
-handle = tensorcast.artifact(artifact_id="mi2:...", fallback="local")
-weights = handle.tensor_dict(device="cuda:0")
+handle = tensorcast.artifact(artifact_id="mi2:...")
+weights = handle.tensor_dict(
+    device="cuda:0",
+    options=tensorcast.GetArtifactOptions(source="local_only"),
+)
 
-# Prefer P2P (allow remote replica selection).
-handle = tensorcast.artifact(artifact_id="mi2:...", fallback="p2p")
-weights = handle.tensor_dict(device="cuda:0")
+# Disk-first reads.
+weights = handle.tensor_dict(
+    device="cuda:0",
+    options=tensorcast.GetArtifactOptions(source="disk_first"),
+)
 ```
 
 ### Store.artifact / from_disk (build handles)
 
-Signature: `tensorcast.artifact(*, artifact_id=None, key=None, fallback=None)`
+Signature: `tensorcast.artifact(*, artifact_id=None, key=None)`
 
-Use `artifact(...)` to build a reusable handle that carries identity and fallback
-hints. You typically provide exactly one of:
+Use `artifact(...)` to build a reusable handle that carries identity and
+metadata only. You typically provide exactly one of:
 
 - `artifact_id`: content-addressed id (preferred)
 - `key`: mapped to an artifact id via key mapping
@@ -399,8 +404,10 @@ For the full policy model and examples, see [Policy & Persistence](./policy-pers
 
 For region-backed registration and quiesced cleanup:
 
-- `Store.register_vram_region(...)` and `Store.unregister_vram_region(...)` manage
-  reusable CUDA IPC regions.
+- `Store.register_region(...)` / `Store.unregister_region(...)` are the daemon
+  region APIs. `Store.register_vram_region(...)` and
+  `Store.unregister_vram_region(...)` remain SDK conveniences that lower to the
+  same unified `RegisterRegion` / `UnregisterRegion` RPCs.
 - `Store.deregister_artifact(...)` quiesces and drains active exports, then
   revokes the lease, performs best-effort Global Store cleanup, and (by default)
   also deletes any managed shared-disk persistence for that artifact

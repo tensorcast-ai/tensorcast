@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import threading
 from collections.abc import Mapping
 from enum import Enum
@@ -11,6 +10,7 @@ from typing import TYPE_CHECKING, SupportsIndex, SupportsInt, cast
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from tensorcast.api._errors import InvalidPlan
+from tensorcast.api.context import CollectiveLoadGroup
 
 if TYPE_CHECKING:
     from tensorcast.proto.daemon.v2 import store_daemon_pb2
@@ -25,7 +25,6 @@ DEFAULT_COLD_TTL_MS: int = 60_000
 # Global daemon address configuration
 _daemon_address_lock = threading.RLock()
 _global_daemon_address: str | None = None
-_global_store_address = os.environ.get("TENSORCAST_GLOBAL_STORE", "127.0.0.1:8085")
 
 
 def set_daemon_address(address: str) -> None:
@@ -53,15 +52,6 @@ def clear_daemon_address() -> None:
 def has_daemon_address() -> bool:
     with _daemon_address_lock:
         return _global_daemon_address is not None
-
-
-def set_global_store_address(address: str) -> None:
-    global _global_store_address
-    _global_store_address = address
-
-
-def get_global_store_address() -> str:
-    return _global_store_address
 
 
 class PlanType(Enum):
@@ -589,6 +579,185 @@ class RegionBackedMode(Enum):
         )
 
 
+class RetrievalPreference(str, Enum):
+    AUTO = "auto"
+    PREFER_P2P = "prefer_p2p"
+    PREFER_DISK = "prefer_disk"
+
+    @staticmethod
+    def parse(value: object) -> "RetrievalPreference":
+        if isinstance(value, RetrievalPreference):
+            return value
+        normalized = "auto" if value is None else str(value).strip().lower()
+        if normalized == "auto":
+            return RetrievalPreference.AUTO
+        if normalized in {"prefer_p2p", "p2p_first"}:
+            return RetrievalPreference.PREFER_P2P
+        if normalized in {"prefer_disk", "disk_first"}:
+            return RetrievalPreference.PREFER_DISK
+        raise ValueError(
+            "Unknown retrieval preference "
+            f"'{value}'; expected auto, prefer_p2p, or prefer_disk."
+        )
+
+
+class RetrievalPreset(str, Enum):
+    AUTO = "auto"
+    LOCAL_ONLY = "local_only"
+    DISK_FIRST = "disk_first"
+    DISK_ONLY = "disk_only"
+
+    @staticmethod
+    def parse(value: object) -> "RetrievalPreset":
+        if isinstance(value, RetrievalPreset):
+            return value
+        normalized = str(value).strip().lower()
+        if normalized == "auto":
+            return RetrievalPreset.AUTO
+        if normalized == "local_only":
+            return RetrievalPreset.LOCAL_ONLY
+        if normalized == "disk_first":
+            return RetrievalPreset.DISK_FIRST
+        if normalized == "disk_only":
+            return RetrievalPreset.DISK_ONLY
+        raise ValueError(
+            "Unknown retrieval preset "
+            f"'{value}'; expected auto, local_only, disk_first, or disk_only."
+        )
+
+
+class RetrievalPolicy(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    preference: RetrievalPreference = RetrievalPreference.AUTO
+    allow_p2p: bool = True
+    allow_disk: bool = True
+
+    @field_validator("preference", mode="before")
+    @classmethod
+    def _normalize_preference(cls, value: object) -> RetrievalPreference:
+        return RetrievalPreference.parse(value)
+
+    @model_validator(mode="after")
+    def _validate_policy(self) -> "RetrievalPolicy":
+        if self.preference is RetrievalPreference.PREFER_P2P and not self.allow_p2p:
+            raise ValueError(
+                "RetrievalPolicy disallows P2P but preference=prefer_p2p was requested"
+            )
+        if self.preference is RetrievalPreference.PREFER_DISK and not self.allow_disk:
+            raise ValueError(
+                "RetrievalPolicy disallows disk but preference=prefer_disk was requested"
+            )
+        return self
+
+    @classmethod
+    def from_preset(cls, preset: RetrievalPreset) -> "RetrievalPolicy":
+        if preset is RetrievalPreset.AUTO:
+            return cls()
+        if preset is RetrievalPreset.LOCAL_ONLY:
+            return cls(
+                preference=RetrievalPreference.AUTO,
+                allow_p2p=False,
+                allow_disk=False,
+            )
+        if preset is RetrievalPreset.DISK_FIRST:
+            return cls(preference=RetrievalPreference.PREFER_DISK)
+        if preset is RetrievalPreset.DISK_ONLY:
+            return cls(
+                preference=RetrievalPreference.PREFER_DISK,
+                allow_p2p=False,
+                allow_disk=True,
+            )
+        raise ValueError(f"Unsupported retrieval preset {preset!r}")
+
+    @classmethod
+    def parse(cls, value: object) -> "RetrievalPolicy | None":
+        if value is None:
+            return None
+        if isinstance(value, RetrievalPolicy):
+            return value
+        if isinstance(value, RetrievalPreset):
+            return cls.from_preset(value)
+        if isinstance(value, str):
+            return cls.from_preset(RetrievalPreset.parse(value))
+        if isinstance(value, Mapping):
+            return cls(**value)
+        raise ValueError(
+            "source must be a RetrievalPolicy, RetrievalPreset, or mapping"
+        )
+
+
+class SourceLocalityHint(str, Enum):
+    AUTO = "auto"
+    HOST_LOCAL = "host_local"
+    SHARED_SOURCE = "shared_source"
+
+    @staticmethod
+    def parse(value: object) -> "SourceLocalityHint":
+        if isinstance(value, SourceLocalityHint):
+            return value
+        normalized = "auto" if value is None else str(value).strip().lower()
+        if normalized == "auto":
+            return SourceLocalityHint.AUTO
+        if normalized == "host_local":
+            return SourceLocalityHint.HOST_LOCAL
+        if normalized == "shared_source":
+            return SourceLocalityHint.SHARED_SOURCE
+        raise ValueError(
+            "Unknown source_locality "
+            f"'{value}'; expected auto, host_local, or shared_source."
+        )
+
+
+class CollectivePolicyMode(str, Enum):
+    REQUIRE_COLLECTIVE = "require_collective"
+    COLLECTIVE_FIRST = "collective_first"
+    DISABLE_COLLECTIVE = "disable_collective"
+
+    @staticmethod
+    def parse(value: object) -> "CollectivePolicyMode":
+        if isinstance(value, CollectivePolicyMode):
+            return value
+        if value is None or value == "":
+            raise ValueError(
+                "collective_policy must be explicit when parsed directly; "
+                "leave it unset for request normalization to choose the default."
+            )
+        normalized = str(value).strip().lower()
+        if normalized == "require_collective":
+            return CollectivePolicyMode.REQUIRE_COLLECTIVE
+        if normalized == "collective_first":
+            return CollectivePolicyMode.COLLECTIVE_FIRST
+        if normalized == "disable_collective":
+            return CollectivePolicyMode.DISABLE_COLLECTIVE
+        raise ValueError(
+            "Unknown collective_policy "
+            f"'{value}'; expected require_collective, "
+            "collective_first, or disable_collective."
+        )
+
+
+class ExecutionTopologyContext(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    collective_group: CollectiveLoadGroup | None = None
+    collective_policy: CollectivePolicyMode | None = None
+    source_locality: SourceLocalityHint = SourceLocalityHint.AUTO
+    source_sharing_domain: str | None = None
+
+    @field_validator("collective_policy", mode="before")
+    @classmethod
+    def _normalize_collective_policy(cls, value: object) -> CollectivePolicyMode | None:
+        if value is None or value == "":
+            return None
+        return CollectivePolicyMode.parse(value)
+
+    @field_validator("source_locality", mode="before")
+    @classmethod
+    def _normalize_source_locality(cls, value: object) -> SourceLocalityHint:
+        return SourceLocalityHint.parse(value)
+
+
 class RegisterArtifactOptions(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -602,8 +771,9 @@ class RegisterArtifactOptions(BaseModel):
     lease_bytes_limit: int = 0
     # Lease/LIP specific: opt-in in-place mode for LIP flows.
     lease_in_place: bool = False
-    # Stable DRAM options
-    stage_on_gpu: bool = True
+    # Stable DRAM options. Whole-replica GPU staging is disabled; keep
+    # stage_on_gpu=false unless the backend is redesigned.
+    stage_on_gpu: bool = False
     release_gpu_on_commit: bool = True
     # When stage_on_gpu=false, require the daemon to return a CPU memfd publish
     # handshake and fail fast instead of silently falling back to cpu_stream.
@@ -635,6 +805,10 @@ class RegisterArtifactOptions(BaseModel):
 class GetArtifactOptions(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    source: RetrievalPolicy | None = None
+    execution_topology: ExecutionTopologyContext | None = None
+    replica_uuid: str | None = None
+    verify_checksums: bool = True
     export_policy: str = "never"  # "never" | "auto" | "force"
     need_view_data_hash: bool = True
     pinned_allocation_timeout_ms: int = DEFAULT_PINNED_TIMEOUT_MS
@@ -652,10 +826,14 @@ class GetArtifactOptions(BaseModel):
     def _reject_removed_fields(cls, value: object) -> object:
         if isinstance(value, Mapping) and "prefer" in value:
             raise ValueError(
-                "GetArtifactOptions.prefer has been removed; use "
-                "FallbackOptions(prefer=...) to control source selection"
+                "GetArtifactOptions.prefer has been removed; use source=..."
             )
         return value
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _normalize_source(cls, value: object) -> RetrievalPolicy | None:
+        return RetrievalPolicy.parse(value)
 
     @field_validator("export_policy", mode="before")
     @classmethod
@@ -687,10 +865,15 @@ __all__ = [
     "DEFAULT_ALIGN",
     "DEFAULT_PINNED_TIMEOUT_MS",
     "DEFAULT_COLD_TTL_MS",
+    "ExecutionTopologyContext",
     "GetArtifactOptions",
     "PlanType",
     "RegionBackedMode",
     "RegisterArtifactOptions",
+    "RetrievalPolicy",
+    "RetrievalPreference",
+    "RetrievalPreset",
+    "SourceLocalityHint",
     "StorePolicy",
     "StorePolicyProfile",
     "PolicyTier",
@@ -702,8 +885,6 @@ __all__ = [
     "policy_requires_persistence",
     "clear_daemon_address",
     "get_daemon_address",
-    "get_global_store_address",
     "has_daemon_address",
     "set_daemon_address",
-    "set_global_store_address",
 ]

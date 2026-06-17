@@ -77,8 +77,8 @@ absl::Status set_socket_timeouts(int fd, std::chrono::milliseconds timeout) {
 
 } // namespace
 
-LocalHandleServer::LocalHandleServer(Options opts, HandleLeaseRegistry& leases)
-    : opts_(std::move(opts)), leases_(&leases) {}
+LocalHandleServer::LocalHandleServer(Options opts, IpcRegionRegistry& regions, HandleLeaseRegistry* leases)
+    : opts_(std::move(opts)), regions_(&regions), leases_(leases) {}
 
 LocalHandleServer::~LocalHandleServer() {
   stop();
@@ -250,6 +250,12 @@ absl::Status LocalHandleServer::handle_conn_(int conn_fd) {
         (void)write_exact_(conn_fd, &code, sizeof(code));
         return absl::FailedPreconditionError("cpu shared memory is disabled");
       }
+      if (leases_ == nullptr) {
+        const auto st = absl::FailedPreconditionError("handle lease registry is unavailable");
+        const uint8_t code = static_cast<uint8_t>(map_status_(st));
+        (void)write_exact_(conn_fd, &code, sizeof(code));
+        return st;
+      }
       auto parsed_or =
           leases_->build_parsed_credential(token, LifecycleFrontDoorKind::kLocalCpuMemfdExport, absl::Now());
       if (!parsed_or.ok()) {
@@ -294,8 +300,49 @@ absl::Status LocalHandleServer::handle_conn_(int conn_fd) {
           << "LocalHandleServer: failed to release export use guard: " << release_status;
       return send_status;
     }
+    case OpCode::kGetRegionMemfdFd: {
+      if (!opts_.cpu_shared_memory_enabled) {
+        const uint8_t code = static_cast<uint8_t>(RespCode::kFailedPrecondition);
+        (void)write_exact_(conn_fd, &code, sizeof(code));
+        return absl::FailedPreconditionError("cpu shared memory is disabled");
+      }
+      if (regions_ == nullptr) {
+        const auto st = absl::FailedPreconditionError("region registry is unavailable");
+        const uint8_t code = static_cast<uint8_t>(map_status_(st));
+        (void)write_exact_(conn_fd, &code, sizeof(code));
+        return st;
+      }
+      auto attachment_or = regions_->acquire_host_shared_attachment(token, static_cast<int>(cred.pid));
+      if (!attachment_or.ok()) {
+        const uint8_t code = static_cast<uint8_t>(map_status_(attachment_or.status()));
+        (void)write_exact_(conn_fd, &code, sizeof(code));
+        return attachment_or.status();
+      }
+      if (attachment_or->fd < 0) {
+        auto release_status = regions_->release_host_shared_attachment(token, static_cast<int>(cred.pid));
+        LOG_IF(WARNING, !release_status.ok())
+            << "LocalHandleServer: failed to release region attachment after invalid fd: " << release_status;
+        const auto st = absl::InternalError("region memfd is invalid");
+        const uint8_t code = static_cast<uint8_t>(map_status_(st));
+        (void)write_exact_(conn_fd, &code, sizeof(code));
+        return st;
+      }
+      auto send_status = send_fd_with_status(conn_fd, attachment_or->fd, static_cast<uint8_t>(RespCode::kOk));
+      if (!send_status.ok()) {
+        auto release_status = regions_->release_host_shared_attachment(token, static_cast<int>(cred.pid));
+        LOG_IF(WARNING, !release_status.ok())
+            << "LocalHandleServer: failed to release region attachment after send failure: " << release_status;
+      }
+      return send_status;
+    }
     case OpCode::kReleaseHandle: {
-      auto rel = leases_->release(token);
+      absl::Status rel = absl::NotFoundError("token not found");
+      if (leases_ != nullptr) {
+        rel = leases_->release(token);
+      }
+      if (absl::IsNotFound(rel) && regions_ != nullptr) {
+        rel = regions_->release_host_shared_attachment(token, static_cast<int>(cred.pid));
+      }
       const uint8_t code = static_cast<uint8_t>(map_status_(rel));
       (void)write_exact_(conn_fd, &code, sizeof(code));
       return rel;

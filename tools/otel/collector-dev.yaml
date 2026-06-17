@@ -27,7 +27,7 @@ receivers:
         parse_from: body
       - type: add
         field: resource.service.name
-        value: tensorcast-dev
+        value: tensorcast-local
 processors:
   batch: {}
   memory_limiter:

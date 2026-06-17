@@ -9,9 +9,9 @@ areas:
   - integrations
   - docs
 created: 2026-03-17
-last_updated: 2026-03-19
+last_updated: 2026-03-27
 related_code:
-  - tensorcast/engine_adapter/kvcache_adapter.py
+  - tensorcast/engine_adapter/artifact_api.py
   - tensorcast/node_agent/executor.py
   - tensorcast/node_agent/server.py
   - tensorcast/api/plan/plan.py
@@ -23,6 +23,7 @@ related_docs:
   - docs/designs/0092-artifact-profiles-shared-dataplane-and-truth-layering.md
   - docs/designs/0100-distributed-authority-handoff-security-and-public-surfaces.md
   - docs/designs/0104-artifact-realization-and-cluster-rollout.md
+  - docs/designs/0111-source-to-serving-builder-and-representation-publication.md
   - docs/designs/0039-artifact-first-sdk.md
   - docs/designs/0055-programmable-framework.md
 links:
@@ -64,7 +65,7 @@ The canonical integration model is therefore:
 
 Current code already points in this direction:
 
-- the file `tensorcast/engine_adapter/kvcache_adapter.py` defines generic artifact lifecycle result types,
+- the file `tensorcast/engine_adapter/artifact_api.py` defines generic artifact lifecycle result types,
 - NodeAgent preserves `manifest/publish/hydrate/evict_local` results,
 - and plan execution already aligns around those canonical action names.
 
@@ -74,12 +75,23 @@ Long-term convergence rule:
 - NodeAgent or the in-process Instance Agent boundary remains the unique instance-scoped execution host in this phase,
 - and `0102` owns only engine-side projection into that spine, including the explicit bridge from engine manifests into
   `0056` `ArtifactSetRef` orchestration.
+- serving-representation publication lineage, serving-artifact manifests used
+  for external closeout, and typed representation-publish child contracts remain
+  outside `0102` and belong to `0111` / `0105`.
+- integration-private serving manifest JSON, integration-private
+  builder/publication digests, and serving-key closeout ownership are therefore
+  target-state removals from the `0102` layer rather than extension points.
 
 `0102` is therefore not:
 
 - a second front door,
 - a second instance-hosting model,
-- or a place to define workflow, continuation, or lifecycle semantics already owned by `0096`, `0100`, and `0094`.
+- a place to define workflow, continuation, or lifecycle semantics already owned by `0096`, `0100`, and `0094`,
+- or a place to define the serving-representation closeout contract consumed by
+  `representation_publish`.
+- or a place to redefine `representation_contract_hash`,
+  `serving_build_digest`, or repo-owned admission carriers in
+  integration-private forms.
 
 # Problem Statement
 
@@ -219,14 +231,18 @@ and as the canonical adapter protocol:
 
 - `EngineArtifactAdapter`
 
-Even though the current module path is `tensorcast/engine_adapter/kvcache_adapter.py`, the semantic contract is already
-generic artifact lifecycle projection rather than framework-owned KV semantics.
+The canonical module path is `tensorcast/engine_adapter/artifact_api.py`, and
+the semantic contract is generic artifact lifecycle projection rather than
+framework-owned KV semantics.
 
 Normative rules:
 
 1. new generic plan, NodeAgent, or proto surfaces must use the canonical action names above,
 2. metrics, audit logs, and idempotency fingerprints must use the canonical action names above,
-3. integration-specific aliases must not become the canonical framework vocabulary.
+3. integration-specific aliases must not become the canonical framework vocabulary,
+4. the canonical action name `publish` in this design names the engine- or
+   instance-side source publication step only; it does not replace the
+   `0111` / `0105` serving-representation closeout vocabulary.
 
 ## Frozen projection bridge, not repeated rescan
 
@@ -304,6 +320,24 @@ This preserves the `0087` rule:
 
 - engine-owned mutable state stays open and engine-local,
 - only sealed immutable snapshots enter TensorCast publication and routing paths.
+
+For engine-owned logical byte artifacts, sealing and join semantics must remain
+explicitly separate:
+
+- sealing still means "freeze one concrete payload snapshot for this publication
+  attempt",
+- but an engine integration may declare that routed join truth is keyed by the
+  engine-owned logical `artifact_id` plus layout or size contract rather than by
+  payload digest,
+- this exception is intended for integrations such as runtime KV pages where
+  the engine defines logical page identity but does not guarantee bitwise-stable
+  payload bytes across repeated publications,
+- and even in that mode, repeated publish attempts remain first-writer-wins
+  `PUT_IF_ABSENT_JOIN`, not upsert.
+
+If an integration needs rewrite or repair semantics, it must use a distinct
+overwrite or delete-and-reissue flow instead of interpreting repeated
+`PutIfAbsentInvariant` publication as last-writer-wins.
 
 # High-Cardinality Manifest Semantics
 
@@ -563,7 +597,6 @@ Proto and SDK additions that follow from this design should remain generic:
 # Trade-offs and Risks
 
 - Canonical artifact actions are less domain-friendly than business-specific aliases, so helper layers remain useful.
-- The current filename `kvcache_adapter.py` can mislead readers into over-ascribing KV semantics to the core contract.
 - Some engines may need richer adapter-local preconditions than others; that complexity belongs in integrations, not in
   framework core.
 - Current code still carries `engine_request_id` through instance-action request shapes; the documentation must not

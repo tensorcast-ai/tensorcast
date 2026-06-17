@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import contextlib
+import logging
 import uuid
 import weakref
 from types import MappingProxyType
@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Mapping, Sequence
 import torch
 
 from tensorcast.api import _metrics as store_metrics
-from tensorcast.api import _region_cache as region_cache
+from tensorcast.api._config import GetArtifactOptions
 from tensorcast.api._device import device_uuid_for
 from tensorcast.api.context import CallContext
 from tensorcast.api.operation import (
@@ -31,21 +31,25 @@ from tensorcast.api.store.mapped_binding import (
     validate_copy_plan,
     view_narrow_ranges,
 )
-from tensorcast.api.store.materialization import _build_source_policy
+from tensorcast.api.store.materialization import _resolve_source_policy_from_options
 from tensorcast.api.store.owned_binding_layout import BindingLayout
+from tensorcast.api.store.realization_kernel import resolve_artifact_selection
 from tensorcast.api.store.region_utils import collect_storage_bases
 from tensorcast.api.store.retry import map_materialization_error
-from tensorcast.api.store.types import ArtifactError, FallbackOptions
-from tensorcast.common.selection_contract import (
-    build_artifact_selection,
-    compute_selected_index_bytes,
+from tensorcast.api.store.target_region_lifecycle import (
+    release_target_region_ids_for_realization,
 )
+from tensorcast.api.store.types import ArtifactError
+from tensorcast.common.selection_contract import compute_selected_index_bytes
 from tensorcast.common.selection_identity import (
     compute_logical_layout_hash,
     compute_selection_hash,
 )
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.types import RuntimeArtifactPolicy
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from tensorcast.api.store import Store
@@ -100,6 +104,20 @@ def _selection_publishable(
     return bool(view_id)
 
 
+def _raise_if_published_for_mutation(
+    *,
+    op_name: str,
+    published_lease_id: str | None,
+) -> None:
+    if published_lease_id is None:
+        return
+    raise ArtifactError(
+        f"{op_name}() requires an unpublished binding; call retire() first",
+        status_code="FAILED_PRECONDITION",
+        retryable=False,
+    )
+
+
 def _is_region_error(error: ArtifactError) -> bool:
     return error.status_code in {"DATA_LOSS", "FAILED_PRECONDITION", "NOT_FOUND"}
 
@@ -128,18 +146,18 @@ def _selection_from_region_layout(
                 view_spec=view_spec_for_selection,
                 tensor_names=selection_names,
             )
-    return build_artifact_selection(
+    return resolve_artifact_selection(
         artifact_id=artifact_id,
         canonical_index_bytes=canonical_index_bytes,
-        layout_index_bytes=layout_index_bytes,
         view_spec=view_spec_for_selection,
         tensor_names=selection_names,
         view_subset_hash=subset_hash if subset_hash else None,
         view_id=_normalize_view_id(region_layout.view_id),
+        view_index_hint=layout_index_bytes,
         allow_view_id_without_spec=bool(
             region_layout.view_id and view_spec_for_selection is None
         ),
-    )
+    ).proto
 
 
 class InplaceSlot:
@@ -161,9 +179,8 @@ class InplaceSlot:
         view_id: str | None,
         view_subset_hash: bytes | None,
         view_spec: common_pb2.ViewSpec | None,
-        fallback: FallbackOptions | None,
         current_value_metadata: BindingValueMetadata | None,
-        target_publication_token: bytes | None,
+        binding_current_value_publication_token: bytes | None,
         copy_plan: Sequence[CopyPlanEntry] | None = None,
     ) -> None:
         if not tensors:
@@ -184,7 +201,6 @@ class InplaceSlot:
         self._device_id = int(device_id)
         self._region_ids = tuple(region_ids or ())
         self._view_spec = view_spec
-        self._fallback = fallback
         self._current_value_metadata = current_value_metadata
         self._artifact_id = (
             str(current_value_metadata.source_artifact_id)
@@ -193,8 +209,10 @@ class InplaceSlot:
             else None
         )
         self._contribution_source_artifact_id = self._artifact_id
-        self._target_publication_token = (
-            bytes(target_publication_token) if target_publication_token else None
+        self._binding_current_value_publication_token = (
+            bytes(binding_current_value_publication_token)
+            if binding_current_value_publication_token
+            else None
         )
         self._copy_plan = tuple(copy_plan) if copy_plan is not None else None
 
@@ -334,9 +352,9 @@ class InplaceSlot:
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-        if not self._target_publication_token:
+        if not self._binding_current_value_publication_token:
             raise ArtifactError(
-                "target_publication_token missing; daemon publish not available",
+                "binding_current_value_publication_token missing; daemon publish not available",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
@@ -345,7 +363,7 @@ class InplaceSlot:
         client = self._runtime.ensure_client()
         try:
             start_resp = client.start_publish_target_replica(
-                target_publication_token=self._target_publication_token,
+                binding_current_value_publication_token=self._binding_current_value_publication_token,
                 byte_space=self.byte_space,
                 ttl_ms=ttl_ms,
                 owner_pid=owner_pid,
@@ -432,9 +450,9 @@ class InplaceSlot:
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-        if not self._target_publication_token:
+        if not self._binding_current_value_publication_token:
             raise ArtifactError(
-                "target_publication_token missing; daemon publish not available",
+                "binding_current_value_publication_token missing; daemon publish not available",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
@@ -443,7 +461,7 @@ class InplaceSlot:
         client = self._runtime.ensure_client()
         try:
             resp = client.publish_target_replica(
-                target_publication_token=self._target_publication_token,
+                binding_current_value_publication_token=self._binding_current_value_publication_token,
                 byte_space=self.byte_space,
                 ttl_ms=ttl_ms,
                 owner_pid=owner_pid,
@@ -496,14 +514,10 @@ class InplaceSlot:
         from tensorcast.api.store.binding import BindingUpdateEpoch
 
         self._ensure_open()
-        operation_id = uuid.uuid4().hex
-        if self._published_lease_id is not None:
-            self._retire_published(
-                operation_id=operation_id,
-                wait=True,
-                drain_timeout_s=drain_timeout_s,
-                ctx=ctx,
-            )
+        _raise_if_published_for_mutation(
+            op_name="begin_update",
+            published_lease_id=self._published_lease_id,
+        )
         timeout_s = _ctx_timeout_s(ctx)
         response = self._runtime.ensure_client().begin_binding_update(
             binding_id=self._binding_id,
@@ -519,7 +533,7 @@ class InplaceSlot:
         self._active_update_epoch = update_epoch
         self._current_value_metadata = None
         self._artifact_id = None
-        self._target_publication_token = None
+        self._binding_current_value_publication_token = None
         self._dirty = False
         return BindingUpdateEpoch(
             binding_id=self._binding_id,
@@ -550,7 +564,7 @@ class InplaceSlot:
                 retryable=error.retryable,
             ) from exc
         metadata = parse_binding_value_or_raise(
-            response.current_value if hasattr(response, "current_value") else None,
+            response.current_value,
             rpc_name="SealBinding",
             expected_binding_id=self._binding_id,
             expected_binding_layout_id=self._binding_layout_id,
@@ -566,14 +580,16 @@ class InplaceSlot:
         self._seal_generation_counter = int(metadata.seal_generation)
         self._current_value_metadata = metadata
         self._artifact_id = None
-        self._target_publication_token = None
+        self._binding_current_value_publication_token = None
         self._dirty = False
 
     def swap(
         self,
         artifact: "Artifact | str",
         *,
+        options: GetArtifactOptions | None = None,
         publish: bool = False,
+        runtime_artifact_policy: RuntimeArtifactPolicy | None = None,
         wait: bool = True,
         drain_timeout_s: float | None = None,
         ctx: CallContext | None = None,
@@ -638,7 +654,7 @@ class InplaceSlot:
                     ctx=ctx,
                 )
 
-            preference, source_policy = self._resolve_source_policy(resolved._fallback)
+            source_policy = _resolve_source_policy_from_options(options)
             artifact_id = resolved._ensure_identified()
             client = self._runtime.ensure_client()
             rpc_timeout_s = _ctx_timeout_s(ctx)
@@ -652,6 +668,7 @@ class InplaceSlot:
             attempt = 0
             response = None
             region_layout = None
+            selection = None
             while attempt < 2:
                 region_layout = pipeline._build_mapped_region_backed_layout(
                     target=self._tensors,
@@ -672,8 +689,8 @@ class InplaceSlot:
                         selection=selection,
                         target_layout=region_layout.layout,
                         device_uuid=device_uuid_for(self._device_id),
-                        preference=preference,
                         source_policy=source_policy,
+                        runtime_artifact_policy=runtime_artifact_policy,
                         copy_plan=self._copy_plan,
                         dst_tensors=self._tensors,
                         operation_id=operation_id,
@@ -713,7 +730,7 @@ class InplaceSlot:
                         retryable=False,
                     )
                 break
-            if response is None or region_layout is None:
+            if response is None or region_layout is None or selection is None:
                 self._enter_dirty_state()
                 raise ArtifactError(
                     "MaterializeIntoMappedTarget retry failed to produce a response",
@@ -728,17 +745,10 @@ class InplaceSlot:
             self._update_state_from_layout(
                 region_layout=region_layout,
                 view_spec=view_spec_proto,
-                target_publication_token=getattr(
-                    response, "target_publication_token", None
-                ),
-                fallback=resolved._fallback,
             )
             self._mark_artifact_backed_current(
                 artifact_id=artifact_id,
                 selection=selection,
-                target_publication_token=getattr(
-                    response, "target_publication_token", None
-                ),
             )
             if publish:
                 self._publish_with_operation_id(
@@ -766,7 +776,7 @@ class InplaceSlot:
                 ctx=ctx,
             )
 
-        preference, source_policy = self._resolve_source_policy(resolved._fallback)
+        source_policy = _resolve_source_policy_from_options(options)
         artifact_id = resolved._ensure_identified()
         client = self._runtime.ensure_client()
         rpc_timeout_s = _ctx_timeout_s(ctx)
@@ -774,6 +784,7 @@ class InplaceSlot:
         attempt = 0
         response = None
         region_layout = None
+        selection = None
         while attempt < 2:
             region_layout = pipeline._build_region_backed_layout(
                 canonical_index=canonical_index,
@@ -806,12 +817,12 @@ class InplaceSlot:
                     region_layout=region_layout,
                     view_spec=view_spec_proto,
                 )
-                response = client.materialize_into_target_v2(
+                response = client.materialize_into_target(
                     selection=selection,
                     target_layout=region_layout.layout,
                     device_uuid=device_uuid_for(self._device_id),
-                    preference=preference,
                     source_policy=source_policy,
+                    runtime_artifact_policy=runtime_artifact_policy,
                     operation_id=operation_id,
                     timeout_s=rpc_timeout_s if rpc_timeout_s is not None else 600.0,
                 )
@@ -839,7 +850,7 @@ class InplaceSlot:
                     retryable=False,
                 )
             break
-        if response is None or region_layout is None:
+        if response is None or region_layout is None or selection is None:
             self._enter_dirty_state()
             raise ArtifactError(
                 "MaterializeIntoTarget retry failed to produce a response",
@@ -854,17 +865,10 @@ class InplaceSlot:
         self._update_state_from_layout(
             region_layout=region_layout,
             view_spec=view_spec_proto,
-            target_publication_token=getattr(
-                response, "target_publication_token", None
-            ),
-            fallback=resolved._fallback,
         )
         self._mark_artifact_backed_current(
             artifact_id=artifact_id,
             selection=selection,
-            target_publication_token=getattr(
-                response, "target_publication_token", None
-            ),
         )
 
         if publish:
@@ -881,16 +885,28 @@ class InplaceSlot:
     def close(self) -> None:
         if self._closed:
             return
-        with contextlib.suppress(Exception):
-            if self._published_lease_id is not None:
+        if self._published_lease_id is not None:
+            try:
                 self.retire(wait=False)
-        with contextlib.suppress(Exception):
-            if self._binding_id:
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "inplace_slot.close failed to retire published binding lease "
+                    "(binding_id=%s, lease_id=%s)",
+                    self._binding_id,
+                    self._published_lease_id,
+                )
+        if self._binding_id:
+            try:
                 self._runtime.ensure_client().close_owned_binding(
                     binding_id=self._binding_id
                 )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "inplace_slot.close failed to close owned binding (binding_id=%s)",
+                    self._binding_id,
+                )
         self._closed = True
-        self._release_regions()
+        self._release_regions(context="inplace_slot.close")
 
     # ------------------------------------------------------------------
     # Internals
@@ -957,13 +973,7 @@ class InplaceSlot:
             )
 
     def _refresh_regions(self) -> None:
-        stale_ids = tuple(self._region_ids)
-        self._release_regions()
-        for region_id in stale_ids:
-            if not region_id:
-                continue
-            with contextlib.suppress(Exception):
-                region_cache.unregister_region(region_id)
+        self._release_regions(context="inplace_slot.refresh_regions")
         ttl_ms = 0
         bases = collect_storage_bases(self._tensors)
         new_ids: list[str] = []
@@ -976,36 +986,6 @@ class InplaceSlot:
             )
             new_ids.append(handle.region_id)
         self._region_ids = tuple(new_ids)
-
-    def _resolve_source_policy(
-        self, fallback: FallbackOptions | None
-    ) -> tuple[
-        store_daemon_pb2.SourcePreference,
-        store_daemon_pb2.SourcePolicy,
-    ]:
-        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        effective_prefer = fallback.prefer if fallback is not None else "auto"
-        if fallback is not None:
-            if fallback.prefer == "p2p":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
-                )
-            elif fallback.prefer == "disk":
-                preference = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
-                )
-        allow_p2p = True if fallback is None else bool(fallback.allow_p2p)
-        if effective_prefer == "local":
-            allow_p2p = False
-        allow_disk = True if fallback is None else bool(fallback.allow_disk)
-        if effective_prefer == "local":
-            allow_disk = False
-        source_policy = _build_source_policy(
-            preference=preference,
-            allow_p2p=allow_p2p,
-            allow_disk=allow_disk,
-        )
-        return preference, source_policy
 
     def _retire_published(
         self,
@@ -1052,9 +1032,9 @@ class InplaceSlot:
         owner_pid: int | None = None,
         ctx: CallContext | None,
     ) -> None:
-        if not self._target_publication_token:
+        if not self._binding_current_value_publication_token:
             raise ArtifactError(
-                "target_publication_token missing; daemon publish not available",
+                "binding_current_value_publication_token missing; daemon publish not available",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
@@ -1062,7 +1042,7 @@ class InplaceSlot:
         client = self._runtime.ensure_client()
         try:
             resp = client.publish_target_replica(
-                target_publication_token=self._target_publication_token,
+                binding_current_value_publication_token=self._binding_current_value_publication_token,
                 byte_space=self.byte_space,
                 ttl_ms=ttl_ms,
                 owner_pid=owner_pid,
@@ -1088,12 +1068,12 @@ class InplaceSlot:
             resp.replica_id if hasattr(resp, "replica_id") and resp.replica_id else None
         )
 
-    def _release_regions(self) -> None:
-        for region_id in self._region_ids:
-            if not region_id:
-                continue
-            with contextlib.suppress(Exception):
-                self._store.unregister_vram_region(region_id)
+    def _release_regions(self, *, context: str) -> None:
+        release_target_region_ids_for_realization(
+            unregister_region=self._store.unregister_vram_region,
+            region_ids=self._region_ids,
+            context=context,
+        )
         self._region_ids = ()
 
     def _update_state_from_layout(
@@ -1101,8 +1081,6 @@ class InplaceSlot:
         *,
         region_layout: "_RegionBackedLayout",
         view_spec: common_pb2.ViewSpec | None,
-        target_publication_token: bytes | None,
-        fallback: FallbackOptions | None,
     ) -> None:
         self._region_ids = tuple(region_layout.region_ids)
         self._view_spec = view_spec
@@ -1126,17 +1104,12 @@ class InplaceSlot:
             view_id=self._view_id,
             view_subset_hash=self._view_subset_hash,
         )
-        self._fallback = fallback
-        self._target_publication_token = (
-            bytes(target_publication_token) if target_publication_token else None
-        )
 
     def _mark_artifact_backed_current(
         self,
         *,
         artifact_id: str,
         selection: common_pb2.ArtifactSelection,
-        target_publication_token: bytes | None,
     ) -> None:
         self._artifact_id = str(artifact_id)
         self._contribution_source_artifact_id = str(artifact_id)
@@ -1145,7 +1118,6 @@ class InplaceSlot:
                 binding_id=self._binding_id,
                 selection=selection,
                 source_artifact_id=artifact_id,
-                target_publication_token=target_publication_token,
                 timeout_s=30.0,
             )
         except Exception as exc:  # noqa: BLE001
@@ -1156,10 +1128,15 @@ class InplaceSlot:
                 status_code=error.status_code,
                 retryable=error.retryable,
             ) from exc
+        if response is None:
+            self._enter_dirty_state()
+            raise ArtifactError(
+                "CommitBindingArtifact returned no response",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
         metadata = parse_binding_value_or_raise(
-            response.current_value
-            if response is not None and hasattr(response, "current_value")
-            else None,
+            response.current_value,
             rpc_name="CommitBindingArtifact",
             expected_binding_id=self._binding_id,
             expected_binding_layout_id=self._binding_layout_id,
@@ -1173,16 +1150,15 @@ class InplaceSlot:
             )
         self._seal_generation_counter = int(metadata.seal_generation)
         self._current_value_metadata = metadata
-        self._target_publication_token = (
-            bytes(target_publication_token) if target_publication_token else None
-        )
+        publication_token = bytes(response.binding_current_value_publication_token)
+        self._binding_current_value_publication_token = publication_token or None
         self._dirty = False
 
     def _enter_dirty_state(self) -> None:
         self._active_update_epoch = None
         self._current_value_metadata = None
         self._artifact_id = None
-        self._target_publication_token = None
+        self._binding_current_value_publication_token = None
         self._dirty = True
 
     def _normalize_update_epoch(

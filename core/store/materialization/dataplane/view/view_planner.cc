@@ -33,6 +33,12 @@ struct CanonicalEntry {
   uint64_t storage_offset{0};
 };
 
+struct TensorStorageSpan {
+  uint64_t source_byte_offset{0};
+  uint64_t normalized_storage_offset{0};
+  uint64_t span_bytes{0};
+};
+
 absl::Status validate_ops(const TensorViewOps& ops) {
   enum class Mode : uint8_t { kNone, kNarrow, kTranspose };
   Mode mode = Mode::kNone;
@@ -156,6 +162,65 @@ std::vector<int64_t> compute_compact_stride(const std::vector<int64_t>& shape) {
     acc *= shape[static_cast<size_t>(i)];
   }
   return stride;
+}
+
+absl::StatusOr<TensorStorageSpan> compute_tensor_storage_span(
+    const CanonicalEntry& entry,
+    const std::vector<int64_t>& stride,
+    uint64_t element_size,
+    std::string_view tensor_name) {
+  if (element_size == 0) {
+    return absl::InvalidArgumentError("element size must be non-zero");
+  }
+  if (entry.shape.size() != stride.size()) {
+    return absl::InvalidArgumentError(absl::StrCat("shape/stride rank mismatch for tensor ", tensor_name));
+  }
+  if (entry.shape.empty()) {
+    return TensorStorageSpan{
+        .source_byte_offset = entry.storage_offset,
+        .normalized_storage_offset = 0,
+        .span_bytes = element_size,
+    };
+  }
+
+  __int128 min_relative = 0;
+  __int128 max_relative = 0;
+  for (size_t idx = 0; idx < entry.shape.size(); ++idx) {
+    const int64_t dim = entry.shape[idx];
+    if (dim < 0) {
+      return absl::InvalidArgumentError(absl::StrCat("negative shape dimension for tensor ", tensor_name));
+    }
+    if (dim == 0) {
+      return TensorStorageSpan{
+          .source_byte_offset = entry.storage_offset,
+          .normalized_storage_offset = 0,
+          .span_bytes = 0,
+      };
+    }
+    const __int128 last_step = static_cast<__int128>(dim - 1) * static_cast<__int128>(stride[idx]);
+    if (last_step < 0) {
+      min_relative += last_step;
+    } else {
+      max_relative += last_step;
+    }
+  }
+
+  const __int128 base = static_cast<__int128>(entry.storage_offset);
+  const __int128 first = base + min_relative * static_cast<__int128>(element_size);
+  const __int128 last = base + max_relative * static_cast<__int128>(element_size);
+  if (first < 0 || last < first) {
+    return absl::InvalidArgumentError(absl::StrCat("tensor storage span is out of bounds for tensor ", tensor_name));
+  }
+  const __int128 span_bytes = last - first + static_cast<__int128>(element_size);
+  if (first > static_cast<__int128>(std::numeric_limits<uint64_t>::max()) ||
+      span_bytes > static_cast<__int128>(std::numeric_limits<uint64_t>::max())) {
+    return absl::OutOfRangeError(absl::StrCat("tensor storage span overflows for tensor ", tensor_name));
+  }
+  return TensorStorageSpan{
+      .source_byte_offset = static_cast<uint64_t>(first),
+      .normalized_storage_offset = static_cast<uint64_t>(base - first),
+      .span_bytes = static_cast<uint64_t>(span_bytes),
+  };
 }
 
 bool is_multiple_of(uint64_t value, uint64_t align) {
@@ -373,8 +438,9 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
     const auto spec_it = spec.tensors.find(name);
     const TensorViewOps* ops = (spec_it == spec.tensors.end() ? nullptr : &spec_it->second);
 
+    const std::vector<int64_t> entry_stride = entry.stride.empty() ? compute_compact_stride(entry.shape) : entry.stride;
     CanonicalTensorMeta meta{
-        .shape = entry.shape, .stride = entry.stride, .dtype = entry.dtype, .storage_offset = entry.storage_offset};
+        .shape = entry.shape, .stride = entry_stride, .dtype = entry.dtype, .storage_offset = entry.storage_offset};
     uint64_t tensor_data_bytes = entry.size_bytes;
     bool tensor_identity = true;
 
@@ -443,8 +509,8 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
           const uint64_t block_bytes = block_elements * element_size;
 
           const uint64_t stride_dim =
-              (entry.stride.size() > static_cast<size_t>(dim)
-                   ? static_cast<uint64_t>(entry.stride[static_cast<size_t>(dim)])
+              (entry_stride.size() > static_cast<size_t>(dim)
+                   ? static_cast<uint64_t>(entry_stride[static_cast<size_t>(dim)])
                    : inner);
 
           const uint64_t outer_count = std::max<uint64_t>(1, outer);
@@ -452,7 +518,7 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
           tensor_data_bytes = block_bytes * outer_count;
 
           for (uint64_t outer_index = 0; outer_index < outer_count; ++outer_index) {
-            uint64_t prefix_elements = entry.storage_offset;
+            uint64_t prefix_elements = 0;
             if (outer_count > 1) {
               uint64_t tmp = outer_index;
               for (int32_t i = dim - 1; i >= 0; --i) {
@@ -462,14 +528,14 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
                 }
                 const uint64_t idx = tmp % extent;
                 tmp /= extent;
-                if (entry.stride.size() <= static_cast<size_t>(i)) {
+                if (entry_stride.size() <= static_cast<size_t>(i)) {
                   return absl::InvalidArgumentError(absl::StrCat("stride missing for tensor ", name));
                 }
-                prefix_elements += static_cast<uint64_t>(entry.stride[static_cast<size_t>(i)]) * idx;
+                prefix_elements += static_cast<uint64_t>(entry_stride[static_cast<size_t>(i)]) * idx;
               }
             }
             const uint64_t start_elements = prefix_elements + static_cast<uint64_t>(normalized_start) * stride_dim;
-            const uint64_t byte_offset = entry.offset + start_elements * element_size;
+            const uint64_t byte_offset = entry.offset + entry.storage_offset + start_elements * element_size;
             selection_plan.map.segments.push_back(make_data_segment(byte_offset, view_cursor, block_bytes));
             view_cursor += block_bytes;
           }
@@ -516,9 +582,13 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
           tensor_transform.tensor_name = name;
           tensor_transform.dst_offset = tensor_dst_offset;
           tensor_transform.canonical_offset = entry.offset;
-          tensor_transform.storage_offset_elements = entry.storage_offset;
+          if (entry.storage_offset % element_size != 0) {
+            return absl::InvalidArgumentError(
+                absl::StrCat("storage_offset must be element-size aligned for tensor ", name));
+          }
+          tensor_transform.storage_offset_elements = entry.storage_offset / element_size;
           tensor_transform.canonical_shape = entry.shape;
-          tensor_transform.canonical_stride = entry.stride.empty() ? compute_compact_stride(entry.shape) : entry.stride;
+          tensor_transform.canonical_stride = entry_stride;
           tensor_transform.view_shape = view_shape;
           tensor_transform.view_stride = view_stride;
           tensor_transform.permutation.assign(permutation.begin(), permutation.end());
@@ -533,8 +603,21 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
     }
 
     if (tensor_identity) {
-      selection_plan.map.segments.push_back(make_data_segment(entry.offset, view_cursor, entry.size_bytes));
-      view_cursor += entry.size_bytes;
+      if (subset_enabled) {
+        auto span_or = compute_tensor_storage_span(entry, entry_stride, element_size, name);
+        if (!span_or.ok()) {
+          return span_or.status();
+        }
+        const TensorStorageSpan& span = *span_or;
+        const uint64_t source_offset = entry.offset + span.source_byte_offset;
+        selection_plan.map.segments.push_back(make_data_segment(source_offset, view_cursor, span.span_bytes));
+        tensor_data_bytes = span.span_bytes;
+        meta.storage_offset = span.normalized_storage_offset;
+        view_cursor += span.span_bytes;
+      } else {
+        selection_plan.map.segments.push_back(make_data_segment(entry.offset, view_cursor, entry.size_bytes));
+        view_cursor += entry.size_bytes;
+      }
     }
 
     offsets[name] = tensor_dst_offset;

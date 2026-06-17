@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-namespace="${NAMESPACE:-shai-core}"
-charged_group="${CHARGED_GROUP:-tensorcast_dev}"
+namespace="${NAMESPACE:-tensorcast}"
+charged_group="${CHARGED_GROUP:-}"
 positive_tags="${POSITIVE_TAGS:-H800,ib}"
 worker_gpu_count="${WORKER_GPU_COUNT:-8}"
 worker_cpu_count="${WORKER_CPU_COUNT:-32}"
@@ -26,11 +26,15 @@ comment_prefix="${COMMENT_PREFIX:-topology-guided-routing-smoke}"
 extra_launch_flags="${EXTRA_LAUNCH_FLAGS:-}"
 max_transfer_attempts="${MAX_TRANSFER_ATTEMPTS:-3}"
 timestamp="$(date +%Y%m%d_%H%M%S)"
-log_dir="${LOG_DIR:-/data/tensorcast/tests/topology_guided_routing_${timestamp}}"
+log_dir="${LOG_DIR:-/tmp/tensorcast/tests/topology_guided_routing_${timestamp}}"
 
 declare -a extra_launch_args=()
 if [[ -n "${extra_launch_flags}" ]]; then
   read -r -a extra_launch_args <<< "${extra_launch_flags}"
+fi
+charged_group_args=()
+if [[ -n "${charged_group}" ]]; then
+  charged_group_args=(--charged-group="${charged_group}")
 fi
 
 if (( transfer_gpu_count < 8 )); then
@@ -74,8 +78,8 @@ if ! awk -v v="${per_link_min_of_peak_ratio}" 'BEGIN { exit !(v + 0 > 0 && v + 0
   exit 2
 fi
 
-if ! command -v brainctl >/dev/null 2>&1; then
-  echo "brainctl is required but not found in PATH." >&2
+if ! command -v orchestratorctl >/dev/null 2>&1; then
+  echo "orchestratorctl is required but not found in PATH." >&2
   exit 2
 fi
 if ! command -v bazel >/dev/null 2>&1; then
@@ -127,7 +131,7 @@ brain_exec_as_user() {
   local cmd_b64
   cmd_b64="$(printf '%s' "${remote_cmd}" | base64 | tr -d '\n')"
 
-  brainctl exec "process/${pid}" -n "${namespace}" -- env \
+  orchestratorctl exec "process/${pid}" -n "${namespace}" -- env \
     RUN_AS_USER="${run_as_user}" \
     REPO_PATH="${repo_path}" \
     REMOTE_CMD_B64="${cmd_b64}" \
@@ -156,8 +160,8 @@ fi
 
 print_process_status() {
   local pid="$1"
-  brainctl get process "${pid}" -n "${namespace}"
-  brainctl describe "process/${pid}" -n "${namespace}" | sed -n '1,80p'
+  orchestratorctl get process "${pid}" -n "${namespace}"
+  orchestratorctl describe "process/${pid}" -n "${namespace}" | sed -n '1,80p'
 }
 
 wait_for_process_ready() {
@@ -170,7 +174,7 @@ wait_for_process_ready() {
   while (( round < max_rounds )); do
     round=$((round + 1))
     local row
-    row="$(brainctl get process "${pid}" -n "${namespace}" --no-headers 2>/dev/null || true)"
+    row="$(orchestratorctl get process "${pid}" -n "${namespace}" --no-headers 2>/dev/null || true)"
     local ready status
     ready="$(printf '%s\n' "${row}" | awk '{print $4}')"
     status="$(printf '%s\n' "${row}" | awk '{print $5}')"
@@ -185,7 +189,7 @@ wait_for_process_ready() {
     fi
 
     if (( preempt_noted == 0 )) &&
-      brainctl describe "process/${pid}" -n "${namespace}" | grep -q "Waiting for resources to be preempted"; then
+      orchestratorctl describe "process/${pid}" -n "${namespace}" | grep -q "Waiting for resources to be preempted"; then
       echo "[scheduler] process ${pid} is waiting for preemption; sleep 60s before next check"
       preempt_noted=1
       sleep 60
@@ -223,8 +227,8 @@ fi
     if [[ -z "${pid}" ]]; then
       continue
     fi
-    brainctl delete process "${pid}" -n "${namespace}" || true
-    brainctl get process "${pid}" -n "${namespace}" 2>&1 | grep -q "NotFound" || true
+    orchestratorctl delete process "${pid}" -n "${namespace}" || true
+    orchestratorctl get process "${pid}" -n "${namespace}" 2>&1 | grep -q "NotFound" || true
   done
 }
 
@@ -360,12 +364,12 @@ grep 'read tensor:' \"${log_path}\" \
 "
 }
 
-echo "[preflight] brainctl version"
-brainctl version
-echo "[preflight] brainctl options"
-brainctl options
+echo "[preflight] orchestratorctl version"
+orchestratorctl version
+echo "[preflight] orchestratorctl options"
+orchestratorctl options
 echo "[preflight] my processes in ${namespace}"
-brainctl get process -n "${namespace}" --no-headers \
+orchestratorctl get process -n "${namespace}" --no-headers \
   | awk -v creator="${run_as_user}" '$3==creator {print $1, $2, $5, $7}' \
   | sed -n '1,20p'
 
@@ -375,8 +379,8 @@ bazel build //core/communicator:gpu_ce_test_binary \
   --ui_event_filters=warning,error
 
 echo "[predict] capacity check"
-brainctl launch \
-  --charged-group="${charged_group}" \
+orchestratorctl launch \
+  "${charged_group_args[@]}" \
   --gpu "${worker_gpu_count}" \
   --cpu "${worker_cpu_count}" \
   --memory "${worker_memory_mb}" \
@@ -385,8 +389,8 @@ brainctl launch \
   --predict-only
 
 echo "[launch] server worker"
-server_worker_pid="$(brainctl launch -d \
-  --charged-group="${charged_group}" \
+server_worker_pid="$(orchestratorctl launch -d \
+  "${charged_group_args[@]}" \
   --gpu "${worker_gpu_count}" \
   --cpu "${worker_cpu_count}" \
   --memory "${worker_memory_mb}" \
@@ -400,8 +404,8 @@ echo "server worker pid: ${server_worker_pid}"
 print_process_status "${server_worker_pid}"
 
 echo "[launch] client worker"
-client_worker_pid="$(brainctl launch -d \
-  --charged-group="${charged_group}" \
+client_worker_pid="$(orchestratorctl launch -d \
+  "${charged_group_args[@]}" \
   --gpu "${worker_gpu_count}" \
   --cpu "${worker_cpu_count}" \
   --memory "${worker_memory_mb}" \
@@ -420,7 +424,7 @@ done
 
 echo "[remote] validate user + workspace"
 for pid in "${server_worker_pid}" "${client_worker_pid}"; do
-  brainctl exec "process/${pid}" -n "${namespace}" -- bash -lc "getent passwd ${run_as_user} >/dev/null"
+  orchestratorctl exec "process/${pid}" -n "${namespace}" -- bash -lc "getent passwd ${run_as_user} >/dev/null"
   brain_exec_as_user "${pid}" "
 pwd
 test -d \"${repo_path}\"

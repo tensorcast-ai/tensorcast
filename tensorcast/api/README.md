@@ -40,9 +40,9 @@ By default, the Python SDK surfaces a concise `ArtifactError` stack without gRPC
   expose metadata (`tensor_names`, `tensor_meta`, `describe`) and selective
   materialization (`subset(...).tensor_dict(...)`, `tensor(name, ...)`, `tensor_into(...)`) as the canonical retrieval surface.
 - Handles accept whichever identifiers are available (`artifact_id`, key, or
-  disk path). At least one identifier is required, but resolved handles keep all
-  known hints so `with_fallback(...)` and `to_dict()/from_dict()` remain valid
-  even after key resolution.
+  disk path). At least one identifier is required, and resolved handles keep
+  identity plus cached metadata only; execution policy now lives on
+  `GetArtifactOptions`.
 - Handles are bound to the originating `Store`; materialization after
   `Store.close()` or `Artifact.release()` raises
   `ArtifactError(status_code="FAILED_PRECONDITION")` while cached metadata
@@ -83,15 +83,14 @@ By default, the Python SDK surfaces a concise `ArtifactError` stack without gRPC
   the instance execution endpoint from that same directory contract before forwarding to the Node Agent.
 - `runtime.signals().get_worker_status()` provides a daemon-backed low-cardinality snapshot for the connected worker
   with explicit snapshot metadata (`SignalSnapshot`).
-- `runtime.signals().list_workers()` and `runtime.signals().list_instances()` remain compatibility delegation shims
-  over `runtime.directory()` during the migration away from direct Global Store directory reads.
 
 ## Materialization v2 (descriptor streaming)
 
 - `MaterializationPipeline` streams `TensorPayloadDescriptor` + tensor pairs from the daemon v2 surface (`tensorcast.proto.daemon.v2`) by default; the v1 path and `TC_ENABLE_MATERIALIZE_V2` flag have been removed.
 - Selective fetch via handle selection (`artifact.subset(...)`) trims descriptors and canonical index bytes; iterator cancellation still routes through `_release_materialized` so CUDA IPC handles are unmapped even on early exit. `tensor_dict_into` / `tensor_into` copies consume descriptors directly without building intermediate dicts.
 - Telemetry attaches per-descriptor attributes (`tc.tensor.count`/`tc.tensor.bytes`) and a subset/full selector to the materialization span, and the client metrics surface attaches the same selector to latency/error/retry series.
-- Disk fallbacks are forwarded to the daemon through `DiskFallbackHint` + `SourcePolicy` (preference + allow flags). Disk‑first sets `preference=PREFER_DISK` and all disk reads stay in the daemon data path.
+- Retrieval policy is forwarded to the daemon through `SourcePolicy`. Disk-first
+  and disk-only requests stay entirely in the daemon-managed data path.
 - `MemCopyHandle` is lease-aware: the daemon returns a handle (`cuda_ipc_handle` for GPU or `cpu_memfd` for CPU) plus an opaque `lease_token`. The SDK binds that lease token to the returned `torch.Tensor` lifetimes and releases it over the daemon’s local handle plane (UDS).
 
 ## Region-backed get_into
@@ -110,7 +109,7 @@ this path.
 The `region_backed_mode` default in the unified runtime config controls the
 behavior:
 
-- `auto`: try region-backed first; fall back to the legacy replica path on
+- `auto`: try region-backed first; use daemon-owned replica materialization on
   validation failures.
 - `require`: enforce region-backed and surface errors.
 
@@ -143,8 +142,8 @@ immediately, keeping callers from running deeper into retry loops that can never
 `Artifact.view(...).tensor*` defaults to executing transforms on the daemon so
 transpose views return buffers in the expected orientation. Client-side
 execution is intentionally disabled until a local transform engine exists; the
-pipeline still accepts `placement="CLIENT"` explicitly for forward
-compatibility.
+pipeline still accepts `placement="CLIENT"` explicitly as a reserved placement
+mode.
 
 ## View Registration
 

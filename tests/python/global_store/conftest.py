@@ -24,6 +24,7 @@ from tensorcast.global_store.repositories import (
     LeafRepository,
     PendingTransportRequestRepository,
     ProofRepository,
+    ProgressiveCoverageRepository,
     ReplicaRepository,
     TransportRepository,
     ViewCoverageRepository,
@@ -33,6 +34,7 @@ from tensorcast.global_store.repositories import (
 from tensorcast.global_store.services import (
     ArtifactService,
     InstanceService,
+    ProgressiveReplicationService,
     TransportService,
     ViewStateService,
     WorkerService,
@@ -212,6 +214,7 @@ def repositories(db_connection):
         "assembly_readiness_cut": AssemblyReadinessCutRepository(db_connection),
         "assembly_slot_occupancy": AssemblySlotOccupancyRepository(db_connection),
         "proof": ProofRepository(db_connection),
+        "progressive": ProgressiveCoverageRepository(db_connection),
     }
 
 
@@ -259,6 +262,7 @@ observability:
             repositories["assembly_layout_binding"],
             repositories["proof"],
         ),
+        "progressive": ProgressiveReplicationService(repositories["progressive"]),
     }
 
 

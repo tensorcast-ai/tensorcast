@@ -474,11 +474,28 @@ worker_policy:
       starvation_aging_threshold: "5s"
       queue_scan_limit: 128
       dispatch_batch_limit: 16
+  progressive_replication:
+    enabled: false
+    max_outgoing_per_source: 1
+    coverage_ttl: "300s"
+    assignment_ttl: "30s"
+    allow_cross_domain_seed_sources: false
+    min_verified_bytes: 16777216
+    min_assignment_bytes: 16777216
+    max_assignment_bytes: 268435456
+    max_assignments_per_materialization: 1024
+    assignment_candidate_scan_limit: 64
+    max_claim_qps_per_daemon: 100
+    cleanup_batch_limit: 256
+    source_domain_policy: local_only
+    min_report_delta_bytes: 16777216
+    min_report_interval: "1s"
 ```
 
 `server.listen` is the bind address, while `server.advertise` is the routable address returned by GetServerInfo and used for clients when it is routable. If `advertise.host` is set but non-routable, startup fails. If it is unset, the server attempts to auto-detect a suitable IPv4 address and logs the resolved value; clients ignore unspecified advertised hosts (for example, `0.0.0.0`) and fall back to a connectable listen host. When `database.db_file` is set, `~` is expanded and its parent directory is created on startup. When `database.db_file` is null/empty, the CLI leaves it unset and the Global Store uses in-memory DuckDB. When `tensorcast-cli global start` runs without `--config`, it uses `$TENSORCAST_GLOBAL_STORE_CONFIG` when set, otherwise `examples/config/global_store_config.yaml` (repo checkout or packaged wheel); if neither is found, startup fails. The example file defaults to `listen.host: 0.0.0.0` and `db_file: null`.
 `worker_policy.key_mapping.alias_cache_ttl` controls the `ResolveKeyMapping` cache TTL returned for alias-style mappings; keep it short to reduce polling pressure.
 Transport request handling always uses queue-based group dispatch; `worker_policy.transport_scheduler.mode` is retained only for config compatibility and should be set to `GROUP_DISPATCH`.
+`worker_policy.progressive_replication` controls the 0118 progressive dissemination path and is disabled by default. When disabled, coverage reports are rejected and source claims return no eligible source. When enabled, verified byte-prefix coverage is stored separately from ordinary replica availability, source claims are bounded and idempotent, coverage and assignment deadlines are capped by the configured TTLs, per-source fanout caps use `progressive_source_counters`, stale heartbeat/export-generation candidates are filtered, and cross-domain seed sources stay disabled unless `allow_cross_domain_seed_sources=true`.
 `UpsertKeyMapping`/`SwapKeyMapping` require descriptor readiness: target `artifact_id` must already resolve to canonical index bytes (`GetArtifactIndexById` path). If artifact row or index bytes are missing, RPC returns `FAILED_PRECONDITION`.
 
 ## Extending the Global Store

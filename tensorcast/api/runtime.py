@@ -66,12 +66,27 @@ class Runtime:
             raise RuntimeError(
                 "Daemon ingress currently supports terminal_only execution only"
             )
-        response = self._client.execute_plan(
-            plan=plan_spec,
-            execution_class=execution_class,
-            dry_run=dry_run,
-        )
-        return PlanResult.from_node_agent_response(response)
+        timeout_s: float | None = None
+        if plan_spec.context.HasField("deadline_ms"):
+            timeout_s = max(
+                0.001,
+                float(plan_spec.context.deadline_ms) / 1000.0,
+            )
+        if timeout_s is None:
+            response = self._client.execute_plan(
+                plan=plan_spec,
+                execution_class=execution_class,
+                dry_run=dry_run,
+            )
+        else:
+            response = self._client.execute_plan(
+                plan=plan_spec,
+                execution_class=execution_class,
+                dry_run=dry_run,
+                timeout_s=timeout_s,
+            )
+        result = PlanResult.from_node_agent_response(response)
+        return result
 
     def close(self) -> None:
         global _ACTIVE_RUNTIME

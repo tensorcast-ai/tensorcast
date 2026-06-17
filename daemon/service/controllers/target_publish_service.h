@@ -2,12 +2,14 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string_view>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
@@ -15,6 +17,8 @@
 #include "core/common/capability_token.h"
 #include "core/store/components/global_store_client.h"
 #include "daemon/service/rpc_context.h"
+#include "daemon/state/binding_registry.h"
+#include "daemon/state/daemon_options.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/lifecycle_kernel.h"
 #include "daemon/state/lip_manager.h"
@@ -33,6 +37,7 @@ class TargetPublishService {
  public:
   struct Dep {
     LipManager& lip_manager;
+    BindingRegistry& bindings;
     DeviceResolver& devices;
     WorkerIdentityStore& identity;
     SessionLifecycleManager& lifecycle;
@@ -42,11 +47,15 @@ class TargetPublishService {
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     common::CapabilityTokenManager* capability_tokens{nullptr};
     uint32_t max_concurrency{4};
+    std::function<absl::Status()> await_state_sync_barrier;
+    DaemonOptions::ProgressiveReplication progressive_replication{};
+    std::string daemon_id;
+    std::string daemon_session_id;
   };
 
   explicit TargetPublishService(Dep d);
 
-  static absl::Duration target_publication_token_ttl();
+  static absl::Duration binding_current_value_publication_token_ttl();
 
   static constexpr std::string_view public_operation_kind() {
     return "publish_target_replica";
@@ -54,13 +63,18 @@ class TargetPublishService {
 
   struct TargetPublicationFrontDoorContext {
     TargetPublicationRegistry::Record record;
-    tensorcast::common::v1::TargetPublicationScope scope;
+    tensorcast::common::v1::BindingCurrentValuePublicationScope scope;
     tensorcast::common::v1::ByteSpaceRef normalized_byte_space;
     FrontDoorCredentialContext front_door_context;
   };
 
   [[nodiscard]] absl::StatusOr<TargetPublicationRegistry::Record> remember_target_publication(
       TargetPublicationRegistry::Record record);
+
+  [[nodiscard]] absl::Status terminalize_publication(
+      std::string_view publication_id,
+      std::string_view reason,
+      bool release_published_lifecycle_lease);
 
   [[nodiscard]] absl::StatusOr<TargetPublicationFrontDoorContext> inspect_target_publication_context(
       const v2::PublishTargetReplicaRequest& req,

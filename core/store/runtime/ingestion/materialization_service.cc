@@ -408,12 +408,13 @@ absl::StatusOr<ReplicaHandle> MaterializationService::load_from_disk(const Mater
 
 absl::StatusOr<ReplicaHandle> MaterializationService::run_auto(const MaterializationRequest& request) const {
   const auto id_kind = tensorcast::common::infer_artifact_id_kind(request.canonical_artifact_id());
-  if (id_kind == tensorcast::common::ArtifactIdKind::kMi2 || id_kind == tensorcast::common::ArtifactIdKind::kCgid) {
+  if (id_kind == tensorcast::common::ArtifactIdKind::kMi2 || id_kind == tensorcast::common::ArtifactIdKind::kCgid ||
+      id_kind == tensorcast::common::ArtifactIdKind::kMsa1) {
     auto id_kind_or = tensorcast::common::validate_and_get_artifact_id_kind(request.canonical_artifact_id());
     if (!id_kind_or.ok()) {
       return absl::InvalidArgumentError(
           absl::StrCat(
-              "AUTO materialize_replica requires a canonical artifact_id starting with mi2: or cgid:. ",
+              "AUTO materialize_replica requires a canonical artifact_id starting with mi2:, cgid:, or msa1:. ",
               "Provide MaterializeHints.artifact_id or VariantIdentity.canonical_artifact_id. Details: ",
               id_kind_or.status().message()));
     }
@@ -462,6 +463,7 @@ replica::ReplicaConfig MaterializationService::build_copy_replica_config(
       .expected_artifact_size = expected_size,
       .view_plan = src_replica->view_plan(),
       .byte_mapping_config = deps_.byte_mapping_config,
+      .materialization_strategy = deps_.materialization_strategy,
       .memory_tier_config = std::move(memory_tier_config)};
   cfg.pinned_memory_timeout = deps_.pinned_memory_timeout;
   cfg.streaming_buffer_chunks = deps_.streaming_buffer_chunks;

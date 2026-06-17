@@ -19,6 +19,8 @@ from tensorcast.engine_adapter import (
 )
 from tensorcast.node_agent.executor import NodeAgentExecutor
 from tensorcast.proto.node_agent.v1 import node_agent_pb2, node_agent_pb2_grpc
+from tensorcast.proto.plan.v1 import plan_pb2
+from tensorcast.types import RepresentationPublishSpec
 
 _STATE_MAP = {
     "pending": node_agent_pb2.OPERATION_STATE_PENDING,
@@ -68,21 +70,16 @@ def _batch_outcome_to_proto(
 
 def _manifest_result_to_proto(
     result: ManifestResult,
-) -> node_agent_pb2.ArtifactManifestResult:
-    message = node_agent_pb2.ArtifactManifestResult(
-        engine_request_id=str(result.engine_request_id),
-        layout_id=str(result.layout_id),
-        artifact_ids=[str(item) for item in result.artifact_ids],
-        key_set_digest_alg=str(result.key_set_digest_alg),
-        key_set_digest_hex=str(result.key_set_digest_hex),
-    )
-    if result.artifact_set_bridge is not None:
-        message.manifest_bridge.CopyFrom(result.artifact_set_bridge.to_proto())
-    return message
+) -> plan_pb2.ArtifactManifest:
+    return result.to_proto()
 
 
 def _artifact_result_to_proto(
-    result: ManifestResult | PublishResult | HydrateResult | BatchResult,
+    result: ManifestResult
+    | PublishResult
+    | HydrateResult
+    | BatchResult
+    | RepresentationPublishSpec,
 ) -> node_agent_pb2.ArtifactActionResult:
     message = node_agent_pb2.ArtifactActionResult()
     if isinstance(result, ManifestResult):
@@ -93,6 +90,10 @@ def _artifact_result_to_proto(
         message.publish.put_outcomes.extend(
             _batch_outcome_to_proto(outcome) for outcome in result.put_outcomes
         )
+        if result.publish_manifest is not None:
+            message.publish.publish_manifest.CopyFrom(
+                result.publish_manifest.to_proto()
+            )
         return message
     if isinstance(result, HydrateResult):
         if result.manifest is not None:
@@ -105,6 +106,9 @@ def _artifact_result_to_proto(
         message.hydrate.missing_artifact_ids.extend(
             str(item) for item in result.missing_artifact_ids
         )
+        return message
+    if isinstance(result, RepresentationPublishSpec):
+        message.representation_publish.CopyFrom(result.to_proto())
         return message
 
     if result.engine_request_id is not None:

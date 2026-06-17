@@ -4,12 +4,17 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/escaping.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
+#include "core/store/components/communication_manager.h"
 
 namespace tensorcast::daemon {
 
@@ -29,9 +34,29 @@ std::string compute_sha256_hex_from_bytes(std::string_view payload) {
   return hex;
 }
 
+store::runtime::ingestion::BackingIdentity derive_backing_identity(
+    const store::loading::ReplicaHandle& replica_handle) {
+  return store::runtime::ingestion::BackingIdentity{
+      .physical_artifact_id = replica_handle.key().artifact_id,
+      .replica_key = replica_handle.key(),
+  };
+}
+
 } // namespace
 
 BodyHandle::BodyHandle(std::shared_ptr<CoreBacking> backing) : backing_(std::move(backing)) {}
+
+BodyHandle::CoreBacking::ExportLease::~ExportLease() {
+  if (engine == nullptr || location == common::memory::MemoryLocation::NONE) {
+    return;
+  }
+  const absl::Status disable_status = engine->disable_remote_replica_access(replica_key, location);
+  if (!disable_status.ok()) {
+    LOG(WARNING) << "BodyHandle export release failed"
+                 << " artifact_id=" << replica_key.artifact_id << " location=" << static_cast<int>(location)
+                 << " error=" << disable_status;
+  }
+}
 
 absl::StatusOr<BodyHandle> BodyHandle::create(
     store::StoreEngine& engine,
@@ -84,6 +109,105 @@ bool BodyHandle::unique_owner() const {
   return backing_ && backing_.use_count() == 1;
 }
 
+absl::StatusOr<BodyExportCapability> BodyHandle::inspect_export_capability() const {
+  if (empty()) {
+    return absl::FailedPreconditionError("BodyHandle is empty");
+  }
+  BodyExportCapability capability;
+  capability.memory_location = location();
+  capability.local_loader_available = true;
+  const auto comm_manager = backing_->engine->get_shared_comm_manager();
+  capability.remote_source_eligible = comm_manager->is_enabled();
+  capability.supports_segmented_export = capability.remote_source_eligible;
+  return capability;
+}
+
+absl::StatusOr<BodyExportView> BodyHandle::acquire_export_view(const BodyExportRequest& request) const {
+  if (empty()) {
+    return absl::FailedPreconditionError("BodyHandle is empty");
+  }
+  const common::memory::MemoryLocation resolved_location = location();
+  if (request.preferred_location != common::memory::MemoryLocation::NONE &&
+      request.preferred_location != resolved_location) {
+    return absl::FailedPreconditionError("BodyHandle preferred export location is unavailable");
+  }
+  auto capability_or = inspect_export_capability();
+  if (!capability_or.ok()) {
+    return capability_or.status();
+  }
+  if (request.require_remote_source && !capability_or->remote_source_eligible) {
+    return absl::FailedPreconditionError("BodyHandle remote source export is unavailable");
+  }
+  if (request.require_remote_source && !request.allow_segmented_export) {
+    return absl::FailedPreconditionError("BodyHandle remote source export requires segmented export");
+  }
+
+  BodyExportView view;
+  view.backing_identity = derive_backing_identity(backing_->replica_handle);
+  view.binding_generation = binding_generation();
+  view.memory_location = resolved_location;
+
+  if (!request.require_remote_source) {
+    view.keepalive = std::shared_ptr<void>(backing_, backing_.get());
+    return view;
+  }
+
+  std::shared_ptr<CoreBacking::ExportLease> lease;
+  {
+    absl::MutexLock lock(&backing_->export_mu);
+    std::weak_ptr<CoreBacking::ExportLease>* export_slot = &backing_->cpu_export;
+    std::shared_ptr<void>* publish_prereg_pin_slot = &backing_->cpu_publish_prereg_pin;
+    absl::Time* publish_prereg_pin_expires_at = &backing_->cpu_publish_prereg_pin_expires_at;
+    if (resolved_location == common::memory::MemoryLocation::GPU) {
+      export_slot = &backing_->gpu_export;
+      publish_prereg_pin_slot = nullptr;
+      publish_prereg_pin_expires_at = nullptr;
+    }
+    if (publish_prereg_pin_slot != nullptr && *publish_prereg_pin_slot != nullptr &&
+        *publish_prereg_pin_expires_at != absl::InfinitePast() && *publish_prereg_pin_expires_at <= absl::Now()) {
+      publish_prereg_pin_slot->reset();
+      *publish_prereg_pin_expires_at = absl::InfinitePast();
+    }
+    lease = export_slot->lock();
+    if (!lease) {
+      auto export_or =
+          backing_->engine->enable_remote_replica_access(backing_->replica_handle.key(), resolved_location);
+      if (!export_or.ok()) {
+        return export_or.status();
+      }
+      lease = std::make_shared<CoreBacking::ExportLease>();
+      lease->engine = backing_->engine;
+      lease->replica_key = backing_->replica_handle.key();
+      lease->location = resolved_location;
+      lease->registration = *export_or;
+      *export_slot = lease;
+    }
+  }
+
+  view.communicator_export = lease->registration;
+  view.keepalive = std::shared_ptr<void>(lease, lease.get());
+  return view;
+}
+
+absl::Status BodyHandle::pin_export_keepalive(
+    common::memory::MemoryLocation location,
+    std::shared_ptr<void> keepalive,
+    absl::Time expires_at) const {
+  if (empty()) {
+    return absl::FailedPreconditionError("BodyHandle is empty");
+  }
+  if (keepalive == nullptr) {
+    return absl::InvalidArgumentError("BodyHandle export keepalive is empty");
+  }
+  if (location != common::memory::MemoryLocation::CPU) {
+    return absl::InvalidArgumentError("BodyHandle publish prereg only supports CPU exports");
+  }
+  absl::MutexLock lock(&backing_->export_mu);
+  backing_->cpu_publish_prereg_pin = std::move(keepalive);
+  backing_->cpu_publish_prereg_pin_expires_at = expires_at;
+  return absl::OkStatus();
+}
+
 absl::StatusOr<std::unique_ptr<store::IArtifactLoader>> BodyHandle::make_loader() const {
   if (empty()) {
     return absl::FailedPreconditionError("BodyHandle is empty");
@@ -91,7 +215,7 @@ absl::StatusOr<std::unique_ptr<store::IArtifactLoader>> BodyHandle::make_loader(
   return backing_->engine->open_local_replica_loader(backing_->replica_handle.key(), location());
 }
 
-absl::StatusOr<std::string> BodyHandle::read_range(std::uint64_t offset, std::size_t bytes) const {
+absl::Status BodyHandle::read_into_range(std::uint64_t offset, void* dst, std::size_t bytes) const {
   if (empty()) {
     return absl::FailedPreconditionError("BodyHandle is empty");
   }
@@ -99,8 +223,11 @@ absl::StatusOr<std::string> BodyHandle::read_range(std::uint64_t offset, std::si
     return absl::OutOfRangeError("BodyHandle offset exceeds payload size");
   }
   const std::size_t to_read = static_cast<std::size_t>(std::min<std::uint64_t>(bytes, backing_->size_bytes - offset));
+  if (to_read != bytes) {
+    return absl::OutOfRangeError("BodyHandle read exceeds payload size");
+  }
   if (to_read == 0) {
-    return std::string();
+    return absl::OkStatus();
   }
 
   auto loader_or = make_loader();
@@ -116,14 +243,37 @@ absl::StatusOr<std::string> BodyHandle::read_range(std::uint64_t offset, std::si
     return source_or.status();
   }
 
+  std::size_t copied = 0;
+  while (copied < to_read) {
+    auto read_or = (**source_or).read_at(offset + copied, static_cast<char*>(dst) + copied, to_read - copied);
+    if (!read_or.ok()) {
+      return read_or.status();
+    }
+    if (*read_or == 0) {
+      return absl::DataLossError("BodyHandle source terminated before requested range");
+    }
+    copied += *read_or;
+  }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<std::string> BodyHandle::read_range(std::uint64_t offset, std::size_t bytes) const {
+  if (empty()) {
+    return absl::FailedPreconditionError("BodyHandle is empty");
+  }
+  if (offset > backing_->size_bytes) {
+    return absl::OutOfRangeError("BodyHandle offset exceeds payload size");
+  }
+  const std::size_t to_read = static_cast<std::size_t>(std::min<std::uint64_t>(bytes, backing_->size_bytes - offset));
+  if (to_read == 0) {
+    return std::string();
+  }
+
   std::string payload;
   payload.resize(to_read);
-  auto read_or = (**source_or).read_at(offset, payload.data(), payload.size());
-  if (!read_or.ok()) {
-    return read_or.status();
-  }
-  if (*read_or != payload.size()) {
-    return absl::DataLossError("BodyHandle source terminated before requested range");
+  auto read_status = read_into_range(offset, payload.data(), payload.size());
+  if (!read_status.ok()) {
+    return read_status;
   }
   return payload;
 }

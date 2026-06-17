@@ -72,6 +72,9 @@ class FakeSlotClient:
         self.last_wait_operation_ref: operation_pb2.OperationRef | None = None
         self.publish_failures = 0
         self.materialize_failures = 0
+        self.create_binding_error: ArtifactError | None = None
+        self.omit_create_binding_current_value = False
+        self.create_binding_returns_publication_token = True
         self.omit_commit_current_value = False
         self._token_counter = 0
         self._region_counter = 0
@@ -135,7 +138,7 @@ class FakeSlotClient:
         self.unregister_calls.append(region_id)
         return True
 
-    def materialize_into_target_v2(self, **kwargs: Any) -> Any:
+    def materialize_into_target(self, **kwargs: Any) -> Any:
         self.materialize_calls.append(kwargs)
         if self.materialize_failures > 0:
             self.materialize_failures -= 1
@@ -144,23 +147,25 @@ class FakeSlotClient:
                 status_code="DATA_LOSS",
                 retryable=False,
             )
-        self._token_counter += 1
-        token = f"token-{self._token_counter}".encode("utf-8")
         selection = common_pb2.ArtifactSelection()
         selection.CopyFrom(kwargs["selection"])
         return types.SimpleNamespace(
             status=store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED,
-            target_publication_token=token,
             resolved_selection=selection,
         )
 
     def create_binding(self, **kwargs: Any) -> Any:
         self.create_binding_calls.append(kwargs)
+        if self.create_binding_error is not None:
+            raise self.create_binding_error
         self._binding_counter += 1
         binding_id = f"client-slot-{self._binding_counter}"
         self._binding_layout_ids[binding_id] = str(kwargs["binding_layout_id"])
         current_value = None
-        if kwargs.get("initial_selection") is not None:
+        if (
+            kwargs.get("initial_selection") is not None
+            and not self.omit_create_binding_current_value
+        ):
             selection = common_pb2.ArtifactSelection()
             selection.CopyFrom(kwargs["initial_selection"])
             self._binding_selections[binding_id] = selection
@@ -168,11 +173,17 @@ class FakeSlotClient:
                 binding_id=binding_id,
                 selection=selection,
             )
-        return types.SimpleNamespace(
+        response = types.SimpleNamespace(
             binding_id=binding_id,
             target_index_bytes=bytes(kwargs["target_index_bytes"]),
             current_value=current_value,
+            binding_current_value_publication_token=b"",
         )
+        if self.create_binding_returns_publication_token:
+            self._token_counter += 1
+            response.binding_current_value_publication_token = (
+                f"create-token-{self._token_counter}".encode("utf-8"))
+        return response
 
     def publish_target_replica(self, **kwargs: Any) -> Any:
         self.publish_calls.append(kwargs)
@@ -254,7 +265,10 @@ class FakeSlotClient:
             artifact_id=str(selection.artifact_id),
             target_index_bytes=bytes(kwargs["target_index_bytes"]),
             resolved_selection=selection,
-            target_publication_token=f"token-{self._token_counter}".encode("utf-8"),
+            binding_current_value_publication_token=f"token-{self._token_counter}".encode(
+                "utf-8"
+            ),
+            created_staged_value=False,
             current_value=self._make_binding_value(
                 binding_id=binding_id,
                 selection=selection,
@@ -264,12 +278,19 @@ class FakeSlotClient:
     def commit_binding_artifact(self, **kwargs: Any) -> Any:
         self.commit_calls.append(kwargs)
         binding_id = str(kwargs["binding_id"])
+        self._token_counter += 1
         selection = common_pb2.ArtifactSelection()
         selection.CopyFrom(kwargs["selection"])
         self._binding_selections[binding_id] = selection
         if self.omit_commit_current_value:
-            return types.SimpleNamespace()
+            return types.SimpleNamespace(
+                binding_current_value_publication_token=b"",
+                current_value=store_daemon_pb2.BindingValue(),
+            )
         return types.SimpleNamespace(
+            binding_current_value_publication_token=f"token-{self._token_counter}".encode(
+                "utf-8"
+            ),
             current_value=self._make_binding_value(
                 binding_id=binding_id,
                 selection=selection,
@@ -300,7 +321,9 @@ class FakeSlotClient:
         return types.SimpleNamespace(
             artifact_id=str(selection.artifact_id),
             resolved_selection=selection,
-            target_publication_token=f"token-{self._token_counter}".encode("utf-8"),
+            binding_current_value_publication_token=f"token-{self._token_counter}".encode(
+                "utf-8"
+            ),
             current_value=self._make_binding_value(
                 binding_id=binding_id,
                 selection=selection,
@@ -359,6 +382,11 @@ def _cache_index(runtime: FakeRuntime, artifact_id: str, index_bytes: bytes) -> 
 
 
 def _patch_owned_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        store_mod,
+        "get_cuda_memory_handle_with_offset",
+        lambda *args, **kwargs: (b"fake-handle", 0),
+    )
     monkeypatch.setattr(artifact_mod, "device_uuid_for", lambda device_id: "gpu-0")
     monkeypatch.setattr(inplace_slot_mod, "device_uuid_for", lambda device_id: "gpu-0")
     monkeypatch.setattr(
@@ -392,9 +420,6 @@ def test_binding_swap_preserves_data_ptr(
     _cache_index(runtime, "artifact-1", index_bytes)
     _cache_index(runtime, "artifact-2", index_bytes)
     monkeypatch.setattr(
-        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
-    )
-    monkeypatch.setattr(
         store_mod,
         "get_cuda_memory_handle_with_offset",
         lambda *args, **kwargs: (b"fake-handle", 0),
@@ -423,9 +448,6 @@ def test_binding_swap_reuses_view_spec(
     store = Store("fake://daemon", runtime=runtime)
     _cache_index(runtime, "mi2:artifact-1", index_bytes)
     _cache_index(runtime, "mi2:artifact-2", index_bytes)
-    monkeypatch.setattr(
-        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
-    )
     _patch_owned_binding(monkeypatch)
 
     artifact1 = store.artifact(artifact_id="mi2:artifact-1")
@@ -455,9 +477,6 @@ def test_publish_failure_keeps_binding_clean_and_retry(
     store = Store("fake://daemon", runtime=runtime)
     _cache_index(runtime, "artifact-1", index_bytes)
     _cache_index(runtime, "artifact-2", index_bytes)
-    monkeypatch.setattr(
-        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
-    )
     _patch_owned_binding(monkeypatch)
 
     artifact1 = store.artifact(artifact_id="artifact-1")
@@ -485,9 +504,6 @@ def test_binding_publish_operation_uses_operation_ref_metadata(
     runtime = FakeRuntime(client)
     store = Store("fake://daemon", runtime=runtime)
     _cache_index(runtime, "artifact-1", index_bytes)
-    monkeypatch.setattr(
-        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
-    )
     _patch_owned_binding(monkeypatch)
 
     artifact = store.artifact(artifact_id="artifact-1")
@@ -508,6 +524,131 @@ def test_binding_publish_operation_uses_operation_ref_metadata(
     assert binding._slot.published_replica_id == "replica-1"
 
 
+def test_bind_into_uses_create_binding_publication_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _skip_if_no_cuda()
+    index_bytes = _make_index_bytes()
+    client = FakeSlotClient(index_bytes)
+    runtime = FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+    _cache_index(runtime, "artifact-1", index_bytes)
+    monkeypatch.setattr(
+        store_mod,
+        "get_cuda_memory_handle_with_offset",
+        lambda *args, **kwargs: (b"fake-handle", 0),
+    )
+    _patch_owned_binding(monkeypatch)
+
+    artifact = store.artifact(artifact_id="artifact-1")
+    target_tensors = {
+        "alpha": torch.empty((4,), dtype=torch.float32, device="cuda:0"),
+        "beta": torch.empty((4,), dtype=torch.float32, device="cuda:0"),
+    }
+    binding = artifact.bind_into(target_tensors, packing="byte_space")
+
+    binding.publish_replica()
+
+    assert len(client.publish_calls) == 1
+    assert (
+        client.publish_calls[0]["binding_current_value_publication_token"]
+        == b"create-token-1"
+    )
+
+
+def test_bind_into_releases_regions_when_create_binding_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _skip_if_no_cuda()
+    index_bytes = _make_index_bytes()
+    client = FakeSlotClient(index_bytes)
+    client.create_binding_error = ArtifactError(
+        "create binding failed after direct write",
+        status_code="DATA_LOSS",
+        retryable=False,
+    )
+    runtime = FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+    _cache_index(runtime, "artifact-1", index_bytes)
+    monkeypatch.setattr(
+        store_mod,
+        "get_cuda_memory_handle_with_offset",
+        lambda *args, **kwargs: (b"fake-handle", 0),
+    )
+    _patch_owned_binding(monkeypatch)
+
+    artifact = store.artifact(artifact_id="artifact-1")
+    target_tensors = {
+        "alpha": torch.empty((4,), dtype=torch.float32, device="cuda:0"),
+        "beta": torch.empty((4,), dtype=torch.float32, device="cuda:0"),
+    }
+
+    with pytest.raises(ArtifactError) as excinfo:
+        artifact.bind_into(target_tensors, packing="byte_space")
+
+    assert excinfo.value.status_code == "DATA_LOSS"
+    assert len(client.materialize_calls) == 1
+    assert len(client.create_binding_calls) == 1
+    assert client.unregister_calls == ["region:slot:1", "region:slot:2"]
+    assert client.close_calls == []
+
+
+def test_bind_into_closes_binding_and_releases_regions_for_malformed_create_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _skip_if_no_cuda()
+    index_bytes = _make_index_bytes()
+    client = FakeSlotClient(index_bytes)
+    client.omit_create_binding_current_value = True
+    runtime = FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+    _cache_index(runtime, "artifact-1", index_bytes)
+    monkeypatch.setattr(
+        store_mod,
+        "get_cuda_memory_handle_with_offset",
+        lambda *args, **kwargs: (b"fake-handle", 0),
+    )
+    _patch_owned_binding(monkeypatch)
+
+    artifact = store.artifact(artifact_id="artifact-1")
+    target_tensors = {
+        "alpha": torch.empty((4,), dtype=torch.float32, device="cuda:0"),
+        "beta": torch.empty((4,), dtype=torch.float32, device="cuda:0"),
+    }
+
+    with pytest.raises(ArtifactError) as excinfo:
+        artifact.bind_into(target_tensors, packing="byte_space")
+
+    assert excinfo.value.status_code == "DATA_LOSS"
+    assert len(client.materialize_calls) == 1
+    assert client.close_calls == ["client-slot-1"]
+    assert client.unregister_calls == ["region:slot:1", "region:slot:2"]
+
+
+def test_binding_begin_update_rejects_published_replica(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _skip_if_no_cuda()
+    index_bytes = _make_index_bytes()
+    client = FakeSlotClient(index_bytes)
+    runtime = FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+    _cache_index(runtime, "artifact-1", index_bytes)
+    _patch_owned_binding(monkeypatch)
+
+    artifact = store.artifact(artifact_id="artifact-1")
+    binding = artifact.bind(device="cuda:0", packing="byte_space")
+    binding._slot._published_lease_id = "lease-1"
+
+    with pytest.raises(ArtifactError) as excinfo:
+        binding.begin_update()
+
+    assert excinfo.value.status_code == "FAILED_PRECONDITION"
+    assert "call retire() first" in str(excinfo.value)
+    assert client.retire_calls == []
+    assert client.begin_update_calls == []
+
+
 def test_bind_into_failed_materialize_clears_current_value_and_marks_dirty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -518,9 +659,6 @@ def test_bind_into_failed_materialize_clears_current_value_and_marks_dirty(
     store = Store("fake://daemon", runtime=runtime)
     _cache_index(runtime, "artifact-1", index_bytes)
     _cache_index(runtime, "artifact-2", index_bytes)
-    monkeypatch.setattr(
-        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
-    )
     monkeypatch.setattr(
         store_mod,
         "get_cuda_memory_handle_with_offset",
@@ -557,9 +695,6 @@ def test_bind_into_missing_commit_current_value_fails_fast(
     store = Store("fake://daemon", runtime=runtime)
     _cache_index(runtime, "artifact-1", index_bytes)
     _cache_index(runtime, "artifact-2", index_bytes)
-    monkeypatch.setattr(
-        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
-    )
     monkeypatch.setattr(
         store_mod,
         "get_cuda_memory_handle_with_offset",

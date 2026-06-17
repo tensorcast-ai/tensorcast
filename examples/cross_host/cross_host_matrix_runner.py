@@ -40,7 +40,7 @@ def run(cmd: str) -> str:
 
 def run_remote(process_id: str, inner_cmd: str) -> str:
     cmd = (
-        f"brainctl exec process/{process_id} -n shai-core -- bash -lc "
+        f"orchestratorctl exec process/{process_id} -n tensorcast -- bash -lc "
         f"{shlex.quote(inner_cmd)}"
     )
     return run(cmd)
@@ -249,7 +249,7 @@ def main() -> int:
     parser.add_argument("--put-policy", default="pinned")
     parser.add_argument("--put-device", default="cuda:0")
     parser.add_argument("--get-device", default="cuda:0")
-    parser.add_argument("--out-dir", default="/tmp/tc_cross_20260221/results")
+    parser.add_argument("--out-dir", default="/tmp/tensorcast/cross_host/results")
     parser.add_argument(
         "--require-p2p", action=argparse.BooleanOptionalAction, default=True
     )
@@ -272,10 +272,14 @@ def main() -> int:
     parser.add_argument("--put-p2p-port", type=int, default=63001)
     parser.add_argument("--get-p2p-port", type=int, default=63011)
 
-    parser.add_argument("--put-home", default="/tmp/tc_cross_20260221/put_home")
-    parser.add_argument("--get-home", default="/tmp/tc_cross_20260221/get_home")
-    parser.add_argument("--put-storage", default="/tmp/tc_cross_20260221/put_storage")
-    parser.add_argument("--get-storage", default="/tmp/tc_cross_20260221/get_storage")
+    parser.add_argument("--put-home", default="/tmp/tensorcast/cross_host/put_home")
+    parser.add_argument("--get-home", default="/tmp/tensorcast/cross_host/get_home")
+    parser.add_argument(
+        "--put-storage", default="/tmp/tensorcast/cross_host/put_storage"
+    )
+    parser.add_argument(
+        "--get-storage", default="/tmp/tensorcast/cross_host/get_storage"
+    )
     parser.add_argument("--put-session", default="tc-cross-put")
     parser.add_argument("--get-session", default="tc-cross-get")
     parser.add_argument("--put-daemon-id", default="tc-cross-put")

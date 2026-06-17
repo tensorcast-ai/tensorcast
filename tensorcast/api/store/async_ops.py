@@ -1,15 +1,16 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
 import concurrent.futures
-import contextlib
+import logging
 from collections.abc import Callable
 from typing import Generic, TypeVar, cast
 
 from tensorcast.api.store.runtime import StoreRuntimeContext
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 
 class ArtifactFuture(Generic[T]):
@@ -55,8 +56,10 @@ class ArtifactFuture(Generic[T]):
             return False
         cancelled = False
         if self._cancel is not None:
-            with contextlib.suppress(Exception):
+            try:
                 cancelled = bool(self._cancel())
+            except Exception:  # noqa: BLE001
+                logger.exception("artifact future cancel callback failed")
         if not cancelled:
             cancelled = self._future.cancel()
         return cancelled

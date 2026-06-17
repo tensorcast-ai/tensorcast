@@ -52,6 +52,11 @@ class TransportController {
       const v2::FetchPayloadRefChunkRequest& req,
       v2::FetchPayloadRefChunkResponse& resp);
 
+  grpc::Status fetch_batch_payload_ref_chunk(
+      RpcContext& rctx,
+      const v2::FetchBatchPayloadRefChunkRequest& req,
+      v2::FetchBatchPayloadRefChunkResponse& resp);
+
   grpc::Status route_authority_stage(
       RpcContext& rctx,
       const v2::RouteAuthorityStageRequest& req,

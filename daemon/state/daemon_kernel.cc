@@ -2,11 +2,14 @@
 
 #include "daemon/state/daemon_kernel.h"
 
+#include <utility>
+
 #include <algorithm>
 #include <utility>
 
 #include "absl/log/log.h"
 #include "absl/time/time.h"
+#include "core/store/components/endpoint_id.h"
 #include "daemon/state/pid_monitor.h"
 #include "daemon/state/sweep_tasks.h"
 #include "daemon/util/grpc_daemon_transport.h"
@@ -21,6 +24,7 @@ DaemonKernel::DaemonKernel(
     : engine_(std::move(engine)),
       async_runtime_(async_runtime ? std::move(async_runtime) : std::make_shared<common::AsyncRuntime>()),
       options_(std::move(options)),
+      global_store_client_(std::move(global_store_client)),
       sessions_(options_.sessions_ttl),
       locks_(options_.locks_ttl),
       region_registry_(
@@ -63,6 +67,7 @@ DaemonKernel::DaemonKernel(
       },
       std::chrono::duration_cast<std::chrono::milliseconds>(options_.proc_check_interval));
   lifecycle_mgr_->attach_pid_monitor(pid_monitor_.get());
+  binding_registry_ = std::make_unique<BindingRegistry>();
 
   configure_scheduler_tasks_();
 
@@ -70,8 +75,6 @@ DaemonKernel::DaemonKernel(
       sessions_, *verif_tracker_, scheduler_.get(), lifecycle_mgr_.get(), absl::Seconds(options_.sessions_ttl.count()));
 
   lip_bridge_ = std::make_unique<LipBridge>(*lip_mgr_);
-  binding_registry_ = std::make_unique<BindingRegistry>();
-
   if (!options_.local_handle_socket_path.empty()) {
     HandleLeaseRegistry::Options hl_opts;
     hl_opts.capacity = 4096;
@@ -156,13 +159,13 @@ DaemonKernel::DaemonKernel(
     }
     byte_artifact_body_store_->invalidate_replica_visibility(payload->key, absl::Now(), "runtime_evicted");
   });
-  worker_directory_cache_ = std::make_unique<WorkerDirectoryCache>(global_store_client);
-  instance_execution_directory_cache_ = std::make_unique<InstanceExecutionDirectoryCache>(global_store_client);
+  worker_directory_cache_ = std::make_unique<WorkerDirectoryCache>(global_store_client_);
+  instance_execution_directory_cache_ = std::make_unique<InstanceExecutionDirectoryCache>(global_store_client_);
   inter_daemon_channel_credentials_ = make_inter_daemon_channel_credentials(options_.inter_daemon_grpc_security);
   const std::string local_daemon_id = options_.daemon_id.empty() ? std::string("daemon-local") : options_.daemon_id;
   byte_artifact_route_resolver_ = std::make_unique<ByteArtifactRouteResolver>(
       *byte_artifact_runtime_state_,
-      global_store_client,
+      global_store_client_,
       local_daemon_id,
       ByteArtifactRouteResolver::Options{
           .route_staleness_budget = absl::Milliseconds(
@@ -188,9 +191,46 @@ DaemonKernel::DaemonKernel(
           .max_chunk_bytes = options_.byte_artifact_routing.payload_transport.max_chunk_bytes,
           .fetch_deadline = options_.byte_artifact_routing.payload_transport.fetch_deadline,
           .cleanup_interval = options_.byte_artifact_routing.payload_transport.cleanup_interval,
+          .max_batch_payload_bytes = options_.byte_artifact_routing.payload_transport.max_batch_payload_bytes,
+          .max_batch_items = options_.byte_artifact_routing.payload_transport.max_batch_items,
+          .max_batch_stage_bytes_per_peer =
+              options_.byte_artifact_routing.payload_transport.max_batch_stage_bytes_per_peer,
+          .batch_transport_protocol_version =
+              options_.byte_artifact_routing.payload_transport.batch_transport_protocol_version,
+          .communicator_source_enabled = options_.byte_artifact_routing.payload_transport.communicator_source_enabled,
+          .host_memory_export_enabled = options_.byte_artifact_routing.payload_transport.host_memory_export_enabled,
+          .segmented_communicator_export_enabled =
+              options_.byte_artifact_routing.payload_transport.segmented_communicator_export_enabled,
+          .minimum_batch_transport_ttl = options_.byte_artifact_routing.payload_transport.minimum_batch_transport_ttl,
+          .transport_release_guard = options_.byte_artifact_routing.payload_transport.transport_release_guard,
+          .comm_manager = engine_->get_shared_comm_manager(),
+          .local_cpu_endpoint_id_provider = [identity_store = identity_store_.get()]() -> std::string {
+            if (identity_store == nullptr) {
+              return "";
+            }
+            const std::string node_id = identity_store->node_id();
+            if (node_id.empty()) {
+              return "";
+            }
+            return store::components::derive_endpoint_id(node_id, common::memory::MemoryLocation::CPU, /*device_id=*/0);
+          },
           .inter_daemon_channel_credentials = inter_daemon_channel_credentials_,
           .inter_daemon_grpc_security = options_.inter_daemon_grpc_security,
       });
+  region_registry_->set_pre_cleanup_callback([this](const IpcRegionRegistry::RegionDescriptor& desc) {
+    if (desc.memory_kind != IpcRegionRegistry::MemoryKind::kHostShared || !desc.daemon_managed) {
+      return;
+    }
+    std::shared_ptr<store::components::CommunicationManager> comm_manager = engine_->get_shared_comm_manager();
+    if (!comm_manager->is_enabled()) {
+      return;
+    }
+    auto status = comm_manager->deactivate_stable_local_backing(desc.region_id);
+    if (!status.ok()) {
+      LOG(WARNING) << "stable_local_backing.deactivate_failed"
+                   << " backing_id=" << desc.region_id << " status=" << status;
+    }
+  });
   retire_gates_ = std::make_unique<RetireGates>(refs_, *lifecycle_mgr_, locks_);
 }
 
@@ -231,6 +271,12 @@ void DaemonKernel::stop() {
 
 void DaemonKernel::begin_shutdown() {
   shutdown_signal_.begin_shutdown();
+  if (binding_registry_) {
+    const size_t removed = binding_registry_->clear_staged_values("daemon_shutdown");
+    if (removed > 0) {
+      VLOG(1) << "DaemonKernel: cleared staged binding values during shutdown count=" << removed;
+    }
+  }
   if (async_runtime_) {
     async_runtime_->shutdown();
   }
@@ -303,6 +349,15 @@ void DaemonKernel::configure_scheduler_tasks_() {
         });
   }
 
+  // Retained serving binding lifecycle sweep.
+  {
+    auto t = std::make_shared<BindingRetentionSweepTask>(*binding_registry_, global_store_client_);
+    scheduler_->add_task(
+        TaskKind::kBindingRetention,
+        std::chrono::duration_cast<milliseconds>(options_.binding_retention_sweep_interval),
+        [t]() { t->run_once(); });
+  }
+
   // Verification
   {
     auto t = std::make_shared<VerificationTask>(*verif_tracker_);
@@ -321,6 +376,25 @@ void DaemonKernel::configure_scheduler_tasks_() {
           t->run_once();
         });
   }
+
+  {
+    const auto keepalive_interval =
+        std::chrono::duration_cast<milliseconds>(options_.byte_artifact_routing.keepalive_interval);
+    scheduler_->add_task(TaskKind::kByteArtifactLeaseKeepalive, keepalive_interval, [this]() {
+      if (this->byte_artifact_route_resolver_ == nullptr) {
+        return;
+      }
+      this->byte_artifact_route_resolver_->keepalive_owned_shard_leases_once(absl::Now());
+    });
+  }
+
+  scheduler_->add_task(
+      TaskKind::kByteArtifactBodyStoreMaintenance, ByteArtifactBodyStore::kMaintenanceInterval, [this]() {
+        if (this->byte_artifact_body_store_ == nullptr) {
+          return;
+        }
+        this->byte_artifact_body_store_->run_maintenance_once();
+      });
 }
 
 } // namespace tensorcast::daemon

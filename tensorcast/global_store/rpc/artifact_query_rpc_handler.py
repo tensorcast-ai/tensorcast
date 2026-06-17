@@ -10,7 +10,7 @@ from typing import Callable, Optional, cast
 import grpc
 from google.protobuf import timestamp_pb2
 
-from tensorcast.common.identity import ArtifactIdKind
+from tensorcast.common.identity import ArtifactIdKind, is_msa1_artifact_id
 from tensorcast.global_store.exceptions import ValidationError
 from tensorcast.global_store.models import Replica
 from tensorcast.global_store.repositories.artifact_repository import ArtifactRepository
@@ -102,6 +102,14 @@ class ArtifactQueryRpcHandler:
             if not artifact_id:
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details("artifact_id is required")
+                return global_store_pb2.GetArtifactInfoByIdResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+            if is_msa1_artifact_id(artifact_id):
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                context.set_details(
+                    "msa1 artifact_id is daemon-session-local and is not valid on Global Store artifact query surfaces"
+                )
                 return global_store_pb2.GetArtifactInfoByIdResponse(
                     status=global_store_pb2.Status.STATUS_ERROR
                 )

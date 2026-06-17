@@ -89,6 +89,15 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "local_handle_socket_path_lib",
+    srcs = ["util/local_handle_socket_path.cc"],
+    hdrs = ["util/local_handle_socket_path.h"],
+    deps = [
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_cc_library(
     name = "startup_coordinator_lib",
     srcs = ["app/startup_coordinator.cc"],
     hdrs = ["app/startup_coordinator.h"],
@@ -159,6 +168,7 @@ sc_cc_library(
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:source_hash",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "//proto/tensorcast/global_store/v1:global_store_cc",
         "//proto/tensorcast/node_agent/v1:node_agent_cc",
         "//proto/tensorcast/node_agent/v1:node_agent_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -221,6 +231,8 @@ sc_cc_library(
         "//core/common:capability_token_lib",
         "//core/common:memory_location_lib",
         "//core/common:selection_identity_lib",
+        "//core/communicator:config_io_lib",
+        "//core/communicator:host_topology_builder_lib",
         "//core/store:device_registry",
         "//core/store:global_store_client",
         "//core/store:store_engine",
@@ -256,6 +268,7 @@ sc_cc_library(
         ":key_mapping_controller_lib",
         ":lease_controller_lib",
         ":local_handle_server_lib",
+        ":local_handle_socket_path_lib",
         ":persistence_rpc_controller_lib",
         ":replica_session_controller_lib",
         ":startup_coordinator_lib",
@@ -491,6 +504,7 @@ sc_cc_library(
         "//core/common:artifact_hash_lib",
         "//core/common:artifact_identity_lib",
         "//core/common:async_runtime_lib",
+        "//core/cuda:cuda_api_lib",
         "//core/store:global_store_client",
         "//core/store:store_engine",
         "//core/store/materialization/contracts:loading_spec",
@@ -597,6 +611,16 @@ sc_cc_library(
     ],
 )
 
+cc_test(
+    name = "target_publication_registry_test",
+    srcs = ["state/target_publication_registry_test.cc"],
+    deps = [
+        ":target_publication_registry_lib",
+        "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
+    ],
+)
+
 sc_cc_library(
     name = "artifact_source_registry_lib",
     srcs = ["state/artifact_source_registry.cc"],
@@ -614,12 +638,27 @@ sc_cc_library(
     srcs = ["state/binding_registry.cc"],
     hdrs = ["state/binding_registry.h"],
     deps = [
+        ":types_hdr",
         "//core/common:cuda_memory_lib",
         "//core/cuda:cuda_ipc_lib",
         "//proto/tensorcast/common/v1:common_cc",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time:time",
+    ],
+)
+
+cc_test(
+    name = "binding_registry_test",
+    srcs = ["state/binding_registry_test.cc"],
+    deps = [
+        ":binding_registry_lib",
+        ":sweep_tasks_hdr",
+        "//core/store:testing_global_store_client_stub",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
     ],
 )
 
@@ -652,6 +691,7 @@ cc_binary(
     deps = [
         ":daemon_app_lib",
         ":identity_utils_lib",
+        ":local_handle_socket_path_lib",
         ":startup_memory_preflight_lib",
         "//core/common:artifact_hash_lib",
         "//core/common:async_runtime_lib",
@@ -666,7 +706,6 @@ cc_binary(
         "//proto/tensorcast/config/v1:config_cc",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
-        "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/time",
         "@gsl",
@@ -727,6 +766,7 @@ sc_cc_library(
     hdrs = ["ha/worker_lifecycle_manager.h"],
     deps = [
         ":identity_utils_lib",
+        ":worker_directory_cache_lib",
         ":worker_lifecycle_ports_hdr",
         "//core/communicator:utils_lib",
         "//core/store:store_engine",
@@ -774,7 +814,6 @@ sc_header_only_library(
     deps = [
         "//core/common:trace_request_data_lib",
         "@abseil-cpp//absl/base:core_headers",
-        "@abseil-cpp//absl/log",
         "@folly//folly/io/async:request_context",
     ],
 )
@@ -811,6 +850,7 @@ sc_header_only_library(
         ":session_manager_hdr",
         ":transport_lock_manager_hdr",
         ":verification_tracker_hdr",
+        "//core/store:global_store_client",
         "//core/store:store_engine",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -1148,12 +1188,29 @@ sc_cc_library(
     srcs = ["service/controllers/assembly_coordination_utils.cc"],
     hdrs = ["service/controllers/assembly_coordination_utils.h"],
     deps = [
+        ":serving_artifact_manifest_utils_lib",
         "//core/common:artifact_hash_lib",
         "//core/store:global_store_client",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "//proto/tensorcast/operation/v1:operation_cc",
         "@abseil-cpp//absl/time",
         "@protobuf",
+    ],
+)
+
+sc_cc_library(
+    name = "serving_artifact_manifest_utils_lib",
+    srcs = ["service/controllers/serving_artifact_manifest_utils.cc"],
+    hdrs = ["service/controllers/serving_artifact_manifest_utils.h"],
+    deps = [
+        "//core/common:artifact_hash_lib",
+        "//core/common:selection_identity_lib",
+        "//core/store:store_engine",
+        "//core/store/materialization/contracts:loading_spec",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+        "@nlohmann_json//:json",
     ],
 )
 
@@ -1168,16 +1225,19 @@ sc_cc_library(
         ":device_resolver_hdr",
         ":grpc_peer_utils_lib",
         ":handle_lease_registry_lib",
+        ":materialization_disk_resolve_utils_lib",
         ":materialization_index_source_utils_lib",
         ":materialization_layout_utils_lib",
         ":materialization_payload_utils_lib",
         ":materialization_policy_utils_lib",
         ":materialization_request_common_utils_lib",
         ":materialization_target_plan_utils_lib",
+        ":path_utils_lib",
         ":registration_controller_lib",
         ":registration_manager_lib",
         ":registration_storage_mapping_utils_lib",
         ":rpc_context_hdr",
+        ":serving_artifact_manifest_utils_lib",
         ":shutdown_signal_hdr",
         ":status_utils",
         ":target_materialization_service_lib",
@@ -1190,6 +1250,7 @@ sc_cc_library(
         "//core/store:store_engine",
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/materialization/dataplane:index_reader",
+        "//core/store/runtime/ingestion:source_bound_strategy_planner",
         "//proto/tensorcast/common/v1:common_cc",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/random:random",
@@ -1200,21 +1261,41 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "assembly_closeout_identity_utils_lib",
+    srcs = ["service/controllers/assembly_closeout_identity_utils.cc"],
+    hdrs = ["service/controllers/assembly_closeout_identity_utils.h"],
+    deps = [
+        ":types_hdr",
+        "//core/common:artifact_hash_lib",
+        "//core/common:artifact_identity_lib",
+        "//core/store:global_store_client",
+    ],
+)
+
+sc_cc_library(
     name = "assembly_operation_service_lib",
     srcs = ["service/controllers/assembly_operation_service.cc"],
     hdrs = ["service/controllers/assembly_operation_service.h"],
     deps = [
+        ":assembly_closeout_identity_utils_lib",
         ":assembly_coordination_utils_lib",
+        ":binding_registry_lib",
         ":daemon_options_hdr",
         ":device_resolver_hdr",
+        ":lip_manager_lib",
+        ":materialization_layout_utils_lib",
         ":materialization_policy_utils_lib",
         ":materialization_post_seal_utils_lib",
         ":rpc_context_hdr",
+        ":serving_artifact_manifest_utils_lib",
+        ":session_lifecycle_lib",
         ":shutdown_signal_hdr",
         ":status_utils",
         ":worker_identity_store_lib",
         "//core/common:artifact_hash_lib",
+        "//core/common:artifact_identity_lib",
         "//core/common:async_runtime_lib",
+        "//core/common:trace_macros_lib",
         "//core/store:global_store_client",
         "//core/store:store_engine",
         "//core/store/materialization/contracts:loading_spec",
@@ -1235,8 +1316,10 @@ sc_cc_library(
     hdrs = ["service/controllers/disk_artifact_service.h"],
     deps = [
         ":artifact_source_registry_lib",
+        ":daemon_options_hdr",
         ":grpc_peer_utils_lib",
         ":materialization_disk_resolve_utils_lib",
+        ":materialization_request_common_utils_lib",
         ":rpc_context_hdr",
         ":shutdown_signal_hdr",
         ":status_utils",
@@ -1268,6 +1351,7 @@ sc_cc_library(
         ":ref_tracker_hdr",
         ":rpc_context_hdr",
         ":selection_validation_utils_lib",
+        ":serving_artifact_manifest_utils_lib",
         ":session_lifecycle_lib",
         ":sessions_service_hdr",
         ":shutdown_signal_hdr",
@@ -1296,6 +1380,7 @@ sc_cc_library(
         ":ipc_region_registry_lib",
         ":lifecycle_kernel_lib",
         ":lip_manager_lib",
+        ":materialization_disk_resolve_utils_lib",
         ":materialization_index_source_utils_lib",
         ":materialization_layout_utils_lib",
         ":materialization_payload_utils_lib",
@@ -1304,6 +1389,7 @@ sc_cc_library(
         ":materialization_target_plan_utils_lib",
         ":materialization_target_storage_utils_lib",
         ":rpc_context_hdr",
+        ":serving_artifact_manifest_utils_lib",
         ":session_lifecycle_lib",
         ":shutdown_signal_hdr",
         ":status_utils",
@@ -1314,11 +1400,16 @@ sc_cc_library(
         "//core/common:async_runtime_lib",
         "//core/common:capability_token_lib",
         "//core/common:selection_identity_lib",
+        "//core/store:endpoint_id",
         "//core/store:global_store_client",
         "//core/store:store_engine",
         "//core/store:view_utils",
+        "//core/store/materialization/contracts:byte_range_map",
         "//core/store/materialization/contracts:loading_spec",
+        "//core/store/materialization/dataplane:p2p_loader",
+        "//core/store/runtime/ingestion:source_bound_strategy_planner",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "//proto/tensorcast/global_store/v1:global_store_cc",
         "//proto/tensorcast/operation/v1:operation_cc",
         "@abseil-cpp//absl/random:random",
         "@abseil-cpp//absl/strings",
@@ -1337,6 +1428,7 @@ sc_cc_library(
         ":grpc_peer_utils_lib",
         ":ipc_region_registry_lib",
         ":materialization_target_storage_utils_lib",
+        "//core/store:communication_manager",
         "//core/store:device_types",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -1348,9 +1440,12 @@ sc_cc_library(
     srcs = ["service/controllers/target_publish_service.cc"],
     hdrs = ["service/controllers/target_publish_service.h"],
     deps = [
+        ":binding_registry_lib",
+        ":daemon_options_hdr",
         ":device_resolver_hdr",
         ":lifecycle_kernel_lib",
         ":lip_manager_lib",
+        ":materialization_policy_utils_lib",
         ":routed_authority_protocol_hdr",
         ":routed_authority_wire_hdr",
         ":rpc_context_hdr",
@@ -1359,10 +1454,12 @@ sc_cc_library(
         ":status_utils",
         ":target_publication_registry_lib",
         ":worker_identity_store_lib",
+        "//core/common:artifact_hash_lib",
         "//core/common:async_runtime_lib",
         "//core/common:capability_token_lib",
         "//core/store:global_store_client",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "//proto/tensorcast/global_store/v1:global_store_cc",
         "//proto/tensorcast/operation/v1:operation_cc",
         "@abseil-cpp//absl/cleanup",
         "@abseil-cpp//absl/container:flat_hash_set",
@@ -1416,6 +1513,7 @@ sc_cc_library(
         ":handle_lease_registry_lib",
         ":lip_bridge_lib",
         ":materialization_disk_resolve_utils_lib",
+        ":materialization_policy_utils_lib",
         ":materialization_replica_handle_utils_lib",
         ":path_utils_lib",
         ":ref_tracker_hdr",
@@ -1466,11 +1564,12 @@ sc_cc_library(
     hdrs = ["service/controllers/materialization_target_plan_utils.h"],
     deps = [
         ":materialization_layout_utils_lib",
-        ":materialization_mapped_copy_plan_utils_lib",
         ":materialization_mapped_target_layout_utils_lib",
         ":materialization_mapped_view_narrow_utils_lib",
         ":materialization_mapped_view_spec_utils_lib",
         ":materialization_policy_utils_lib",
+        ":representation_layout_types",
+        ":representation_transform_builder_lib",
         ":selection_validation_utils_lib",
         ":status_utils",
         ":types_hdr",
@@ -1481,6 +1580,22 @@ sc_cc_library(
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+sc_cc_library(
+    name = "representation_transform_builder_lib",
+    srcs = ["service/controllers/representation_transform_builder.cc"],
+    hdrs = ["service/controllers/representation_transform_builder.h"],
+    deps = [
+        ":materialization_layout_utils_lib",
+        ":representation_layout_types",
+        "//core/store/materialization/contracts:representation_contract",
+        "//proto/tensorcast/common/v1:common_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
     ],
@@ -1529,17 +1644,9 @@ sc_cc_library(
     ],
 )
 
-sc_cc_library(
-    name = "materialization_mapped_copy_plan_utils_lib",
-    srcs = ["service/controllers/materialization_mapped_copy_plan_utils.cc"],
-    hdrs = ["service/controllers/materialization_mapped_copy_plan_utils.h"],
-    deps = [
-        ":materialization_layout_utils_lib",
-        "//core/store/materialization/contracts:byte_range_map",
-        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
-        "@abseil-cpp//absl/container:flat_hash_map",
-        "@abseil-cpp//absl/types:span",
-    ],
+sc_header_only_library(
+    name = "representation_layout_types",
+    hdrs = ["service/controllers/representation_layout_types.h"],
 )
 
 sc_cc_library(
@@ -1548,7 +1655,7 @@ sc_cc_library(
     hdrs = ["service/controllers/materialization_mapped_target_layout_utils.h"],
     deps = [
         ":materialization_layout_utils_lib",
-        ":materialization_mapped_copy_plan_utils_lib",
+        ":representation_layout_types",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
@@ -1560,7 +1667,7 @@ sc_cc_library(
     srcs = ["service/controllers/materialization_mapped_view_narrow_utils.cc"],
     hdrs = ["service/controllers/materialization_mapped_view_narrow_utils.h"],
     deps = [
-        ":materialization_mapped_copy_plan_utils_lib",
+        ":representation_layout_types",
         "//core/store/materialization/dataplane:view_planner",
         "@abseil-cpp//absl/container:flat_hash_map",
     ],
@@ -1584,10 +1691,18 @@ sc_cc_library(
     srcs = ["service/controllers/materialization_policy_utils.cc"],
     hdrs = ["service/controllers/materialization_policy_utils.h"],
     deps = [
+        ":rpc_context_hdr",
+        "//core/common:artifact_hash_lib",
+        "//core/store:global_store_client",
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:view_identity",
         "//core/store/materialization/dataplane:view_planner",
+        "//proto/tensorcast/common/v1:common_cc",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "//proto/tensorcast/global_store/v1:global_store_grpc_cc",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+        "@protobuf",
     ],
 )
 
@@ -1616,9 +1731,11 @@ sc_cc_library(
     deps = [
         ":ipc_region_registry_lib",
         "//core/cuda:cuda_ipc_lib",
+        "//core/store:communication_manager",
         "//core/store:store_engine",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
         "@protobuf",
     ],
 )
@@ -1717,6 +1834,7 @@ sc_cc_library(
     deps = [
         ":ipc_region_registry_lib",
         ":materialization_target_storage_utils_lib",
+        "//core/store:communication_manager",
         "//core/store:device_registry",
         "//core/store:device_types",
         "//core/store/materialization/contracts:loading_spec",
@@ -1753,6 +1871,7 @@ cc_test(
     srcs = ["state/distributed_security_kernel_test.cc"],
     deps = [
         ":distributed_security_kernel_lib",
+        ":routed_authority_wire_hdr",
         "@abseil-cpp//absl/time:time",
         "@catch2//:catch2_main",
     ],
@@ -1764,6 +1883,35 @@ cc_test(
     deps = [
         ":path_utils_lib",
         "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "local_handle_socket_path_test",
+    srcs = ["util/local_handle_socket_path_test.cc"],
+    deps = [
+        ":local_handle_socket_path_lib",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "materialization_layout_utils_test",
+    srcs = ["service/controllers/materialization_layout_utils_test.cc"],
+    deps = [
+        ":materialization_layout_utils_lib",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "materialization_target_plan_utils_test",
+    srcs = ["service/controllers/materialization_target_plan_utils_test.cc"],
+    deps = [
+        ":materialization_target_plan_utils_lib",
+        "//core/store:store_engine_options",
+        "//core/store/runtime/ingestion:source_bound_strategy_planner",
         "@catch2//:catch2_main",
     ],
 )
@@ -1870,7 +2018,9 @@ cc_test(
     name = "pid_monitor_unwatch_integration_test",
     srcs = ["state/pid_monitor_unwatch_integration_test.cc"],
     deps = [
+        ":handle_lease_registry_lib",
         ":ipc_region_registry_lib",
+        ":lifecycle_kernel_lib",
         ":lip_manager_lib",
         ":pid_monitor_lib",
         ":ref_tracker_hdr",
@@ -1878,6 +2028,7 @@ cc_test(
         ":session_lifecycle_lib",
         ":session_manager_hdr",
         "//core/store:device_registry",
+        "//core/store:store_engine",
         "@catch2//:catch2_main",
     ],
 )
@@ -1998,8 +2149,10 @@ cc_test(
     deps = [
         ":daemon_service_harness_lib",
         ":grpc_service_impl",
+        ":types_hdr",
         "//core/store:store_engine",
         "//core/store:store_engine_options",
+        "//core/store:testing_recording_global_store_client",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],
@@ -2110,10 +2263,20 @@ cc_test(
         ":routed_authority_protocol_hdr",
         ":routed_authority_wire_hdr",
         "//core/common:artifact_hash_lib",
+        "//core/communicator:routing_adapter_lib",
+        "//core/communicator:routing_context_lib",
+        "//core/communicator:topology_lib",
         "//core/store:store_engine",
+        "//core/store:testing_global_store_client_stub",
         "//core/store:testing_recording_global_store_client",
+        "//core/testing:test_helpers",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/log:globals",
+        "@abseil-cpp//absl/log:log_entry",
+        "@abseil-cpp//absl/log:log_sink",
+        "@abseil-cpp//absl/log:log_sink_registry",
         "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/types:span",
         "@catch2//:catch2_main",
     ],
@@ -2178,7 +2341,9 @@ cc_test(
 cc_test(
     name = "grpc_service_impl_publish_target_replica_test",
     srcs = ["service/grpc_service_impl_publish_target_replica_test.cc"],
+    data = [":cuda_ipc_helper"],
     deps = [
+        ":cuda_ipc_spawn_helper_lib",
         ":daemon_service_harness_lib",
         ":grpc_service_impl",
         ":routed_authority_protocol_hdr",
@@ -2212,8 +2377,10 @@ cc_test(
     deps = [
         ":daemon_service_harness_lib",
         ":grpc_service_impl",
+        "//core/common:artifact_hash_lib",
         "//core/store:store_engine",
         "//core/store:testing_recording_global_store_client",
+        "//core/store/materialization/dataplane:disk_dir_hash",
         "//core/testing:common",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
@@ -2385,6 +2552,28 @@ cc_test(
 )
 
 cc_test(
+    name = "assembly_closeout_identity_utils_test",
+    srcs = ["service/assembly_closeout_identity_utils_test.cc"],
+    deps = [
+        ":assembly_closeout_identity_utils_lib",
+        "//core/common:artifact_hash_lib",
+        "//core/store:testing_global_store_client_stub",
+        "//core/store:testing_recording_global_store_client",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "materialization_policy_utils_test",
+    srcs = ["service/materialization_policy_utils_test.cc"],
+    deps = [
+        ":materialization_policy_utils_lib",
+        "//core/store:testing_global_store_client_stub",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "owned_binding_service_test",
     srcs = ["service/owned_binding_service_test.cc"],
     deps = [
@@ -2481,6 +2670,22 @@ alias(
 )
 
 cc_test(
+    name = "byte_artifact_region_layout_host_shared_test",
+    srcs = ["service/byte_artifact_region_layout_host_shared_test.cc"],
+    deps = [
+        ":external_target_access_service_lib",
+        ":ipc_region_registry_lib",
+        ":materialization_target_storage_utils_lib",
+        "//core/store:communication_manager",
+        "//core/store:device_registry",
+        "//core/testing:test_helpers",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "materialize_into_target_validation_test",
     srcs = ["service/materialize_into_target_validation_test.cc"],
     data = [":cuda_ipc_helper"],
@@ -2509,6 +2714,23 @@ cc_test(
         "@abseil-cpp//absl/time:time",
         "@abseil-cpp//absl/types:span",
         "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "nccl_ipc_sendrecv_test",
+    srcs = ["service/nccl_ipc_sendrecv_test.cc"],
+    data = [":cuda_ipc_helper"],
+    tags = ["requires_cuda"],
+    deps = [
+        ":cuda_ipc_spawn_helper_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/cuda:cuda_ipc_lib",
+        "//core/cuda:device_guard_lib",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@catch2//:catch2_main",
+        "@nccl",
     ],
 )
 
@@ -2627,6 +2849,21 @@ cc_test(
         "//core/store:testing_recording_global_store_client",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "serving_artifact_manifest_utils_test",
+    srcs = ["service/controllers/serving_artifact_manifest_utils_test.cc"],
+    deps = [
+        ":serving_artifact_manifest_utils_lib",
+        "//core/common:artifact_hash_lib",
+        "//core/store:store_engine",
+        "//core/store:store_engine_options",
+        "//core/store/materialization/dataplane:safetensors_util",
+        "@abseil-cpp//absl/types:span",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
     ],
 )
 

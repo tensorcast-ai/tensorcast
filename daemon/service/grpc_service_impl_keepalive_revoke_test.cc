@@ -2,9 +2,18 @@
 
 #include "daemon/testing/daemon_service_harness.h"
 
+#include <unistd.h>
+#include <chrono>
+#include <filesystem>
+#include <memory>
+#include <string>
+#include <utility>
+
 #include <catch2/catch_test_macros.hpp>
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
+#include "core/store/testing/recording_global_store_client.h"
+#include "daemon/state/types.h"
 #include "grpcpp/server_context.h"
 
 namespace {
@@ -21,13 +30,25 @@ tensorcast::store::StoreEngineOptions make_opts() {
 }
 
 std::unique_ptr<tensorcast::daemon::DaemonServiceHarness> make_harness(
-    const std::shared_ptr<tensorcast::store::StoreEngine>& engine) {
+    const std::shared_ptr<tensorcast::store::StoreEngine>& engine,
+    std::shared_ptr<tensorcast::store::testing::RecordingGlobalStoreClient> gs = nullptr) {
   tensorcast::daemon::DaemonOptions options;
-  auto harness_or = tensorcast::daemon::DaemonServiceHarness::create(engine, options);
+  auto harness_or = tensorcast::daemon::DaemonServiceHarness::create(engine, options, nullptr, std::move(gs));
   REQUIRE(harness_or.ok());
   auto harness = std::move(*harness_or);
   REQUIRE(harness->start().ok());
   return harness;
+}
+
+tensorcast::daemon::LipLeaseEntry make_lip_lease(std::string registration_id, std::string artifact_id) {
+  tensorcast::daemon::LipLeaseEntry entry;
+  entry.registration_id = std::move(registration_id);
+  entry.artifact_id = std::move(artifact_id);
+  entry.device_id = 0;
+  entry.owner_pid = getpid();
+  entry.ttl_ms = 60000;
+  entry.expiry = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+  return entry;
 }
 
 } // namespace
@@ -82,6 +103,38 @@ TEST_CASE("RevokeRegisteredArtifact is a no-op for unknown registration", "[daem
   rreq.set_reason("test");
   auto st = service.RevokeRegisteredArtifact(&ctx, &rreq, &rresp);
   REQUIRE(st.ok());
+}
+
+TEST_CASE("RevokeRegisteredArtifact unregisters routable Global Store replica", "[daemon][registration]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  auto gs = std::make_shared<tensorcast::store::testing::RecordingGlobalStoreClient>();
+  auto harness = make_harness(engine, gs);
+  auto& lip_manager = harness->kernel().lip_manager();
+  auto& service = harness->service();
+
+  auto lease = make_lip_lease("registration-revoke", "artifact-revoke");
+  tensorcast::daemon::ArtifactDeviceKey key{
+      .artifact_id = lease.artifact_id,
+      .view_id = "",
+      .device_id = lease.device_id,
+  };
+  lip_manager.put_lease(lease.registration_id, key, lease);
+  lip_manager.attach_replica_id(lease.registration_id, "replica-revoke");
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::RevokeRegisteredArtifactRequest req;
+  tensorcast::daemon::v2::RevokeRegisteredArtifactResponse resp;
+  req.set_registration_id(lease.registration_id);
+  req.set_reason("source_visibility_revoke");
+  const auto st = service.RevokeRegisteredArtifact(&ctx, &req, &resp);
+
+  REQUIRE(st.ok());
+  REQUIRE(
+      gs->unregistered_replicas ==
+      std::vector<std::pair<std::string, std::string>>{
+          {"artifact-revoke", "replica-revoke"},
+      });
+  REQUIRE_FALSE(lip_manager.find_active_by_key(key).has_value());
 }
 
 TEST_CASE("KeepAliveRegisterArtifact rejects unknown registration", "[daemon][registration]") {

@@ -52,6 +52,18 @@ namespace {
 
 constexpr std::uint64_t kFeedStreamProgressLogIntervalBytes = 8ULL * 1024ULL * 1024ULL * 1024ULL;
 
+grpc::Status await_state_sync_barrier(const RegistrationController::Dep& dep) {
+  if (!dep.await_state_sync_barrier) {
+    return Status::OK;
+  }
+  const absl::Status barrier_status = dep.await_state_sync_barrier();
+  if (barrier_status.ok()) {
+    return Status::OK;
+  }
+  LOG(WARNING) << "Piece registration state sync barrier failed: " << barrier_status;
+  return to_grpc_status(barrier_status);
+}
+
 void EraseRegistrationRegionRefs(
     RegistrationManager& registration_manager,
     HandleLeaseRegistry* handle_leases,
@@ -717,10 +729,14 @@ grpc::Status commit_piece_view_registration(
 
   std::string worker_id = dep.identity->worker_id();
   if (worker_id.empty()) {
-    LOG(WARNING) << "worker_id is empty while registering memory replica for artifact_id=" << meta.client_artifact_id
-                 << " view_id=" << meta.view_id
-                 << "; using fallback worker_id='local' (transport eligibility may lag until worker lifecycle sync)";
-    worker_id = "local";
+    return {
+        StatusCode::UNAVAILABLE,
+        absl::StrCat(
+            "worker identity unavailable while registering memory replica for artifact_id=",
+            meta.client_artifact_id,
+            " view_id=",
+            meta.view_id,
+            "; routable replicas require completed worker lifecycle registration")};
   }
   const store::DeviceKey device = store::DeviceRegistry::instance().gpu_key(meta.device_id);
 
@@ -792,6 +808,11 @@ grpc::Status commit_piece_view_registration(
     }
   } replica_rollback{
       .client = dep.global_store_client.get(), .artifact_id = meta.client_artifact_id, .replica_id = replica_id};
+
+  const auto barrier_status = await_state_sync_barrier(dep);
+  if (!barrier_status.ok()) {
+    return barrier_status;
+  }
 
   // Publish response metadata.
   auto* desc = resp.mutable_artifact_descriptor();
@@ -996,6 +1017,7 @@ grpc::Status commit_engine_registration(
     const std::string& registration_id,
     RegistrationManager::RegMeta meta,
     v2::CommitRegisteredArtifactResponse& resp) {
+  const absl::Time controller_start = absl::Now();
   // Release temporary publish handle lease before commit admission so stable
   // budget is not double-counted (publish guard lease + stable cache lease).
   release_stable_publish_lease_if_any(dep, meta, registration_id);
@@ -1003,8 +1025,17 @@ grpc::Status commit_engine_registration(
     dep.reg.set_meta(registration_id, meta);
   }
 
+  const absl::Time engine_commit_start = absl::Now();
   auto commit_or = dep.engine.commit_registered_artifact(registration_id);
+  const double engine_commit_ms = absl::ToDoubleMilliseconds(absl::Now() - engine_commit_start);
   if (!commit_or.ok()) {
+    LOG(INFO) << absl::StrFormat(
+        "CommitRegisteredArtifact profile registration_id=%s phase=engine_commit status=error engine_commit_ms=%.3f "
+        "total_ms=%.3f error=%s",
+        registration_id,
+        engine_commit_ms,
+        absl::ToDoubleMilliseconds(absl::Now() - controller_start),
+        commit_or.status().ToString());
     return to_grpc_status(commit_or.status());
   }
   const auto& out = commit_or.value();
@@ -1057,6 +1088,7 @@ grpc::Status commit_engine_registration(
   }
 
   auto* local_stable = resp.mutable_local_stable_tier();
+  const absl::Time local_stable_start = absl::Now();
   if (out.stable_cache_admitted) {
     local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_READY);
     local_stable->set_message("local stable tier admitted during stable_dram commit");
@@ -1077,9 +1109,18 @@ grpc::Status commit_engine_registration(
           dep.reg.erase_meta(registration_id);
         });
     if (!local_stable_status.ok()) {
+      LOG(INFO) << absl::StrFormat(
+          "CommitRegisteredArtifact profile registration_id=%s phase=local_stable status=error "
+          "engine_commit_ms=%.3f local_stable_ms=%.3f total_ms=%.3f error=%s",
+          registration_id,
+          engine_commit_ms,
+          absl::ToDoubleMilliseconds(absl::Now() - local_stable_start),
+          absl::ToDoubleMilliseconds(absl::Now() - controller_start),
+          local_stable_status.ToString());
       return to_grpc_status(local_stable_status);
     }
   }
+  const double local_stable_ms = absl::ToDoubleMilliseconds(absl::Now() - local_stable_start);
 
   if (out.existed) {
     store::loading::ReplicaKey key{.artifact_id = out.artifact_id, .device = out.device, .replica = 0};
@@ -1111,6 +1152,16 @@ grpc::Status commit_engine_registration(
   } catch (...) {
     VLOG(1) << "metrics counter tc_register_commit_(stable_dram|coalesced)_total unavailable";
   }
+  LOG(INFO) << absl::StrFormat(
+      "CommitRegisteredArtifact profile registration_id=%s status=ok engine_commit_ms=%.3f local_stable_ms=%.3f "
+      "total_ms=%.3f artifact_id=%s existed=%d stable_cache_admitted=%d",
+      registration_id,
+      engine_commit_ms,
+      local_stable_ms,
+      absl::ToDoubleMilliseconds(absl::Now() - controller_start),
+      out.artifact_id,
+      out.existed ? 1 : 0,
+      out.stable_cache_admitted ? 1 : 0);
   rctx.mark_success();
   return Status::OK;
 }

@@ -95,11 +95,26 @@ struct LipExportRecord {
   int device_id{0};
   std::vector<cuda::IpcMapping> opened_maps; // RAII CUDA IPC mappings held until unlock
   std::vector<std::string> tensor_keys; // registered keys to unregister
+  std::vector<uint64_t> buffer_sizes; // registered buffer sizes parallel to tensor_keys
   // Region lease ownership for region-backed storages used by this export.
   // These references are acquired explicitly at staging time and must be
   // released when the staged export is released.
   IpcRegionRegistry* region_registry{nullptr};
   absl::flat_hash_map<std::string, uint32_t> held_region_refs; // region_id -> refcount
+};
+
+enum class CommitLeaseHashBackend {
+  kNone,
+  kGpu,
+  kD2HCpu,
+  kCpu,
+};
+
+struct CommitLeaseHashInfo {
+  CommitLeaseHashBackend backend{CommitLeaseHashBackend::kNone};
+  uint64_t bytes{0};
+  uint64_t wall_time_ms{0};
+  bool identity_forming{false};
 };
 
 // Result of committing a LIP in-place registration: descriptor fields and
@@ -108,11 +123,13 @@ struct CommitLeaseResult {
   std::string artifact_id;
   std::string index_multihash;
   std::string data_multihash;
+  std::string canonical_index_json;
   std::string schema_version; // e.g., "v3"
   std::string encoding; // e.g., "json"
   uint64_t total_size{0};
   std::string verification_json; // optional JSON payload
   tensorcast::common::ArtifactIdKind id_kind{tensorcast::common::ArtifactIdKind::kMi2};
+  CommitLeaseHashInfo hash_info;
 };
 
 } // namespace tensorcast::daemon

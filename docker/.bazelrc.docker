@@ -1,0 +1,78 @@
+##########################################################################
+# Copyright (c) 2018-2019 NVIDIA Corporation. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# File: DL4AGX/.bazelrc
+# Description: Default bazel settings and toolchain configuration
+##########################################################################
+
+# +------------------------------------------------------------+
+# | Build Configurations                                       |
+# +------------------------------------------------------------+
+
+common --enable_platform_specific_config
+
+build --crosstool_top=@bazel_tools//tools/cpp:toolchain
+build --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
+build --action_env=CC=/usr/bin/clang
+build --action_env=CXX=/usr/bin/clang++
+build --action_env=AR=/usr/bin/llvm-ar
+build --action_env=LD=/usr/bin/lld
+
+build --cxxopt="-std=c++20"
+build --cxxopt="-Werror=thread-safety-analysis"
+build --cxxopt="-Werror=unused-result"
+build --cxxopt="-Werror=switch"
+build --cxxopt="-Wno-macro-redefined"
+build --cxxopt="-fdiagnostics-color=always"
+build --cxxopt="-D_GLIBCXX_USE_CXX11_ABI=1"
+# build --linkopt="-D_GLIBCXX_USE_CXX11_ABI=0"
+build --cxxopt="-Xclang"
+build --cxxopt="-fno-cxx-modules"
+
+build:asan --copt=-fsanitize=address
+build:asan --linkopt=-fsanitize=address
+build:asan --copt=-g
+# test:asan --test_env=ASAN_SYMBOLIZER_PATH=$(which llvm-symbolizer)
+test:asan --test_env=ASAN_OPTIONS=detect_leaks=0
+
+build:python --define=target_lang=python
+
+# build:cxx11_abi --cxxopt="-D_GLIBCXX_USE_CXX11_ABI=1"
+# build:cxx11_abi --linkopt="-D_GLIBCXX_USE_CXX11_ABI=1"
+# build:cxx11_abi --define=abi=cxx11_abi
+
+# build:pre_cxx11_abi --cxxopt="-D_GLIBCXX_USE_CXX11_ABI=0"
+# build:pre_cxx11_abi --linkopt="-D_GLIBCXX_USE_CXX11_ABI=0"
+# build:pre_cxx11_abi --define=abi=pre_cxx11_abi
+
+common:remote --bes_results_url=https://app.buildbuddy.io/invocation/
+common:remote --bes_backend=grpcs://remote.buildbuddy.io
+common:remote --remote_cache=grpcs://remote.buildbuddy.io
+common:remote --remote_timeout=10m
+common:remote --remote_cache_compression
+common:remote --experimental_remote_cache_compression_threshold=100
+
+# common:remote --remote_executor=grpcs://remote.buildbuddy.io
+# common:remote --host_platform=//:docker_image_platform
+
+common:remote --build_metadata=REPO_URL=https://github.com/tensorcast-ai/tensorcast.git
+
+# CI runners typically don't have RDMA (ibverbs) development headers installed.
+# Use the in-repo IBV mock header so the build does not depend on <infiniband/verbs.h>
+# Also mock CUDA backend since CI runners do not have GPU drivers.
+common:ci --define use_mock_ibv=true
+common:ci --test_env=TENSORCAST_CUDA_BACKEND=fake
+
+try-import user.bazelrc

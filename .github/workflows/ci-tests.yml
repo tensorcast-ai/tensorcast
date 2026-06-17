@@ -226,7 +226,9 @@ jobs:
 
       - name: Install Python dependencies
         shell: bash
-        run: uv sync --locked --all-extras --dev
+        run: |
+          uv lock
+          uv sync --locked --all-extras --dev
 
       - name: Run Python linting
         run: |
@@ -306,7 +308,7 @@ jobs:
 
       - name: Setup Buf CLI
         # if: steps.restore-buf-proto-gen.outputs.cache-hit != 'true'
-        uses: bufbuild/buf-setup-action@v1
+        uses: bufbuild/buf-setup-action@v1.50.0
 
       - name: Generate protos via Buf
         # if: steps.restore-buf-proto-gen.outputs.cache-hit != 'true'
@@ -348,8 +350,25 @@ jobs:
 
       - name: Run Python tests
         run: |
-          uv run pytest tests/python/ -v --tb=short
+          uv run python - <<'PY'
+          import contextlib
+          import os
+          import sys
+
+          import pytest
+
+          exit_code = pytest.main(["tests/python/", "-v", "--tb=short"])
+          if "tensorcast._C" in sys.modules:
+              with contextlib.suppress(Exception):
+                  from tensorcast._c_ext import get_c_ext
+
+                  get_c_ext().shutdown_native_runtime()
+          sys.stdout.flush()
+          sys.stderr.flush()
+          os._exit(int(exit_code))
+          PY
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/tensorcast/lib:${{ env.LD_LIBRARY_PATH }}
           TENSORCAST_CUDA_BACKEND: fake
+          PYTHONFAULTHANDLER: 1
         shell: bash

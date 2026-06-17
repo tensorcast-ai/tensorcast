@@ -31,14 +31,21 @@ struct TargetLayoutSpan {
   uint64_t length{0};
 };
 
+enum class CanonicalIndexAuthority : std::uint8_t {
+  kEngineMetadata = 1,
+  kDiskSource = 2,
+};
+
 absl::Status ensure_tensor_index_present(const std::filesystem::path& artifact_dir);
 
-absl::StatusOr<std::string> load_canonical_index_with_disk_fallback(
+CanonicalIndexAuthority canonical_index_authority_for_resolution(bool gs_connected, bool has_local_import);
+
+absl::StatusOr<std::string> load_canonical_index_from_authority(
     store::StoreEngine& engine,
     std::string_view resolved_artifact_id,
     const std::optional<std::filesystem::path>& normalized_disk_path,
     int device_ordinal,
-    bool gs_connected);
+    CanonicalIndexAuthority authority);
 
 std::optional<std::string> parse_mi2_data_multihash(std::string_view artifact_id);
 

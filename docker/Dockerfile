@@ -1,105 +1,79 @@
-FROM hub.i.basemind.com/tensorcast/python:uv-bookworm-slim as builder
+FROM ghcr.io/astral-sh/uv:python3.10-bookworm-slim AS builder
 
-ARG HTTPS_PROXY
-ARG HTTP_PROXY
-ARG NO_PROXY
+ARG TENSORCAST_BUILD_COMMIT
 
-ENV HTTPS_PROXY=$HTTPS_PROXY
-ENV HTTP_PROXY=$HTTP_PROXY
-ENV NO_PROXY=$NO_PROXY
-
-ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
-
+ENV TENSORCAST_BUILD_COMMIT=${TENSORCAST_BUILD_COMMIT}
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
 ENV UV_PYTHON_INSTALL_DIR=/python
-
 ENV UV_PYTHON_PREFERENCE=only-managed
 
 RUN uv python install 3.10
 
-RUN apt update && apt install -y git
-
 WORKDIR /app
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --extra global --extra local --frozen --no-install-project --no-dev
+    uv sync --no-install-project --no-dev
 
-ADD .python-version /app/.python-version
-ADD setup.py /app/setup.py
-ADD version.txt /app/version.txt
-ADD versions.py /app/versions.py
-ADD dev_dep_versions.yml /app/dev_dep_versions.yml
-ADD pyproject.toml /app/pyproject.toml
-ADD uv.lock /app/uv.lock
-ADD README.md /app/README.md
+COPY .python-version /app/.python-version
+COPY setup.py /app/setup.py
+COPY version.txt /app/version.txt
+COPY versions.py /app/versions.py
+COPY dev_dep_versions.yml /app/dev_dep_versions.yml
+COPY pyproject.toml /app/pyproject.toml
+COPY README.md /app/README.md
 
-ADD tensorcast/global_store /app/tensorcast/global_store
-ADD tensorcast/*.py /app/tensorcast/
-ADD tensorcast/proto/*.py /app/tensorcast/proto/
-ADD tensorcast/cli_utils /app/tensorcast/cli_utils
-## Legacy Python StoreDaemon removed; config-only lives in tensorcast/daemon_config.py
+COPY tensorcast/global_store /app/tensorcast/global_store
+COPY tensorcast/*.py /app/tensorcast/
+COPY tensorcast/proto/*.py /app/tensorcast/proto/
+COPY tensorcast/cli_utils /app/tensorcast/cli_utils
 
-ADD .git /app/.git
+FROM ghcr.io/astral-sh/uv:python3.10-bookworm-slim
 
-# Remove the uv pip install from builder stage
-# RUN --mount=type=cache,target=/root/.cache/uv \
-#     uv pip install --no-deps -e .
+ARG TENSORCAST_BUILD_COMMIT
 
-FROM hub.i.basemind.com/tensorcast/python:uv-bookworm-slim
+ENV TENSORCAST_BUILD_COMMIT=${TENSORCAST_BUILD_COMMIT}
 
-RUN apt update && apt install -y git curl zip unzip openjdk-17-jdk-headless openssh-server vim net-tools iputils-ping iproute2
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    iproute2 \
+    iputils-ping \
+    net-tools \
+    openssh-server \
+    unzip \
+    vim \
+    zip \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install grpc-health-probe for health checks
 RUN GRPC_HEALTH_PROBE_VERSION=v0.4.39 && \
-    curl -fsSL https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-linux-amd64 \
-    -o /bin/grpc_health_probe && \
+    curl -fsSL "https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-linux-amd64" \
+      -o /bin/grpc_health_probe && \
     chmod +x /bin/grpc_health_probe
 
 RUN uv python install 3.10
 
-COPY --from=builder --chown=python:python /python /python
-
-# First copy only the dependencies (.venv) - this layer can be cached when only code changes
-# /app/.venv/lib/python3.10/site-packages/nvidia 2.7G
-# /app/.venv/lib/python3.10/site-packages/torch 1.5G
-COPY --from=builder --chown=app:app /app/.venv /app/.venv
-
-# Copy configuration files that rarely change
-COPY --from=builder --chown=app:app /app/.python-version /app/.python-version
-COPY --from=builder --chown=app:app /app/pyproject.toml /app/pyproject.toml
-COPY --from=builder --chown=app:app /app/uv.lock /app/uv.lock
-
-# Copy version and setup files
-COPY --from=builder --chown=app:app /app/version.txt /app/version.txt
-COPY --from=builder --chown=app:app /app/versions.py /app/versions.py
-COPY --from=builder --chown=app:app /app/dev_dep_versions.yml /app/dev_dep_versions.yml
-COPY --from=builder --chown=app:app /app/setup.py /app/setup.py
-COPY --from=builder --chown=app:app /app/README.md /app/README.md
-
-# Copy application code (changes more frequently)
-COPY --from=builder --chown=app:app /app/tensorcast /app/tensorcast
-
-# Copy .git last as it changes with every commit
-COPY --from=builder --chown=app:app /app/.git /app/.git
+COPY --from=builder /python /python
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/.python-version /app/.python-version
+COPY --from=builder /app/pyproject.toml /app/pyproject.toml
+COPY --from=builder /app/version.txt /app/version.txt
+COPY --from=builder /app/versions.py /app/versions.py
+COPY --from=builder /app/dev_dep_versions.yml /app/dev_dep_versions.yml
+COPY --from=builder /app/setup.py /app/setup.py
+COPY --from=builder /app/README.md /app/README.md
+COPY --from=builder /app/tensorcast /app/tensorcast
 
 WORKDIR /app
 
-# Install the application in editable mode after copying all files
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --no-deps -e .
 
-ADD tensorcast/lib/libcheckpoint_ext.so /app/tensorcast/lib/libcheckpoint_ext.so
+COPY docker/entrypoint.sh /app/entrypoint.sh
 
-# Place executables in the environment at the front of the path
-ENV PATH="/app/.venv/bin:$PATH"
-
-ADD docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-ADD tensorcast/*.so /app/tensorcast/
+ENV PATH="/app/.venv/bin:${PATH}"
 
 ENTRYPOINT ["/app/entrypoint.sh"]
-
-# Default command prints help if no arguments supplied
 CMD ["/app/entrypoint.sh", "help"]

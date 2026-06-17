@@ -45,7 +45,8 @@ links:
 TensorCast already supports a real target-backed volatile publication path:
 
 - bytes are written into caller-owned target memory,
-- daemon mints `target_publication_token`,
+- binding current-value commit/promote paths mint
+  `binding_current_value_publication_token`,
 - and `PublishTargetReplica` or `StartPublishTargetReplica` promotes that target into a routable replica.
 
 What is still missing is the stable object model underneath that landed path.
@@ -53,7 +54,7 @@ What is still missing is the stable object model underneath that landed path.
 This document narrows `0103` deliberately.
 When this design says `publish`, it means the target-publication family exposed today by:
 
-- `target_publication_token`,
+- `binding_current_value_publication_token`,
 - `PublishTargetReplica`,
 - `StartPublishTargetReplica`,
 - and the SDK helpers that observe those operations.
@@ -143,8 +144,8 @@ Its job is narrower:
 
 Current code already has meaningful publish primitives:
 
-- `TargetPublicationScope`
-- `target_publication_token`
+- `BindingCurrentValuePublicationScope`
+- `binding_current_value_publication_token`
 - `TargetPublicationRegistry`
 - `StartPublishTargetReplica`
 - and the SDK `publish_replica_operation()` helpers
@@ -476,7 +477,7 @@ The design is only useful if target-publication semantics lower into the existin
 | Same-subject non-reuse or rebinding | logical `PublicationOwnerFence` | `LifecycleEpochs.subject_generation`; optional `FencingContext` only for future authority turnover | currently fixed at `1` |
 | Concrete issued publication instance | `PublicationInstanceId` | `publication_id`, `WorkflowCompanionRef.workflow_id`, `OperationRef.authority_scope_id` | `publication_id` |
 | Caller-visible continuation | chosen publication instance | `OperationRef` | current `attach_existing -> Operation[T]` path |
-| Request-local owner observation | local admission-only fact | `TargetPublicationScope.owner_pid` and local observations | current owner PID checks |
+| Request-local owner observation | local admission-only fact | `BindingCurrentValuePublicationScope.owner_pid` and local observations | current owner PID checks |
 
 Normative rules:
 
@@ -484,8 +485,9 @@ Normative rules:
 2. New code must not create an ad hoc second semantic id when one of the carriers above already owns that role.
 3. `LifecycleSubjectRecord.semantic_ref_id` may remain a runtime anchor for implementation convenience, but it must not
    redefine publication currentness truth.
-4. `TargetPublicationScope` is an ingress credential scope and request-shaping carrier; it is not the canonical
-   repository-wide subject schema.
+4. `BindingCurrentValuePublicationScope` is the ingress credential scope and
+   request-shaping carrier; it is not the canonical repository-wide subject
+   schema.
 
 ### 2.5 Current-code bridge
 
@@ -730,8 +732,9 @@ Implications:
 - current SDK `publish_replica_operation()` may remain additive,
 - current `StartPublishTargetReplica` may remain additive,
 - both should be interpreted as `local_ephemeral` publication with current-instance dependency-ready semantics,
-- current `TargetPublicationScope` may remain the ingress credential scope, but it must be interpreted as request-local
-  credential material rather than as the canonical long-term publication subject schema,
+- current `BindingCurrentValuePublicationScope` is the ingress credential scope,
+  and must be interpreted as request-local credential material rather than as
+  the canonical long-term publication subject schema,
 - current `OperationRef` remains publication-instance scoped,
 - and daemon-side public-operation admission must resolve `publication_id` back to publication instance, target-domain
   currentness, and lifecycle generation before it grants attach, wait, or status semantics.

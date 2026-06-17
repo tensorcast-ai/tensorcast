@@ -1,25 +1,16 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+set -euo pipefail
 
 # Get the short commit hash (first 5 characters)
 COMMIT_HASH=$(git rev-parse --short=5 HEAD)
 DATE=$(date +%Y.%m.%d)
 
 # Construct the tag
-TAG="hub.i.basemind.com/tensorcast/tensorcast:${DATE}-${COMMIT_HASH}"
-
-# Prepare proxy arguments
-PROXY_ARGS=""
-if [ -n "$http_proxy" ]; then
-  PROXY_ARGS="$PROXY_ARGS --build-arg http_proxy=$http_proxy"
-fi
-if [ -n "$https_proxy" ]; then
-  PROXY_ARGS="$PROXY_ARGS --build-arg https_proxy=$https_proxy"
-fi
-if [ -n "$no_proxy" ]; then
-  PROXY_ARGS="$PROXY_ARGS --build-arg no_proxy=$no_proxy"
-fi
+IMAGE_REPOSITORY="${TENSORCAST_IMAGE_REPOSITORY:-ghcr.io/tensorcast-ai/tensorcast}"
+TAG="${IMAGE_REPOSITORY}:${DATE}-${COMMIT_HASH}"
 
 # Build the Docker image
-sudo docker build $PROXY_ARGS -f ./docker/Dockerfile -t $TAG .
+docker build --build-arg TENSORCAST_BUILD_COMMIT="$COMMIT_HASH" -f ./docker/Dockerfile -t "$TAG" .
 
-docker push $TAG
+docker push "$TAG"

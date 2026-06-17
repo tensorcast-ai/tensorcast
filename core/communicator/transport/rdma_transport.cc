@@ -1,6 +1,8 @@
 // Copyright (c) 2025-2026, TensorCast Team.
 
 #include <algorithm>
+#include <chrono>
+#include <limits>
 #include <utility>
 
 #include "absl/log/log.h"
@@ -11,6 +13,11 @@
 #include "core/communicator/transport/rdma_transport.h"
 
 namespace tensorcast::communicator::transport {
+
+RdmaTransport::PostSendHook& RdmaTransport::post_send_hook_for_tests() {
+  static PostSendHook hook;
+  return hook;
+}
 
 RdmaTransport::RdmaTransport(RdmaContext* context, net_dev_t dev, rdma_thread_t th)
     : context_(context),
@@ -294,6 +301,9 @@ misc::result_t RdmaTransport::do_post_send() {
     return misc::FAILED;
   }
 
+  if (req->rdma_profile_enabled()) {
+    req->note_rdma_posted_wr(1);
+  }
   // Push to per-QP queue for lock-free completion matching
   per_qp_inflight_queues_[qp_index].push(req);
   return misc::SUCCESS;
@@ -314,8 +324,38 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
     return misc::INVALID_ARGUMENT;
   }
 
-  auto* mr = request->get_local_tensor()->get_mr_by_rail(request->get_rail_id());
+  struct ibv_mr* fallback_mr = nullptr;
+  if (request->get_local_tensor() != nullptr) {
+    auto local_tensor = request->get_local_tensor();
+    auto local_dev = local_tensor->get_dev_by_rail(request->get_rail_id());
+    if (local_dev == nullptr) {
+      local_dev = local_tensor->get_dev();
+    }
+    fallback_mr = local_tensor->get_mr_by_rail(request->get_rail_id());
+  }
   request->record_rdma_queue_done();
+  uint64_t total_bytes = 0;
+  uint64_t local_addr_min = std::numeric_limits<uint64_t>::max();
+  uint64_t local_addr_max_end = 0;
+  uint64_t remote_addr_min = std::numeric_limits<uint64_t>::max();
+  uint64_t remote_addr_max_end = 0;
+  std::vector<uint32_t> local_lkeys;
+  local_lkeys.reserve(segs.size());
+  for (const auto& seg : segs) {
+    const uint64_t length = seg.length;
+    total_bytes += length;
+    local_addr_min = std::min(local_addr_min, seg.local_addr);
+    local_addr_max_end = std::max(local_addr_max_end, seg.local_addr + length);
+    remote_addr_min = std::min(remote_addr_min, seg.remote_addr);
+    remote_addr_max_end = std::max(remote_addr_max_end, seg.remote_addr + length);
+    if (seg.local_lkey != 0) {
+      local_lkeys.push_back(seg.local_lkey);
+    }
+  }
+  std::sort(local_lkeys.begin(), local_lkeys.end());
+  local_lkeys.erase(std::unique(local_lkeys.begin(), local_lkeys.end()), local_lkeys.end());
+
+  const auto post_send_started_at = std::chrono::steady_clock::now();
   std::array<std::vector<size_t>, kMaxQpCount> qp_seg_indices;
   const size_t start_qp = static_cast<size_t>(next_qp_index_.fetch_add(static_cast<int>(segs.size())));
   for (size_t i = 0; i < segs.size(); ++i) {
@@ -351,14 +391,28 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
       wr.wr.rdma.rkey = seg.rkey;
       sge.addr = seg.local_addr;
       sge.length = seg.length;
-      sge.lkey = mr->lkey;
+      const uint32_t lkey = seg.local_lkey != 0 ? seg.local_lkey : (fallback_mr != nullptr ? fallback_mr->lkey : 0);
+      if (lkey == 0) {
+        request->set_result(absl::FailedPreconditionError("rdma read_multi missing local lkey"));
+        LOG(WARNING) << "[rdma_transport] request=" << request->get_key()
+                     << " missing local lkey for segment on qp=" << qp_index;
+        return misc::FAILED;
+      }
+      sge.lkey = lkey;
       wr.next = (i + 1 < indices.size()) ? &wrs[i + 1] : nullptr;
     }
 
-    auto res = misc::wrap_ibv_post_send(qps_[qp_index], wrs.data(), &bad_wr);
+    auto& post_send_hook = post_send_hook_for_tests();
+    auto res = post_send_hook ? post_send_hook(qps_[qp_index], wrs.data(), &bad_wr)
+                              : misc::wrap_ibv_post_send(qps_[qp_index], wrs.data(), &bad_wr);
     size_t posted_count = indices.size();
     if (res != misc::SUCCESS) {
       posted_count = (bad_wr != nullptr) ? static_cast<size_t>(bad_wr - wrs.data()) : 0;
+    }
+    // Record posting before exposing the request to CQ consumers. Otherwise a
+    // very fast completion can observe completion-before-post in profiling.
+    if (request->rdma_profile_enabled()) {
+      request->note_rdma_posted_wr(static_cast<uint32_t>(posted_count));
     }
     for (size_t i = 0; i < posted_count; ++i) {
       request->enqueue_completion_bytes(segs[indices[i]].length);
@@ -367,6 +421,10 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
     total_posted += posted_count;
 
     if (res != misc::SUCCESS) {
+      // Once ibv_post_send has accepted part of the chain we cannot roll those
+      // WRs back. Treat this as a hard request failure: already-posted WRs stay
+      // inflight and may still complete locally, but the request result becomes
+      // terminally failed and no unposted WRs are counted.
       if (posted_count > 0) {
         LOG(WARNING) << "[rdma_transport] partial post on QP " << qp_index << ": " << posted_count << "/"
                      << indices.size() << " WRs posted before failure";
@@ -378,8 +436,29 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
     }
   }
 
+  const auto post_send_finished_at = std::chrono::steady_clock::now();
+  size_t max_qp_segments = 0;
+  size_t min_qp_segments = std::numeric_limits<size_t>::max();
+  for (int qp_index = 0; qp_index < qp_count_; ++qp_index) {
+    const size_t qp_segments = qp_seg_indices[qp_index].size();
+    if (qp_segments == 0) {
+      continue;
+    }
+    max_qp_segments = std::max(max_qp_segments, qp_segments);
+    min_qp_segments = std::min(min_qp_segments, qp_segments);
+  }
   LOG(INFO) << "[rdma_transport] Posted " << total_posted << " RDMA READ WRs across " << qp_used
             << " QPs for request=" << request->get_key();
+  VLOG(2)
+      << "rdma_transport.read_multi_summary"
+      << " request=" << request->get_key() << " request_id=" << request->request_id()
+      << " is_read_plan=" << request->is_read_plan() << " window_seq=" << segs.front().window_seq
+      << " segs=" << segs.size() << " total_bytes=" << total_bytes
+      << " local_span_bytes=" << (local_addr_max_end - local_addr_min)
+      << " remote_span_bytes=" << (remote_addr_max_end - remote_addr_min) << " unique_lkeys=" << local_lkeys.size()
+      << " qp_used=" << qp_used << " qp_segments_min=" << (qp_used == 0 ? 0 : min_qp_segments)
+      << " qp_segments_max=" << max_qp_segments << " posted_wr=" << total_posted << " post_send_us="
+      << std::chrono::duration_cast<std::chrono::microseconds>(post_send_finished_at - post_send_started_at).count();
   return misc::SUCCESS;
 }
 
@@ -393,6 +472,9 @@ misc::result_t RdmaTransport::do_process_wc(struct ibv_wc* wc) {
     auto req = per_qp_inflight_queues_[qp_index].pop(true);
     if (req == nullptr) {
       LOG(FATAL) << "abnormal queue state for qp_index=" << qp_index;
+    }
+    if (req->rdma_profile_enabled()) {
+      req->note_rdma_completion();
     }
     req->record_read_done();
     if (wc->status == IBV_WC_SUCCESS) {

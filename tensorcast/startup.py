@@ -16,6 +16,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import hashlib
+import importlib
 import json
 import os
 import signal
@@ -23,7 +24,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, SupportsIndex, SupportsInt, cast
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -46,6 +47,8 @@ if TYPE_CHECKING:
     from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.daemon_runtime_config import load_daemon_config
 from tensorcast.logger import init_logger, setup_logging
+
+runtime = importlib.import_module("tensorcast.runtime")
 
 _current_ctx: Context | None = None
 _atexit_registered = False
@@ -92,7 +95,9 @@ class PortConfig(BaseModel):
         if isinstance(value, bool):
             raise ValueError("port values must be integers between 0 and 65535")
         try:
-            port = int(value)
+            port = int(
+                cast(SupportsInt | SupportsIndex | str | bytes | bytearray, value)
+            )
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 "port values must be integers between 0 and 65535"
@@ -284,6 +289,20 @@ def _promote_auto_state_ready_when_rpc_ready(
     thread.start()
 
 
+def _wait_for_daemon_rpc_ready_or_raise(
+    *,
+    address: str,
+    timeout_s: float,
+    context: str,
+) -> None:
+    if wait_for_daemon(address, timeout=timeout_s):
+        return
+    raise RuntimeError(
+        "TensorCast daemon did not become RPC-ready after startup: "
+        f"context={context}, address={address}, timeout_s={timeout_s:.1f}"
+    )
+
+
 def _auto_wait_timeout_seconds() -> float:
     raw = os.environ.get("TENSORCAST_STARTUP_AUTO_WAIT_TIMEOUT_SECONDS")
     if raw is None or raw == "":
@@ -442,7 +461,9 @@ def _resolve_launch_config(
     daemon_config_path: str | None,
 ) -> tuple[Path | None, Any | None, bool]:
     cfg_path: Path | None = None
-    restrict_localhost = True
+    # Defaults should remain routable. Explicit loopback configs still bind to
+    # loopback because the host is carried by the config itself.
+    restrict_localhost = False
     cfg: Any | None = None
     if daemon_config_path:
         cfg_path = Path(daemon_config_path)
@@ -473,8 +494,11 @@ def _connect_context(
     global _current_ctx
     if not target_address:
         raise RuntimeError("Missing daemon address for connect mode.")
-    if not ping_daemon(target_address):
-        raise RuntimeError(f"No daemon found at {target_address}")
+    _wait_for_daemon_rpc_ready_or_raise(
+        address=target_address,
+        timeout_s=_auto_wait_timeout_seconds(),
+        context="connect",
+    )
     set_daemon_address(target_address)
     from tensorcast.daemon_ctl import get_daemon_client
 
@@ -557,6 +581,11 @@ def _start_context(
             daemon_address = f"{host}:{port}"
     if not daemon_address:
         daemon_address = "127.0.0.1:0"
+    _wait_for_daemon_rpc_ready_or_raise(
+        address=daemon_address,
+        timeout_s=_auto_wait_timeout_seconds(),
+        context="start",
+    )
     set_daemon_address(daemon_address)
     from tensorcast.daemon_ctl import get_daemon_client
 
@@ -869,20 +898,16 @@ def _init_auto_mode(
                     _write_auto_state_locked(failed)
                 raise
             with file_lock(runtime_lock_path()):
-                listening = dict(leader_state)
-                listening["status"] = _AUTO_STATUS_LISTENING
-                listening["address"] = ctx.address
-                listening["session_id"] = ctx.session_id or ""
-                listening["logs_dir"] = (
+                ready = dict(leader_state)
+                ready["status"] = _AUTO_STATUS_READY
+                ready["address"] = ctx.address
+                ready["session_id"] = ctx.session_id or ""
+                ready["logs_dir"] = (
                     str(session_paths(ctx.session_id).logs) if ctx.session_id else ""
                 )
-                listening["error_code"] = ""
-                listening["error_message"] = ""
-                _write_auto_state_locked(listening)
-            _promote_auto_state_ready_when_rpc_ready(
-                session_id=ctx.session_id,
-                address=ctx.address,
-            )
+                ready["error_code"] = ""
+                ready["error_message"] = ""
+                _write_auto_state_locked(ready)
             return ctx
 
         time.sleep(_AUTO_POLL_INTERVAL_SECONDS)

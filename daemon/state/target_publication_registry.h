@@ -60,14 +60,31 @@ class TargetPublicationRegistry {
     std::string target_layout_hash;
     tensorcast::common::v1::ArtifactSelection selection;
     tensorcast::common::v1::ByteSpaceRef byte_space;
+    std::string group_version_set_id;
+    std::string group_part_id;
     std::string canonical_index_json;
     std::string index_key_hex;
     std::string device_uuid;
     int owner_pid{0};
+    std::string daemon_id;
+    std::string daemon_session_id;
+    std::string binding_id;
+    std::string binding_layout_id;
+    std::string binding_value_id;
+    std::uint64_t seal_generation{0};
     std::string request_operation_id;
     absl::Time expires_at{absl::InfinitePast()};
     std::string capability_id;
     std::uint64_t lease_id{0};
+    bool published{false};
+    std::string published_lease_id;
+    std::string published_replica_id;
+    std::string published_operation_id;
+    std::uint64_t published_lifecycle_lease_id{0};
+    absl::Time published_at{absl::InfinitePast()};
+    bool terminal{false};
+    std::string terminal_reason;
+    absl::Time terminal_at{absl::InfinitePast()};
     std::optional<WorkflowBindingProjection> workflow_binding_projection;
     std::optional<WorkflowOutcomeProjection> replay_outcome_projection;
     WorkflowRecoveryClass workflow_recovery_class{WorkflowRecoveryClass::kEphemeralProcessLocal};
@@ -75,9 +92,27 @@ class TargetPublicationRegistry {
     std::vector<RegisterStorageMeta> storages;
   };
 
+  struct GroupRealizationStaging {
+    std::string transaction_id;
+    std::string version_set_id;
+    std::string part_id;
+    std::string staging_token;
+    std::uint64_t staging_epoch{0};
+    bool publish_admitted{false};
+  };
+
+  struct StagedRecord {
+    Record publication;
+    GroupRealizationStaging staging;
+  };
+
   explicit TargetPublicationRegistry(Options opts);
 
   [[nodiscard]] Record insert(Record record);
+  [[nodiscard]] StagedRecord insert_staged(StagedRecord record);
+  [[nodiscard]] std::optional<StagedRecord> lookup_staged(std::string_view publication_id, absl::Time now) const;
+  [[nodiscard]] std::optional<StagedRecord> publish_staged(std::string_view publication_id);
+  [[nodiscard]] size_t erase_staged_for_transaction(std::string_view transaction_id, size_t max_to_erase = 0);
   [[nodiscard]] std::optional<Record> lookup(std::string_view publication_id, absl::Time now, bool require_not_expired)
       const;
   [[nodiscard]] std::optional<Record> lookup_current_for_subject(
@@ -86,6 +121,14 @@ class TargetPublicationRegistry {
       bool require_not_expired) const;
   [[nodiscard]] bool is_current_for_subject(std::string_view publication_subject_key, std::string_view publication_id)
       const;
+  [[nodiscard]] std::optional<Record> mark_published(
+      std::string_view publication_id,
+      std::string_view operation_id,
+      std::string_view lease_id,
+      std::string_view replica_id,
+      std::uint64_t published_lifecycle_lease_id,
+      absl::Time now);
+  [[nodiscard]] std::optional<Record> terminalize(std::string_view publication_id, std::string_view reason);
   void erase(std::string_view publication_id);
   void prune(absl::Time now);
 
@@ -97,6 +140,7 @@ class TargetPublicationRegistry {
   Options opts_;
   mutable absl::Mutex mu_;
   absl::flat_hash_map<std::string, Record> records_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<std::string, StagedRecord> staged_records_ ABSL_GUARDED_BY(mu_);
   absl::flat_hash_map<std::string, std::string> latest_by_subject_ ABSL_GUARDED_BY(mu_);
 };
 

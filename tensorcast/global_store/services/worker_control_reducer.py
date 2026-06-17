@@ -11,7 +11,7 @@ import zlib
 from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import TypeVar
+from typing import Any, TypeVar, cast
 
 from tensorcast.global_store.metrics import (
     inc_worker_control_reducer_intent,
@@ -182,7 +182,8 @@ class WorkerControlReducer:
                 continue
             if item is _STOP_SENTINEL:
                 break
-            intent = item
+            intent: WorkerControlIntent[Any] = cast(WorkerControlIntent[Any], item)
+            assert intent is not None
             wait_s = max(0.0, time.monotonic() - intent.enqueued_at_s)
             observe_worker_control_reducer_queue_latency(wait_seconds=wait_s)
             try:
@@ -219,7 +220,7 @@ class WorkerControlReducer:
                     wait_s,
                 )
             finally:
-                if intent.kind == "heartbeat":
+                if intent is not None and intent.kind == "heartbeat":
                     with shard.lock:
                         pending = shard.pending_heartbeats.get(intent.worker_key)
                         if pending is intent:

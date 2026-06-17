@@ -4,6 +4,7 @@ package tensorcast.operation.v1;
 
 import "google/protobuf/any.proto";
 import "google/protobuf/timestamp.proto";
+import "tensorcast/publication/v1/publication.proto";
 
 message OperationRef {
   string operation_id = 1;
@@ -111,3 +112,190 @@ message UpdateOperationRequest {
 }
 
 message UpdateOperationResponse {}
+
+enum ServingBindingReadiness {
+  SERVING_BINDING_READINESS_UNSPECIFIED = 0;
+  SERVING_BINDING_READINESS_RESERVED = 1;
+  SERVING_BINDING_READINESS_LOCAL_READY = 2;
+  SERVING_BINDING_READINESS_PUBLISHED_READY = 3;
+}
+
+message ServingTopologyRef {
+  uint32 schema_version = 1;
+  string schema_topology_digest = 2;
+  optional string admission_topology_digest = 3;
+  optional string logical_topology_ref = 4;
+  optional string runtime_topology_diagnostics_ref = 5;
+}
+
+message ServingBindingMemberRef {
+  string member_id = 1;
+  uint32 member_index = 2;
+  uint32 member_count = 3;
+  optional string group_id = 4;
+}
+
+message BlobRef {
+  string path = 1;
+  string sha256 = 2;
+  uint64 size_bytes = 3;
+}
+
+message ServingBindingSourceMemberRef {
+  ServingBindingMemberRef member = 1;
+  string artifact_ref = 2;
+  optional string serving_manifest_ref = 3;
+  optional string tensor_schema_hash = 4;
+  optional string target_layout_hash = 5;
+}
+
+enum ServingBindingSourceKind {
+  SERVING_BINDING_SOURCE_KIND_UNSPECIFIED = 0;
+  SERVING_BINDING_SOURCE_KIND_CHECKPOINT_ARTIFACT = 1;
+  SERVING_BINDING_SOURCE_KIND_SERVING_ARTIFACT = 2;
+  SERVING_BINDING_SOURCE_KIND_SERVING_ARTIFACT_SET = 3;
+}
+
+message ServingBindingSourceRef {
+  ServingBindingSourceKind source_kind = 1;
+  string artifact_selection_digest = 2;
+  optional string source_artifact_ref = 3;
+  string source_schema_hash = 4;
+  optional string representation_contract_hash = 5;
+  optional string serving_build_digest = 6;
+  optional string tensor_schema_hash = 7;
+  optional ServingTopologyRef topology = 8;
+  repeated ServingBindingSourceMemberRef members = 9;
+}
+
+enum ServingBindingSourceReuseMode {
+  SERVING_BINDING_SOURCE_REUSE_MODE_UNSPECIFIED = 0;
+  SERVING_BINDING_SOURCE_REUSE_MODE_CHECKPOINT_TO_SERVING = 1;
+  SERVING_BINDING_SOURCE_REUSE_MODE_SERVING_DIRECT_MEMBER_COPY = 2;
+  SERVING_BINDING_SOURCE_REUSE_MODE_SERVING_TRANSFORM_REQUIRED = 3;
+  SERVING_BINDING_SOURCE_REUSE_MODE_UNSUPPORTED = 4;
+}
+
+message ServingBindingSourceReuseDecision {
+  ServingBindingSourceReuseMode mode = 1;
+  optional string representation_contract_hash = 2;
+  optional string work_plan_hash = 3;
+  optional string reason = 4;
+}
+
+message ServingBindingResolvedLayout {
+  string binding_layout_id = 1;
+  ServingBindingSourceRef source = 2;
+  ServingBindingSourceReuseDecision source_reuse = 3;
+  ServingTopologyRef topology = 4;
+  ServingBindingMemberRef member = 5;
+  bytes target_layout = 6;
+  bytes target_index_bytes = 7;
+  string target_layout_hash = 8;
+  string tensor_schema_hash = 9;
+  string spec_digest = 10;
+  optional string source_schema_hash = 11;
+  optional bytes copy_plan_bytes = 12;
+  optional bytes dst_specs_bytes = 13;
+}
+
+message ServingBindingTarget {
+  string runtime = 1;
+  string device = 2;
+  optional string device_uuid = 3;
+  ServingBindingSourceRef source = 4;
+  ServingTopologyRef topology = 5;
+  ServingBindingMemberRef member = 6;
+  string model_config_digest = 7;
+  optional string load_config_digest = 8;
+  string serving_build_digest = 9;
+  ServingBindingResolvedLayout resolved_layout = 10;
+}
+
+message ServingBindingSetTarget {
+  string runtime = 1;
+  ServingBindingSourceRef source = 2;
+  ServingTopologyRef topology = 3;
+  string group_id = 4;
+  repeated ServingBindingTarget members = 5;
+}
+
+message ServingBindingResolvedSpecCacheEntry {
+  uint32 schema_version = 1;
+  string cache_key_digest = 2;
+  string spec_digest = 3;
+  string runtime = 4;
+  ServingBindingSourceRef source = 5;
+  ServingBindingSourceReuseDecision source_reuse = 6;
+  ServingTopologyRef topology = 7;
+  ServingBindingMemberRef member = 8;
+  string source_schema_hash = 9;
+  string model_config_digest = 10;
+  optional string load_config_digest = 11;
+  string serving_build_digest = 12;
+  string binding_layout_id = 13;
+  string target_layout_hash = 14;
+  string tensor_schema_hash = 15;
+  map<string, BlobRef> blob_refs = 16;
+}
+
+message PrefetchRetentionPolicy {
+  optional uint64 expire_if_unacquired_after_ms = 1;
+  optional uint64 idle_ttl_after_last_release_ms = 2;
+  optional uint64 materialization_timeout_ms = 3;
+  bool allow_acquire_after_creator_exit = 4;
+}
+
+message BindingReservationCapability {
+  string capability_id = 1;
+  tensorcast.publication.v1.BindingValueRef binding_value_ref = 2;
+  string daemon_id = 3;
+  string daemon_session_id = 4;
+  string device_uuid = 5;
+  ServingBindingMemberRef member = 6;
+  uint64 reservation_bytes = 7;
+  string scope_digest = 8;
+  optional uint64 expires_at_ms = 9;
+}
+
+message PrefetchServingBindingResult {
+  optional string local_serving_ref = 1;
+  tensorcast.publication.v1.BindingValueRef binding_value_ref = 2;
+  string daemon_id = 3;
+  string daemon_session_id = 4;
+  string device_uuid = 5;
+  ServingBindingMemberRef member = 6;
+  uint64 reservation_bytes = 7;
+  BindingReservationCapability reservation_capability = 8;
+  ServingBindingReadiness readiness = 9;
+  string verification_state = 10;
+  optional string serving_artifact_id = 11;
+  optional uint64 expires_at_ms = 12;
+  bool staged_value = 13;
+  optional string group_realization_transaction_id = 14;
+  optional string group_realization_version_set_id = 15;
+  optional string group_realization_part_id = 16;
+  optional string group_realization_staging_token = 17;
+  optional bool group_realization_wait_for_publish = 18;
+  optional uint64 group_realization_wait_timeout_ms = 19;
+}
+
+message PrefetchServingBindingMemberFailure {
+  ServingBindingMemberRef member = 1;
+  string code = 2;
+  string message = 3;
+  optional string phase = 4;
+  optional string cache_key_digest = 5;
+  optional string spec_digest = 6;
+}
+
+message PrefetchServingBindingSetResult {
+  string runtime = 1;
+  ServingTopologyRef topology = 2;
+  string group_id = 3;
+  repeated PrefetchServingBindingResult members = 4;
+  ServingBindingReadiness readiness = 5;
+  optional uint64 expires_at_ms = 6;
+  repeated PrefetchServingBindingMemberFailure member_failures = 7;
+  bool partial = 8;
+}

@@ -4,7 +4,7 @@ title: Unified Artifact Profiles with Shared Dataplane
 status: accepted
 areas: ["core", "daemon", "sdk", "global_store", "proto", "docs"]
 created: 2026-03-08
-last_updated: 2026-03-11
+last_updated: 2026-04-19
 related_code:
   - docs/designs/0017-client-generated-artifact-id.md
   - docs/designs/0039-artifact-first-sdk.md
@@ -114,6 +114,22 @@ Accepted decisions for the landed cut:
 
 The sections below preserve the pre-landing problem statement and target architecture that this accepted cut
 standardized.
+
+## Follow-on Shared Dataplane Extension
+
+`0088` remains the authoritative owner of the "one shared dataplane" rule.
+
+The accepted follow-on extension of that dataplane is now explicitly owned by
+`0115`.
+
+That follow-on keeps the same architectural split:
+
+- `0088` says all steady-state transfer must converge on one shared dataplane,
+- `0108` says strategy and semantic truth stay in `MaterializationFacade`,
+- `0115` defines the shared composite source -> composite target execution
+  contract plus routed vectored pull fast path below that seam,
+- and consumers such as routed byte-artifact batch-get must use that common
+  capability rather than minting a second copy engine.
 
 # Problem Statement
 
@@ -405,7 +421,7 @@ They must first produce a canonical internal lowering object:
 
 Minimum contents of `ArtifactLoweringPlan`:
 
-- resolved source handle or adapter,
+- resolved source artifact or adapter,
 - canonical payload metadata required by the core executor,
 - byte-range map,
 - target layout or replica target,

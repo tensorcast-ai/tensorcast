@@ -7,18 +7,28 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import json
-from pathlib import Path
+import os
 import shlex
 import subprocess
 import sys
 import time
+from pathlib import Path
 
-REPO_ROOT = Path("/data/workspace/tensorcast-280")
-BENCH_BINARY = REPO_ROOT / "bazel-bin/core/communicator/communicator_bench_binary"
-NAMESPACE = "shai-core"
-NUMA_WRAPPER = REPO_ROOT / "tools/communicator/run_with_numa_policy.py"
-RUN_AS_USER = subprocess.check_output(["id", "-un"], text=True).strip()
+LOCAL_REPO_ROOT = Path(__file__).resolve().parents[2]
+BENCH_BINARY_REL = Path("bazel-bin/core/communicator/communicator_bench_binary")
+NUMA_WRAPPER_REL = Path("tools/communicator/run_with_numa_policy.py")
+BENCH_BINARY = LOCAL_REPO_ROOT / BENCH_BINARY_REL
+NAMESPACE = "tensorcast"
+RUN_AS_USER = (
+    os.environ.get("TENSORCAST_RUN_AS_USER")
+    or os.environ.get("ORCHESTRATOR_RUN_AS_USER")
+    or subprocess.check_output(["id", "-un"], text=True).strip()
+).strip()
+DEFAULT_REMOTE_REPO_ROOT = os.environ.get(
+    "TENSORCAST_REMOTE_REPO_ROOT", str(LOCAL_REPO_ROOT)
+)
 
 
 def parse_bench_output(stdout: str) -> dict:
@@ -69,7 +79,9 @@ def parse_bench_output(stdout: str) -> dict:
     return parsed
 
 
-def run_command(command: list[str], log_path: Path | None = None) -> subprocess.CompletedProcess[str]:
+def run_command(
+    command: list[str], log_path: Path | None = None
+) -> subprocess.CompletedProcess[str]:
     proc = subprocess.run(
         command,
         text=True,
@@ -96,7 +108,9 @@ def run_command(command: list[str], log_path: Path | None = None) -> subprocess.
 
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def wrap_remote_shell_command(shell_command: str) -> str:
@@ -143,29 +157,41 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--case-timeout-sec", type=int, default=600)
     parser.add_argument("--direct-rdma", action="store_true")
     parser.add_argument("--strict-direct-rdma", action="store_true")
+    parser.add_argument("--rdma-profile", action="store_true")
     parser.add_argument("--bind-numa", action="store_true")
     parser.add_argument("--no-verify", action="store_true")
     parser.add_argument("--worker-max-wait-duration", default="20m")
-    parser.add_argument("--charged-group", default="tensorcast_dev")
+    parser.add_argument("--charged-group", default="")
+    parser.add_argument("--worker-gpu", type=int, default=8)
+    parser.add_argument("--worker-cpu", type=int, default=8)
+    parser.add_argument("--worker-memory-mib", type=int, default=32768)
+    parser.add_argument("--private-machine", default="group")
+    parser.add_argument("--pool", default="")
+    parser.add_argument("--positive-tags", default="")
+    parser.add_argument("--negative-tags", default="")
     parser.add_argument("--require-target-host", default="")
     parser.add_argument("--require-initiator-host", default="")
+    parser.add_argument("--keep-workers", action="store_true")
+    parser.add_argument("--target-worker-id", default="")
+    parser.add_argument("--initiator-worker-id", default="")
+    parser.add_argument(
+        "--remote-repo-root",
+        default=DEFAULT_REMOTE_REPO_ROOT,
+        help="Absolute TensorCast checkout path on remote workers.",
+    )
     return parser.parse_args()
 
 
 def launch_flags(args: argparse.Namespace, comment: str) -> list[str]:
-    return [
-        "brainctl",
+    flags = [
+        "orchestratorctl",
         "launch",
-        "--charged-group",
-        args.charged_group,
         "--gpu",
-        "8",
+        str(args.worker_gpu),
         "--cpu",
-        "8",
+        str(args.worker_cpu),
         "--memory",
-        "32768",
-        "--private-machine",
-        "group",
+        str(args.worker_memory_mib),
         "--host-network=true",
         "--custom-resources",
         "rdma/mlnx_shared=8",
@@ -176,14 +202,35 @@ def launch_flags(args: argparse.Namespace, comment: str) -> list[str]:
         "--comment",
         comment,
     ]
+    if args.charged_group:
+        flags.extend(["--charged-group", args.charged_group])
+    if args.private_machine:
+        flags.extend(["--private-machine", args.private_machine])
+    if args.pool:
+        flags.extend(["--pool", args.pool])
+    if args.positive_tags:
+        flags.extend(["--positive-tags", args.positive_tags])
+    if args.negative_tags:
+        flags.extend(["--negative-tags", args.negative_tags])
+    return flags
 
 
-def predict_worker(args: argparse.Namespace, role: str, log_path: Path) -> subprocess.CompletedProcess[str]:
-    return run_command(launch_flags(args, f"{args.case_name}-{role}") + ["--predict-only"], log_path)
+def predict_reports_no_capacity(proc: subprocess.CompletedProcess[str]) -> bool:
+    return "no machine available" in proc.stdout.lower()
+
+
+def predict_worker(
+    args: argparse.Namespace, role: str, log_path: Path
+) -> subprocess.CompletedProcess[str]:
+    return run_command(
+        launch_flags(args, f"{args.case_name}-{role}") + ["--predict-only"], log_path
+    )
 
 
 def launch_worker(args: argparse.Namespace, role: str, log_path: Path) -> str:
-    keepalive_cmd = wrap_remote_shell_command("set -euo pipefail\necho START\nhostname\nid -un\nsleep 7200\n")
+    keepalive_cmd = wrap_remote_shell_command(
+        "set -euo pipefail\necho START\nhostname\nid -un\nsleep 7200\n"
+    )
     proc = run_command(
         launch_flags(args, f"{args.case_name}-{role}")
         + [
@@ -205,10 +252,12 @@ def launch_worker(args: argparse.Namespace, role: str, log_path: Path) -> str:
     return worker_id
 
 
-def brainctl_exec(worker_id: str, shell_command: str, log_path: Path | None = None) -> subprocess.CompletedProcess[str]:
+def orchestratorctl_exec(
+    worker_id: str, shell_command: str, log_path: Path | None = None
+) -> subprocess.CompletedProcess[str]:
     return run_command(
         [
-            "brainctl",
+            "orchestratorctl",
             "exec",
             f"process/{worker_id}",
             "-n",
@@ -223,7 +272,9 @@ def brainctl_exec(worker_id: str, shell_command: str, log_path: Path | None = No
 
 
 def worker_status(worker_id: str) -> str:
-    proc = run_command(["brainctl", "get", "process", worker_id, "-n", NAMESPACE])
+    proc = run_command(
+        ["orchestratorctl", "get", "process", worker_id, "-n", NAMESPACE]
+    )
     if proc.returncode != 0:
         return "UNKNOWN"
     lines = [line for line in proc.stdout.splitlines() if line.strip()]
@@ -248,13 +299,17 @@ def wait_worker_running(worker_id: str, timeout_sec: int) -> None:
 
 
 def delete_worker(worker_id: str, log_path: Path) -> None:
-    run_command(["brainctl", "delete", "process", worker_id, "-n", NAMESPACE], log_path)
+    run_command(
+        ["orchestratorctl", "delete", "process", worker_id, "-n", NAMESPACE], log_path
+    )
 
 
 def remote_stdout(worker_id: str, shell_command: str, log_path: Path) -> str:
-    proc = brainctl_exec(worker_id, shell_command, log_path)
+    proc = orchestratorctl_exec(worker_id, shell_command, log_path)
     if proc.returncode != 0:
-        raise RuntimeError(f"remote command failed on {worker_id}: {proc.stderr.strip()}")
+        raise RuntimeError(
+            f"remote command failed on {worker_id}: {proc.stderr.strip()}"
+        )
     return proc.stdout.strip()
 
 
@@ -271,9 +326,9 @@ def collect_host_facts(worker_id: str, node_dir: Path) -> dict[str, str]:
         "numactl_hardware.txt": "command -v numactl >/dev/null 2>&1 && numactl --hardware || true",
         "infiniband_numa.txt": (
             "for d in /sys/class/infiniband/*; do "
-            "name=$(basename \"$d\"); "
-            "node=$(cat \"$d/device/numa_node\" 2>/dev/null || echo -1); "
-            "echo \"$name $node\"; "
+            'name=$(basename "$d"); '
+            'node=$(cat "$d/device/numa_node" 2>/dev/null || echo -1); '
+            'echo "$name $node"; '
             "done | sort"
         ),
         "modules.txt": "cat /proc/modules | egrep 'nvidia_peermem|nv_peer_mem|mlx5' || true",
@@ -281,16 +336,29 @@ def collect_host_facts(worker_id: str, node_dir: Path) -> dict[str, str]:
     node_dir.mkdir(parents=True, exist_ok=True)
     summary: dict[str, str] = {}
     for name, command in commands.items():
-        proc = brainctl_exec(worker_id, command, node_dir / name)
+        proc = orchestratorctl_exec(worker_id, command, node_dir / name)
         if proc.returncode == 0:
             summary[name] = proc.stdout.strip()
     return summary
 
 
-def base_remote_preamble() -> str:
+def validate_remote_repo_root(remote_repo_root: str) -> str:
+    resolved = remote_repo_root.strip()
+    if not resolved or not resolved.startswith("/"):
+        raise ValueError(
+            "--remote-repo-root must be an absolute path on remote workers"
+        )
+    return resolved
+
+
+def base_remote_preamble(args: argparse.Namespace) -> str:
+    remote_repo_root = validate_remote_repo_root(args.remote_repo_root)
     return (
         "set -euo pipefail\n"
-        f"cd {shlex.quote(str(REPO_ROOT))}\n"
+        f"remote_repo_root={shlex.quote(remote_repo_root)}\n"
+        'if [ ! -d "$remote_repo_root" ]; then echo "remote repo root not found: $remote_repo_root" >&2; exit 3; fi\n'
+        'cd "$remote_repo_root"\n'
+        'if [ ! -f .venv/bin/activate ]; then echo "missing .venv at $remote_repo_root" >&2; exit 3; fi\n'
         "source .venv/bin/activate\n"
         "export LD_LIBRARY_PATH=/data/cuda/compat:/usr/local/nvidia/lib64:${LD_LIBRARY_PATH:-}\n"
     )
@@ -305,7 +373,7 @@ def bench_shell_command(
     peer_port: int = 0,
 ) -> str:
     cmd = [
-        str(BENCH_BINARY),
+        str(BENCH_BINARY_REL),
         "--role",
         role,
         "--listen-ip",
@@ -366,19 +434,27 @@ def bench_shell_command(
         cmd.append("--direct-rdma")
     if args.strict_direct_rdma:
         cmd.append("--strict-direct-rdma")
+    if args.rdma_profile:
+        cmd.append("--rdma-profile")
 
     bench_cmd = shlex.join(cmd)
     nic_path = shlex.quote(nic)
-    shell = base_remote_preamble()
+    shell = base_remote_preamble(args)
     if args.bind_numa:
         shell += (
-            f"numa_node=\"$(cat /sys/class/infiniband/{nic_path}/device/numa_node)\"\n"
-            "[ \"$numa_node\" -ge 0 ] || { echo \"invalid numa node for NIC\" >&2; exit 4; }\n"
-            f"exec python {shlex.quote(str(NUMA_WRAPPER))} --numa-node \"$numa_node\" -- {bench_cmd}\n"
+            f'numa_node="$(cat /sys/class/infiniband/{nic_path}/device/numa_node)"\n'
+            '[ "$numa_node" -ge 0 ] || { echo "invalid numa node for NIC" >&2; exit 4; }\n'
+            f'exec python {shlex.quote(str(NUMA_WRAPPER_REL))} --numa-node "$numa_node" -- {bench_cmd}\n'
         )
     else:
         shell += f"exec {bench_cmd}\n"
     return shell
+
+
+def target_ready_from_log(content: str) -> bool:
+    has_structured_ready = "role=target" in content and "listen_port=" in content
+    has_rdma_register = "register done:" in content
+    return has_structured_ready or has_rdma_register
 
 
 def wait_for_ready_line(log_path: Path, timeout_sec: int) -> None:
@@ -386,7 +462,7 @@ def wait_for_ready_line(log_path: Path, timeout_sec: int) -> None:
     while time.time() < deadline:
         if log_path.exists():
             content = log_path.read_text(encoding="utf-8", errors="ignore")
-            if "role=target" in content and "listen_port=" in content:
+            if target_ready_from_log(content):
                 return
         time.sleep(1)
     raise RuntimeError(f"target log did not reach READY before timeout: {log_path}")
@@ -397,12 +473,20 @@ def main() -> int:
         print("refuse to run remote workload as root", file=sys.stderr)
         return 2
     args = parse_args()
+    reuse_workers = bool(args.target_worker_id or args.initiator_worker_id)
+    if reuse_workers and (not args.target_worker_id or not args.initiator_worker_id):
+        print(
+            "both --target-worker-id and --initiator-worker-id are required when reusing workers",
+            file=sys.stderr,
+        )
+        return 2
     case_dir = Path(args.case_dir)
     case_dir.mkdir(parents=True, exist_ok=True)
     write_json(
         case_dir / "case_config.json",
         {
             "case_name": args.case_name,
+            "charged_group": args.charged_group,
             "memory": args.memory,
             "bytes": args.bytes,
             "target_gpu_id": args.target_gpu_id,
@@ -419,8 +503,21 @@ def main() -> int:
             "case_timeout_sec": args.case_timeout_sec,
             "direct_rdma": args.direct_rdma,
             "strict_direct_rdma": args.strict_direct_rdma,
+            "rdma_profile": args.rdma_profile,
             "bind_numa": args.bind_numa,
             "verify": not args.no_verify,
+            "worker_gpu": args.worker_gpu,
+            "worker_cpu": args.worker_cpu,
+            "worker_memory_mib": args.worker_memory_mib,
+            "private_machine": args.private_machine,
+            "pool": args.pool,
+            "positive_tags": args.positive_tags,
+            "negative_tags": args.negative_tags,
+            "keep_workers": args.keep_workers,
+            "reuse_workers": reuse_workers,
+            "target_worker_id": args.target_worker_id,
+            "initiator_worker_id": args.initiator_worker_id,
+            "remote_repo_root": args.remote_repo_root,
         },
     )
 
@@ -429,28 +526,61 @@ def main() -> int:
         return 2
 
     worker_ids: list[str] = []
+    launched_worker_ids: list[str] = []
     try:
-        predict_target = predict_worker(args, "target", case_dir / "launch_target_predict.json")
-        predict_initiator = predict_worker(args, "initiator", case_dir / "launch_initiator_predict.json")
-        if predict_target.returncode != 0 or predict_initiator.returncode != 0:
-            raise RuntimeError("predict-only failed for target or initiator")
+        if reuse_workers:
+            target_worker = args.target_worker_id
+            initiator_worker = args.initiator_worker_id
+            worker_ids.extend([target_worker, initiator_worker])
+            wait_worker_running(target_worker, timeout_sec=600)
+            wait_worker_running(initiator_worker, timeout_sec=600)
+        else:
+            predict_target = predict_worker(
+                args, "target", case_dir / "launch_target_predict.json"
+            )
+            predict_initiator = predict_worker(
+                args, "initiator", case_dir / "launch_initiator_predict.json"
+            )
+            if predict_target.returncode != 0 or predict_initiator.returncode != 0:
+                raise RuntimeError("predict-only failed for target or initiator")
+            if predict_reports_no_capacity(
+                predict_target
+            ) or predict_reports_no_capacity(predict_initiator):
+                raise RuntimeError(
+                    "predict-only reported no machine available for target or initiator; "
+                    "adjust scheduler constraints (private-machine/pool/positive-tags) or wait for capacity"
+                )
 
-        target_worker = launch_worker(args, "target", case_dir / "launch_target.json")
-        initiator_worker = launch_worker(args, "initiator", case_dir / "launch_initiator.json")
-        worker_ids.extend([target_worker, initiator_worker])
+            target_worker = launch_worker(
+                args, "target", case_dir / "launch_target.json"
+            )
+            initiator_worker = launch_worker(
+                args, "initiator", case_dir / "launch_initiator.json"
+            )
+            worker_ids.extend([target_worker, initiator_worker])
+            launched_worker_ids.extend([target_worker, initiator_worker])
 
-        wait_worker_running(target_worker, timeout_sec=600)
-        wait_worker_running(initiator_worker, timeout_sec=600)
+            wait_worker_running(target_worker, timeout_sec=600)
+            wait_worker_running(initiator_worker, timeout_sec=600)
 
-        target_host = remote_stdout(target_worker, "hostname", case_dir / "target_hostname_exec.json")
-        initiator_host = remote_stdout(initiator_worker, "hostname", case_dir / "initiator_hostname_exec.json")
+        target_host = remote_stdout(
+            target_worker, "hostname", case_dir / "target_hostname_exec.json"
+        )
+        initiator_host = remote_stdout(
+            initiator_worker, "hostname", case_dir / "initiator_hostname_exec.json"
+        )
         if target_host == initiator_host:
-            raise RuntimeError(f"target and initiator landed on the same host: {target_host}")
+            raise RuntimeError(
+                f"target and initiator landed on the same host: {target_host}"
+            )
         if args.require_target_host and args.require_target_host not in target_host:
             raise RuntimeError(
                 f"target host mismatch: expected contains {args.require_target_host}, got {target_host}"
             )
-        if args.require_initiator_host and args.require_initiator_host not in initiator_host:
+        if (
+            args.require_initiator_host
+            and args.require_initiator_host not in initiator_host
+        ):
             raise RuntimeError(
                 f"initiator host mismatch: expected contains {args.require_initiator_host}, got {initiator_host}"
             )
@@ -471,14 +601,16 @@ def main() -> int:
         collect_host_facts(target_worker, target_node_dir)
         collect_host_facts(initiator_worker, initiator_node_dir)
 
-        target_inspect = brainctl_exec(
+        target_inspect = orchestratorctl_exec(
             target_worker,
             bench_shell_command(args, "inspect", args.target_nic, args.target_gpu_id),
             target_node_dir / "inspect.json",
         )
-        initiator_inspect = brainctl_exec(
+        initiator_inspect = orchestratorctl_exec(
             initiator_worker,
-            bench_shell_command(args, "inspect", args.initiator_nic, args.initiator_gpu_id),
+            bench_shell_command(
+                args, "inspect", args.initiator_nic, args.initiator_gpu_id
+            ),
             initiator_node_dir / "inspect.json",
         )
         if target_inspect.returncode != 0 or initiator_inspect.returncode != 0:
@@ -487,18 +619,22 @@ def main() -> int:
         target_log = case_dir / "target.log"
         target_pid = case_dir / "target.pid"
         target_shell = (
-            base_remote_preamble()
+            base_remote_preamble(args)
             + f": > {shlex.quote(str(target_log))}\n"
             + f"(\n{bench_shell_command(args, 'target', args.target_nic, args.target_gpu_id)}) >> {shlex.quote(str(target_log))} 2>&1 &\n"
             + f"echo $! > {shlex.quote(str(target_pid))}\n"
             + f"cat {shlex.quote(str(target_pid))}\n"
         )
-        target_start = brainctl_exec(target_worker, target_shell, case_dir / "target_start.json")
+        target_start = orchestratorctl_exec(
+            target_worker, target_shell, case_dir / "target_start.json"
+        )
         if target_start.returncode != 0:
-            raise RuntimeError(f"failed to start target bench: {target_start.stderr.strip()}")
+            raise RuntimeError(
+                f"failed to start target bench: {target_start.stderr.strip()}"
+            )
         wait_for_ready_line(target_log, timeout_sec=120)
 
-        initiator_result = brainctl_exec(
+        initiator_result = orchestratorctl_exec(
             initiator_worker,
             bench_shell_command(
                 args,
@@ -530,6 +666,7 @@ def main() -> int:
                 "bytes": args.bytes,
                 "direct_rdma": args.direct_rdma,
                 "strict_direct_rdma": args.strict_direct_rdma,
+                "rdma_profile": args.rdma_profile,
                 "bind_numa": args.bind_numa,
                 "verify": not args.no_verify,
                 "duration_sec": args.duration_sec,
@@ -539,30 +676,56 @@ def main() -> int:
                 "batch_size": args.batch_size,
                 "qp_count": args.qp_count,
                 "outstanding_wr": args.outstanding_wr,
+                "reused_workers": reuse_workers,
                 "parsed": parsed,
             },
         )
         return initiator_result.returncode
     finally:
-        for worker_id, log_name in (
-            (worker_ids[0], "cleanup_target_worker.json") if len(worker_ids) > 0 else (None, None),
-            (worker_ids[1], "cleanup_initiator_worker.json") if len(worker_ids) > 1 else (None, None),
-        ):
-            if worker_id is None or log_name is None:
-                continue
-            try:
-                brainctl_exec(
-                    worker_id,
+        if len(worker_ids) > 0:
+            with contextlib.suppress(Exception):
+                orchestratorctl_exec(
+                    worker_ids[0],
                     (
                         f"if [ -f {shlex.quote(str(case_dir / 'target.pid'))} ]; then "
                         f"kill $(cat {shlex.quote(str(case_dir / 'target.pid'))}) >/dev/null 2>&1 || true; "
                         "fi"
                     ),
-                    case_dir / f"pre_{log_name}",
+                    case_dir / "pre_cleanup_target_process.json",
                 )
-            except Exception:
-                pass
-            delete_worker(worker_id, case_dir / log_name)
+        if args.keep_workers:
+            write_json(
+                case_dir / "kept_workers.json",
+                {
+                    "target_worker": worker_ids[0] if len(worker_ids) > 0 else "",
+                    "initiator_worker": worker_ids[1] if len(worker_ids) > 1 else "",
+                },
+            )
+        else:
+            for worker_id, log_name in (
+                (launched_worker_ids[0], "cleanup_target_worker.json")
+                if len(launched_worker_ids) > 0
+                else (None, None),
+                (
+                    launched_worker_ids[1],
+                    "cleanup_initiator_worker.json",
+                )
+                if len(launched_worker_ids) > 1
+                else (None, None),
+            ):
+                if worker_id is None or log_name is None:
+                    continue
+                with contextlib.suppress(Exception):
+                    orchestratorctl_exec(
+                        worker_id,
+                        (
+                            f"if [ -f {shlex.quote(str(case_dir / 'target.pid'))} ]; then "
+                            f"kill $(cat {shlex.quote(str(case_dir / 'target.pid'))}) >/dev/null 2>&1 || true; "
+                            "fi"
+                        ),
+                        case_dir / f"pre_{log_name}",
+                    )
+                delete_worker(worker_id, case_dir / log_name)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from uuid import UUID
 
 import grpc
 
+from tensorcast.common.identity import is_msa1_artifact_id
 from tensorcast.global_store.models import MemoryType, Replica
 from tensorcast.global_store.repositories.replica_repository import ReplicaRepository
 from tensorcast.global_store.repositories.transport_repository import (
@@ -51,6 +52,16 @@ class ReplicaLifecycleRpcHandler:
         try:
             replica_id = UUID(request.replica_id)
             artifact_id = request.artifact_id
+            if artifact_id and is_msa1_artifact_id(artifact_id):
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                context.set_details(
+                    "msa1 artifact_id is daemon-session-local and cannot be managed on Global Store replica lifecycle surfaces"
+                )
+                return global_store_pb2.UpdateReplicaResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR,
+                    artifact_id=artifact_id,
+                    replica_id=request.replica_id,
+                )
 
             set_span_attributes(
                 {
@@ -92,6 +103,14 @@ class ReplicaLifecycleRpcHandler:
         try:
             replica_id = UUID(request.replica_id)
             artifact_id = request.artifact_id
+            if artifact_id and is_msa1_artifact_id(artifact_id):
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                context.set_details(
+                    "msa1 artifact_id is daemon-session-local and cannot be managed on Global Store replica lifecycle surfaces"
+                )
+                return global_store_pb2.UnregisterReplicaResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
 
             success = self._artifact_service.unregister_replica(replica_id, artifact_id)
             status = (
@@ -122,6 +141,14 @@ class ReplicaLifecycleRpcHandler:
             if not artifact_id or not worker_id:
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details("artifact_id and worker_id are required")
+                return global_store_pb2.UnregisterReplicaByWorkerResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+            if is_msa1_artifact_id(artifact_id):
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                context.set_details(
+                    "msa1 artifact_id is daemon-session-local and cannot be managed on Global Store replica lifecycle surfaces"
+                )
                 return global_store_pb2.UnregisterReplicaByWorkerResponse(
                     status=global_store_pb2.Status.STATUS_ERROR
                 )
@@ -175,6 +202,15 @@ class ReplicaLifecycleRpcHandler:
                     updated=False,
                 )
             replica_id = UUID(request.replica_id)
+            if request.artifact_id and is_msa1_artifact_id(request.artifact_id):
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                context.set_details(
+                    "msa1 artifact_id is daemon-session-local and cannot be managed on Global Store replica lifecycle surfaces"
+                )
+                return global_store_pb2.MarkReplicaUnavailableResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR,
+                    updated=False,
+                )
             replica = self._replica_repository.find_by_replica_id(replica_id)
             if replica is None or (
                 request.artifact_id and replica.artifact_id != request.artifact_id

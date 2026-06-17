@@ -9,8 +9,8 @@ import torch
 
 from tensorcast.api.store.artifact import Artifact
 from tensorcast.api.store.cache import ArtifactCache
-from tensorcast.api.store.types import StoreOptions
 from tensorcast.api.store.retry import build_retry_policies
+from tensorcast.api.store.types import StoreOptions
 
 
 def _canonical_index_bytes() -> bytes:
@@ -23,9 +23,11 @@ class _ClientStub:
     def __init__(self, canonical_index_bytes: bytes) -> None:
         self.canonical_index_bytes = canonical_index_bytes
         self.calls = 0
+        self.requested_artifact_ids: list[str] = []
 
     def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
         self.calls += 1
+        self.requested_artifact_ids.append(artifact_id)
         return self.canonical_index_bytes
 
 
@@ -39,7 +41,7 @@ class _RuntimeStub:
             daemon_endpoint="daemon", ttl_seconds=5, max_entries=4
         )
         self._client = client
-        self._key_cache: dict[str, str | None] = {}
+        self._key_cache: dict[str, tuple[str | None, str | None]] = {}
 
     def ensure_client(self) -> _ClientStub:
         return self._client
@@ -55,13 +57,21 @@ class _RuntimeStub:
         if key and key in self._key_cache:
             del self._key_cache[key]
 
-    def resolve_key_mapping_cached(self, *, key: str) -> str | None:
-        return self._key_cache.get(key)
+    def resolve_key_mapping_cached(
+        self, *, key: str
+    ) -> tuple[str | None, str | None]:
+        return self._key_cache.get(key, (None, None))
 
     def cache_key_mapping(
-        self, key: str, *, artifact_id: str | None, ttl_override=None
+        self,
+        key: str,
+        *,
+        artifact_id: str | None,
+        disk_path: str | None = None,
+        ttl_override=None,
     ) -> None:
-        self._key_cache[key] = artifact_id
+        del ttl_override
+        self._key_cache[key] = (artifact_id, disk_path)
 
 
 class _StoreStub:
@@ -91,3 +101,20 @@ def test_exists_populates_cache_and_id():
     cached = runtime.get_artifact_index_cached("aid")
     assert cached is not None
     assert cached.canonical_index_bytes == canonical_bytes
+
+
+def test_exists_handles_tuple_key_mapping_cache_result():
+    canonical_bytes = _canonical_index_bytes()
+    client = _ClientStub(canonical_bytes)
+    runtime = _RuntimeStub(client)
+    store = _StoreStub(runtime)
+    runtime.cache_key_mapping(
+        "mapped",
+        artifact_id="aid",
+        disk_path="/tmp/cached.index",
+    )
+    artifact = Artifact(store_ref=weakref.ref(store), key="mapped")
+
+    assert artifact.exists() is True
+    assert artifact.artifact_id == "aid"
+    assert client.requested_artifact_ids == ["aid"]

@@ -154,9 +154,7 @@ class TransportRpcHandler:
                 replica=replica,
             )
 
-            from contextlib import suppress
-
-            with suppress(Exception):
+            try:
                 set_span_attributes({"tc.transport.id": str(transport_id)})
                 set_span_attributes({"tc.transport.route_kind": int(route_kind)})
                 if view_transport_metadata is not None:
@@ -168,6 +166,10 @@ class TransportRpcHandler:
                             ),
                         }
                     )
+            except Exception:  # noqa: BLE001
+                self._logger.debug(
+                    "Failed to set transport span attributes", exc_info=True
+                )
 
             response = global_store_pb2.RequestReplicaTransportResponse(
                 status=global_store_pb2.Status.STATUS_OK,

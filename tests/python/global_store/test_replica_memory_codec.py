@@ -123,6 +123,7 @@ def test_replica_to_memory_info_roundtrip_transport_and_view_space():
         replica=replica,
         datetime_to_timestamp=to_timestamp,
     )
+    assert mem_info.replica_id == str(replica.replica_id)
     assert mem_info.byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW
     assert mem_info.byte_space.id == "v-1"
     assert (

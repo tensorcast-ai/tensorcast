@@ -42,6 +42,17 @@ class ByteArtifactAuthorityService {
     BodyHandle body_handle;
   };
 
+  struct PutPreflightItem {
+    std::string artifact_id;
+    v2::PutIfAbsentInvariant invariant;
+  };
+
+  struct PutPreflightResult {
+    std::string artifact_id;
+    bool requires_backing{true};
+    v2::BatchItemOutcome terminal_outcome;
+  };
+
   explicit ByteArtifactAuthorityService(ByteArtifactBodyStore& body_store);
 
   [[nodiscard]] std::vector<v2::BatchItemOutcome> batch_exists(
@@ -53,6 +64,11 @@ class ByteArtifactAuthorityService {
 
   [[nodiscard]] std::vector<v2::BatchItemOutcome> batch_put_if_absent(
       const std::vector<PutItem>& items,
+      const Context& context,
+      const std::optional<std::uint64_t>& ttl_ms) const;
+
+  [[nodiscard]] std::vector<PutPreflightResult> batch_preflight_put_if_absent(
+      const std::vector<PutPreflightItem>& items,
       const Context& context,
       const std::optional<std::uint64_t>& ttl_ms) const;
 

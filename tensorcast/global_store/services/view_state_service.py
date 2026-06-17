@@ -244,15 +244,37 @@ class ViewStateService:
                             "view_data_hash conflict for existing view registration"
                         )
 
+                # Metadata-only updates omit fields (empty/None); preserve the
+                # previously stored values instead of clobbering them. The repo
+                # upsert is a pure overwrite, so the merge happens here.
+                view_spec_json = view.view_spec_json
+                view_data_hash = view.view_data_hash
+                verified_at = view.verified_at
+                canonical_size_bytes = view.canonical_size_bytes
+                canonical_bytes_covered = view.canonical_bytes_covered
+                if existing is not None:
+                    if not view_spec_json:
+                        view_spec_json = existing.get("view_spec_json") or ""
+                    if view_data_hash is None:
+                        view_data_hash = existing.get("view_data_hash")
+                    if verified_at is None:
+                        verified_at = existing.get("verified_at")
+                    if canonical_size_bytes is None:
+                        canonical_size_bytes = existing.get("canonical_size_bytes")
+                    if canonical_bytes_covered is None:
+                        canonical_bytes_covered = existing.get(
+                            "canonical_bytes_covered"
+                        )
+
                 self.view_repository.upsert(
                     artifact_id=view.artifact_id,
                     view_id=view.view_id,
-                    view_spec_json=view.view_spec_json,
+                    view_spec_json=view_spec_json,
                     view_size=view.view_size,
-                    view_data_hash=view.view_data_hash,
-                    verified_at=view.verified_at,
-                    canonical_size_bytes=view.canonical_size_bytes,
-                    canonical_bytes_covered=view.canonical_bytes_covered,
+                    view_data_hash=view_data_hash,
+                    verified_at=verified_at,
+                    canonical_size_bytes=canonical_size_bytes,
+                    canonical_bytes_covered=canonical_bytes_covered,
                     cursor=cursor,
                 )
 

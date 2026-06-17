@@ -58,6 +58,18 @@ class TestGRPCService:
 
         assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
 
+    def test_update_replica_rejects_msa1(self, servicer, test_context):
+        request = global_store_pb2.UpdateReplicaRequest(
+            artifact_id="msa1:test-session~policy~partitioned~deadbeef",
+            replica_id=str(uuid.uuid4()),
+        )
+
+        response = servicer.UpdateReplica(request, test_context)
+
+        assert response.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+        assert "daemon-session-local" in (test_context.details or "")
+
     def test_register_replica_rejects_non_v3_schema(
         self, servicer, test_context, memory_info, registered_worker
     ):
@@ -74,6 +86,22 @@ class TestGRPCService:
 
         assert response.status == global_store_pb2.Status.STATUS_ERROR
         assert test_context.code == grpc.StatusCode.INVALID_ARGUMENT
+
+    def test_register_replica_rejects_msa1(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        request = global_store_pb2.RegisterReplicaRequest(
+            artifact_id="msa1:test-session~policy~partitioned~deadbeef",
+            mem_info=memory_info,
+            max_concurrency=1,
+            worker_id=registered_worker,
+        )
+
+        response = servicer.RegisterReplica(request, test_context)
+
+        assert response.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+        assert "daemon-session-local" in (test_context.details or "")
 
     def test_register_replica_idempotent_replay(
         self, servicer, test_context, memory_info, registered_worker, monkeypatch
@@ -220,6 +248,18 @@ class TestGRPCService:
 
         assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
 
+    def test_unregister_replica_rejects_msa1(self, servicer, test_context):
+        request = global_store_pb2.UnregisterReplicaRequest(
+            artifact_id="msa1:test-session~policy~partitioned~deadbeef",
+            replica_id=str(uuid.uuid4()),
+        )
+
+        response = servicer.UnregisterReplica(request, test_context)
+
+        assert response.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+        assert "daemon-session-local" in (test_context.details or "")
+
     def test_mark_replica_unavailable_idempotent(
         self, servicer, test_context, memory_info, registered_worker
     ):
@@ -250,6 +290,20 @@ class TestGRPCService:
         )
         assert second.status == global_store_pb2.Status.STATUS_OK
         assert second.updated is True
+
+    def test_mark_replica_unavailable_rejects_msa1(self, servicer, test_context):
+        response = servicer.MarkReplicaUnavailable(
+            global_store_pb2.MarkReplicaUnavailableRequest(
+                artifact_id="msa1:test-session~policy~partitioned~deadbeef",
+                replica_id=str(uuid.uuid4()),
+            ),
+            test_context,
+        )
+
+        assert response.status == global_store_pb2.Status.STATUS_ERROR
+        assert response.updated is False
+        assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+        assert "daemon-session-local" in (test_context.details or "")
 
     def test_wait_replica_drain_timeout_snapshot(
         self, servicer, test_context, memory_info, registered_worker
@@ -356,12 +410,8 @@ class TestGRPCService:
 
     def test_worker_routing_capability_flags_filtering(self, servicer, test_context):
         flags = (
-            1
-            << global_store_pb2.WORKER_CAPABILITY_FLAG_GATEWAY_INGRESS_ENABLED
-        ) | (
-            1
-            << global_store_pb2.WORKER_CAPABILITY_FLAG_SHARD_HOME_ELIGIBLE
-        )
+            1 << global_store_pb2.WORKER_CAPABILITY_FLAG_GATEWAY_INGRESS_ENABLED
+        ) | (1 << global_store_pb2.WORKER_CAPABILITY_FLAG_SHARD_HOME_ELIGIBLE)
         register_request = global_store_pb2.RegisterWorkerRequest(
             node_id="routing_cap_worker",
             node_address="192.168.2.30",
@@ -378,8 +428,7 @@ class TestGRPCService:
         list_response = servicer.ListActiveWorkers(
             global_store_pb2.ListActiveWorkersRequest(
                 required_capability_flags=(
-                    1
-                    << global_store_pb2.WORKER_CAPABILITY_FLAG_SHARD_HOME_ELIGIBLE
+                    1 << global_store_pb2.WORKER_CAPABILITY_FLAG_SHARD_HOME_ELIGIBLE
                 )
             ),
             test_context,
@@ -1107,6 +1156,124 @@ class TestGRPCService:
         assert response.view_transport_metadata.view_data_hash == "derived-hash-1"
         assert response.source_grpc_port == worker.grpc_port
 
+    def test_canonical_transport_prefers_full_identity_view_replica(
+        self, servicer, test_context, registered_worker
+    ):
+        from tensorcast.api.store.common import canonical_index_from_bytes
+        from tensorcast.api.store.view_composer import (
+            _build_subset_identity_view_spec_proto,
+            compute_index_multihash,
+            compute_view_id,
+        )
+
+        index_bytes = (
+            b'{"alpha":[0,4,[1],[1],"torch.float32",0],'
+            b'"beta":[4,4,[1],[1],"torch.float32",0]}'
+        )
+        canonical_index = canonical_index_from_bytes(index_bytes)
+        tensor_names = tuple(entry.name for entry in canonical_index.entries)
+        identity_spec = _build_subset_identity_view_spec_proto(
+            canonical_index=canonical_index,
+            tensor_names=tensor_names,
+        )
+        assert identity_spec is not None
+        identity_view_id = compute_view_id(identity_spec, index_bytes)
+        artifact_id = (
+            f"mi2:{compute_index_multihash(index_bytes)}:"
+            f"{compute_index_multihash(b'payload')}"
+        )
+
+        def _memory_info(
+            *,
+            view_id: str | None,
+            remote_key: str,
+        ) -> common_pb2.MemoryInfo:
+            byte_space = common_pb2.ByteSpaceRef(
+                kind=(
+                    common_pb2.BYTE_SPACE_KIND_VIEW
+                    if view_id
+                    else common_pb2.BYTE_SPACE_KIND_CANONICAL
+                ),
+                id=view_id or "",
+            )
+            info = common_pb2.MemoryInfo(
+                node_id=str(uuid.uuid4()),
+                node_address="192.168.8.10",
+                node_port=9001 if view_id else 9000,
+                memory_size=8,
+                memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU,
+                device_id=0,
+                byte_space=byte_space,
+            )
+            info.transport.export_state = (
+                common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE
+            )
+            info.transport.export_generation = 1
+            info.transport.remote_memory_keys.append(remote_key)
+            info.transport.buffer_sizes.append(info.memory_size)
+            return info
+
+        canonical_info = _memory_info(view_id=None, remote_key="canonical-key")
+        view_info = _memory_info(view_id=identity_view_id, remote_key="runtime-key")
+        servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id=artifact_id,
+                mem_info=canonical_info,
+                max_concurrency=1,
+                worker_id=registered_worker,
+                tensor_index_data=index_bytes,
+                encoding="json",
+                schema_version="v3",
+            ),
+            test_context,
+        )
+        servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id=artifact_id,
+                mem_info=view_info,
+                max_concurrency=1,
+                worker_id=registered_worker,
+            ),
+            test_context,
+        )
+        servicer.WorkerHeartbeat(
+            global_store_pb2.WorkerHeartbeatRequest(
+                worker_id=registered_worker,
+                mem_pool_available_size=7000000000,
+                accepting_new_requests=True,
+                state_version=1,
+            ),
+            test_context,
+        )
+
+        response = servicer.RequestReplicaTransport(
+            global_store_pb2.RequestReplicaTransportRequest(
+                artifact_id=artifact_id,
+                local_memory_info=canonical_info,
+                wait_timeout_dur=duration_pb2.Duration(seconds=1),
+                source_node_id="consumer",
+                source_address="192.168.8.20",
+                source_port=9010,
+                request_id="transport-canonical-identity-view",
+                requested_byte_space=common_pb2.ByteSpaceRef(
+                    kind=common_pb2.BYTE_SPACE_KIND_CANONICAL,
+                    id="",
+                ),
+            ),
+            test_context,
+        )
+
+        assert response.status == global_store_pb2.Status.STATUS_OK
+        assert (
+            response.remote_memory_info.byte_space.kind
+            == common_pb2.BYTE_SPACE_KIND_VIEW
+        )
+        assert response.remote_memory_info.byte_space.id == identity_view_id
+        assert (
+            list(response.remote_memory_info.transport.remote_memory_keys)
+            == ["runtime-key"]
+        )
+
     def test_get_artifact_index_by_id_with_multibase(
         self, servicer, test_context, memory_info, registered_worker
     ):
@@ -1141,6 +1308,18 @@ class TestGRPCService:
 
         assert resp.status == global_store_pb2.Status.STATUS_OK
         assert resp.tensor_index_data == index_bytes
+
+    def test_get_artifact_index_by_id_rejects_msa1(self, servicer, test_context):
+        resp = servicer.GetArtifactIndexById(
+            global_store_pb2.GetArtifactIndexByIdRequest(
+                artifact_id="msa1:test-session~policy~partitioned~deadbeef"
+            ),
+            test_context,
+        )
+
+        assert resp.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+        assert "daemon-session-local" in (test_context.details or "")
 
     def test_register_replica_honors_descriptor_binding(
         self, servicer, test_context, memory_info, registered_worker
@@ -1305,10 +1484,7 @@ class TestGRPCService:
         transport_row = servicer.transport_repository.find_by_id(transport_id)
         assert transport_row is not None
         assert transport_row.status == "completed"
-        assert (
-            transport_row.completion_outcome.value
-            == "failed"
-        )
+        assert transport_row.completion_outcome.value == "failed"
         assert transport_row.completion_detail == "simulated_transport_failure"
 
     def test_complete_nonexistent_transport(self, servicer, test_context):
@@ -1365,7 +1541,7 @@ class TestGRPCService:
                 request_id="query-window-req-1",
                 scheduling_group=global_store_pb2.TransportSchedulingGroup(
                     group_id="case-a0:v1",
-                    group_kind="tp_version",
+                    group_kind="group_realization_transport",
                     total_parts=16,
                     part_id="rx1:r0",
                     priority=0,
@@ -1404,7 +1580,7 @@ class TestGRPCService:
                 break
         assert matched is not None
         assert matched.requester_worker_id == "receiver-1"
-        assert matched.group_kind == "tp_version"
+        assert matched.group_kind == "group_realization_transport"
         assert matched.group_total_parts == 16
         assert matched.HasField("created_at")
 

@@ -2,13 +2,18 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
 #include "core/common/selection_identity.h"
 #include "core/store/device_types.h"
@@ -126,6 +131,59 @@ inline absl::StatusOr<ResolvedSourceDescriptor> build_resolved_source_descriptor
   descriptor.already_verified = false;
   descriptor.source_kind = source_kind;
   return descriptor;
+}
+
+inline absl::StatusOr<std::uint64_t> required_source_bytes_for_single_source_map(
+    const loader::ByteRangeMap& map,
+    std::string_view context) {
+  if (map.num_sources != 1) {
+    return absl::InvalidArgumentError(absl::StrCat(context, " requires byte_range_map.num_sources == 1"));
+  }
+  std::uint64_t required_bytes = 0;
+  for (const auto& segment : map.segments) {
+    if (segment.kind != loader::ByteRangeSegment::Kind::kData || segment.length == 0) {
+      continue;
+    }
+    if (segment.source_index != 0) {
+      return absl::InvalidArgumentError(absl::StrCat(context, " requires all data segments to use source_index=0"));
+    }
+    if (segment.src_offset > std::numeric_limits<std::uint64_t>::max() - segment.length) {
+      return absl::OutOfRangeError(absl::StrCat(context, " source range overflows uint64_t"));
+    }
+    required_bytes = std::max(required_bytes, segment.src_offset + segment.length);
+  }
+  return required_bytes;
+}
+
+inline absl::StatusOr<std::vector<std::shared_ptr<loader::SeekableSource>>> open_single_loader_sources(
+    std::unique_ptr<IArtifactLoader> loader,
+    const loader::ByteRangeMap& map,
+    std::string_view context) {
+  if (loader == nullptr) {
+    return absl::InvalidArgumentError(absl::StrCat(context, " requires source_loader"));
+  }
+  auto required_bytes_or = required_source_bytes_for_single_source_map(map, context);
+  if (!required_bytes_or.ok()) {
+    return required_bytes_or.status();
+  }
+  auto init_status = loader->initialize();
+  if (!init_status.ok()) {
+    return init_status;
+  }
+  auto size_or = loader->get_artifact_size();
+  if (!size_or.ok()) {
+    return size_or.status();
+  }
+  if (*size_or < *required_bytes_or) {
+    return absl::FailedPreconditionError(absl::StrCat(context, " source is smaller than required byte-range map"));
+  }
+  auto source_or = loader->open_source();
+  if (!source_or.ok()) {
+    return source_or.status();
+  }
+  std::vector<std::shared_ptr<loader::SeekableSource>> sources;
+  sources.emplace_back(std::move(*source_or));
+  return sources;
 }
 
 inline absl::StatusOr<ArtifactLoweringPlan> lower_to_artifact_plan(LowerToArtifactPlanRequest request) {

@@ -46,7 +46,7 @@ jobs:
           key: proto-gen-${{ hashFiles('head/proto/**/*.proto', 'head/proto/buf.gen.yaml', 'head/proto/buf.yaml') }}
       - name: Setup Buf CLI
         if: steps.restore-proto-gen.outputs.cache-hit != 'true'
-        uses: bufbuild/buf-setup-action@v1
+        uses: bufbuild/buf-setup-action@v1.50.0
       - name: Generate
         if: steps.restore-proto-gen.outputs.cache-hit != 'true'
         run: cd head/proto && buf generate

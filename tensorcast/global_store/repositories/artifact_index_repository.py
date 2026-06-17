@@ -50,9 +50,10 @@ class ArtifactIndexRepository(BaseRepository):
                 cursor.close()
         return index_key
 
-    def get(self, index_key: str) -> Optional[bytes]:
+    def get(self, index_key: str, cursor=None) -> Optional[bytes]:
         """Fetch canonical index bytes by key; returns None if not found."""
-        cursor = self.get_cursor()
+        owns_cursor = cursor is None
+        cursor = cursor if cursor is not None else self.get_cursor()
         try:
             row = cursor.execute(
                 "SELECT index_data FROM artifact_indices WHERE index_key = ?",
@@ -60,4 +61,5 @@ class ArtifactIndexRepository(BaseRepository):
             ).fetchone()
             return row[0] if row else None
         finally:
-            cursor.close()
+            if owns_cursor:
+                cursor.close()

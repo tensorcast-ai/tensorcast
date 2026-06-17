@@ -5,7 +5,8 @@
 --
 -- Areas currently covered:
 --   - Global Store (DuckDB-backed): workers, artifact_replicas, replica_counters,
---     artifact_transports, artifacts, artifact_indices, chunk_directory, key_mappings
+--     artifact_transports, progressive replica coverage, artifacts,
+--     artifact_indices, chunk_directory, key_mappings
 --
 -- Notes:
 --   - SQL dialect strives to be DuckDB-compatible as the Global Store uses DuckDB.
@@ -240,6 +241,118 @@ CREATE INDEX IF NOT EXISTS idx_replicas_worker ON artifact_replicas(worker_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_replicas_tensor_index_key ON artifact_replicas(tensor_index_key);
 CREATE INDEX IF NOT EXISTS idx_artifact_replicas_memory_replica ON artifact_replicas(is_memory_replica, artifact_id);
 
+-- Progressive replica dissemination coverage. These rows are partial-source
+-- visibility records only; ordinary complete-replica source selection must not
+-- consult this table.
+CREATE TABLE IF NOT EXISTS replica_progress_coverage (
+    coverage_id TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL,
+    byte_space_kind TEXT NOT NULL,
+    byte_space_id TEXT NOT NULL DEFAULT '',
+    selection_hash TEXT NOT NULL,
+    logical_layout_hash TEXT NOT NULL,
+    hash_space_kind TEXT NOT NULL,
+    hash_space_id TEXT NOT NULL DEFAULT '',
+    canonical_index_multihash TEXT NOT NULL,
+    coverage_order_hash TEXT NOT NULL,
+    group_version_set_id TEXT NOT NULL DEFAULT '',
+    group_part_id TEXT NOT NULL DEFAULT '',
+    replica_id TEXT NOT NULL,
+    daemon_id TEXT NOT NULL,
+    daemon_session_id TEXT NULL,
+    worker_id TEXT NOT NULL,
+    source_export_generation BIGINT NOT NULL,
+    coverage_epoch BIGINT NOT NULL,
+    coverage_kind TEXT CHECK (coverage_kind IN ('byte_prefix')) NOT NULL,
+    state TEXT CHECK (state IN ('pending','verified','failed','retired')) NOT NULL,
+    export_state TEXT CHECK (export_state IN (
+      'not_exportable','in_progress_exportable','complete_exportable'
+    )) NOT NULL,
+    verified_units BIGINT NOT NULL,
+    verified_bytes BIGINT NOT NULL,
+    completed_units BIGINT NOT NULL,
+    completed_bytes BIGINT NOT NULL,
+    total_units BIGINT NOT NULL,
+    total_bytes BIGINT NOT NULL,
+    materialization_attempt_id TEXT NOT NULL,
+    source_transport_id TEXT NULL,
+    source_domain TEXT NOT NULL DEFAULT '',
+    seed_transport_kind TEXT NULL,
+    deadline_at TIMESTAMP WITH TIME ZONE NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(materialization_attempt_id, replica_id, source_export_generation)
+);
+
+CREATE INDEX IF NOT EXISTS idx_progress_coverage_artifact_space_state
+    ON replica_progress_coverage(artifact_id, byte_space_kind, byte_space_id, state, verified_bytes);
+CREATE INDEX IF NOT EXISTS idx_progress_coverage_identity_state
+    ON replica_progress_coverage(selection_hash, logical_layout_hash, coverage_order_hash, state);
+CREATE INDEX IF NOT EXISTS idx_progress_coverage_claim_identity
+    ON replica_progress_coverage(
+        artifact_id, byte_space_kind, byte_space_id,
+        selection_hash, logical_layout_hash,
+        hash_space_kind, hash_space_id, canonical_index_multihash,
+        coverage_order_hash, group_version_set_id, group_part_id,
+        state, verified_units, verified_bytes, deadline_at
+    );
+CREATE INDEX IF NOT EXISTS idx_progress_coverage_daemon_state_deadline
+    ON replica_progress_coverage(daemon_id, state, deadline_at);
+CREATE INDEX IF NOT EXISTS idx_progress_coverage_domain_seed_state
+    ON replica_progress_coverage(source_domain, seed_transport_kind, state);
+CREATE INDEX IF NOT EXISTS idx_progress_coverage_attempt_replica_generation
+    ON replica_progress_coverage(materialization_attempt_id, replica_id, source_export_generation);
+
+-- Durable progressive source claims. Assignment rows are the audit truth for
+-- partial-source reads; progressive_source_counters is admission state only.
+-- coverage_id is kept as an indexed audit relation rather than a DuckDB foreign
+-- key because coverage state must be mutable while assignments reference it.
+CREATE TABLE IF NOT EXISTS progressive_source_assignments (
+    assignment_id TEXT PRIMARY KEY,
+    coverage_id TEXT NOT NULL,
+    requester_daemon_id TEXT NOT NULL,
+    requester_worker_id TEXT NOT NULL,
+    requester_materialization_attempt_id TEXT NOT NULL DEFAULT '',
+    source_daemon_id TEXT NOT NULL,
+    source_worker_id TEXT NOT NULL,
+    source_domain TEXT NOT NULL,
+    seed_transport_kind TEXT NULL,
+    start_unit BIGINT NOT NULL,
+    end_unit_exclusive BIGINT NOT NULL,
+    start_byte BIGINT NOT NULL,
+    end_byte_exclusive BIGINT NOT NULL,
+    source_export_generation BIGINT NOT NULL,
+    state TEXT CHECK (state IN (
+      'claimed','reading','succeeded','failed','expired','cancelled'
+    )) NOT NULL,
+    deadline_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    request_fingerprint BLOB NOT NULL,
+    outcome_detail TEXT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(request_fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_progress_assignments_coverage_state_deadline
+    ON progressive_source_assignments(coverage_id, state, deadline_at);
+CREATE INDEX IF NOT EXISTS idx_progress_assignments_source_state_deadline
+    ON progressive_source_assignments(source_daemon_id, state, deadline_at);
+CREATE INDEX IF NOT EXISTS idx_progress_assignments_requester_attempt
+    ON progressive_source_assignments(requester_daemon_id, requester_worker_id, requester_materialization_attempt_id);
+
+CREATE TABLE IF NOT EXISTS progressive_source_counters (
+    source_replica_id TEXT NOT NULL,
+    source_daemon_id TEXT NOT NULL,
+    source_export_generation BIGINT NOT NULL,
+    active_assignments INTEGER NOT NULL DEFAULT 0,
+    last_assigned_at TIMESTAMP WITH TIME ZONE NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (source_replica_id, source_export_generation)
+);
+
+CREATE INDEX IF NOT EXISTS idx_progress_source_counters_daemon_active
+    ON progressive_source_counters(source_daemon_id, active_assignments);
+
 -- Deduplicated tensor index storage
 CREATE TABLE IF NOT EXISTS artifact_indices (
     index_key TEXT PRIMARY KEY,            -- SHA-256 hex of canonical index bytes
@@ -408,20 +521,163 @@ CREATE TABLE IF NOT EXISTS artifact_persistence_status (
 );
 CREATE INDEX IF NOT EXISTS idx_artifact_persistence_status_artifact_state ON artifact_persistence_status(artifact_id, state);
 
--- Key mapping: Human key -> artifact_id with optional routing hints
+-- Key mapping: Human key -> current target with optional routing hints.
+--
+-- `key_mappings` is intentionally only the fast current pointer. The
+-- generation-forming truth lives in `key_version_targets`.
 CREATE TABLE IF NOT EXISTS key_mappings (
     key TEXT PRIMARY KEY,
-    artifact_id TEXT NOT NULL,
+    artifact_id TEXT NULL,
     replica_uuid TEXT NULL,
     daemon_address TEXT NULL,
     ttl_seconds BIGINT NULL,
     generation BIGINT NOT NULL DEFAULT 0,
     kind TEXT NOT NULL DEFAULT 'IMMUTABLE',
+    target_kind TEXT NOT NULL DEFAULT 'artifact_selection' CHECK (target_kind IN ('artifact_selection','group_version_set')),
+    group_version_set_id TEXT NULL,
+    selection_hash BLOB NULL,
+    manifest_hash BLOB NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CHECK (
+        (
+            target_kind = 'artifact_selection'
+            AND artifact_id IS NOT NULL
+            AND group_version_set_id IS NULL
+        )
+        OR (
+            target_kind = 'group_version_set'
+            AND group_version_set_id IS NOT NULL
+        )
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_key_mappings_artifact ON key_mappings(artifact_id);
+
+CREATE TABLE IF NOT EXISTS key_version_targets (
+    namespace TEXT NOT NULL DEFAULT '',
+    key TEXT NOT NULL,
+    generation BIGINT NOT NULL,
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('artifact_selection','group_version_set')),
+    artifact_id TEXT NULL,
+    view_id TEXT NULL,
+    group_version_set_id TEXT NULL,
+    selection_hash BLOB NULL,
+    manifest_hash BLOB NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (
+        (
+            target_kind = 'artifact_selection'
+            AND artifact_id IS NOT NULL
+            AND group_version_set_id IS NULL
+        )
+        OR (
+            target_kind = 'group_version_set'
+            AND group_version_set_id IS NOT NULL
+            AND artifact_id IS NULL
+            AND view_id IS NULL
+        )
+    ),
+    PRIMARY KEY (namespace, key, generation)
+);
+
+CREATE INDEX IF NOT EXISTS idx_key_version_targets_current ON key_version_targets(namespace, key, generation);
+CREATE INDEX IF NOT EXISTS idx_key_version_targets_artifact ON key_version_targets(artifact_id, view_id);
+CREATE INDEX IF NOT EXISTS idx_key_version_targets_version_set ON key_version_targets(group_version_set_id);
+
+CREATE TABLE IF NOT EXISTS group_version_sets (
+    version_set_id TEXT PRIMARY KEY,
+    realization_kind TEXT NOT NULL CHECK (realization_kind IN ('same_selection','per_part_selection')),
+    namespace TEXT NULL,
+    key TEXT NULL,
+    key_generation BIGINT NULL,
+    total_parts INTEGER NOT NULL,
+    manifest_hash BLOB NOT NULL UNIQUE,
+    manifest_generation BIGINT NOT NULL DEFAULT 1,
+    logical_layout_hash BLOB NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS group_version_set_parts (
+    version_set_id TEXT NOT NULL,
+    part_id TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    view_id TEXT NULL,
+    requested_byte_space TEXT NOT NULL,
+    selection_hash BLOB NOT NULL,
+    logical_layout_hash BLOB NULL,
+    part_metadata_json TEXT NULL,
+    selection_proto BLOB NULL,
+    PRIMARY KEY (version_set_id, part_id),
+    FOREIGN KEY (version_set_id) REFERENCES group_version_sets(version_set_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_version_set_parts_artifact ON group_version_set_parts(artifact_id, view_id, requested_byte_space);
+
+CREATE TABLE IF NOT EXISTS group_realization_transactions (
+    transaction_id TEXT PRIMARY KEY,
+    group_kind TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    epoch BIGINT NOT NULL,
+    version_set_id TEXT NOT NULL,
+    realization_kind TEXT NOT NULL CHECK (realization_kind IN ('same_selection','per_part_selection')),
+    transaction_fingerprint BLOB NOT NULL,
+    required_part_ids_json TEXT NOT NULL,
+    total_parts INTEGER NOT NULL,
+    prepared_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    published_count INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL CHECK (
+        state IN ('open','resolved','preparing','ready_to_publish','published','aborted','expired')
+    ),
+    deadline_unix_nanos BIGINT NULL,
+    namespace TEXT NULL,
+    key TEXT NULL,
+    key_generation BIGINT NULL,
+    manifest_hash BLOB NULL,
+    failure_code TEXT NULL,
+    failure_detail TEXT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_state_change_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (group_kind, group_id, epoch),
+    FOREIGN KEY (version_set_id) REFERENCES group_version_sets(version_set_id)
+);
+
+CREATE TABLE IF NOT EXISTS group_realization_members (
+    transaction_id TEXT NOT NULL,
+    part_id TEXT NOT NULL,
+    daemon_id TEXT NOT NULL DEFAULT '',
+    worker_id TEXT NULL,
+    daemon_session_id TEXT NULL,
+    materialization_attempt_id TEXT NULL,
+    artifact_id TEXT NOT NULL,
+    view_id TEXT NULL,
+    requested_byte_space TEXT NOT NULL,
+    selection_hash BLOB NOT NULL,
+    member_fingerprint BLOB NULL,
+    state TEXT NOT NULL CHECK (
+        state IN ('joined','preparing','prepared','published','failed','cancelled','expired')
+    ),
+    staged_binding_id TEXT NULL,
+    staged_binding_value_id TEXT NULL,
+    staging_token TEXT NULL,
+    staging_epoch BIGINT NULL,
+    expected_previous_seal_generation BIGINT NULL,
+    prepared_value_hash BLOB NULL,
+    source_replica_id TEXT NULL,
+    source_export_generation BIGINT NULL,
+    child_transport_request_id TEXT NULL,
+    failure_code TEXT NULL,
+    failure_detail TEXT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (transaction_id, part_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_realization_transactions_state_deadline ON group_realization_transactions(state, deadline_unix_nanos);
+CREATE INDEX IF NOT EXISTS idx_group_realization_transactions_version_set ON group_realization_transactions(version_set_id);
+CREATE INDEX IF NOT EXISTS idx_group_realization_members_state ON group_realization_members(transaction_id, state);
 
 -- Disk locations (durable shared-disk persistence locations)
 CREATE TABLE IF NOT EXISTS artifact_disk_locations (

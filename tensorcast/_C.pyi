@@ -82,11 +82,6 @@ def allocate_cuda_memory(
 ) -> _Ptr: ...
 
 
-def get_cuda_memory_handle(
-    device_id: int,
-    memory_ptr: _Ptr,
-) -> bytes: ...
-
 def get_cuda_memory_handle_with_offset(
     device_id: int,
     memory_ptr: _Ptr,

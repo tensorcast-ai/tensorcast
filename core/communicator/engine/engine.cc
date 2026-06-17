@@ -4,18 +4,20 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cstring>
 #include <cstdlib>
+#include <cstring>
 #include <format>
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "absl/base/call_once.h"
 #include "absl/cleanup/cleanup.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -35,6 +37,7 @@
 #include "core/communicator/engine/protocol.h"
 #include "core/communicator/engine/staging_flow_controller.h"
 #include "core/communicator/misc/utils.h"
+#include "core/communicator/routing/types.h"
 #include "core/communicator/transport/rdma_context.h"
 #include "core/cuda/cuda_api.h"
 #include "opentelemetry/common/attribute_value.h"
@@ -52,6 +55,8 @@ using base::COMMUNICATE_ENGINE_DEV_GPU;
 using misc::get_us;
 using misc::INTERNAL_ERROR;
 using misc::SUCCESS;
+using tensorcast::store::StableLocalBackingKind;
+using tensorcast::store::StableLocalBackingRef;
 using transport::future_read_result_t;
 using transport::net_dev_t;
 using transport::PartitionTensor;
@@ -59,8 +64,74 @@ using transport::RdmaContext;
 using transport::read_request_t;
 using transport::tcp_transport_t;
 
+struct RdmaReadPlanSourceSlice {
+  uint32_t source_slice_index = 0;
+  std::string tensor_key;
+  uint64_t remote_offset = 0;
+  uint64_t bytes = 0;
+  std::shared_ptr<PartitionTensor> tensor;
+  std::shared_ptr<MemoryStager> stager;
+  net_dev_t dev;
+  StagingWindow::StageFn stage_fn;
+  uint64_t chunk_size = 0;
+  bool zero_copy = false;
+};
+
+struct RdmaSourceStageProfile {
+  uint64_t window_count = 0;
+  uint64_t segment_count = 0;
+  uint64_t stage_calls = 0;
+  uint64_t staged_bytes = 0;
+  uint64_t cpu_stage_calls = 0;
+  uint64_t cpu_stage_bytes = 0;
+  uint64_t stage_total_us = 0;
+  uint64_t cpu_pool_allocate_us = 0;
+  uint64_t cpu_lease_acquire_us = 0;
+  uint64_t cpu_memcpy_us = 0;
+  uint64_t mr_us = 0;
+  uint64_t mr_cache_hits = 0;
+  uint64_t mr_cache_misses = 0;
+  uint64_t max_cpu_memcpy_us = 0;
+  uint64_t max_mr_us = 0;
+};
+
+struct Communicator::LazySourceMrInflightState {
+  absl::Mutex mu;
+  absl::CondVar cv;
+  bool registering ABSL_GUARDED_BY(mu) = true;
+  absl::Status last_status ABSL_GUARDED_BY(mu) = absl::UnknownError("lazy source MR registration still pending");
+};
+
+absl::Mutex& lazy_source_mr_test_hook_mu() {
+  static auto* mu = new absl::Mutex();
+  return *mu;
+}
+
+std::function<void(int, std::string_view, int16_t)>& lazy_source_mr_test_hook_storage() {
+  static auto* hook = new std::function<void(int, std::string_view, int16_t)>();
+  return *hook;
+}
+
+void maybe_run_lazy_source_mr_test_hook(int event, std::string_view tensor_key, int16_t rail_id) {
+  std::function<void(int, std::string_view, int16_t)> hook_copy;
+  {
+    absl::MutexLock lock(&lazy_source_mr_test_hook_mu());
+    hook_copy = lazy_source_mr_test_hook_storage();
+  }
+  if (hook_copy) {
+    hook_copy(event, tensor_key, rail_id);
+  }
+}
+
 struct RdmaReadSession {
+  enum class Mode {
+    kLegacyTensor = 0,
+    kReadPlan = 1,
+  };
+
+  Mode mode = Mode::kLegacyTensor;
   ProtoReadRequest request;
+  ProtoReadPlanRequestHeader plan_request;
   std::string tensor_key;
   std::string request_key;
   std::string transfer_id;
@@ -72,6 +143,25 @@ struct RdmaReadSession {
   std::unique_ptr<FlowCreditLedger> direct_ledger;
   std::unique_ptr<StagingWindow> window;
   bool zero_copy = false;
+  bool direct_source_response = false;
+  uint32_t read_plan_window_segment_limit = 0;
+  std::shared_ptr<RdmaSourceStageProfile> source_stage_profile;
+  std::chrono::steady_clock::time_point created_at = std::chrono::steady_clock::now();
+  uint64_t first_stage_start_us = 0;
+  uint64_t first_window_send_us = 0;
+  uint64_t first_window_segment_count = 0;
+  uint64_t first_window_stage_calls = 0;
+  uint64_t first_window_staged_bytes = 0;
+  uint64_t first_window_cpu_stage_bytes = 0;
+  uint64_t first_window_stage_total_us = 0;
+  uint64_t first_window_cpu_memcpy_us = 0;
+  uint64_t first_window_mr_us = 0;
+  uint64_t first_window_mr_cache_hits = 0;
+  uint64_t first_window_mr_cache_misses = 0;
+  std::vector<RdmaReadPlanSourceSlice> plan_source_slices;
+  size_t next_source_slice = 0;
+  uint64_t next_source_slice_offset = 0;
+  uint32_t next_window_seq = 0;
 };
 
 struct Communicator::GpuChannelLease {
@@ -99,6 +189,558 @@ struct Communicator::TensorReadLease {
   std::string tensor_key;
 };
 
+struct Communicator::StableLocalBackingState : public std::enable_shared_from_this<StableLocalBackingState> {
+  struct ChunkRegistration {
+    uint64_t chunk_index = 0;
+    uint64_t base_addr = 0;
+    uint64_t bytes = 0;
+    struct ibv_mr* mr = nullptr;
+  };
+
+  struct ChunkEntry {
+    enum class State {
+      kEmpty,
+      kRegistering,
+      kReady,
+      kFailed,
+    };
+
+    absl::Mutex mu;
+    absl::CondVar cv;
+    State state ABSL_GUARDED_BY(mu) = State::kEmpty;
+    ChunkRegistration registration ABSL_GUARDED_BY(mu);
+    absl::Status last_error ABSL_GUARDED_BY(mu) = absl::OkStatus();
+  };
+
+  struct RailRegistration {
+    int16_t rail_id = -1;
+    std::string nic_name;
+    net_dev_t dev;
+    absl::Mutex mu;
+    absl::flat_hash_map<uint64_t, std::shared_ptr<ChunkEntry>> chunks ABSL_GUARDED_BY(mu);
+  };
+
+  struct ChunkHandle {
+    int16_t rail_id = -1;
+    std::string nic_name;
+    struct ibv_mr* mr = nullptr;
+    uint64_t chunk_index = 0;
+    bool cache_hit = false;
+    bool waited_on_inflight = false;
+    bool registered_now = false;
+  };
+
+  struct ResolvedChunk {
+    uint64_t chunk_index = 0;
+    uint64_t chunk_base_addr = 0;
+    uint64_t chunk_bytes = 0;
+    uint64_t requested_chunk_bytes = 0;
+  };
+
+  struct Use {
+    explicit Use(std::shared_ptr<StableLocalBackingState> owner) : owner(std::move(owner)) {}
+
+    ~Use() {
+      if (owner == nullptr) {
+        return;
+      }
+      absl::MutexLock lock(&owner->lifecycle_mu);
+      CHECK(owner->inflight_uses > 0);
+      --owner->inflight_uses;
+      if (owner->retiring && owner->inflight_uses == 0) {
+        owner->drained_cv.SignalAll();
+      }
+    }
+
+    std::shared_ptr<StableLocalBackingState> owner;
+  };
+
+  ~StableLocalBackingState() {
+    std::vector<std::shared_ptr<RailRegistration>> rail_states;
+    {
+      absl::MutexLock lock(&rails_mu);
+      rail_states.reserve(rails.size());
+      for (const auto& [rail_id, registration] : rails) {
+        (void)rail_id;
+        rail_states.push_back(registration);
+      }
+    }
+    for (const auto& rail : rail_states) {
+      if (rail == nullptr) {
+        continue;
+      }
+      std::vector<std::pair<uint64_t, std::shared_ptr<ChunkEntry>>> entries;
+      {
+        absl::MutexLock lock(&rail->mu);
+        entries.reserve(rail->chunks.size());
+        for (const auto& [chunk_index, entry] : rail->chunks) {
+          entries.emplace_back(chunk_index, entry);
+        }
+      }
+      for (const auto& [chunk_index, entry] : entries) {
+        if (entry == nullptr) {
+          continue;
+        }
+
+        struct ibv_mr* mr = nullptr;
+        {
+          absl::MutexLock entry_lock(&entry->mu);
+          if (entry->state == ChunkEntry::State::kReady) {
+            mr = entry->registration.mr;
+          }
+        }
+
+        if (mr == nullptr) {
+          continue;
+        }
+        const int rc = misc::wrap_ibv_dereg_mr(mr);
+        if (rc != misc::SUCCESS) {
+          LOG(WARNING) << "stable_local_backing.dereg_failed"
+                       << " backing_id=" << backing.backing_id << " rail_id=" << rail->rail_id
+                       << " nic=" << rail->nic_name << " chunk_index=" << chunk_index;
+        }
+      }
+    }
+  }
+
+  std::shared_ptr<void> acquire_use() {
+    absl::MutexLock lock(&lifecycle_mu);
+    if (retiring) {
+      return nullptr;
+    }
+    ++inflight_uses;
+    return std::make_shared<Use>(shared_from_this());
+  }
+
+  void begin_retire_and_wait() {
+    absl::MutexLock lock(&lifecycle_mu);
+    retiring = true;
+    while (inflight_uses > 0) {
+      drained_cv.Wait(&lifecycle_mu);
+    }
+  }
+
+  absl::Status merge_activation_backing(const StableLocalBackingRef& candidate, std::shared_ptr<void> keepalive) {
+    absl::MutexLock lock(&lifecycle_mu);
+    if (candidate.kind != backing.kind || candidate.backing_id != backing.backing_id ||
+        candidate.backing_base_addr != backing.backing_base_addr || candidate.backing_bytes != backing.backing_bytes ||
+        candidate.dev_type != backing.dev_type || candidate.dev_id != backing.dev_id) {
+      return absl::FailedPreconditionError("stable local backing id already exists with different metadata");
+    }
+    if (backing.slot_bytes == 0 && candidate.slot_bytes > 0) {
+      backing.slot_bytes = candidate.slot_bytes;
+    } else if (candidate.slot_bytes > 0 && backing.slot_bytes > 0 && backing.slot_bytes != candidate.slot_bytes) {
+      return absl::FailedPreconditionError("stable local backing slot_bytes mismatch");
+    }
+    if (keepalive != nullptr) {
+      activation_keepalive = std::move(keepalive);
+    }
+    return absl::OkStatus();
+  }
+
+  absl::StatusOr<uint64_t> compute_requested_chunk_bytes(uint64_t requested_slot_bytes, uint32_t requested_chunk_slots)
+      const {
+    if (requested_slot_bytes == 0 || requested_chunk_slots == 0) {
+      return absl::InvalidArgumentError("stable local backing chunk registration requires slot geometry");
+    }
+    if (requested_slot_bytes > std::numeric_limits<uint64_t>::max() / requested_chunk_slots) {
+      return absl::OutOfRangeError("stable local backing chunk geometry overflows");
+    }
+    return requested_slot_bytes * requested_chunk_slots;
+  }
+
+  absl::Status validate_geometry_locked(
+      uint64_t requested_slot_bytes,
+      uint32_t requested_chunk_slots,
+      uint64_t requested_chunk_bytes) ABSL_EXCLUSIVE_LOCKS_REQUIRED(lifecycle_mu) {
+    if (registration_slot_bytes == 0) {
+      registration_slot_bytes = requested_slot_bytes;
+      registration_chunk_slots = requested_chunk_slots;
+      registration_chunk_bytes = requested_chunk_bytes;
+      return absl::OkStatus();
+    }
+    if (registration_slot_bytes != requested_slot_bytes || registration_chunk_slots != requested_chunk_slots ||
+        registration_chunk_bytes != requested_chunk_bytes) {
+      return absl::FailedPreconditionError("stable local backing chunk geometry mismatch");
+    }
+    return absl::OkStatus();
+  }
+
+  absl::StatusOr<ResolvedChunk> resolve_chunk_for_region(
+      uint64_t requested_slot_bytes,
+      uint32_t requested_chunk_slots,
+      uint64_t local_addr,
+      uint64_t local_bytes) const {
+    if (local_addr < backing.backing_base_addr) {
+      return absl::InvalidArgumentError("stable local backing local_addr precedes backing base");
+    }
+    const auto requested_chunk_bytes_or = compute_requested_chunk_bytes(requested_slot_bytes, requested_chunk_slots);
+    if (!requested_chunk_bytes_or.ok()) {
+      return requested_chunk_bytes_or.status();
+    }
+    const uint64_t requested_chunk_bytes = *requested_chunk_bytes_or;
+    const uint64_t region_offset = local_addr - backing.backing_base_addr;
+    if (region_offset > std::numeric_limits<uint64_t>::max() - local_bytes ||
+        region_offset + local_bytes > backing.backing_bytes) {
+      return absl::InvalidArgumentError("stable local backing local region exceeds backing bounds");
+    }
+    if (region_offset % requested_slot_bytes != 0) {
+      return absl::InvalidArgumentError("stable local backing local region is not slot-aligned");
+    }
+    if (local_bytes == 0 || local_bytes > requested_slot_bytes) {
+      return absl::InvalidArgumentError("stable local backing local region size is incompatible with slot_bytes");
+    }
+    const uint64_t slot_index = region_offset / requested_slot_bytes;
+    const uint64_t chunk_index = slot_index / requested_chunk_slots;
+    if (chunk_index > std::numeric_limits<uint64_t>::max() / requested_chunk_bytes) {
+      return absl::OutOfRangeError("stable local backing chunk offset overflows");
+    }
+    const uint64_t chunk_base_offset = chunk_index * requested_chunk_bytes;
+    if (chunk_base_offset >= backing.backing_bytes) {
+      return absl::OutOfRangeError("stable local backing chunk base exceeds backing bytes");
+    }
+    const uint64_t chunk_base_addr = backing.backing_base_addr + chunk_base_offset;
+    const uint64_t chunk_bytes = std::min<uint64_t>(requested_chunk_bytes, backing.backing_bytes - chunk_base_offset);
+    if (region_offset + local_bytes > chunk_base_offset + chunk_bytes) {
+      return absl::InvalidArgumentError("stable local backing local region crosses chunk boundary");
+    }
+    return ResolvedChunk{
+        .chunk_index = chunk_index,
+        .chunk_base_addr = chunk_base_addr,
+        .chunk_bytes = chunk_bytes,
+        .requested_chunk_bytes = requested_chunk_bytes,
+    };
+  }
+
+  absl::StatusOr<ResolvedChunk> resolve_chunk_by_index(
+      uint64_t requested_slot_bytes,
+      uint32_t requested_chunk_slots,
+      uint64_t chunk_index) const {
+    const auto requested_chunk_bytes_or = compute_requested_chunk_bytes(requested_slot_bytes, requested_chunk_slots);
+    if (!requested_chunk_bytes_or.ok()) {
+      return requested_chunk_bytes_or.status();
+    }
+    const uint64_t requested_chunk_bytes = *requested_chunk_bytes_or;
+    if (backing.backing_bytes == 0) {
+      return absl::InvalidArgumentError("stable local backing requires non-zero backing_bytes");
+    }
+    if (chunk_index > std::numeric_limits<uint64_t>::max() / requested_chunk_bytes) {
+      return absl::OutOfRangeError("stable local backing chunk offset overflows");
+    }
+    const uint64_t chunk_base_offset = chunk_index * requested_chunk_bytes;
+    if (chunk_base_offset >= backing.backing_bytes) {
+      return absl::OutOfRangeError("stable local backing chunk base exceeds backing bytes");
+    }
+    return ResolvedChunk{
+        .chunk_index = chunk_index,
+        .chunk_base_addr = backing.backing_base_addr + chunk_base_offset,
+        .chunk_bytes = std::min<uint64_t>(requested_chunk_bytes, backing.backing_bytes - chunk_base_offset),
+        .requested_chunk_bytes = requested_chunk_bytes,
+    };
+  }
+
+  absl::Status ensure_geometry(
+      uint64_t requested_slot_bytes,
+      uint32_t requested_chunk_slots,
+      uint64_t requested_chunk_bytes) {
+    absl::MutexLock lock(&lifecycle_mu);
+    if (retiring) {
+      return absl::FailedPreconditionError("stable local backing is retiring");
+    }
+    return validate_geometry_locked(requested_slot_bytes, requested_chunk_slots, requested_chunk_bytes);
+  }
+
+  std::shared_ptr<RailRegistration> get_or_create_rail(net_dev_t dev, int16_t rail_id) {
+    absl::MutexLock lock(&rails_mu);
+    auto it = rails.find(rail_id);
+    if (it != rails.end()) {
+      return it->second;
+    }
+    auto rail = std::make_shared<RailRegistration>();
+    rail->rail_id = rail_id;
+    rail->nic_name = dev->get_name();
+    rail->dev = dev;
+    rails.emplace(rail_id, rail);
+    return rail;
+  }
+
+  std::shared_ptr<ChunkEntry> get_or_create_chunk_entry(
+      const std::shared_ptr<RailRegistration>& rail,
+      uint64_t chunk_index) {
+    absl::MutexLock lock(&rail->mu);
+    auto it = rail->chunks.find(chunk_index);
+    if (it != rail->chunks.end()) {
+      return it->second;
+    }
+    auto entry = std::make_shared<ChunkEntry>();
+    rail->chunks.emplace(chunk_index, entry);
+    return entry;
+  }
+
+  absl::StatusOr<ChunkHandle> ensure_resolved_chunk(
+      net_dev_t dev,
+      int16_t rail_id,
+      uint64_t requested_slot_bytes,
+      uint32_t requested_chunk_slots,
+      const ResolvedChunk& resolved_chunk) {
+    if (dev == nullptr) {
+      return absl::InvalidArgumentError("stable local backing chunk registration requires a net_dev");
+    }
+
+    auto geometry_status =
+        ensure_geometry(requested_slot_bytes, requested_chunk_slots, resolved_chunk.requested_chunk_bytes);
+    if (!geometry_status.ok()) {
+      return geometry_status;
+    }
+    auto rail = get_or_create_rail(dev, rail_id);
+    auto entry = get_or_create_chunk_entry(rail, resolved_chunk.chunk_index);
+
+    bool waited_on_inflight = false;
+    while (true) {
+      {
+        absl::MutexLock entry_lock(&entry->mu);
+        if (entry->state == ChunkEntry::State::kReady) {
+          return ChunkHandle{
+              .rail_id = rail->rail_id,
+              .nic_name = rail->nic_name,
+              .mr = entry->registration.mr,
+              .chunk_index = resolved_chunk.chunk_index,
+              .cache_hit = !waited_on_inflight,
+              .waited_on_inflight = waited_on_inflight,
+              .registered_now = false,
+          };
+        }
+        if (entry->state == ChunkEntry::State::kRegistering) {
+          waited_on_inflight = true;
+          entry->cv.Wait(&entry->mu);
+          continue;
+        }
+        entry->state = ChunkEntry::State::kRegistering;
+        entry->last_error = absl::OkStatus();
+      }
+
+      constexpr int kAccess = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
+      struct ibv_mr* mr = nullptr;
+      auto status = dev->reg_mr(
+          &mr,
+          reinterpret_cast<void*>(resolved_chunk.chunk_base_addr),
+          static_cast<size_t>(resolved_chunk.chunk_bytes),
+          kAccess);
+
+      absl::Status register_status = absl::OkStatus();
+      if (status != SUCCESS || mr == nullptr) {
+        register_status = absl::InternalError("failed to register stable local backing chunk MR");
+      }
+
+      {
+        absl::MutexLock entry_lock(&entry->mu);
+        if (register_status.ok()) {
+          entry->registration = ChunkRegistration{
+              .chunk_index = resolved_chunk.chunk_index,
+              .base_addr = resolved_chunk.chunk_base_addr,
+              .bytes = resolved_chunk.chunk_bytes,
+              .mr = mr,
+          };
+          entry->state = ChunkEntry::State::kReady;
+        } else {
+          if (mr != nullptr) {
+            const int rc = misc::wrap_ibv_dereg_mr(mr);
+            if (rc != misc::SUCCESS) {
+              LOG(WARNING) << "stable_local_backing.chunk_reg_cleanup_failed"
+                           << " backing_id=" << backing.backing_id << " rail_id=" << rail_id
+                           << " nic=" << rail->nic_name << " chunk_index=" << resolved_chunk.chunk_index;
+            }
+          }
+          entry->last_error = register_status;
+          entry->state = ChunkEntry::State::kFailed;
+        }
+        entry->cv.SignalAll();
+        if (!register_status.ok()) {
+          return register_status;
+        }
+        return ChunkHandle{
+            .rail_id = rail->rail_id,
+            .nic_name = rail->nic_name,
+            .mr = entry->registration.mr,
+            .chunk_index = resolved_chunk.chunk_index,
+            .cache_hit = false,
+            .waited_on_inflight = waited_on_inflight,
+            .registered_now = true,
+        };
+      }
+    }
+  }
+
+  absl::StatusOr<ChunkHandle> ensure_chunk(
+      net_dev_t dev,
+      int16_t rail_id,
+      uint64_t requested_slot_bytes,
+      uint32_t requested_chunk_slots,
+      uint64_t local_addr,
+      uint64_t local_bytes) {
+    auto resolved_chunk_or =
+        resolve_chunk_for_region(requested_slot_bytes, requested_chunk_slots, local_addr, local_bytes);
+    if (!resolved_chunk_or.ok()) {
+      return resolved_chunk_or.status();
+    }
+    return ensure_resolved_chunk(dev, rail_id, requested_slot_bytes, requested_chunk_slots, *resolved_chunk_or);
+  }
+
+  bool try_mark_prewarm_requested(size_t rail_count, uint64_t chunk_count_per_rail) {
+    absl::MutexLock lock(&lifecycle_mu);
+    if (retiring || prewarm_requested) {
+      return false;
+    }
+    prewarm_requested = true;
+    prewarm_complete = rail_count == 0;
+    prewarm_rail_count = rail_count;
+    prewarm_chunk_count_per_rail = chunk_count_per_rail;
+    prewarm_jobs_total = rail_count;
+    prewarm_jobs_completed = 0;
+    prewarm_jobs_failed = 0;
+    if (prewarm_complete) {
+      prewarm_cv.SignalAll();
+    }
+    return true;
+  }
+
+  void note_prewarm_job_finished(bool success) {
+    absl::MutexLock lock(&lifecycle_mu);
+    if (!prewarm_requested) {
+      return;
+    }
+    if (success) {
+      ++prewarm_jobs_completed;
+    } else {
+      ++prewarm_jobs_failed;
+    }
+    if (!prewarm_complete && prewarm_jobs_completed + prewarm_jobs_failed >= prewarm_jobs_total) {
+      prewarm_complete = true;
+      prewarm_cv.SignalAll();
+    }
+  }
+
+  bool prewarm_requested_enabled() const {
+    absl::MutexLock lock(&lifecycle_mu);
+    return prewarm_requested;
+  }
+
+  bool prewarm_complete_for_test() const {
+    absl::MutexLock lock(&lifecycle_mu);
+    return prewarm_complete;
+  }
+
+  bool wait_for_prewarm_completion(absl::Duration timeout) const {
+    absl::MutexLock lock(&lifecycle_mu);
+    if (!prewarm_requested || prewarm_complete) {
+      return true;
+    }
+    const absl::Time deadline = absl::Now() + timeout;
+    while (!prewarm_complete) {
+      if (absl::Now() >= deadline) {
+        break;
+      }
+      prewarm_cv.WaitWithDeadline(&lifecycle_mu, deadline);
+    }
+    return prewarm_complete;
+  }
+
+  std::string rail_chunk_counts_debug_string() const {
+    std::vector<std::shared_ptr<RailRegistration>> rail_states;
+    {
+      absl::MutexLock lock(&rails_mu);
+      rail_states.reserve(rails.size());
+      for (const auto& [rail_id, registration] : rails) {
+        (void)rail_id;
+        rail_states.push_back(registration);
+      }
+    }
+    std::ostringstream oss;
+    bool first = true;
+    for (const auto& registration : rail_states) {
+      if (registration == nullptr) {
+        continue;
+      }
+      if (!first) {
+        oss << ",";
+      }
+      first = false;
+      oss << registration->rail_id << ":" << chunk_count_for_rail(registration->rail_id);
+    }
+    return oss.str();
+  }
+
+  size_t chunk_count_for_rail(int16_t rail_id) const {
+    std::shared_ptr<RailRegistration> rail;
+    {
+      absl::MutexLock lock(&rails_mu);
+      auto it = rails.find(rail_id);
+      if (it == rails.end()) {
+        return 0;
+      }
+      rail = it->second;
+    }
+    if (rail == nullptr) {
+      return 0;
+    }
+    std::vector<std::shared_ptr<ChunkEntry>> entries;
+    {
+      absl::MutexLock lock(&rail->mu);
+      entries.reserve(rail->chunks.size());
+      for (const auto& [chunk_index, entry] : rail->chunks) {
+        (void)chunk_index;
+        entries.push_back(entry);
+      }
+    }
+    size_t ready = 0;
+    for (const auto& entry : entries) {
+      if (entry == nullptr) {
+        continue;
+      }
+      absl::MutexLock entry_lock(&entry->mu);
+      if (entry->state == ChunkEntry::State::kReady) {
+        ++ready;
+      }
+    }
+    return ready;
+  }
+
+  size_t prewarm_rail_count_for_test() const {
+    absl::MutexLock lock(&lifecycle_mu);
+    return prewarm_rail_count;
+  }
+
+  uint64_t prewarm_chunk_count_per_rail_for_test() const {
+    absl::MutexLock lock(&lifecycle_mu);
+    return prewarm_chunk_count_per_rail;
+  }
+
+  std::pair<size_t, size_t> prewarm_job_counters_for_test() const {
+    absl::MutexLock lock(&lifecycle_mu);
+    return {prewarm_jobs_completed, prewarm_jobs_failed};
+  }
+
+  StableLocalBackingRef backing;
+  std::shared_ptr<void> activation_keepalive;
+  mutable absl::Mutex lifecycle_mu;
+  mutable absl::Mutex rails_mu;
+  absl::flat_hash_map<int16_t, std::shared_ptr<RailRegistration>> rails ABSL_GUARDED_BY(rails_mu);
+  uint64_t registration_slot_bytes ABSL_GUARDED_BY(lifecycle_mu) = 0;
+  uint32_t registration_chunk_slots ABSL_GUARDED_BY(lifecycle_mu) = 0;
+  uint64_t registration_chunk_bytes ABSL_GUARDED_BY(lifecycle_mu) = 0;
+  int inflight_uses ABSL_GUARDED_BY(lifecycle_mu) = 0;
+  bool retiring ABSL_GUARDED_BY(lifecycle_mu) = false;
+  bool prewarm_requested ABSL_GUARDED_BY(lifecycle_mu) = false;
+  bool prewarm_complete ABSL_GUARDED_BY(lifecycle_mu) = false;
+  size_t prewarm_rail_count ABSL_GUARDED_BY(lifecycle_mu) = 0;
+  uint64_t prewarm_chunk_count_per_rail ABSL_GUARDED_BY(lifecycle_mu) = 0;
+  size_t prewarm_jobs_total ABSL_GUARDED_BY(lifecycle_mu) = 0;
+  size_t prewarm_jobs_completed ABSL_GUARDED_BY(lifecycle_mu) = 0;
+  size_t prewarm_jobs_failed ABSL_GUARDED_BY(lifecycle_mu) = 0;
+  absl::CondVar drained_cv;
+  mutable absl::CondVar prewarm_cv;
+};
+
 struct Communicator::TransferProgressState {
   std::string transfer_id;
   std::string request_key;
@@ -115,6 +757,176 @@ struct Communicator::TransferProgressState {
 };
 
 namespace {
+
+future_read_result_t make_failed_read_future(absl::Status status, std::string tensor_key = {}) {
+  std::promise<transport::read_result_t> promise;
+  auto future = promise.get_future();
+  transport::read_result_t result;
+  result.status = std::move(status);
+  result.tensor_key = std::move(tensor_key);
+  promise.set_value(std::move(result));
+  return future;
+}
+
+bool add_overflows(uint64_t lhs, uint64_t rhs) {
+  return lhs > std::numeric_limits<uint64_t>::max() - rhs;
+}
+
+absl::StatusOr<std::vector<transport::RdmaTransport::RdmaReadSeg>> BuildPreparedPlanRdmaSegments(
+    const transport::PreparedReadPlan& prepared,
+    const ProtoReadPlanResponseExHeader& header,
+    const ProtoReadPlanResponseExSeg* segments) {
+  std::vector<transport::RdmaTransport::RdmaReadSeg> rdma_segments;
+  rdma_segments.reserve(header.num_segments);
+  uint64_t total_bytes = 0;
+  uint64_t local_addr_min = std::numeric_limits<uint64_t>::max();
+  uint64_t local_addr_max_end = 0;
+  uint64_t remote_addr_min = std::numeric_limits<uint64_t>::max();
+  uint64_t remote_addr_max_end = 0;
+  uint64_t mr_relative_min = std::numeric_limits<uint64_t>::max();
+  uint64_t mr_relative_max_end = 0;
+  uint64_t mr_length_min = std::numeric_limits<uint64_t>::max();
+  uint64_t mr_length_max = 0;
+  std::vector<uint32_t> local_lkeys;
+  std::vector<uint64_t> mr_bases;
+  for (uint32_t i = 0; i < header.num_segments; ++i) {
+    const auto& seg = segments[i];
+    if (seg.source_slice_index >= prepared.logical_plan.source_slices.size()) {
+      return absl::InvalidArgumentError("read_plan response references invalid source slice index");
+    }
+    if (seg.source_slice_index >= prepared.placements_by_source_slice.size()) {
+      return absl::InvalidArgumentError("prepared read_plan missing source slice placement");
+    }
+    const auto& placements = prepared.placements_by_source_slice[seg.source_slice_index];
+    if (placements.empty()) {
+      return absl::FailedPreconditionError("prepared read_plan source slice has no placements");
+    }
+    const auto& source_slice = prepared.logical_plan.source_slices[seg.source_slice_index];
+    if (seg.source_slice_offset > source_slice.bytes || seg.bytes > source_slice.bytes - seg.source_slice_offset) {
+      return absl::OutOfRangeError("read_plan response segment exceeds source slice bounds");
+    }
+    const uint64_t segment_begin = seg.source_slice_offset;
+    const uint64_t segment_end = seg.source_slice_offset + seg.bytes;
+    uint64_t covered_until = segment_begin;
+    for (const auto& placement : placements) {
+      if (placement.local_region_index >= prepared.local_regions.size()) {
+        return absl::InvalidArgumentError("prepared read_plan placement references invalid local region");
+      }
+      if (add_overflows(placement.source_slice_offset, placement.bytes)) {
+        return absl::FailedPreconditionError("prepared read_plan placement source range overflows");
+      }
+      const uint64_t placement_begin = placement.source_slice_offset;
+      const uint64_t placement_end = placement.source_slice_offset + placement.bytes;
+      if (placement_end <= segment_begin) {
+        continue;
+      }
+      if (placement_begin >= segment_end) {
+        break;
+      }
+
+      const uint64_t overlap_begin = std::max<uint64_t>(segment_begin, placement_begin);
+      const uint64_t overlap_end = std::min<uint64_t>(segment_end, placement_end);
+      if (overlap_begin >= overlap_end) {
+        continue;
+      }
+      if (overlap_begin != covered_until) {
+        return absl::FailedPreconditionError("read_plan response segment is not fully covered by prepared placements");
+      }
+
+      const auto& region = prepared.local_regions[placement.local_region_index];
+      struct ibv_mr* mr = region.mr;
+      if (mr == nullptr) {
+        if (region.tensor == nullptr) {
+          return absl::FailedPreconditionError("prepared read_plan local region missing registered tensor");
+        }
+        auto dev = region.tensor->get_dev_by_rail(region.rail_id);
+        if (dev == nullptr) {
+          dev = region.tensor->get_dev();
+        }
+        if (dev == nullptr) {
+          return absl::FailedPreconditionError("prepared read_plan local region missing RDMA device");
+        }
+        region.tensor->wait_mr_ready(dev);
+        mr = region.tensor->get_mr(dev);
+      }
+      if (mr == nullptr) {
+        return absl::FailedPreconditionError("prepared read_plan local region MR not ready");
+      }
+
+      const uint64_t local_offset = overlap_begin - placement_begin;
+      const uint64_t remote_offset = overlap_begin - segment_begin;
+      if (add_overflows(placement.local_region_offset, local_offset) ||
+          add_overflows(region.logical_region.addr, placement.local_region_offset + local_offset) ||
+          add_overflows(seg.addr, remote_offset)) {
+        return absl::FailedPreconditionError("prepared read_plan segment address computation overflow");
+      }
+
+      const uint32_t length = static_cast<uint32_t>(overlap_end - overlap_begin);
+      const uint64_t local_addr = region.logical_region.addr + placement.local_region_offset + local_offset;
+      const uint64_t remote_addr = seg.addr + remote_offset;
+      if (add_overflows(local_addr, length) || add_overflows(remote_addr, length)) {
+        return absl::FailedPreconditionError("prepared read_plan segment end address overflow");
+      }
+      const uint64_t local_end = local_addr + length;
+      const uint64_t remote_end = remote_addr + length;
+      const uint64_t mr_base = reinterpret_cast<uint64_t>(mr->addr);
+      if (local_addr < mr_base) {
+        return absl::FailedPreconditionError("prepared read_plan local addr precedes MR base");
+      }
+      const uint64_t mr_relative = local_addr - mr_base;
+      if (add_overflows(mr_relative, length)) {
+        return absl::FailedPreconditionError("prepared read_plan MR-relative address overflow");
+      }
+      const uint64_t mr_relative_end = mr_relative + length;
+
+      total_bytes += length;
+      local_addr_min = std::min(local_addr_min, local_addr);
+      local_addr_max_end = std::max(local_addr_max_end, local_end);
+      remote_addr_min = std::min(remote_addr_min, remote_addr);
+      remote_addr_max_end = std::max(remote_addr_max_end, remote_end);
+      mr_relative_min = std::min(mr_relative_min, mr_relative);
+      mr_relative_max_end = std::max(mr_relative_max_end, mr_relative_end);
+      mr_length_min = std::min<uint64_t>(mr_length_min, mr->length);
+      mr_length_max = std::max<uint64_t>(mr_length_max, mr->length);
+      local_lkeys.push_back(mr->lkey);
+      mr_bases.push_back(mr_base);
+
+      rdma_segments.push_back(
+          transport::RdmaTransport::RdmaReadSeg{
+              .local_addr = local_addr,
+              .local_lkey = mr->lkey,
+              .length = length,
+              .remote_addr = remote_addr,
+              .rkey = seg.rkey,
+              .window_seq = header.window_seq,
+              .segment_idx = i,
+          });
+      covered_until = overlap_end;
+    }
+    if (covered_until != segment_end) {
+      return absl::FailedPreconditionError("read_plan response segment exceeds prepared placement coverage");
+    }
+  }
+  if (!rdma_segments.empty()) {
+    std::sort(local_lkeys.begin(), local_lkeys.end());
+    local_lkeys.erase(std::unique(local_lkeys.begin(), local_lkeys.end()), local_lkeys.end());
+    std::sort(mr_bases.begin(), mr_bases.end());
+    mr_bases.erase(std::unique(mr_bases.begin(), mr_bases.end()), mr_bases.end());
+    VLOG(2) << "communicator.read_plan_segments"
+            << " request_id=" << header.request_id << " window_seq=" << header.window_seq
+            << " local_registration_mode=" << prepared.local_registration_mode
+            << " stable_backing_id=" << prepared.stable_backing_id << " response_segments=" << header.num_segments
+            << " rdma_segments=" << rdma_segments.size() << " total_bytes=" << total_bytes
+            << " local_span_bytes=" << (local_addr_max_end - local_addr_min)
+            << " remote_span_bytes=" << (remote_addr_max_end - remote_addr_min)
+            << " unique_lkeys=" << local_lkeys.size() << " unique_mr_bases=" << mr_bases.size()
+            << " mr_length_min=" << mr_length_min << " mr_length_max=" << mr_length_max
+            << " mr_relative_min=" << mr_relative_min << " mr_relative_max_end=" << mr_relative_max_end
+            << " mr_relative_span_bytes=" << (mr_relative_max_end - mr_relative_min) << " rail_id=" << prepared.rail_id
+            << " local_nic=" << prepared.local_nic;
+  }
+  return rdma_segments;
+}
 
 struct RdmaDriveResult {
   absl::Status status = absl::OkStatus();
@@ -200,15 +1012,24 @@ StagingWindow::StageFn MakeStageFunction(
     std::string request_key,
     v1::RdmaConfig::StagedRdmaBackend staged_backend,
     bool use_direct,
-    ibv_mr* direct_mr) {
+    ibv_mr* direct_mr,
+    std::shared_ptr<void> direct_keepalive,
+    std::shared_ptr<RdmaSourceStageProfile> source_stage_profile) {
   if (use_direct) {
     const uint64_t base_addr = tensor->get_uint64_addr();
     const uint64_t tensor_bytes = tensor->get_bytes();
-    return [tensor, ledger, request_key = std::move(request_key), base_addr, tensor_bytes, direct_mr](
+    return [tensor,
+            ledger,
+            request_key = std::move(request_key),
+            base_addr,
+            tensor_bytes,
+            direct_mr,
+            direct_keepalive = std::move(direct_keepalive)](
                uint64_t offset, uint32_t bytes, uint32_t /*segment_idx*/) -> absl::StatusOr<StageLease> {
       if (offset + bytes > tensor_bytes) {
         return absl::OutOfRangeError("direct RDMA stage exceeded tensor bounds");
       }
+      (void)direct_keepalive;
       void* device_ptr = reinterpret_cast<void*>(base_addr + offset);
       StageLease::Metadata metadata;
       metadata.transport = StageTransport::kRdma;
@@ -235,10 +1056,23 @@ StagingWindow::StageFn MakeStageFunction(
   }
 
   auto fallback_stager = stager;
-  return [fallback_stager, tensor, dev, ledger, mr_cache, request_key = std::move(request_key), staged_backend](
+  return [fallback_stager,
+          tensor,
+          dev,
+          ledger,
+          mr_cache,
+          request_key = std::move(request_key),
+          staged_backend,
+          source_stage_profile = std::move(source_stage_profile)](
              uint64_t offset, uint32_t bytes, uint32_t /*segment_idx*/) -> absl::StatusOr<StageLease> {
     constexpr int kAccess = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
+    auto to_duration_us = [](std::chrono::steady_clock::time_point start,
+                             std::chrono::steady_clock::time_point end) -> uint64_t {
+      return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+    };
+    const auto stage_started_at = std::chrono::steady_clock::now();
     auto staged_or = fallback_stager->stage(tensor, offset, bytes, MemoryStager::StageMode::kTry);
+    const auto stage_finished_at = std::chrono::steady_clock::now();
     if (!staged_or.ok()) {
       return staged_or.status();
     }
@@ -247,13 +1081,19 @@ StagingWindow::StageFn MakeStageFunction(
     bool deregister_mr = false;
 
     gsl::not_null<void*> exposed_ptr_nn{exposed_ptr};
+    std::optional<HostPinnedCpuStager::StageStats> cpu_stage_stats;
+    if (auto* cpu_stager = dynamic_cast<HostPinnedCpuStager*>(fallback_stager.get()); cpu_stager != nullptr) {
+      cpu_stage_stats = cpu_stager->stage_stats_for_ptr(exposed_ptr_nn);
+    }
     const char* mr_location = StagedBackendToString(staged_backend);
+    const auto mr_started_at = std::chrono::steady_clock::now();
     if (mr_cache) {
       const auto slab = NormalizeMrRegion(*fallback_stager, exposed_ptr_nn, bytes);
       gsl::not_null<void*> mr_base = slab.base;
       size_t mr_bytes = slab.bytes;
 
       auto mr_result = mr_cache->get_or_register(dev->get_pd(), mr_base, mr_bytes, kAccess);
+      const auto mr_finished_at = std::chrono::steady_clock::now();
       staged_mr = mr_result.mr;
       if (staged_mr == nullptr) {
         record_mr_register_metrics(mr_location, "cache_register_failed", false);
@@ -262,6 +1102,28 @@ StagingWindow::StageFn MakeStageFunction(
           LOG(WARNING) << "Failed to release staged buffer after MR cache failure: " << release_status;
         }
         return absl::InternalError("failed to register MR via cache");
+      }
+      if (source_stage_profile != nullptr) {
+        source_stage_profile->stage_calls += 1;
+        source_stage_profile->staged_bytes += bytes;
+        source_stage_profile->stage_total_us += to_duration_us(stage_started_at, stage_finished_at);
+        source_stage_profile->mr_us += to_duration_us(mr_started_at, mr_finished_at);
+        if (mr_result.registered) {
+          source_stage_profile->mr_cache_misses += 1;
+        } else {
+          source_stage_profile->mr_cache_hits += 1;
+        }
+        source_stage_profile->max_mr_us =
+            std::max<uint64_t>(source_stage_profile->max_mr_us, to_duration_us(mr_started_at, mr_finished_at));
+        if (cpu_stage_stats.has_value()) {
+          source_stage_profile->cpu_stage_calls += 1;
+          source_stage_profile->cpu_stage_bytes += cpu_stage_stats->requested_bytes;
+          source_stage_profile->cpu_pool_allocate_us += cpu_stage_stats->pool_allocate_us;
+          source_stage_profile->cpu_lease_acquire_us += cpu_stage_stats->lease_acquire_us;
+          source_stage_profile->cpu_memcpy_us += cpu_stage_stats->memcpy_us;
+          source_stage_profile->max_cpu_memcpy_us =
+              std::max<uint64_t>(source_stage_profile->max_cpu_memcpy_us, cpu_stage_stats->memcpy_us);
+        }
       }
       if (mr_result.registered) {
         record_mr_register_metrics(mr_location, nullptr, true);
@@ -274,6 +1136,25 @@ StagingWindow::StageFn MakeStageFunction(
           LOG(WARNING) << "Failed to release staged buffer after MR registration failure: " << release_status;
         }
         return absl::InternalError("failed to register staged MR");
+      }
+      const auto mr_finished_at = std::chrono::steady_clock::now();
+      if (source_stage_profile != nullptr) {
+        source_stage_profile->stage_calls += 1;
+        source_stage_profile->staged_bytes += bytes;
+        source_stage_profile->stage_total_us += to_duration_us(stage_started_at, stage_finished_at);
+        source_stage_profile->mr_us += to_duration_us(mr_started_at, mr_finished_at);
+        source_stage_profile->mr_cache_misses += 1;
+        source_stage_profile->max_mr_us =
+            std::max<uint64_t>(source_stage_profile->max_mr_us, to_duration_us(mr_started_at, mr_finished_at));
+        if (cpu_stage_stats.has_value()) {
+          source_stage_profile->cpu_stage_calls += 1;
+          source_stage_profile->cpu_stage_bytes += cpu_stage_stats->requested_bytes;
+          source_stage_profile->cpu_pool_allocate_us += cpu_stage_stats->pool_allocate_us;
+          source_stage_profile->cpu_lease_acquire_us += cpu_stage_stats->lease_acquire_us;
+          source_stage_profile->cpu_memcpy_us += cpu_stage_stats->memcpy_us;
+          source_stage_profile->max_cpu_memcpy_us =
+              std::max<uint64_t>(source_stage_profile->max_cpu_memcpy_us, cpu_stage_stats->memcpy_us);
+        }
       }
       record_mr_register_metrics(mr_location, nullptr, true);
       deregister_mr = true;
@@ -523,6 +1404,88 @@ uint32_t compute_direct_window_segments(uint64_t total_bytes, uint64_t chunk_siz
   return static_cast<uint32_t>(std::min<uint64_t>(total_segments, scaled_window));
 }
 
+uint64_t compute_read_plan_direct_chunk_bytes(uint64_t source_bytes) {
+  if (source_bytes == 0) {
+    return 1;
+  }
+  return std::min<uint64_t>(source_bytes, static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()));
+}
+
+uint32_t compute_read_plan_direct_window_segment_limit(uint64_t total_segments) {
+  if (total_segments == 0) {
+    return 1;
+  }
+  const uint64_t max_segments_by_payload =
+      (static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) - sizeof(ProtoReadPlanResponseExHeader)) /
+      sizeof(ProtoReadPlanResponseExSeg);
+  const uint64_t max_segments =
+      std::min<uint64_t>(max_segments_by_payload, static_cast<uint64_t>(std::numeric_limits<int>::max()));
+  return static_cast<uint32_t>(std::min<uint64_t>(total_segments, max_segments));
+}
+
+void log_rdma_source_stage_summary(const RdmaReadSession& session, const absl::Status& status) {
+  if (session.source_stage_profile == nullptr) {
+    return;
+  }
+  const auto& profile = *session.source_stage_profile;
+  if (profile.stage_calls == 0 && profile.window_count == 0) {
+    return;
+  }
+  const char* mode = session.mode == RdmaReadSession::Mode::kReadPlan ? "read_plan" : "legacy_tensor";
+  const double stage_total_ms = static_cast<double>(profile.stage_total_us) / 1000.0;
+  const double alloc_ms = static_cast<double>(profile.cpu_pool_allocate_us) / 1000.0;
+  const double lease_ms = static_cast<double>(profile.cpu_lease_acquire_us) / 1000.0;
+  const double copy_ms = static_cast<double>(profile.cpu_memcpy_us) / 1000.0;
+  const double mr_ms = static_cast<double>(profile.mr_us) / 1000.0;
+  const double source_prep_ms = stage_total_ms + mr_ms;
+  const double copy_share_of_stage_pct = profile.stage_total_us == 0
+      ? 0.0
+      : 100.0 * static_cast<double>(profile.cpu_memcpy_us) / static_cast<double>(profile.stage_total_us);
+  const double copy_share_of_source_prep_pct = source_prep_ms <= 0.0 ? 0.0 : 100.0 * copy_ms / source_prep_ms;
+  const double first_stage_start_ms = static_cast<double>(session.first_stage_start_us) / 1000.0;
+  const double first_window_send_ms = static_cast<double>(session.first_window_send_us) / 1000.0;
+  const double first_window_stage_total_ms = static_cast<double>(session.first_window_stage_total_us) / 1000.0;
+  const double first_window_cpu_memcpy_ms = static_cast<double>(session.first_window_cpu_memcpy_us) / 1000.0;
+  const double first_window_mr_ms = static_cast<double>(session.first_window_mr_us) / 1000.0;
+  const double first_window_other_before_send_ms =
+      std::max(0.0, first_window_send_ms - first_stage_start_ms - first_window_stage_total_ms - first_window_mr_ms);
+  std::ostringstream log;
+  log << "rdma_source_stage_summary"
+      << " mode=" << mode << " request=" << session.request_key;
+  if (session.mode == RdmaReadSession::Mode::kReadPlan) {
+    log << " request_id=" << session.plan_request.request_id
+        << " direct_source_response=" << (session.direct_source_response ? "yes" : "no")
+        << " read_plan_window_segment_limit=" << session.read_plan_window_segment_limit;
+  }
+  log << " tensor_key=" << (session.tensor_key.empty() ? "<read_plan>" : session.tensor_key) << " status=" << status
+      << " windows=" << profile.window_count << " segments=" << profile.segment_count
+      << " source_slices=" << session.plan_source_slices.size() << " stage_calls=" << profile.stage_calls
+      << " staged_bytes=" << profile.staged_bytes << " cpu_stage_calls=" << profile.cpu_stage_calls
+      << " cpu_stage_bytes=" << profile.cpu_stage_bytes << " stage_total_ms=" << stage_total_ms
+      << " cpu_pool_allocate_ms=" << alloc_ms << " cpu_lease_acquire_ms=" << lease_ms << " cpu_memcpy_ms=" << copy_ms
+      << " mr_ms=" << mr_ms << " source_prep_ms=" << source_prep_ms
+      << " copy_share_of_stage_pct=" << copy_share_of_stage_pct
+      << " copy_share_of_source_prep_pct=" << copy_share_of_source_prep_pct
+      << " mr_cache_hits=" << profile.mr_cache_hits << " mr_cache_misses=" << profile.mr_cache_misses
+      << " max_cpu_memcpy_ms=" << (static_cast<double>(profile.max_cpu_memcpy_us) / 1000.0)
+      << " max_mr_ms=" << (static_cast<double>(profile.max_mr_us) / 1000.0)
+      << " first_stage_start_ms=" << first_stage_start_ms << " first_window_send_ms=" << first_window_send_ms
+      << " first_window_segments=" << session.first_window_segment_count
+      << " first_window_stage_calls=" << session.first_window_stage_calls
+      << " first_window_staged_bytes=" << session.first_window_staged_bytes
+      << " first_window_cpu_stage_bytes=" << session.first_window_cpu_stage_bytes
+      << " first_window_stage_total_ms=" << first_window_stage_total_ms
+      << " first_window_cpu_memcpy_ms=" << first_window_cpu_memcpy_ms << " first_window_mr_ms=" << first_window_mr_ms
+      << " first_window_other_before_send_ms=" << first_window_other_before_send_ms
+      << " first_window_mr_cache_hits=" << session.first_window_mr_cache_hits
+      << " first_window_mr_cache_misses=" << session.first_window_mr_cache_misses;
+  if (session.mode == RdmaReadSession::Mode::kReadPlan) {
+    LOG(INFO) << log.str();
+  } else {
+    VLOG(2) << log.str();
+  }
+}
+
 RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession& session) {
   RdmaDriveResult result;
   while (true) {
@@ -556,6 +1519,10 @@ RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession
     if (zero_copy_segments > 0) {
       const int device_id = session.tensor ? session.tensor->get_device_id() : -1;
       record_direct_window_metrics(device_id, zero_copy_segments, zero_copy_bytes);
+    }
+    if (session.source_stage_profile != nullptr) {
+      session.source_stage_profile->window_count += 1;
+      session.source_stage_profile->segment_count += static_cast<uint64_t>(staged_window.segments.size());
     }
 
     result.made_progress = true;
@@ -641,6 +1608,230 @@ RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession
     }
 
     if (!staged_window.more_segments) {
+      result.completed = true;
+      result.status = absl::OkStatus();
+      return result;
+    }
+  }
+}
+
+RdmaDriveResult DriveRdmaPlanSession(Channel::FlowState& flow_state, RdmaReadSession& session) {
+  struct WindowSegment {
+    StageLease lease;
+    uint32_t source_slice_index = 0;
+    uint64_t source_slice_offset = 0;
+    uint32_t bytes = 0;
+    uint32_t segment_idx = 0;
+  };
+
+  RdmaDriveResult result;
+  auto elapsed_us = [&](std::chrono::steady_clock::time_point end) -> uint64_t {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(end - session.created_at).count());
+  };
+  while (true) {
+    if (session.next_source_slice >= session.plan_source_slices.size()) {
+      result.completed = true;
+      result.status = absl::OkStatus();
+      return result;
+    }
+
+    FlowCreditLedger* ledger = session.direct_source_response ? session.direct_ledger.get() : &flow_state.ledger;
+    CHECK(ledger != nullptr);
+    const uint32_t requested_segments = session.direct_source_response
+        ? std::max<uint32_t>(1, session.read_plan_window_segment_limit)
+        : std::max<uint32_t>(1, flow_state.max_window_segments);
+    auto credit_or = ledger->try_acquire(static_cast<int>(requested_segments));
+    if (!credit_or.ok()) {
+      result.status = credit_or.status();
+      return result;
+    }
+    FlowCreditLedger::Lease credit_lease = std::move(credit_or.value());
+    if (credit_lease.granted_segments() <= 0) {
+      result.status = absl::UnavailableError("ledger granted no segments for read_plan");
+      return result;
+    }
+
+    std::vector<WindowSegment> window_segments;
+    window_segments.reserve(static_cast<size_t>(credit_lease.granted_segments()));
+    bool all_zero_copy = true;
+    bool early_window_exit = false;
+    const uint32_t window_seq = session.next_window_seq++;
+    const bool capture_first_window = session.first_window_send_us == 0;
+    uint64_t first_window_stage_calls_before = 0;
+    uint64_t first_window_staged_bytes_before = 0;
+    uint64_t first_window_cpu_stage_bytes_before = 0;
+    uint64_t first_window_stage_total_us_before = 0;
+    uint64_t first_window_cpu_memcpy_us_before = 0;
+    uint64_t first_window_mr_us_before = 0;
+    uint64_t first_window_mr_cache_hits_before = 0;
+    uint64_t first_window_mr_cache_misses_before = 0;
+    if (capture_first_window && session.source_stage_profile != nullptr) {
+      first_window_stage_calls_before = session.source_stage_profile->stage_calls;
+      first_window_staged_bytes_before = session.source_stage_profile->staged_bytes;
+      first_window_cpu_stage_bytes_before = session.source_stage_profile->cpu_stage_bytes;
+      first_window_stage_total_us_before = session.source_stage_profile->stage_total_us;
+      first_window_cpu_memcpy_us_before = session.source_stage_profile->cpu_memcpy_us;
+      first_window_mr_us_before = session.source_stage_profile->mr_us;
+      first_window_mr_cache_hits_before = session.source_stage_profile->mr_cache_hits;
+      first_window_mr_cache_misses_before = session.source_stage_profile->mr_cache_misses;
+    }
+
+    for (uint32_t segment_idx = 0; segment_idx < static_cast<uint32_t>(credit_lease.granted_segments());
+         ++segment_idx) {
+      if (session.next_source_slice >= session.plan_source_slices.size()) {
+        break;
+      }
+      auto& source_slice = session.plan_source_slices[session.next_source_slice];
+      const uint64_t source_slice_offset = session.next_source_slice_offset;
+      const uint64_t remaining_slice_bytes = source_slice.bytes - source_slice_offset;
+      const uint32_t bytes = static_cast<uint32_t>(std::min<uint64_t>(source_slice.chunk_size, remaining_slice_bytes));
+      if (session.first_stage_start_us == 0) {
+        session.first_stage_start_us = elapsed_us(std::chrono::steady_clock::now());
+      }
+      auto lease_or = source_slice.stage_fn(source_slice.remote_offset + source_slice_offset, bytes, segment_idx);
+      if (!lease_or.ok()) {
+        const absl::Status status = lease_or.status();
+        credit_lease.release_unused();
+        if ((absl::IsResourceExhausted(status) || absl::IsUnavailable(status)) && !window_segments.empty()) {
+          early_window_exit = true;
+          break;
+        }
+        for (auto& segment : window_segments) {
+          segment.lease.release();
+        }
+        result.status = status;
+        return result;
+      }
+
+      StageLease lease = std::move(lease_or.value());
+      all_zero_copy = all_zero_copy && lease.metadata().zero_copy;
+      credit_lease.mark_consumed();
+      window_segments.push_back(
+          WindowSegment{
+              .lease = std::move(lease),
+              .source_slice_index = source_slice.source_slice_index,
+              .source_slice_offset = source_slice_offset,
+              .bytes = bytes,
+              .segment_idx = segment_idx,
+          });
+
+      session.next_source_slice_offset += bytes;
+      if (session.next_source_slice_offset == source_slice.bytes) {
+        session.next_source_slice += 1;
+        session.next_source_slice_offset = 0;
+      }
+    }
+
+    if (window_segments.empty()) {
+      result.status = absl::UnavailableError("read_plan staging produced no segments");
+      return result;
+    }
+
+    const bool more_segments = early_window_exit || session.next_source_slice < session.plan_source_slices.size();
+    result.made_progress = true;
+    if (session.source_stage_profile != nullptr) {
+      session.source_stage_profile->window_count += 1;
+      session.source_stage_profile->segment_count += static_cast<uint64_t>(window_segments.size());
+    }
+    VLOG(2) << "rdma_plan_window"
+            << " request=" << session.request_key
+            << " direct_source_response=" << (session.direct_source_response ? "yes" : "no")
+            << " window_seq=" << window_seq << " granted=" << credit_lease.granted_segments()
+            << " segments=" << window_segments.size() << " more=" << (more_segments ? "yes" : "no")
+            << " outstanding=" << ledger->outstanding_credit();
+    const uint32_t seg_count = static_cast<uint32_t>(window_segments.size());
+    auto rsp = std::make_shared<EngineMessage>(
+        ENGINE_OP_READ_PLAN_RESPONSE_EX,
+        static_cast<uint32_t>(sizeof(ProtoReadPlanResponseExHeader) + seg_count * sizeof(ProtoReadPlanResponseExSeg)));
+    auto* hdr = rsp->get_payload<ProtoReadPlanResponseExHeader>();
+    hdr->transport_type = ENGINE_TRANSPORT_RDMA;
+    hdr->staged = all_zero_copy ? 0 : 1;
+    misc::STRNCPY(hdr->nic_name, session.dev ? session.dev->get_name().c_str() : "", kMaxDevName);
+    hdr->request_id = session.plan_request.request_id;
+    hdr->num_segments = seg_count;
+    hdr->window_seq = window_seq;
+    hdr->credit_granted = static_cast<uint32_t>(window_segments.size());
+    hdr->more_segments = more_segments ? 1 : 0;
+    hdr->zero_copy = all_zero_copy ? 1 : 0;
+    hdr->rail_id = session.dev ? session.dev->get_rail_id() : 0;
+
+    std::vector<StageLeaseKey> inserted_keys;
+    inserted_keys.reserve(seg_count);
+    for (uint32_t i = 0; i < seg_count; ++i) {
+      auto& segment = window_segments[i];
+      auto* seg_pl = reinterpret_cast<ProtoReadPlanResponseExSeg*>(
+          reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadPlanResponseExHeader) +
+          i * sizeof(ProtoReadPlanResponseExSeg));
+      seg_pl->source_slice_index = segment.source_slice_index;
+      seg_pl->source_slice_offset = segment.source_slice_offset;
+      seg_pl->addr = reinterpret_cast<uint64_t>(segment.lease.exposed_ptr());
+      seg_pl->bytes = segment.bytes;
+      seg_pl->rkey = segment.lease.mr() ? segment.lease.mr()->rkey : 0;
+
+      StageLease::Metadata metadata = segment.lease.metadata();
+      metadata.window_seq = window_seq;
+      metadata.segment_idx = segment.segment_idx;
+      metadata.offset = segment.source_slice_offset;
+      metadata.bytes = segment.bytes;
+      segment.lease.set_metadata(metadata);
+
+      StageLeaseKey key{
+          .request_key = metadata.request_key,
+          .window_seq = metadata.window_seq,
+          .segment_idx = metadata.segment_idx,
+      };
+      if (hdr->staged) {
+        flow_state.registry.put(key, segment.lease);
+        inserted_keys.push_back(key);
+      }
+    }
+
+    if (session.control_transport->send(rsp) != misc::SUCCESS) {
+      if (hdr->staged) {
+        for (const auto& key : inserted_keys) {
+          auto lease_or = flow_state.registry.take(key);
+          if (lease_or.ok()) {
+            lease_or->release();
+          }
+        }
+      } else {
+        for (auto& segment : window_segments) {
+          segment.lease.release();
+        }
+      }
+      result.status = absl::InternalError("failed to send read_plan response window");
+      return result;
+    }
+
+    if (capture_first_window) {
+      session.first_window_send_us = elapsed_us(std::chrono::steady_clock::now());
+      session.first_window_segment_count = static_cast<uint64_t>(window_segments.size());
+      if (session.source_stage_profile != nullptr) {
+        session.first_window_stage_calls = session.source_stage_profile->stage_calls - first_window_stage_calls_before;
+        session.first_window_staged_bytes =
+            session.source_stage_profile->staged_bytes - first_window_staged_bytes_before;
+        session.first_window_cpu_stage_bytes =
+            session.source_stage_profile->cpu_stage_bytes - first_window_cpu_stage_bytes_before;
+        session.first_window_stage_total_us =
+            session.source_stage_profile->stage_total_us - first_window_stage_total_us_before;
+        session.first_window_cpu_memcpy_us =
+            session.source_stage_profile->cpu_memcpy_us - first_window_cpu_memcpy_us_before;
+        session.first_window_mr_us = session.source_stage_profile->mr_us - first_window_mr_us_before;
+        session.first_window_mr_cache_hits =
+            session.source_stage_profile->mr_cache_hits - first_window_mr_cache_hits_before;
+        session.first_window_mr_cache_misses =
+            session.source_stage_profile->mr_cache_misses - first_window_mr_cache_misses_before;
+      }
+    }
+
+    if (!hdr->staged) {
+      for (auto& segment : window_segments) {
+        segment.lease.release();
+      }
+    }
+
+    if (!more_segments) {
       result.completed = true;
       result.status = absl::OkStatus();
       return result;
@@ -771,6 +1962,72 @@ absl::Status Communicator::wait_for_tensor_reads_to_drain(const std::string& ten
   }
 
   return absl::OkStatus();
+}
+
+std::shared_ptr<Communicator::StableLocalBackingSourceViewState> Communicator::lookup_stable_local_backing_source_view(
+    const std::string& tensor_key) const {
+  absl::MutexLock lock(&stable_source_views_mu_);
+  auto it = stable_source_views_.find(tensor_key);
+  if (it == stable_source_views_.end()) {
+    return nullptr;
+  }
+  return it->second;
+}
+
+absl::StatusOr<Communicator::StableSourceViewMrEnsureResult> Communicator::ensure_stable_local_backing_source_view_mr(
+    const std::string& tensor_key,
+    const std::shared_ptr<StableLocalBackingSourceViewState>& view,
+    const net_dev_t& dev) {
+  if (view == nullptr) {
+    return absl::InvalidArgumentError("stable-backed source view is required");
+  }
+  if (dev == nullptr) {
+    return absl::InvalidArgumentError("stable-backed source view requires an RDMA device");
+  }
+  std::shared_ptr<StableLocalBackingState> state;
+  {
+    absl::MutexLock lock(&stable_local_backings_mu_);
+    auto it = stable_local_backings_.find(view->backing.backing_id);
+    if (it != stable_local_backings_.end()) {
+      state = it->second;
+    }
+  }
+  if (state == nullptr) {
+    return absl::FailedPreconditionError("stable-backed source view backing is not active");
+  }
+  auto stable_use = state->acquire_use();
+  if (stable_use == nullptr) {
+    return absl::FailedPreconditionError("stable-backed source view backing is retiring");
+  }
+
+  const uint32_t chunk_slots = std::max<uint32_t>(1, stable_local_mr_reuse_chunk_slots_);
+  const bool prewarm_requested = state->prewarm_requested_enabled();
+  const bool prewarm_complete = state->prewarm_complete_for_test();
+  auto chunk_or =
+      state->ensure_chunk(dev, dev->get_rail_id(), view->backing.slot_bytes, chunk_slots, view->addr, view->bytes);
+  if (!chunk_or.ok()) {
+    return chunk_or.status();
+  }
+  if (chunk_or->mr == nullptr) {
+    return absl::InternalError("stable-backed source view chunk MR is null");
+  }
+  VLOG(2) << "communicator.read_plan_stable_source_prepare"
+          << " tensor_key=" << tensor_key << " backing_id=" << view->backing.backing_id
+          << " rail_id=" << chunk_or->rail_id << " nic=" << chunk_or->nic_name
+          << " chunk_index=" << chunk_or->chunk_index << " cache_hit=" << chunk_or->cache_hit
+          << " waited_on_inflight=" << chunk_or->waited_on_inflight << " registered_now=" << chunk_or->registered_now
+          << " prewarm_requested=" << prewarm_requested << " prewarm_complete=" << prewarm_complete;
+  return StableSourceViewMrEnsureResult{
+      .mr = chunk_or->mr,
+      .backing_use = stable_use,
+      .backing_id = view->backing.backing_id,
+      .chunk_index = chunk_or->chunk_index,
+      .cache_hit = chunk_or->cache_hit,
+      .waited_on_inflight = chunk_or->waited_on_inflight,
+      .registered_now = chunk_or->registered_now,
+      .prewarm_requested = prewarm_requested,
+      .prewarm_complete = prewarm_complete,
+  };
 }
 
 std::shared_ptr<Communicator::TransferProgressState> Communicator::create_transfer_progress_state(
@@ -1127,6 +2384,25 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, PinnedStagingPo
   }
   configured_conn = std::max(2, configured_conn);
   mtcp_conn_count_ = configured_conn;
+  stable_local_mr_reuse_chunk_slots_ = std::max<uint32_t>(1, config_.rdma().stable_local_mr_reuse_chunk_slots());
+  stable_local_mr_reuse_async_prewarm_enabled_ = false;
+  stable_local_mr_reuse_prewarm_workers_ = 0;
+  if (config_.rdma().has_stable_local_mr_reuse_prewarm_workers()) {
+    stable_local_mr_reuse_prewarm_workers_ = config_.rdma().stable_local_mr_reuse_prewarm_workers();
+    stable_local_mr_reuse_async_prewarm_enabled_ = stable_local_mr_reuse_prewarm_workers_ > 0;
+  } else if (config_.rdma().has_stable_local_mr_reuse_eager_prereg_all_rails()) {
+    stable_local_mr_reuse_async_prewarm_enabled_ = config_.rdma().stable_local_mr_reuse_eager_prereg_all_rails();
+    stable_local_mr_reuse_prewarm_workers_ = stable_local_mr_reuse_async_prewarm_enabled_ ? 1 : 0;
+  }
+  if (config_.rdma().has_stable_local_mr_reuse_prewarm_workers() &&
+      config_.rdma().has_stable_local_mr_reuse_eager_prereg_all_rails()) {
+    const bool alias_enabled = config_.rdma().stable_local_mr_reuse_eager_prereg_all_rails();
+    const bool workers_enabled = config_.rdma().stable_local_mr_reuse_prewarm_workers() > 0;
+    if (alias_enabled != workers_enabled) {
+      LOG(WARNING) << "communicator.rdma.stable_local_mr_reuse_eager_prereg_all_rails is deprecated and ignored "
+                   << "because communicator.rdma.stable_local_mr_reuse_prewarm_workers is set";
+    }
+  }
   const auto mtcp_conn_budget = static_cast<size_t>(configured_conn);
   const size_t recv_num_buffers = num_buffers * mtcp_conn_budget;
   const size_t computed_pool_buffers = num_buffers + recv_num_buffers;
@@ -1326,8 +2602,20 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, PinnedStagingPo
 
     handshake_retry_thread_ = std::thread([this]() { this->handshake_retry_loop(); });
     handshake_retry_thread_started_ = true;
+
+    for (uint32_t worker_index = 0; worker_index < stable_local_mr_reuse_prewarm_workers_; ++worker_index) {
+      stable_local_prewarm_threads_.emplace_back([this]() { this->stable_local_prewarm_loop(); });
+    }
   }
 
+  read_plan_admission_workers_ = resolve_read_plan_admission_worker_count();
+  read_plan_direct_source_workers_ = resolve_read_plan_direct_source_worker_count();
+  for (uint32_t worker_index = 0; worker_index < read_plan_admission_workers_; ++worker_index) {
+    read_plan_admission_threads_.emplace_back([this]() { this->read_plan_admission_loop(); });
+  }
+  for (uint32_t worker_index = 0; worker_index < read_plan_direct_source_workers_; ++worker_index) {
+    read_plan_execution_threads_.emplace_back([this]() { this->read_plan_execution_loop(); });
+  }
   mtcp_staging_thread_ = std::thread([this]() { this->mtcp_staging_loop(); });
 }
 
@@ -1335,16 +2623,34 @@ Communicator::~Communicator() {
   store_.clear();
   stop_.store(true);
   request_queue_.stop();
+  read_plan_admission_queue_.stop();
+  read_plan_execution_queue_.stop();
   handshake_retry_stop_.store(true);
   handshake_retry_cv_.SignalAll();
+  stable_local_prewarm_queue_.stop();
   mtcp_staging_queue_.notify();
   if (handshake_retry_thread_started_ && handshake_retry_thread_.joinable()) {
     handshake_retry_thread_.join();
+  }
+  for (auto& thread : stable_local_prewarm_threads_) {
+    if (thread.joinable()) {
+      thread.join();
+    }
   }
   if (mtcp_staging_thread_.joinable()) {
     mtcp_staging_thread_.join();
   }
   mtcp_staging_queue_.stop();
+  for (auto& thread : read_plan_admission_threads_) {
+    if (thread.joinable()) {
+      thread.join();
+    }
+  }
+  for (auto& thread : read_plan_execution_threads_) {
+    if (thread.joinable()) {
+      thread.join();
+    }
+  }
   if (request_thread_.joinable()) {
     request_thread_.join();
   }
@@ -1357,6 +2663,977 @@ Communicator::~Communicator() {
   }
 
   pending_requests_.clear();
+  {
+    absl::MutexLock lock(&stable_local_backings_mu_);
+    stable_local_backings_.clear();
+  }
+}
+
+misc::result_t Communicator::send_read_plan_failed_response(
+    const tcp_transport_t& control_transport,
+    uint64_t request_id,
+    uint32_t reason) {
+  if (control_transport == nullptr) {
+    return misc::FAILED;
+  }
+  auto rsp = EngineMessage::make_message<ProtoReadPlanFailed>(ENGINE_OP_READ_PLAN_FAILED);
+  auto* payload = rsp->get_payload<ProtoReadPlanFailed>();
+  payload->request_id = request_id;
+  payload->reason = reason;
+  return control_transport->send(rsp);
+}
+
+uint32_t Communicator::resolve_read_plan_admission_worker_count() const {
+  const uint32_t configured = config_.rdma().read_plan_admission_workers();
+  if (configured > 0) {
+    return configured;
+  }
+  if (!enable_rdma_) {
+    return 1;
+  }
+  if (rdma_context_ == nullptr) {
+    return 2;
+  }
+  const size_t visible_rail_count = rdma_context_->list_devs().size();
+  return static_cast<uint32_t>(std::min<size_t>(4, std::max<size_t>(2, visible_rail_count)));
+}
+
+uint32_t Communicator::resolve_read_plan_direct_source_worker_count() const {
+  const uint32_t configured = config_.rdma().read_plan_direct_source_workers();
+  if (configured > 0) {
+    return configured;
+  }
+  if (!enable_rdma_) {
+    return 1;
+  }
+  if (rdma_context_ == nullptr) {
+    return 2;
+  }
+  const size_t visible_rail_count = rdma_context_->list_devs().size();
+  return static_cast<uint32_t>(std::min<size_t>(4, std::max<size_t>(1, visible_rail_count)));
+}
+
+void Communicator::read_plan_admission_loop() {
+  while (true) {
+    auto task = read_plan_admission_queue_.pop(/*block=*/true);
+    if (task == nullptr) {
+      if (stop_.load(std::memory_order_acquire)) {
+        return;
+      }
+      continue;
+    }
+
+    auto session_or = admit_read_plan_request(*task);
+    if (!session_or.ok()) {
+      const absl::Status status = session_or.status();
+      if (send_read_plan_failed_response(
+              task->control_transport, task->request.request_id, ReadFailedReasonFromStatus(status)) != SUCCESS) {
+        LOG(WARNING) << "Failed to send READ_PLAN_FAILED after async admission failure request_id="
+                     << task->request.request_id;
+      }
+      continue;
+    }
+
+    auto session = *session_or;
+    const bool direct_source = session->direct_source_response;
+    absl::Status schedule_status = direct_source ? schedule_read_plan_direct_source_lane(task->channel, session)
+                                                 : schedule_read_plan_staged_session(task->channel, session);
+    if (!schedule_status.ok()) {
+      if (!session->transfer_id.empty()) {
+        finish_source_transfer_progress(session->transfer_id, schedule_status);
+      }
+      if (send_read_plan_failed_response(
+              task->control_transport, task->request.request_id, ReadFailedReasonFromStatus(schedule_status)) !=
+          SUCCESS) {
+        LOG(WARNING) << "Failed to send READ_PLAN_FAILED after scheduling failure request_id="
+                     << task->request.request_id;
+      }
+    }
+  }
+}
+
+void Communicator::read_plan_execution_loop() {
+  while (true) {
+    auto task = read_plan_execution_queue_.pop(/*block=*/true);
+    if (task == nullptr) {
+      if (stop_.load(std::memory_order_acquire)) {
+        return;
+      }
+      continue;
+    }
+
+    switch (task->kind) {
+      case ReadPlanExecutionTask::Kind::kDirectSourceLane:
+        process_read_plan_direct_source_lane(task->flow_state, task->lane, task->rail_id);
+        break;
+      case ReadPlanExecutionTask::Kind::kLegacyStagedResume:
+        process_read_plan_staged_resume(task->channel);
+        break;
+    }
+  }
+}
+
+absl::StatusOr<std::shared_ptr<RdmaReadSession>> Communicator::admit_read_plan_request(
+    const ReadPlanAdmissionTask& task) {
+  auto flow_state = task.channel ? task.channel->flow_state() : nullptr;
+  if (!enable_rdma_) {
+    return absl::FailedPreconditionError("RDMA transport disabled");
+  }
+  if (flow_state == nullptr) {
+    return absl::InternalError("channel missing flow state");
+  }
+
+  auto read_guards = std::make_shared<std::vector<std::shared_ptr<void>>>();
+  auto session = std::make_shared<RdmaReadSession>();
+  session->mode = RdmaReadSession::Mode::kReadPlan;
+  session->plan_request = task.request;
+  session->request_key = transport::get_read_plan_request_key(task.request.request_id);
+  session->control_transport = task.control_transport;
+  session->source_stage_profile = std::make_shared<RdmaSourceStageProfile>();
+  session->created_at = task.ingress_received_at;
+
+  struct PlannedSourceSlice {
+    uint32_t source_slice_index = 0;
+    std::string tensor_key;
+    uint64_t remote_offset = 0;
+    uint64_t bytes = 0;
+    std::shared_ptr<PartitionTensor> tensor;
+    std::shared_ptr<MemoryStager> stager;
+    net_dev_t dev;
+    v1::RdmaConfig::StagedRdmaBackend staged_backend = v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED;
+    bool direct_eligible = false;
+    ibv_mr* direct_mr = nullptr;
+    std::shared_ptr<void> direct_keepalive;
+  };
+
+  std::vector<PlannedSourceSlice> resolved_slices;
+  resolved_slices.reserve(task.request.num_source_slices);
+  uint64_t total_bytes = 0;
+
+  for (uint32_t index = 0; index < task.request.num_source_slices; ++index) {
+    const auto& source = task.source_slices[index];
+    const std::string tensor_key = reinterpret_cast<const char*>(source.tensor_key);
+    auto tensor = store_.get_tensor(tensor_key);
+    if (tensor == nullptr) {
+      return absl::NotFoundError(absl::StrCat("read_plan tensor not found: ", tensor_key));
+    }
+    if (source.remote_offset > tensor->get_bytes() || source.bytes > tensor->get_bytes() - source.remote_offset) {
+      return absl::OutOfRangeError(absl::StrCat("read_plan slice out of range: ", tensor_key));
+    }
+
+    auto read_guard_or = acquire_tensor_read_lease(tensor_key);
+    if (!read_guard_or.ok()) {
+      return read_guard_or.status();
+    }
+    read_guards->push_back(*read_guard_or);
+    tensor->wait_read_ready();
+    auto stable_source_view = lookup_stable_local_backing_source_view(tensor_key);
+
+    auto dev = task.request.rail_id >= 0 ? tensor->get_dev_by_rail(task.request.rail_id) : nullptr;
+    if (dev == nullptr) {
+      dev = tensor->get_dev();
+      if (dev != nullptr && task.request.rail_id >= 0) {
+        VLOG(2) << "READ_PLAN_REQUEST rail fallback tensor=" << tensor_key << " requested_rail=" << task.request.rail_id
+                << " selected_rail=" << dev->get_rail_id() << " nic=" << dev->get_name();
+      }
+    }
+    const bool tensor_on_cpu = tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU;
+    if (dev == nullptr && tensor_on_cpu && stable_source_view != nullptr) {
+      const int requested_rail = task.request.rail_id >= 0
+          ? task.request.rail_id
+          : (session->dev != nullptr ? session->dev->get_rail_id() : -1);
+      dev = get_net_dev(COMMUNICATE_ENGINE_DEV_CPU, 0, tensor_key, requested_rail);
+      if (dev != nullptr) {
+        tensor->add_dev(dev);
+      }
+    }
+    if (tensor_on_cpu && session->dev != nullptr &&
+        (dev == nullptr || session->dev->get_name() != dev->get_name() ||
+         session->dev->get_rail_id() != dev->get_rail_id())) {
+      VLOG(2) << "READ_PLAN_REQUEST cpu source rebinding tensor=" << tensor_key
+              << " selected_rail=" << (dev != nullptr ? dev->get_rail_id() : -1)
+              << " selected_nic=" << (dev != nullptr ? dev->get_name() : "<none>")
+              << " session_rail=" << session->dev->get_rail_id() << " session_nic=" << session->dev->get_name();
+      dev = session->dev;
+      if (stable_source_view != nullptr && tensor->get_dev_by_rail(dev->get_rail_id()) == nullptr) {
+        tensor->add_dev(dev);
+      }
+    }
+    if (dev == nullptr) {
+      return absl::FailedPreconditionError(absl::StrCat("read_plan tensor missing RDMA device: ", tensor_key));
+    }
+    if (session->dev == nullptr) {
+      session->dev = dev;
+    } else if (session->dev->get_name() != dev->get_name() || session->dev->get_rail_id() != dev->get_rail_id()) {
+      return absl::FailedPreconditionError("read_plan source slices must resolve to one RDMA device/rail");
+    }
+
+    const int device_id = tensor->get_device_id();
+    std::shared_ptr<MemoryStager> stager;
+    if (tensor_on_cpu) {
+      stager = get_cpu_stager_for_nic(dev->get_name());
+    } else if (use_gpu_vram_staging_) {
+      stager = get_gpu_vram_stager_for_id(device_id);
+    } else {
+      stager = get_gpu_mem_stager_for_id(device_id);
+    }
+    if (!stager) {
+      if (tensor_on_cpu) {
+        stager = memory_stager_;
+      } else if (use_gpu_vram_staging_) {
+        stager = get_gpu_mem_stager_for_id(device_id);
+        if (!stager) {
+          stager = gpu_memory_stager_;
+        }
+      } else {
+        stager = gpu_memory_stager_;
+      }
+    }
+
+    const bool direct_requested = tensor->direct_rdma_enabled();
+    bool direct_eligible = false;
+    ibv_mr* direct_mr = nullptr;
+    std::shared_ptr<void> direct_keepalive;
+    DirectFallbackReason fallback_reason = DirectFallbackReason::kNone;
+    if (direct_requested) {
+      const bool direct_mem_supported = tensor_on_cpu || tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_GPU;
+      if (!direct_mem_supported) {
+        fallback_reason = DirectFallbackReason::kNotGpu;
+      } else if (tensor->needs_staging()) {
+        fallback_reason = DirectFallbackReason::kNeedsStaging;
+      } else {
+        if (tensor_on_cpu && stable_source_view != nullptr) {
+          auto ensure_result_or = ensure_stable_local_backing_source_view_mr(tensor_key, stable_source_view, dev);
+          if (!ensure_result_or.ok()) {
+            return ensure_result_or.status();
+          }
+          direct_mr = ensure_result_or->mr;
+          direct_keepalive = std::move(ensure_result_or->backing_use);
+          direct_eligible = direct_mr != nullptr;
+          if (!direct_eligible) {
+            fallback_reason = DirectFallbackReason::kMrUnavailable;
+          }
+        } else if (tensor_on_cpu) {
+          auto ensure_result_or = ensure_tensor_registered_on_dev(tensor, dev);
+          if (!ensure_result_or.ok()) {
+            fallback_reason = DirectFallbackReason::kMrUnavailable;
+          } else {
+            direct_mr = tensor->get_mr(dev);
+            direct_eligible = direct_mr != nullptr && tensor->has_registered_mr(dev);
+            if (!direct_eligible) {
+              fallback_reason = DirectFallbackReason::kMrUnavailable;
+            }
+          }
+        } else {
+          tensor->wait_mr_ready(dev);
+          direct_mr = tensor->get_mr(dev);
+          if (direct_mr == nullptr || !tensor->has_registered_mr(dev)) {
+            fallback_reason = DirectFallbackReason::kMrUnavailable;
+          } else {
+            direct_eligible = true;
+          }
+        }
+      }
+      if (!direct_eligible && tensor->direct_rdma_required()) {
+        return absl::FailedPreconditionError(
+            absl::StrCat("read_plan direct RDMA required but unavailable: ", tensor_key));
+      }
+      if (!direct_eligible && fallback_reason != DirectFallbackReason::kNone) {
+        record_direct_fallback_metric(fallback_reason);
+      }
+    }
+    if (!direct_eligible && !stager) {
+      return absl::FailedPreconditionError("no staging backend available for read_plan source slice");
+    }
+
+    const bool using_gpu_vram_stager =
+        !tensor_on_cpu && use_gpu_vram_staging_ && stager && stager == get_gpu_vram_stager_for_id(device_id);
+    const v1::RdmaConfig::StagedRdmaBackend staged_backend = using_gpu_vram_stager
+        ? v1::RdmaConfig::STAGED_RDMA_BACKEND_GPU_VRAM
+        : v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED;
+    resolved_slices.push_back(
+        PlannedSourceSlice{
+            .source_slice_index = source.source_slice_index,
+            .tensor_key = tensor_key,
+            .remote_offset = source.remote_offset,
+            .bytes = source.bytes,
+            .tensor = tensor,
+            .stager = stager,
+            .dev = dev,
+            .staged_backend = staged_backend,
+            .direct_eligible = direct_eligible,
+            .direct_mr = direct_mr,
+            .direct_keepalive = direct_keepalive,
+        });
+    if (source.bytes > std::numeric_limits<uint64_t>::max() - total_bytes) {
+      return absl::InvalidArgumentError("read_plan source byte count overflow");
+    }
+    total_bytes += source.bytes;
+  }
+
+  bool direct_source_response = !resolved_slices.empty();
+  uint64_t direct_source_segment_count = 0;
+  for (const auto& source : resolved_slices) {
+    if (source.tensor->get_mem_type() != COMMUNICATE_ENGINE_DEV_CPU || !source.direct_eligible) {
+      direct_source_response = false;
+      break;
+    }
+    const uint64_t chunk_size = compute_read_plan_direct_chunk_bytes(source.bytes);
+    const uint64_t source_segments = (source.bytes + chunk_size - 1) / chunk_size;
+    if (source_segments > std::numeric_limits<uint64_t>::max() - direct_source_segment_count) {
+      return absl::InvalidArgumentError("read_plan direct source segment count overflow");
+    }
+    direct_source_segment_count += source_segments;
+  }
+
+  if (direct_source_response) {
+    session->direct_source_response = true;
+    session->read_plan_window_segment_limit =
+        compute_read_plan_direct_window_segment_limit(direct_source_segment_count);
+    session->direct_ledger =
+        std::make_unique<FlowCreditLedger>(static_cast<int>(session->read_plan_window_segment_limit));
+  }
+
+  FlowCreditLedger* plan_ledger = session->direct_source_response ? session->direct_ledger.get() : &flow_state->ledger;
+  CHECK(plan_ledger != nullptr);
+  for (const auto& source : resolved_slices) {
+    const bool use_direct = session->direct_source_response
+        ? source.direct_eligible
+        : (source.tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_GPU && source.direct_eligible);
+    const uint64_t chunk_size = use_direct
+        ? (session->direct_source_response ? compute_read_plan_direct_chunk_bytes(source.bytes)
+                                           : compute_direct_chunk_bytes(
+                                                 source.bytes,
+                                                 direct_rdma_chunk_bytes_,
+                                                 flow_state->max_window_segments,
+                                                 config_.rdma().qp_count()))
+        : (source.stager && source.stager->get_chunk_size() > 0 ? source.stager->get_chunk_size() : source.bytes);
+    session->plan_source_slices.push_back(
+        RdmaReadPlanSourceSlice{
+            .source_slice_index = source.source_slice_index,
+            .tensor_key = source.tensor_key,
+            .remote_offset = source.remote_offset,
+            .bytes = source.bytes,
+            .tensor = source.tensor,
+            .stager = source.stager,
+            .dev = source.dev,
+            .stage_fn = MakeStageFunction(
+                source.tensor,
+                plan_ledger,
+                source.stager,
+                source.dev,
+                meta_mr_cache_.get(),
+                source.tensor_key,
+                session->request_key,
+                source.staged_backend,
+                use_direct,
+                source.direct_mr,
+                source.direct_keepalive,
+                session->source_stage_profile),
+            .chunk_size = chunk_size,
+            .zero_copy = use_direct,
+        });
+  }
+
+  session->read_guard = read_guards;
+  const std::string peer = task.control_transport ? task.control_transport->get_remote_url() : std::string();
+  session->transfer_id = make_transfer_id(session->request_key, peer);
+  (void)register_source_transfer_progress(session->request_key, peer, "rdma", total_bytes, session->read_guard);
+  return session;
+}
+
+absl::Status Communicator::schedule_read_plan_direct_source_lane(
+    const channel_t& channel,
+    const std::shared_ptr<RdmaReadSession>& session) {
+  if (channel == nullptr || session == nullptr) {
+    return absl::InvalidArgumentError("channel and session are required");
+  }
+  auto flow_state = channel->flow_state();
+  if (flow_state == nullptr) {
+    return absl::InternalError("channel missing flow state");
+  }
+  if (session->dev == nullptr) {
+    return absl::FailedPreconditionError("direct-source session missing selected rail");
+  }
+
+  const int16_t rail_id = session->dev->get_rail_id();
+  std::shared_ptr<Channel::FlowState::DirectSourceLaneState> lane;
+  {
+    absl::MutexLock lock(&flow_state->direct_source_lanes_mu);
+    auto& slot = flow_state->direct_source_lanes[rail_id];
+    if (slot == nullptr) {
+      slot = std::make_shared<Channel::FlowState::DirectSourceLaneState>();
+    }
+    lane = slot;
+  }
+
+  bool need_schedule = false;
+  {
+    absl::MutexLock lock(&lane->mu);
+    lane->sessions.push_back(session);
+    if (!lane->scheduled) {
+      lane->scheduled = true;
+      need_schedule = true;
+    }
+  }
+
+  if (!need_schedule) {
+    return absl::OkStatus();
+  }
+
+  auto task = std::make_shared<ReadPlanExecutionTask>();
+  task->kind = ReadPlanExecutionTask::Kind::kDirectSourceLane;
+  task->channel = channel;
+  task->flow_state = flow_state;
+  task->lane = lane;
+  task->rail_id = rail_id;
+  if (read_plan_execution_queue_.push(task, /*block=*/false) != SUCCESS) {
+    absl::MutexLock lock(&lane->mu);
+    lane->scheduled = false;
+    return absl::UnavailableError("failed to enqueue direct-source execution task");
+  }
+  return absl::OkStatus();
+}
+
+absl::Status Communicator::schedule_read_plan_staged_session(
+    const channel_t& channel,
+    const std::shared_ptr<RdmaReadSession>& session) {
+  if (channel == nullptr || session == nullptr) {
+    return absl::InvalidArgumentError("channel and session are required");
+  }
+  auto flow_state = channel->flow_state();
+  if (flow_state == nullptr) {
+    return absl::InternalError("channel missing flow state");
+  }
+
+  {
+    absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+    flow_state->rdma_pending_reads.push_back(session);
+  }
+
+  auto task = std::make_shared<ReadPlanExecutionTask>();
+  task->kind = ReadPlanExecutionTask::Kind::kLegacyStagedResume;
+  task->channel = channel;
+  task->flow_state = flow_state;
+  if (read_plan_execution_queue_.push(task, /*block=*/false) != SUCCESS) {
+    return absl::UnavailableError("failed to enqueue staged read-plan resume");
+  }
+  return absl::OkStatus();
+}
+
+void Communicator::process_read_plan_direct_source_lane(
+    const std::shared_ptr<Channel::FlowState>& flow_state,
+    const std::shared_ptr<Channel::FlowState::DirectSourceLaneState>& lane,
+    int16_t rail_id) {
+  if (flow_state == nullptr || lane == nullptr) {
+    return;
+  }
+
+  while (true) {
+    std::shared_ptr<RdmaReadSession> session;
+    {
+      absl::MutexLock lock(&lane->mu);
+      if (lane->sessions.empty()) {
+        lane->scheduled = false;
+        return;
+      }
+      session = lane->sessions.front();
+      lane->sessions.pop_front();
+    }
+
+    while (true) {
+      auto result = DriveRdmaPlanSession(*flow_state, *session);
+      if (!result.status.ok()) {
+        if (send_read_plan_failed_response(
+                session->control_transport,
+                session->plan_request.request_id,
+                ReadFailedReasonFromStatus(result.status)) != SUCCESS) {
+          LOG(WARNING) << "Failed to send READ_PLAN_FAILED after direct-source execution failure request="
+                       << session->request_key;
+        }
+        log_rdma_source_stage_summary(*session, result.status);
+        if (!session->transfer_id.empty()) {
+          finish_source_transfer_progress(session->transfer_id, result.status);
+        }
+        break;
+      }
+
+      if (result.completed) {
+        log_rdma_source_stage_summary(*session, result.status);
+        break;
+      }
+
+      if (!result.made_progress) {
+        absl::SleepFor(absl::Milliseconds(1));
+      }
+    }
+  }
+}
+
+void Communicator::process_read_plan_staged_resume(const channel_t& channel) {
+  auto status = resume_rdma_reads(channel);
+  if (!status.ok()) {
+    LOG(WARNING) << "READ_PLAN_REQUEST failed to resume session: " << status;
+  }
+}
+
+void Communicator::set_lazy_source_mr_test_hook_for_test(LazySourceMrTestHook hook) {
+  absl::MutexLock lock(&lazy_source_mr_test_hook_mu());
+  if (!hook) {
+    lazy_source_mr_test_hook_storage() = nullptr;
+    return;
+  }
+  lazy_source_mr_test_hook_storage() = [hook = std::move(hook)](
+                                           int event, std::string_view tensor_key, int16_t rail_id) {
+    hook(static_cast<LazySourceMrTestEvent>(event), tensor_key, rail_id);
+  };
+}
+
+void Communicator::clear_lazy_source_mr_test_hook_for_test() {
+  absl::MutexLock lock(&lazy_source_mr_test_hook_mu());
+  lazy_source_mr_test_hook_storage() = nullptr;
+}
+
+absl::StatusOr<Communicator::LazySourceMrEnsureResult> Communicator::ensure_tensor_registered_on_dev(
+    const std::shared_ptr<PartitionTensor>& tensor,
+    const net_dev_t& dev) {
+  if (tensor == nullptr || dev == nullptr) {
+    return absl::InvalidArgumentError("tensor and dev are required for lazy MR registration");
+  }
+
+  LazySourceMrEnsureResult result;
+  const int16_t rail_id = dev->get_rail_id();
+  const std::string tensor_key = tensor->get_key();
+  if (tensor->has_registered_mr(dev)) {
+    result.fast_path_hit = true;
+    maybe_run_lazy_source_mr_test_hook(static_cast<int>(LazySourceMrTestEvent::kFastPathHit), tensor_key, rail_id);
+    return result;
+  }
+
+  std::shared_ptr<LazySourceMrInflightState> inflight_state;
+  bool owner = false;
+  {
+    absl::MutexLock lock(&lazy_source_mr_inflight_mu_);
+    auto it = lazy_source_mr_inflight_.find(tensor.get());
+    if (it == lazy_source_mr_inflight_.end()) {
+      inflight_state = std::make_shared<LazySourceMrInflightState>();
+      lazy_source_mr_inflight_.emplace(tensor.get(), inflight_state);
+      owner = true;
+    } else {
+      inflight_state = it->second;
+    }
+  }
+
+  if (!owner) {
+    result.waiter = true;
+    maybe_run_lazy_source_mr_test_hook(static_cast<int>(LazySourceMrTestEvent::kWaiterJoined), tensor_key, rail_id);
+    const auto wait_started_at = std::chrono::steady_clock::now();
+    absl::Status wait_status;
+    {
+      absl::MutexLock lock(&inflight_state->mu);
+      while (inflight_state->registering) {
+        inflight_state->cv.Wait(&inflight_state->mu);
+      }
+      wait_status = inflight_state->last_status;
+    }
+    result.gate_wait_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                              std::chrono::steady_clock::now() - wait_started_at)
+                              .count();
+    maybe_run_lazy_source_mr_test_hook(static_cast<int>(LazySourceMrTestEvent::kWaiterReleased), tensor_key, rail_id);
+    if (!wait_status.ok()) {
+      return wait_status;
+    }
+    if (!tensor->has_registered_mr(dev)) {
+      return absl::InternalError(
+          absl::StrCat("lazy source tensor MR unavailable on ", dev->get_name(), " after waiter release"));
+    }
+    return result;
+  }
+
+  result.owner = true;
+  maybe_run_lazy_source_mr_test_hook(static_cast<int>(LazySourceMrTestEvent::kOwnerAcquired), tensor_key, rail_id);
+  absl::Status owner_status = absl::OkStatus();
+  absl::Cleanup owner_cleanup = [&] {
+    {
+      absl::MutexLock lock(&inflight_state->mu);
+      inflight_state->last_status = owner_status;
+      inflight_state->registering = false;
+      inflight_state->cv.SignalAll();
+    }
+    {
+      absl::MutexLock lock(&lazy_source_mr_inflight_mu_);
+      auto it = lazy_source_mr_inflight_.find(tensor.get());
+      if (it != lazy_source_mr_inflight_.end() && it->second == inflight_state) {
+        lazy_source_mr_inflight_.erase(it);
+      }
+    }
+    maybe_run_lazy_source_mr_test_hook(static_cast<int>(LazySourceMrTestEvent::kOwnerCompleted), tensor_key, rail_id);
+  };
+
+  if (tensor->get_dev_by_rail(rail_id) == nullptr) {
+    tensor->add_dev(dev);
+    result.add_dev_fallback = true;
+  }
+  if (!tensor->is_registered(dev)) {
+    const auto reg_status = dev->reg_async(tensor);
+    if (reg_status != misc::SUCCESS) {
+      owner_status =
+          absl::InternalError(absl::StrCat("failed to lazily register source tensor MR on ", dev->get_name()));
+      return owner_status;
+    }
+    result.reg_async_issued = true;
+  }
+  tensor->wait_mr_ready(dev);
+  if (!tensor->has_registered_mr(dev)) {
+    owner_status = absl::InternalError(
+        absl::StrCat("lazy source tensor MR unavailable on ", dev->get_name(), " after registration"));
+    return owner_status;
+  }
+  return result;
+}
+
+absl::Status Communicator::activate_stable_local_backing(
+    const StableLocalBackingRef& backing,
+    std::shared_ptr<void> keepalive) {
+  if (!enable_rdma_ || rdma_context_ == nullptr) {
+    return absl::OkStatus();
+  }
+  if (backing.kind != StableLocalBackingKind::kHostSharedRegion) {
+    return absl::InvalidArgumentError("stable local backing activation only supports HOST_SHARED regions");
+  }
+  if (backing.backing_id.empty() || backing.backing_base_addr == 0 || backing.backing_bytes == 0) {
+    return absl::InvalidArgumentError("stable local backing activation requires id, base address, and bytes");
+  }
+  if (backing.dev_type != COMMUNICATE_ENGINE_DEV_CPU) {
+    return absl::InvalidArgumentError("stable local backing activation only supports CPU backing in the first cut");
+  }
+
+  std::shared_ptr<StableLocalBackingState> state;
+  bool created = false;
+  {
+    absl::MutexLock lock(&stable_local_backings_mu_);
+    auto it = stable_local_backings_.find(backing.backing_id);
+    if (it != stable_local_backings_.end()) {
+      if (it->second == nullptr) {
+        return absl::FailedPreconditionError("stable local backing exists with null state");
+      }
+      state = it->second;
+    } else {
+      state = std::make_shared<StableLocalBackingState>();
+      state->backing = backing;
+      state->activation_keepalive = std::move(keepalive);
+      stable_local_backings_.emplace(backing.backing_id, state);
+      created = true;
+    }
+  }
+
+  if (!created) {
+    auto status = state->merge_activation_backing(backing, std::move(keepalive));
+    if (!status.ok()) {
+      return status;
+    }
+    VLOG(2) << "stable_local_backing.activate_merge"
+            << " backing_id=" << backing.backing_id << " backing_bytes=" << backing.backing_bytes
+            << " slot_bytes=" << backing.slot_bytes;
+  } else {
+    VLOG(2) << "stable_local_backing.activate"
+            << " backing_id=" << backing.backing_id << " backing_base_addr=0x" << std::hex << backing.backing_base_addr
+            << std::dec << " backing_bytes=" << backing.backing_bytes << " slot_bytes=" << backing.slot_bytes;
+  }
+
+  auto prewarm_status = schedule_stable_local_backing_prewarm(state);
+  if (!prewarm_status.ok()) {
+    if (created) {
+      absl::MutexLock lock(&stable_local_backings_mu_);
+      auto it = stable_local_backings_.find(backing.backing_id);
+      if (it != stable_local_backings_.end() && it->second == state) {
+        stable_local_backings_.erase(it);
+      }
+    }
+    return prewarm_status;
+  }
+  return absl::OkStatus();
+}
+
+absl::Status Communicator::deactivate_stable_local_backing(std::string_view backing_id) {
+  std::shared_ptr<StableLocalBackingState> state;
+  {
+    absl::MutexLock lock(&stable_local_backings_mu_);
+    auto it = stable_local_backings_.find(std::string(backing_id));
+    if (it == stable_local_backings_.end()) {
+      return absl::OkStatus();
+    }
+    state = std::move(it->second);
+    stable_local_backings_.erase(it);
+  }
+
+  VLOG(2) << "stable_local_backing.deactivate_begin"
+          << " backing_id=" << backing_id;
+  if (state != nullptr) {
+    state->begin_retire_and_wait();
+  }
+  VLOG(2) << "stable_local_backing.deactivate_done" << " backing_id=" << backing_id;
+  return absl::OkStatus();
+}
+
+absl::Status Communicator::register_stable_local_backing_source_view(const StableLocalBackingSourceView& view) {
+  if (!enable_rdma_ || rdma_context_ == nullptr) {
+    return absl::FailedPreconditionError("stable-backed source views require RDMA");
+  }
+  if (view.tensor_key.empty()) {
+    return absl::InvalidArgumentError("stable-backed source view requires tensor_key");
+  }
+  if (view.addr == 0 || view.bytes == 0) {
+    return absl::InvalidArgumentError("stable-backed source view requires non-empty address range");
+  }
+  if (view.backing.kind != StableLocalBackingKind::kHostSharedRegion || view.backing.backing_id.empty() ||
+      view.backing.backing_base_addr == 0 || view.backing.backing_bytes == 0 ||
+      view.backing.dev_type != COMMUNICATE_ENGINE_DEV_CPU || view.backing.slot_bytes == 0) {
+    return absl::InvalidArgumentError("stable-backed source view requires CPU HOST_SHARED backing with slot geometry");
+  }
+  if (view.keepalive == nullptr) {
+    return absl::InvalidArgumentError("stable-backed source view requires keepalive");
+  }
+
+  std::shared_ptr<StableLocalBackingState> state;
+  {
+    absl::MutexLock lock(&stable_local_backings_mu_);
+    auto it = stable_local_backings_.find(view.backing.backing_id);
+    if (it != stable_local_backings_.end()) {
+      state = it->second;
+    }
+  }
+  if (state == nullptr) {
+    return absl::FailedPreconditionError("stable-backed source view backing is not active");
+  }
+  auto merge_status = state->merge_activation_backing(view.backing, nullptr);
+  if (!merge_status.ok()) {
+    return merge_status;
+  }
+  const uint32_t chunk_slots = std::max<uint32_t>(1, stable_local_mr_reuse_chunk_slots_);
+  auto chunk_or = state->resolve_chunk_for_region(view.backing.slot_bytes, chunk_slots, view.addr, view.bytes);
+  if (!chunk_or.ok()) {
+    return chunk_or.status();
+  }
+
+  auto tensor = std::make_shared<PartitionTensor>(
+      view.tensor_key,
+      view.addr,
+      view.bytes,
+      COMMUNICATE_ENGINE_DEV_CPU,
+      /*dev=*/nullptr);
+  tensor->set_read_ready();
+  tensor->set_direct_rdma_enabled(true);
+  store_.register_tensor(tensor);
+  {
+    absl::MutexLock lock(&stable_source_views_mu_);
+    stable_source_views_[view.tensor_key] =
+        std::make_shared<StableLocalBackingSourceViewState>(StableLocalBackingSourceViewState{
+            .addr = view.addr,
+            .bytes = view.bytes,
+            .backing = view.backing,
+            .keepalive = view.keepalive,
+        });
+  }
+  VLOG(2) << "stable_local_backing.source_view_register"
+          << " key=" << view.tensor_key << " backing_id=" << view.backing.backing_id << " addr=0x" << std::hex
+          << view.addr << std::dec << " bytes=" << view.bytes << " slot_bytes=" << view.backing.slot_bytes
+          << " chunk_index=" << chunk_or->chunk_index << " chunk_bytes=" << chunk_or->chunk_bytes;
+  return absl::OkStatus();
+}
+
+bool Communicator::stable_local_backing_supported_for_test() const {
+  return enable_rdma_ && rdma_context_ != nullptr;
+}
+
+bool Communicator::stable_local_backing_active_for_test(std::string_view backing_id) const {
+  absl::MutexLock lock(&stable_local_backings_mu_);
+  auto it = stable_local_backings_.find(std::string(backing_id));
+  return it != stable_local_backings_.end() && it->second != nullptr;
+}
+
+size_t Communicator::stable_local_backing_chunk_count_for_test(std::string_view backing_id, int16_t rail_id) const {
+  absl::MutexLock lock(&stable_local_backings_mu_);
+  auto it = stable_local_backings_.find(std::string(backing_id));
+  if (it == stable_local_backings_.end() || it->second == nullptr) {
+    return 0;
+  }
+  return it->second->chunk_count_for_rail(rail_id);
+}
+
+bool Communicator::stable_local_backing_prewarm_complete_for_test(std::string_view backing_id) const {
+  absl::MutexLock lock(&stable_local_backings_mu_);
+  auto it = stable_local_backings_.find(std::string(backing_id));
+  if (it == stable_local_backings_.end() || it->second == nullptr) {
+    return false;
+  }
+  return it->second->prewarm_complete_for_test();
+}
+
+bool Communicator::wait_for_stable_local_backing_prewarm_for_test(std::string_view backing_id, absl::Duration timeout)
+    const {
+  std::shared_ptr<StableLocalBackingState> state;
+  {
+    absl::MutexLock lock(&stable_local_backings_mu_);
+    auto it = stable_local_backings_.find(std::string(backing_id));
+    if (it == stable_local_backings_.end() || it->second == nullptr) {
+      return false;
+    }
+    state = it->second;
+  }
+  return state->wait_for_prewarm_completion(timeout);
+}
+
+std::vector<net_dev_t> Communicator::collect_primary_visible_rdma_rail_devs() const {
+  std::vector<net_dev_t> rail_devs;
+  if (!enable_rdma_ || rdma_context_ == nullptr) {
+    return rail_devs;
+  }
+  absl::flat_hash_set<int16_t> seen_rails;
+  rail_devs.reserve(rdma_context_->list_devs().size());
+  for (const auto& dev : rdma_context_->list_devs()) {
+    if (dev == nullptr) {
+      continue;
+    }
+    if (!seen_rails.insert(dev->get_rail_id()).second) {
+      continue;
+    }
+    auto primary = rdma_context_->get_dev_by_rail(dev->get_rail_id());
+    if (primary != nullptr) {
+      rail_devs.push_back(primary);
+    }
+  }
+  return rail_devs;
+}
+
+absl::Status Communicator::schedule_stable_local_backing_prewarm(
+    const std::shared_ptr<StableLocalBackingState>& state) {
+  if (state == nullptr || !stable_local_mr_reuse_async_prewarm_enabled_ ||
+      stable_local_mr_reuse_prewarm_workers_ == 0) {
+    return absl::OkStatus();
+  }
+  if (state->backing.slot_bytes == 0) {
+    LOG(WARNING) << "stable_local_backing.activate_prewarm_skipped"
+                 << " backing_id=" << state->backing.backing_id << " reason=missing_slot_bytes";
+    return absl::OkStatus();
+  }
+  const auto rail_devs = collect_primary_visible_rdma_rail_devs();
+  if (rail_devs.empty()) {
+    VLOG(2) << "stable_local_backing.activate_prewarm_skipped"
+            << " backing_id=" << state->backing.backing_id << " reason=no_visible_rdma_rails";
+    return absl::OkStatus();
+  }
+  const uint32_t chunk_slots = std::max<uint32_t>(1, stable_local_mr_reuse_chunk_slots_);
+  const auto chunk_bytes_or = state->compute_requested_chunk_bytes(state->backing.slot_bytes, chunk_slots);
+  if (!chunk_bytes_or.ok()) {
+    return chunk_bytes_or.status();
+  }
+  const uint64_t chunk_bytes = *chunk_bytes_or;
+  const uint64_t chunk_count = 1 + ((state->backing.backing_bytes - 1) / chunk_bytes);
+  if (!state->try_mark_prewarm_requested(rail_devs.size(), chunk_count)) {
+    return absl::OkStatus();
+  }
+
+  LOG(INFO) << "stable_local_backing.activate_prewarm_enqueued"
+            << " backing_id=" << state->backing.backing_id << " backing_bytes=" << state->backing.backing_bytes
+            << " slot_bytes=" << state->backing.slot_bytes << " chunk_slots=" << chunk_slots
+            << " chunk_bytes=" << chunk_bytes << " chunk_count_per_rail=" << chunk_count
+            << " visible_rail_count=" << rail_devs.size()
+            << " prewarm_workers=" << stable_local_mr_reuse_prewarm_workers_;
+  for (const auto& dev : rail_devs) {
+    StableLocalPrewarmTask task;
+    task.backing_state = state;
+    task.backing_id = state->backing.backing_id;
+    task.dev = dev;
+    task.rail_id = dev->get_rail_id();
+    task.slot_bytes = state->backing.slot_bytes;
+    task.chunk_slots = chunk_slots;
+    task.chunk_count = chunk_count;
+    if (stable_local_prewarm_queue_.push(task) != misc::SUCCESS) {
+      state->note_prewarm_job_finished(false);
+      LOG(WARNING) << "stable_local_backing.activate_prewarm_enqueue_failed"
+                   << " backing_id=" << state->backing.backing_id << " rail_id=" << task.rail_id;
+    }
+  }
+  return absl::OkStatus();
+}
+
+void Communicator::stable_local_prewarm_loop() {
+  while (!stop_.load()) {
+    StableLocalPrewarmTask task = stable_local_prewarm_queue_.pop(true, 1000);
+    if (task.backing_id.empty() && task.backing_state.expired()) {
+      continue;
+    }
+    if (task.backing_state.expired()) {
+      continue;
+    }
+    process_stable_local_prewarm_task(std::move(task));
+  }
+
+  while (true) {
+    StableLocalPrewarmTask task = stable_local_prewarm_queue_.pop(false);
+    if (task.backing_id.empty() && task.backing_state.expired()) {
+      break;
+    }
+    if (task.backing_state.expired()) {
+      continue;
+    }
+    process_stable_local_prewarm_task(std::move(task));
+  }
+}
+
+void Communicator::process_stable_local_prewarm_task(StableLocalPrewarmTask task) {
+  auto state = task.backing_state.lock();
+  if (state == nullptr) {
+    return;
+  }
+
+  auto use = state->acquire_use();
+  if (use == nullptr) {
+    state->note_prewarm_job_finished(false);
+    return;
+  }
+
+  const absl::Time started_at = absl::Now();
+  bool success = true;
+  uint64_t cache_hits = 0;
+  uint64_t lazy_regs = 0;
+  for (uint64_t chunk_index = 0; chunk_index < task.chunk_count; ++chunk_index) {
+    if (stop_.load(std::memory_order_relaxed)) {
+      success = false;
+      break;
+    }
+    auto resolved_chunk_or = state->resolve_chunk_by_index(task.slot_bytes, task.chunk_slots, chunk_index);
+    if (!resolved_chunk_or.ok()) {
+      success = false;
+      LOG(WARNING) << "stable_local_backing.prewarm_chunk_resolve_failed"
+                   << " backing_id=" << task.backing_id << " rail_id=" << task.rail_id << " chunk_index=" << chunk_index
+                   << " status=" << resolved_chunk_or.status();
+      break;
+    }
+    auto chunk_or =
+        state->ensure_resolved_chunk(task.dev, task.rail_id, task.slot_bytes, task.chunk_slots, *resolved_chunk_or);
+    if (!chunk_or.ok()) {
+      success = false;
+      LOG(WARNING) << "stable_local_backing.prewarm_chunk_register_failed"
+                   << " backing_id=" << task.backing_id << " rail_id=" << task.rail_id << " chunk_index=" << chunk_index
+                   << " status=" << chunk_or.status();
+      break;
+    }
+    if (chunk_or->cache_hit) {
+      ++cache_hits;
+    }
+    if (chunk_or->registered_now) {
+      ++lazy_regs;
+    }
+  }
+
+  state->note_prewarm_job_finished(success);
+  VLOG(2) << "stable_local_backing.prewarm_job_done"
+          << " backing_id=" << task.backing_id << " rail_id=" << task.rail_id << " chunk_count=" << task.chunk_count
+          << " ready_chunks=" << state->chunk_count_for_rail(task.rail_id) << " cache_hits=" << cache_hits
+          << " lazy_regs=" << lazy_regs << " success=" << success
+          << " prewarm_ms=" << absl::ToDoubleMilliseconds(absl::Now() - started_at);
 }
 
 void Communicator::mtcp_staging_loop() {
@@ -1705,15 +3982,16 @@ future_read_result_t Communicator::read_tensor_local(
 
   const uint64_t tensor_bytes = local_tensor->get_bytes();
   if (remote_offset > tensor_bytes || bytes > tensor_bytes - remote_offset) {
-    result.status = absl::OutOfRangeError(absl::StrCat(
-        "local read range out of bounds: key=",
-        key,
-        " offset=",
-        remote_offset,
-        " bytes=",
-        bytes,
-        " tensor_bytes=",
-        tensor_bytes));
+    result.status = absl::OutOfRangeError(
+        absl::StrCat(
+            "local read range out of bounds: key=",
+            key,
+            " offset=",
+            remote_offset,
+            " bytes=",
+            bytes,
+            " tensor_bytes=",
+            tensor_bytes));
     promise.set_value(std::move(result));
     return future;
   }
@@ -1750,8 +4028,7 @@ future_read_result_t Communicator::read_tensor_local(
       return status;
     }
     return absl::Status(
-        status.code(),
-        absl::StrCat("local tensor copy ", op, " failed for key=", key, ": ", status.message()));
+        status.code(), absl::StrCat("local tensor copy ", op, " failed for key=", key, ": ", status.message()));
   };
 
   absl::Status copy_status = absl::OkStatus();
@@ -1786,7 +4063,8 @@ future_read_result_t Communicator::read_tensor_local(
       }
     } else {
       int can_access = 0;
-      copy_status = wrap_cuda_status("device_can_access_peer", cuda::device_can_access_peer(&can_access, dev_id, src_dev_id));
+      copy_status =
+          wrap_cuda_status("device_can_access_peer", cuda::device_can_access_peer(&can_access, dev_id, src_dev_id));
       if (copy_status.ok() && can_access == 0) {
         copy_status = absl::FailedPreconditionError(
             absl::StrCat("peer access unavailable between dst_device=", dev_id, " and src_device=", src_dev_id));
@@ -1795,17 +4073,16 @@ future_read_result_t Communicator::read_tensor_local(
         copy_status = wrap_cuda_status("enable_peer_access", cuda::enable_peer_access(dev_id, src_dev_id));
       }
       if (copy_status.ok()) {
-        copy_status = wrap_cuda_status(
-            "memcpy_peer_async",
-            cuda::memcpy_peer_async(dst_ptr, dev_id, src_ptr, src_dev_id, bytes));
+        copy_status =
+            wrap_cuda_status("memcpy_peer_async", cuda::memcpy_peer_async(dst_ptr, dev_id, src_ptr, src_dev_id, bytes));
       }
       if (copy_status.ok()) {
         copy_status = wrap_cuda_status("device_synchronize", cuda::device_synchronize());
       }
     }
   } else {
-    copy_status = absl::InvalidArgumentError(absl::StrCat(
-        "unsupported local copy matrix: src_dev_type=", src_dev_type, " dst_dev_type=", dev_type));
+    copy_status = absl::InvalidArgumentError(
+        absl::StrCat("unsupported local copy matrix: src_dev_type=", src_dev_type, " dst_dev_type=", dev_type));
   }
 
   result.status = copy_status;
@@ -1824,11 +4101,454 @@ absl::Status Communicator::init(const std::string& ip, uint16_t port, int conn_c
   return absl::OkStatus();
 }
 
+std::vector<Communicator::VisibleRdmaDeviceInfo> Communicator::visible_rdma_devices() const {
+  std::vector<VisibleRdmaDeviceInfo> devices;
+  if (rdma_context_ == nullptr) {
+    return devices;
+  }
+  devices.reserve(rdma_context_->list_devs().size());
+  for (const auto& dev : rdma_context_->list_devs()) {
+    if (dev == nullptr) {
+      continue;
+    }
+    devices.push_back(
+        VisibleRdmaDeviceInfo{
+            .name = dev->get_name(),
+            .rail_id = dev->get_rail_id(),
+        });
+  }
+  return devices;
+}
+
 uint16_t Communicator::listening_port() const {
   if (!server_context_) {
     return 0;
   }
   return server_context_->listening_port();
+}
+
+future_read_result_t Communicator::read_plan(
+    const routing::ReadPlan& plan,
+    const std::string& dst_ip,
+    uint16_t dst_port) {
+  const std::string tensor_key =
+      plan.source_slices.empty() ? std::string("read_plan") : plan.source_slices.front().tensor_key;
+  if (!inited_.load()) {
+    return make_failed_read_future(
+        absl::FailedPreconditionError("failed to read plan through un-initiated engine"), tensor_key);
+  }
+  if (!enable_rdma_) {
+    return make_failed_read_future(
+        absl::UnimplementedError(
+            std::format("communicator read_plan requires RDMA transport for peer {}:{}", dst_ip, dst_port)),
+        tensor_key);
+  }
+  if (plan.source_slices.empty() || plan.slices.empty() || plan.local_regions.empty()) {
+    return make_failed_read_future(
+        absl::InvalidArgumentError("read_plan requires non-empty sources, slices, and regions"), tensor_key);
+  }
+
+  const routing::ReadRouteContext& route = plan.source_slices.front().route;
+  if (route.protocol != routing::ConnectionProtocol::kRdma) {
+    return make_failed_read_future(
+        absl::UnimplementedError(
+            std::format("communicator read_plan only supports routed RDMA today for peer {}:{}", dst_ip, dst_port)),
+        tensor_key);
+  }
+
+  const uint64_t request_id = next_request_id_.fetch_add(1, std::memory_order_relaxed);
+  auto prepared_or = prepare_read_plan(plan, request_id, tensor_key);
+  if (!prepared_or.ok()) {
+    return make_failed_read_future(prepared_or.status(), tensor_key);
+  }
+  auto prepared = std::move(*prepared_or);
+
+  if (!plan.transport_request_id.empty()) {
+    LOG(INFO) << "communicator.read_plan_issue"
+              << " request_id=" << request_id << " transport_request_id=" << plan.transport_request_id
+              << " tensor_key=" << tensor_key << " peer=" << dst_ip << ":" << dst_port
+              << " source_slices=" << plan.source_slices.size() << " read_slices=" << plan.slices.size()
+              << " local_regions=" << plan.local_regions.size() << " total_bytes=" << prepared->total_bytes
+              << " local_registration_mode=" << prepared->local_registration_mode
+              << " stable_backing_chunk_count=" << prepared->stable_backing_chunk_count
+              << " stable_backing_chunk_cache_hits=" << prepared->stable_backing_chunk_cache_hits
+              << " stable_backing_chunk_cache_misses=" << prepared->stable_backing_chunk_cache_misses
+              << " stable_backing_chunk_waits=" << prepared->stable_backing_chunk_waits
+              << " stable_backing_chunk_lazy_registrations=" << prepared->stable_backing_chunk_lazy_registrations
+              << " stable_backing_prewarm_requested=" << prepared->stable_backing_prewarm_requested
+              << " stable_backing_prewarm_complete=" << prepared->stable_backing_prewarm_complete
+              << " rail_id=" << prepared->rail_id << " local_nic=" << prepared->local_nic;
+  }
+
+  auto req =
+      std::make_shared<transport::ReadRequest>(tensor_key, dst_ip, dst_port, prepared, request_id, prepared->rail_id);
+  req->status_.transport_is_rdma = true;
+  req->status_.local_nic = prepared->local_nic;
+  req->status_.local_rail_id = prepared->rail_id;
+  const std::string peer = std::format("{}:{}", dst_ip, dst_port);
+  auto target_progress = create_transfer_progress_state(
+      make_transfer_id(req->get_key(), peer), req->get_key(), peer, "target", "rdma", req->total_bytes());
+  if (target_progress) {
+    auto last_done = std::make_shared<std::atomic<uint64_t>>(0);
+    req->set_progress_callbacks(
+        [state = target_progress, last_done](uint64_t done, uint64_t /*total*/) {
+          const uint64_t prev = last_done->exchange(done, std::memory_order_relaxed);
+          if (done > prev) {
+            add_transfer_progress_bytes(state, done - prev);
+          }
+        },
+        [this, req_key = req->get_key(), state = std::move(target_progress)](const absl::Status& status) {
+          pending_requests_.erase_if_present(req_key);
+          finish_transfer_progress(state, status);
+        });
+  } else {
+    req->set_progress_callbacks(
+        {}, [this, req_key = req->get_key()](const absl::Status&) { pending_requests_.erase_if_present(req_key); });
+  }
+
+  request_queue_.push(req);
+  return req->get_future();
+}
+
+absl::StatusOr<std::shared_ptr<transport::PreparedReadPlan>> Communicator::prepare_read_plan(
+    const routing::ReadPlan& plan,
+    uint64_t request_id,
+    std::string_view tensor_key) {
+  if (plan.source_slices.empty() || plan.slices.empty() || plan.local_regions.empty()) {
+    return absl::InvalidArgumentError("read_plan requires non-empty sources, slices, and regions");
+  }
+
+  const routing::ReadRouteContext& route = plan.source_slices.front().route;
+  if (route.protocol != routing::ConnectionProtocol::kRdma) {
+    return absl::UnimplementedError("communicator prepare_read_plan only supports routed RDMA today");
+  }
+
+  const absl::Time prepare_started_at = absl::Now();
+  const std::string tensor_key_owned(tensor_key);
+  auto prepared = std::make_shared<transport::PreparedReadPlan>();
+  prepared->logical_plan = plan;
+  prepared->remote_endpoint_id = route.remote_endpoint_id;
+  prepared->protocol = route.protocol;
+  prepared->rail_id = route.rail_id;
+  prepared->placements_by_source_slice.resize(plan.source_slices.size());
+
+  absl::Duration rail_resolve_elapsed = absl::ZeroDuration();
+  absl::Duration stable_backing_lookup_elapsed = absl::ZeroDuration();
+  absl::Duration stable_backing_acquire_elapsed = absl::ZeroDuration();
+  absl::Duration local_region_reg_elapsed = absl::ZeroDuration();
+  size_t local_regions_reused = 0;
+  size_t local_regions_registered = 0;
+  uint64_t total_bytes = 0;
+  for (const auto& slice : plan.slices) {
+    if (slice.source_slice_index >= plan.source_slices.size()) {
+      return absl::InvalidArgumentError("read_plan slice references invalid source slice index");
+    }
+    if (slice.local_region_index >= plan.local_regions.size()) {
+      return absl::InvalidArgumentError("read_plan slice references invalid local region index");
+    }
+    const auto& source_slice = plan.source_slices[slice.source_slice_index];
+    if (slice.bytes == 0 || slice.bytes > source_slice.bytes) {
+      return absl::InvalidArgumentError("read_plan slice has invalid byte count");
+    }
+    prepared->placements_by_source_slice[slice.source_slice_index].push_back(
+        transport::PreparedSourcePlacement{
+            .local_region_index = slice.local_region_index,
+            .local_region_offset = slice.local_region_offset,
+            .source_slice_offset = slice.source_slice_offset,
+            .bytes = slice.bytes,
+        });
+    if (slice.bytes > std::numeric_limits<uint64_t>::max() - total_bytes) {
+      return absl::InvalidArgumentError("read_plan total byte count overflow");
+    }
+    total_bytes += slice.bytes;
+  }
+  for (size_t source_index = 0; source_index < prepared->placements_by_source_slice.size(); ++source_index) {
+    auto& placements = prepared->placements_by_source_slice[source_index];
+    if (placements.empty()) {
+      return absl::FailedPreconditionError(
+          "read_plan execution requires each source slice to have prepared placements");
+    }
+    std::sort(
+        placements.begin(),
+        placements.end(),
+        [](const transport::PreparedSourcePlacement& lhs, const transport::PreparedSourcePlacement& rhs) {
+          if (lhs.source_slice_offset != rhs.source_slice_offset) {
+            return lhs.source_slice_offset < rhs.source_slice_offset;
+          }
+          return lhs.local_region_index < rhs.local_region_index;
+        });
+    uint64_t expected_offset = 0;
+    for (const auto& placement : placements) {
+      if (placement.source_slice_offset != expected_offset) {
+        return absl::FailedPreconditionError(
+            "read_plan placements must exactly cover each source slice without gaps or overlap");
+      }
+      if (placement.bytes > std::numeric_limits<uint64_t>::max() - expected_offset) {
+        return absl::InvalidArgumentError("read_plan placement coverage overflows source slice range");
+      }
+      expected_offset += placement.bytes;
+    }
+    if (expected_offset != plan.source_slices[source_index].bytes) {
+      return absl::FailedPreconditionError("read_plan placements must exactly cover the full source slice");
+    }
+  }
+
+  net_dev_t selected_net_dev = nullptr;
+  const absl::Time local_region_device_resolve_started_at = absl::Now();
+  for (const auto& region : plan.local_regions) {
+    if (region.addr == 0 || region.bytes == 0) {
+      return absl::InvalidArgumentError("read_plan local region must have non-zero addr and bytes");
+    }
+    const absl::Time net_dev_started_at = absl::Now();
+    auto net_dev = get_net_dev(region.dev_type, region.dev_id, tensor_key_owned, route.rail_id);
+    rail_resolve_elapsed += absl::Now() - net_dev_started_at;
+    if (net_dev == nullptr) {
+      return absl::InternalError("failed to select RDMA device for read_plan local region");
+    }
+    if (selected_net_dev == nullptr) {
+      selected_net_dev = net_dev;
+      prepared->local_nic = net_dev->get_name();
+      prepared->rail_id = net_dev->get_rail_id();
+      continue;
+    }
+    if (prepared->local_nic != net_dev->get_name() || prepared->rail_id != net_dev->get_rail_id()) {
+      return absl::FailedPreconditionError(
+          "read_plan local regions must resolve to one RDMA device/rail in the first cut");
+    }
+  }
+  const absl::Duration local_region_device_resolve_elapsed = absl::Now() - local_region_device_resolve_started_at;
+
+  bool stable_local_mr_reuse_enabled = true;
+  if (config_.rdma().has_enable_stable_local_mr_reuse()) {
+    stable_local_mr_reuse_enabled = config_.rdma().enable_stable_local_mr_reuse();
+  }
+  const uint32_t chunk_slots = std::max<uint32_t>(1, stable_local_mr_reuse_chunk_slots_);
+  std::shared_ptr<StableLocalBackingState> stable_backing_state;
+  std::shared_ptr<void> stable_backing_use;
+  bool stable_backing_prewarm_requested = false;
+  bool stable_backing_prewarm_complete = false;
+  const absl::Time stable_backing_prepare_started_at = absl::Now();
+  if (!plan.local_regions.empty()) {
+    if (!stable_local_mr_reuse_enabled) {
+      prepared->local_registration_fallback_reason = "stable_backing_reuse_disabled";
+    } else if (!plan.local_regions.front().stable_backing.has_value()) {
+      prepared->local_registration_fallback_reason = "stable_backing_missing";
+    } else {
+      const auto& first_backing = *plan.local_regions.front().stable_backing;
+      bool consistent_backing = first_backing.kind == StableLocalBackingKind::kHostSharedRegion &&
+          first_backing.dev_type == COMMUNICATE_ENGINE_DEV_CPU && first_backing.slot_bytes > 0;
+      for (size_t i = 0; i < plan.local_regions.size() && consistent_backing; ++i) {
+        consistent_backing =
+            plan.local_regions[i].stable_backing.has_value() && *plan.local_regions[i].stable_backing == first_backing;
+      }
+      if (!consistent_backing) {
+        prepared->local_registration_fallback_reason = "stable_backing_prepare_failure";
+      } else if (selected_net_dev == nullptr) {
+        return absl::InternalError("read_plan stable local backing path requires a selected RDMA device");
+      } else if (first_backing.slot_bytes > std::numeric_limits<uint64_t>::max() / chunk_slots) {
+        prepared->local_registration_fallback_reason = "stable_backing_prepare_failure";
+      } else {
+        const absl::Time stable_backing_lookup_started_at = absl::Now();
+        {
+          absl::MutexLock lock(&stable_local_backings_mu_);
+          auto it = stable_local_backings_.find(first_backing.backing_id);
+          if (it != stable_local_backings_.end()) {
+            stable_backing_state = it->second;
+          }
+        }
+        stable_backing_lookup_elapsed += absl::Now() - stable_backing_lookup_started_at;
+        if (stable_backing_state == nullptr) {
+          prepared->local_registration_fallback_reason = "stable_backing_missing";
+        } else {
+          stable_backing_prewarm_requested = stable_backing_state->prewarm_requested_enabled();
+          stable_backing_prewarm_complete = stable_backing_state->prewarm_complete_for_test();
+          const absl::Time stable_backing_acquire_started_at = absl::Now();
+          stable_backing_use = stable_backing_state->acquire_use();
+          stable_backing_acquire_elapsed += absl::Now() - stable_backing_acquire_started_at;
+          if (stable_backing_use == nullptr) {
+            prepared->local_registration_fallback_reason = "stable_backing_prepare_failure";
+            stable_backing_state.reset();
+          } else {
+            prepared->stable_backing_id = first_backing.backing_id;
+            prepared->stable_backing_chunk_bytes = first_backing.slot_bytes * chunk_slots;
+            absl::flat_hash_set<uint64_t> chunk_indices;
+            std::vector<transport::PreparedLocalRegion> stable_regions;
+            stable_regions.reserve(plan.local_regions.size());
+            uint32_t chunk_cache_hits = 0;
+            uint32_t chunk_cache_misses = 0;
+            uint32_t chunk_waits = 0;
+            uint32_t chunk_lazy_registrations = 0;
+            for (const auto& region : plan.local_regions) {
+              auto chunk_or = stable_backing_state->ensure_chunk(
+                  selected_net_dev,
+                  prepared->rail_id,
+                  first_backing.slot_bytes,
+                  chunk_slots,
+                  region.addr,
+                  region.bytes);
+              if (!chunk_or.ok()) {
+                VLOG(2) << "communicator.read_plan_prepare_chunk_failed"
+                        << " request_id=" << request_id << " tensor_key=" << tensor_key_owned
+                        << " backing_id=" << first_backing.backing_id << " rail_id=" << prepared->rail_id
+                        << " status=" << chunk_or.status();
+                prepared->local_registration_fallback_reason = "stable_backing_prepare_failure";
+                prepared->stable_backing_id.clear();
+                prepared->stable_backing_chunk_bytes = 0;
+                stable_backing_use.reset();
+                stable_backing_state.reset();
+                stable_regions.clear();
+                chunk_indices.clear();
+                chunk_cache_hits = 0;
+                chunk_cache_misses = 0;
+                chunk_waits = 0;
+                chunk_lazy_registrations = 0;
+                break;
+              }
+              const auto& chunk = *chunk_or;
+              chunk_indices.insert(chunk.chunk_index);
+              if (chunk.cache_hit) {
+                ++chunk_cache_hits;
+              } else {
+                ++chunk_cache_misses;
+              }
+              if (chunk.waited_on_inflight) {
+                ++chunk_waits;
+              }
+              if (chunk.registered_now) {
+                ++chunk_lazy_registrations;
+              }
+              stable_regions.push_back(
+                  transport::PreparedLocalRegion{
+                      .logical_region = region,
+                      .rail_id = chunk.rail_id,
+                      .nic_name = chunk.nic_name,
+                      .tensor = nullptr,
+                      .mr = chunk.mr,
+                      .keepalive = stable_backing_use,
+                  });
+            }
+            if (stable_backing_use != nullptr && stable_regions.size() == plan.local_regions.size()) {
+              prepared->local_registration_mode = "stable_backing_reuse";
+              prepared->local_registration_fallback_reason.clear();
+              prepared->local_regions = std::move(stable_regions);
+              prepared->stable_backing_chunk_count = static_cast<uint32_t>(chunk_indices.size());
+              prepared->stable_backing_chunk_cache_hits = chunk_cache_hits;
+              prepared->stable_backing_chunk_cache_misses = chunk_cache_misses;
+              prepared->stable_backing_chunk_waits = chunk_waits;
+              prepared->stable_backing_chunk_lazy_registrations = chunk_lazy_registrations;
+              prepared->stable_backing_prewarm_requested = stable_backing_prewarm_requested;
+              prepared->stable_backing_prewarm_complete = stable_backing_prewarm_complete;
+              local_regions_reused = prepared->local_regions.size();
+            }
+          }
+        }
+      }
+    }
+  }
+  const absl::Duration stable_backing_prepare_elapsed = absl::Now() - stable_backing_prepare_started_at;
+  {
+    std::ostringstream log;
+    log << "communicator.read_plan_prepare"
+        << " request_id=" << request_id << " tensor_key=" << tensor_key_owned
+        << " transport_request_id=" << (plan.transport_request_id.empty() ? "<unset>" : plan.transport_request_id)
+        << " local_registration_mode=" << prepared->local_registration_mode
+        << " fallback_reason=" << prepared->local_registration_fallback_reason
+        << " stable_backing_id=" << prepared->stable_backing_id
+        << " stable_backing_prewarm_requested=" << stable_backing_prewarm_requested
+        << " stable_backing_prewarm_complete=" << stable_backing_prewarm_complete
+        << " stable_backing_chunk_bytes=" << prepared->stable_backing_chunk_bytes
+        << " stable_backing_chunk_count=" << prepared->stable_backing_chunk_count
+        << " stable_backing_chunk_cache_hits=" << prepared->stable_backing_chunk_cache_hits
+        << " stable_backing_chunk_cache_misses=" << prepared->stable_backing_chunk_cache_misses
+        << " stable_backing_chunk_waits=" << prepared->stable_backing_chunk_waits
+        << " stable_backing_chunk_lazy_registrations=" << prepared->stable_backing_chunk_lazy_registrations
+        << " rail_id=" << prepared->rail_id << " local_regions=" << plan.local_regions.size()
+        << " stable_local_mr_reuse_enabled=" << stable_local_mr_reuse_enabled
+        << " device_resolve_ms=" << absl::ToDoubleMilliseconds(local_region_device_resolve_elapsed)
+        << " stable_backing_prepare_ms=" << absl::ToDoubleMilliseconds(stable_backing_prepare_elapsed)
+        << " stable_backing_lookup_ms=" << absl::ToDoubleMilliseconds(stable_backing_lookup_elapsed)
+        << " stable_backing_acquire_ms=" << absl::ToDoubleMilliseconds(stable_backing_acquire_elapsed);
+    if (!plan.transport_request_id.empty()) {
+      LOG(INFO) << log.str();
+    } else {
+      VLOG(2) << log.str();
+    }
+  }
+
+  const absl::Time local_region_prepare_started_at = absl::Now();
+  if (prepared->local_registration_mode != "stable_backing_reuse") {
+    prepared->local_regions.clear();
+    prepared->local_regions.reserve(plan.local_regions.size());
+    for (size_t region_index = 0; region_index < plan.local_regions.size(); ++region_index) {
+      const auto& region = plan.local_regions[region_index];
+      const absl::Time net_dev_started_at = absl::Now();
+      auto net_dev = get_net_dev(region.dev_type, region.dev_id, tensor_key_owned, route.rail_id);
+      rail_resolve_elapsed += absl::Now() - net_dev_started_at;
+      if (net_dev == nullptr) {
+        return absl::InternalError("failed to select RDMA device for read_plan local region");
+      }
+      auto local_tensor = std::make_shared<PartitionTensor>(
+          std::format("read_plan:{}:{}", request_id, region_index),
+          region.addr,
+          region.bytes,
+          region.dev_type,
+          net_dev);
+      local_tensor->set_read_unready();
+      if (region.dev_type == COMMUNICATE_ENGINE_DEV_GPU) {
+        local_tensor->set_device_id(region.dev_id);
+      }
+      if (local_tensor->get_dev_by_rail(net_dev->get_rail_id()) == nullptr) {
+        local_tensor->add_dev(net_dev);
+      }
+      if (!local_tensor->is_registered(net_dev)) {
+        const absl::Time reg_started_at = absl::Now();
+        net_dev->reg_async(local_tensor);
+        local_tensor->wait_mr_ready(net_dev);
+        local_region_reg_elapsed += absl::Now() - reg_started_at;
+        if (local_tensor->get_mr(net_dev) == nullptr) {
+          return absl::InternalError("failed to register read_plan local region MR");
+        }
+      }
+      local_tensor->set_read_ready();
+      prepared->local_regions.push_back(
+          transport::PreparedLocalRegion{
+              .logical_region = region,
+              .rail_id = net_dev->get_rail_id(),
+              .nic_name = net_dev->get_name(),
+              .tensor = local_tensor,
+          });
+      ++local_regions_registered;
+    }
+  }
+  const absl::Duration local_region_prepare_elapsed = absl::Now() - local_region_prepare_started_at;
+  {
+    std::ostringstream log;
+    log << "communicator.read_plan_prepare_complete"
+        << " request_id=" << request_id << " tensor_key=" << tensor_key_owned
+        << " transport_request_id=" << (plan.transport_request_id.empty() ? "<unset>" : plan.transport_request_id)
+        << " local_registration_mode=" << prepared->local_registration_mode
+        << " fallback_reason=" << prepared->local_registration_fallback_reason
+        << " local_regions=" << prepared->local_regions.size() << " local_regions_reused=" << local_regions_reused
+        << " local_regions_registered=" << local_regions_registered
+        << " stable_backing_chunk_count=" << prepared->stable_backing_chunk_count
+        << " stable_backing_chunk_cache_hits=" << prepared->stable_backing_chunk_cache_hits
+        << " stable_backing_chunk_cache_misses=" << prepared->stable_backing_chunk_cache_misses
+        << " stable_backing_chunk_waits=" << prepared->stable_backing_chunk_waits
+        << " stable_backing_chunk_lazy_registrations=" << prepared->stable_backing_chunk_lazy_registrations
+        << " stable_backing_prewarm_requested=" << prepared->stable_backing_prewarm_requested
+        << " stable_backing_prewarm_complete=" << prepared->stable_backing_prewarm_complete
+        << " rail_resolve_ms=" << absl::ToDoubleMilliseconds(rail_resolve_elapsed)
+        << " local_region_prepare_ms=" << absl::ToDoubleMilliseconds(local_region_prepare_elapsed)
+        << " local_region_reg_ms=" << absl::ToDoubleMilliseconds(local_region_reg_elapsed)
+        << " total_prepare_ms=" << absl::ToDoubleMilliseconds(absl::Now() - prepare_started_at);
+    if (!plan.transport_request_id.empty()) {
+      LOG(INFO) << log.str();
+    } else {
+      VLOG(2) << log.str();
+    }
+  }
+  prepared->total_bytes = total_bytes;
+  return prepared;
 }
 
 future_read_result_t Communicator::read_tensor(
@@ -1876,22 +4596,11 @@ future_read_result_t Communicator::read_tensor(
       local_tensor->add_dev(net_dev);
     }
     if (!local_tensor->is_registered(net_dev)) {
-      bool cached_mr_installed = false;
-      if (meta_mr_cache_ != nullptr) {
-        constexpr int kAccess = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
-        auto ptr = reinterpret_cast<void*>(addr);
-        if (ptr != nullptr) {
-          auto mr_result =
-              meta_mr_cache_->get_or_register(net_dev->get_pd(), gsl::not_null<void*>{ptr}, bytes, kAccess);
-          if (mr_result.mr != nullptr) {
-            local_tensor->set_registered_mr(net_dev, mr_result.mr, /*owns_mr=*/false);
-            cached_mr_installed = true;
-          }
-        }
-      }
-      if (!cached_mr_installed) {
-        net_dev->reg_async(local_tensor);
-      }
+      // Request destination buffers are caller-owned and request-scoped. They
+      // do not have the stable slab lifetime required by meta_mr_cache_, so
+      // each read request must register its own MR and retire it with the
+      // request-local PartitionTensor.
+      net_dev->reg_async(local_tensor);
     }
   }
   local_tensor->set_read_ready();
@@ -1944,6 +4653,7 @@ absl::Status Communicator::register_tensor_ex(
     int dev_type,
     int dev_id,
     const RegisterTensorOptions& opts) {
+  const absl::Time total_started_at = absl::Now();
   // Check for zero-size tensor
   if (bytes == 0) {
     return absl::InvalidArgumentError("Cannot register zero-size tensor");
@@ -1953,8 +4663,11 @@ absl::Status Communicator::register_tensor_ex(
   }
 
   net_dev_t net_dev = nullptr;
+  absl::Duration net_dev_select_elapsed = absl::ZeroDuration();
   if (enable_rdma_) {
+    const absl::Time net_dev_select_started_at = absl::Now();
     net_dev = get_net_dev(dev_type, dev_id, tensor_key);
+    net_dev_select_elapsed = absl::Now() - net_dev_select_started_at;
     if (net_dev == nullptr) {
       return absl::InternalError("failed to get net dev");
     }
@@ -1974,6 +4687,17 @@ absl::Status Communicator::register_tensor_ex(
   auto tensor = std::make_shared<PartitionTensor>(tensor_key, addr, bytes, dev_type, net_dev);
   tensor->set_read_ready();
 
+  std::size_t visible_dev_count = 0;
+  absl::Duration visible_dev_attach_elapsed = absl::ZeroDuration();
+  if (enable_rdma_ && rdma_context_ != nullptr && dev_type == COMMUNICATE_ENGINE_DEV_CPU && opts.direct_rdma_enabled) {
+    const absl::Time visible_dev_attach_started_at = absl::Now();
+    for (const auto& visible_dev : rdma_context_->list_devs()) {
+      tensor->add_dev(visible_dev);
+      ++visible_dev_count;
+    }
+    visible_dev_attach_elapsed = absl::Now() - visible_dev_attach_started_at;
+  }
+
   // Set device ID for GPU tensors
   if (dev_type == COMMUNICATE_ENGINE_DEV_GPU) {
     tensor->set_device_id(dev_id);
@@ -1990,16 +4714,24 @@ absl::Status Communicator::register_tensor_ex(
     tensor->set_direct_rdma_required(true);
   }
 
+  absl::Duration reg_async_elapsed = absl::ZeroDuration();
+  absl::Duration wait_mr_elapsed = absl::ZeroDuration();
   if (enable_rdma_ && opts.register_mr) {
+    const absl::Time reg_async_started_at = absl::Now();
     net_dev->reg_async(tensor);
+    reg_async_elapsed = absl::Now() - reg_async_started_at;
     if (!opts.async) {
+      const absl::Time wait_mr_started_at = absl::Now();
       if (tensor->get_mr(net_dev) == nullptr) {
         return absl::InternalError("failed to register mr");
       }
+      wait_mr_elapsed = absl::Now() - wait_mr_started_at;
     }
   }
 
+  const absl::Time store_register_started_at = absl::Now();
   store_.register_tensor(tensor);
+  const absl::Duration store_register_elapsed = absl::Now() - store_register_started_at;
   {
     absl::MutexLock lock(&tensor_read_mu_);
     auto it = tensor_read_states_.find(tensor_key);
@@ -2009,6 +4741,20 @@ absl::Status Communicator::register_tensor_ex(
         tensor_read_states_.erase(it);
       }
     }
+  }
+  if (opts.direct_rdma_enabled || opts.register_mr) {
+    VLOG(2) << "communicator.register_tensor_ex"
+            << " key=" << tensor_key << " mem_type=" << dev_type << " dev_id=" << dev_id << " bytes=" << bytes
+            << " selected_net_dev=" << (net_dev == nullptr ? "none" : net_dev->get_name())
+            << " net_dev_select_ms=" << absl::ToDoubleMilliseconds(net_dev_select_elapsed)
+            << " visible_dev_count=" << visible_dev_count
+            << " visible_dev_attach_ms=" << absl::ToDoubleMilliseconds(visible_dev_attach_elapsed)
+            << " register_mr=" << opts.register_mr << " direct_rdma_enabled=" << opts.direct_rdma_enabled
+            << " direct_rdma_required=" << opts.direct_rdma_required
+            << " reg_async_ms=" << absl::ToDoubleMilliseconds(reg_async_elapsed)
+            << " wait_mr_ms=" << absl::ToDoubleMilliseconds(wait_mr_elapsed)
+            << " store_register_ms=" << absl::ToDoubleMilliseconds(store_register_elapsed)
+            << " total_ms=" << absl::ToDoubleMilliseconds(absl::Now() - total_started_at);
   }
   return absl::OkStatus();
 }
@@ -2144,6 +4890,7 @@ absl::Status Communicator::handle_rdma_read_request(
   session->control_transport = control_transport;
   session->transfer_id = transfer_id;
   session->zero_copy = use_direct;
+  session->source_stage_profile = std::make_shared<RdmaSourceStageProfile>();
 
   uint32_t window_segments = flow_state->max_window_segments;
   if (use_direct) {
@@ -2154,19 +4901,38 @@ absl::Status Communicator::handle_rdma_read_request(
   }
 
   auto stage_fn = MakeStageFunction(
-      tensor, ledger_ptr, stager, dev, mr_cache_ptr, tensor_key, request_key, staged_backend, use_direct, direct_mr);
+      tensor,
+      ledger_ptr,
+      stager,
+      dev,
+      mr_cache_ptr,
+      tensor_key,
+      request_key,
+      staged_backend,
+      use_direct,
+      direct_mr,
+      nullptr,
+      session->source_stage_profile);
   session->window =
       std::make_unique<StagingWindow>(*ledger_ptr, stage_fn, total_bytes, chunk_size, start_offset, window_segments);
 
-  flow_state->rdma_pending_reads.push_back(session);
+  size_t pending_reads = 0;
+  {
+    absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+    flow_state->rdma_pending_reads.push_back(session);
+    pending_reads = flow_state->rdma_pending_reads.size();
+  }
   LOG(INFO) << "[rdma_session] queued request=" << request_key << " zero_copy=" << use_direct
-            << " pending_reads=" << flow_state->rdma_pending_reads.size()
-            << " outstanding_credit=" << ledger_ptr->outstanding_credit() << " window_segments=" << window_segments;
+            << " pending_reads=" << pending_reads << " outstanding_credit=" << ledger_ptr->outstanding_credit()
+            << " window_segments=" << window_segments;
 
   auto status = resume_rdma_reads(channel);
+  {
+    absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+    pending_reads = flow_state->rdma_pending_reads.size();
+  }
   LOG(INFO) << "[rdma_session] resume status request=" << request_key << " status=" << status
-            << " pending_reads=" << flow_state->rdma_pending_reads.size()
-            << " outstanding_credit=" << flow_state->ledger.outstanding_credit();
+            << " pending_reads=" << pending_reads << " outstanding_credit=" << flow_state->ledger.outstanding_credit();
   if (!status.ok()) {
     finish_source_transfer_progress(transfer_id, status);
     return status;
@@ -2183,8 +4949,12 @@ absl::Status Communicator::resume_rdma_reads(const channel_t& channel) {
   bool expected = false;
   if (!flow_state->rdma_refill_in_progress.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
     flow_state->rdma_refill_requested.store(true, std::memory_order_release);
-    LOG(INFO) << "[rdma_resume] refill already in progress; request another pass pending_reads="
-              << flow_state->rdma_pending_reads.size()
+    size_t pending_reads = 0;
+    {
+      absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+      pending_reads = flow_state->rdma_pending_reads.size();
+    }
+    LOG(INFO) << "[rdma_resume] refill already in progress; request another pass pending_reads=" << pending_reads
               << " outstanding_credit=" << flow_state->ledger.outstanding_credit();
     return absl::OkStatus();
   }
@@ -2192,41 +4962,74 @@ absl::Status Communicator::resume_rdma_reads(const channel_t& channel) {
   absl::Status first_error = absl::OkStatus();
 
   while (true) {
-    LOG(INFO) << "[rdma_resume] pass begin pending_reads=" << flow_state->rdma_pending_reads.size()
+    size_t pending_reads = 0;
+    {
+      absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+      pending_reads = flow_state->rdma_pending_reads.size();
+    }
+    LOG(INFO) << "[rdma_resume] pass begin pending_reads=" << pending_reads
               << " outstanding_credit=" << flow_state->ledger.outstanding_credit();
     flow_state->rdma_refill_requested.store(false, std::memory_order_release);
 
-    while (!flow_state->rdma_pending_reads.empty()) {
-      auto session = flow_state->rdma_pending_reads.front();
-      auto result = DriveRdmaSession(*flow_state, *session);
+    while (true) {
+      std::shared_ptr<RdmaReadSession> session;
+      {
+        absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+        if (flow_state->rdma_pending_reads.empty()) {
+          break;
+        }
+        session = flow_state->rdma_pending_reads.front();
+        pending_reads = flow_state->rdma_pending_reads.size();
+      }
+      auto result = session->mode == RdmaReadSession::Mode::kReadPlan ? DriveRdmaPlanSession(*flow_state, *session)
+                                                                      : DriveRdmaSession(*flow_state, *session);
       LOG(INFO) << "[rdma_resume] drove request=" << session->request_key << " status=" << result.status
                 << " completed=" << result.completed << " made_progress=" << result.made_progress
-                << " pending_reads=" << flow_state->rdma_pending_reads.size()
+                << " pending_reads=" << pending_reads
                 << " outstanding_credit=" << flow_state->ledger.outstanding_credit();
 
       if (!result.status.ok()) {
         if (absl::IsResourceExhausted(result.status) || absl::IsUnavailable(result.status)) {
-          if (!result.made_progress && flow_state->rdma_pending_reads.size() > 1) {
-            flow_state->rdma_pending_reads.pop_front();
-            flow_state->rdma_pending_reads.push_back(std::move(session));
+          if (!result.made_progress) {
+            absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+            if (flow_state->rdma_pending_reads.size() > 1 && flow_state->rdma_pending_reads.front() == session) {
+              auto queued = flow_state->rdma_pending_reads.front();
+              flow_state->rdma_pending_reads.pop_front();
+              flow_state->rdma_pending_reads.push_back(std::move(queued));
+            }
           }
           break;
         }
 
         LOG(ERROR) << "Failed to service RDMA read request=" << session->request_key << " status=" << result.status;
 
-        auto rsp = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
-        auto* payload = rsp->get_payload<ProtoReadFailed>();
-        memcpy(payload->tensor_key, session->request.tensor_key, kMaxTensorNameLen);
-        payload->offset = session->request.offset;
-        payload->request_id = session->request.request_id;
-        payload->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
-        misc::result_t send_res = session->control_transport->send(rsp);
+        misc::result_t send_res = misc::FAILED;
+        if (session->mode == RdmaReadSession::Mode::kReadPlan) {
+          auto rsp = EngineMessage::make_message<ProtoReadPlanFailed>(ENGINE_OP_READ_PLAN_FAILED);
+          auto* payload = rsp->get_payload<ProtoReadPlanFailed>();
+          payload->request_id = session->plan_request.request_id;
+          payload->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
+          send_res = session->control_transport->send(rsp);
+        } else {
+          auto rsp = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
+          auto* payload = rsp->get_payload<ProtoReadFailed>();
+          memcpy(payload->tensor_key, session->request.tensor_key, kMaxTensorNameLen);
+          payload->offset = session->request.offset;
+          payload->request_id = session->request.request_id;
+          payload->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
+          send_res = session->control_transport->send(rsp);
+        }
         if (send_res != misc::SUCCESS) {
           LOG(WARNING) << "Failed to send READ_FAILED after staging failure: " << send_res;
         }
 
-        flow_state->rdma_pending_reads.pop_front();
+        {
+          absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+          if (!flow_state->rdma_pending_reads.empty() && flow_state->rdma_pending_reads.front() == session) {
+            flow_state->rdma_pending_reads.pop_front();
+          }
+        }
+        log_rdma_source_stage_summary(*session, result.status);
         if (!session->transfer_id.empty()) {
           this->finish_source_transfer_progress(session->transfer_id, result.status);
         }
@@ -2237,7 +5040,13 @@ absl::Status Communicator::resume_rdma_reads(const channel_t& channel) {
       }
 
       if (result.completed) {
-        flow_state->rdma_pending_reads.pop_front();
+        {
+          absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+          if (!flow_state->rdma_pending_reads.empty() && flow_state->rdma_pending_reads.front() == session) {
+            flow_state->rdma_pending_reads.pop_front();
+          }
+        }
+        log_rdma_source_stage_summary(*session, result.status);
         continue;
       }
 
@@ -2250,11 +5059,14 @@ absl::Status Communicator::resume_rdma_reads(const channel_t& channel) {
     }
 
     flow_state->rdma_refill_in_progress.store(false, std::memory_order_release);
-    LOG(INFO) << "[rdma_resume] pass end pending_reads=" << flow_state->rdma_pending_reads.size()
-              << " requested_again=" << flow_state->rdma_refill_requested.load(std::memory_order_acquire)
+    {
+      absl::MutexLock lock(&flow_state->rdma_pending_reads_mu);
+      pending_reads = flow_state->rdma_pending_reads.size();
+    }
+    const bool requested_again = flow_state->rdma_refill_requested.load(std::memory_order_acquire);
+    LOG(INFO) << "[rdma_resume] pass end pending_reads=" << pending_reads << " requested_again=" << requested_again
               << " outstanding_credit=" << flow_state->ledger.outstanding_credit();
-    if (!flow_state->rdma_refill_requested.load(std::memory_order_acquire) || flow_state->rdma_pending_reads.empty() ||
-        !first_error.ok()) {
+    if (!requested_again || pending_reads == 0 || !first_error.ok()) {
       break;
     }
 
@@ -2415,6 +5227,10 @@ absl::Status Communicator::unregister_tensor(const std::string& tensor_key) {
   } else {
     store_.unregister_tensor(tensor_key);
   }
+  {
+    absl::MutexLock lock(&stable_source_views_mu_);
+    stable_source_views_.erase(tensor_key);
+  }
 
   {
     absl::MutexLock lock(&tensor_read_mu_);
@@ -2569,19 +5385,51 @@ void Communicator::do_read_request_loop() {
       continue;
     }
 
-    auto msg = EngineMessage::make_message<ProtoReadRequest>(ENGINE_OP_READ_REQUEST);
-    auto* request = msg->get_payload<ProtoReadRequest>();
-    misc::STRNCPY(request->tensor_key, req->tensor_key_, kMaxTensorNameLen);
+    std::shared_ptr<EngineMessage> msg;
+    if (req->is_read_plan()) {
+      auto prepared = req->get_prepared_read_plan();
+      if (prepared == nullptr) {
+        req->set_result(absl::InternalError("read_plan request missing prepared plan"));
+        continue;
+      }
+      if (prepared->logical_plan.source_slices.size() > std::numeric_limits<uint32_t>::max()) {
+        req->set_result(absl::InvalidArgumentError("read_plan source slice count exceeds wire limit"));
+        continue;
+      }
+      const uint32_t payload_size = static_cast<uint32_t>(
+          sizeof(ProtoReadPlanRequestHeader) +
+          prepared->logical_plan.source_slices.size() * sizeof(ProtoReadPlanSourceSlice));
+      msg = std::make_shared<EngineMessage>(ENGINE_OP_READ_PLAN_REQUEST, payload_size);
+      auto* header = msg->get_payload<ProtoReadPlanRequestHeader>();
+      header->transport_type = ENGINE_TRANSPORT_RDMA;
+      header->rail_id = req->get_rail_id();
+      header->request_id = req->request_id();
+      header->num_source_slices = static_cast<uint32_t>(prepared->logical_plan.source_slices.size());
+      auto* source_payload = reinterpret_cast<ProtoReadPlanSourceSlice*>(
+          reinterpret_cast<uint8_t*>(header) + sizeof(ProtoReadPlanRequestHeader));
+      for (size_t index = 0; index < prepared->logical_plan.source_slices.size(); ++index) {
+        const auto& source_slice = prepared->logical_plan.source_slices[index];
+        misc::STRNCPY(source_payload[index].tensor_key, source_slice.tensor_key, kMaxTensorNameLen);
+        source_payload[index].source_slice_index = static_cast<uint32_t>(index);
+        source_payload[index].remote_offset = source_slice.remote_offset;
+        source_payload[index].bytes = source_slice.bytes;
+      }
+      VLOG(1) << "[do_read_request_loop] Sending READ_PLAN_REQUEST: key=" << req->get_key() << " to "
+              << req->get_dst_url() << " source_slices=" << prepared->logical_plan.source_slices.size();
+    } else {
+      msg = EngineMessage::make_message<ProtoReadRequest>(ENGINE_OP_READ_REQUEST);
+      auto* request = msg->get_payload<ProtoReadRequest>();
+      misc::STRNCPY(request->tensor_key, req->tensor_key_, kMaxTensorNameLen);
 
-    request->transport_type = enable_rdma_ ? ENGINE_TRANSPORT_RDMA : ENGINE_TRANSPORT_MTCP;
-    request->offset = req->remote_offset_;
-    request->bytes = req->get_local_tensor()->get_bytes();
-    request->request_id = req->request_id();
+      request->transport_type = enable_rdma_ ? ENGINE_TRANSPORT_RDMA : ENGINE_TRANSPORT_MTCP;
+      request->offset = req->remote_offset_;
+      request->bytes = req->get_local_tensor()->get_bytes();
+      request->request_id = req->request_id();
+      request->rail_id = req->get_rail_id();
 
-    request->rail_id = req->get_rail_id();
-
-    VLOG(1) << "[do_read_request_loop] Sending READ_REQUEST: key=" << req->tensor_key_ << " to " << req->get_dst_url()
-            << " transport_type=" << (request->transport_type == ENGINE_TRANSPORT_MTCP ? "MTCP" : "RDMA");
+      VLOG(1) << "[do_read_request_loop] Sending READ_REQUEST: key=" << req->tensor_key_ << " to " << req->get_dst_url()
+              << " transport_type=" << (request->transport_type == ENGINE_TRANSPORT_MTCP ? "MTCP" : "RDMA");
+    }
 
     const std::string req_key = req->get_key();
     auto existing = pending_requests_.get(req_key);
@@ -2769,6 +5617,45 @@ misc::result_t Communicator::on_receive_request(
       }
       break;
     }
+    case ENGINE_OP_READ_PLAN_REQUEST: {
+      auto* req = msg->get_payload<ProtoReadPlanRequestHeader>();
+      if (msg->get_payload_size() < sizeof(ProtoReadPlanRequestHeader)) {
+        LOG(WARNING) << "READ_PLAN_REQUEST payload too small";
+        break;
+      }
+      const size_t expected_size = sizeof(ProtoReadPlanRequestHeader) +
+          static_cast<size_t>(req->num_source_slices) * sizeof(ProtoReadPlanSourceSlice);
+      if (msg->get_payload_size() < expected_size) {
+        LOG(WARNING) << "READ_PLAN_REQUEST payload truncated: expected=" << expected_size
+                     << " actual=" << msg->get_payload_size();
+        send_read_plan_failed_response(t, req->request_id, TENSORCAST_READ_FAILED_MEM_MISMATCH);
+        break;
+      }
+      if (!enable_rdma_ || req->transport_type != ENGINE_TRANSPORT_RDMA) {
+        send_read_plan_failed_response(t, req->request_id, TENSORCAST_READ_FAILED_MEM_MISMATCH);
+        break;
+      }
+      auto flow_state = channel->flow_state();
+      if (!flow_state) {
+        send_read_plan_failed_response(t, req->request_id, TENSORCAST_READ_FAILED_MEM_MISMATCH);
+        break;
+      }
+
+      auto* source_payload = reinterpret_cast<ProtoReadPlanSourceSlice*>(
+          reinterpret_cast<uint8_t*>(req) + sizeof(ProtoReadPlanRequestHeader));
+      auto task = std::make_shared<ReadPlanAdmissionTask>();
+      task->channel = channel;
+      task->control_transport = t;
+      task->request = *req;
+      task->source_slices.assign(source_payload, source_payload + req->num_source_slices);
+      task->ingress_received_at = std::chrono::steady_clock::now();
+      if (read_plan_admission_queue_.push(task, /*block=*/false) != SUCCESS) {
+        send_read_plan_failed_response(t, req->request_id, TENSORCAST_READ_FAILED_MEM_MISMATCH);
+        LOG(WARNING) << "READ_PLAN_REQUEST failed to enqueue admission request_id=" << req->request_id;
+        break;
+      }
+      break;
+    }
     case ENGINE_OP_RDMA_READ_DONE_EX: {
       auto* hdr = msg->get_payload<ProtoRdmaReadDoneExHeader>();
       const std::string tensor_key = reinterpret_cast<char*>(hdr->tensor_key);
@@ -2807,6 +5694,44 @@ misc::result_t Communicator::on_receive_request(
       }
       break;
     }
+    case ENGINE_OP_RDMA_READ_PLAN_DONE_EX: {
+      auto* hdr = msg->get_payload<ProtoRdmaReadPlanDoneExHeader>();
+      const std::string peer = t ? t->get_remote_url() : std::string();
+      auto flow_state = channel->flow_state();
+      if (!flow_state) {
+        LOG(WARNING) << "RDMA_READ_PLAN_DONE_EX without channel flow state";
+        break;
+      }
+      const std::string request_key = transport::get_read_plan_request_key(hdr->request_id);
+      for (uint32_t i = 0; i < hdr->num_segments; ++i) {
+        StageLeaseKey key{
+            .request_key = request_key,
+            .window_seq = hdr->window_seq,
+            .segment_idx = i,
+        };
+        auto lease_or = flow_state->registry.take(key);
+        if (!lease_or.ok()) {
+          LOG(WARNING) << "RDMA_READ_PLAN_DONE_EX for unknown lease: key=" << key.request_key
+                       << " window=" << hdr->window_seq << " segment=" << i;
+          continue;
+        }
+        const uint64_t bytes = lease_or->bytes();
+        const std::string transfer_id = make_transfer_id(request_key, peer);
+        auto progress = lookup_source_transfer_progress(transfer_id);
+        if (progress && bytes > 0) {
+          const uint64_t done = add_transfer_progress_bytes(progress, bytes);
+          if (done >= progress->total_bytes) {
+            finish_source_transfer_progress(transfer_id, absl::OkStatus());
+          }
+        }
+        lease_or->release();
+      }
+      auto resume_status = resume_rdma_reads(channel);
+      if (!resume_status.ok()) {
+        LOG(WARNING) << "Failed to resume RDMA read_plan staging after ACK: " << resume_status;
+      }
+      break;
+    }
     default:
       LOG(WARNING) << "failed to process request: " << msg->get_op();
       return misc::FAILED;
@@ -2820,46 +5745,249 @@ misc::result_t Communicator::on_receive_response(
     const engine_message_t& msg) {
   LOG(INFO) << "[on_receive_response] Received response op=" << msg->get_op() << " from " << t->get_remote_url();
 
-  auto handle_rdma_connect_failure = [&](const std::string& local_dev_name,
-                                         const std::string& peer_dev_name,
-                                         const char* failure_reason) {
-    LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_FAILED: local=" << local_dev_name
-               << " peer=" << peer_dev_name << " reason=" << failure_reason;
+  auto handle_rdma_connect_failure =
+      [&](const std::string& local_dev_name, const std::string& peer_dev_name, const char* failure_reason) {
+        LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_FAILED: local=" << local_dev_name << " peer=" << peer_dev_name
+                   << " reason=" << failure_reason;
 
-    auto endpoint = channel->get_rdma_endpoint(local_dev_name, peer_dev_name);
-    if (endpoint == nullptr) {
+        auto endpoint = channel->get_rdma_endpoint(local_dev_name, peer_dev_name);
+        if (endpoint == nullptr) {
+          return;
+        }
+
+        uint64_t generation = 0;
+        Channel::HandshakeState from_state = Channel::HandshakeState::kIdle;
+        {
+          absl::MutexLock lock(&endpoint->mu);
+          generation = endpoint->generation;
+          from_state = endpoint->state;
+        }
+
+        auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
+        const absl::Status status = absl::UnavailableError(failure_reason);
+        for (auto& pending : failed_reads) {
+          pending_requests_.erase_if_present(pending.request->get_key());
+          pending.request->set_result(status);
+        }
+
+        {
+          absl::MutexLock lock(&endpoint->mu);
+          log_handshake_transition(
+              local_dev_name,
+              peer_dev_name,
+              from_state,
+              Channel::HandshakeState::kFailed,
+              endpoint->generation,
+              endpoint->pending_reads.size());
+          endpoint->state = Channel::HandshakeState::kFailed;
+          endpoint->transport.reset();
+          endpoint->failure_count += 1;
+          endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
+          endpoint->retry_scheduled = false;
+        }
+      };
+  auto handle_target_rdma_reads = [&](const std::string& req_key,
+                                      const std::shared_ptr<transport::ReadRequest>& read_request,
+                                      const std::string& peer_dev_name,
+                                      std::vector<transport::RdmaTransport::RdmaReadSeg> rdma_segs) {
+    CHECK(rdma_context_ != nullptr) << "rdma context is not initialized";
+
+    std::string local_dev_name;
+    if (read_request->is_read_plan()) {
+      auto prepared = read_request->get_prepared_read_plan();
+      if (prepared == nullptr || prepared->local_nic.empty()) {
+        read_request->set_result(absl::FailedPreconditionError("read_plan request missing prepared local nic"));
+        pending_requests_.erase_if_present(req_key);
+        return;
+      }
+      local_dev_name = prepared->local_nic;
+    } else {
+      auto tensor = read_request->get_local_tensor();
+      if (tensor == nullptr || tensor->get_dev() == nullptr) {
+        read_request->set_result(absl::FailedPreconditionError("read request missing local tensor device metadata"));
+        pending_requests_.erase_if_present(req_key);
+        return;
+      }
+      local_dev_name = tensor->get_dev()->get_name();
+    }
+
+    auto endpoint = channel->ensure_rdma_endpoint(local_dev_name, peer_dev_name);
+    auto now = absl::Now();
+    transport::rdma_transport_t transport_to_use;
+    transport::rdma_transport_t prepared_transport;
+    std::shared_ptr<EngineMessage> connect_request_msg;
+    bool issue_now = false;
+    bool handshake_started = false;
+    bool queued_current = false;
+    bool deferred_for_backoff = false;
+    bool schedule_retry = false;
+    absl::Duration backoff_remaining = absl::ZeroDuration();
+    absl::Status immediate_failure = absl::OkStatus();
+    uint64_t generation = 0;
+
+    while (true) {
+      endpoint->mu.Lock();
+      auto state = endpoint->state;
+      if (state == Channel::HandshakeState::kReady) {
+        transport_to_use = endpoint->transport;
+        if (transport_to_use == nullptr || !transport_to_use->ready()) {
+          log_handshake_transition(
+              local_dev_name,
+              peer_dev_name,
+              state,
+              Channel::HandshakeState::kIdle,
+              endpoint->generation,
+              endpoint->pending_reads.size());
+          endpoint->state = Channel::HandshakeState::kIdle;
+          endpoint->transport.reset();
+          endpoint->mu.Unlock();
+          continue;
+        }
+        generation = endpoint->generation;
+        endpoint->mu.Unlock();
+        issue_now = true;
+        break;
+      }
+
+      if (state == Channel::HandshakeState::kConnectRequested) {
+        generation = endpoint->generation;
+        endpoint->pending_reads.push_back(
+            Channel::PendingRdmaRead{
+                .request = read_request,
+                .segments = std::move(rdma_segs),
+                .enqueued_at = now,
+                .generation = generation,
+            });
+        queued_current = true;
+        endpoint->mu.Unlock();
+        break;
+      }
+
+      if (state == Channel::HandshakeState::kIdle || state == Channel::HandshakeState::kFailed) {
+        const bool can_retry = state == Channel::HandshakeState::kIdle || now >= endpoint->next_retry_at;
+        if (!can_retry) {
+          generation = endpoint->generation;
+          endpoint->pending_reads.push_back(
+              Channel::PendingRdmaRead{
+                  .request = read_request,
+                  .segments = std::move(rdma_segs),
+                  .enqueued_at = now,
+                  .generation = generation,
+              });
+          queued_current = true;
+          deferred_for_backoff = true;
+          backoff_remaining = endpoint->next_retry_at - now;
+          if (!endpoint->retry_scheduled) {
+            endpoint->retry_scheduled = true;
+            schedule_retry = true;
+          }
+          endpoint->mu.Unlock();
+          break;
+        }
+
+        if (prepared_transport == nullptr) {
+          endpoint->mu.Unlock();
+          prepared_transport = rdma_context_->create_transport(local_dev_name);
+          if (prepared_transport == nullptr) {
+            immediate_failure = absl::InternalError("failed to allocate RDMA transport");
+            break;
+          }
+          connect_request_msg = EngineMessage::make_message<ProtoRdmaConnectRequest>(ENGINE_OP_RDMA_CONNECT_REQUEST);
+          auto* payload = connect_request_msg->get_payload<ProtoRdmaConnectRequest>();
+          misc::result_t info_res = prepared_transport->get_local_info(&payload->qp_info);
+          if (info_res != misc::SUCCESS) {
+            immediate_failure = absl::InternalError("failed to prepare RDMA connect info");
+            prepared_transport.reset();
+            connect_request_msg.reset();
+            break;
+          }
+          misc::STRNCPY(payload->src_dev_name, local_dev_name, kMaxDevName);
+          misc::STRNCPY(payload->dst_dev_name, peer_dev_name, kMaxDevName);
+          continue;
+        }
+
+        Channel::HandshakeState from_state = state;
+        endpoint->transport = prepared_transport;
+        endpoint->generation += 1;
+        generation = endpoint->generation;
+        endpoint->state = Channel::HandshakeState::kConnectRequested;
+        endpoint->failure_count = 0;
+        endpoint->next_retry_at = absl::InfinitePast();
+        endpoint->retry_scheduled = false;
+        endpoint->pending_reads.push_back(
+            Channel::PendingRdmaRead{
+                .request = read_request,
+                .segments = std::move(rdma_segs),
+                .enqueued_at = now,
+                .generation = generation,
+            });
+        queued_current = true;
+        handshake_started = true;
+        const size_t queue_depth = endpoint->pending_reads.size();
+        endpoint->mu.Unlock();
+        log_handshake_transition(
+            local_dev_name,
+            peer_dev_name,
+            from_state,
+            Channel::HandshakeState::kConnectRequested,
+            generation,
+            queue_depth);
+        break;
+      }
+
+      endpoint->mu.Unlock();
+      immediate_failure = absl::InternalError("unexpected RDMA handshake state");
+      break;
+    }
+
+    if (!immediate_failure.ok()) {
+      read_request->set_result(immediate_failure);
+      pending_requests_.erase_if_present(req_key);
       return;
     }
 
-    uint64_t generation = 0;
-    Channel::HandshakeState from_state = Channel::HandshakeState::kIdle;
-    {
-      absl::MutexLock lock(&endpoint->mu);
-      generation = endpoint->generation;
-      from_state = endpoint->state;
+    if (issue_now) {
+      auto res = transport_to_use->read_multi(read_request, rdma_segs);
+      if (res != misc::SUCCESS) {
+        read_request->set_result(absl::UnavailableError("rdma read_multi failed before completion"));
+        pending_requests_.erase_if_present(req_key);
+      }
+      return;
     }
 
-    auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
-    const absl::Status status = absl::UnavailableError(failure_reason);
-    for (auto& pending : failed_reads) {
-      pending_requests_.erase_if_present(pending.request->get_key());
-      pending.request->set_result(status);
+    if (handshake_started) {
+      auto send_res = t->send(connect_request_msg);
+      if (send_res != misc::SUCCESS) {
+        const absl::Status send_error = absl::UnavailableError("failed to send RDMA connect request to peer");
+        auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
+        for (auto& pending : failed_reads) {
+          pending_requests_.erase_if_present(pending.request->get_key());
+          pending.request->set_result(send_error);
+        }
+        {
+          absl::MutexLock lock(&endpoint->mu);
+          log_handshake_transition(
+              local_dev_name,
+              peer_dev_name,
+              Channel::HandshakeState::kConnectRequested,
+              Channel::HandshakeState::kFailed,
+              endpoint->generation,
+              endpoint->pending_reads.size());
+          endpoint->state = Channel::HandshakeState::kFailed;
+          endpoint->transport.reset();
+          endpoint->failure_count += 1;
+          endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
+          endpoint->retry_scheduled = false;
+        }
+      }
+      return;
     }
 
-    {
-      absl::MutexLock lock(&endpoint->mu);
-      log_handshake_transition(
-          local_dev_name,
-          peer_dev_name,
-          from_state,
-          Channel::HandshakeState::kFailed,
-          endpoint->generation,
-          endpoint->pending_reads.size());
-      endpoint->state = Channel::HandshakeState::kFailed;
-      endpoint->transport.reset();
-      endpoint->failure_count += 1;
-      endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
-      endpoint->retry_scheduled = false;
+    if (queued_current && deferred_for_backoff && schedule_retry) {
+      if (backoff_remaining <= absl::ZeroDuration()) {
+        backoff_remaining = absl::Milliseconds(1);
+      }
+      schedule_handshake_retry(channel, local_dev_name, peer_dev_name, backoff_remaining);
     }
   };
 
@@ -2875,8 +6003,8 @@ misc::result_t Communicator::on_receive_response(
         break;
       }
       if (msg->get_payload_size() < sizeof(ProtoRdmaConnectResponse)) {
-        LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_RESPONSE payload too small: got="
-                   << msg->get_payload_size() << " expected=" << sizeof(ProtoRdmaConnectResponse);
+        LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_RESPONSE payload too small: got=" << msg->get_payload_size()
+                   << " expected=" << sizeof(ProtoRdmaConnectResponse);
         break;
       }
 
@@ -2984,6 +6112,14 @@ misc::result_t Communicator::on_receive_response(
 
       auto ready_reads = drain_pending_reads_for_generation(endpoint, generation);
       for (auto& pending : ready_reads) {
+        if (pending.enqueued_at != absl::InfinitePast()) {
+          const auto wait_us = absl::ToInt64Microseconds(absl::Now() - pending.enqueued_at);
+          if (wait_us > 0) {
+            if (pending.request->rdma_profile_enabled()) {
+              pending.request->note_rdma_handshake_queue_wait_us(static_cast<uint64_t>(wait_us));
+            }
+          }
+        }
         auto res = transport->read_multi(pending.request, pending.segments);
         if (res != misc::SUCCESS) {
           pending_requests_.erase_if_present(pending.request->get_key());
@@ -3033,15 +6169,11 @@ misc::result_t Communicator::on_receive_response(
       read_request->record_request_response();
 
       if (enable_rdma_ && hdr->transport_type == ENGINE_TRANSPORT_RDMA) {
-        CHECK(rdma_context_ != nullptr) << "rdma context is not initialized";
-
+        if (read_request->rdma_profile_enabled()) {
+          read_request->note_rdma_response_window(hdr->num_segments);
+        }
         auto tensor = read_request->get_local_tensor();
-        auto dev = tensor->get_dev();
-        CHECK(dev != nullptr) << "local tensor missing device metadata";
-        const std::string local_dev_name = dev->get_name();
-
-        auto endpoint = channel->ensure_rdma_endpoint(local_dev_name, peer_dev_name);
-
+        auto dev = tensor != nullptr ? tensor->get_dev() : nullptr;
         std::vector<transport::RdmaTransport::RdmaReadSeg> rdma_segs;
         rdma_segs.reserve(hdr->num_segments);
         std::vector<uint64_t> ack_offsets;
@@ -3068,230 +6200,43 @@ misc::result_t Communicator::on_receive_response(
           const std::string staged_key = tensor_key;
           const uint64_t request_offset = read_request->remote_offset_;
           const uint64_t request_id = read_request->request_id();
-          read_request->set_ack_sender(
-              [ctrl, staged_key, request_offset, request_id](
-                  uint32_t window_seq, const std::vector<uint64_t>& offsets, bool final_window) {
-                auto ack = std::make_shared<EngineMessage>(
-                    ENGINE_OP_RDMA_READ_DONE_EX,
-                    static_cast<uint32_t>(
-                        sizeof(ProtoRdmaReadDoneExHeader) + offsets.size() * sizeof(ProtoRdmaReadDoneExSeg)));
-                auto* h = ack->get_payload<ProtoRdmaReadDoneExHeader>();
-                misc::STRNCPY(h->tensor_key, staged_key, kMaxTensorNameLen);
-                h->request_offset = request_offset;
-                h->request_id = request_id;
-                h->num_segments = static_cast<uint32_t>(offsets.size());
-                h->window_seq = window_seq;
-                h->final_window = final_window ? 1 : 0;
-                for (size_t i = 0; i < offsets.size(); ++i) {
-                  auto* seg_ack = reinterpret_cast<ProtoRdmaReadDoneExSeg*>(
-                      reinterpret_cast<uint8_t*>(h) + sizeof(ProtoRdmaReadDoneExHeader) +
-                      i * sizeof(ProtoRdmaReadDoneExSeg));
-                  seg_ack->offset = offsets[i];
-                }
-                CHECK_WARN(ctrl->send(ack), "ack send failed");
-              });
+          std::weak_ptr<transport::ReadRequest> weak_read_request(read_request);
+          read_request->set_ack_sender([ctrl, staged_key, request_offset, request_id, weak_read_request](
+                                           const transport::ReadRequest::PendingAckWindow& window) {
+            if (auto ack_request = weak_read_request.lock(); ack_request != nullptr) {
+              if (ack_request->rdma_profile_enabled()) {
+                ack_request->note_rdma_ack_window(window.num_segments);
+              }
+            }
+            auto ack = std::make_shared<EngineMessage>(
+                ENGINE_OP_RDMA_READ_DONE_EX,
+                static_cast<uint32_t>(
+                    sizeof(ProtoRdmaReadDoneExHeader) + window.offsets.size() * sizeof(ProtoRdmaReadDoneExSeg)));
+            auto* h = ack->get_payload<ProtoRdmaReadDoneExHeader>();
+            misc::STRNCPY(h->tensor_key, staged_key, kMaxTensorNameLen);
+            h->request_offset = request_offset;
+            h->request_id = request_id;
+            h->num_segments = static_cast<uint32_t>(window.offsets.size());
+            h->window_seq = window.window_seq;
+            h->final_window = window.final_window ? 1 : 0;
+            for (size_t i = 0; i < window.offsets.size(); ++i) {
+              auto* seg_ack = reinterpret_cast<ProtoRdmaReadDoneExSeg*>(
+                  reinterpret_cast<uint8_t*>(h) + sizeof(ProtoRdmaReadDoneExHeader) +
+                  i * sizeof(ProtoRdmaReadDoneExSeg));
+              seg_ack->offset = window.offsets[i];
+            }
+            CHECK_WARN(ctrl->send(ack), "ack send failed");
+          });
 
           read_request->enqueue_window_ack(hdr->window_seq, std::move(ack_offsets), hdr->more_segments == 0);
         }
-
-        auto now = absl::Now();
-        transport::rdma_transport_t transport_to_use;
-        transport::rdma_transport_t prepared_transport;
-        std::shared_ptr<EngineMessage> connect_request_msg;
-        bool issue_now = false;
-        bool handshake_started = false;
-        bool queued_current = false;
-        bool deferred_for_backoff = false;
-        bool schedule_retry = false;
-        absl::Duration backoff_remaining = absl::ZeroDuration();
-        absl::Status immediate_failure = absl::OkStatus();
-        uint64_t generation = 0;
-
-        while (true) {
-          endpoint->mu.Lock();
-          auto state = endpoint->state;
-          if (state == Channel::HandshakeState::kReady) {
-            transport_to_use = endpoint->transport;
-            if (transport_to_use == nullptr || !transport_to_use->ready()) {
-              log_handshake_transition(
-                  local_dev_name,
-                  peer_dev_name,
-                  state,
-                  Channel::HandshakeState::kIdle,
-                  endpoint->generation,
-                  endpoint->pending_reads.size());
-              endpoint->state = Channel::HandshakeState::kIdle;
-              endpoint->transport.reset();
-              endpoint->mu.Unlock();
-              continue;
-            }
-            generation = endpoint->generation;
-            endpoint->mu.Unlock();
-            issue_now = true;
-            break;
-          }
-
-          if (state == Channel::HandshakeState::kConnectRequested) {
-            generation = endpoint->generation;
-            endpoint->pending_reads.push_back(
-                Channel::PendingRdmaRead{
-                    .request = read_request,
-                    .segments = std::move(rdma_segs),
-                    .enqueued_at = now,
-                    .generation = generation,
-                });
-            queued_current = true;
-            const size_t queue_depth = endpoint->pending_reads.size();
-            endpoint->mu.Unlock();
-            LOG(INFO) << "[rdma_handshake] queueing read while awaiting connect: request=" << read_request->get_key()
-                      << " local_dev=" << local_dev_name << " peer_dev=" << peer_dev_name
-                      << " queue_depth=" << queue_depth << " rail_id=" << read_request->get_rail_id();
-            break;
-          }
-
-          if (state == Channel::HandshakeState::kIdle || state == Channel::HandshakeState::kFailed) {
-            const bool can_retry = state == Channel::HandshakeState::kIdle || now >= endpoint->next_retry_at;
-            if (!can_retry) {
-              generation = endpoint->generation;
-              endpoint->pending_reads.push_back(
-                  Channel::PendingRdmaRead{
-                      .request = read_request,
-                      .segments = std::move(rdma_segs),
-                      .enqueued_at = now,
-                      .generation = generation,
-                  });
-              queued_current = true;
-              deferred_for_backoff = true;
-              backoff_remaining = endpoint->next_retry_at - now;
-              if (!endpoint->retry_scheduled) {
-                endpoint->retry_scheduled = true;
-                schedule_retry = true;
-              }
-              const size_t queue_depth = endpoint->pending_reads.size();
-              endpoint->mu.Unlock();
-              LOG(WARNING) << "[rdma_handshake] deferring read during backoff: request=" << read_request->get_key()
-                           << " local_dev=" << local_dev_name << " peer_dev=" << peer_dev_name
-                           << " queue_depth=" << queue_depth
-                           << " wait_ms=" << absl::ToInt64Milliseconds(backoff_remaining);
-              break;
-            }
-
-            if (prepared_transport == nullptr) {
-              endpoint->mu.Unlock();
-              prepared_transport = rdma_context_->create_transport(local_dev_name);
-              if (prepared_transport == nullptr) {
-                immediate_failure = absl::InternalError("failed to allocate RDMA transport");
-                break;
-              }
-              connect_request_msg =
-                  EngineMessage::make_message<ProtoRdmaConnectRequest>(ENGINE_OP_RDMA_CONNECT_REQUEST);
-              auto* payload = connect_request_msg->get_payload<ProtoRdmaConnectRequest>();
-              misc::result_t info_res = prepared_transport->get_local_info(&payload->qp_info);
-              if (info_res != misc::SUCCESS) {
-                immediate_failure = absl::InternalError("failed to prepare RDMA connect info");
-                prepared_transport.reset();
-                connect_request_msg.reset();
-                break;
-              }
-              misc::STRNCPY(payload->src_dev_name, local_dev_name, kMaxDevName);
-              misc::STRNCPY(payload->dst_dev_name, peer_dev_name, kMaxDevName);
-              continue;
-            }
-
-            Channel::HandshakeState from_state = state;
-            endpoint->transport = prepared_transport;
-            endpoint->generation += 1;
-            generation = endpoint->generation;
-            endpoint->state = Channel::HandshakeState::kConnectRequested;
-            endpoint->failure_count = 0;
-            endpoint->next_retry_at = absl::InfinitePast();
-            endpoint->retry_scheduled = false;
-            endpoint->pending_reads.push_back(
-                Channel::PendingRdmaRead{
-                    .request = read_request,
-                    .segments = std::move(rdma_segs),
-                    .enqueued_at = now,
-                    .generation = generation,
-                });
-            queued_current = true;
-            handshake_started = true;
-            const size_t queue_depth = endpoint->pending_reads.size();
-            endpoint->mu.Unlock();
-            log_handshake_transition(
-                local_dev_name,
-                peer_dev_name,
-                from_state,
-                Channel::HandshakeState::kConnectRequested,
-                generation,
-                queue_depth);
-            break;
-          }
-
-          endpoint->mu.Unlock();
-          immediate_failure = absl::InternalError("unexpected RDMA handshake state");
-          break;
-        }
-
-        if (!immediate_failure.ok()) {
-          LOG(WARNING) << "[rdma_handshake] immediate failure handling read: request=" << read_request->get_key()
-                       << " status=" << immediate_failure;
-          read_request->set_result(immediate_failure);
+        if (dev == nullptr) {
+          read_request->set_result(absl::FailedPreconditionError("local tensor missing device metadata"));
           pending_requests_.erase_if_present(req_key);
           break;
         }
-
-        if (issue_now) {
-          auto res = transport_to_use->read_multi(read_request, rdma_segs);
-          if (res != misc::SUCCESS) {
-            read_request->set_result(absl::UnavailableError("rdma read_multi failed before completion"));
-            pending_requests_.erase_if_present(req_key);
-          }
-          break;
-        }
-
-        if (handshake_started) {
-          auto send_res = t->send(connect_request_msg);
-          if (send_res != misc::SUCCESS) {
-            LOG(WARNING) << "[rdma_handshake] failed to send connect request: request=" << read_request->get_key()
-                         << " local_dev=" << local_dev_name << " peer_dev=" << peer_dev_name << " res=" << send_res;
-            const absl::Status send_error = absl::UnavailableError("failed to send RDMA connect request to peer");
-            auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
-            for (auto& pending : failed_reads) {
-              pending_requests_.erase_if_present(pending.request->get_key());
-              pending.request->set_result(send_error);
-            }
-            {
-              absl::MutexLock lock(&endpoint->mu);
-              log_handshake_transition(
-                  local_dev_name,
-                  peer_dev_name,
-                  Channel::HandshakeState::kConnectRequested,
-                  Channel::HandshakeState::kFailed,
-                  endpoint->generation,
-                  endpoint->pending_reads.size());
-              endpoint->state = Channel::HandshakeState::kFailed;
-              endpoint->transport.reset();
-              endpoint->failure_count += 1;
-              endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
-              endpoint->retry_scheduled = false;
-            }
-          }
-          break;
-        }
-
-        if (queued_current && deferred_for_backoff) {
-          if (schedule_retry) {
-            if (backoff_remaining <= absl::ZeroDuration()) {
-              backoff_remaining = absl::Milliseconds(1);
-            }
-            schedule_handshake_retry(channel, local_dev_name, peer_dev_name, backoff_remaining);
-          }
-          break;
-        }
-
-        break;
-      }
-      if (hdr->transport_type == ENGINE_TRANSPORT_MTCP) {
+        handle_target_rdma_reads(req_key, read_request, peer_dev_name, std::move(rdma_segs));
+      } else if (hdr->transport_type == ENGINE_TRANSPORT_MTCP) {
         // MTCP path using EX header (no segments)
         auto transport = channel->get_mtcp();
         if (transport == nullptr) {
@@ -3314,8 +6259,10 @@ misc::result_t Communicator::on_receive_response(
           read_request->set_mtcp_stage_unit_hint_bytes(static_cast<uint64_t>(hdr->credit_granted));
         }
         CHECK_WARN(transport->recv(read_request), "failed to recv via mtcp");
-        // Remove pending entry now; completion is tracked in request future
-        pending_requests_.del(req_key);
+        // The request completion callback also erases this entry. Keep the cleanup
+        // here idempotent because MTCP can complete quickly enough for set_result()
+        // to win the race and erase the pending entry first.
+        pending_requests_.erase_if_present(req_key);
       } else {
         LOG(ERROR) << "[on_receive_response] READ_RESPONSE_EX unsupported transport type";
         read_request->set_result(absl::InternalError("READ_RESPONSE_EX unsupported transport type"));
@@ -3323,10 +6270,77 @@ misc::result_t Communicator::on_receive_response(
       }
       break;
     }
+    case ENGINE_OP_READ_PLAN_RESPONSE_EX: {
+      auto* hdr = msg->get_payload<ProtoReadPlanResponseExHeader>();
+      std::string peer_dev_name = reinterpret_cast<char*>(hdr->nic_name);
+      auto req_key = transport::get_read_plan_request_key(hdr->request_id);
+      auto read_request = pending_requests_.get(req_key);
+      if (read_request == nullptr) {
+        LOG(ERROR) << "[on_receive_response] READ_PLAN_RESPONSE_EX: pending request not found for " << req_key;
+        break;
+      }
+      read_request->status_.transport_is_rdma = hdr->transport_type == ENGINE_TRANSPORT_RDMA;
+      read_request->status_.remote_nic = peer_dev_name;
+      read_request->status_.remote_rail_id = hdr->rail_id;
+      read_request->status_.rdma_staged_response = hdr->staged != 0;
+      read_request->status_.rdma_zero_copy_response = hdr->zero_copy != 0;
+      read_request->record_request_response();
+
+      if (enable_rdma_ && hdr->transport_type == ENGINE_TRANSPORT_RDMA) {
+        if (read_request->rdma_profile_enabled()) {
+          read_request->note_rdma_response_window(hdr->num_segments);
+        }
+        auto* segments = reinterpret_cast<ProtoReadPlanResponseExSeg*>(
+            reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadPlanResponseExHeader));
+        auto prepared = read_request->get_prepared_read_plan();
+        if (prepared == nullptr) {
+          read_request->set_result(absl::FailedPreconditionError("read_plan response missing prepared plan"));
+          pending_requests_.erase_if_present(req_key);
+          break;
+        }
+        auto rdma_segs_or = BuildPreparedPlanRdmaSegments(*prepared, *hdr, segments);
+        if (!rdma_segs_or.ok()) {
+          read_request->set_result(rdma_segs_or.status());
+          pending_requests_.erase_if_present(req_key);
+          break;
+        }
+        auto rdma_segs = std::move(rdma_segs_or.value());
+        read_request->note_rdma_window(static_cast<int>(rdma_segs.size()), hdr->more_segments == 0);
+
+        if (hdr->staged) {
+          auto ctrl = channel->get_control();
+          const uint64_t request_id = read_request->request_id();
+          std::weak_ptr<transport::ReadRequest> weak_read_request(read_request);
+          read_request->set_ack_sender(
+              [ctrl, request_id, weak_read_request](const transport::ReadRequest::PendingAckWindow& window) {
+                if (auto ack_request = weak_read_request.lock(); ack_request != nullptr) {
+                  if (ack_request->rdma_profile_enabled()) {
+                    ack_request->note_rdma_ack_window(window.num_segments);
+                  }
+                }
+                auto ack = EngineMessage::make_message<ProtoRdmaReadPlanDoneExHeader>(ENGINE_OP_RDMA_READ_PLAN_DONE_EX);
+                auto* payload = ack->get_payload<ProtoRdmaReadPlanDoneExHeader>();
+                payload->request_id = request_id;
+                payload->num_segments = window.num_segments;
+                payload->window_seq = window.window_seq;
+                payload->final_window = window.final_window ? 1 : 0;
+                CHECK_WARN(ctrl->send(ack), "read_plan ack send failed");
+              });
+          read_request->enqueue_plan_window_ack(
+              hdr->window_seq, hdr->num_segments, static_cast<uint32_t>(rdma_segs.size()), hdr->more_segments == 0);
+        }
+
+        handle_target_rdma_reads(req_key, read_request, peer_dev_name, std::move(rdma_segs));
+      } else {
+        read_request->set_result(absl::InternalError("READ_PLAN_RESPONSE_EX unsupported transport type"));
+        pending_requests_.erase_if_present(req_key);
+      }
+      break;
+    }
     case ENGINE_OP_RDMA_CONNECT_FAILED: {
       if (msg->get_payload_size() < sizeof(ProtoRdmaConnectFailed)) {
-        LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_FAILED payload too small: got="
-                   << msg->get_payload_size() << " expected=" << sizeof(ProtoRdmaConnectFailed);
+        LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_FAILED payload too small: got=" << msg->get_payload_size()
+                   << " expected=" << sizeof(ProtoRdmaConnectFailed);
         break;
       }
 
@@ -3349,7 +6363,7 @@ misc::result_t Communicator::on_receive_response(
         LOG(WARNING) << "failed to get read response: key=" << tensor_key;
         break;
       }
-      pending_requests_.del(req_key);
+      pending_requests_.erase_if_present(req_key);
       absl::Status failure_status = absl::InternalError("failed to read from peer");
       switch (rsp->reason) {
         case TENSORCAST_READ_FAILED_NO_TENSOR:
@@ -3367,6 +6381,37 @@ misc::result_t Communicator::on_receive_response(
           break;
         case TENSORCAST_READ_FAILED_MEM_MISMATCH:
         default:
+          break;
+      }
+      read_request->set_result(failure_status);
+      break;
+    }
+    case ENGINE_OP_READ_PLAN_FAILED: {
+      auto* rsp = msg->get_payload<ProtoReadPlanFailed>();
+      const auto req_key = transport::get_read_plan_request_key(rsp->request_id);
+      auto read_request = pending_requests_.get(req_key);
+      if (read_request == nullptr) {
+        LOG(WARNING) << "failed to get read_plan response for request_id=" << rsp->request_id;
+        break;
+      }
+      pending_requests_.erase_if_present(req_key);
+      absl::Status failure_status = absl::InternalError("failed to read plan from peer");
+      switch (rsp->reason) {
+        case TENSORCAST_READ_FAILED_NO_TENSOR:
+          failure_status = absl::NotFoundError("read_plan source tensor not found on peer");
+          break;
+        case TENSORCAST_READ_FAILED_OVERFLOW:
+          failure_status = absl::OutOfRangeError("read_plan source slice overflow on peer");
+          break;
+        case TENSORCAST_READ_FAILED_RESOURCE_EXHAUSTED:
+          failure_status = absl::ResourceExhaustedError("read_plan source staging capacity exceeded on peer");
+          break;
+        case TENSORCAST_READ_FAILED_DIRECT_RDMA_REQUIRED:
+          failure_status = absl::FailedPreconditionError("read_plan direct RDMA required but unavailable on peer");
+          break;
+        case TENSORCAST_READ_FAILED_MEM_MISMATCH:
+        default:
+          failure_status = absl::InternalError("read_plan request failed on peer");
           break;
       }
       read_request->set_result(failure_status);
@@ -3598,7 +6643,7 @@ net_dev_t Communicator::get_net_dev(int dev_type, int dev_id, const std::string&
   if (enable_rdma_) {
     CHECK(rdma_context_ != nullptr) << "rdma context is not initialized";
 
-    net_dev = rdma_context_->get_best_dev(dev_type, dev_id, -1, key);
+    net_dev = rdma_context_->get_best_dev(dev_type, dev_id, rail_id, key);
 
     if (net_dev == nullptr) {
       LOG(WARNING) << "failed to select RDMA device (dev_type=" << dev_type

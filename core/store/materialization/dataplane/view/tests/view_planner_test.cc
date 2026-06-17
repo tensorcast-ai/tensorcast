@@ -96,7 +96,7 @@ TEST_CASE("ViewPlanner packs subset names into view index", "[view_planner]") {
       /*shape=*/{4},
       /*stride=*/{1},
       /*dtype=*/"torch.float32",
-      /*storage_offset=*/4);
+      /*storage_offset=*/0);
   const std::string canonical = index.dump();
 
   ViewSpec spec;
@@ -137,7 +137,7 @@ TEST_CASE("ViewPlanner keeps identity for full-name subset", "[view_planner]") {
       /*shape=*/{4},
       /*stride=*/{1},
       /*dtype=*/"torch.float32",
-      /*storage_offset=*/4);
+      /*storage_offset=*/0);
   const std::string canonical = index.dump();
 
   ViewSpec spec;
@@ -148,6 +148,90 @@ TEST_CASE("ViewPlanner keeps identity for full-name subset", "[view_planner]") {
   const auto& plan = *plan_or;
   CHECK_FALSE(plan.is_identity);
   CHECK(plan.view_index_json == tensorcast::store::loader::rebuild_stable_canonical_index(canonical, 0).value());
+}
+
+TEST_CASE("ViewPlanner compacts shared-storage identity subset to tensor span", "[view_planner]") {
+  nlohmann::json index = nlohmann::json::object();
+  index["weights"] = tensor_entry(
+      /*offset=*/0,
+      /*size=*/2048,
+      /*shape=*/{16},
+      /*stride=*/{1},
+      /*dtype=*/"torch.float32",
+      /*storage_offset=*/0);
+  index["__tensorcast_meta__.manifest_json"] = tensor_entry(
+      /*offset=*/0,
+      /*size=*/2048,
+      /*shape=*/{1008},
+      /*stride=*/{1},
+      /*dtype=*/"torch.uint8",
+      /*storage_offset=*/1000);
+  const std::string canonical = index.dump();
+
+  ViewSpec spec;
+  const std::vector<std::string> subset{"__tensorcast_meta__.manifest_json"};
+
+  auto plan_or = ViewPlanner::compute_view_plan(canonical, spec, subset);
+  REQUIRE(plan_or.ok());
+  const auto& plan = *plan_or;
+
+  CHECK_FALSE(plan.is_identity);
+  REQUIRE(plan.selection.map.segments.size() == 1);
+  const auto& range = plan.selection.map.segments.front();
+  CHECK(range.kind == ByteRangeSegment::Kind::kData);
+  CHECK(range.src_offset == 1000);
+  CHECK(range.dst_offset == 0);
+  CHECK(range.length == 1008);
+  CHECK(plan.view_size_bytes == 1008);
+
+  const auto view_json = nlohmann::json::parse(plan.view_index_json);
+  REQUIRE(view_json.size() == 1);
+  const auto& entry = view_json.at("__tensorcast_meta__.manifest_json");
+  CHECK(entry[0].get<uint64_t>() == 0);
+  CHECK(entry[1].get<uint64_t>() == 1008);
+  CHECK(entry[5].get<uint64_t>() == 0);
+}
+
+TEST_CASE("ViewPlanner treats shared-storage storage_offset as bytes", "[view_planner]") {
+  nlohmann::json index = nlohmann::json::object();
+  index["alpha"] = tensor_entry(
+      /*offset=*/0,
+      /*size=*/1024,
+      /*shape=*/{2},
+      /*stride=*/{1},
+      /*dtype=*/"torch.float32",
+      /*storage_offset=*/0);
+  index["beta"] = tensor_entry(
+      /*offset=*/0,
+      /*size=*/1024,
+      /*shape=*/{4},
+      /*stride=*/{1},
+      /*dtype=*/"torch.float32",
+      /*storage_offset=*/16);
+  const std::string canonical = index.dump();
+
+  ViewSpec spec;
+  const std::vector<std::string> subset{"beta"};
+
+  auto plan_or = ViewPlanner::compute_view_plan(canonical, spec, subset);
+  REQUIRE(plan_or.ok());
+  const auto& plan = *plan_or;
+
+  CHECK_FALSE(plan.is_identity);
+  REQUIRE(plan.selection.map.segments.size() == 1);
+  const auto& range = plan.selection.map.segments.front();
+  CHECK(range.kind == ByteRangeSegment::Kind::kData);
+  CHECK(range.src_offset == 16);
+  CHECK(range.dst_offset == 0);
+  CHECK(range.length == 16);
+  CHECK(plan.view_size_bytes == 16);
+
+  const auto view_json = nlohmann::json::parse(plan.view_index_json);
+  REQUIRE(view_json.size() == 1);
+  const auto& entry = view_json.at("beta");
+  CHECK(entry[0].get<uint64_t>() == 0);
+  CHECK(entry[1].get<uint64_t>() == 16);
+  CHECK(entry[5].get<uint64_t>() == 0);
 }
 
 TEST_CASE("ViewPlanner preserves subset ordering", "[view_planner]") {

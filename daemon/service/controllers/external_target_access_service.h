@@ -7,6 +7,7 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/statusor.h"
+#include "core/store/components/communication_manager.h"
 #include "core/store/device_types.h"
 #include "daemon/service/byte_artifact_region_layout.h"
 #include "daemon/service/controllers/materialization_target_storage_utils.h"
@@ -21,6 +22,7 @@ class ExternalTargetAccessService {
   struct Dep {
     DeviceResolver& devices;
     IpcRegionRegistry& regions;
+    store::components::CommunicationManager* comm_manager{nullptr};
   };
 
   struct ValidatedTargetAccess {
@@ -52,9 +54,9 @@ class ExternalTargetAccessService {
       const absl::flat_hash_map<std::string, std::uint64_t>& expected_lengths) const;
 
  private:
-  [[nodiscard]] absl::Status validate_target_storage_device(
+  [[nodiscard]] absl::StatusOr<store::DeviceKey> resolve_target_storage_device(
       const v2::TargetLayout& layout,
-      const store::DeviceKey& device,
+      std::string_view device_uuid,
       std::string_view rpc_name) const;
 
   Dep d_;

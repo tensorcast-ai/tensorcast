@@ -5,9 +5,13 @@
 
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
@@ -20,16 +24,31 @@
 #include "core/store/store_engine.h"
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/types.h"
+#include "gsl/pointers"
 
 namespace tensorcast::daemon {
 
 class LipManager {
  public:
+  struct BuildCommitLeaseOptions {
+    std::optional<gsl::not_null<void*>> direct_gpu_hash_ptr;
+    bool require_gpu_identity_hash;
+  };
+
   struct RoutableLeaseResult {
     ArtifactDeviceKey key;
     std::vector<std::string> remote_memory_keys;
     std::vector<uint64_t> buffer_sizes;
   };
+
+  struct RoutableInventoryEntry {
+    ArtifactDeviceKey key;
+    uint64_t total_size{0};
+    std::vector<std::string> remote_memory_keys;
+    std::vector<uint64_t> buffer_sizes;
+  };
+
+  using HostChunkConsumer = std::function<absl::Status(const uint8_t* data, size_t size)>;
 
   LipManager(std::shared_ptr<store::StoreEngine> engine, IpcRegionRegistry* regions)
       : engine_(std::move(engine)), region_registry_(regions) {}
@@ -56,6 +75,14 @@ class LipManager {
       const LipLeaseEntry& lip,
       absl::Span<const uint32_t> chunk_indices,
       store::StoreEngine& engine);
+
+  [[nodiscard]] absl::Status copy_active_lease_range_to_host(
+      std::string_view artifact_id,
+      uint64_t offset,
+      uint64_t length,
+      size_t chunk_bytes,
+      const HostChunkConsumer& consume,
+      std::optional<std::string_view> view_id = std::nullopt) const;
 
   // Release a staged export by lock token: unregister tensor keys and close
   // CUDA IPC mappings.
@@ -107,6 +134,23 @@ class LipManager {
   // computing the artifact descriptor using index/data multihashes streamed
   // from the leased GPU segments. Stores the lease for keepalive/revoke and
   // returns descriptor fields and an optional verification JSON.
+  [[nodiscard]] absl::StatusOr<CommitLeaseResult> build_commit_lease_result(
+      int device_id,
+      int owner_pid,
+      uint64_t total_size,
+      tensorcast::common::ArtifactIdKind id_kind,
+      const std::string& client_artifact_id,
+      const std::string& index_data,
+      const std::string& index_key_hex,
+      absl::Span<const LeaseSegMeta> segments,
+      absl::Span<const RegisterStorageMeta> storages,
+      absl::Span<const RegisterTensorAliasMeta> aliases,
+      const std::optional<CommitLeaseResult>& identity_override = std::nullopt,
+      BuildCommitLeaseOptions options = {});
+
+  // Commit a LIP (lease in-place) registration into a persistent lease entry,
+  // optionally reusing a pre-minted identity instead of hashing the same bytes
+  // a second time.
   [[nodiscard]] absl::StatusOr<CommitLeaseResult> commit_lease_in_place(
       const std::string& registration_id,
       int device_id,
@@ -120,7 +164,9 @@ class LipManager {
       const std::string& index_key_hex, // precomputed index sha256 hex (may be empty)
       std::vector<LeaseSegMeta>&& segments,
       std::vector<RegisterStorageMeta>&& storages,
-      std::vector<RegisterTensorAliasMeta>&& aliases);
+      std::vector<RegisterTensorAliasMeta>&& aliases,
+      const std::optional<CommitLeaseResult>& identity_override = std::nullopt,
+      BuildCommitLeaseOptions options = {});
 
   // Commit a view-scoped routable LIP lease (used for piece registrations).
   // This registers long-lived communicator keys over the leased view ByteSpace
@@ -137,8 +183,16 @@ class LipManager {
       std::vector<LeaseSegMeta>&& segments,
       std::vector<RegisterStorageMeta>&& storages);
 
+  // Export an already committed lease as a routable replica without creating a
+  // second lease entry. Used by full-artifact binding-subject publication.
+  [[nodiscard]] absl::StatusOr<RoutableLeaseResult> publish_committed_lease_routable(std::string_view registration_id);
+
   // Attach a Global Store replica_id to a committed LIP lease for best-effort cleanup.
   void attach_replica_id(const std::string& registration_id, std::string replica_id);
+
+  // Snapshot active routable exports so worker lifecycle state sync can report
+  // LIP-backed transportable replicas alongside replica-runtime inventory.
+  [[nodiscard]] std::vector<RoutableInventoryEntry> list_active_routable_inventory() const;
 
  private:
   std::shared_ptr<store::StoreEngine> engine_;

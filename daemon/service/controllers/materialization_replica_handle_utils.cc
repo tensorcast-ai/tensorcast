@@ -118,7 +118,7 @@ absl::Status bind_replica_handle_for_response(
     std::string_view replica_uuid,
     int32_t effective_pid,
     bool allow_pid_ref,
-    bool cpu_target,
+    std::string_view planned_export_kind,
     std::string_view lease_log_context,
     const std::function<void()>& on_lease_create_failed,
     v2::MemCopyHandle& out_mem_handle) {
@@ -137,7 +137,12 @@ absl::Status bind_replica_handle_for_response(
     (void)engine.unload_replica(handle.replica_key);
   });
 
-  if (cpu_target) {
+  if (planned_export_kind == "none") {
+    std::move(rollback).Cancel();
+    return absl::OkStatus();
+  }
+
+  if (planned_export_kind == "cpu_memfd_lease") {
     if (!handle.cpu_memfd_region.has_value()) {
       return absl::FailedPreconditionError("CPU memfd handle unavailable for replica");
     }
@@ -170,6 +175,10 @@ absl::Status bind_replica_handle_for_response(
     out_mem_handle.set_lease_token(*token_or);
     std::move(rollback).Cancel();
     return absl::OkStatus();
+  }
+
+  if (planned_export_kind != "cuda_ipc_lease") {
+    return absl::InvalidArgumentError("unsupported replica handle export kind");
   }
 
   if (!handle.cuda_ipc_handle.is_valid()) {

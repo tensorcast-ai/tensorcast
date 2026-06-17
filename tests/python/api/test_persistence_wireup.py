@@ -54,15 +54,25 @@ class _RuntimeStub:
 
 
 class _ClientStub:
-    def __init__(self, *, response=None, query_response=None, exc: Exception | None = None):
+    def __init__(
+        self, *, response=None, query_response=None, exc: Exception | None = None
+    ):
         self.response = response
         self.query_response = query_response
         self.exc = exc
-        self.start_calls: list[tuple[str, object | None]] = []
+        self.start_calls: list[tuple[str, str | None, object | None]] = []
         self.query_calls: list[tuple[str | None, str | None]] = []
 
-    def start_persistence(self, *, artifact_id: str, policy=None):
-        self.start_calls.append((artifact_id, policy))
+    def start_persistence(
+        self,
+        *,
+        artifact_id: str,
+        key_hint: str | None = None,
+        policy=None,
+        timeout_s: float | None = None,
+    ):
+        del timeout_s
+        self.start_calls.append((artifact_id, key_hint, policy))
         if self.exc:
             raise self.exc
         if self.response is not None:
@@ -147,7 +157,7 @@ def test_maybe_start_persistence_requests_task() -> None:
     task_id = pipeline._maybe_start_persistence(options, _ResultStub("artifact-7"))
 
     assert task_id == "task-42"
-    assert client.start_calls == [("artifact-7", options.policy)]
+    assert client.start_calls == [("artifact-7", None, options.policy)]
 
 
 def test_maybe_start_persistence_raises_for_missing_artifact() -> None:
@@ -180,7 +190,7 @@ def test_maybe_start_persistence_swallows_unexpected_errors() -> None:
     task_id = pipeline._maybe_start_persistence(options, _ResultStub("artifact-9"))
 
     assert task_id is None
-    assert client.start_calls == [("artifact-9", options.policy)]
+    assert client.start_calls == [("artifact-9", None, options.policy)]
 
 
 def test_query_persistence_status_requires_identifier() -> None:
@@ -225,6 +235,37 @@ def test_query_persistence_status_maps_proto_fields() -> None:
     assert shard.target_nodes == ("node-a", "node-b")
     assert shard.lease_ids == ("lease-1", "")
     assert client.query_calls == [("task-11", None)]
+
+
+def test_persist_artifact_starts_persistence_with_key_hint() -> None:
+    response = store_daemon_pb2.StartPersistenceResponse(
+        task_id="task-55",
+        plan_id="plan-55",
+        state=store_daemon_pb2.PERSISTENCE_STATE_RUNNING,
+        progress=0.2,
+    )
+    query_response = store_daemon_pb2.QueryPersistenceStatusResponse(
+        task_id="task-55",
+        artifact_id="artifact-55",
+        plan_id="plan-55",
+        state=store_daemon_pb2.PERSISTENCE_STATE_SUCCESS,
+        progress=1.0,
+    )
+    client = _ClientStub(response=response, query_response=query_response)
+    store = _store_with_client(client)
+
+    operation = store.persist_artifact(
+        artifact_id="artifact-55",
+        key_hint="models/demo/serving/v1",
+        policy="durable",
+    )
+    result = operation.wait(timeout_s=1.0)
+
+    assert result.task_id == "task-55"
+    assert result.artifact_id == "artifact-55"
+    assert client.start_calls == [
+        ("artifact-55", "models/demo/serving/v1", "durable")
+    ]
 
 
 def test_persistence_operation_status_carries_operation_context() -> None:

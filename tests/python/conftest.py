@@ -7,14 +7,15 @@ Pytest configuration and shared fixtures.
 import contextlib
 import logging
 import os
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
 import duckdb
 import pytest
 
-from tests.python.utils.ports import get_free_port, get_free_port_pair
 from tests.python.utils.hardware import has_cuda_or_fake
+from tests.python.utils.ports import get_free_port, get_free_port_pair
 
 # PyTest's `PYTEST_CURRENT_TEST` is not guaranteed to be set during all hook
 # phases (e.g. `pytest_runtest_setup`). TensorCast's fake CUDA backend gate
@@ -48,6 +49,16 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     """Skip tests that require CUDA when neither real nor fake backend is present."""
     if "requires_cuda_or_fake" in item.keywords and not has_cuda_or_fake():
         pytest.skip("CUDA driver unavailable and fake CUDA backend not enabled")
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Tear down native TensorCast workers before Python extension finalization."""
+    if "tensorcast._C" not in sys.modules:
+        return
+    with contextlib.suppress(Exception):
+        from tensorcast._c_ext import get_c_ext
+
+        get_c_ext().shutdown_native_runtime()
 
 
 @pytest.fixture(autouse=True, scope="function")

@@ -1,0 +1,7 @@
+title = "TensorCast gitleaks configuration"
+
+[allowlist]
+description = "Allow only the checked-in mTLS fixture material used by grpc_daemon_transport_test."
+paths = [
+  '''daemon/util/grpc_daemon_transport_test\.cc''',
+]

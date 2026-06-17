@@ -335,13 +335,13 @@ bazel run //core/store/materialization/benchmarks:safetensors_load_strategy_benc
 bazel run //core/store/materialization/benchmarks:safetensors_load_strategy_benchmark -- \
   --mode=materialize_d \
   --strategy=c \
-  --safetensors_dir=/mnt/host0/Qwen2.5-32B-Instruct \
+  --safetensors_dir=/shared/tensorcast/models/example-hf-model \
   --load_plan_json_path=/path/to/loading-meta.json \
   --tp_world_size=4 \
   --tp_rank=0 \
   --device_id=0 \
   --use_pinned_host_buffer=true \
-  --materialized_dir=/mnt/host0/Qwen2.5-32B-Instruct/tensorcast_materialized
+  --materialized_dir=/shared/tensorcast/models/example-hf-model/tensorcast_materialized
 ```
 
 ### D.2 加载基线（materialized_disk_baseline）
@@ -351,7 +351,7 @@ bazel run //core/store/materialization/benchmarks:safetensors_load_strategy_benc
 ```bash
 bazel run //core/store/materialization/benchmarks:safetensors_load_strategy_benchmark -- \
   --mode=materialized_disk_baseline \
-  --materialized_meta_path=/mnt/host0/Qwen2.5-32B-Instruct/tensorcast_materialized/tp4/rank0.meta.json \
+  --materialized_meta_path=/shared/tensorcast/models/example-hf-model/tensorcast_materialized/tp4/rank0.meta.json \
   --device_id=0 \
   --disk_io_mode=direct \
   --use_pinned_host_buffer=true

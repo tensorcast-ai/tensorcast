@@ -199,7 +199,7 @@ tc.init(mode="connect", address="127.0.0.1:50052")
 
 store = tc.store(
     opts=tc.StoreOptions(
-        fallback="local",
+        get=tc.GetArtifactOptions(source="local_only"),
         retry_overrides={"get": RetryPolicy(20.0, 2, 0.1, 2.0, 0.5)},
     )
 )

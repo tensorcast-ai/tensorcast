@@ -77,7 +77,7 @@ Current request path lacks robust scheduler-grade primitives:
 - Improve source utilization by balancing both replica and worker pressure.
 - Introduce global group-aware dispatch with fairness floor, completion bias, and starvation aging.
 - Keep data path unchanged (RDMA/TCP/CUDA IPC and payload format unchanged).
-- Keep backward-compatible behavior when group metadata is absent.
+- Keep ungrouped request behavior explicit when group metadata is absent.
 - Roll out in two stages so production risk is bounded and benchmark tuning is incremental.
 
 ## Non-Goals
@@ -92,7 +92,7 @@ Current request path lacks robust scheduler-grade primitives:
 flowchart LR
   A["RequestReplicaTransport\nwith optional group hint"] --> B["Global Store request intake"]
   B --> C{Scheduler mode}
-  C -->|legacy or stage A| D["Inline source scoring\nreplica + worker + diffusion"]
+  C -->|ungrouped or stage A| D["Inline source scoring\nreplica + worker + diffusion"]
   C -->|stage B| E["Pending request queue\nglobal dispatcher"]
   E --> F["Group score\nfairness + completion + aging"]
   D --> G["Atomic claim + transport create"]
@@ -129,6 +129,14 @@ Dispatch objective:
 
 This is the first stage that can correctly optimize cluster-level group completion tail.
 
+This dispatcher is the only Global Store global transport dispatcher in the
+long-term architecture. Higher-level semantic designs such as `0117` should
+derive strict child transport groups into this path, and progressive partial
+source designs such as `0118` should use bounded atomic claims rather than
+adding a second global queue or dispatch lock. Queue scans and dispatch batches
+remain configuration-bounded because Global Store DuckDB access has strong
+serialization points.
+
 ## Group Contract (v1 Scope)
 
 Group metadata is generic but v1 contract is intentionally constrained:
@@ -139,6 +147,12 @@ Group metadata is generic but v1 contract is intentionally constrained:
 - `part_id` is unique within the group
 
 Multi-artifact groups are out of v1 scope and reserved for v2+.
+
+Semantic version-set transactions, such as `0117` group realization, must not
+weaken this transport contract. If one semantic group spans multiple artifacts,
+views, or requested byte spaces, Global Store/daemon code derives one or more
+strict child transport groups from the parent semantic transaction. Each child
+group still obeys the same-artifact and same-byte-space rule above.
 
 ## Protocol Changes
 
@@ -190,7 +204,8 @@ Group progress uses `outcome=SUCCESS` only.
 
 - Transport completion always releases source-side concurrency lease exactly once.
 - Group completion is computed from requester-reported success outcomes, not from lease closure.
-- If outcome is missing (older client), request is treated as compatibility mode and does not enter group-success accounting.
+- Final-state completion requires an explicit outcome. Missing outcome is
+  rejected and cannot enter group-success accounting.
 - Scheduler metadata is additive and cannot alter artifact correctness semantics.
 
 # Schema Changes
@@ -228,9 +243,12 @@ Add `pending_transport_requests` for dispatcher mode:
 
 Indexes must cover fairness scan and deadline expiration paths.
 
-## Compatibility naming note
+## Naming Cleanup Note
 
-`source_node_id/source_address/source_port` are requester-side identity in current request path. They remain for compatibility, but scheduler internals should use requester-oriented naming.
+`source_node_id/source_address/source_port` are requester-side identity in the
+current request path. New code should use requester-oriented naming, and the
+final schema should converge the field names rather than carrying both naming
+families indefinitely.
 
 A synchronized `schema.sql` patch is required.
 
@@ -240,7 +258,7 @@ Scheduler configuration must follow unified runtime config (`tensorcast.config.v
 
 Recommended addition in `GlobalStoreConfig.worker_policy`:
 
-- scheduler mode: `LEGACY`, `SOURCE_BALANCE`, `GROUP_DISPATCH`
+- scheduler mode: `SOURCE_BALANCE`, `GROUP_DISPATCH`
 - score weights (`w1..w4`)
 - fairness and aging thresholds
 - queue scan and dispatch limits
@@ -260,15 +278,17 @@ Rollout must be mode-based, not branch-based.
 - Stage B adds complexity (queue state, dispatcher correctness, more metrics).
 - Incorrect fairness parameters can hurt large-group latency.
 - Queue and score queries can increase DB pressure; indexes and bounded scans are mandatory.
-- Mixed-version clients may under-report outcome details; mode gating is required.
+- Clients that omit completion outcome details must be updated before strict
+  group accounting is enabled.
 
-# Compatibility and Acceptance Criteria
+# Cutover and Acceptance Criteria
 
-## Compatibility
+## Final-State Rules
 
-- Absent `scheduling_group` means legacy request behavior.
-- Absent completion outcome is treated as compatibility mode.
-- Mixed-version rollout supports Stage A first; Stage B requires outcome-aware clients for strict group accounting.
+- Absent `scheduling_group` means an explicit ungrouped request, not a hidden
+  fallback mode.
+- Completion outcome is required.
+- Stage B requires outcome-aware clients before enablement.
 
 ## Acceptance Criteria
 

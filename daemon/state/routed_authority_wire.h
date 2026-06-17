@@ -49,7 +49,7 @@ inline std::string lifecycle_front_door_kind_label(LifecycleFrontDoorKind front_
     case LifecycleFrontDoorKind::kRetentionHandleToken:
       return "retention_handle_token";
     case LifecycleFrontDoorKind::kTargetPublicationToken:
-      return "target_publication_token";
+      return "binding_current_value_publication_token";
     case LifecycleFrontDoorKind::kInternalRecord:
       return "internal_record";
   }
@@ -75,7 +75,7 @@ inline absl::StatusOr<LifecycleFrontDoorKind> lifecycle_front_door_kind_from_lab
   if (label == "retention_handle_token") {
     return LifecycleFrontDoorKind::kRetentionHandleToken;
   }
-  if (label == "target_publication_token") {
+  if (label == "binding_current_value_publication_token") {
     return LifecycleFrontDoorKind::kTargetPublicationToken;
   }
   if (label == "internal_record") {

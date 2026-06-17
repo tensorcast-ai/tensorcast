@@ -1,0 +1,22 @@
+meta:
+  schema_version: "v1"
+  description: "TensorCast local development Global Store profile"
+  cluster_token: ""
+
+database:
+  db_file: null
+
+server:
+  listen:
+    host: 127.0.0.1
+    port: 0
+  advertise:
+    host: ""
+    port: 0
+  max_workers: 4
+  metrics_port: 0
+
+worker_policy:
+  heartbeat_timeout: 30s
+  cleanup_interval: 60s
+  default_heartbeat_interval: 5s

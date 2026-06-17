@@ -11,8 +11,8 @@ import torch
 from tensorcast.api.store.artifact import Artifact
 from tensorcast.api.store.cache import ArtifactCache
 from tensorcast.api.store.common import canonical_index_from_bytes
-from tensorcast.api.store.types import ArtifactError, StoreOptions
 from tensorcast.api.store.retry import build_retry_policies
+from tensorcast.api.store.types import ArtifactError, StoreOptions
 
 
 def _canonical_index_bytes() -> bytes:

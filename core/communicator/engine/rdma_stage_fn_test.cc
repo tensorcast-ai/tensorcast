@@ -16,6 +16,8 @@ struct ibv_mr;
 
 namespace tensorcast::communicator::engine {
 
+struct RdmaSourceStageProfile;
+
 StagingWindow::StageFn MakeStageFunction(
     const std::shared_ptr<transport::PartitionTensor>& tensor,
     FlowCreditLedger* ledger,
@@ -26,7 +28,9 @@ StagingWindow::StageFn MakeStageFunction(
     std::string request_key,
     v1::RdmaConfig::StagedRdmaBackend staged_backend,
     bool use_direct,
-    ::ibv_mr* direct_mr);
+    ::ibv_mr* direct_mr,
+    std::shared_ptr<void> direct_keepalive,
+    std::shared_ptr<RdmaSourceStageProfile> source_stage_profile);
 
 TEST_CASE("MakeStageFunction guards null stager", "[communicator][rdma]") {
   transport::net_dev_t dev = nullptr;
@@ -41,7 +45,9 @@ TEST_CASE("MakeStageFunction guards null stager", "[communicator][rdma]") {
       /*request_key=*/"missing_stager:0#1",
       /*staged_backend=*/v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED,
       /*use_direct=*/false,
-      /*direct_mr=*/nullptr);
+      /*direct_mr=*/nullptr,
+      /*direct_keepalive=*/nullptr,
+      /*source_stage_profile=*/nullptr);
 
   auto lease_or = stage_fn(/*offset=*/0, /*bytes=*/1, /*segment_idx=*/0);
   REQUIRE_FALSE(lease_or.ok());

@@ -24,7 +24,7 @@ sequenceDiagram
     participant Daemon
     participant Comm as Communicator
     participant Peer
-    Client->>Daemon: RegisterVramRegion
+    Client->>Daemon: RegisterRegion(memory_kind=VRAM)
     Daemon->>Comm: register_tensor_ex(needs_staging=false, register_mr=true)
     Client->>Daemon: RegisterArtifact (region-backed)
     Daemon->>Comm: StageExport (region metadata)

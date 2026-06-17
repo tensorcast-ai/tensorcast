@@ -12,7 +12,7 @@ namespace tensorcast::daemon::materialization_mapped_view_narrow {
 
 namespace {
 
-using materialization_mapped_copy_plan::ViewNarrowSpec;
+using representation_layout::ViewNarrowSpec;
 using store::loader::ViewOp;
 using store::loader::ViewSpec;
 

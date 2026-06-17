@@ -7,6 +7,7 @@ import concurrent.futures
 import json
 import threading
 import time
+import weakref
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any, Callable, Sequence, cast
@@ -15,6 +16,7 @@ import pytest
 import torch
 
 import tensorcast.api.store as store_mod
+import tensorcast.api.store.runtime as store_runtime_mod
 from tensorcast import daemon_ctl
 from tensorcast.api._config import GetArtifactOptions, PlanType, RegisterArtifactOptions
 from tensorcast.api._materialize import MaterializationPayload, TensorPayloadDescriptor
@@ -27,7 +29,6 @@ from tensorcast.api._register import (
 from tensorcast.api.store import (
     ArtifactError,
     ArtifactFuture,
-    FallbackOptions,
     Store,
     StoreOptions,
 )
@@ -87,7 +88,7 @@ class FakeDaemonCtl:
             cache_ttl_seconds=int(self.cache_ttl_seconds),
         )
 
-    def import_artifact_from_path_v2(self, *, path: str, verify_checksums: bool = True):
+    def import_artifact_from_path(self, *, path: str, verify_checksums: bool = True):
         self.resolve_disk_calls.append((path, bool(verify_checksums)))
         artifact_id = self.disk_artifacts.get(path, path)
 
@@ -102,10 +103,10 @@ class FakeDaemonCtl:
         resp.generation = 0
         return resp
 
-    def import_artifact_from_path_stream_v2(
+    def import_artifact_from_path_stream(
         self, *, path: str, verify_checksums: bool = True
     ):
-        resp = self.import_artifact_from_path_v2(
+        resp = self.import_artifact_from_path(
             path=path,
             verify_checksums=verify_checksums,
         )
@@ -689,11 +690,9 @@ def test_store_get_prefers_disk_when_available(
 
     def fake_materialize(
         *,
-        preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         **_: Any,
     ) -> MaterializationPayload:
-        disk_called["preference"] = preference
         disk_called["allow_disk"] = (
             bool(source_policy.allow_disk) if source_policy is not None else None
         )
@@ -709,9 +708,11 @@ def test_store_get_prefers_disk_when_available(
             byte_length=size_bytes,
             storage_offset=int(tensor.storage_offset()),
         )
-        effective_preference = preference
-        if effective_preference is None and source_policy is not None:
-            effective_preference = source_policy.preference
+        effective_preference = (
+            source_policy.preference
+            if source_policy is not None
+            else store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+        )
         use_disk = (
             effective_preference
             == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
@@ -739,13 +740,13 @@ def test_store_get_prefers_disk_when_available(
 
     store.set_materialize_fn(fake_materialize)
 
-    artifact = store.artifact(
-        key="does-not-matter",
-        fallback="disk",
+    artifact = store.artifact(key="does-not-matter")
+    result = artifact.tensor_dict(
+        device=torch.device("cuda", 0),
+        options=GetArtifactOptions(source="disk_first"),
     )
-    result = artifact.tensor_dict(device=torch.device("cuda", 0))
     assert (
-        disk_called["preference"]
+        disk_called["policy_preference"]
         == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
     )
     assert disk_called["allow_disk"] is True
@@ -856,16 +857,16 @@ def test_store_key_resolution_cache_reuses_mapping(
         materialize_fn=env.fake_materialize,
     )
 
-    fallback = FallbackOptions(
-        prefer_disk=True, allow_p2p=False, verify_checksums=False
-    )
-
     # Warm the key mapping cache so key resolution is cached.
     store._runtime.resolve_key_mapping_cached(key=key)
 
-    artifact = store.artifact(key=key, fallback=fallback)
-    first = artifact.tensor_dict(device=torch.device("cuda", 0))
-    second = artifact.tensor_dict(device=torch.device("cuda", 0))
+    artifact = store.artifact(key=key)
+    disk_only = GetArtifactOptions(
+        source="disk_only",
+        verify_checksums=False,
+    )
+    first = artifact.tensor_dict(device=torch.device("cuda", 0), options=disk_only)
+    second = artifact.tensor_dict(device=torch.device("cuda", 0), options=disk_only)
 
     assert torch.allclose(first["weight"], tensor)
     assert torch.allclose(second["weight"], tensor)
@@ -998,23 +999,20 @@ def test_get_function_delegates_to_session(
             *,
             artifact_id: str | None = None,
             key: str | None = None,
-            fallback: FallbackOptions | str | None = None,
         ) -> object:
             self.kwargs = {
                 "artifact_id": artifact_id,
                 "key": key,
-                "fallback": fallback,
             }
             return self.result
 
     session = DummyStore()
     monkeypatch.setattr(store_mod, "store", lambda: session)
-    outcome: object = store_mod.artifact(key="demo", fallback="disk")
+    outcome: object = store_mod.artifact(key="demo")
 
     assert outcome is session.result
     assert session.kwargs is not None
     assert session.kwargs["key"] == "demo"
-    assert session.kwargs["fallback"] == "disk"
 
 
 def test_from_disk_function_delegates_to_session(
@@ -1049,6 +1047,107 @@ def test_from_disk_function_delegates_to_session(
     assert session.kwargs is not None
     assert session.kwargs["path"] == "/tmp/data"
     assert session.kwargs["verify_checksums"] is True
+
+
+def test_import_from_disk_function_delegates_to_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyStore:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] | None = None
+            self.result = object()
+
+        def import_from_disk(
+            self,
+            path: str,
+            *,
+            key: str | None = None,
+            verify_checksums: bool = True,
+            show_progress: bool | None = None,
+        ):
+            self.kwargs = {
+                "path": path,
+                "key": key,
+                "verify_checksums": verify_checksums,
+                "show_progress": show_progress,
+            }
+            return self.result
+
+    session = DummyStore()
+    monkeypatch.setattr(store_mod, "store", lambda: session)
+    result = store_mod.import_from_disk("/tmp/data", key="k")
+
+    assert result is session.result
+    assert session.kwargs is not None
+    assert session.kwargs["path"] == "/tmp/data"
+    assert session.kwargs["key"] == "k"
+    assert session.kwargs["verify_checksums"] is True
+
+
+def test_promote_mounted_source_function_delegates_to_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyStore:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] | None = None
+            self.result = object()
+
+        def promote_mounted_source(
+            self,
+            artifact: object,
+            *,
+            verify_checksums: bool = True,
+            timeout_s: float | None = None,
+        ):
+            self.kwargs = {
+                "artifact": artifact,
+                "verify_checksums": verify_checksums,
+                "timeout_s": timeout_s,
+            }
+            return self.result
+
+    session = DummyStore()
+    monkeypatch.setattr(store_mod, "store", lambda: session)
+    result = store_mod.promote_mounted_source("msa1:test")
+
+    assert result is session.result
+    assert session.kwargs is not None
+    assert session.kwargs["artifact"] == "msa1:test"
+    assert session.kwargs["verify_checksums"] is True
+    assert session.kwargs["timeout_s"] is None
+
+
+def test_promote_mounted_source_function_delegates_timeout_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyStore:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] | None = None
+            self.result = object()
+
+        def promote_mounted_source(
+            self,
+            artifact: object,
+            *,
+            verify_checksums: bool = True,
+            timeout_s: float | None = None,
+        ):
+            self.kwargs = {
+                "artifact": artifact,
+                "verify_checksums": verify_checksums,
+                "timeout_s": timeout_s,
+            }
+            return self.result
+
+    session = DummyStore()
+    monkeypatch.setattr(store_mod, "store", lambda: session)
+    result = store_mod.promote_mounted_source("msa1:test", timeout_s=45.0)
+
+    assert result is session.result
+    assert session.kwargs is not None
+    assert session.kwargs["artifact"] == "msa1:test"
+    assert session.kwargs["verify_checksums"] is True
+    assert session.kwargs["timeout_s"] == 45.0
 
 
 def test_store_singleton_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1205,10 +1304,10 @@ def test_store_force_recreate_and_option_refresh(
 
     store_mod.shutdown_process_store()
 
-    initial_opts = store_mod.StoreOptions(fallback=FallbackOptions(prefer_disk=False))
+    initial_opts = store_mod.StoreOptions(get=GetArtifactOptions(source="auto"))
     first = cast(DummyStore, store_mod.store(opts=initial_opts))
 
-    mismatch_opts = store_mod.StoreOptions(fallback=FallbackOptions(prefer_disk=True))
+    mismatch_opts = store_mod.StoreOptions(get=GetArtifactOptions(source="disk_only"))
     with pytest.raises(RuntimeError):
         store_mod.store(opts=mismatch_opts)
 
@@ -1221,3 +1320,60 @@ def test_store_force_recreate_and_option_refresh(
     assert refreshed.opts == mismatch_opts
 
     store_mod.shutdown_process_store()
+
+
+def test_shutdown_live_stores_closes_leaked_store_instances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyStore:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    leaked_a = DummyStore()
+    leaked_b = DummyStore()
+    live_stores: weakref.WeakSet[DummyStore] = weakref.WeakSet()
+    live_stores.add(leaked_a)
+    live_stores.add(leaked_b)
+
+    shutdown_calls: list[str] = []
+    monkeypatch.setattr(store_mod, "_LIVE_STORES", live_stores)
+    monkeypatch.setattr(
+        store_mod,
+        "shutdown_context",
+        lambda: shutdown_calls.append("shutdown_context"),
+    )
+
+    store_mod._shutdown_live_stores()
+
+    assert leaked_a.closed is True
+    assert leaked_b.closed is True
+    assert shutdown_calls == ["shutdown_context"]
+
+
+def test_shutdown_all_contexts_closes_leaked_runtime_contexts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyContext:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    leaked_a = DummyContext()
+    leaked_b = DummyContext()
+    live_contexts: weakref.WeakSet[DummyContext] = weakref.WeakSet()
+    live_contexts.add(leaked_a)
+    live_contexts.add(leaked_b)
+
+    monkeypatch.setattr(
+        store_runtime_mod.StoreRuntimeContext, "_LIVE_CONTEXTS", live_contexts
+    )
+
+    store_runtime_mod._shutdown_all_contexts()
+
+    assert leaked_a.closed is True
+    assert leaked_b.closed is True

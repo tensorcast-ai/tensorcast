@@ -11,7 +11,7 @@
 namespace tensorcast::daemon {
 
 // Build canonical index JSON from deduplicated storage metadata and tensor aliases.
-// Returns Ok("") when aliases/storages are empty (legacy clients).
+// Returns Ok("") when aliases/storages are empty.
 absl::StatusOr<std::string> build_canonical_index_from_metadata(
     absl::Span<const LeaseSegMeta> segments,
     absl::Span<const RegisterStorageMeta> storages,

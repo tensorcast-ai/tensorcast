@@ -14,16 +14,11 @@ namespace tensorcast::store::materialization::runtime::pipeline {
 absl::StatusOr<loading::ReplicaHandle> HandleStage::build(IngestionContext& ctx) {
   loading::ReplicaHandle handle;
 
-  DeviceKey dev_key = ctx.target_device;
-  if (!ctx.target_is_gpu) {
-    dev_key = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
-  }
-
-  handle.replica_key = loading::ReplicaKey{
-      .artifact_id = ctx.artifact_identifier,
-      .view_id = ctx.hints.variant ? ctx.hints.variant->view_id : std::optional<std::string>(),
-      .device = dev_key,
-      .replica = 0};
+  // The replica already carries the canonicalized device identity chosen by
+  // the engine. Reuse that key verbatim so later session joins (for example
+  // prefetch followed by tensor_dict on the same replica_uuid) see identical
+  // ReplicaKeys instead of mixing normalized and non-normalized DeviceKeys.
+  handle.replica_key = ctx.replica->replica_key();
   handle.ready_signal = ctx.load_signal;
   handle.cpu_state = ctx.replica->get_memory_state(common::memory::MemoryLocation::CPU);
   handle.gpu_state = ctx.replica->get_memory_state(common::memory::MemoryLocation::GPU);
@@ -35,6 +30,9 @@ absl::StatusOr<loading::ReplicaHandle> HandleStage::build(IngestionContext& ctx)
     auto ipc_or = ctx.replica->get_memory_manager().get_ipc_handle();
     if (ipc_or.ok()) {
       handle.cuda_ipc_handle = cuda::IpcHandleBytes::from_native(*ipc_or);
+    } else {
+      LOG(WARNING) << "HandleStage: get_ipc_handle failed for key=" << handle.replica_key
+                   << " gpu_state=" << static_cast<int>(handle.gpu_state) << " status=" << ipc_or.status();
     }
   } else {
     auto uma = ctx.replica->get_memory_manager().memory_authority();

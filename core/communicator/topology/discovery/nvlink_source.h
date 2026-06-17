@@ -49,9 +49,7 @@ struct NvlinkRuntimeProbeOptions {
 // Snapshot format:
 //   gpu,<gpu_uuid>,<gpu_index>
 //   edge,<src_gpu_uuid>,<dst_gpu_uuid>,<link_count>,<bandwidth_hint_gbps>
-absl::StatusOr<NvlinkSnapshot> load_nvlink_snapshot(
-    const std::string& file_path,
-    NvlinkSnapshotOptions options = {});
+absl::StatusOr<NvlinkSnapshot> load_nvlink_snapshot(const std::string& file_path, NvlinkSnapshotOptions options = {});
 
 // Parse outputs from:
 //   nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits
@@ -62,8 +60,7 @@ absl::StatusOr<NvlinkSnapshot> parse_nvlink_runtime_probe_outputs(
     NvlinkSnapshotOptions options = {});
 
 // Discover NVLINK topology from runtime environment.
-absl::StatusOr<NvlinkSnapshot> load_nvlink_runtime_probe(
-    NvlinkRuntimeProbeOptions options = {});
+absl::StatusOr<NvlinkSnapshot> load_nvlink_runtime_probe(NvlinkRuntimeProbeOptions options = {});
 
 } // namespace tensorcast::communicator::topology::discovery
 

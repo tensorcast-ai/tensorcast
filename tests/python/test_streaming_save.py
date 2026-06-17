@@ -3,6 +3,7 @@
 
 """Tests for streaming save functionality (pytest style)."""
 
+import contextlib
 import json
 import os
 
@@ -10,9 +11,10 @@ import pytest
 import torch
 
 from tensorcast.testing.io_disk import load_dict_from_disk, save_dict
-
+from tests.python.utils.hardware import synchronize_cuda
 
 pytestmark = pytest.mark.requires_cuda_or_fake
+
 
 @pytest.fixture
 def has_cuda():
@@ -43,22 +45,20 @@ def create_test_artifact(num_tensors=10, tensor_size_mb=100, use_cuda=False):
         except Exception:  # Fallback if current device not initialized
             device_index = 0
         # Ensure process device is set explicitly to avoid stale ambient device state from other tests
-        try:
+        with contextlib.suppress(Exception):
             torch.cuda.set_device(device_index)
-        except Exception:
-            pass
-        device = torch.device('cuda', device_index)
+        device = torch.device("cuda", device_index)
         # Ensure a clean allocator state before large allocations
         try:
             torch.cuda.empty_cache()
-            torch.cuda.synchronize(device_index)
+            synchronize_cuda(device_index)
             # Warm up CUDA context on the target device
             _ = torch.randn((1,), device=device, dtype=torch.float32)
-            torch.cuda.synchronize(device_index)
+            synchronize_cuda(device_index)
         except Exception:
             pass
     else:
-        device = 'cpu'
+        device = "cpu"
 
     for i in range(num_tensors):
         shape = (1024, elements_per_tensor // 1024)
@@ -71,7 +71,9 @@ def create_test_artifact(num_tensors=10, tensor_size_mb=100, use_cuda=False):
 
 def test_streaming_save_basic(tmp_path, has_cuda):
     """Test basic streaming save functionality."""
-    state_dict = create_test_artifact(num_tensors=5, tensor_size_mb=50, use_cuda=has_cuda)
+    state_dict = create_test_artifact(
+        num_tensors=5, tensor_size_mb=50, use_cuda=has_cuda
+    )
 
     save_path = os.path.join(str(tmp_path), "streaming_test")
     save_dict(state_dict, save_path)
@@ -95,7 +97,9 @@ def test_streaming_vs_traditional_equivalence(tmp_path, has_cuda):
 
     This checks determinism of the unified writer.
     """
-    state_dict = create_test_artifact(num_tensors=3, tensor_size_mb=30, use_cuda=has_cuda)
+    state_dict = create_test_artifact(
+        num_tensors=3, tensor_size_mb=30, use_cuda=has_cuda
+    )
 
     path_a = os.path.join(str(tmp_path), "save_a")
     save_dict(state_dict, path_a)
@@ -106,7 +110,7 @@ def test_streaming_vs_traditional_equivalence(tmp_path, has_cuda):
     traditional_loaded = load_dict_from_disk(path_a, device_id=0)
     streaming_loaded = load_dict_from_disk(path_b, device_id=0)
 
-    for name in state_dict.keys():
+    for name in state_dict:
         trad_tensor = traditional_loaded[name].cpu()
         stream_tensor = streaming_loaded[name].cpu()
         assert torch.allclose(trad_tensor, stream_tensor)
@@ -115,8 +119,10 @@ def test_streaming_vs_traditional_equivalence(tmp_path, has_cuda):
 def test_streaming_custom_config(tmp_path, has_cuda):
     """Test streaming save with custom configuration."""
     if has_cuda:
-        torch.cuda.synchronize()
-    state_dict = create_test_artifact(num_tensors=4, tensor_size_mb=25, use_cuda=has_cuda)
+        synchronize_cuda()
+    state_dict = create_test_artifact(
+        num_tensors=4, tensor_size_mb=25, use_cuda=has_cuda
+    )
 
     custom_config = {
         "num_buffers": 2,
@@ -142,7 +148,7 @@ def test_empty_artifact(tmp_path):
 
     assert os.path.exists(os.path.join(save_path, "tensor_index.json"))
 
-    with open(os.path.join(save_path, "tensor_index.json"), 'r') as f:
+    with open(os.path.join(save_path, "tensor_index.json"), "r") as f:
         index = json.load(f)
         assert len(index) == 0
 
@@ -150,10 +156,10 @@ def test_empty_artifact(tmp_path):
 def test_mixed_tensor_sizes(tmp_path):
     """Test saving artifact with various tensor sizes."""
     state_dict = {
-        "tiny": torch.randn(10, device='cpu'),
-        "small": torch.randn(100, 100, device='cpu'),
-        "medium": torch.randn(1000, 1000, device='cpu'),
-        "large": torch.randn(5000, 5000, device='cpu'),
+        "tiny": torch.randn(10, device="cpu"),
+        "small": torch.randn(100, 100, device="cpu"),
+        "medium": torch.randn(1000, 1000, device="cpu"),
+        "large": torch.randn(5000, 5000, device="cpu"),
     }
 
     save_path = os.path.join(str(tmp_path), "mixed_sizes")

@@ -19,6 +19,12 @@ class BindingValueMetadata:
     source_artifact_id: str | None
     selection: common_pb2.ArtifactSelection | None
     is_artifact_backed: bool
+    verification_state: int
+    verification_job_id: str | None
+    source_artifact_ref: str | None
+    local_serving_ref: str | None
+    serving_artifact_id: str | None
+    verification_failure_reason: str | None
 
 
 def clone_selection(
@@ -40,11 +46,22 @@ def binding_value_from_proto(
     if value is None:
         return None
     binding_id = str(getattr(value, "binding_id", "") or "")
+    binding_layout_id = str(getattr(value, "binding_layout_id", "") or "")
+    binding_value_id = str(getattr(value, "binding_value_id", "") or "")
+    if (
+        not binding_id
+        and not binding_layout_id
+        and not binding_value_id
+        and not value.HasField("selection")
+        and not value.HasField("source_artifact_id")
+        and int(getattr(value, "seal_generation", 0) or 0) == 0
+        and not bool(getattr(value, "is_artifact_backed", False))
+    ):
+        return None
     if not binding_id:
         raise ValueError("binding_id is required")
     if expected_binding_id is not None and binding_id != str(expected_binding_id):
         raise ValueError(f"binding_id mismatch ({binding_id} != {expected_binding_id})")
-    binding_layout_id = str(getattr(value, "binding_layout_id", "") or "")
     if not binding_layout_id:
         raise ValueError("binding_layout_id is required")
     if expected_binding_layout_id is not None and binding_layout_id != str(
@@ -54,7 +71,6 @@ def binding_value_from_proto(
             "binding_layout_id mismatch "
             f"({binding_layout_id} != {expected_binding_layout_id})"
         )
-    binding_value_id = str(getattr(value, "binding_value_id", "") or "")
     if not binding_value_id:
         raise ValueError("binding_value_id is required")
     selection = None
@@ -63,6 +79,12 @@ def binding_value_from_proto(
     source_artifact_id = None
     if value.HasField("source_artifact_id"):
         source_artifact_id = str(value.source_artifact_id)
+    serving_artifact_id = None
+    if value.HasField("serving_artifact_id"):
+        serving_artifact_id = str(value.serving_artifact_id)
+    verification_failure_reason = None
+    if value.HasField("verification_failure_reason"):
+        verification_failure_reason = str(value.verification_failure_reason)
     is_artifact_backed = bool(value.is_artifact_backed)
     if is_artifact_backed:
         if source_artifact_id is None:
@@ -89,6 +111,12 @@ def binding_value_from_proto(
         source_artifact_id=source_artifact_id,
         selection=selection,
         is_artifact_backed=is_artifact_backed,
+        verification_state=int(value.verification_state),
+        verification_job_id=str(value.verification_job_id or "") or None,
+        source_artifact_ref=str(value.source_artifact_ref or "") or None,
+        local_serving_ref=str(value.local_serving_ref or "") or None,
+        serving_artifact_id=serving_artifact_id,
+        verification_failure_reason=verification_failure_reason,
     )
 
 
@@ -108,6 +136,12 @@ def mint_artifact_backed_value(
         source_artifact_id=str(source_artifact_id),
         selection=clone_selection(selection),
         is_artifact_backed=True,
+        verification_state=store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_VERIFIED,
+        verification_job_id=None,
+        source_artifact_ref=str(source_artifact_id),
+        local_serving_ref=None,
+        serving_artifact_id=str(source_artifact_id),
+        verification_failure_reason=None,
     )
 
 
@@ -125,6 +159,12 @@ def mint_local_value(
         source_artifact_id=None,
         selection=None,
         is_artifact_backed=False,
+        verification_state=store_daemon_pb2.BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY,
+        verification_job_id=None,
+        source_artifact_ref=None,
+        local_serving_ref=None,
+        serving_artifact_id=None,
+        verification_failure_reason=None,
     )
 
 

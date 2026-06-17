@@ -19,7 +19,7 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 import torch
 from opentelemetry import trace
@@ -107,6 +107,21 @@ class RegistrationResult:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _log_best_effort_cleanup_failure(context: str, **fields: object) -> None:
+    handlers = tuple(logger.handlers) + tuple(logging.getLogger().handlers)
+    if any(
+        getattr(getattr(handler, "stream", None), "closed", False)
+        for handler in handlers
+    ):
+        return
+    details = ", ".join(f"{key}={value}" for key, value in fields.items())
+    if details:
+        logger.exception("%s failed (%s)", context, details)
+        return
+    logger.exception("%s failed", context)
+
 
 _LOCAL_HANDLE_RESP_LABELS: dict[int, str] = {
     0: "ok",
@@ -385,6 +400,20 @@ class RegisteredArtifact:
         return self.client.revoke_registered_artifact(self.registration_id, reason)
 
 
+def _abort_registered_artifact_best_effort(
+    handle: RegisteredArtifact,
+    *,
+    context: str,
+) -> None:
+    try:
+        handle.abort(timeout_s=5.0)
+    except Exception:  # noqa: BLE001
+        _log_best_effort_cleanup_failure(
+            context,
+            registration_id=handle.registration_id,
+        )
+
+
 class RegisteredLease:
     """Post-commit lease keepalive and best-effort revoke helper.
 
@@ -459,14 +488,11 @@ class RegisteredLease:
         try:
             self._client.revoke_registered_artifact(self.registration_id)
         except Exception:  # noqa: BLE001
-            with contextlib.suppress(Exception):
-                logger.debug(
-                    "Failed to revoke registered artifact %s",
-                    self.registration_id,
-                    exc_info=True,
-                )
+            _log_best_effort_cleanup_failure(
+                "register_artifact.revoke_registered_artifact",
+                registration_id=self.registration_id,
+            )
             # rely on TTL + pid_watcher
-            pass
 
     @classmethod
     def _revoke_all(cls) -> None:
@@ -1258,6 +1284,11 @@ class _StableDramUploader:
                     )
                 return int(payload_view.nbytes)
 
+            def _tensor_payload_view(local_tensor: torch.Tensor) -> memoryview:
+                payload_array = local_tensor.view(torch.uint8).numpy()
+                return cast(memoryview, payload_array.data).cast("B")
+
+            upload_spans: list[tuple[int, memoryview]] = []
             if upload_workers <= 1:
 
                 def _iter_tensor_spans():
@@ -1269,9 +1300,7 @@ class _StableDramUploader:
                             local_tensor,
                             prepare_elapsed_s,
                         ) = _prepare_tensor_payload(name)
-                        payload_view = memoryview(
-                            local_tensor.view(torch.uint8).numpy()
-                        ).cast("B")
+                        payload_view = _tensor_payload_view(local_tensor)
                         logger.info(
                             "stable_dram upload tensor_ready "
                             "registration_id=%s tensor=%s bytes=%d prepare_s=%.3f",
@@ -1303,7 +1332,6 @@ class _StableDramUploader:
                         "FeedRegisterArtifactStream(stable_dram_cpu) failed during tensor upload"
                     )
             else:
-                upload_spans: list[tuple[int, memoryview]] = []
                 for name in ordered_names:
                     (
                         canonical_offset,
@@ -1311,9 +1339,7 @@ class _StableDramUploader:
                         local_tensor,
                         prepare_elapsed_s,
                     ) = _prepare_tensor_payload(name)
-                    payload_view = memoryview(
-                        local_tensor.view(torch.uint8).numpy()
-                    ).cast("B")
+                    payload_view = _tensor_payload_view(local_tensor)
                     logger.info(
                         "stable_dram upload tensor_ready "
                         "registration_id=%s tensor=%s bytes=%d prepare_s=%.3f",
@@ -1489,7 +1515,8 @@ class _LeaseUploader:
                     )
                 )
             else:
-                # Fallback to legacy handle-based path.
+                # Use the per-storage CUDA IPC source when no registered VRAM
+                # region fully covers this storage window.
                 handle_bytes, base_offset = _export_cuda_ipc_handle(int(entry.base_ptr))
                 if not handle_bytes:
                     raise TensorCastError(
@@ -1696,8 +1723,10 @@ def _register_artifact_core(
         if on_begin is not None:
             on_begin(handle)
         if cancel_event and cancel_event.is_set():
-            with contextlib.suppress(Exception):
-                handle.abort(timeout_s=5.0)
+            _abort_registered_artifact_best_effort(
+                handle,
+                context="register_artifact.cancel_before_upload.abort",
+            )
             raise CancelledError
 
         if view is not None:
@@ -1742,8 +1771,16 @@ def _register_artifact_core(
                             local_stable_tier=commit_res.local_stable_tier,
                         )
                     except CancelledError:
-                        with contextlib.suppress(Exception):
-                            handle.abort(timeout_s=5.0)
+                        _abort_registered_artifact_best_effort(
+                            handle,
+                            context="register_artifact.server_view_cancel.abort",
+                        )
+                        raise
+                    except Exception:
+                        _abort_registered_artifact_best_effort(
+                            handle,
+                            context="register_artifact.server_view_error.abort",
+                        )
                         raise
             elif view.placement != store_daemon_pb2.TRANSFORM_PLACEMENT_CLIENT:
                 raise TensorCastError(
@@ -1755,6 +1792,7 @@ def _register_artifact_core(
             try:
                 # Upload per plan
                 if isinstance(registrar, (_CoalescedUploader, _StableDramUploader)):
+                    state_dict: dict[str, torch.Tensor] | None
                     upload_kwargs = {
                         "artifact": artifact,
                         "ctx": ctx,
@@ -1847,8 +1885,16 @@ def _register_artifact_core(
                         local_stable_tier=commit_res.local_stable_tier,
                     )
             except CancelledError:
-                with contextlib.suppress(Exception):
-                    handle.abort(timeout_s=5.0)
+                _abort_registered_artifact_best_effort(
+                    handle,
+                    context="register_artifact.upload_cancel.abort",
+                )
+                raise
+            except Exception:
+                _abort_registered_artifact_best_effort(
+                    handle,
+                    context="register_artifact.upload_error.abort",
+                )
                 raise
 
     raise InvalidPlan(f"Unknown plan: {plan_type}")

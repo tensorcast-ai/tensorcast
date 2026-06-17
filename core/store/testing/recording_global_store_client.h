@@ -9,6 +9,7 @@
 #include <string_view>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -53,6 +54,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   std::vector<components::MemoryTierLeaseDescriptor> memory_tier_leases;
   std::vector<components::PlacementPlanResult> placement_plans;
   std::vector<components::PersistenceReport> persistence_reports;
+  std::vector<tensorcast::global_store::v1::ReportProgressiveCoverageRequest> progressive_coverage_reports;
   std::unordered_map<std::string, tensorcast::operation::v1::GetOperationResponse> operations;
   std::unordered_map<std::string, std::string> operation_lease_tokens;
   std::unordered_map<std::string, std::string> operation_lease_owners;
@@ -66,6 +68,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   absl::Status upsert_artifact_metadata_status{absl::OkStatus()};
   absl::Status unregister_replica_status{absl::OkStatus()};
   absl::Status unregister_replica_by_worker_status{absl::OkStatus()};
+  absl::Status report_progressive_coverage_status{absl::OkStatus()};
   bool drain_success{true};
   uint32_t drain_current_requests{0};
   std::string remote_node_id{"stub-remote"};
@@ -77,8 +80,16 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   std::vector<components::ArtifactDiskLocation> disk_locations;
   std::vector<common::v1::ArtifactDescriptor> upserted_artifact_metadata_descriptors;
   std::vector<std::string> upserted_artifact_metadata_indices;
+  std::vector<tensorcast::layout::v1::LayoutSpec> put_layout_specs;
+  std::vector<std::string> put_layout_canonical_index_data;
+  std::vector<std::string> put_layout_json;
+  std::unordered_map<std::string, std::vector<std::string>> artifact_layouts;
+  absl::Status put_layout_spec_status{absl::OkStatus()};
+  absl::Status attach_layout_to_artifact_status{absl::OkStatus()};
+  std::string next_layout_id{"layout-0"};
 
   struct TransportReplicaInfo {
+    std::string replica_id;
     std::string artifact_id;
     std::optional<std::string> view_id;
     uint64_t memory_size{0};
@@ -86,6 +97,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     std::vector<uint64_t> buffer_sizes;
     common::memory::MemoryLocation memory_type{common::memory::MemoryLocation::CPU};
     int device_id{0};
+    uint64_t export_generation{0};
   };
 
   struct UnregisterReplicaByWorkerCall {
@@ -96,6 +108,8 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   };
 
   std::unordered_map<std::string, TransportReplicaInfo> transport_replicas;
+  std::unordered_map<std::string, std::string> replica_transport_keys;
+  std::unordered_set<std::string> unavailable_transport_keys;
   std::vector<UnregisterReplicaByWorkerCall> unregister_replica_by_worker_calls;
   std::vector<components::TransportSession> scripted_transport_sessions;
   size_t scripted_transport_next{0};
@@ -153,6 +167,13 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::UnimplementedError("list_active_workers not supported in test stub");
   }
 
+  absl::StatusOr<std::vector<components::ActiveInstanceInfo>> list_active_instances(
+      bool,
+      uint64_t,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("list_active_instances not supported in test stub");
+  }
+
   absl::StatusOr<std::vector<std::string>> list_active_worker_identities(bool) override {
     return absl::UnimplementedError("list_active_worker_identities not supported in test stub");
   }
@@ -195,7 +216,8 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       uint32_t,
       const std::optional<std::string>&,
       std::optional<std::string_view> view_id,
-      const std::optional<common::v1::ArtifactDescriptor>&) override {
+      const std::optional<common::v1::ArtifactDescriptor>&,
+      uint64_t export_generation) override {
     if (register_memory_replica_delay > absl::ZeroDuration()) {
       absl::SleepFor(register_memory_replica_delay);
     }
@@ -211,12 +233,29 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     info.memory_type =
         (device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;
     info.device_id = device.ordinal;
-    transport_replicas[transport_key(info.artifact_id, view_id)] = std::move(info);
-    return std::string("memory_replica");
+    info.export_generation = export_generation;
+    const std::string key = transport_key(info.artifact_id, view_id);
+    const std::string replica_id = "memory_replica";
+    info.replica_id = replica_id;
+    unavailable_transport_keys.erase(key);
+    replica_transport_keys[replica_id] = key;
+    transport_replicas[key] = std::move(info);
+    return replica_id;
   }
 
   absl::Status unregister_replica(std::string_view artifact_id, std::string_view replica_id) override {
     unregistered_replicas.emplace_back(std::string(artifact_id), std::string(replica_id));
+    if (!unregister_replica_status.ok()) {
+      return unregister_replica_status;
+    }
+    auto key_it = replica_transport_keys.find(std::string(replica_id));
+    if (key_it != replica_transport_keys.end()) {
+      unavailable_transport_keys.insert(key_it->second);
+      transport_replicas.erase(key_it->second);
+      replica_transport_keys.erase(key_it);
+      return absl::OkStatus();
+    }
+    unavailable_transport_keys.insert(transport_key(artifact_id, std::nullopt));
     return unregister_replica_status;
   }
 
@@ -231,11 +270,26 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
             .worker_id = std::string(worker_id),
             .memory_type = memory_type,
             .device_id = device_id});
+    if (!unregister_replica_by_worker_status.ok()) {
+      return unregister_replica_by_worker_status;
+    }
+    for (const auto& [key, info] : transport_replicas) {
+      if (info.artifact_id != artifact_id) {
+        continue;
+      }
+      if (memory_type.has_value() && info.memory_type != *memory_type) {
+        continue;
+      }
+      if (device_id.has_value() && info.device_id != static_cast<int>(*device_id)) {
+        continue;
+      }
+      unavailable_transport_keys.insert(key);
+    }
     return unregister_replica_by_worker_status;
   }
 
   absl::StatusOr<bool> mark_replica_unavailable(
-      std::string_view,
+      std::string_view artifact_id,
       std::string_view replica_id,
       std::optional<std::string_view>,
       std::optional<std::string_view>) override {
@@ -244,6 +298,12 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     }
     call_sequence.emplace_back(absl::StrCat("mark:", replica_id));
     marked_unavailable.emplace_back(std::string(replica_id));
+    auto key_it = replica_transport_keys.find(std::string(replica_id));
+    if (key_it != replica_transport_keys.end()) {
+      unavailable_transport_keys.insert(key_it->second);
+      return true;
+    }
+    unavailable_transport_keys.insert(transport_key(artifact_id, std::nullopt));
     return true;
   }
 
@@ -337,12 +397,35 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::UnimplementedError("get_layout_spec not supported in RecordingGlobalStoreClient");
   }
 
-  absl::Status attach_layout_to_artifact(std::string_view, std::string_view) override {
-    return absl::UnimplementedError("attach_layout_to_artifact not supported in RecordingGlobalStoreClient");
+  absl::StatusOr<std::string> put_layout_spec(
+      const tensorcast::layout::v1::LayoutSpec& layout_spec,
+      std::string_view canonical_index_data,
+      std::string_view layout_json) override {
+    if (!put_layout_spec_status.ok()) {
+      return put_layout_spec_status;
+    }
+    put_layout_specs.push_back(layout_spec);
+    put_layout_canonical_index_data.emplace_back(canonical_index_data);
+    put_layout_json.emplace_back(layout_json);
+    if (!next_layout_id.empty()) {
+      return next_layout_id;
+    }
+    return absl::StrCat("layout-", put_layout_specs.size() - 1);
   }
 
-  absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view) override {
-    return absl::UnimplementedError("list_artifact_layouts not supported in RecordingGlobalStoreClient");
+  absl::Status attach_layout_to_artifact(std::string_view artifact_id, std::string_view layout_id) override {
+    if (!attach_layout_to_artifact_status.ok()) {
+      return attach_layout_to_artifact_status;
+    }
+    artifact_layouts[std::string(artifact_id)].push_back(std::string(layout_id));
+    return absl::OkStatus();
+  }
+
+  absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view artifact_id) override {
+    if (auto it = artifact_layouts.find(std::string(artifact_id)); it != artifact_layouts.end()) {
+      return it->second;
+    }
+    return std::vector<std::string>{};
   }
 
   absl::StatusOr<tensorcast::global_store::v1::WriteTensorProofCommitmentsResponse> write_tensor_proof_commitments(
@@ -525,13 +608,17 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     if (scripted_transport_next < scripted_transport_sessions.size()) {
       return scripted_transport_sessions[scripted_transport_next++];
     }
+    const std::string key = transport_key(artifact_id, std::nullopt);
+    if (unavailable_transport_keys.contains(key)) {
+      return absl::NotFoundError("replica transport unavailable in RecordingGlobalStoreClient");
+    }
     if (replica_transport_not_found) {
       return absl::NotFoundError("replica transport not found in RecordingGlobalStoreClient");
     }
     if (!allow_replica_transport) {
       return absl::UnavailableError("replica transport disabled in RecordingGlobalStoreClient");
     }
-    auto it = transport_replicas.find(transport_key(artifact_id, std::nullopt));
+    auto it = transport_replicas.find(key);
     if (it == transport_replicas.end()) {
       return make_transport_session(artifact_id, target_device);
     }
@@ -557,7 +644,11 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     if (!allow_view_transport) {
       return absl::NotFoundError("view transport disabled in RecordingGlobalStoreClient");
     }
-    auto it = transport_replicas.find(transport_key(artifact_id, view_id));
+    const std::string key = transport_key(artifact_id, view_id);
+    if (unavailable_transport_keys.contains(key)) {
+      return absl::NotFoundError("view transport unavailable in RecordingGlobalStoreClient");
+    }
+    auto it = transport_replicas.find(key);
     if (it == transport_replicas.end()) {
       return absl::NotFoundError("view transport not found in RecordingGlobalStoreClient");
     }
@@ -746,6 +837,62 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::UnimplementedError("revoke_key_mapping not supported in test stub");
   }
 
+  absl::StatusOr<tensorcast::global_store::v1::RegisterGroupVersionSetResponse> register_group_version_set(
+      const tensorcast::global_store::v1::RegisterGroupVersionSetRequest&,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("register_group_version_set not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::BeginOrJoinGroupRealizationResponse> begin_or_join_group_realization(
+      const tensorcast::global_store::v1::BeginOrJoinGroupRealizationRequest&,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("begin_or_join_group_realization not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::ReportGroupRealizationPreparedResponse> report_group_realization_prepared(
+      const tensorcast::global_store::v1::ReportGroupRealizationPreparedRequest&,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("report_group_realization_prepared not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::PublishGroupRealizationResponse> publish_group_realization(
+      const tensorcast::global_store::v1::PublishGroupRealizationRequest&,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("publish_group_realization not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::WaitGroupRealizationPublishedResponse> wait_group_realization_published(
+      const tensorcast::global_store::v1::WaitGroupRealizationPublishedRequest&,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("wait_group_realization_published not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::AbortGroupRealizationResponse> abort_group_realization(
+      const tensorcast::global_store::v1::AbortGroupRealizationRequest&,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("abort_group_realization not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::GetGroupRealizationResponse> get_group_realization(
+      const tensorcast::global_store::v1::GetGroupRealizationRequest&,
+      const components::RpcOptions&) override {
+    return absl::UnimplementedError("get_group_realization not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::ReportProgressiveCoverageResponse> report_progressive_coverage(
+      const tensorcast::global_store::v1::ReportProgressiveCoverageRequest& request,
+      const components::RpcOptions&) override {
+    if (!report_progressive_coverage_status.ok()) {
+      return report_progressive_coverage_status;
+    }
+    progressive_coverage_reports.push_back(request);
+    tensorcast::global_store::v1::ReportProgressiveCoverageResponse response;
+    response.set_status(tensorcast::global_store::v1::STATUS_OK);
+    response.set_coverage_id(request.coverage_id());
+    response.set_updated(true);
+    return response;
+  }
+
   absl::Status publish_memory_tier_status(const components::MemoryTierStatusPayload& status) override {
     memory_tier_statuses.push_back(status);
     return absl::OkStatus();
@@ -852,6 +999,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     components::TransportSession session;
     (void)artifact_id;
     session.transport_id = "test-transport";
+    session.remote_replica.replica_id = "stub-replica";
     session.remote_replica.node_id = "stub-node";
     session.remote_replica.node_address = "127.0.0.1";
     session.remote_replica.node_port = 12345;
@@ -871,6 +1019,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       const tensorcast::store::DeviceKey&) const {
     components::TransportSession session;
     session.transport_id = "test-transport";
+    session.remote_replica.replica_id = info.replica_id;
     session.remote_replica.node_id = remote_node_id;
     session.remote_replica.node_address = remote_node_address;
     session.remote_replica.node_port = remote_node_port;

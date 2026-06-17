@@ -31,6 +31,12 @@ message RdmaConfig {
   StagedRdmaBackend staging_backend = 8;
   uint64 vram_pool_bytes_per_gpu = 9;
   uint64 vram_slice_bytes = 10;
+  optional bool enable_stable_local_mr_reuse = 11; // default: true
+  uint32 stable_local_mr_reuse_chunk_slots = 12; // default: 1
+  optional bool stable_local_mr_reuse_eager_prereg_all_rails = 13; // deprecated compatibility alias; when workers is unset, true maps to 1 and false maps to 0
+  optional uint32 stable_local_mr_reuse_prewarm_workers = 14; // canonical async prewarm control; unset/0 disables, >0 enables one job per visible rail on a bounded worker pool
+  uint32 read_plan_admission_workers = 15; // default: 0 (auto)
+  uint32 read_plan_direct_source_workers = 16; // default: 0 (auto)
 }
 
 message TransportConfig {

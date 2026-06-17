@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Callable, SupportsIndex, SupportsInt, cast
 
 import grpc
 from google.protobuf import timestamp_pb2
@@ -252,9 +252,19 @@ class AssemblySlotOccupancyRpcHandler:
             coverage_plan_hash=str(row["coverage_plan_hash"]),
             contributor_daemon_id=str(row["contributor_daemon_id"]),
             coordinator_operation_id=str(row["coordinator_operation_id"]),
-            coordinator_generation=int(row["coordinator_generation"]),
+            coordinator_generation=int(
+                cast(
+                    SupportsInt | SupportsIndex | str | bytes | bytearray,
+                    row["coordinator_generation"],
+                )
+            ),
             lease_id=str(row["lease_id"]),
-            lease_generation=int(row["lease_generation"]),
+            lease_generation=int(
+                cast(
+                    SupportsInt | SupportsIndex | str | bytes | bytearray,
+                    row["lease_generation"],
+                )
+            ),
             state=str(row["state"]),
         )
         lease_expires_at = self._datetime_to_timestamp(

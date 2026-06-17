@@ -6,6 +6,7 @@
 #include <atomic>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -63,6 +64,11 @@ struct PumpState {
   std::atomic<bool> should_stop{false};
   std::atomic<bool> drain_requested{false};
   std::atomic<uint64_t> next_chunk_id{0};
+  std::atomic<uint64_t> produced_chunks_total{0};
+  std::atomic<uint64_t> produced_bytes_total{0};
+  std::atomic<uint64_t> producer_read_at_us_total{0};
+  std::atomic<uint64_t> consumer_gpu_write_wait_us_total{0};
+  std::atomic<uint64_t> consumer_gpu_write_bytes_total{0};
   absl::Status producer_status;
   absl::Status consumer_status;
   absl::Mutex status_mutex;
@@ -91,6 +97,247 @@ inline void record_copy_failure(const char* device) {
   attrs.emplace("device", opentelemetry::common::AttributeValue(device));
   g_copy_failures_total->Add(
       1.0, opentelemetry::common::KeyValueIterableView(attrs), opentelemetry::context::Context{});
+}
+
+void record_direct_bytes(std::string_view mode, size_t bytes) {
+  if (bytes == 0) {
+    return;
+  }
+  std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+  attrs.emplace("mode", opentelemetry::common::AttributeValue(std::string(mode)));
+  g_bytes_total->Add(
+      static_cast<double>(bytes),
+      opentelemetry::common::KeyValueIterableView(attrs),
+      opentelemetry::context::Context{});
+}
+
+void record_direct_failure(std::string_view reason) {
+  std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+  attrs.emplace("reason", opentelemetry::common::AttributeValue(std::string(reason)));
+  g_direct_win_failures_total->Add(
+      1.0, opentelemetry::common::KeyValueIterableView(attrs), opentelemetry::context::Context{});
+}
+
+void record_direct_fallback(std::string_view reason) {
+  std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+  attrs.emplace("reason", opentelemetry::common::AttributeValue(std::string(reason)));
+  g_direct_win_fallback_total->Add(
+      1.0, opentelemetry::common::KeyValueIterableView(attrs), opentelemetry::context::Context{});
+}
+
+size_t saturating_mul(size_t lhs, size_t rhs) {
+  if (lhs == 0 || rhs == 0) {
+    return 0;
+  }
+  if (lhs > std::numeric_limits<size_t>::max() / rhs) {
+    return std::numeric_limits<size_t>::max();
+  }
+  return lhs * rhs;
+}
+
+size_t resolve_direct_write_batch_bytes(size_t window_bytes, const PumpDirectWriteOptions& options) {
+  const size_t requested = options.direct_write_batch_bytes;
+  if (requested > 0) {
+    return std::max(window_bytes, requested);
+  }
+  return std::max(window_bytes, saturating_mul(window_bytes, 8));
+}
+
+size_t resolve_direct_write_batch_ops(const PumpDirectWriteOptions& options) {
+  return std::max<size_t>(1, options.direct_write_batch_ops > 0 ? options.direct_write_batch_ops : 8);
+}
+
+absl::Status staged_copy_direct_write_batch(
+    SeekableSource& src,
+    PositionedSink& dst,
+    absl::Span<const DirectWriteOp> ops,
+    size_t staging_chunk_bytes,
+    std::vector<uint8_t>& staging_buf) {
+  if (ops.empty()) {
+    return absl::OkStatus();
+  }
+  if (staging_chunk_bytes == 0) {
+    return absl::InvalidArgumentError("staging chunk bytes must be positive");
+  }
+  if (staging_buf.size() < staging_chunk_bytes) {
+    staging_buf.resize(staging_chunk_bytes);
+  }
+  for (const auto& op : ops) {
+    uint64_t src_offset = op.src_offset;
+    uint64_t dest_offset = op.dest_va_offset;
+    uint64_t remaining = op.bytes;
+    while (remaining > 0) {
+      const size_t chunk = static_cast<size_t>(std::min<uint64_t>(remaining, staging_buf.size()));
+      auto got_or = src.read_at(src_offset, staging_buf.data(), chunk);
+      if (!got_or.ok()) {
+        return got_or.status();
+      }
+      if (*got_or == 0) {
+        return absl::OutOfRangeError("EOF during staged direct-write fallback");
+      }
+      auto write_status = dst.write_at(dest_offset, staging_buf.data(), *got_or);
+      if (!write_status.ok()) {
+        return write_status;
+      }
+      record_direct_bytes("staged", *got_or);
+      src_offset += *got_or;
+      dest_offset += *got_or;
+      remaining -= *got_or;
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::Status pump_ranges_direct_write_impl(
+    SeekableSource& src,
+    PositionedSink& dst,
+    absl::Span<const Range> ranges,
+    size_t window_bytes,
+    int concurrency,
+    PumpDebugStats* debug_stats,
+    PumpDirectWriteOptions direct_write_options) {
+  if (!src.supports_direct_write_at()) {
+    return absl::FailedPreconditionError("pump_ranges_direct_write requires a direct-write-capable source");
+  }
+  auto* cap = dynamic_cast<DirectWriteCapable*>(&dst);
+  if (cap == nullptr) {
+    return absl::FailedPreconditionError("pump_ranges_direct_write requires a DirectWriteCapable destination");
+  }
+  if (window_bytes == 0) {
+    return absl::InvalidArgumentError("pump_ranges_direct_write requires window_bytes > 0");
+  }
+
+  const size_t batch_bytes_limit = resolve_direct_write_batch_bytes(window_bytes, direct_write_options);
+  const size_t batch_ops_limit = resolve_direct_write_batch_ops(direct_write_options);
+  std::size_t direct_batch_count = 0;
+  std::size_t fallback_batch_count = 0;
+  absl::Duration plan_direct_write_elapsed = absl::ZeroDuration();
+  absl::Duration source_readv_elapsed = absl::ZeroDuration();
+  absl::Duration staged_fallback_elapsed = absl::ZeroDuration();
+  LOG(INFO) << "pump_ranges using direct-write path"
+            << " ranges=" << ranges.size() << " concurrency=" << concurrency << " window_bytes=" << window_bytes
+            << " batch_bytes_limit=" << batch_bytes_limit << " batch_ops_limit=" << batch_ops_limit;
+  if (!g_meter) {
+    g_meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+  }
+  if (!g_bytes_total) {
+    g_bytes_total = g_meter->CreateDoubleCounter("tc_tx_bytes_total");
+  }
+  if (!g_direct_win_failures_total) {
+    g_direct_win_failures_total = g_meter->CreateDoubleCounter("tc_tx_direct_window_failures_total");
+  }
+  if (!g_direct_win_retry_total) {
+    g_direct_win_retry_total = g_meter->CreateDoubleCounter("tc_tx_direct_window_retry_total");
+  }
+  if (!g_direct_win_fallback_total) {
+    g_direct_win_fallback_total = g_meter->CreateDoubleCounter("tc_tx_direct_window_fallback_total");
+  }
+  if (!g_direct_win_duration_ms) {
+    g_direct_win_duration_ms = g_meter->CreateDoubleHistogram("tc_tx_direct_window_duration_ms");
+  }
+
+  std::vector<VaRange> batch_ranges;
+  std::vector<DirectWriteOp> batch_ops;
+  std::vector<uint8_t> staging_buf;
+  size_t batch_bytes = 0;
+  uint64_t total_direct_path_bytes = 0;
+  uint64_t total_direct_path_chunks = 0;
+
+  auto clear_batch = [&]() {
+    batch_ranges.clear();
+    batch_ops.clear();
+    batch_bytes = 0;
+  };
+  auto flush_batch = [&]() -> absl::Status {
+    if (batch_ops.empty()) {
+      return absl::OkStatus();
+    }
+    const size_t expected_bytes = batch_bytes;
+    const absl::Time plan_direct_write_started_at = absl::Now();
+    auto grant_or = cap->plan_direct_write(batch_ranges);
+    plan_direct_write_elapsed += absl::Now() - plan_direct_write_started_at;
+    if (!grant_or.ok()) {
+      record_direct_failure("pre_issue_plan");
+      record_direct_fallback("pre_issue_plan");
+      ++fallback_batch_count;
+      const absl::Time staged_fallback_started_at = absl::Now();
+      auto staged_status =
+          staged_copy_direct_write_batch(src, dst, absl::MakeConstSpan(batch_ops), window_bytes, staging_buf);
+      staged_fallback_elapsed += absl::Now() - staged_fallback_started_at;
+      if (staged_status.ok()) {
+        total_direct_path_bytes += expected_bytes;
+        total_direct_path_chunks += batch_ops.size();
+      }
+      clear_batch();
+      return staged_status;
+    }
+
+    ++direct_batch_count;
+    const absl::Time direct_started_at = absl::Now();
+    auto got_or = src.readv_into_at(absl::MakeConstSpan(batch_ops), *grant_or);
+    source_readv_elapsed += absl::Now() - direct_started_at;
+    if (!got_or.ok()) {
+      record_direct_failure("post_issue_readv");
+      return got_or.status();
+    }
+    if (*got_or != expected_bytes) {
+      record_direct_failure("post_issue_short_write");
+      return absl::DataLossError("Short direct write batch");
+    }
+    record_direct_bytes("direct", *got_or);
+    total_direct_path_bytes += *got_or;
+    total_direct_path_chunks += batch_ops.size();
+    const std::map<std::string, opentelemetry::common::AttributeValue> attrs{
+        {"mode", opentelemetry::common::AttributeValue("direct")}};
+    g_direct_win_duration_ms->Record(
+        absl::ToDoubleMilliseconds(absl::Now() - direct_started_at),
+        opentelemetry::common::KeyValueIterableView(attrs),
+        opentelemetry::context::Context{});
+    clear_batch();
+    return absl::OkStatus();
+  };
+
+  for (const auto& [range_off, range_len] : ranges) {
+    uint64_t off = range_off;
+    const uint64_t end = range_off + range_len;
+    while (off < end) {
+      const size_t step = static_cast<size_t>(std::min<uint64_t>(window_bytes, end - off));
+      const bool bytes_limit_hit = !batch_ops.empty() && batch_bytes + step > batch_bytes_limit;
+      const bool ops_limit_hit = !batch_ops.empty() && batch_ops.size() >= batch_ops_limit;
+      if (bytes_limit_hit || ops_limit_hit) {
+        auto flush_status = flush_batch();
+        if (!flush_status.ok()) {
+          return flush_status;
+        }
+      }
+      batch_ranges.push_back(VaRange{off, step});
+      batch_ops.push_back(
+          DirectWriteOp{
+              .src_offset = off,
+              .dest_va_offset = off,
+              .bytes = step,
+          });
+      batch_bytes += step;
+      off += step;
+    }
+  }
+  auto flush_status = flush_batch();
+  if (!flush_status.ok()) {
+    return flush_status;
+  }
+  if (debug_stats != nullptr) {
+    debug_stats->produced_chunks = total_direct_path_chunks;
+    debug_stats->produced_bytes = total_direct_path_bytes;
+  }
+  VLOG(2) << "pump_ranges.direct_write_summary"
+          << " ranges=" << ranges.size() << " concurrency=" << concurrency << " window_bytes=" << window_bytes
+          << " batch_bytes_limit=" << batch_bytes_limit << " batch_ops_limit=" << batch_ops_limit
+          << " direct_batches=" << direct_batch_count << " fallback_batches=" << fallback_batch_count
+          << " total_chunks=" << total_direct_path_chunks << " total_bytes=" << total_direct_path_bytes
+          << " plan_direct_write_ms=" << absl::ToDoubleMilliseconds(plan_direct_write_elapsed)
+          << " source_readv_ms=" << absl::ToDoubleMilliseconds(source_readv_elapsed)
+          << " staged_fallback_ms=" << absl::ToDoubleMilliseconds(staged_fallback_elapsed);
+  return absl::OkStatus();
 }
 
 // RAII lease for a pool slot to guarantee return on all paths
@@ -126,12 +373,19 @@ static void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state
   bool draining = false;
 
   struct AsyncSlot {
-    AsyncSlot(BufferPool& pool_in, int slot_in, uint64_t chunk_in, uint64_t dest_in, size_t bytes_in)
+    AsyncSlot(
+        BufferPool& pool_in,
+        int slot_in,
+        uint64_t chunk_in,
+        uint64_t dest_in,
+        size_t bytes_in,
+        absl::Time submitted_at_in)
         : pool(pool_in),
           slot_id(slot_in),
           global_chunk_id(chunk_in),
           dest_offset(dest_in),
           bytes(bytes_in),
+          submitted_at(submitted_at_in),
           lease(pool_in, slot_in) {}
 
     void return_if_needed() {
@@ -147,6 +401,7 @@ static void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state
       {
         absl::MutexLock lock(&status_mutex);
         callback_status = st;
+        completed_at = absl::Now();
         has_status = true;
       }
       status_cv.SignalAll();
@@ -157,11 +412,18 @@ static void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state
       while (!has_status) {
         status_cv.Wait(&status_mutex);
       }
-      has_status = false;
       if (callback_status.ok()) {
         return fallback;
       }
       return callback_status;
+    }
+
+    absl::Duration copy_elapsed() {
+      absl::MutexLock lock(&status_mutex);
+      if (!has_status) {
+        return absl::ZeroDuration();
+      }
+      return completed_at - submitted_at;
     }
 
     void request_pool_shutdown() {
@@ -173,11 +435,13 @@ static void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state
     uint64_t global_chunk_id;
     uint64_t dest_offset;
     size_t bytes;
+    absl::Time submitted_at;
     SlotLease lease;
     std::atomic<bool> returned{false};
     absl::Mutex status_mutex;
     absl::CondVar status_cv;
     absl::Status callback_status ABSL_GUARDED_BY(status_mutex) = absl::OkStatus();
+    absl::Time completed_at ABSL_GUARDED_BY(status_mutex);
     bool has_status ABSL_GUARDED_BY(status_mutex) = false;
   };
 
@@ -197,6 +461,12 @@ static void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state
     absl::Status st = handle_status;
     if (entry.slot_ctx) {
       st = entry.slot_ctx->await_final_status(handle_status);
+    }
+    if (entry.slot_ctx) {
+      state.consumer_gpu_write_wait_us_total.fetch_add(
+          static_cast<uint64_t>(std::max<int64_t>(0, absl::ToInt64Microseconds(entry.slot_ctx->copy_elapsed()))),
+          std::memory_order_relaxed);
+      state.consumer_gpu_write_bytes_total.fetch_add(entry.bytes, std::memory_order_relaxed);
     }
     const bool failed = !st.ok();
     if (failed) {
@@ -283,7 +553,7 @@ static void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state
       const uint64_t chunk_id = chunk.global_chunk_id;
       const size_t chunk_bytes = chunk.bytes_in_chunk;
       write_opts.copy_options = copy_opts;
-      auto slot_ctx = std::make_shared<AsyncSlot>(pool, slot_id, chunk_id, dest_offset, chunk_bytes);
+      auto slot_ctx = std::make_shared<AsyncSlot>(pool, slot_id, chunk_id, dest_offset, chunk_bytes, absl::Now());
       write_opts.copy_options->callbacks.on_copy_done = [slot_ctx](absl::Status st) {
         slot_ctx->record_status(st);
         slot_ctx->return_if_needed();
@@ -318,7 +588,12 @@ static void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state
                 .slot_ctx = std::move(slot_ctx)});
       }
     } else {
+      const absl::Time sync_write_started_at = absl::Now();
       auto status = dst.write_at(dest_offset, chunk.data_ptr, chunk.bytes_in_chunk);
+      state.consumer_gpu_write_wait_us_total.fetch_add(
+          static_cast<uint64_t>(std::max<int64_t>(0, absl::ToInt64Microseconds(absl::Now() - sync_write_started_at))),
+          std::memory_order_relaxed);
+      state.consumer_gpu_write_bytes_total.fetch_add(chunk.bytes_in_chunk, std::memory_order_relaxed);
       pool.return_chunk(chunk.slot_id);
       if (!status.ok()) {
         absl::MutexLock lock(&state.status_mutex);
@@ -486,9 +761,29 @@ void run_range_producer(
           << " duration_us="
           << static_cast<uint64_t>(std::max<int64_t>(0, absl::ToInt64Microseconds(absl::Now() - producer_start)))
           << " tid=" << current_tid() << " cpu=" << current_cpu();
+  state.produced_chunks_total.fetch_add(produced_chunks, std::memory_order_relaxed);
+  state.produced_bytes_total.fetch_add(produced_bytes, std::memory_order_relaxed);
+  state.producer_read_at_us_total.fetch_add(read_at_us_total, std::memory_order_relaxed);
 }
 
 } // namespace
+
+absl::Status pump_ranges_direct_write(
+    SeekableSource& src,
+    PositionedSink& dst,
+    absl::Span<const Range> ranges,
+    size_t window_bytes,
+    int concurrency,
+    PumpDebugStats* debug_stats,
+    PumpDirectWriteOptions direct_write_options) {
+  if (concurrency <= 0) {
+    return absl::InvalidArgumentError("Concurrency must be positive");
+  }
+  if (ranges.empty()) {
+    return absl::InvalidArgumentError("Ranges cannot be empty");
+  }
+  return pump_ranges_direct_write_impl(src, dst, ranges, window_bytes, concurrency, debug_stats, direct_write_options);
+}
 
 absl::Status pump_ranges(
     SeekableSource& src,
@@ -496,7 +791,9 @@ absl::Status pump_ranges(
     BufferPool& pool,
     absl::Span<const Range> ranges,
     int concurrency,
-    folly::Executor::KeepAlive<> executor) {
+    folly::Executor::KeepAlive<> executor,
+    PumpDebugStats* debug_stats,
+    PumpDirectWriteOptions direct_write_options) {
   if (concurrency <= 0) {
     return absl::InvalidArgumentError("Concurrency must be positive");
   }
@@ -511,142 +808,24 @@ absl::Status pump_ranges(
   // DirectWriteCapable and source supports direct writes (e.g., RDMA),
   // plan windowed grants and stream directly into destination VA ranges.
   if (src.supports_direct_write_at()) {
-    if (auto* cap = dynamic_cast<DirectWriteCapable*>(&dst)) {
-      const size_t window_bytes = pool.chunk_size();
-      if (!g_meter) {
-        g_meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-      }
-      if (!g_bytes_total) {
-        g_bytes_total = g_meter->CreateDoubleCounter("tc_tx_bytes_total");
-      }
-      if (!g_direct_win_failures_total) {
-        g_direct_win_failures_total = g_meter->CreateDoubleCounter("tc_tx_direct_window_failures_total");
-      }
-      if (!g_direct_win_retry_total) {
-        g_direct_win_retry_total = g_meter->CreateDoubleCounter("tc_tx_direct_window_retry_total");
-      }
-      if (!g_direct_win_fallback_total) {
-        g_direct_win_fallback_total = g_meter->CreateDoubleCounter("tc_tx_direct_window_fallback_total");
-      }
-      if (!g_direct_win_duration_ms) {
-        g_direct_win_duration_ms = g_meter->CreateDoubleHistogram("tc_tx_direct_window_duration_ms");
-      }
-      // Convert to VaRanges
-      std::vector<VaRange> va_ranges;
-      va_ranges.reserve(ranges.size());
-      for (const auto& r : ranges)
-        va_ranges.push_back({r.first, r.second});
-
-      // Always use sliding window mode in V3 final state.
-
-      // Sliding window mode: plan small per-window tokens to reduce lease lifetime.
-      for (const auto& [range_off, range_len] : ranges) {
-        uint64_t off = range_off;
-        uint64_t end = range_off + range_len;
-        bool range_staged_fallback = false;
-        std::vector<uint8_t> staging_buf; // allocated on first fallback use
-        while (off < end) {
-          size_t step = static_cast<size_t>(std::min<uint64_t>(window_bytes, end - off));
-          VaRange win{off, step};
-          auto grant_or = cap->plan_direct_write(absl::Span<const VaRange>(&win, 1));
-          if (!grant_or.ok()) {
-            // classify as failure event and fallback for remaining range
-            {
-              std::map<std::string, opentelemetry::common::AttributeValue> attr{
-                  {"reason", opentelemetry::common::AttributeValue("plan")}};
-              g_direct_win_failures_total->Add(
-                  1.0, opentelemetry::common::KeyValueIterableView(attr), opentelemetry::context::Context{});
-            }
-            range_staged_fallback = true;
-          } else {
-            auto t0 = absl::Now();
-            auto got = src.read_into_at(off, off, step, *grant_or);
-            if (!got.ok()) {
-              // retry once on recoverable errors
-              auto code = got.status().code();
-              bool retriable =
-                  (code == absl::StatusCode::kUnavailable || code == absl::StatusCode::kDeadlineExceeded ||
-                   code == absl::StatusCode::kAborted || code == absl::StatusCode::kResourceExhausted ||
-                   code == absl::StatusCode::kInternal);
-              if (retriable) {
-                static const std::map<std::string, opentelemetry::common::AttributeValue> kEmptyAttrs;
-                g_direct_win_retry_total->Add(
-                    1.0, opentelemetry::common::KeyValueIterableView(kEmptyAttrs), opentelemetry::context::Context{});
-                got = src.read_into_at(off, off, step, *grant_or);
-              }
-              if (!got.ok()) {
-                // mark failure and fallback sticky for remaining of this range
-                static const std::map<std::string, opentelemetry::common::AttributeValue> kEmptyAttrs;
-                g_direct_win_failures_total->Add(
-                    1.0, opentelemetry::common::KeyValueIterableView(kEmptyAttrs), opentelemetry::context::Context{});
-                range_staged_fallback = true;
-              } else {
-                if (*got != step)
-                  return absl::DataLossError("Short direct write (window)");
-                // metrics for successful window
-                std::map<std::string, opentelemetry::common::AttributeValue> attrs;
-                attrs.emplace("mode", opentelemetry::common::AttributeValue("direct"));
-                g_bytes_total->Add(
-                    static_cast<double>(*got),
-                    opentelemetry::common::KeyValueIterableView(attrs),
-                    opentelemetry::context::Context{});
-                const double ms = absl::ToDoubleMilliseconds(absl::Now() - t0);
-                g_direct_win_duration_ms->Record(
-                    ms, opentelemetry::common::KeyValueIterableView(attrs), opentelemetry::context::Context{});
-                off += step;
-              }
-            } else {
-              if (*got != step)
-                return absl::DataLossError("Short direct write (window)");
-              std::map<std::string, opentelemetry::common::AttributeValue> attrs;
-              attrs.emplace("mode", opentelemetry::common::AttributeValue("direct"));
-              g_bytes_total->Add(
-                  static_cast<double>(*got),
-                  opentelemetry::common::KeyValueIterableView(attrs),
-                  opentelemetry::context::Context{});
-              const double ms = absl::ToDoubleMilliseconds(absl::Now() - t0);
-              g_direct_win_duration_ms->Record(
-                  ms, opentelemetry::common::KeyValueIterableView(attrs), opentelemetry::context::Context{});
-              off += step;
-            }
-          }
-
-          if (range_staged_fallback) {
-            static const std::map<std::string, opentelemetry::common::AttributeValue> kEmptyAttrs;
-            g_direct_win_fallback_total->Add(
-                1.0, opentelemetry::common::KeyValueIterableView(kEmptyAttrs), opentelemetry::context::Context{});
-            // staged copy for remaining bytes in this range [off .. end)
-            if (staging_buf.empty())
-              staging_buf.resize(pool.chunk_size());
-            while (off < end) {
-              const size_t chunk = static_cast<size_t>(std::min<uint64_t>(staging_buf.size(), end - off));
-              // read from source into host buffer, then write via PositionedSink
-              auto got2 = src.read_at(off, staging_buf.data(), chunk);
-              if (!got2.ok())
-                return got2.status();
-              if (*got2 == 0)
-                return absl::OutOfRangeError("EOF during staged fallback");
-              auto st2 = dst.write_at(off, staging_buf.data(), *got2);
-              if (!st2.ok())
-                return st2;
-              // metrics for staged bytes
-              std::map<std::string, opentelemetry::common::AttributeValue> attrs;
-              attrs.emplace("mode", opentelemetry::common::AttributeValue("staged"));
-              g_bytes_total->Add(
-                  static_cast<double>(*got2),
-                  opentelemetry::common::KeyValueIterableView(attrs),
-                  opentelemetry::context::Context{});
-              off += *got2;
-            }
-            break; // exit window loop for this range
-          }
-        }
+    if (dynamic_cast<DirectWriteCapable*>(&dst) != nullptr) {
+      auto direct_status = pump_ranges_direct_write_impl(
+          src, dst, ranges, pool.chunk_size(), concurrency, debug_stats, direct_write_options);
+      if (!direct_status.ok()) {
+        return direct_status;
       }
       if (auto* base_sink = dynamic_cast<Sink*>(&dst)) {
         return base_sink->close();
       }
       return dst.close();
     }
+    LOG(INFO) << "pump_ranges direct-write unavailable: destination is not DirectWriteCapable"
+              << " ranges=" << ranges.size() << " concurrency=" << concurrency;
+  }
+
+  if (!src.supports_direct_write_at()) {
+    LOG(INFO) << "pump_ranges staged path: source does not support direct-write"
+              << " ranges=" << ranges.size() << " concurrency=" << concurrency << " chunk_bytes=" << pool.chunk_size();
   }
 
   PumpState state;
@@ -704,6 +883,14 @@ absl::Status pump_ranges(
       LOG(ERROR) << "pump_ranges returning producer error: " << state.producer_status;
       return state.producer_status;
     }
+  }
+
+  if (debug_stats != nullptr) {
+    debug_stats->produced_chunks = state.produced_chunks_total.load(std::memory_order_relaxed);
+    debug_stats->produced_bytes = state.produced_bytes_total.load(std::memory_order_relaxed);
+    debug_stats->source_read_at_us_total = state.producer_read_at_us_total.load(std::memory_order_relaxed);
+    debug_stats->gpu_write_wait_us_total = state.consumer_gpu_write_wait_us_total.load(std::memory_order_relaxed);
+    debug_stats->gpu_write_bytes_total = state.consumer_gpu_write_bytes_total.load(std::memory_order_relaxed);
   }
 
   return close_status;
