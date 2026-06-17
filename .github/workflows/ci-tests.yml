@@ -236,7 +236,7 @@ jobs:
           uv run ruff format . --check
 
       - name: Download libcheckpoint_ext.so artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: libcheckpoint_ext-so
           path: .
@@ -248,7 +248,7 @@ jobs:
           cp -f libcheckpoint_ext.so bazel-bin/core/libcheckpoint_ext.so
 
       - name: Download tensorcast_daemon artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: tensorcast-daemon-bin
           path: bazel-bin/daemon
@@ -265,7 +265,7 @@ jobs:
           key: bazel-external-includes-v13-${{ hashFiles('MODULE.bazel') }}
 
       - name: Download Bazel external headers artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         if: steps.cache-externals.outputs.cache-hit != 'true'
         with:
           name: bazel-external-includes
@@ -280,7 +280,7 @@ jobs:
           ls -la bazel-bin/external/folly+/folly
 
       - name: Download Bazel generated C++ protos artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: bazel-bin-proto
           path: .
