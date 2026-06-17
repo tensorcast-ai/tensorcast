@@ -9,9 +9,10 @@ related_code:
   - core/common/memory/streaming_pinned_buffer.*
   - core/communicator/transport/rdma_transport.cc
   - core/communicator/transport/mtcp_transport.cc
+  - core/communicator/transport/mtcp_transport.h
   - proto/tensorcast/communicator/v1/communicator_config.proto
 created: 2025-09-26
-last_updated: 2025-09-27
+last_updated: 2026-06-17
 links:
   plan: ../plans/0013-rdma-staging-flow-control.md
 ---
@@ -211,6 +212,151 @@ None.
 - MTCP throughput remains within ±5% of baseline under typical workloads.
 - Cross-transport soak coverage provided by `bazel test //core/communicator:cross_transport_soak_test`; run on verbs-enabled hosts to validate StageLease credit recycling across RDMA and MTCP.
 - Documentation (`core/communicator/README.md`, `docs/architecture/p2p-transfer-strategies.md`) updated to describe unified flow control before rollout.
+
+# Addendum (2026-06-17): MTCP Receive-Side Recv-Path Decoupling
+
+The original design removed **send-side** staging deadlocks (request size decoupled
+from pool capacity; credit returns on send completion). The MTCP GPU **receive** path now
+carries the complementary decoupling: the network *producer* and the H2D *consumer* run on
+separate threads over the `StreamingPinnedBuffer` slot lifecycle, so the producer never
+blocks on the H2D copy. This addendum documents that recv-path design as it currently
+stands.
+
+## Background: the coupling this removed
+
+The risk was already flagged in *Trade-offs & Risks → MTCP Back-pressure*: completion
+callbacks must surface promptly or flows starve. On the receive side the "completion" that
+frees a staging slot is the **H2D copy**. The previous recv path held the slot across that
+copy — it acquired a slot with a blocking `get_free_chunk`, handed it to a lane reader,
+spawned one `std::async` thread per sub-chunk to run the H2D and free the slot in its
+`on_copy_done` callback, and then blocked the request on an aggregate `future.get()` over
+all sub-chunks. Three coupled effects made this deadlock-prone:
+
+1. **Slot held across H2D.** Once every slot was stuck in H2D, the next `get_free_chunk`
+   blocked, the recv loop stopped feeding lane readers, the sockets stopped draining, TCP
+   back-pressure stalled the source's `socket-write`, and the source's staging credit (freed
+   on send completion) never returned — so the source `StagingWindow` parked on credit.
+   `AsyncCopyManager` is a process **singleton** shared across transports, so one H2D stall
+   correlated across the tp views (more views → more likely to trip).
+2. **Reaper masked the starvation.** `staging_wait_timeout_` and `ack_ttl_ms_` were both
+   30s. When they shared a deadline, the channel-GC reaper could reap the stale lease and
+   "rescue" the source loop (`release()` credit + `finish_source_transfer_progress` with a
+   `DeadlineExceededError`) **without** sending `READ_FAILED` to the target — leaving the
+   target to hang to its full ~180s read budget → `DEADLINE_EXCEEDED`.
+3. **Per-request buffer reset race.** The per-request `reset_for_new_production()` assumed
+   the buffer was idle between requests (true only because of the aggregate `future.get()`).
+   Because `return_chunk` fired from the async `on_copy_done` callback, a return could still
+   be in flight when the next request's reset ran, clobbering it — the same use-after-reset
+   family as the RDMA `raw_hash_set RAW: Use of destroyed hash table` warning.
+
+The failure mode was a **pipeline head-of-line coupling / flow-control** stall (the source
+and target serialize requests A-then-B, so each socket carries ordered bytes; data
+corruption was ruled out), and it was non-deterministic — sensitive to the timing of the
+target draining its sockets.
+
+## Current recv path: network producer + dedicated H2D consumer
+
+The recv path routes through the native `StreamingPinnedBuffer` ready-queue
+(`Free → ProducerOwned → Ready → ConsumerOwned`,
+`core/common/memory/streaming_pinned_buffer.h`: `get_free_chunk`, `mark_chunk_ready`,
+`get_ready_chunk`, `return_chunk`). The network producer never blocks on H2D:
+
+```
+recv_queue_ (per request)
+   │ recv_loop: producer-orchestrator (never blocks on H2D)
+   ▼
+acquire_recv_slot()  ── non-blocking try_get_free_chunk + poll, shutdown-aware
+   │  register slot_jobs_[slot] = {gpu_ptr, bytes, chunk_idx, request_state}
+   │  chunk.on_complete = on_recv_chunk_complete(slot, status)
+   │  tasks_[lane]->push_recv(chunk)        // returns immediately; recv_loop pops next request
+   ▼
+lane reader fills slot, set_result() → fires on_complete → mark_chunk_ready
+   ▼
+ready_queue_  ──►  h2d_consumer_loop (one dedicated thread per transport)
+                     get_ready_chunk(); submit_h2d + wait (skip if recv failed);
+                     return_chunk(slot)          // the ONLY return path
+                     request_state.on_chunk_done(status, bytes)  → last chunk fires msg->set_result()
+```
+
+- **`MTcpTransportChunk`** (`mtcp_transport.h`) carries an optional
+  `std::function<void(misc::result_t)> on_complete_`, invoked at the tail of `set_result()`.
+  The per-lane reader thread already calls `set_result()` after the socket read, so this
+  fires `mark_chunk_ready` with **no extra waiter thread**.
+- **`recv_loop`** (`mtcp_transport.cc`) is producer-only: per request it plans the
+  sub-chunks, then for each one `acquire_recv_slot` → register `slot_jobs_` → set
+  `on_complete` → `push_recv`, and returns to pop the next request. There is no aggregate
+  `future.get()`. The CPU branch routes through the same per-request accounting for uniform
+  completion. `acquire_recv_slot` uses the non-blocking `try_get_free_chunk` with a poll so
+  it wakes promptly on shutdown and returns `Cancelled` when stopping.
+- **`on_recv_chunk_complete`** (`mtcp_transport.cc`) fires from the lane reader thread:
+  on success `mark_chunk_ready(slot, chunk_index, bytes)`; on failure it marks the slot's
+  job failed and aborts/marks the slot so the consumer still observes it exactly once.
+- **`h2d_consumer_loop`** (`mtcp_transport.cc`), one dedicated thread per transport, is the
+  sole consumer: `get_ready_chunk` → look up `slot_jobs_` → set the CUDA device →
+  `submit_h2d` + `wait` (skipped when the recv failed) → `return_chunk(slot)` synchronously
+  on this thread → `request_state.on_chunk_done`. It exits when `get_ready_chunk` reports
+  the queue is drained after `signal_production_complete`.
+- The buffer is reset once at receive-side init rather than per request; `slot_id` is the
+  authoritative key (`global_chunk_id` is diagnostic only), so the per-request reset race is
+  gone.
+
+The `slot_jobs_` side table (sized to the slot count, guarded by a small mutex) links a slot
+to its in-flight job `{gpu_ptr, bytes, device_id, chunk_index, request, recv_status}`; only
+the slot's current owner writes it.
+
+Invariant: **every slot acquired via `acquire_recv_slot` is returned by exactly one
+`return_chunk` in the consumer** — success and failure both route through a ready chunk
+(failure carries a poison flag) — so accounting lives in one place and double-free is
+impossible. H2D concurrency is bounded to one consumer thread per transport instead of one
+`std::async` thread per sub-chunk, removing the thread explosion that aggravated the shared
+`AsyncCopyManager` stall.
+
+## Completion accounting: `MTcpRecvRequestState`
+
+A single per-request `MTcpRecvRequestState` (`mtcp_transport.h`) accounts for completion
+with one atomic counter seeded with a producer "issuing" token (`outstanding_ = 1`). The
+producer calls `add_chunk()` per issued sub-chunk and `seal()` once issuing is done; the
+consumer calls `on_chunk_done(status, bytes)` per sub-chunk. Whichever thread decrements the
+count to zero finalizes the request exactly once and sets the result (failed if any
+sub-chunk failed). The issuing token closes the check-then-act race between the last
+completing chunk and `seal()`, so the producer never has to block waiting for completions.
+
+## Timeout ordering and reaper notification (defense-in-depth)
+
+Two engine-side guards bound the residual case where H2D genuinely cannot keep up:
+
+1. **Timeout ordering** (`engine.cc`, transport init): `ack_ttl_ms_` is raised at startup to
+   at least `staging_wait_timeout_ + 15s` when it would otherwise be lower. Ordering the
+   lease-TTL reaper strictly more patient than the source staging-credit wait lets the source
+   `fail_mtcp_read_task` path — which already sends `READ_FAILED` — fire first, leaving the
+   reaper as a pure memory backstop.
+2. **Reaper notifies the target** (`engine.cc`, channel-GC reaper): when the reaper takes a
+   stale lease it `release()`s its credit, finishes the source transfer progress, and sends a
+   `READ_FAILED` (reason `TENSORCAST_READ_FAILED_MEM_MISMATCH`) to the target over the control
+   transport. The target's `ENGINE_OP_READ_FAILED` handler then fails the read immediately
+   instead of waiting out its full read budget. A duplicate notification is benign — the
+   target tolerates a missing/already-completed request.
+
+## Why it holds / residual risk
+
+The consumer drains `ready_queue_` independently and continuously, so slots cycle and the
+lane readers keep draining sockets whenever any slot is free → the source `socket-write`
+completes → source credit returns → the reaper does not fire under H2D-comparable-to-net
+conditions (H2D ≈ PCIe gen4 ~25 GB/s ≈ one 200GbE link). If H2D genuinely cannot keep up,
+the system degrades to **bounded back-pressure (rate-limited), not deadlock**, and the two
+guards above make the extreme-stall case fail fast rather than hang. The separate
+non-deterministic mutex-assert / `destroyed hash table` concurrency crash on the RDMA path is
+not addressed here (the per-request reset race is removed on the MTCP path, but the RDMA-side
+variant is tracked separately).
+
+## Implementation
+
+- Primary: `core/communicator/transport/mtcp_transport.{h,cc}` — chunk completion callback,
+  dedicated H2D consumer thread, `slot_jobs_` side table, `MTcpRecvRequestState`, and the
+  producer-only `recv_loop`. No protocol, source-staging, or credit changes; no new pinned
+  pool; no extra copy.
+- Secondary: `core/communicator/engine/engine.cc` — startup `ack_ttl_ms_` ordering and the
+  reaper `READ_FAILED` notification to the target.
 
 # References
 

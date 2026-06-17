@@ -1,9 +1,12 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
+#include <atomic>
 #include <chrono>
+#include <thread>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "absl/status/status.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
 
@@ -91,6 +94,72 @@ TEST_CASE("StreamingPinnedBuffer promote and abort helpers work", "[streaming_pi
   REQUIRE(ready_chunk.ok());
   REQUIRE(buffer.return_chunk(ready_chunk->slot_id).ok());
 
+  REQUIRE(buffer.release().ok());
+}
+
+// Producer/consumer decoupling: a slow consumer must never wedge a producer that
+// keeps acquiring slots. With far more items than slots, the producer acquires
+// via the non-blocking try_get_free_chunk (polling on Unavailable) while a slow
+// consumer cycles slots, so the whole stream drains without deadlock. This is
+// the StreamingPinnedBuffer property the MTCP recv path relies on: the network
+// producer hands staged slots to a single H2D consumer and is never forced into
+// a hard block that a stalled consumer cannot break.
+TEST_CASE("StreamingPinnedBuffer slow consumer does not block producer", "[streaming_pinned_buffer]") {
+  constexpr size_t kChunkBytes = 4096;
+  constexpr size_t kNumChunks = 4;
+  constexpr size_t kTotalItems = 64; // >> slots, so the producer must wait on the consumer
+  auto pool = std::make_shared<PinnedBufferPool>(kChunkBytes * kNumChunks, kChunkBytes);
+  StreamingPinnedBuffer buffer(kNumChunks, kChunkBytes, pool);
+  REQUIRE(buffer.initialize(std::chrono::milliseconds(0)).ok());
+
+  std::atomic<size_t> produced{0};
+  std::atomic<size_t> consumed{0};
+  std::atomic<bool> saw_backpressure{false};
+
+  std::thread producer([&] {
+    for (size_t i = 0; i < kTotalItems; ++i) {
+      int slot = -1;
+      // Non-blocking acquire with poll -- never a hard block the consumer can't break.
+      while (true) {
+        auto slot_or = buffer.try_get_free_chunk();
+        if (slot_or.ok()) {
+          slot = *slot_or;
+          break;
+        }
+        // The only expected failure while draining is "no free slot right now".
+        REQUIRE(absl::IsUnavailable(slot_or.status()));
+        saw_backpressure.store(true, std::memory_order_relaxed);
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+      }
+      REQUIRE(buffer.mark_chunk_ready(slot, /*global_chunk_id=*/i, kChunkBytes).ok());
+      produced.fetch_add(1, std::memory_order_relaxed);
+    }
+    buffer.signal_production_complete();
+  });
+
+  std::thread consumer([&] {
+    while (true) {
+      auto ready_or = buffer.get_ready_chunk();
+      if (!ready_or.ok()) {
+        // OutOfRange once production is complete and the queue is drained.
+        REQUIRE(absl::IsOutOfRange(ready_or.status()));
+        break;
+      }
+      // Simulate a slow H2D copy so the producer is forced to wait on free slots.
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      REQUIRE(buffer.return_chunk(ready_or->slot_id).ok());
+      consumed.fetch_add(1, std::memory_order_relaxed);
+    }
+  });
+
+  producer.join();
+  consumer.join();
+
+  REQUIRE(produced.load() == kTotalItems);
+  REQUIRE(consumed.load() == kTotalItems);
+  // The test is only meaningful if the producer actually hit slot exhaustion and
+  // recovered via the non-blocking path rather than deadlocking.
+  REQUIRE(saw_backpressure.load());
   REQUIRE(buffer.release().ok());
 }
 

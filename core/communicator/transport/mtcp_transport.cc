@@ -281,6 +281,9 @@ MTcpTransport::MTcpTransport(
   bzero(&server_addr_, sizeof(struct sockaddr_in));
   bzero(client_addrs_, sizeof(struct sockaddr_in) * base::kMaxTcpConns);
 
+  // One side-table entry per staging slot; only the slot's current owner writes it.
+  slot_jobs_.resize(gpu_recv_buffer_->capacity());
+
   const auto init_wait_start = std::chrono::steady_clock::now();
   int init_retry_count = 0;
 
@@ -366,6 +369,18 @@ MTcpTransport::~MTcpTransport() {
       tasks_[i]->stop();
     }
     tasks_[i].reset();
+  }
+
+  // Producer (recv_loop) and all lane readers are now stopped, so every staging
+  // slot that was producer-owned has fired on_complete -> mark_chunk_ready. No
+  // more chunks will ever become ready. Wake the H2D consumer so it drains the
+  // remaining ready slots (skipping the copy under stop_) and exits, returning
+  // every slot before release_receive_resources() waits on them.
+  if (h2d_consumer_started_.load(std::memory_order_acquire)) {
+    gpu_recv_buffer_->signal_production_complete();
+    if (h2d_consumer_thread_.joinable()) {
+      h2d_consumer_thread_.join();
+    }
   }
 
   fail_pending_async_tasks(misc::TRANSPORT_FAILED);
@@ -1120,9 +1135,6 @@ void MTcpTransport::prune_async_tasks() {
 void MTcpTransport::recv_loop() {
   ready_.store(true);
   closed_.store(false);
-  struct pollfd fds[1] = {};
-  fds[0].fd = sock_fds_[0];
-  fds[0].events = POLLIN;
   while (!stop_.load()) {
     if (stop_.load() || closed_.load()) {
       break;
@@ -1133,10 +1145,8 @@ void MTcpTransport::recv_loop() {
       break;
     }
 
-    // Debug trace for recv_loop – starting a ReadRequest
     VLOG(2) << "[MTcpTransport::recv_loop] Start processing ReadRequest key=" << msg->get_key()
             << " bytes=" << msg->get_local_tensor()->get_bytes() << " conn_count=" << conn_count_;
-    const auto request_start = std::chrono::steady_clock::now();
 
     auto tensor = msg->get_local_tensor();
     auto bytes = tensor->get_bytes();
@@ -1153,10 +1163,6 @@ void MTcpTransport::recv_loop() {
     const int lanes_to_use =
         compute_active_lanes_internal(bytes, static_cast<size_t>(stage_unit), conn_count_, buffers_per_flow_limit_);
 
-    VLOG(2) << "[mtcp_lane] key=" << msg->get_key() << " bytes=" << bytes << " conn_count=" << conn_count_
-            << " lanes_to_use=" << lanes_to_use << " buffers_per_flow_limit=" << buffers_per_flow_limit_
-            << " stage_unit_bytes=" << stage_unit << " request_base_offset=" << request_base_offset;
-
     VLOG(1) << "[MTcpTransport::recv_loop] key=" << msg->get_key() << " bytes=" << bytes
             << " conn_count=" << conn_count_ << " lanes_to_use=" << lanes_to_use
             << " buffers_per_flow_limit=" << buffers_per_flow_limit_ << " stage_unit_bytes=" << stage_unit
@@ -1164,47 +1170,33 @@ void MTcpTransport::recv_loop() {
 
     const uint64_t network_segment_bytes = stage_unit;
 
-    struct PendingChunkResult {
-      future_chunk_result_t future;
-      uint64_t bytes = 0;
-    };
+    // Single accounting object for this request. The producer (this loop) issues
+    // sub-chunks and seals; each sub-chunk reports completion later from the lane
+    // reader thread (CPU) or the H2D consumer thread (GPU). The thread whose
+    // action drives the outstanding count to zero finalizes the request.
+    auto state = std::make_shared<MTcpRecvRequestState>(msg);
+    bool issue_failed = false;
 
-    std::vector<PendingChunkResult> results;
-
-    // Check if tensor is on GPU and needs staging
     if (tensor->get_mem_type() == base::COMMUNICATE_ENGINE_DEV_GPU) {
-      // Handle GPU tensor with staging - recv to CPU first, then copy to GPU
-      VLOG(1) << "Receiving to GPU tensor of " << bytes << " bytes in " << conn_count_ << " chunks with staging";
-      VLOG(1) << "[MTcpTransport::recv_loop] GPU recv starting for " << msg->get_key() << " bytes=" << bytes
-              << " chunks=" << conn_count_ << " tensor_ptr=" << tensor.get();
-
-      // Determine pool chunk size once for this tensor receive
-      size_t pool_chunk_size = memory_pool_->slice_bytes();
-      ABSL_CHECK_GT(pool_chunk_size, 0) << "MTcpTransport::recv_loop: pool_chunk_size must be > 0";
-      if (network_segment_bytes > pool_chunk_size) {
-        VLOG(1) << "network_segment_bytes (" << network_segment_bytes << ") larger than pool_chunk_size ("
-                << pool_chunk_size << ") – enabling sub-chunked receive";
+      // GPU path: this loop is a pure network producer. It acquires a staging
+      // slot, hands a recv chunk to a lane, and moves on. It never waits on the
+      // H2D copy. When the lane finishes the recv, on_recv_chunk_complete fires
+      // and publishes the slot to the dedicated H2D consumer thread. This
+      // decouples socket draining from H2D so a slow copy can never stall the
+      // lanes (and therefore can never apply TCP backpressure to the source).
+      start_h2d_consumer_if_needed();
+      if (!h2d_consumer_started_.load(std::memory_order_acquire)) {
+        LOG(ERROR) << "[MTcpTransport::recv_loop] H2D consumer/GPU buffer not ready for " << msg->get_key();
+        state->mark_failed();
+        issue_failed = true;
       }
 
-      // Use StreamingPinnedBuffer for efficient memory management
-      VLOG(1) << "Using StreamingPinnedBuffer for GPU receive";
-
-      if (!gpu_buffer_ready_.load(std::memory_order_acquire)) {
-        absl::Status ensure_status = ensure_gpu_buffer_ready();
-        if (!ensure_status.ok()) {
-          LOG(ERROR) << "[MTcpTransport::recv_loop] Failed to prepare GPU receive buffer: " << ensure_status;
-          msg->set_result(absl::InternalError("failed to prepare GPU receive buffer"));
-          continue;
-        }
-      }
-      absl::Status reset_status = gpu_recv_buffer_->reset_for_new_production();
-      if (!reset_status.ok()) {
-        LOG(WARNING) << "[MTcpTransport::recv_loop] reset_for_new_production failed: " << reset_status;
+      size_t pool_chunk_size = issue_failed ? 0 : memory_pool_->slice_bytes();
+      if (!issue_failed) {
+        ABSL_CHECK_GT(pool_chunk_size, 0) << "MTcpTransport::recv_loop: pool_chunk_size must be > 0";
       }
 
-      // Process stage-unit aligned network segments with streaming buffer (supports sub-chunking).
-      bool processing_failed = false;
-      for (uint64_t segment_offset = 0; segment_offset < bytes && !processing_failed;
+      for (uint64_t segment_offset = 0; segment_offset < bytes && !issue_failed;
            segment_offset += network_segment_bytes) {
         const uint64_t segment_size = std::min<uint64_t>(network_segment_bytes, bytes - segment_offset);
         int lane = compute_gpu_lane_for_subchunk_internal(
@@ -1215,144 +1207,60 @@ void MTcpTransport::recv_loop() {
         if (lane >= conn_count_ || tasks_[lane] == nullptr) {
           LOG(ERROR) << "[MTcpTransport::recv_loop] Invalid lane index " << lane << " (lanes_to_use=" << lanes_to_use
                      << ") for " << msg->get_key();
-          processing_failed = true;
+          state->mark_failed();
+          issue_failed = true;
           break;
         }
 
         // A single network segment can still be larger than one pinned slot.
         uint64_t remain_in_segment = segment_size;
         uint64_t sub_offset_in_segment = 0;
-        while (remain_in_segment > 0 && !processing_failed) {
+        while (remain_in_segment > 0 && !issue_failed) {
           uint64_t sub_chunk_size = std::min<uint64_t>(remain_in_segment, pool_chunk_size);
 
-          auto slot_guard = std::make_shared<common::memory::StreamingChunkGuard>(gpu_recv_buffer_);
-          auto staged_ptr_or = slot_guard->acquire();
-          if (!staged_ptr_or.ok()) {
-            LOG(ERROR) << "Failed to get free chunk from GPU receive buffer: " << staged_ptr_or.status();
-            processing_failed = true;
+          auto slot_or = acquire_recv_slot();
+          if (!slot_or.ok()) {
+            LOG(ERROR) << "[MTcpTransport::recv_loop] Failed to acquire staging slot for " << msg->get_key() << ": "
+                       << slot_or.status();
+            state->mark_failed();
+            issue_failed = true;
             break;
           }
+          const int slot_id = *slot_or;
+          char* staged_ptr = gpu_recv_buffer_->get_chunk_ptr(slot_id);
 
-          char* staged_ptr = *staged_ptr_or;
-          const int slot_id = slot_guard->slot_id();
+          const uint64_t gpu_global_offset = segment_offset + sub_offset_in_segment;
+          auto* gpu_ptr = tensor->get_addr<uint8_t>() + gpu_global_offset;
+          const size_t chunk_index = pool_chunk_size > 0 ? static_cast<size_t>(gpu_global_offset / pool_chunk_size) : 0;
+          int device_id = std::max(tensor->get_device_id(), 0);
 
-          VLOG(2) << "[MTcpTransport::recv_loop] Got buffer slot #" << slot_id << " for sub-chunk ("
-                  << sub_offset_in_segment << "/" << segment_size << ") of lane #" << lane;
+          {
+            std::lock_guard<std::mutex> lk(slot_jobs_mutex_);
+            slot_jobs_[slot_id] = RecvSlotJob{
+                .gpu_ptr = gpu_ptr,
+                .bytes = sub_chunk_size,
+                .device_id = device_id,
+                .chunk_index = chunk_index,
+                .request = state,
+                .recv_status = misc::SUCCESS,
+            };
+          }
 
-          // Create chunk for receiving into staged buffer
+          state->add_chunk();
           auto chunk = std::make_shared<MTcpTransportChunk>(reinterpret_cast<uint8_t*>(staged_ptr), sub_chunk_size);
+          chunk->set_on_complete([this, slot_id](misc::result_t st) { on_recv_chunk_complete(slot_id, st); });
           tasks_[lane]->push_recv(chunk);
 
-          // Create a future that will copy to GPU and return buffer after recv completes
-          auto chunk_future = chunk->get_future();
-          auto gpu_global_offset = segment_offset + sub_offset_in_segment;
-          auto* gpu_ptr = tensor->get_addr<uint8_t>() + gpu_global_offset;
-          auto recv_buffer = gpu_recv_buffer_.get(); // keep shared ownership for async copy
-          const size_t chunk_index = pool_chunk_size > 0 ? static_cast<size_t>(gpu_global_offset / pool_chunk_size) : 0;
-
-          const int lane_for_async = lane;
-          auto copy_future = std::async(
-              std::launch::async,
-              [staged_ptr,
-               gpu_ptr,
-               sub_chunk_size,
-               chunk_future = std::move(chunk_future),
-               tensor,
-               lane_for_async,
-               slot_id,
-               slot_guard,
-               recv_buffer,
-               gpu_global_offset,
-               chunk_index]() mutable -> chunk_result_t {
-                VLOG(2) << "[MTcpTransport::recv_loop] Async task lane=" << lane_for_async
-                        << " waiting for sub-chunk recv to complete";
-
-                auto result = chunk_future.get();
-                if (result.status != misc::SUCCESS) {
-                  LOG(ERROR) << "[MTcpTransport::recv_loop] Async task lane=" << lane_for_async
-                             << " sub-chunk recv failed, returning buffer";
-                  return result;
-                }
-
-                if (sub_chunk_size >= sizeof(uint64_t)) {
-                  const uint64_t head_sample = *reinterpret_cast<const uint64_t*>(staged_ptr);
-                  const uint64_t tail_sample =
-                      *reinterpret_cast<const uint64_t*>(staged_ptr + sub_chunk_size - sizeof(uint64_t));
-                  VLOG(2) << "[MTcpTransport::recv_loop] staged sub-chunk slot=" << slot_id
-                          << " bytes=" << sub_chunk_size << " gpu_off=" << gpu_global_offset << " first=0x"
-                          << absl::StrCat(absl::Hex(head_sample, absl::kZeroPad16)) << " last=0x"
-                          << absl::StrCat(absl::Hex(tail_sample, absl::kZeroPad16));
-                } else {
-                  VLOG(2) << "[MTcpTransport::recv_loop] staged sub-chunk slot=" << slot_id
-                          << " bytes=" << sub_chunk_size << " gpu_off=" << gpu_global_offset << " (<8 bytes payload)";
-                }
-
-                // Copy from staged buffer to GPU
-                int device_id = tensor->get_device_id();
-                device_id = std::max(device_id, 0);
-
-                cuda::DeviceGuard guard(device_id);
-                if (!guard.status().ok()) {
-                  LOG(ERROR) << "Failed to set CUDA device: " << guard.status();
-                  return {misc::TRANSPORT_FAILED, result.cost};
-                }
-
-                auto promote_status = slot_guard->promote_to_consumer(chunk_index, sub_chunk_size);
-                if (!promote_status.ok()) {
-                  LOG(ERROR) << "Failed to promote slot " << slot_guard->slot_id()
-                             << " for async copy: " << promote_status;
-                  return {misc::TRANSPORT_FAILED, result.cost};
-                }
-                const int promoted_slot = slot_guard->release_for_async();
-
-                // Schedule async H2D using AsyncCopyManager, wait for completion to respect semantics.
-                tensorcast::common::HostRegion h{
-                    .base = staged_ptr, .length = static_cast<size_t>(sub_chunk_size), .pinned = true};
-                tensorcast::common::DeviceRegion d{
-                    .device_id = device_id, .dev_ptr = gpu_ptr, .length = static_cast<size_t>(sub_chunk_size)};
-                tensorcast::common::CopyOptions opts{
-                    .tracing_stage = "H2D/Copy",
-                    .callbacks = {.on_copy_done = [recv_buffer, promoted_slot](absl::Status st) {
-                      absl::Status rc = recv_buffer->return_chunk(promoted_slot);
-                      if (!rc.ok()) {
-                        LOG(WARNING) << "recv_buffer->return_chunk failed slot=" << promoted_slot << ": " << rc;
-                      }
-                      if (!st.ok()) {
-                        LOG(ERROR) << "AsyncCopyManager::submit_h2d failed slot=" << promoted_slot << ": " << st;
-                      }
-                    }}};
-                auto hdl_or = tensorcast::common::AsyncCopyManager::instance().submit_h2d(h, d, opts);
-                if (!hdl_or.ok()) {
-                  LOG(ERROR) << "Failed to schedule H2D copy: " << hdl_or.status();
-                  absl::Status rc = recv_buffer->return_chunk(promoted_slot);
-                  if (!rc.ok()) {
-                    LOG(WARNING) << "recv_buffer->return_chunk failed slot=" << promoted_slot
-                                 << " after submit error: " << rc;
-                  }
-                  return {misc::TRANSPORT_FAILED, result.cost};
-                }
-                auto wait_st = hdl_or->wait();
-                if (!wait_st.ok()) {
-                  LOG(ERROR) << "H2D copy failed: " << wait_st;
-                  return {misc::TRANSPORT_FAILED, result.cost};
-                }
-                VLOG(2) << "[MTcpTransport::recv_loop] H2D copy complete slot=" << promoted_slot
-                        << " bytes=" << sub_chunk_size << " gpu_off=" << gpu_global_offset;
-                return result;
-              });
-
-          results.push_back(
-              PendingChunkResult{
-                  .future = std::move(copy_future),
-                  .bytes = sub_chunk_size,
-              });
+          VLOG(2) << "[MTcpTransport::recv_loop] Issued sub-chunk slot=" << slot_id << " lane=" << lane
+                  << " gpu_off=" << gpu_global_offset << " bytes=" << sub_chunk_size;
 
           remain_in_segment -= sub_chunk_size;
           sub_offset_in_segment += sub_chunk_size;
         }
       }
     } else {
-      // Regular CPU tensor path
+      // CPU path: recv directly into the destination tensor; completion is
+      // reported straight from the lane reader thread (no H2D, no consumer).
       for (uint64_t segment_offset = 0; segment_offset < bytes; segment_offset += network_segment_bytes) {
         const uint64_t segment_size = std::min<uint64_t>(network_segment_bytes, bytes - segment_offset);
         int lane = compute_gpu_lane_for_subchunk_internal(
@@ -1363,73 +1271,172 @@ void MTcpTransport::recv_loop() {
         if (lane >= conn_count_ || tasks_[lane] == nullptr) {
           LOG(ERROR) << "[MTcpTransport::recv_loop] Invalid CPU lane index " << lane
                      << " (lanes_to_use=" << lanes_to_use << ") for " << msg->get_key();
-          auto fail_chunk = std::make_shared<MTcpTransportChunk>(nullptr, 0);
-          fail_chunk->set_result(misc::TRANSPORT_FAILED);
-          results.push_back(
-              PendingChunkResult{
-                  .future = fail_chunk->get_future(),
-                  .bytes = 0,
-              });
+          state->mark_failed();
           break;
         }
+        const uint64_t seg_bytes = segment_size;
+        auto state_for_cb = state;
         auto chunk = std::make_shared<MTcpTransportChunk>(segment_offset + tensor->get_addr<uint8_t>(), segment_size);
+        chunk->set_on_complete(
+            [state_for_cb, seg_bytes](misc::result_t st) { state_for_cb->on_chunk_done(st, seg_bytes); });
+        state->add_chunk();
         tasks_[lane]->push_recv(chunk);
-        results.push_back(
-            PendingChunkResult{
-                .future = chunk->get_future(),
-                .bytes = segment_size,
-            });
       }
     }
 
-    misc::result_t result = misc::SUCCESS;
-    VLOG(1) << "[MTcpTransport::recv_loop] Waiting for " << results.size() << " async operations for "
-            << msg->get_key();
-    for (size_t i = 0; i < results.size(); ++i) {
-      VLOG(2) << "[MTcpTransport::recv_loop] Awaiting sub-chunk future index=" << i;
-      auto chunk_result = results[i].future.get();
-      if (chunk_result.status != misc::SUCCESS) {
-        LOG(ERROR) << "[MTcpTransport::recv_loop] Chunk " << i << " failed for " << msg->get_key();
-        result = misc::FAILED;
-      } else if (results[i].bytes > 0) {
-        msg->mark_completion_and_is_done(results[i].bytes);
-      }
-      VLOG(2) << "[MTcpTransport::recv_loop] Completed sub-chunk future index=" << i;
-    }
-
-    if (result == misc::SUCCESS) {
-      msg->set_result(absl::OkStatus());
-    } else {
-      msg->set_result(absl::InternalError("failed to read chunk"));
-    }
-
-    const auto request_elapsed = std::chrono::steady_clock::now() - request_start;
-    const auto request_elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(request_elapsed).count();
-    const double request_elapsed_sec = static_cast<double>(request_elapsed_us) / 1'000'000.0;
-    const double request_gibps = request_elapsed_sec > 0.0
-        ? (static_cast<double>(bytes) / request_elapsed_sec / static_cast<double>(1ULL << 30))
-        : 0.0;
-    const double request_elapsed_ms = request_elapsed_sec * 1000.0;
-    if (request_elapsed_ms >= 100.0) {
-      LOG(WARNING) << "[mtcp_read_req] key=" << msg->get_key() << " bytes=" << bytes << " conn_count=" << conn_count_
-                   << " lanes_to_use=" << lanes_to_use << " chunks=" << results.size()
-                   << " elapsed_ms=" << request_elapsed_ms << " gibps=" << request_gibps;
-    } else if (request_elapsed_ms >= 25.0) {
-      LOG(INFO) << "[mtcp_read_req] key=" << msg->get_key() << " bytes=" << bytes << " conn_count=" << conn_count_
-                << " lanes_to_use=" << lanes_to_use << " chunks=" << results.size()
-                << " elapsed_ms=" << request_elapsed_ms << " gibps=" << request_gibps;
-    } else {
-      VLOG(1) << "[mtcp_read_req] key=" << msg->get_key() << " bytes=" << bytes << " conn_count=" << conn_count_
-              << " lanes_to_use=" << lanes_to_use << " chunks=" << results.size()
-              << " elapsed_ms=" << request_elapsed_ms << " gibps=" << request_gibps;
-    }
-
-    // Debug trace for recv_loop – finished a ReadRequest with result
-    VLOG(2) << "[MTcpTransport::recv_loop] Finished ReadRequest key=" << msg->get_key()
-            << " status=" << (result == misc::SUCCESS ? "SUCCESS" : "FAILED");
+    // Remove the producer issuing token. If every sub-chunk already completed,
+    // this finalizes the request (set_result) on this thread; otherwise the last
+    // completing sub-chunk finalizes it asynchronously. Either way the producer
+    // does not block here, so it is free to pop the next request immediately.
+    state->seal();
   }
   closed_.store(true);
   ready_.store(false);
+}
+
+void MTcpTransport::start_h2d_consumer_if_needed() {
+  if (h2d_consumer_started_.load(std::memory_order_acquire)) {
+    return;
+  }
+  std::lock_guard<std::mutex> lk(h2d_consumer_start_mutex_);
+  if (h2d_consumer_started_.load(std::memory_order_acquire)) {
+    return;
+  }
+  if (!gpu_buffer_ready_.load(std::memory_order_acquire)) {
+    absl::Status ensure_status = ensure_gpu_buffer_ready();
+    if (!ensure_status.ok()) {
+      LOG(ERROR) << "[MTcpTransport::start_h2d_consumer_if_needed] failed to prepare GPU receive buffer: "
+                 << ensure_status;
+      return;
+    }
+  }
+  h2d_consumer_thread_ = std::thread([this] { this->h2d_consumer_loop(); });
+  h2d_consumer_started_.store(true, std::memory_order_release);
+}
+
+absl::StatusOr<int> MTcpTransport::acquire_recv_slot() {
+  // The H2D consumer frees slots asynchronously, so block by polling rather than
+  // sleeping inside get_free_chunk(): this lets the producer wake promptly on
+  // shutdown without depending on a consumer return to break a blocking wait.
+  while (!stop_.load(std::memory_order_acquire)) {
+    auto slot_or = gpu_recv_buffer_->try_get_free_chunk();
+    if (slot_or.ok()) {
+      return *slot_or;
+    }
+    if (!absl::IsUnavailable(slot_or.status())) {
+      return slot_or.status();
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+  }
+  return absl::CancelledError("MTcpTransport stopping");
+}
+
+void MTcpTransport::on_recv_chunk_complete(int slot_id, misc::result_t status) {
+  // Fired from the per-lane reader thread when a recv sub-chunk finishes (or
+  // from the teardown drain). We are the producer-owned slot's owner here.
+  recv_request_state_t request;
+  uint64_t bytes = 0;
+  size_t chunk_index = 0;
+  {
+    std::lock_guard<std::mutex> lk(slot_jobs_mutex_);
+    slot_jobs_[slot_id].recv_status = status;
+    request = slot_jobs_[slot_id].request;
+    bytes = slot_jobs_[slot_id].bytes;
+    chunk_index = slot_jobs_[slot_id].chunk_index;
+  }
+
+  if (status != misc::SUCCESS) {
+    // Recv failed: the staging buffer holds garbage, so don't enqueue it for
+    // H2D. Return the slot and finalize this sub-chunk as failed directly.
+    absl::Status ab = gpu_recv_buffer_->abort_producer_slot(slot_id);
+    if (!ab.ok()) {
+      LOG(WARNING) << "[MTcpTransport::on_recv_chunk_complete] abort_producer_slot failed slot=" << slot_id << ": "
+                   << ab;
+    }
+    if (request) {
+      request->on_chunk_done(status, 0);
+    }
+    return;
+  }
+
+  // Hand the filled slot to the H2D consumer thread. The consumer reports the
+  // sub-chunk completion (request->on_chunk_done) after the copy.
+  absl::Status mr = gpu_recv_buffer_->mark_chunk_ready(slot_id, chunk_index, bytes);
+  if (!mr.ok()) {
+    LOG(ERROR) << "[MTcpTransport::on_recv_chunk_complete] mark_chunk_ready failed slot=" << slot_id << ": " << mr;
+    absl::Status ab = gpu_recv_buffer_->abort_producer_slot(slot_id);
+    if (!ab.ok()) {
+      LOG(WARNING) << "[MTcpTransport::on_recv_chunk_complete] abort_producer_slot failed slot=" << slot_id << ": "
+                   << ab;
+    }
+    if (request) {
+      request->on_chunk_done(misc::TRANSPORT_FAILED, 0);
+    }
+  }
+}
+
+void MTcpTransport::h2d_consumer_loop() {
+  // Single dedicated consumer for the receive path: drains ready staging slots,
+  // performs the H2D copy, returns the slot, and reports completion to the owning
+  // request. Exits when production is complete (teardown) and the queue drains.
+  while (true) {
+    auto ready_or = gpu_recv_buffer_->get_ready_chunk();
+    if (!ready_or.ok()) {
+      // OutOfRange => production complete and fully drained => exit.
+      VLOG(1) << "[MTcpTransport::h2d_consumer_loop] exiting: " << ready_or.status();
+      break;
+    }
+    const int slot_id = ready_or->slot_id;
+
+    RecvSlotJob job;
+    {
+      std::lock_guard<std::mutex> lk(slot_jobs_mutex_);
+      job = slot_jobs_[slot_id];
+    }
+
+    misc::result_t status = job.recv_status;
+    if (status == misc::SUCCESS && !stop_.load(std::memory_order_acquire)) {
+      cuda::DeviceGuard guard(job.device_id);
+      if (!guard.status().ok()) {
+        LOG(ERROR) << "[MTcpTransport::h2d_consumer_loop] failed to set CUDA device " << job.device_id << ": "
+                   << guard.status();
+        status = misc::TRANSPORT_FAILED;
+      } else {
+        char* staged_ptr = gpu_recv_buffer_->get_chunk_ptr(slot_id);
+        tensorcast::common::HostRegion h{.base = staged_ptr, .length = static_cast<size_t>(job.bytes), .pinned = true};
+        tensorcast::common::DeviceRegion d{
+            .device_id = job.device_id, .dev_ptr = job.gpu_ptr, .length = static_cast<size_t>(job.bytes)};
+        tensorcast::common::CopyOptions opts{.tracing_stage = "H2D/Copy"};
+        auto hdl_or = tensorcast::common::AsyncCopyManager::instance().submit_h2d(h, d, opts);
+        if (!hdl_or.ok()) {
+          LOG(ERROR) << "[MTcpTransport::h2d_consumer_loop] submit_h2d failed slot=" << slot_id << ": "
+                     << hdl_or.status();
+          status = misc::TRANSPORT_FAILED;
+        } else {
+          auto wait_st = hdl_or->wait();
+          if (!wait_st.ok()) {
+            LOG(ERROR) << "[MTcpTransport::h2d_consumer_loop] H2D copy failed slot=" << slot_id << ": " << wait_st;
+            status = misc::TRANSPORT_FAILED;
+          }
+        }
+      }
+    } else if (stop_.load(std::memory_order_acquire)) {
+      // Shutting down: skip the copy and finalize as failed so the request
+      // unblocks instead of waiting on a copy we will never perform.
+      status = misc::TRANSPORT_FAILED;
+    }
+
+    // Return the slot to the free pool regardless of copy outcome so the
+    // producer can reuse it.
+    absl::Status rc = gpu_recv_buffer_->return_chunk(slot_id);
+    if (!rc.ok()) {
+      LOG(WARNING) << "[MTcpTransport::h2d_consumer_loop] return_chunk failed slot=" << slot_id << ": " << rc;
+    }
+
+    if (job.request) {
+      job.request->on_chunk_done(status, status == misc::SUCCESS ? job.bytes : 0);
+    }
+  }
 }
 
 misc::result_t MTcpTransport::init_socket_fd(int sock_fd) {

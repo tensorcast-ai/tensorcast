@@ -21,6 +21,7 @@
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/time/clock.h"
@@ -2320,6 +2321,23 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, PinnedStagingPo
   if (staging_wait_timeout_ <= absl::ZeroDuration()) {
     LOG(WARNING) << "Communicator staging_wait_timeout is <= 0; defaulting to 30s";
     staging_wait_timeout_ = absl::Seconds(30);
+  }
+  // Defense-in-depth (MTCP recv-deadlock safety net): keep the lease-TTL reaper
+  // strictly more patient than the source staging-credit wait. If they share a
+  // deadline the reaper can reap a lease out from under the staging wait and
+  // "rescue" the source loop *without* sending READ_FAILED, leaving the target to
+  // hang to its full read budget. Ordering ack_ttl_ms_ > staging_wait_timeout_
+  // lets the source fail_mtcp_read_task path (which does send READ_FAILED) fire
+  // first; the reaper then degrades to a pure memory backstop.
+  {
+    const uint64_t staging_wait_ms =
+        static_cast<uint64_t>(std::max<int64_t>(0, absl::ToInt64Milliseconds(staging_wait_timeout_)));
+    const uint64_t min_ack_ttl_ms = staging_wait_ms + 15000;
+    if (ack_ttl_ms_ < min_ack_ttl_ms) {
+      LOG(INFO) << "[mtcp] raising ack_ttl_ms from " << ack_ttl_ms_ << " to " << min_ack_ttl_ms
+                << " to stay strictly above staging_wait_timeout (" << staging_wait_ms << "ms)";
+      ack_ttl_ms_ = min_ack_ttl_ms;
+    }
   }
   const auto staging_backend = NormalizeStagedBackend(config_);
   if (staging_backend == v1::RdmaConfig::STAGED_RDMA_BACKEND_GPU_VRAM && !enable_rdma_) {
@@ -6668,6 +6686,31 @@ absl::Status Communicator::close_connection(const std::string& dst_ip, uint16_t 
   return absl::OkStatus();
 }
 
+namespace {
+// Recover (tensor_key, request_id) from a "<tensor_key>:<offset>#<request_id>"
+// staging-lease request key. The offset is already carried separately in the
+// lease metadata, so we only need the head (tensor_key) and tail (request_id).
+// request_id and offset are numeric and always the last two fields, so reverse
+// scanning isolates them even if tensor_key itself contains ':' or '#'.
+bool parse_request_instance_key(const std::string& key, std::string* tensor_key, uint64_t* request_id) {
+  const auto hash_pos = key.rfind('#');
+  if (hash_pos == std::string::npos) {
+    return false;
+  }
+  const auto colon_pos = key.rfind(':', hash_pos);
+  if (colon_pos == std::string::npos) {
+    return false;
+  }
+  uint64_t parsed_id = 0;
+  if (!absl::SimpleAtoi(key.substr(hash_pos + 1), &parsed_id)) {
+    return false;
+  }
+  *tensor_key = key.substr(0, colon_pos);
+  *request_id = parsed_id;
+  return true;
+}
+} // namespace
+
 void Communicator::do_channel_gc_loop() {
   while (!stop_.load()) {
     std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -6709,6 +6752,33 @@ void Communicator::do_channel_gc_loop() {
           finish_source_transfer_progress(
               make_transfer_id(metadata.request_key, entry.first),
               absl::DeadlineExceededError("source staged lease reaped before ACK"));
+          // Safety net: the reaper "rescues" the source loop but historically did
+          // not tell the target, leaving it to hang to its full ~180s read budget.
+          // Notify the target with READ_FAILED so its ENGINE_OP_READ_FAILED handler
+          // fails the read immediately. (With ack_ttl_ms_ > staging_wait_timeout_
+          // the source fail_mtcp_read_task path normally fires first; this covers
+          // the residual case where the reaper trips anyway. A duplicate is benign:
+          // the target tolerates a missing/already-completed request.)
+          std::string reaped_tensor_key;
+          uint64_t reaped_request_id = 0;
+          if (auto control = entry.second->get_control(); control != nullptr &&
+              parse_request_instance_key(metadata.request_key, &reaped_tensor_key, &reaped_request_id)) {
+            auto fail_msg = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
+            auto* payload = fail_msg->get_payload<ProtoReadFailed>();
+            misc::STRNCPY(payload->tensor_key, reaped_tensor_key, kMaxTensorNameLen);
+            payload->offset = metadata.offset;
+            payload->request_id = reaped_request_id;
+            payload->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
+            misc::result_t send_res = control->send(fail_msg);
+            if (send_res != misc::SUCCESS) {
+              LOG(WARNING) << "[staging_credit] failed to send READ_FAILED to target after reap: key="
+                           << reaped_tensor_key << " res=" << send_res;
+            }
+          } else {
+            LOG(WARNING) << "[staging_credit] reaped lease without notifying target (no control transport or "
+                            "unparsable key): "
+                         << metadata.request_key;
+          }
           resumed = true;
         }
         if (resumed) {
