@@ -3194,12 +3194,14 @@ class ArtifactRealizationSpec:
         target: object,
         readiness: object | None = None,
         retention: object | None = None,
+        options: object | None = None,
     ) -> "ArtifactRealizationSpec":
         return cls(
             target_kind="retained_binding",
             target=target,
             readiness=readiness,
             retention=retention,
+            options=options,
         )
 
     @classmethod
@@ -3209,12 +3211,14 @@ class ArtifactRealizationSpec:
         target: object,
         readiness: object | None = None,
         retention: object | None = None,
+        options: object | None = None,
     ) -> "ArtifactRealizationSpec":
         return cls(
             target_kind="target_set",
             target=target,
             readiness=readiness,
             retention=retention,
+            options=options,
         )
 
     @classmethod

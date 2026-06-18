@@ -562,6 +562,23 @@ def test_realize_async_retained_binding_completed_operation_status_and_cancel() 
     assert isinstance(result, PrefetchHandoff)
 
 
+def test_realize_async_retained_binding_propagates_call_context_timeout() -> None:
+    store = _Store()
+    artifact = Artifact(store_ref=_store_ref(store), artifact_id="aid")
+    target = _realization_target()
+
+    op = artifact.realize_async(
+        ArtifactRealizationSpec.retained_binding(target=target),
+        ctx=tc.CallContext(deadline_ms=123456),
+    )
+    result = op.result(timeout_s=1.0)
+
+    assert isinstance(result, PrefetchHandoff)
+    calls = store._runtime.ensure_client().prefetch_binding_calls
+    assert calls
+    assert calls[0]["timeout_s"] == pytest.approx(123.456)
+
+
 def test_realize_async_retained_binding_attaches_report_to_result() -> None:
     store = _Store()
     artifact = Artifact(store_ref=_store_ref(store), artifact_id="aid")

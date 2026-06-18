@@ -10,6 +10,7 @@
 #include "core/common/capability_token.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/rpc_context.h"
+#include "daemon/state/handle_lease_registry.h"
 #include "daemon/state/lifecycle_kernel.h"
 #include "daemon/state/placement_lease_tokens.h"
 #include "daemon/state/retention_registry.h"
@@ -27,6 +28,7 @@ class LeaseController {
     LifecycleKernel& lifecycle_kernel;
     PlacementLeaseTokens& placement_lease_tokens;
     common::CapabilityTokenManager* capability_tokens{nullptr};
+    HandleLeaseRegistry* handle_leases{nullptr};
     RetentionRegistry* retention_registry{nullptr};
     std::string daemon_id;
     ShutdownSignal& shutdown_signal;

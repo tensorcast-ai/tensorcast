@@ -134,22 +134,10 @@ bool window_has_only_one_consumer_rank(const SourceWindowCollectiveWindow& windo
       [rank](const SourceWindowCollectiveConsumerSpan& span) { return span.rank == rank; });
 }
 
-bool consumer_span_is_linear_or_contiguous(const SourceWindowCollectiveConsumerSpan& span) {
-  if (span.row_count <= 1 || span.row_bytes == 0) {
-    return true;
-  }
-  return span.source_stride_bytes == span.row_bytes && span.target_stride_bytes == span.row_bytes;
-}
-
-bool window_has_only_linear_or_contiguous_consumer_spans(const SourceWindowCollectiveWindow& window) {
-  return std::all_of(window.consumer_spans.begin(), window.consumer_spans.end(), consumer_span_is_linear_or_contiguous);
-}
-
 std::optional<uint64_t> consumer_routed_peer_saving_bytes(
     const SourceWindowCollectiveWindow& window,
     uint32_t world_size) {
-  if (world_size <= 1 || window_has_only_one_consumer_rank(window) ||
-      !window_has_only_linear_or_contiguous_consumer_spans(window)) {
+  if (world_size <= 1 || window_has_only_one_consumer_rank(window)) {
     return std::nullopt;
   }
   const uint64_t window_bytes = window.end > window.start ? window.end - window.start : 0;

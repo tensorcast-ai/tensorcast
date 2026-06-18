@@ -73,6 +73,7 @@ from tensorcast.api.store.owned_binding_layout import (
 )
 from tensorcast.api.store.owned_binding_slot import (
     OwnedBindingSlot,
+    _build_source_execution_contract,
     restore_owned_binding_tensors,
 )
 from tensorcast.api.store.realization_kernel import (
@@ -1485,6 +1486,7 @@ class Artifact:
                 target=cast(RealizationTarget | RealizationTargetSet, spec.target),
                 readiness=readiness,
                 retention=cast(PrefetchRetentionPolicy | None, spec.retention),
+                options=cast("GetArtifactOptions | None", spec.options),
                 ctx=ctx,
             )
         if spec.target_kind == "target_set":
@@ -1509,6 +1511,7 @@ class Artifact:
                 target=spec.target,
                 readiness=readiness,
                 retention=cast(PrefetchRetentionPolicy | None, spec.retention),
+                options=cast("GetArtifactOptions | None", spec.options),
                 ctx=ctx,
             )
         raise ArtifactError(
@@ -2829,6 +2832,7 @@ class Artifact:
         target: RealizationTarget | RealizationTargetSet,
         readiness: RuntimeBindingReadiness,
         retention: PrefetchRetentionPolicy | None,
+        options: GetArtifactOptions | None,
         ctx: CallContext | None,
     ) -> Operation[RuntimePrefetchResult]:
         artifact_id = self._ensure_identified()
@@ -2870,14 +2874,24 @@ class Artifact:
             )
 
         client = runtime.ensure_client()
+        execution_topology, collective_policy = _build_source_execution_contract(
+            options=options,
+            ctx=ctx,
+        )
+        timeout_s: float | None = None
+        if ctx is not None and ctx.deadline_ms is not None:
+            timeout_s = max(0.001, float(ctx.deadline_ms) / 1000.0)
         try:
             response = client.prefetch_serving_binding(
                 source_selection=selection,
                 target=target,
                 requested_readiness=readiness,
                 retention_policy=retention,
+                execution_topology=execution_topology,
+                collective_policy=collective_policy,
                 operation_id=operation_id,
                 group_realization=ctx.group_realization if ctx is not None else None,
+                timeout_s=timeout_s if timeout_s is not None else 600.0,
             )
         except RuntimeError as exc:
             raise ArtifactError(
@@ -2956,12 +2970,14 @@ class Artifact:
                     target=target,
                     readiness=readiness,
                     retention=retention,
+                    options=options,
                 )
                 if isinstance(target, RealizationTargetSet)
                 else ArtifactRealizationSpec.retained_binding(
                     target=target,
                     readiness=readiness,
                     retention=retention,
+                    options=options,
                 )
             )
             return self.realize_async(spec, ctx=ctx)
@@ -3011,6 +3027,7 @@ class Artifact:
                 target=target,
                 readiness=readiness,
                 retention=retention,
+                options=options,
                 ctx=ctx,
             )
         if device is None:

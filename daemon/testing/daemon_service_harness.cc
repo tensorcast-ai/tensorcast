@@ -290,6 +290,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .lifecycle_kernel = kernel->lifecycle_kernel(),
       .placement_lease_tokens = kernel->placement_lease_tokens(),
       .capability_tokens = kernel->capability_tokens(),
+      .handle_leases = kernel->handle_leases(),
       .retention_registry = kernel->retention_registry(),
       .daemon_id = options.daemon_id,
       .shutdown_signal = kernel->shutdown_signal(),

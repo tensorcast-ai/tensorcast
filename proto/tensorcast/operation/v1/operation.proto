@@ -197,6 +197,7 @@ message ServingBindingResolvedLayout {
   optional string source_schema_hash = 11;
   optional bytes copy_plan_bytes = 12;
   optional bytes dst_specs_bytes = 13;
+  optional bytes realization_plan_bytes = 14;
 }
 
 message ServingBindingTarget {

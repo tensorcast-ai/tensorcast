@@ -154,7 +154,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "Source-bound strategy planner marks source-window pre-candidate independent of owner-file locality gate",
+    "Source-bound strategy planner selects source-window independent of owner-file locality gate",
     "[source_bound_strategy_planner][source_window]") {
   std::array<std::uint8_t, 8> target{};
   RepresentationWorkPlan work_plan;
@@ -195,7 +195,7 @@ TEST_CASE(
   CHECK(strategy_plan_or->summary.source_window_candidate_summary.source_window_target_write_bytes == 8);
   CHECK(strategy_plan_or->summary.source_window_candidate_summary.source_window_residual_bytes == 0);
   CHECK_FALSE(strategy_plan_or->summary.collective_lane_eligible);
-  CHECK(strategy_plan_or->lane_plan.collective_executor != SourceBoundCollectiveExecutor::kSourceWindow);
+  CHECK(strategy_plan_or->lane_plan.collective_executor == SourceBoundCollectiveExecutor::kSourceWindow);
 }
 
 TEST_CASE(

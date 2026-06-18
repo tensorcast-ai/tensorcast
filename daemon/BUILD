@@ -1045,6 +1045,7 @@ sc_cc_library(
     srcs = ["service/controllers/lease_controller.cc"],
     hdrs = ["service/controllers/lease_controller.h"],
     deps = [
+        ":handle_lease_registry_lib",
         ":lifecycle_kernel_lib",
         ":placement_lease_tokens_lib",
         ":retention_registry_lib",

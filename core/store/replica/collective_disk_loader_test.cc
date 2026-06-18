@@ -300,6 +300,31 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "auto local mapped safetensors io keeps tmpfs sources buffered",
+    "[collective_disk_loader][local_mapped][io_policy]") {
+  constexpr uint64_t kPayloadBytes = (1ULL << 30) + 4096;
+  const std::filesystem::path tmpfs_root = "/dev/shm";
+  if (!std::filesystem::is_directory(tmpfs_root)) {
+    SKIP("/dev/shm is unavailable");
+  }
+
+  auto temp_root = tmpfs_root /
+      ("collective-disk-loader-auto-io-policy-tmpfs-" +
+       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  std::filesystem::create_directories(temp_root);
+  const auto safetensors_path = temp_root / "weights.safetensors";
+  const auto segment = create_sparse_safetensors_segment(safetensors_path, kPayloadBytes);
+
+  const auto decision_or = choose_auto_local_mapped_safetensors_io_for_testing(absl::MakeSpan(&segment, 1));
+  REQUIRE(decision_or.ok());
+  CHECK_FALSE(decision_or->use_direct_aligned_edges);
+  CHECK(decision_or->reason == "filesystem_not_direct_friendly");
+
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE(
     "try_source_window_collective_mapped_target_load performs group final admission before runtime fallback",
     "[collective_disk_loader][source_window][admission]") {
   std::array<std::uint8_t, 8> rank0_target{};

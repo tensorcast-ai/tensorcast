@@ -364,7 +364,7 @@ class MaterializationSettings(BaseModel):
 
     def collective_policy_value(self) -> str:
         return {
-            "auto": "disable_collective",
+            "auto": "auto",
             "required": "require_collective",
             "disabled": "disable_collective",
             "collective_first": "collective_first",

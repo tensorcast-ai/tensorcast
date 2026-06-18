@@ -198,6 +198,35 @@ def test_materialization_execution_context_builds_collective_options() -> None:
     assert profile["source_locality"] == "shared_source"
 
 
+def test_materialization_execution_context_auto_chooses_collective_for_same_node_tp() -> (
+    None
+):
+    options, profile = build_materialization_execution_context(
+        artifact_ref="mi2:test:serving",
+        operation_scope="startup.bind",
+        configured_policy="auto",
+        tp_rank=1,
+        tp_world_size=2,
+        same_node_tp=True,
+        tp_ranks=(0, 1),
+        collective_world_size=2,
+        collective_rank=1,
+        source_bound_contract_profile_fields={},
+        build_group_id=lambda **_kwargs: "group-auto",
+    )
+
+    assert options.execution_topology.collective_group is not None
+    assert options.execution_topology.collective_group.group_id == "group-auto"
+    assert (
+        options.execution_topology.collective_policy
+        is CollectivePolicyMode.COLLECTIVE_FIRST
+    )
+    assert profile["collective_policy_configured"] == "auto"
+    assert profile["collective_policy_auto_resolved"] is True
+    assert profile["collective_policy"] == "collective_first"
+    assert profile["collective_requested"] is True
+
+
 def test_materialization_execution_context_respects_disabled_collective_policy() -> (
     None
 ):
@@ -246,3 +275,36 @@ def test_materialization_execution_context_disables_collective_when_unavailable(
     assert options.execution_topology.collective_group is None
     assert profile["collective_requested"] is False
     assert profile["collective_reason"] == "collective_context_unavailable"
+    assert profile["collective_policy_configured"] == "collective_first"
+    assert profile["collective_policy_rejected"] == "collective_first"
+    assert profile["collective_policy"] == "disable_collective"
+
+
+def test_materialization_execution_context_auto_disables_when_context_unavailable() -> (
+    None
+):
+    options, profile = build_materialization_execution_context(
+        artifact_ref="mi2:test:serving",
+        operation_scope="startup.bind",
+        configured_policy="auto",
+        tp_rank=0,
+        tp_world_size=2,
+        same_node_tp=False,
+        tp_ranks=(),
+        collective_world_size=2,
+        collective_rank=0,
+        source_bound_contract_profile_fields={},
+        build_group_id=lambda **_kwargs: "group-1",
+        collective_context_unavailable=True,
+    )
+
+    assert options.execution_topology.collective_group is None
+    assert (
+        options.execution_topology.collective_policy
+        is CollectivePolicyMode.DISABLE_COLLECTIVE
+    )
+    assert profile["collective_requested"] is False
+    assert profile["collective_reason"] == "collective_context_unavailable"
+    assert profile["collective_auto_reason"] == "collective_context_unavailable"
+    assert profile["collective_policy_configured"] == "auto"
+    assert profile["collective_policy"] == "disable_collective"

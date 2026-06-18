@@ -61,6 +61,7 @@ from tensorcast.artifact_runtime.lifecycle import (
     PlacementAdmissionFacts,
     PlacementIdentityFacts,
     PlacementMemberFacts,
+    PreparedLocalReadyBundle,
     RecipeBuildSessionRequest,
     RecipeCachePolicy,
     RequestContext,
@@ -118,7 +119,10 @@ from tensorcast.artifact_runtime.recipe.local_ready import (
     canonical_index_entries_from_tensor_schema,
     logical_topology_json_from_recipe,
 )
-from tensorcast.pytorch.module_binding import TorchModuleAdapterMixin
+from tensorcast.pytorch.module_binding import (
+    TorchModuleAdapterMixin,
+    align_runtime_binding_exclude_names,
+)
 from tensorcast.retained_realization_authority import (
     ParsedRetainedRealizationAuthority,
     RetainedRealizationExpectedDigests,
@@ -144,6 +148,30 @@ def _profile_records(tmp_path) -> list[dict[str, object]]:
         for path in tmp_path.glob("tensorcast_pid*.jsonl")
         for line in path.read_text(encoding="utf-8").splitlines()
     ]
+
+
+def _install_fake_artifact_selection(monkeypatch) -> None:
+    def fake_resolve_artifact_selection(**kwargs):
+        return SimpleNamespace(
+            source_selection_digest="selection-digest",
+            artifact_id=str(kwargs.get("artifact_id") or "mi2:test:retained"),
+            view_id="view-id",
+            artifact_profile=str(kwargs.get("artifact_profile") or "retained_binding"),
+            authority_scope=str(
+                kwargs.get("authority_scope")
+                or "daemon_retained_runtime_attachment"
+            ),
+            generation_hint=None,
+            view_subset_hash=b"view-subset",
+            logical_layout_hash=b"logical-layout",
+            selection_hash=b"selection",
+        )
+
+    monkeypatch.setattr(
+        integration_mod,
+        "resolve_artifact_selection",
+        fake_resolve_artifact_selection,
+    )
 
 
 class _Bound:
@@ -2196,6 +2224,64 @@ class _MaterializationAdapter(TorchModuleAdapterMixin):
     def semantic_probes(self, model, model_config):
         assert not model.w.is_meta
         return {"model_name": getattr(model_config, "name", None)}
+
+
+class _RetainedRuntimeSurfaceModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.w = nn.Parameter(torch.empty((1,), device="meta"))
+        self.register_buffer("cache", torch.empty((1,), device="meta"))
+
+
+class _RetainedRuntimeSurfaceAdapter(_MaterializationAdapter):
+    _EXCLUDE_NAMES_ATTR = "_tensorcast_test_runtime_binding_exclude_names"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.align_calls: list[tuple[str, ...]] = []
+        self.finalize_calls = 0
+
+    def build_meta_model(self, framework_config, model_config):
+        del framework_config, model_config
+        return _RetainedRuntimeSurfaceModel()
+
+    def runtime_only_tensor_names(self, model: nn.Module) -> tuple[str, ...]:
+        return tuple(getattr(model, self._EXCLUDE_NAMES_ATTR, ()) or ())
+
+    def align_runtime_tensor_names(self, model, expected_names):
+        self.align_calls.append(tuple(str(name) for name in expected_names))
+        return align_runtime_binding_exclude_names(
+            model,
+            expected_names,
+            self._set_runtime_binding_exclude_names,
+            fail_on_missing=True,
+        )
+
+    def _set_runtime_binding_exclude_names(self, model, names) -> None:
+        existing = set(getattr(model, self._EXCLUDE_NAMES_ATTR, ()) or ())
+        existing.update(str(name) for name in names)
+        setattr(model, self._EXCLUDE_NAMES_ATTR, tuple(sorted(existing)))
+
+    def compute_runtime_tensor_schema_hash(self, tensors, *, remove_duplicate=False):
+        del tensors, remove_duplicate
+        return "schema-hash"
+
+    def allocate_runtime_only_tensors(self, model, target_device):
+        del target_device
+        allocated = {}
+        for name in self.runtime_only_tensor_names(model):
+            if name != "cache":
+                continue
+            tensor = torch.empty((1,), dtype=torch.float32)
+            model._buffers[name] = tensor
+            allocated[name] = tensor
+        return allocated
+
+    def run_runtime_only_post_bind(self, model, model_config, target_device):
+        del model_config, target_device
+        assert not model.cache.is_meta
+        model.cache = torch.full((1,), 7.0, dtype=torch.float32)
+        self.finalize_calls += 1
 
 
 class _AdapterFrameworkHost:
@@ -4347,6 +4433,57 @@ def test_prepare_local_ready_recipe_accepts_prebuilt_admin_inputs(monkeypatch):
     assert result.source_artifact_ref == "mi2:test:source"
 
 
+def test_prepare_local_ready_bundle_combines_recipe_and_retained_target(
+    monkeypatch,
+):
+    calls = []
+    prepared = LocalReadyPreparationResult(
+        recipe=object(),
+        source_subject=object(),
+        source_artifact_ref="mi2:test:source",
+    )
+    retained_target_plan = object()
+    intent = LocalSourceBootstrap(
+        source_selector=SourceSelector.local_path("/tmp/model"),
+        bootstrap_policy=BootstrapPolicy(),
+    )
+    context = RequestContext(
+        model_config=object(),
+        target_device=torch.device("cuda:0"),
+    )
+
+    def fake_prepare(self, observed_intent, observed_context):
+        del self
+        calls.append(("prepare", observed_intent, observed_context))
+        return prepared
+
+    def fake_build(self, observed_intent, observed_context, *, prepared):
+        del self
+        calls.append(("target_plan", observed_intent, observed_context, prepared))
+        return retained_target_plan
+
+    monkeypatch.setattr(
+        ArtifactRuntimeIntegration,
+        "prepare_local_ready_recipe",
+        fake_prepare,
+    )
+    monkeypatch.setattr(
+        ArtifactRuntimeIntegration,
+        "build_local_ready_retained_target_plan",
+        fake_build,
+    )
+
+    result = ArtifactRuntimeIntegration().prepare_local_ready_bundle(intent, context)
+
+    assert isinstance(result, PreparedLocalReadyBundle)
+    assert result.prepared is prepared
+    assert result.retained_target_plan is retained_target_plan
+    assert calls == [
+        ("prepare", intent, context),
+        ("target_plan", intent, context, prepared),
+    ]
+
+
 def test_mounted_source_realization_reuses_prepared_local_ready(monkeypatch):
     recipe = _local_ready_recipe()
     recipe.source_artifact_ref = "msa1:test:source"
@@ -4605,7 +4742,8 @@ def test_serving_integration_finalizes_local_ready_runtime_closes_on_error():
     assert binding.closed
 
 
-def test_artifact_runtime_acquire_retained_binding_uses_materialization():
+def test_artifact_runtime_acquire_retained_binding_uses_materialization(monkeypatch):
+    _install_fake_artifact_selection(monkeypatch)
     client = _Client()
     adapter = _MaterializationAdapter()
     adapter.compute_runtime_tensor_schema_hash = (
@@ -4656,6 +4794,33 @@ def test_artifact_runtime_acquire_retained_binding_uses_materialization():
     result.runtime_state.close()
     assert client.released_tokens == [b"lease"]
     assert result.runtime_state.release_contract.released is True
+
+
+def test_artifact_runtime_retained_restore_aligns_runtime_surface(monkeypatch):
+    _install_fake_artifact_selection(monkeypatch)
+    adapter = _RetainedRuntimeSurfaceAdapter()
+    integration = ArtifactRuntimeIntegration(host=_host_for_adapter(adapter))
+
+    result = integration._restore_retained_for_intent(
+        _RetainedBindingAcquire(
+            authority=_authority(),
+            model_config=SimpleNamespace(name="model-config"),
+            target_device=torch.device("cuda:0"),
+            expected_member=_member(),
+            runtime=_Runtime(_Client()),
+            restore_fn=lambda **_kwargs: {
+                "w": torch.ones((1,), dtype=torch.float32),
+            },
+        )
+    )
+
+    assert result.model is not None
+    assert adapter.align_calls == [("w",)]
+    assert adapter.finalize_calls == 1
+    assert torch.equal(result.model.w.detach(), torch.ones((1,)))
+    assert torch.equal(result.model.cache, torch.full((1,), 7.0))
+    assert result.runtime_view.tensor_schema_hash == "schema-hash"
+    result.runtime_state.close()
 
 
 def test_artifact_runtime_acquire_retained_binding_rejects_published_ready():

@@ -83,10 +83,6 @@ engine:
     enable_local_batched_disk_load: true
     enable_tensor_aware_mapped_executor: true
     allow_mixed_execution: true
-    enable_owner_file_collective: false
-    enable_source_window_collective: false
-    enable_source_window_plan_cache: false
-    executor_preference: MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO
     owner_file_collective_peak_bytes_budget: 8GB
     owner_file_collective_batch_bytes: 512MB
     owner_file_collective_dim1_staging_bytes: 256MB
@@ -98,7 +94,6 @@ engine:
     owner_file_collective_allow_mixed_residual: false
     owner_file_collective_planner_cache_entries: 256
     local_mapped_safetensors_io_mode: MATERIALIZATION_STRATEGY_LOCAL_MAPPED_SAFETENSORS_IO_MODE_AUTO_BY_FILESYSTEM
-    source_window_collective_selection_mode: MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_DRY_RUN
     source_window_collective_window_bytes: 512MB
     source_window_collective_max_gap_bytes: 256KB
     source_window_collective_max_window_amplification_x1000: 2000
@@ -110,8 +105,6 @@ engine:
     source_window_collective_min_routed_peer_saving_bytes: 64MB
     source_window_collective_distribution_mode: MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_DISTRIBUTION_MODE_AUTO
     source_window_collective_allow_mixed_residual: false
-    enable_source_window_batched_scatter_kernel: false
-    enable_source_window_compiled_routed_program: false
     source_window_compiled_program_build_threads: 0
     enable_source_window_scatter_cuda_graph: false
 ```
@@ -122,15 +115,15 @@ Operationally, this means:
 
 - local-batched disk load is enabled by default,
 - tensor-aware mapped execution remains available for eligible mapped paths,
-- owner-file collective now uses a bounded batched executor when selected,
-- source-window collective is represented in typed config and remains
-  disabled/dry-run by default for generic daemon startup, while validated
-  TensorCast loader benchmarks opt into the source-window path with explicit
-  typed config,
-- when source-window is explicitly enabled and selected, its strict/auto
-  admission is independent from owner-file `pure_collective` gates; a required
-  collective request can be satisfied by `SourceWindowCollectiveExecutor` after
-  group final admission,
+- source-window collective is auto-admitted by default for eligible TP mapped loads,
+- owner-file collective now uses a bounded batched executor when explicitly selected,
+- source-window collective is the default auto-admitted TP disk fast path. The
+  daemon keeps plan caching, compiled routed programs, and batched scatter
+  enabled by default, so validated TensorCast loader benchmarks should not need
+  explicit typed fast-path config,
+- when source-window is selected, its strict/auto admission is independent from
+  owner-file `pure_collective` gates; a required collective request can be
+  satisfied by `SourceWindowCollectiveExecutor` after group final admission,
 - `local_mapped_safetensors_io_mode=AUTO_BY_FILESYSTEM` is shared by local
   mapped and source-window mapped execution. Large regular safetensors on
   direct-friendly local filesystems use `direct_aligned_edges` when page-cache

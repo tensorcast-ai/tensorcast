@@ -144,7 +144,7 @@ struct ResolvedSourceBinding {
 struct SourceWindowCollectiveCandidateSummary {
   bool candidate{false};
   bool group_final_admitted{false};
-  SourceWindowCollectiveSelectionMode selection_mode{SourceWindowCollectiveSelectionMode::kDryRun};
+  SourceWindowCollectiveSelectionMode selection_mode{SourceWindowCollectiveSelectionMode::kAuto};
   SourceWindowCollectiveDistributionMode distribution_mode{SourceWindowCollectiveDistributionMode::kAuto};
   std::string pre_admission_reason;
   std::string group_reject_reason;
@@ -180,7 +180,7 @@ struct SourceBoundExecutionPlanSummary {
   bool collective_lane_eligible{false};
   bool strict_pure_collective_eligible{false};
   bool source_window_collective_candidate{false};
-  SourceWindowCollectiveSelectionMode source_window_selection_mode{SourceWindowCollectiveSelectionMode::kDryRun};
+  SourceWindowCollectiveSelectionMode source_window_selection_mode{SourceWindowCollectiveSelectionMode::kAuto};
   SourceWindowCollectiveCandidateSummary source_window_candidate_summary;
   std::string source_window_group_reject_reason;
 };

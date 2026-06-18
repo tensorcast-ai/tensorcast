@@ -1068,8 +1068,6 @@ Proposed fields:
 ```yaml
 engine:
   materialization_strategy:
-    enable_source_window_collective: false
-    source_window_collective_selection_mode: dry_run
     source_window_collective_window_bytes: 512MB
     source_window_collective_max_gap_bytes: 256KB
     source_window_collective_max_window_amplification_x1000: 2000
@@ -1081,11 +1079,17 @@ engine:
     source_window_collective_min_routed_peer_saving_bytes: 64MB
     source_window_collective_distribution_mode: auto
     source_window_collective_allow_mixed_residual: false
-    enable_source_window_batched_scatter_kernel: false
-    enable_source_window_compiled_routed_program: false
     source_window_compiled_program_build_threads: 0
     enable_source_window_scatter_cuda_graph: false
 ```
+
+`enable_source_window_collective`, `source_window_collective_selection_mode`,
+`source_window_collective_distribution_mode`,
+`enable_source_window_plan_cache`,
+`enable_source_window_batched_scatter_kernel`, and
+`enable_source_window_compiled_routed_program` are production defaults. Normal
+serving configs should not restate them; override them only for diagnostics or
+controlled experiments.
 
 The protobuf and C++ config should use integer byte fields and `_x1000`
 fixed-point ratios. Human-readable YAML size literals may be accepted by the
@@ -1698,13 +1702,13 @@ distribution/layout planning so the runtime issues fewer scatter operations.
 # Source-Window Plan Cache Semantics
 
 The source-window group-plan cache is now part of the daemon materialization
-strategy surface through `enable_source_window_plan_cache`. The default remains
-false, so existing source-window runs keep building the admitted group plan once
-per realization. When enabled, the daemon builds a prepared plan key from
-artifact identity, source index digest, world size, member prepared-realization
-facts, target layout/template hash, target index hash, and target storage span
-geometry. The key intentionally excludes runtime-only group identifiers and
-target pointer addresses.
+strategy surface through `enable_source_window_plan_cache`. The default is
+enabled, so repeated realizations reuse the admitted group plan whenever the
+artifact identity and target layout facts match. The daemon builds a prepared
+plan key from artifact identity, source index digest, world size, member
+prepared-realization facts, target layout/template hash, target index hash, and
+target storage span geometry. The key intentionally excludes runtime-only group
+identifiers and target pointer addresses.
 
 This cache is TensorCast-owned prepared/reuse state. It does not create a vLLM
 loader branch and does not change source-window admission semantics. In strict

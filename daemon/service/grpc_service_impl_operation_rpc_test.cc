@@ -649,8 +649,13 @@ TEST_CASE("AcquireBindingValue can borrow retained binding by local_serving_ref"
     REQUIRE(record->active_attachment_refs == 1);
   }
 
-  REQUIRE(harness->kernel().handle_leases() != nullptr);
-  REQUIRE(harness->kernel().handle_leases()->release(resp.lease_token()).ok());
+  tensorcast::daemon::v2::ReleasePlacementLeaseRequest release_req;
+  release_req.set_lease_token(resp.lease_token());
+  tensorcast::daemon::v2::ReleasePlacementLeaseResponse release_resp;
+  grpc::ServerContext release_ctx;
+  const auto release_status = harness->service().ReleasePlacementLease(&release_ctx, &release_req, &release_resp);
+  REQUIRE(release_status.ok());
+  REQUIRE(release_resp.released());
   {
     absl::MutexLock lock(&record->mu);
     REQUIRE(record->active_attachment_refs == 0);

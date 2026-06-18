@@ -1130,8 +1130,11 @@ class DaemonCtl:
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         runtime_artifact_policy: "RuntimeArtifactPolicy | None" = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
+        realization_plan: store_daemon_pb2.BindingRealizationPlan | None = None,
         copy_plan: store_daemon_pb2.CopyPlan | None = None,
         dst_specs: Iterable[store_daemon_pb2.MappedTensorSpec] | None = None,
+        execution_topology: store_daemon_pb2.SourceExecutionTopology | None = None,
+        collective_policy: store_daemon_pb2.CollectivePolicy | None = None,
         pid: int | None = None,
         operation_id: str | None = None,
         group_realization: Any | None = None,
@@ -1165,11 +1168,17 @@ class DaemonCtl:
                 )
             if placement is not None:
                 request.placement = placement
+            if realization_plan is not None:
+                request.realization_plan.CopyFrom(realization_plan)
             if copy_plan is not None:
                 request.copy_plan.CopyFrom(copy_plan)
             if dst_specs is not None:
                 for spec in dst_specs:
                     request.dst_tensors.add().CopyFrom(spec)
+            if execution_topology is not None:
+                request.execution_topology.CopyFrom(execution_topology)
+            if collective_policy is not None:
+                request.collective_policy = collective_policy
             if operation_id:
                 request.operation_id = str(operation_id)
             _copy_group_realization_options(
@@ -1206,9 +1215,11 @@ class DaemonCtl:
         target: RealizationTarget | RealizationTargetSet,
         requested_readiness: RuntimeBindingReadiness,
         retention_policy: PrefetchRetentionPolicy | None = None,
+        execution_topology: store_daemon_pb2.SourceExecutionTopology | None = None,
+        collective_policy: store_daemon_pb2.CollectivePolicy | None = None,
         operation_id: str | None = None,
         group_realization: Any | None = None,
-        timeout_s: float = 10.0,
+        timeout_s: float = 600.0,
     ) -> store_daemon_pb2.PrefetchServingBindingResponse:
         if not isinstance(source_selection, common_pb2.ArtifactSelection):
             raise ValueError("source_selection is required")
@@ -1234,6 +1245,10 @@ class DaemonCtl:
             request.retention_policy.CopyFrom(retention_policy.to_proto())
         else:
             request.retention_policy.CopyFrom(PrefetchRetentionPolicy().to_proto())
+        if execution_topology is not None:
+            request.execution_topology.CopyFrom(execution_topology)
+        if collective_policy is not None:
+            request.collective_policy = collective_policy
         if operation_id:
             request.operation_id = str(operation_id)
         _copy_group_realization_options(

@@ -139,16 +139,17 @@ def test_runtime_config_parses_nested_schema_defaults() -> None:
     assert config.materialization.collective_policy_value() == "require_collective"
 
 
-def test_materialization_auto_defaults_to_local_first_policy() -> None:
+def test_materialization_auto_preserves_strategy_resolver_policy() -> None:
     config = TensorCastRuntimeConfig.from_mapping({})
 
     assert config.materialization.collective == "auto"
-    assert config.materialization.collective_policy_value() == "disable_collective"
+    assert config.materialization.collective_policy_value() == "auto"
 
 
 @pytest.mark.parametrize(
     ("collective", "expected_policy"),
     [
+        ("auto", "auto"),
         ("collective_first", "collective_first"),
         ("required", "require_collective"),
         ("require_collective", "require_collective"),

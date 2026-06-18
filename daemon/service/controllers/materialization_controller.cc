@@ -569,6 +569,10 @@ grpc::Status MaterializationController::prefetch_serving_binding(
         member_req.mutable_group_realization()->CopyFrom(req.group_realization());
         member_req.mutable_group_realization()->mutable_group()->set_part_id(member_target.member().member_id());
       }
+      if (req.has_execution_topology()) {
+        member_req.mutable_execution_topology()->CopyFrom(req.execution_topology());
+      }
+      member_req.set_collective_policy(req.collective_policy());
 
       v2::PrefetchServingBindingResponse member_resp;
       const grpc::Status member_status = prefetch_serving_binding(rctx, member_req, member_resp);
@@ -664,9 +668,20 @@ grpc::Status MaterializationController::prefetch_serving_binding(
   if (!layout.copy_plan_bytes().empty()) {
     return {grpc::StatusCode::UNIMPLEMENTED, "serving binding mapped copy plans are not implemented"};
   }
+  if (!layout.realization_plan_bytes().empty()) {
+    v2::BindingRealizationPlan realization_plan;
+    if (!realization_plan.ParseFromString(layout.realization_plan_bytes())) {
+      return {grpc::StatusCode::INVALID_ARGUMENT, "serving binding realization_plan_bytes is invalid"};
+    }
+    create_req.mutable_realization_plan()->CopyFrom(realization_plan);
+  }
   if (req.has_group_realization()) {
     create_req.mutable_group_realization()->CopyFrom(req.group_realization());
   }
+  if (req.has_execution_topology()) {
+    create_req.mutable_execution_topology()->CopyFrom(req.execution_topology());
+  }
+  create_req.set_collective_policy(req.collective_policy());
 
   v2::CreateOwnedBindingResponse create_resp;
   const grpc::Status create_status = owner_binding_service_.create_owned_binding(rctx, create_req, create_resp);

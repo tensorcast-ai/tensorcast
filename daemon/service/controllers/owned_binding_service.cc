@@ -429,13 +429,15 @@ void append_materialization_strategy_cache_key(
   append_cache_uint64(payload, config.source_window_collective_allow_mixed_residual ? 1 : 0);
 }
 
-bool should_prepare_source_window_strict_coverage_proof(
+bool should_prepare_source_window_lightweight_coverage_plan(
     const store::StoreEngineOptions::MaterializationStrategyConfig& strategy_config,
     const store::loading::ExecutionTopologyContext& execution_topology,
     v2::CollectivePolicy collective_policy) {
+  using ExecutorPreference = store::StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference;
+  using SelectionMode = store::StoreEngineOptions::MaterializationStrategyConfig::SourceWindowCollectiveSelectionMode;
   return strategy_config.enable_source_window_collective &&
-      strategy_config.source_window_collective_selection_mode ==
-      store::StoreEngineOptions::MaterializationStrategyConfig::SourceWindowCollectiveSelectionMode::kStrict &&
+      (strategy_config.source_window_collective_selection_mode != SelectionMode::kDryRun ||
+       strategy_config.executor_preference == ExecutorPreference::kSourceWindowCollective) &&
       execution_topology.collective_load_group.has_value() &&
       collective_policy != v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE;
 }
@@ -2821,10 +2823,10 @@ grpc::Status prepare_source_bound_plan(
   if (request.realization_plan != nullptr) {
     MappedTargetMaterializationPlan mapped_plan;
     const auto& strategy_config = d.engine.options().materialization_strategy;
-    const bool source_window_strict_collective_prep = should_prepare_source_window_strict_coverage_proof(
+    const bool source_window_lightweight_coverage_plan = should_prepare_source_window_lightweight_coverage_plan(
         strategy_config, out.request_context.execution_topology, out.collective_policy);
     const BindingRealizationMaterializationPlanOptions mapped_plan_options{
-        .build_byte_range_maps = !source_window_strict_collective_prep,
+        .build_byte_range_maps = !source_window_lightweight_coverage_plan,
         .canonical_index_parse_identity_key = out.disk_metadata.has_value() &&
                 out.disk_metadata->canonical_index_json.has_value() && out.disk_metadata->index_multihash.has_value() &&
                 !out.disk_metadata->index_multihash->empty() &&
@@ -3107,7 +3109,7 @@ grpc::Status prepare_source_bound_execution(
 
     const uint64_t generation =
         materialization_payload::compute_generation_from_index(mapped_plan.canonical_index_json);
-    const bool source_window_strict_collective_prep = should_prepare_source_window_strict_coverage_proof(
+    const bool source_window_lightweight_coverage_plan = should_prepare_source_window_lightweight_coverage_plan(
         d.engine.options().materialization_strategy,
         prepared_plan.request_context.execution_topology,
         prepared_plan.collective_policy);
@@ -3202,7 +3204,7 @@ grpc::Status prepare_source_bound_execution(
             : std::nullopt,
         std::move(physical_source_table),
         materialization_target_plan::ResolvedMappedMaterializationPlanOptions{
-            .source_window_strict_coverage_proof_only = source_window_strict_collective_prep,
+            .source_window_strict_coverage_proof_only = source_window_lightweight_coverage_plan,
         });
     if (!prepared_execution_plan_or.ok()) {
       if (execution_template_cache_key.has_value() && execution_template_cache_builder) {
@@ -3687,7 +3689,8 @@ grpc::Status OwnedBindingService::create_owned_binding(
   if (d_.handle_leases == nullptr) {
     return {StatusCode::FAILED_PRECONDITION, "local handle plane is disabled (no handle leases)"};
   }
-  const bool mapped = req.copy_plan().entries_size() > 0 || req.dst_tensors_size() > 0;
+  const bool use_realization_plan = req.has_realization_plan() && req.realization_plan().entries_size() > 0;
+  const bool mapped = req.copy_plan().entries_size() > 0 || req.dst_tensors_size() > 0 || use_realization_plan;
   if (req.copy_plan().entries_size() > 0 && req.dst_tensors_size() == 0) {
     return {StatusCode::INVALID_ARGUMENT, "mapped owner binding requires dst_tensors"};
   }
@@ -3710,9 +3713,12 @@ grpc::Status OwnedBindingService::create_owned_binding(
           .source_selection = &req.source_selection(),
           .target_layout = &req.target_layout(),
           .target_index_json = std::string_view(req.target_index_bytes().data(), req.target_index_bytes().size()),
-          .copy_plan = mapped ? &req.copy_plan() : nullptr,
+          .realization_plan = use_realization_plan ? &req.realization_plan() : nullptr,
+          .copy_plan = (mapped && !use_realization_plan) ? &req.copy_plan() : nullptr,
           .dst_tensors = mapped ? &mapped_dst_tensors : nullptr,
           .source_policy = req.has_source_policy() ? &req.source_policy() : nullptr,
+          .execution_topology = req.has_execution_topology() ? &req.execution_topology() : nullptr,
+          .collective_policy = req.collective_policy(),
           .operation_id = req.has_operation_id() ? std::optional<std::string_view>(req.operation_id()) : std::nullopt,
           .group_realization = req.has_group_realization() ? &req.group_realization() : nullptr,
           .staged_publish_supported = true,

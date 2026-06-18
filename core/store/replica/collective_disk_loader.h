@@ -48,7 +48,7 @@ struct CollectiveMappedTargetLoadOptions {
   uint64_t merge_max_gap_bytes{256ULL * 1024ULL};
   uint64_t merge_max_amplification{4};
   StoreEngineOptions::MaterializationStrategyConfig strategy_config;
-  bool enable_source_window_plan_cache{false};
+  bool enable_source_window_plan_cache{true};
 };
 
 struct CollectiveMappedTargetLoadRequest {
