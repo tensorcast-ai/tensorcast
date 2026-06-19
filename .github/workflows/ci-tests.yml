@@ -77,14 +77,14 @@ jobs:
             --config=remote \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
       - name: Upload libcheckpoint_ext.so artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: libcheckpoint_ext-so
           path: bazel-bin/core/libcheckpoint_ext.so
           if-no-files-found: error
 
       - name: Upload tensorcast_daemon artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tensorcast-daemon-bin
           path: bazel-bin/daemon/tensorcast_daemon
@@ -134,7 +134,7 @@ jobs:
             $BOOST_INCLUDES
 
       - name: Upload Bazel external headers artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bazel-external-includes
           path: bazel-external-includes.tar.gz
@@ -145,7 +145,7 @@ jobs:
           tar -czf bazel-bin-proto.tgz -C bazel-bin proto
 
       - name: Upload Bazel generated C++ protos artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bazel-bin-proto
           path: bazel-bin-proto.tgz
