@@ -154,7 +154,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "Source-bound strategy planner selects source-window independent of owner-file locality gate",
+    "Source-bound strategy planner selects explicit source-window independent of owner-file locality gate",
     "[source_bound_strategy_planner][source_window]") {
   std::array<std::uint8_t, 8> target{};
   RepresentationWorkPlan work_plan;
@@ -173,6 +173,8 @@ TEST_CASE(
 
   auto strategy_config = make_strategy_config();
   strategy_config.enable_source_window_collective = true;
+  strategy_config.executor_preference =
+      StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference::kSourceWindowCollective;
   strategy_config.owner_file_collective_shared_fs_only = true;
   auto topology = make_collective_topology();
   topology.source_locality = loading::SourceLocalityHint::kHostLocal;
@@ -274,6 +276,49 @@ TEST_CASE(
   CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kSourceWindowCollectiveMixed);
   CHECK(strategy_plan_or->lane_plan.collective_executor == SourceBoundCollectiveExecutor::kSourceWindow);
   CHECK(strategy_plan_or->lane_plan.local_mapped_typed_selected);
+}
+
+TEST_CASE(
+    "Source-bound strategy planner keeps host-local auto mode on local mapped typed lane",
+    "[source_bound_strategy_planner][source_window]") {
+  std::array<std::uint8_t, 8> target{};
+  RepresentationWorkPlan work_plan;
+  work_plan.items.push_back(
+      RepresentationWorkItem{
+          .kind = RepresentationWorkItemKind::kTensorCopy,
+          .partition_kind = WorkPartitionKind::kDim1Partitioned,
+          .committed_bytes = 8,
+      });
+  work_plan.committed_bytes = 8;
+  auto plan = make_plan(std::move(work_plan));
+  attach_target_layout(&plan, target.data(), target.size());
+
+  SourceBoundLoweringArtifacts lowering_artifacts;
+  lowering_artifacts.executor_generic_data_map = make_data_map(8);
+  lowering_artifacts.executor_generic_data_map_coverage_only = true;
+
+  auto strategy_config = make_strategy_config();
+  strategy_config.enable_source_window_collective = true;
+  strategy_config.source_window_collective_selection_mode =
+      StoreEngineOptions::MaterializationStrategyConfig::SourceWindowCollectiveSelectionMode::kAuto;
+  auto topology = make_collective_topology();
+  topology.source_locality = loading::SourceLocalityHint::kHostLocal;
+  topology.source_sharing_domain.reset();
+
+  auto strategy_plan_or = build_source_bound_execution_strategy_plan(
+      plan,
+      lowering_artifacts,
+      SourceBoundPolicy::kCollectiveFirst,
+      strategy_config,
+      topology,
+      safetensors_disk_source());
+  REQUIRE(strategy_plan_or.ok());
+  CHECK(strategy_plan_or->summary.source_window_collective_candidate);
+  CHECK(strategy_plan_or->summary.source_window_selection_mode == SourceWindowCollectiveSelectionMode::kAuto);
+  CHECK(strategy_plan_or->lane_plan.mode == SourceBoundExecutionMode::kLocalMappedTyped);
+  CHECK(strategy_plan_or->lane_plan.collective_executor == SourceBoundCollectiveExecutor::kNone);
+  CHECK(strategy_plan_or->lane_plan.local_mapped_typed_selected);
+  CHECK(strategy_plan_or->summary.execution_plan_kind == "local_mapped_typed");
 }
 
 TEST_CASE(

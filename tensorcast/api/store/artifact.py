@@ -139,6 +139,7 @@ from tensorcast.types import (
     PrefetchHandoff,
     PrefetchHandoffSet,
     PrefetchRetentionPolicy,
+    PublicDiskSourceHandle,
     RealizationTarget,
     RealizationTargetSet,
     RuntimeArtifactPolicy,
@@ -828,6 +829,20 @@ class Artifact:
         self._store_ref = store_ref
         self._lock = threading.RLock()
         self._released = False
+
+    def _public_disk_source_proto_hint(
+        self,
+        *,
+        artifact_id: str,
+    ) -> store_daemon_pb2.PublicDiskSourceHandle | None:
+        subject = self._source_subject
+        if not isinstance(subject, PublicDiskSourceHandle):
+            return None
+        if str(subject.artifact_id or "") != str(artifact_id):
+            return None
+        if not bytes(subject.canonical_index_bytes or b""):
+            return None
+        return subject.to_proto()
 
     # ------------------------------------------------------------------
     # Public API
@@ -2621,6 +2636,9 @@ class Artifact:
             ) as profile:
                 response = runtime.ensure_client().create_owned_binding(
                     source_selection=source_selection,
+                    public_disk_source=self._public_disk_source_proto_hint(
+                        artifact_id=str(source_selection.artifact_id),
+                    ),
                     target_layout=owner_layout.target_layout,
                     target_index_bytes=owner_layout.target_index_bytes,
                     device_uuid=device_uuid_for(device_id),
@@ -2884,6 +2902,9 @@ class Artifact:
         try:
             response = client.prefetch_serving_binding(
                 source_selection=selection,
+                public_disk_source=self._public_disk_source_proto_hint(
+                    artifact_id=artifact_id,
+                ),
                 target=target,
                 requested_readiness=readiness,
                 retention_policy=retention,

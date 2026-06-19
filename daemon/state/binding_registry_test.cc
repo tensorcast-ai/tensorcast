@@ -210,6 +210,48 @@ TEST_CASE(
   REQUIRE_FALSE(registry.get("binding-idle").ok());
 }
 
+TEST_CASE(
+    "binding attachment release uses record idle ttl by default",
+    "[daemon][binding][retention]") {
+  BindingRegistry registry;
+  auto record = make_record("binding-idle-default");
+  record->idle_ttl_after_last_release = absl::Seconds(5);
+
+  REQUIRE(registry.insert(record).ok());
+  REQUIRE(registry.acquire_attachment_ref("binding-idle-default", absl::UnixEpoch() + absl::Seconds(1)).ok());
+
+  registry.release_attachment_ref("binding-idle-default", absl::UnixEpoch() + absl::Seconds(3));
+  {
+    absl::MutexLock lock(&record->mu);
+    REQUIRE(record->active_attachment_refs == 0);
+    REQUIRE(record->idle_deadline == absl::UnixEpoch() + absl::Seconds(8));
+  }
+  REQUIRE(registry.sweep_retention(absl::UnixEpoch() + absl::Seconds(7)) == 0);
+  REQUIRE(registry.sweep_retention(absl::UnixEpoch() + absl::Seconds(8)) == 1);
+  REQUIRE_FALSE(registry.get("binding-idle-default").ok());
+}
+
+TEST_CASE(
+    "binding attachment bootstrap release does not arm idle ttl before first acquire",
+    "[daemon][binding][retention]") {
+  BindingRegistry registry;
+  auto record = make_record("binding-bootstrap");
+  record->idle_ttl_after_last_release = absl::Seconds(1);
+  record->active_attachment_refs = 1;
+
+  REQUIRE(registry.insert(record).ok());
+
+  registry.release_attachment_ref("binding-bootstrap", absl::UnixEpoch() + absl::Seconds(3));
+  {
+    absl::MutexLock lock(&record->mu);
+    REQUIRE(record->active_attachment_refs == 0);
+    REQUIRE(record->first_acquired_at == absl::InfinitePast());
+    REQUIRE(record->idle_deadline == absl::InfiniteFuture());
+  }
+  REQUIRE(registry.sweep_retention(absl::UnixEpoch() + absl::Seconds(10)) == 0);
+  REQUIRE(registry.get("binding-bootstrap").ok());
+}
+
 TEST_CASE("materialization timeout retires not-ready retained binding", "[daemon][binding][retention]") {
   BindingRegistry registry;
   auto record = make_record("binding-materializing");

@@ -5,6 +5,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <atomic>
+#include <chrono>
 #include <iomanip>
 #include <mutex>
 #include <sstream>
@@ -56,6 +57,29 @@ std::string to_hex_string(const cudaIpcMemHandle_t& h) {
        << static_cast<int>(reinterpret_cast<const unsigned char*>(&h)[i]);
   }
   return ss.str();
+}
+
+struct DeviceMemorySnapshot {
+  bool ok{false};
+  int device_id{-1};
+  size_t free_bytes{0};
+  size_t total_bytes{0};
+  cudaError_t error{cudaSuccess};
+};
+
+DeviceMemorySnapshot best_effort_current_device_memory_snapshot() {
+  DeviceMemorySnapshot snapshot;
+  snapshot.error = cudaGetDevice(&snapshot.device_id);
+  if (snapshot.error != cudaSuccess) {
+    return snapshot;
+  }
+  snapshot.error = cudaMemGetInfo(&snapshot.free_bytes, &snapshot.total_bytes);
+  snapshot.ok = snapshot.error == cudaSuccess;
+  return snapshot;
+}
+
+long long signed_delta_bytes(size_t after, size_t before) {
+  return static_cast<long long>(after) - static_cast<long long>(before);
 }
 } // namespace
 
@@ -433,7 +457,9 @@ absl::Status get_ipc_mem_handle(cudaIpcMemHandle_t* handle, void* dev_ptr) {
 }
 
 absl::Status open_ipc_mem_handle(void** dev_ptr, cudaIpcMemHandle_t handle, unsigned int flags) {
+  const auto profile_start = std::chrono::steady_clock::now();
   const std::string handle_hex = to_hex_string(handle);
+  const auto after_hex = std::chrono::steady_clock::now();
   // For same-process open, optionally fall back to the original exported pointer
   // instead of surfacing the CUDA runtime error. This is required for local
   // daemon flows that route through IPC-shaped metadata even when export and
@@ -460,10 +486,36 @@ absl::Status open_ipc_mem_handle(void** dev_ptr, cudaIpcMemHandle_t handle, unsi
         return absl::FailedPreconditionError("IPC fallback rejected: recorded device mismatch");
       }
       *dev_ptr = it->second.ptr;
+      const auto after_fallback = std::chrono::steady_clock::now();
+      LOG(INFO) << "tc_profile_cpp cuda.open_ipc_mem_handle timings path=same_process_fallback"
+                << " hex_sec=" << std::chrono::duration<double>(after_hex - profile_start).count()
+                << " lookup_and_fallback_sec=" << std::chrono::duration<double>(after_fallback - after_hex).count()
+                << " total_sec=" << std::chrono::duration<double>(after_fallback - profile_start).count();
       return absl::OkStatus();
     }
   }
+  const auto after_lookup = std::chrono::steady_clock::now();
+  const DeviceMemorySnapshot before_open_mem = best_effort_current_device_memory_snapshot();
   SC_RETURN_IF_CUDA_ERROR(cudaIpcOpenMemHandle(dev_ptr, handle, flags));
+  const auto after_open = std::chrono::steady_clock::now();
+  const DeviceMemorySnapshot after_open_mem = best_effort_current_device_memory_snapshot();
+  LOG(INFO) << "tc_profile_cpp cuda.open_ipc_mem_handle timings path=cuda_runtime"
+            << " hex_sec=" << std::chrono::duration<double>(after_hex - profile_start).count()
+            << " lookup_sec=" << std::chrono::duration<double>(after_lookup - after_hex).count()
+            << " cuda_ipc_open_sec=" << std::chrono::duration<double>(after_open - after_lookup).count()
+            << " total_sec=" << std::chrono::duration<double>(after_open - profile_start).count() << " flags=" << flags
+            << " mem_before_ok=" << before_open_mem.ok << " mem_after_ok=" << after_open_mem.ok
+            << " device_before=" << before_open_mem.device_id << " device_after=" << after_open_mem.device_id
+            << " free_before_bytes=" << before_open_mem.free_bytes
+            << " free_after_bytes=" << after_open_mem.free_bytes
+            << " free_delta_bytes="
+            << (before_open_mem.ok && after_open_mem.ok
+                    ? signed_delta_bytes(after_open_mem.free_bytes, before_open_mem.free_bytes)
+                    : 0)
+            << " total_before_bytes=" << before_open_mem.total_bytes
+            << " total_after_bytes=" << after_open_mem.total_bytes
+            << " mem_before_error=" << cudaGetErrorName(before_open_mem.error)
+            << " mem_after_error=" << cudaGetErrorName(after_open_mem.error);
   VLOG(1) << "open_ipc_mem_handle: handle=0x" << handle_hex << " ptr=" << *dev_ptr << " flags=" << flags;
   return absl::OkStatus();
 }

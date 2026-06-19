@@ -106,6 +106,7 @@ from tensorcast.artifact_runtime.lifecycle import (
     source_selection_projection_from_materialization_diagnostics,
     source_subject_broadcast_payload,
     source_subject_from_broadcast_payload,
+    source_subject_payload_to_tensor_dict,
     swap_runtime_artifact,
 )
 from tensorcast.artifact_runtime.lifecycle import (
@@ -130,6 +131,7 @@ from tensorcast.retained_realization_authority import (
 from tensorcast.types import (
     BindingReservationCapability,
     BindingValueRef,
+    PublicDiskSourceHandle,
     RuntimeBindingMemberRef,
     RuntimeTopologyRef,
 )
@@ -158,8 +160,7 @@ def _install_fake_artifact_selection(monkeypatch) -> None:
             view_id="view-id",
             artifact_profile=str(kwargs.get("artifact_profile") or "retained_binding"),
             authority_scope=str(
-                kwargs.get("authority_scope")
-                or "daemon_retained_runtime_attachment"
+                kwargs.get("authority_scope") or "daemon_retained_runtime_attachment"
             ),
             generation_hint=None,
             view_subset_hash=b"view-subset",
@@ -3339,6 +3340,183 @@ def test_source_subject_broadcast_round_trips_non_public_subjects():
     integration = ArtifactRuntimeIntegration()
     payload = integration.source_subject_broadcast_payload(subject)
     assert integration.source_subject_from_broadcast_payload(payload) == restored
+
+
+def _public_disk_source_handle(
+    *,
+    canonical_index_bytes: bytes = b'{"w":[0,4,[1],[1],"torch.float32",0]}',
+    source_index_bytes: bytes | None = b'{"files":[]}',
+) -> PublicDiskSourceHandle:
+    return PublicDiskSourceHandle(
+        path="/tmp/model",
+        canonical_index_bytes=canonical_index_bytes,
+        artifact_id="mi2:test:source",
+        generation=7,
+        verify_checksums=False,
+        trusted_content_artifact_id="mi2:test:trusted",
+        source_index_bytes=source_index_bytes,
+        exact_size_bytes=123,
+    )
+
+
+def test_serving_integration_broadcasts_full_public_disk_source_by_default(
+    monkeypatch,
+):
+    source = _public_disk_source_handle()
+    subject = SourceSubject(
+        artifact_ref=source.artifact_id,
+        subject=source,
+        source_kind="public_disk",
+    )
+    calls = []
+
+    monkeypatch.setattr(
+        integration_mod,
+        "resolve_source_subject",
+        lambda path, *, verify_checksums: subject,
+    )
+
+    class _Coordinator:
+        source_rank = 0
+
+        @staticmethod
+        def should_coordinate():
+            return True
+
+        @staticmethod
+        def is_source_rank():
+            return True
+
+        @staticmethod
+        def broadcast_object(payload, *, src):
+            calls.append((payload, src))
+            return payload
+
+    resolved = ArtifactRuntimeIntegration().resolve_source_subject(
+        SourceSelector.local_path("/tmp/model"),
+        verify_checksums=False,
+        coordinator=_Coordinator(),
+    )
+
+    assert resolved == subject
+    assert calls[0][1] == 0
+    broadcast_subject = calls[0][0]["subject"]
+    assert "payload_kind" not in broadcast_subject
+    assert broadcast_subject["canonical_index_bytes"] == source.canonical_index_bytes
+    assert broadcast_subject["source_index_bytes"] == source.source_index_bytes
+
+
+def test_serving_integration_broadcasts_public_disk_indexes_as_tensor_dict(
+    monkeypatch,
+):
+    source = _public_disk_source_handle()
+    subject = SourceSubject(
+        artifact_ref=source.artifact_id,
+        subject=source,
+        source_kind="public_disk",
+    )
+    calls = []
+
+    monkeypatch.setattr(
+        integration_mod,
+        "resolve_source_subject",
+        lambda path, *, verify_checksums: subject,
+    )
+
+    class _Coordinator:
+        source_rank = 0
+
+        @staticmethod
+        def should_coordinate():
+            return True
+
+        @staticmethod
+        def is_source_rank():
+            return True
+
+        @staticmethod
+        def broadcast_object(payload, *, src):
+            calls.append(("object", payload, src))
+            return payload
+
+        @staticmethod
+        def broadcast_tensor_dict(payload, *, src):
+            calls.append(("tensor_dict", payload, src))
+            assert isinstance(payload["canonical_index_bytes"], torch.Tensor)
+            assert isinstance(payload["source_index_bytes"], torch.Tensor)
+            assert "canonical_index_bytes" not in payload["payload"]["subject"]
+            assert "source_index_bytes" not in payload["payload"]["subject"]
+            return payload
+
+    resolved = ArtifactRuntimeIntegration().resolve_source_subject(
+        SourceSelector.local_path("/tmp/model"),
+        verify_checksums=False,
+        coordinator=_Coordinator(),
+    )
+
+    assert resolved == subject
+    assert calls[0] == ("object", {"tensor_payload": True}, 0)
+    assert calls[1][0] == "tensor_dict"
+
+
+def test_serving_integration_restores_public_disk_source_from_tensor_dict(
+    monkeypatch,
+):
+    source = _public_disk_source_handle()
+    subject = SourceSubject(
+        artifact_ref=source.artifact_id,
+        subject=source,
+        source_kind="public_disk",
+    )
+    tensor_payload = source_subject_payload_to_tensor_dict(
+        source_subject_broadcast_payload(subject)
+    )
+    calls = []
+
+    def _resolve_source_subject(path, *, verify_checksums):
+        raise AssertionError("non-source rank must not re-resolve source subject")
+
+    monkeypatch.setattr(
+        integration_mod,
+        "resolve_source_subject",
+        _resolve_source_subject,
+    )
+
+    class _Coordinator:
+        source_rank = 0
+
+        @staticmethod
+        def should_coordinate():
+            return True
+
+        @staticmethod
+        def is_source_rank():
+            return False
+
+        @staticmethod
+        def broadcast_object(payload, *, src):
+            calls.append(("object", payload, src))
+            return {"tensor_payload": True}
+
+        @staticmethod
+        def broadcast_tensor_dict(payload, *, src):
+            calls.append(("tensor_dict", payload, src))
+            assert payload is None
+            return tensor_payload
+
+    restored = ArtifactRuntimeIntegration().resolve_source_subject(
+        SourceSelector.local_path("/tmp/model"),
+        verify_checksums=False,
+        coordinator=_Coordinator(),
+    )
+
+    assert restored.artifact_ref == subject.artifact_ref
+    assert restored.source_kind == "public_disk"
+    assert restored.subject == source
+    assert calls == [
+        ("object", None, 0),
+        ("tensor_dict", None, 0),
+    ]
 
 
 def test_serving_integration_resolve_source_subject_uses_coordinator(monkeypatch):

@@ -164,6 +164,11 @@ struct LocalMappedSafetensorsAutoIoDecision {
   uint64_t buffered_probe_bytes{0};
   double buffered_probe_sec{-1.0};
   double buffered_probe_gib_per_sec{-1.0};
+  bool direct_probe_attempted{false};
+  bool direct_probe_supported{false};
+  uint64_t direct_probe_bytes{0};
+  int direct_probe_errno{0};
+  std::string direct_probe_status;
   std::string reason;
 };
 
@@ -212,6 +217,9 @@ void clear_source_window_routed_program_cache_for_testing();
 
 SourceWindowCollectivePlanCacheStats source_window_routed_program_cache_stats_for_testing();
 
+size_t source_window_compiled_routed_program_build_thread_count_for_testing(
+    size_t chunk_count, uint32_t configured_thread_count);
+
 absl::StatusOr<std::string> source_window_routed_program_cache_key_for_testing(
     std::string_view artifact_id,
     const SourceWindowCollectivePlan& plan,
@@ -230,6 +238,10 @@ SourceWindowRoutedProgramCachePrepareResult prepare_source_window_routed_program
     uint32_t configured_build_threads);
 
 SourceWindowRoutedProgramCachePrepareResult prepare_source_window_collective_routed_program_cache(
+    absl::Span<const SourceWindowCollectiveMappedTargetLoadRequest> requests,
+    const CollectiveMappedTargetLoadOptions& options);
+
+SourceWindowRoutedProgramCachePrepareResult prepare_source_window_collective_plan_cache(
     absl::Span<const SourceWindowCollectiveMappedTargetLoadRequest> requests,
     const CollectiveMappedTargetLoadOptions& options);
 

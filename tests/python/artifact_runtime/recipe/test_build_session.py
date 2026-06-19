@@ -661,6 +661,113 @@ def test_recipe_build_session_build_recipe_runs_core_orchestration():
     assert any(event["stage"] == "recipe.summary" for event in events)
 
 
+def test_recipe_build_session_debug_trace_dump_requires_explicit_flag(tmp_path):
+    import tensorcast as tc
+    from tensorcast.artifact_runtime.recipe.trace_ir import CopyPlanEntry, TracePlan
+    from tensorcast.artifact_runtime.source import (
+        SourceCatalog,
+        SourceTensorMeta,
+        compute_source_metadata_fingerprint,
+    )
+
+    class _Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.w = nn.Parameter(torch.empty((4,), device="meta"))
+
+    class _Adapter:
+        def framework_name(self):
+            return "fakefw"
+
+        def framework_version(self):
+            return "fakefw-v1"
+
+        def adapter_version(self):
+            return "adapter-v1"
+
+        def serving_abi_version(self, model_config):
+            return "abi-v1"
+
+        def support_level(self, model, model_config):
+            return RuntimeSupportLevel.BUILDER_PUBLICATION_READY
+
+        def runtime_only_tensor_names(self, model):
+            return ()
+
+        def process_after_load_class(self, model, model_config):
+            return tc.FinalizeClass.RUNTIME_ONLY
+
+        def post_bind_finalize_class(self, model, model_config):
+            return tc.FinalizeClass.RUNTIME_ONLY
+
+        def semantic_probes(self, model, model_config):
+            return None
+
+    ordered_names = ("x",)
+    meta_by_name = {
+        "x": SourceTensorMeta(
+            dtype=torch.float16,
+            shape=(4,),
+            stride=(1,),
+            storage_offset=0,
+        )
+    }
+    source_catalog = SourceCatalog(
+        ordered_names=ordered_names,
+        meta_by_name=meta_by_name,
+        selected_files=(),
+        source_artifact_ref="mi2:test:source",
+        canonical_index_hash="",
+        metadata_fingerprint=compute_source_metadata_fingerprint(
+            ordered_names=ordered_names,
+            meta_by_name=meta_by_name,
+        ),
+        canonical_index_bytes=b"",
+    )
+    trace_plan = TracePlan(
+        copy_plan=[
+            CopyPlanEntry(
+                op="copy", ckpt_name="x", ckpt_range=None, dst_name="w", dst_range=None
+            )
+        ],
+        expected_src_names={"x"},
+        expected_dst_names={"w"},
+        tensorcast_slices={},
+        src_hull={},
+    )
+
+    def _build(*, debug_dump_trace: bool):
+        session = RecipeBuildSession(_identity(framework_name="fakefw"))
+        return session.build_recipe(
+            model_config=SimpleNamespace(
+                model="fake-model",
+                revision=None,
+                dtype=torch.float16,
+                compute_hash=lambda: "fake-model-hash",
+            ),
+            framework_config=None,
+            source_catalog=source_catalog,
+            framework_adapter=_Adapter(),
+            build_meta_model=_Model,
+            cache_config=RecipeBuildCacheConfig(
+                cache_dirs=(),
+                allow_cache=False,
+                allow_recipe_cache=False,
+                allow_trace=True,
+                debug_output_dir=tmp_path,
+                debug_dump_trace=debug_dump_trace,
+            ),
+            is_reserved_runtime_tensor_name=lambda _name: False,
+            trace_capture_fn=lambda *_args, **_kwargs: trace_plan,
+        )
+
+    _build(debug_dump_trace=False)
+    assert not list(tmp_path.glob("tensorcast_trace_plan_*.json"))
+
+    _build(debug_dump_trace=True)
+    assert list(tmp_path.glob("tensorcast_trace_plan_*.json"))
+
+
 def test_recipe_build_session_owns_cached_recipe_context_match():
     session = RecipeBuildSession(_identity())
     source_catalog = type(

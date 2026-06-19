@@ -110,7 +110,7 @@ size_t compiled_routed_program_build_thread_count(size_t chunk_count, uint32_t c
     }
     return std::min<size_t>(static_cast<size_t>(configured_thread_count), chunk_count);
   }
-  if (chunk_count < 256) {
+  if (chunk_count < 32) {
     return 1;
   }
   const size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
@@ -904,8 +904,11 @@ struct SourceWindowCollectivePlanCacheState {
   absl::Mutex mu;
   absl::flat_hash_map<std::string, SourceWindowCollectivePlan> plans ABSL_GUARDED_BY(mu);
   std::vector<std::string> insertion_order ABSL_GUARDED_BY(mu);
+  std::unordered_set<std::string> inflight ABSL_GUARDED_BY(mu);
+  absl::CondVar cv;
   uint64_t hits ABSL_GUARDED_BY(mu){0};
   uint64_t misses ABSL_GUARDED_BY(mu){0};
+  uint64_t waits ABSL_GUARDED_BY(mu){0};
 };
 
 struct RoutedTargetRef {
@@ -1351,17 +1354,33 @@ bool lookup_source_window_collective_plan_cache(
     SourceWindowCollectivePlan* plan) {
   auto& cache = source_window_collective_plan_cache();
   absl::MutexLock lock(&cache.mu);
-  auto it = cache.plans.find(key);
-  if (it == cache.plans.end()) {
-    cache.misses += 1;
-    return false;
+  for (;;) {
+    auto it = cache.plans.find(key);
+    if (it != cache.plans.end()) {
+      cache.hits += 1;
+      if (plan != nullptr) {
+        *plan = it->second;
+        plan->group = group;
+      }
+      return true;
+    }
+
+    if (cache.inflight.find(key) == cache.inflight.end()) {
+      cache.inflight.insert(key);
+      cache.misses += 1;
+      return false;
+    }
+
+    cache.waits += 1;
+    cache.cv.Wait(&cache.mu);
   }
-  cache.hits += 1;
-  if (plan != nullptr) {
-    *plan = it->second;
-    plan->group = group;
-  }
-  return true;
+}
+
+void abandon_source_window_collective_plan_cache_build(const std::string& key) {
+  auto& cache = source_window_collective_plan_cache();
+  absl::MutexLock lock(&cache.mu);
+  cache.inflight.erase(key);
+  cache.cv.SignalAll();
 }
 
 void store_source_window_collective_plan_cache(const std::string& key, const SourceWindowCollectivePlan& plan) {
@@ -1370,6 +1389,8 @@ void store_source_window_collective_plan_cache(const std::string& key, const Sou
   auto existing = cache.plans.find(key);
   if (existing != cache.plans.end()) {
     existing->second = plan;
+    cache.inflight.erase(key);
+    cache.cv.SignalAll();
     return;
   }
   while (cache.plans.size() >= kSourceWindowCollectivePlanCacheMaxEntries && !cache.insertion_order.empty()) {
@@ -1378,6 +1399,8 @@ void store_source_window_collective_plan_cache(const std::string& key, const Sou
   }
   cache.plans.emplace(key, plan);
   cache.insertion_order.push_back(key);
+  cache.inflight.erase(key);
+  cache.cv.SignalAll();
 }
 
 void clear_source_window_collective_plan_cache() {
@@ -1385,8 +1408,11 @@ void clear_source_window_collective_plan_cache() {
   absl::MutexLock lock(&cache.mu);
   cache.plans.clear();
   cache.insertion_order.clear();
+  cache.inflight.clear();
   cache.hits = 0;
   cache.misses = 0;
+  cache.waits = 0;
+  cache.cv.SignalAll();
 }
 
 SourceWindowCollectivePlanCacheStats source_window_collective_plan_cache_stats_snapshot() {
@@ -1618,6 +1644,123 @@ std::string clique_cache_key(const std::vector<int>& device_ids) {
   return key;
 }
 
+struct SourceWindowDeviceMemorySnapshot {
+  int device_id{-1};
+  bool ok{false};
+  size_t free_bytes{0};
+  size_t total_bytes{0};
+  std::string error;
+};
+
+std::vector<SourceWindowDeviceMemorySnapshot> capture_source_window_device_memory(
+    const std::vector<int>& device_ids) {
+  std::vector<SourceWindowDeviceMemorySnapshot> snapshots;
+  snapshots.reserve(device_ids.size());
+  for (int device_id : device_ids) {
+    SourceWindowDeviceMemorySnapshot snapshot;
+    snapshot.device_id = device_id;
+    size_t free_bytes = 0;
+    size_t total_bytes = 0;
+    const absl::Status status = tensorcast::cuda::get_memory_info(&free_bytes, &total_bytes, device_id);
+    if (status.ok()) {
+      snapshot.ok = true;
+      snapshot.free_bytes = free_bytes;
+      snapshot.total_bytes = total_bytes;
+    } else {
+      snapshot.error = status.ToString();
+    }
+    snapshots.push_back(std::move(snapshot));
+  }
+  return snapshots;
+}
+
+std::string join_source_window_memory_bool_field(
+    const std::vector<SourceWindowDeviceMemorySnapshot>& snapshots) {
+  std::string out = "[";
+  for (size_t i = 0; i < snapshots.size(); ++i) {
+    if (i != 0) {
+      absl::StrAppend(&out, ",");
+    }
+    absl::StrAppend(&out, snapshots[i].ok ? 1 : 0);
+  }
+  absl::StrAppend(&out, "]");
+  return out;
+}
+
+std::string join_source_window_memory_size_field(
+    const std::vector<SourceWindowDeviceMemorySnapshot>& snapshots,
+    bool total_bytes) {
+  std::string out = "[";
+  for (size_t i = 0; i < snapshots.size(); ++i) {
+    if (i != 0) {
+      absl::StrAppend(&out, ",");
+    }
+    if (snapshots[i].ok) {
+      absl::StrAppend(&out, total_bytes ? snapshots[i].total_bytes : snapshots[i].free_bytes);
+    } else {
+      absl::StrAppend(&out, -1);
+    }
+  }
+  absl::StrAppend(&out, "]");
+  return out;
+}
+
+std::string join_source_window_memory_delta_field(
+    const std::vector<SourceWindowDeviceMemorySnapshot>& snapshots,
+    const std::vector<SourceWindowDeviceMemorySnapshot>* baseline) {
+  std::string out = "[";
+  for (size_t i = 0; i < snapshots.size(); ++i) {
+    if (i != 0) {
+      absl::StrAppend(&out, ",");
+    }
+    if (baseline != nullptr && i < baseline->size() && snapshots[i].ok && (*baseline)[i].ok &&
+        snapshots[i].device_id == (*baseline)[i].device_id) {
+      absl::StrAppend(
+          &out,
+          static_cast<long long>(snapshots[i].free_bytes) -
+              static_cast<long long>((*baseline)[i].free_bytes));
+    } else {
+      absl::StrAppend(&out, "null");
+    }
+  }
+  absl::StrAppend(&out, "]");
+  return out;
+}
+
+std::string join_source_window_memory_error_field(
+    const std::vector<SourceWindowDeviceMemorySnapshot>& snapshots) {
+  std::string out = "[";
+  for (size_t i = 0; i < snapshots.size(); ++i) {
+    if (i != 0) {
+      absl::StrAppend(&out, "|");
+    }
+    if (snapshots[i].ok) {
+      absl::StrAppend(&out, "ok");
+    } else {
+      absl::StrAppend(&out, snapshots[i].error);
+    }
+  }
+  absl::StrAppend(&out, "]");
+  return out;
+}
+
+void log_source_window_collective_memory(
+    absl::string_view stage,
+    absl::string_view artifact_id,
+    absl::string_view group_id,
+    const std::vector<SourceWindowDeviceMemorySnapshot>& snapshots,
+    const std::vector<SourceWindowDeviceMemorySnapshot>* baseline = nullptr) {
+  LOG(INFO) << "source_window_collective_memory"
+            << " stage=" << stage
+            << " artifact_id=" << artifact_id
+            << " group_id=" << group_id
+            << " ok=" << join_source_window_memory_bool_field(snapshots)
+            << " free_bytes=" << join_source_window_memory_size_field(snapshots, /*total_bytes=*/false)
+            << " total_bytes=" << join_source_window_memory_size_field(snapshots, /*total_bytes=*/true)
+            << " free_delta_from_entry_bytes=" << join_source_window_memory_delta_field(snapshots, baseline)
+            << " errors=" << join_source_window_memory_error_field(snapshots);
+}
+
 absl::StatusOr<std::shared_ptr<NcclClique>> get_or_create_cached_clique(
     const std::vector<int>& device_ids,
     bool* cache_hit) {
@@ -1646,6 +1789,38 @@ absl::StatusOr<std::shared_ptr<NcclClique>> get_or_create_cached_clique(
     }
     return it->second;
   }
+}
+
+void try_evict_cached_clique_if_idle(
+    const std::vector<int>& device_ids,
+    const std::weak_ptr<NcclClique>& expected_clique,
+    absl::string_view reason) {
+  const std::string key = clique_cache_key(device_ids);
+  bool found = false;
+  bool same_entry = false;
+  bool erased = false;
+  long use_count = 0;
+  std::owner_less<void> owner_less;
+  {
+    absl::MutexLock lock(&g_clique_mu);
+    auto it = g_clique_cache.find(key);
+    if (it != g_clique_cache.end()) {
+      found = true;
+      same_entry =
+          !owner_less(expected_clique, it->second) && !owner_less(it->second, expected_clique);
+      use_count = it->second.use_count();
+      if (same_entry && use_count == 1) {
+        g_clique_cache.erase(it);
+        erased = true;
+      }
+    }
+  }
+  LOG(INFO) << "collective_disk_load clique cache idle evict device_ids=" << key
+            << " found=" << (found ? 1 : 0)
+            << " same_entry=" << (same_entry ? 1 : 0)
+            << " use_count=" << use_count
+            << " erased=" << (erased ? 1 : 0)
+            << " reason=" << reason;
 }
 
 std::optional<uint64_t> dtype_element_size(std::string_view dtype) {
@@ -2544,6 +2719,14 @@ constexpr uint64_t kLocalMappedBufferedProbeMaxBytes = 256ULL << 20;
 constexpr uint64_t kLocalMappedBufferedProbeChunkBytes = 16ULL << 20;
 constexpr double kLocalMappedBufferedHotProbeMinGiBPerSec = 3.0;
 
+struct LocalMappedDirectProbeResult {
+  bool attempted{false};
+  bool supported{false};
+  uint64_t bytes{0};
+  int error_number{0};
+  std::string status;
+};
+
 struct LocalMappedBufferedProbeResult {
   uint64_t bytes{0};
   double sec{0.0};
@@ -2571,13 +2754,20 @@ bool is_aligned_address(const void* ptr, uint64_t alignment) {
 bool is_direct_friendly_fs_type(uint64_t fs_type) {
   // Linux magic values for local filesystems where O_DIRECT is expected to be
   // stable for large regular files. Unknown, network, and memory filesystems
-  // intentionally stay on the buffered path in auto mode.
+  // may still be probed below before auto falls back to the buffered path.
   constexpr uint64_t kExtSuperMagic = 0xEF53;
   constexpr uint64_t kXfsSuperMagic = 0x58465342;
   constexpr uint64_t kBtrfsSuperMagic = 0x9123683E;
   constexpr uint64_t kF2fsSuperMagic = 0xF2F52010;
   return fs_type == kExtSuperMagic || fs_type == kXfsSuperMagic || fs_type == kBtrfsSuperMagic ||
       fs_type == kF2fsSuperMagic;
+}
+
+bool is_memory_fs_type(uint64_t fs_type) {
+  constexpr uint64_t kTmpfsSuperMagic = 0x01021994;
+  constexpr uint64_t kRamfsSuperMagic = 0x858458F6;
+  constexpr uint64_t kHugetlbfsSuperMagic = 0x958458F6;
+  return fs_type == kTmpfsSuperMagic || fs_type == kRamfsSuperMagic || fs_type == kHugetlbfsSuperMagic;
 }
 
 absl::StatusOr<double> estimate_file_page_cache_residency(const std::filesystem::path& path, uint64_t file_size) {
@@ -2754,6 +2944,110 @@ absl::StatusOr<LocalMappedBufferedProbeResult> probe_buffered_source_throughput(
   };
 }
 
+LocalMappedDirectProbeResult probe_direct_source_capability(
+    absl::Span<const loader::SharedSafetensorsSegment> segments) {
+  for (const auto& segment : segments) {
+    if (segment.path.empty() || segment.data_size == 0) {
+      continue;
+    }
+    struct stat st{};
+    if (::stat(segment.path.c_str(), &st) != 0) {
+      return LocalMappedDirectProbeResult{
+          .attempted = true,
+          .supported = false,
+          .error_number = errno,
+          .status = absl::StrCat("stat_failed:", segment.path.string()),
+      };
+    }
+    if (st.st_size <= 0) {
+      continue;
+    }
+    const uint64_t file_size = static_cast<uint64_t>(st.st_size);
+    const uint64_t data_begin = segment.data_start;
+    const uint64_t data_end = segment.data_start + segment.data_size;
+    const uint64_t probe_begin = align_up_u64(data_begin, kLocalMappedDirectIoAlignment);
+    const uint64_t probe_limit =
+        std::min<uint64_t>(align_down_u64(data_end, kLocalMappedDirectIoAlignment),
+                           align_down_u64(file_size, kLocalMappedDirectIoAlignment));
+    if (probe_begin + kLocalMappedDirectIoAlignment > probe_limit) {
+      continue;
+    }
+
+    const int fd = ::open(segment.path.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECT);
+    if (fd < 0) {
+      return LocalMappedDirectProbeResult{
+          .attempted = true,
+          .supported = false,
+          .error_number = errno,
+          .status = absl::StrCat("open_failed:", segment.path.string()),
+      };
+    }
+    absl::Cleanup close_fd = [fd] { ::close(fd); };
+
+    void* buffer = nullptr;
+    const int rc = ::posix_memalign(&buffer, kLocalMappedDirectIoAlignment, kLocalMappedDirectIoAlignment);
+    if (rc != 0) {
+      return LocalMappedDirectProbeResult{
+          .attempted = true,
+          .supported = false,
+          .error_number = rc,
+          .status = "posix_memalign_failed",
+      };
+    }
+    absl::Cleanup free_buffer = [buffer] { std::free(buffer); };
+
+    auto got_or = pread_fully(fd, probe_begin, buffer, static_cast<size_t>(kLocalMappedDirectIoAlignment));
+    if (!got_or.ok()) {
+      int err = 0;
+      if (absl::IsInternal(got_or.status()) || absl::IsInvalidArgument(got_or.status()) ||
+          absl::IsFailedPrecondition(got_or.status()) || absl::IsUnavailable(got_or.status())) {
+        err = errno;
+      }
+      return LocalMappedDirectProbeResult{
+          .attempted = true,
+          .supported = false,
+          .error_number = err,
+          .status = got_or.status().ToString(),
+      };
+    }
+    if (*got_or != kLocalMappedDirectIoAlignment) {
+      return LocalMappedDirectProbeResult{
+          .attempted = true,
+          .supported = false,
+          .status = absl::StrCat("short_read:", *got_or),
+      };
+    }
+    return LocalMappedDirectProbeResult{
+        .attempted = true,
+        .supported = true,
+        .bytes = kLocalMappedDirectIoAlignment,
+        .status = "ok",
+    };
+  }
+  return LocalMappedDirectProbeResult{
+      .attempted = false,
+      .supported = false,
+      .status = "no_aligned_probe_range",
+  };
+}
+
+LocalMappedSafetensorsAutoIoDecision decision_with_direct_probe(
+    bool use_direct,
+    double page_cache_residency,
+    const LocalMappedDirectProbeResult& probe,
+    std::string reason) {
+  return LocalMappedSafetensorsAutoIoDecision{
+      .use_direct_aligned_edges = use_direct,
+      .page_cache_residency_ratio = page_cache_residency,
+      .direct_probe_attempted = probe.attempted,
+      .direct_probe_supported = probe.supported,
+      .direct_probe_bytes = probe.bytes,
+      .direct_probe_errno = probe.error_number,
+      .direct_probe_status = probe.status,
+      .reason = std::move(reason),
+  };
+}
+
 absl::StatusOr<LocalMappedSafetensorsAutoIoDecision> choose_auto_local_mapped_safetensors_io(
     absl::Span<const loader::SharedSafetensorsSegment> segments) {
   const uint64_t total_bytes = total_source_bytes(segments);
@@ -2763,6 +3057,7 @@ absl::StatusOr<LocalMappedSafetensorsAutoIoDecision> choose_auto_local_mapped_sa
         .reason = "source_below_direct_threshold",
     };
   }
+  bool all_direct_friendly = true;
   for (const auto& segment : segments) {
     if (segment.path.empty()) {
       return LocalMappedSafetensorsAutoIoDecision{
@@ -2784,15 +3079,30 @@ absl::StatusOr<LocalMappedSafetensorsAutoIoDecision> choose_auto_local_mapped_sa
     if (::statfs(segment.path.c_str(), &fs) != 0) {
       return absl::ErrnoToStatus(errno, absl::StrCat("statfs failed for safetensors source: ", segment.path.string()));
     }
-    if (!is_direct_friendly_fs_type(static_cast<uint64_t>(fs.f_type))) {
+    const auto fs_type = static_cast<uint64_t>(fs.f_type);
+    if (is_memory_fs_type(fs_type)) {
       return LocalMappedSafetensorsAutoIoDecision{
           .use_direct_aligned_edges = false,
-          .reason = "filesystem_not_direct_friendly",
+          .reason = "filesystem_memory_buffered",
       };
     }
+    all_direct_friendly = all_direct_friendly && is_direct_friendly_fs_type(fs_type);
   }
   double page_cache_residency = 0.0;
-  TC_ASSIGN_OR_RETURN(page_cache_residency, estimate_source_page_cache_residency(segments));
+  auto page_cache_residency_or = estimate_source_page_cache_residency(segments);
+  if (!page_cache_residency_or.ok()) {
+    if (all_direct_friendly) {
+      return page_cache_residency_or.status();
+    }
+    const auto probe = probe_direct_source_capability(segments);
+    if (probe.supported) {
+      return decision_with_direct_probe(
+          true, -1.0, probe, "page_cache_residency_unavailable_direct_probe_supported");
+    }
+    return decision_with_direct_probe(
+        false, -1.0, probe, "page_cache_residency_unavailable_direct_probe_unsupported_buffered");
+  }
+  page_cache_residency = *page_cache_residency_or;
   if (page_cache_residency >= kLocalMappedBufferedPageCacheResidencyThreshold) {
     LocalMappedBufferedProbeResult probe;
     TC_ASSIGN_OR_RETURN(probe, probe_buffered_source_throughput(segments, total_bytes));
@@ -2806,6 +3116,37 @@ absl::StatusOr<LocalMappedSafetensorsAutoIoDecision> choose_auto_local_mapped_sa
           .reason = "page_cache_hot_probe_fast",
       };
     }
+    if (!all_direct_friendly) {
+      const auto direct_probe = probe_direct_source_capability(segments);
+      if (!direct_probe.supported) {
+        return LocalMappedSafetensorsAutoIoDecision{
+            .use_direct_aligned_edges = false,
+            .page_cache_residency_ratio = page_cache_residency,
+            .buffered_probe_bytes = probe.bytes,
+            .buffered_probe_sec = probe.sec,
+            .buffered_probe_gib_per_sec = probe.gib_per_sec,
+            .direct_probe_attempted = direct_probe.attempted,
+            .direct_probe_supported = direct_probe.supported,
+            .direct_probe_bytes = direct_probe.bytes,
+            .direct_probe_errno = direct_probe.error_number,
+            .direct_probe_status = direct_probe.status,
+            .reason = "page_cache_resident_probe_slow_direct_probe_unsupported_buffered",
+        };
+      }
+      return LocalMappedSafetensorsAutoIoDecision{
+          .use_direct_aligned_edges = true,
+          .page_cache_residency_ratio = page_cache_residency,
+          .buffered_probe_bytes = probe.bytes,
+          .buffered_probe_sec = probe.sec,
+          .buffered_probe_gib_per_sec = probe.gib_per_sec,
+          .direct_probe_attempted = direct_probe.attempted,
+          .direct_probe_supported = direct_probe.supported,
+          .direct_probe_bytes = direct_probe.bytes,
+          .direct_probe_errno = direct_probe.error_number,
+          .direct_probe_status = direct_probe.status,
+          .reason = "page_cache_resident_probe_slow_direct_probe_supported",
+      };
+    }
     return LocalMappedSafetensorsAutoIoDecision{
         .use_direct_aligned_edges = true,
         .page_cache_residency_ratio = page_cache_residency,
@@ -2814,6 +3155,14 @@ absl::StatusOr<LocalMappedSafetensorsAutoIoDecision> choose_auto_local_mapped_sa
         .buffered_probe_gib_per_sec = probe.gib_per_sec,
         .reason = "page_cache_resident_probe_slow_direct",
     };
+  }
+  if (!all_direct_friendly) {
+    const auto direct_probe = probe_direct_source_capability(segments);
+    if (direct_probe.supported) {
+      return decision_with_direct_probe(true, page_cache_residency, direct_probe, "direct_probe_cold_or_partial_direct");
+    }
+    return decision_with_direct_probe(
+        false, page_cache_residency, direct_probe, "direct_probe_unsupported_buffered");
   }
   return LocalMappedSafetensorsAutoIoDecision{
       .use_direct_aligned_edges = true,
@@ -2830,6 +3179,11 @@ void log_local_mapped_safetensors_auto_decision(
             << " buffered_probe_bytes=" << decision.buffered_probe_bytes
             << " buffered_probe_sec=" << decision.buffered_probe_sec
             << " buffered_probe_gib_per_sec=" << decision.buffered_probe_gib_per_sec
+            << " direct_probe_attempted=" << decision.direct_probe_attempted
+            << " direct_probe_supported=" << decision.direct_probe_supported
+            << " direct_probe_bytes=" << decision.direct_probe_bytes
+            << " direct_probe_errno=" << decision.direct_probe_errno
+            << " direct_probe_status=" << decision.direct_probe_status
             << " decision=" << (decision.use_direct_aligned_edges ? "direct_aligned_edges" : "buffered")
             << " reason=" << decision.reason;
 }
@@ -9999,6 +10353,46 @@ bool source_window_window_uses_local_only(const SourceWindowCollectiveWindow& wi
   return window.distribution_mode == runtime::ingestion::strategy::SourceWindowCollectiveDistributionMode::kLocalOnly;
 }
 
+struct SourceWindowRuntimeChunkSizing {
+  size_t stripe_buffer_bytes{0};
+  size_t max_collective_chunk_bytes{0};
+  size_t max_stripe_bytes{0};
+};
+
+absl::StatusOr<SourceWindowRuntimeChunkSizing> source_window_runtime_chunk_sizing(
+    size_t stripe_buffer_bytes,
+    size_t world_size,
+    runtime::ingestion::strategy::SourceWindowCollectiveDistributionMode distribution_mode) {
+  if (stripe_buffer_bytes == 0) {
+    return absl::InvalidArgumentError("source-window runtime stripe buffer bytes must be non-zero");
+  }
+  if (world_size == 0) {
+    return absl::InvalidArgumentError("source-window runtime world size must be non-zero");
+  }
+  const bool consumer_routed =
+      distribution_mode == runtime::ingestion::strategy::SourceWindowCollectiveDistributionMode::kConsumerRouted;
+  if (consumer_routed) {
+    if (stripe_buffer_bytes > std::numeric_limits<size_t>::max() / world_size) {
+      return absl::InvalidArgumentError("source-window runtime consumer-routed chunk sizing overflows");
+    }
+    return SourceWindowRuntimeChunkSizing{
+        .stripe_buffer_bytes = stripe_buffer_bytes,
+        .max_collective_chunk_bytes = stripe_buffer_bytes * world_size,
+        .max_stripe_bytes = stripe_buffer_bytes,
+    };
+  }
+
+  const size_t max_collective_chunk_bytes = (stripe_buffer_bytes / world_size) * world_size;
+  if (max_collective_chunk_bytes == 0) {
+    return absl::InvalidArgumentError("source-window runtime chunk bytes must be at least world_size");
+  }
+  return SourceWindowRuntimeChunkSizing{
+      .stripe_buffer_bytes = stripe_buffer_bytes,
+      .max_collective_chunk_bytes = max_collective_chunk_bytes,
+      .max_stripe_bytes = max_collective_chunk_bytes / world_size,
+  };
+}
+
 absl::StatusOr<std::vector<SourceWindowRuntimeChunk>> build_source_window_runtime_chunks(
     const SourceWindowCollectivePlan& plan,
     size_t world_size,
@@ -10029,8 +10423,8 @@ absl::StatusOr<std::vector<SourceWindowRuntimeChunk>> build_source_window_runtim
       const size_t chunk_len = static_cast<size_t>(chunk_end - chunk_start);
       const size_t stripe_bytes = local_only_window ? chunk_len : (chunk_len + world_size - 1) / world_size;
       const size_t gathered_bytes = local_only_window ? chunk_len : stripe_bytes * world_size;
-      if (stripe_bytes == 0 || gathered_bytes > configured_chunk_bytes ||
-          (!local_only_window && stripe_bytes > max_collective_chunk_bytes / world_size)) {
+      const size_t max_stripe_bytes = local_only_window ? configured_chunk_bytes : max_collective_chunk_bytes / world_size;
+      if (stripe_bytes == 0 || stripe_bytes > max_stripe_bytes || gathered_bytes > max_collective_chunk_bytes) {
         return absl::InternalError("source-window collective stripe sizing exceeded staging buffers");
       }
       std::vector<const SourceWindowCollectiveConsumerSpan*> chunk_consumer_spans;
@@ -10598,6 +10992,19 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
   if (participants.empty()) {
     return absl::InvalidArgumentError("source-window collective participants are empty");
   }
+  double logged_total_sec = 0.0;
+  bool logged_success = false;
+  absl::Cleanup exit_profile = [&]() {
+    const double exit_total_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - total_start).count();
+    LOG(INFO) << "tc_profile source_window_collective_mapped_target exit"
+              << " artifact_id=" << participants.front().artifact_id
+              << " group_id=" << plan.group.group_id
+              << " logged_success=" << (logged_success ? 1 : 0)
+              << " logged_total_sec=" << logged_total_sec
+              << " exit_total_sec=" << exit_total_sec
+              << " post_log_teardown_sec=" << (logged_success ? exit_total_sec - logged_total_sec : 0.0);
+  };
   if (pinned_pool == nullptr) {
     return absl::FailedPreconditionError("pinned_pool_missing");
   }
@@ -10634,14 +11041,37 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
     }
     device_ids.push_back(participant.device_id);
   }
+  const auto memory_entry = capture_source_window_device_memory(device_ids);
+  log_source_window_collective_memory(
+      "entry",
+      participants.front().artifact_id,
+      plan.group.group_id,
+      memory_entry,
+      &memory_entry);
   const auto clique_start = std::chrono::steady_clock::now();
   bool clique_cache_hit = false;
   auto clique_or = get_or_create_cached_clique(device_ids, &clique_cache_hit);
   if (!clique_or.ok()) {
     return clique_or.status();
   }
-  auto clique = *clique_or;
+  auto clique = std::move(clique_or).value();
+  std::weak_ptr<NcclClique> clique_identity = clique;
+  bool evict_clique_on_exit = false;
+  absl::Cleanup clique_cache_cleanup = [&clique, &device_ids, &clique_identity, &evict_clique_on_exit]() {
+    if (!evict_clique_on_exit) {
+      return;
+    }
+    // Drop this call's handle first; an idle cache entry then has use_count() == 1.
+    clique.reset();
+    try_evict_cached_clique_if_idle(device_ids, clique_identity, "source_window_collective_complete");
+  };
   const auto clique_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - clique_start).count();
+  log_source_window_collective_memory(
+      "after_clique",
+      participants.front().artifact_id,
+      plan.group.group_id,
+      capture_source_window_device_memory(device_ids),
+      &memory_entry);
   absl::MutexLock clique_use_lock(&clique->use_mutex());
 
   PinnedBorrow host_pool;
@@ -10687,19 +11117,33 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
   }
   const auto pinned_alloc_sec =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - pinned_alloc_start).count();
+  log_source_window_collective_memory(
+      "after_pinned_alloc",
+      participants.front().artifact_id,
+      plan.group.group_id,
+      capture_source_window_device_memory(device_ids),
+      &memory_entry);
 
   const size_t world_size = participants.size();
-  const size_t max_collective_chunk_bytes = (configured_chunk_bytes / world_size) * world_size;
-  if (max_collective_chunk_bytes == 0) {
-    return absl::InvalidArgumentError("source-window runtime chunk bytes must be at least world_size");
+  auto chunk_sizing_or = source_window_runtime_chunk_sizing(configured_chunk_bytes, world_size, plan.distribution_mode);
+  if (!chunk_sizing_or.ok()) {
+    return chunk_sizing_or.status();
   }
-  const size_t max_stripe_bytes = max_collective_chunk_bytes / world_size;
+  const auto chunk_sizing = *chunk_sizing_or;
+  const size_t max_collective_chunk_bytes = chunk_sizing.max_collective_chunk_bytes;
+  const size_t max_stripe_bytes = chunk_sizing.max_stripe_bytes;
   const bool has_consumer_routed_windows =
       std::any_of(plan.windows.begin(), plan.windows.end(), [](const SourceWindowCollectiveWindow& window) {
         return window.distribution_mode ==
             runtime::ingestion::strategy::SourceWindowCollectiveDistributionMode::kConsumerRouted;
       });
 
+  log_source_window_collective_memory(
+      "before_gpu_stage_alloc",
+      participants.front().artifact_id,
+      plan.group.group_id,
+      capture_source_window_device_memory(device_ids),
+      &memory_entry);
   const auto stage_alloc_start = std::chrono::steady_clock::now();
   std::vector<std::unique_ptr<common::memory::GpuDeviceMemory>> rank_send_stages;
   std::vector<std::unique_ptr<common::memory::GpuDeviceMemory>> rank_stages;
@@ -10714,6 +11158,7 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
 
   std::vector<std::vector<BatchedScatterHostDescriptorSlot>> rank_batched_scatter_host_descriptor_slots;
   std::vector<size_t> rank_next_batched_scatter_host_descriptor_slot;
+  double batched_scatter_descriptor_final_drain_sec = 0.0;
   std::vector<std::vector<std::unique_ptr<common::memory::GpuDeviceMemory>>> route_pack_stages;
   std::vector<std::vector<std::unique_ptr<common::memory::GpuDeviceMemory>>> route_recv_stages;
   rank_send_stages.reserve(participants.size());
@@ -10721,7 +11166,8 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
   rank_batched_scatter_descriptors.resize(participants.size());
   rank_batched_scatter_host_descriptor_slots.resize(participants.size());
   rank_next_batched_scatter_host_descriptor_slot.resize(participants.size(), 0);
-  auto cleanup_batched_scatter_host_descriptors = absl::Cleanup([&]() {
+  auto drain_batched_scatter_host_descriptor_slots = [&]() {
+    const auto drain_start = std::chrono::steady_clock::now();
     for (auto& slots : rank_batched_scatter_host_descriptor_slots) {
       for (auto& slot : slots) {
         if (slot.ready_event != nullptr && slot.in_flight) {
@@ -10731,6 +11177,15 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
           }
           slot.in_flight = false;
         }
+      }
+    }
+    batched_scatter_descriptor_final_drain_sec +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - drain_start).count();
+  };
+  auto cleanup_batched_scatter_host_descriptors = absl::Cleanup([&]() {
+    drain_batched_scatter_host_descriptor_slots();
+    for (auto& slots : rank_batched_scatter_host_descriptor_slots) {
+      for (auto& slot : slots) {
         if (slot.ready_event != nullptr) {
           if (slot.device_id >= 0) {
             const absl::Status set_device_status = tensorcast::cuda::set_device(slot.device_id);
@@ -10850,6 +11305,12 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
   }
   const auto stage_alloc_sec =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - stage_alloc_start).count();
+  log_source_window_collective_memory(
+      "after_gpu_stage_alloc",
+      participants.front().artifact_id,
+      plan.group.group_id,
+      capture_source_window_device_memory(device_ids),
+      &memory_entry);
 
   std::vector<std::unique_ptr<loader::SeekableSource>> rank_sources;
   rank_sources.reserve(participants.size());
@@ -11086,6 +11547,18 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
   auto host_h2d_offset_for_slot = [&](size_t slot, size_t rank) -> size_t& {
     return host_h2d_offsets[slot * world_size + rank];
   };
+  std::vector<std::atomic<uint64_t>> rank_read_bytes(world_size);
+  std::vector<std::atomic<uint64_t>> rank_read_calls(world_size);
+  std::vector<std::atomic<uint64_t>> rank_read_ns(world_size);
+  std::vector<std::atomic<uint64_t>> rank_zero_fill_bytes(world_size);
+  std::vector<std::atomic<uint64_t>> rank_zero_fill_calls(world_size);
+  for (size_t rank = 0; rank < world_size; ++rank) {
+    rank_read_bytes[rank].store(0, std::memory_order_relaxed);
+    rank_read_calls[rank].store(0, std::memory_order_relaxed);
+    rank_read_ns[rank].store(0, std::memory_order_relaxed);
+    rank_zero_fill_bytes[rank].store(0, std::memory_order_relaxed);
+    rank_zero_fill_calls[rank].store(0, std::memory_order_relaxed);
+  }
 
   struct SourceWindowReaderSlotState {
     std::mutex mu;
@@ -11142,6 +11615,7 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
                 ? static_cast<size_t>(std::min<uint64_t>(chunk->stripe_bytes, chunk->chunk_end - stripe_start))
                 : 0;
             if (read_len > 0) {
+              const auto rank_read_start = std::chrono::steady_clock::now();
               auto* direct_source = dynamic_cast<DirectAlignedSafetensorsSource*>(rank_sources[rank].get());
               if (direct_source != nullptr) {
                 direct_pinned_read_attempts.fetch_add(1, std::memory_order_relaxed);
@@ -11175,17 +11649,33 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
                     case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kNone:
                       break;
                   }
-                  std::memset(host_buffer, 0, chunk->stripe_bytes);
                   status = read_exact(*rank_sources[rank], stripe_start, host_buffer, read_len);
+                  if (status.ok() && read_len < chunk->stripe_bytes) {
+                    std::memset(host_buffer + read_len, 0, chunk->stripe_bytes - read_len);
+                    rank_zero_fill_bytes[rank].fetch_add(chunk->stripe_bytes - read_len, std::memory_order_relaxed);
+                    rank_zero_fill_calls[rank].fetch_add(1, std::memory_order_relaxed);
+                  }
                 } else {
                   status = h2d_offset_or.status();
                 }
               } else {
-                std::memset(host_buffer, 0, chunk->stripe_bytes);
                 status = read_exact(*rank_sources[rank], stripe_start, host_buffer, read_len);
+                if (status.ok() && read_len < chunk->stripe_bytes) {
+                  std::memset(host_buffer + read_len, 0, chunk->stripe_bytes - read_len);
+                  rank_zero_fill_bytes[rank].fetch_add(chunk->stripe_bytes - read_len, std::memory_order_relaxed);
+                  rank_zero_fill_calls[rank].fetch_add(1, std::memory_order_relaxed);
+                }
               }
+              const auto rank_read_elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                    std::chrono::steady_clock::now() - rank_read_start)
+                                                    .count();
+              rank_read_ns[rank].fetch_add(static_cast<uint64_t>(rank_read_elapsed_ns), std::memory_order_relaxed);
+              rank_read_bytes[rank].fetch_add(read_len, std::memory_order_relaxed);
+              rank_read_calls[rank].fetch_add(1, std::memory_order_relaxed);
             } else {
               std::memset(host_buffer, 0, chunk->stripe_bytes);
+              rank_zero_fill_bytes[rank].fetch_add(chunk->stripe_bytes, std::memory_order_relaxed);
+              rank_zero_fill_calls[rank].fetch_add(1, std::memory_order_relaxed);
             }
           }
 
@@ -12555,7 +13045,6 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
       {
         const auto step_start = std::chrono::steady_clock::now();
         char* host_buffer = host_pool.buffers.front();
-        std::memset(host_buffer, 0, chunk.chunk_len);
         TC_RETURN_IF_ERROR(read_exact(*rank_sources[owner], chunk.chunk_start, host_buffer, chunk.chunk_len));
         TC_RETURN_IF_ERROR(set_device_cached(participants[owner].device_id));
         TC_RETURN_IF_ERROR(
@@ -12574,13 +13063,17 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
       std::vector<absl::Status> read_statuses(world_size);
       for (size_t rank = 0; rank < world_size; ++rank) {
         char* host_buffer = host_pool.buffers.front();
-        std::memset(host_buffer, 0, chunk.stripe_bytes);
         const uint64_t stripe_start = chunk.chunk_start + static_cast<uint64_t>(rank * chunk.stripe_bytes);
         const size_t read_len = stripe_start < chunk.chunk_end
             ? static_cast<size_t>(std::min<uint64_t>(chunk.stripe_bytes, chunk.chunk_end - stripe_start))
             : 0;
         if (read_len > 0) {
           read_statuses[rank] = read_exact(*rank_sources[rank], stripe_start, host_buffer, read_len);
+          if (read_statuses[rank].ok() && read_len < chunk.stripe_bytes) {
+            std::memset(host_buffer + read_len, 0, chunk.stripe_bytes - read_len);
+          }
+        } else {
+          std::memset(host_buffer, 0, chunk.stripe_bytes);
         }
         if (!read_statuses[rank].ok()) {
           break;
@@ -12611,6 +13104,7 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
     for (; next_launch_chunk < initial_read_ahead; ++next_launch_chunk) {
       TC_RETURN_IF_ERROR(launch_parallel_chunk_read(next_launch_chunk));
     }
+    double read_job_max_sec = 0.0;
     for (size_t chunk_index = 0; chunk_index < runtime_chunks.size(); ++chunk_index) {
       const size_t slot = chunk_index % active_pipeline_slots;
       SourceWindowReadAheadResult read_result = wait_parallel_chunk_read(chunk_index);
@@ -12619,6 +13113,7 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
       }
       read_sec += read_result.read_sec;
       read_job_sec += read_result.read_job_sec;
+      read_job_max_sec = std::max(read_job_max_sec, read_result.read_job_sec);
       bytes_read += runtime_chunks[chunk_index].chunk_len;
       chunk_count += 1;
       if (chunk_uses_consumer_routed(runtime_chunks[chunk_index])) {
@@ -12636,6 +13131,12 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
         ++next_launch_chunk;
       }
     }
+    LOG(INFO) << "source_window_collective_read_ahead_profile"
+              << " artifact_id=" << participants.front().artifact_id << " group_id=" << plan.group.group_id
+              << " chunks=" << runtime_chunks.size()
+              << " active_pipeline_slots=" << active_pipeline_slots
+              << " read_job_avg=" << (runtime_chunks.empty() ? 0.0 : read_job_sec / runtime_chunks.size()) << "s"
+              << " read_job_max=" << read_job_max_sec << "s";
   } else {
     for (const auto& chunk : runtime_chunks) {
       bytes_read += chunk.chunk_len;
@@ -12643,6 +13144,14 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
       TC_RETURN_IF_ERROR(execute_single_buffer_chunk(chunk));
     }
   }
+  drain_batched_scatter_host_descriptor_slots();
+  log_source_window_collective_memory(
+      "after_data_plane",
+      participants.front().artifact_id,
+      plan.group.group_id,
+      capture_source_window_device_memory(device_ids),
+      &memory_entry);
+  evict_clique_on_exit = true;
 
   auto metrics = source_window_metrics_from_summary(plan.summary);
   metrics.unique_source_bytes = bytes_read;
@@ -12666,11 +13175,40 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
   }
   metrics.source_window_scatter_op_count = actual_scatter_ops;
 
+  auto join_atomic_u64 = [](const std::vector<std::atomic<uint64_t>>& values) {
+    std::string out = "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (i != 0) {
+        absl::StrAppend(&out, ",");
+      }
+      absl::StrAppend(&out, values[i].load(std::memory_order_relaxed));
+    }
+    absl::StrAppend(&out, "]");
+    return out;
+  };
+  auto join_rank_read_sec = [&]() {
+    std::string out = "[";
+    for (size_t i = 0; i < rank_read_ns.size(); ++i) {
+      if (i != 0) {
+        absl::StrAppend(&out, ",");
+      }
+      const double sec = static_cast<double>(rank_read_ns[i].load(std::memory_order_relaxed)) / 1e9;
+      absl::StrAppend(&out, sec);
+    }
+    absl::StrAppend(&out, "]");
+    return out;
+  };
+
   const auto total_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - total_start).count();
+  logged_total_sec = total_sec;
+  logged_success = true;
   LOG(INFO) << "source_window_collective_mapped_target timings"
             << " artifact_id=" << participants.front().artifact_id << " group_id=" << plan.group.group_id
             << " windows=" << plan.windows.size() << " chunks=" << chunk_count
-            << " chunk_bytes=" << configured_chunk_bytes << " max_collective_chunk_bytes=" << max_collective_chunk_bytes
+            << " chunk_bytes=" << configured_chunk_bytes
+            << " stripe_buffer_bytes=" << chunk_sizing.stripe_buffer_bytes
+            << " max_collective_chunk_bytes=" << max_collective_chunk_bytes
+            << " max_stripe_bytes=" << max_stripe_bytes
             << " parallel_host_buffers=" << (parallel_host_buffers ? 1 : 0)
             << " requested_pipeline_slots=" << requested_pipeline_slots
             << " active_pipeline_slots=" << active_pipeline_slots << " bytes_read=" << bytes_read
@@ -12692,6 +13230,7 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
             << " batched_scatter_descriptor_build=" << batched_scatter_descriptor_build_sec << "s"
             << " batched_scatter_descriptor_host_copy=" << batched_scatter_descriptor_host_copy_sec << "s"
             << " batched_scatter_descriptor_slot_wait=" << batched_scatter_descriptor_slot_wait_sec << "s"
+            << " batched_scatter_descriptor_final_drain=" << batched_scatter_descriptor_final_drain_sec << "s"
             << " batched_scatter_kernel_submit=" << batched_scatter_kernel_submit_sec << "s"
             << " batched_scatter_fallback_submit=" << batched_scatter_fallback_submit_sec << "s"
             << " routed_span_plan=" << routed_span_plan_sec << "s"
@@ -12747,6 +13286,11 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
             << " stage_alloc=" << stage_alloc_sec << "s"
             << " read=" << read_sec << "s"
             << " read_job_sum=" << read_job_sec << "s"
+            << " rank_read_sec=" << join_rank_read_sec()
+            << " rank_read_bytes=" << join_atomic_u64(rank_read_bytes)
+            << " rank_read_calls=" << join_atomic_u64(rank_read_calls)
+            << " rank_zero_fill_bytes=" << join_atomic_u64(rank_zero_fill_bytes)
+            << " rank_zero_fill_calls=" << join_atomic_u64(rank_zero_fill_calls)
             << " h2d=" << h2d_sec << "s"
             << " collective_issue=" << collective_sec << "s"
             << " collective_sync=" << collective_sync_sec << "s"
@@ -12816,6 +13360,9 @@ SourceWindowCollectiveMappedTargetLoadResult execute_source_window_group_final_a
     build_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - build_start).count();
     if (!plan_or.ok()) {
       plan_status = plan_or.status();
+      if (options.enable_source_window_plan_cache && !plan_cache_key.empty()) {
+        abandon_source_window_collective_plan_cache_build(plan_cache_key);
+      }
     } else {
       plan = std::move(*plan_or);
       if (options.enable_source_window_plan_cache) {
@@ -13248,6 +13795,11 @@ SourceWindowCollectivePlanCacheStats source_window_routed_program_cache_stats_fo
   return source_window_routed_program_cache_stats_snapshot();
 }
 
+size_t source_window_compiled_routed_program_build_thread_count_for_testing(
+    size_t chunk_count, uint32_t configured_thread_count) {
+  return compiled_routed_program_build_thread_count(chunk_count, configured_thread_count);
+}
+
 absl::StatusOr<std::string> source_window_routed_program_cache_key_for_testing(
     std::string_view artifact_id,
     const SourceWindowCollectivePlan& plan,
@@ -13426,47 +13978,52 @@ SourceWindowRoutedProgramCachePrepareResult prepare_source_window_routed_program
   return result;
 }
 
-SourceWindowRoutedProgramCachePrepareResult prepare_source_window_collective_routed_program_cache(
+struct SourceWindowCollectivePlanPrepareState {
+  SourceWindowRoutedProgramCachePrepareResult result;
+  std::vector<SourceWindowCollectiveMappedTargetLoadRequest> requests;
+  SourceWindowCollectivePlan plan;
+  size_t configured_chunk_bytes{0};
+  size_t max_collective_chunk_bytes{0};
+  size_t max_stripe_bytes{0};
+};
+
+SourceWindowCollectivePlanPrepareState prepare_source_window_collective_plan_cache_state(
     absl::Span<const SourceWindowCollectiveMappedTargetLoadRequest> requests,
     const CollectiveMappedTargetLoadOptions& options) {
-  SourceWindowRoutedProgramCachePrepareResult result;
+  SourceWindowCollectivePlanPrepareState state;
+  auto& result = state.result;
   if (requests.empty()) {
     result.status = absl::InvalidArgumentError("source-window collective routed program prepare requires requests");
     result.skip_reason = "requests_empty";
-    return result;
+    return state;
   }
 
   const SourceWindowCollectiveConfig config = source_window_collective_config_from_strategy(options.strategy_config);
   if (!config.enabled) {
     result.status = absl::OkStatus();
     result.skip_reason = "strategy_disabled";
-    return result;
+    return state;
   }
   if (config.selection_mode == runtime::ingestion::strategy::SourceWindowCollectiveSelectionMode::kDryRun) {
     result.status = absl::OkStatus();
     result.skip_reason = "source_window_dry_run";
-    return result;
-  }
-  if (!options.strategy_config.enable_source_window_compiled_routed_program) {
-    result.status = absl::OkStatus();
-    result.skip_reason = "compiled_routed_program_disabled";
-    return result;
+    return state;
   }
   const auto& first = requests.front();
   if (first.group.world_size <= 1) {
     result.status = absl::OkStatus();
     result.skip_reason = "collective_group_missing";
-    return result;
+    return state;
   }
   if (requests.size() != first.group.world_size) {
     result.status = absl::FailedPreconditionError("source-window collective prepare member count mismatch");
     result.skip_reason = "member_count_mismatch";
-    return result;
+    return state;
   }
   if (options.chunk_bytes == 0) {
     result.status = absl::InvalidArgumentError("source-window collective routed program prepare requires chunk bytes");
     result.skip_reason = "invalid_chunk_sizing";
-    return result;
+    return state;
   }
 
   std::vector<std::optional<SourceWindowMappedParticipant>> participant_slots(first.group.world_size);
@@ -13474,17 +14031,17 @@ SourceWindowRoutedProgramCachePrepareResult prepare_source_window_collective_rou
     if (request.group.group_id != first.group.group_id || request.group.world_size != first.group.world_size) {
       result.status = absl::FailedPreconditionError("source-window collective prepare group mismatch");
       result.skip_reason = "group_mismatch";
-      return result;
+      return state;
     }
     if (request.group.rank >= first.group.world_size) {
       result.status = absl::InvalidArgumentError("source-window collective prepare rank out of range");
       result.skip_reason = "collective_rank_out_of_range";
-      return result;
+      return state;
     }
     if (participant_slots[request.group.rank].has_value()) {
       result.status = absl::InvalidArgumentError("source-window collective prepare duplicate rank");
       result.skip_reason = "duplicate_member_rank";
-      return result;
+      return state;
     }
     auto work_plan_ref = source_window_request_work_plan_ref(request);
     auto target_layout_ref = source_window_request_target_layout_ref(request);
@@ -13493,25 +14050,25 @@ SourceWindowRoutedProgramCachePrepareResult prepare_source_window_collective_rou
         work_plan_ref->items.empty()) {
       result.status = absl::OkStatus();
       result.skip_reason = "request_incomplete";
-      return result;
+      return state;
     }
     if (!request.candidate_summary.candidate) {
       result.status = absl::OkStatus();
       result.skip_reason = request.candidate_summary.pre_admission_reason.empty()
           ? "candidate_missing"
           : request.candidate_summary.pre_admission_reason;
-      return result;
+      return state;
     }
     if (!request.disk_context->is_safetensors()) {
       result.status = absl::OkStatus();
       result.skip_reason = "non_safetensors_source";
-      return result;
+      return state;
     }
     auto storage_spans_or = build_target_storage_spans(*target_layout_ref);
     if (!storage_spans_or.ok()) {
       result.status = storage_spans_or.status();
       result.skip_reason = "invalid_target_storage_layout";
-      return result;
+      return state;
     }
     participant_slots[request.group.rank] = SourceWindowMappedParticipant{
         .artifact_id = request.artifact_id,
@@ -13533,7 +14090,7 @@ SourceWindowRoutedProgramCachePrepareResult prepare_source_window_collective_rou
     if (!participant.has_value()) {
       result.status = absl::FailedPreconditionError("source-window collective prepare missing rank");
       result.skip_reason = "missing_member_rank";
-      return result;
+      return state;
     }
     participants.push_back(std::move(*participant));
   }
@@ -13542,7 +14099,7 @@ SourceWindowRoutedProgramCachePrepareResult prepare_source_window_collective_rou
   if (!input_or.ok()) {
     result.status = input_or.status();
     result.skip_reason = absl::StrCat("source_window_group_rejected:", input_or.status().message());
-    return result;
+    return state;
   }
 
   SourceWindowCollectivePlan plan;
@@ -13559,9 +14116,10 @@ SourceWindowRoutedProgramCachePrepareResult prepare_source_window_collective_rou
     if (!plan_cache_hit) {
       auto plan_or = build_source_window_collective_plan(*input_or);
       if (!plan_or.ok()) {
+        abandon_source_window_collective_plan_cache_build(plan_cache_key);
         result.status = plan_or.status();
         result.skip_reason = absl::StrCat("source_window_group_rejected:", plan_or.status().message());
-        return result;
+        return state;
       }
       plan = std::move(*plan_or);
       store_source_window_collective_plan_cache(plan_cache_key, plan);
@@ -13571,11 +14129,12 @@ SourceWindowRoutedProgramCachePrepareResult prepare_source_window_collective_rou
     if (!plan_or.ok()) {
       result.status = plan_or.status();
       result.skip_reason = absl::StrCat("source_window_group_rejected:", plan_or.status().message());
-      return result;
+      return state;
     }
     plan = std::move(*plan_or);
   }
   result.plan_hash = plan.plan_hash;
+  result.cache_hit = plan_cache_hit;
 
   LOG(INFO) << "source_window_collective_routed_program_prepare"
             << " artifact_id=" << first.artifact_id << " group_id=" << first.group.group_id
@@ -13588,24 +14147,54 @@ SourceWindowRoutedProgramCachePrepareResult prepare_source_window_collective_rou
   if (!plan.summary.group_final_admitted) {
     result.status = absl::OkStatus();
     result.skip_reason = absl::StrCat("source_window_group_rejected:", plan.summary.group_reject_reason);
-    return result;
+    return state;
   }
 
   const size_t configured_chunk_bytes = static_cast<size_t>(options.chunk_bytes);
-  const size_t max_collective_chunk_bytes = (configured_chunk_bytes / requests.size()) * requests.size();
-  if (max_collective_chunk_bytes == 0) {
-    result.status = absl::InvalidArgumentError("source-window collective routed program chunk bytes below world size");
+  auto chunk_sizing_or =
+      source_window_runtime_chunk_sizing(configured_chunk_bytes, requests.size(), plan.distribution_mode);
+  if (!chunk_sizing_or.ok()) {
+    result.status = chunk_sizing_or.status();
     result.skip_reason = "invalid_chunk_sizing";
-    return result;
+    return state;
   }
-  const size_t max_stripe_bytes = max_collective_chunk_bytes / requests.size();
+  const auto& chunk_sizing = *chunk_sizing_or;
+  state.requests.assign(requests.begin(), requests.end());
+  state.plan = std::move(plan);
+  state.configured_chunk_bytes = configured_chunk_bytes;
+  state.max_collective_chunk_bytes = chunk_sizing.max_collective_chunk_bytes;
+  state.max_stripe_bytes = chunk_sizing.max_stripe_bytes;
+  result.prepared = true;
+  result.status = absl::OkStatus();
+  return state;
+}
+
+SourceWindowRoutedProgramCachePrepareResult prepare_source_window_collective_plan_cache(
+    absl::Span<const SourceWindowCollectiveMappedTargetLoadRequest> requests,
+    const CollectiveMappedTargetLoadOptions& options) {
+  auto state = prepare_source_window_collective_plan_cache_state(requests, options);
+  return state.result;
+}
+
+SourceWindowRoutedProgramCachePrepareResult prepare_source_window_collective_routed_program_cache(
+    absl::Span<const SourceWindowCollectiveMappedTargetLoadRequest> requests,
+    const CollectiveMappedTargetLoadOptions& options) {
+  auto state = prepare_source_window_collective_plan_cache_state(requests, options);
+  if (!state.result.status.ok() || !state.result.prepared) {
+    return state.result;
+  }
+  if (!options.strategy_config.enable_source_window_compiled_routed_program) {
+    state.result.prepared = false;
+    state.result.skip_reason = "compiled_routed_program_disabled";
+    return state.result;
+  }
   return prepare_source_window_routed_program_cache(
-      first.artifact_id,
-      plan,
-      requests,
-      configured_chunk_bytes,
-      max_collective_chunk_bytes,
-      max_stripe_bytes,
+      state.requests.front().artifact_id,
+      state.plan,
+      absl::MakeConstSpan(state.requests),
+      state.configured_chunk_bytes,
+      state.max_collective_chunk_bytes,
+      state.max_stripe_bytes,
       options.strategy_config.source_window_compiled_program_build_threads);
 }
 
@@ -13760,11 +14349,24 @@ absl::Status warm_collective_clique_cache(const std::vector<int>& device_ids) {
   if (device_ids.size() <= 1) {
     return absl::OkStatus();
   }
+  const auto memory_before = capture_source_window_device_memory(device_ids);
+  log_source_window_collective_memory(
+      "clique_prewarm_before",
+      /*artifact_id=*/"",
+      /*group_id=*/"prewarm",
+      memory_before,
+      &memory_before);
   bool cache_hit = false;
   auto clique_or = get_or_create_cached_clique(device_ids, &cache_hit);
   if (!clique_or.ok()) {
     return clique_or.status();
   }
+  log_source_window_collective_memory(
+      "clique_prewarm_after",
+      /*artifact_id=*/"",
+      /*group_id=*/"prewarm",
+      capture_source_window_device_memory(device_ids),
+      &memory_before);
   LOG(INFO) << "collective_disk_load clique prewarm complete device_ids=" << clique_cache_key(device_ids)
             << " cache_hit=" << (cache_hit ? 1 : 0);
   return absl::OkStatus();

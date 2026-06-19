@@ -263,7 +263,36 @@ class MaterializationController {
       TargetPublicationRegistry::Record record);
 
  private:
+  struct ServingPrefetchExecutionProfile {
+    double parse_target_sec{0.0};
+    double create_owned_binding_sec{0.0};
+    double record_lookup_sec{0.0};
+    double retained_mark_sec{0.0};
+    double lease_release_sec{0.0};
+    double response_sec{0.0};
+    double total_sec{0.0};
+  };
+
+  struct ServingPrefetchLocalReadyResult {
+    v2::PrefetchServingBindingResponse response;
+    std::string binding_id;
+    std::string target_device_uuid;
+    ServingPrefetchExecutionProfile profile;
+  };
+
+  grpc::Status materialize_prefetch_serving_binding_local_ready(
+      const OwnedBindingService::SourceBoundExecutionContext& execution_context,
+      RpcContext* rctx,
+      const v2::PrefetchServingBindingRequest& req,
+      ServingPrefetchLocalReadyResult& result);
+
+  grpc::Status start_async_prefetch_serving_binding_local_ready(
+      const OwnedBindingService::SourceBoundExecutionContext& execution_context,
+      const v2::PrefetchServingBindingRequest& req,
+      v2::PrefetchServingBindingResponse& resp);
+
   std::shared_ptr<store::components::IGlobalStoreClient> global_store_client_;
+  common::AsyncRuntime* async_runtime_{nullptr};
   ShutdownSignal* shutdown_signal_{nullptr};
   BindingRegistry* binding_registry_{nullptr};
   HandleLeaseRegistry* handle_leases_{nullptr};

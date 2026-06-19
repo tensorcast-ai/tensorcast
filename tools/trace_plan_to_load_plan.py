@@ -44,10 +44,8 @@ import argparse
 import json
 import re
 import struct
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
-
 
 SAFE_TENSORS_TO_TORCH_DTYPE: dict[str, str] = {
     "BOOL": "torch.bool",
@@ -89,12 +87,15 @@ def _load_source_metadata(model_dir: Path) -> dict[str, dict[str, Any]]:
             if tensor_name == "__metadata__":
                 continue
             if tensor_name in meta_by_name:
-                raise RuntimeError(f"Duplicate tensor '{tensor_name}' across safetensors shards")
+                raise RuntimeError(
+                    f"Duplicate tensor '{tensor_name}' across safetensors shards"
+                )
             safe_dtype = str(tensor_info["dtype"])
             torch_dtype = SAFE_TENSORS_TO_TORCH_DTYPE.get(safe_dtype)
             if torch_dtype is None:
                 raise ValueError(
-                    f"Unsupported safetensors dtype '{safe_dtype}' for tensor '{tensor_name}'")
+                    f"Unsupported safetensors dtype '{safe_dtype}' for tensor '{tensor_name}'"
+                )
             meta_by_name[tensor_name] = {
                 "shape": [int(dim) for dim in tensor_info["shape"]],
                 "dtype": torch_dtype,
@@ -117,8 +118,17 @@ def _load_trace_plan(path: Path) -> tuple[dict[str, Any], int | None, int | None
     trace_plan = data.get("trace_plan", data)
     if not isinstance(trace_plan, dict):
         raise ValueError(f"Trace plan wrapper must contain an object: {path}")
-    if "copy_plan" not in trace_plan or not isinstance(trace_plan["copy_plan"], list):
-        raise ValueError(f"Trace plan missing copy_plan[]: {path}")
+    copy_plan = trace_plan.get("copy_plan")
+    has_copy_plan = isinstance(copy_plan, list)
+    has_trace_summary = isinstance(
+        trace_plan.get("expected_src_names"), list
+    ) and isinstance(trace_plan.get("tensorcast_slices"), dict)
+    if not has_copy_plan and not has_trace_summary:
+        raise ValueError(
+            f"Trace plan missing copy_plan[] and trace summary fields: {path}"
+        )
+    if not has_copy_plan:
+        trace_plan["copy_plan"] = []
 
     tp_rank = trace_plan.get("tp_rank", data.get("tp_rank"))
     tp_world_size = trace_plan.get("tp_world_size", data.get("tp_world_size"))
@@ -147,14 +157,30 @@ def _range_spec_to_slices(range_spec: dict[str, Any] | None) -> list[dict[str, i
                 "axis": int(axis["dim"]),
                 "start": start,
                 "size": end - start,
-            })
+            }
+        )
     return slices
+
+
+def _summary_range_to_slices(range_spec: dict[str, Any] | None) -> list[dict[str, int]]:
+    if range_spec is None:
+        return []
+    start = int(range_spec["start"])
+    end = int(range_spec["end"])
+    return [
+        {
+            "axis": int(range_spec["dim"]),
+            "start": start,
+            "size": end - start,
+        }
+    ]
 
 
 def _copy_sort_key(copy_spec: dict[str, Any]) -> tuple[Any, ...]:
     slices = tuple(
         (int(s["axis"]), int(s["start"]), int(s["size"]))
-        for s in copy_spec.get("slices", []))
+        for s in copy_spec.get("slices", [])
+    )
     return (str(copy_spec["dst_param"]), slices)
 
 
@@ -168,8 +194,36 @@ def _build_rank_entry(
     tensors: dict[str, dict[str, Any]] = {}
     skipped_fill_ops = 0
     skipped_other_ops = 0
+    used_trace_summary_fallback = False
 
-    for entry in trace_plan["copy_plan"]:
+    copy_plan = trace_plan["copy_plan"]
+    if not copy_plan and trace_plan.get("expected_src_names"):
+        # Newer trace-cache summaries intentionally omit the full copy_plan to
+        # keep cached recipes compact. For benchmark-only path microbenchmarks,
+        # approximate each source tensor as one destination with the recorded
+        # source hull slice. This preserves the source read volume and shape but
+        # does not try to reconstruct exact vLLM destination parameter names.
+        used_trace_summary_fallback = True
+        tensorcast_slices = trace_plan.get("tensorcast_slices") or {}
+        for ckpt_name_raw in sorted(trace_plan.get("expected_src_names") or []):
+            ckpt_name = str(ckpt_name_raw)
+            source_meta = source_meta_by_name.get(ckpt_name)
+            if source_meta is None:
+                raise KeyError(
+                    f"Trace summary {trace_plan_path} references tensor not "
+                    f"present in source checkpoint: {ckpt_name}"
+                )
+            copy_spec: dict[str, Any] = {"dst_param": ckpt_name}
+            slices = _summary_range_to_slices(tensorcast_slices.get(ckpt_name))
+            if slices:
+                copy_spec["slices"] = slices
+            tensors[ckpt_name] = {
+                "shape": list(source_meta["shape"]),
+                "dtype": str(source_meta["dtype"]),
+                "copies": [copy_spec],
+            }
+
+    for entry in copy_plan:
         op = str(entry.get("op", ""))
         ckpt_name = entry.get("ckpt_name")
         if op != "copy" or ckpt_name is None:
@@ -183,7 +237,8 @@ def _build_rank_entry(
         source_meta = source_meta_by_name.get(ckpt_name)
         if source_meta is None:
             raise KeyError(
-                f"Trace plan {trace_plan_path} references tensor not present in source checkpoint: {ckpt_name}")
+                f"Trace plan {trace_plan_path} references tensor not present in source checkpoint: {ckpt_name}"
+            )
 
         tensor_entry = tensors.setdefault(
             ckpt_name,
@@ -216,6 +271,7 @@ def _build_rank_entry(
         "unique_source_tensors": len(sorted_tensors),
         "skipped_fill_ops": skipped_fill_ops,
         "skipped_other_ops": skipped_other_ops,
+        "used_trace_summary_fallback": int(used_trace_summary_fallback),
     }
     return rank_entry, stats
 
@@ -263,7 +319,9 @@ def main() -> int:
     if args.trace_plan_dir is not None:
         trace_paths.extend(sorted(args.trace_plan_dir.glob("*.json")))
     if not trace_paths:
-        raise SystemExit("No trace plans provided. Use --trace-plan or --trace-plan-dir.")
+        raise SystemExit(
+            "No trace plans provided. Use --trace-plan or --trace-plan-dir."
+        )
 
     source_meta_by_name = _load_source_metadata(args.model_dir)
     rank_entries: list[dict[str, Any]] = []
@@ -308,9 +366,12 @@ def main() -> int:
                 "tp_rank": rank_entry["tp_rank"],
                 "tp_world_size": rank_entry["tp_world_size"],
                 **stats,
-            })
+            }
+        )
 
-    rank_entries.sort(key=lambda item: (int(item["tp_world_size"]), int(item["tp_rank"])))
+    rank_entries.sort(
+        key=lambda item: (int(item["tp_world_size"]), int(item["tp_rank"]))
+    )
     output_payload = {
         "version": 2,
         "source": "tensorcast_trace_plan",
@@ -320,14 +381,17 @@ def main() -> int:
     }
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(output_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    args.output.write_text(
+        json.dumps(output_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     print(
         json.dumps(
             {
                 "output": str(args.output),
                 "rank_count": len(rank_entries),
                 "unique_tensor_counts": {
-                    str(entry["tp_rank"]): len(entry["tensors"]) for entry in rank_entries
+                    str(entry["tp_rank"]): len(entry["tensors"])
+                    for entry in rank_entries
                 },
                 "copy_counts": {
                     str(stat["tp_rank"]): stat["kept_copy_ops"] for stat in rank_stats
@@ -335,7 +399,8 @@ def main() -> int:
             },
             indent=2,
             sort_keys=True,
-        ))
+        )
+    )
     return 0
 
 

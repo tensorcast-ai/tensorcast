@@ -3,6 +3,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -39,6 +40,14 @@ namespace tensorcast::daemon {
 
 class OwnedBindingService {
  public:
+  struct SourceBoundExecutionContext {
+    bool loopback_peer{false};
+    std::chrono::milliseconds request_budget{std::chrono::milliseconds(0)};
+  };
+
+  static SourceBoundExecutionContext source_bound_execution_context_from_server_context(
+      const grpc::ServerContext& server_context);
+
   struct Dep {
     store::StoreEngine& engine;
     DeviceResolver& devices;
@@ -69,6 +78,11 @@ class OwnedBindingService {
 
   grpc::Status create_owned_binding(
       RpcContext& rctx,
+      const v2::CreateOwnedBindingRequest& req,
+      v2::CreateOwnedBindingResponse& resp);
+
+  grpc::Status create_owned_binding_with_context(
+      const SourceBoundExecutionContext& execution_context,
       const v2::CreateOwnedBindingRequest& req,
       v2::CreateOwnedBindingResponse& resp);
 
@@ -134,6 +148,12 @@ class OwnedBindingService {
       v2::PromoteBindingCurrentValueResponse& resp);
 
   void run_async_promotion_job(std::string job_id, v2::PromoteBindingCurrentValueRequest req);
+
+  grpc::Status create_owned_binding_impl(
+      const SourceBoundExecutionContext& execution_context,
+      RpcContext* rctx,
+      const v2::CreateOwnedBindingRequest& req,
+      v2::CreateOwnedBindingResponse& resp);
 
   void cancel_promotion_jobs_for_value(
       std::string_view binding_id,

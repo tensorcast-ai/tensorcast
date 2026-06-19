@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -73,7 +74,8 @@ class DiskArtifactContext {
       bool descriptor_present,
       bool tensor_index_json_present,
       bool tensor_index_cbor_present,
-      std::vector<SharedSafetensorsSegment> safetensors_segments);
+      std::vector<SharedSafetensorsSegment> safetensors_segments,
+      std::optional<IndexInfo> initial_index_info = std::nullopt);
 
   [[nodiscard]] const std::filesystem::path& artifact_path() const {
     return artifact_path_;

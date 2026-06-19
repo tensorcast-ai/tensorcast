@@ -286,14 +286,17 @@ TEST_CASE(
 
   const auto decision_or = choose_auto_local_mapped_safetensors_io_for_testing(absl::MakeSpan(&segment, 1));
   REQUIRE(decision_or.ok());
-  if (decision_or->reason == "filesystem_not_direct_friendly") {
+  if (!decision_or->use_direct_aligned_edges) {
     std::error_code cleanup_ec;
     std::filesystem::remove_all(temp_root, cleanup_ec);
-    SKIP("test filesystem is not direct-friendly");
+    SKIP("test filesystem does not support direct auto path: " << decision_or->reason);
   }
 
   CHECK(decision_or->use_direct_aligned_edges);
-  CHECK(decision_or->reason == "page_cache_cold_or_partial_direct");
+  const bool cold_direct_reason =
+      decision_or->reason == "page_cache_cold_or_partial_direct" ||
+      decision_or->reason == "direct_probe_cold_or_partial_direct";
+  CHECK(cold_direct_reason);
 
   std::error_code cleanup_ec;
   std::filesystem::remove_all(temp_root, cleanup_ec);
@@ -318,7 +321,7 @@ TEST_CASE(
   const auto decision_or = choose_auto_local_mapped_safetensors_io_for_testing(absl::MakeSpan(&segment, 1));
   REQUIRE(decision_or.ok());
   CHECK_FALSE(decision_or->use_direct_aligned_edges);
-  CHECK(decision_or->reason == "filesystem_not_direct_friendly");
+  CHECK(decision_or->reason == "filesystem_memory_buffered");
 
   std::error_code cleanup_ec;
   std::filesystem::remove_all(temp_root, cleanup_ec);
@@ -763,6 +766,17 @@ TEST_CASE(
       kMaxStripeBytes);
   REQUIRE(plan_changed_key.ok());
   CHECK(*base_key != *plan_changed_key);
+}
+
+TEST_CASE(
+    "source-window compiled routed program auto parallelizes medium chunk counts",
+    "[collective_disk_loader][source_window][routed_program][compiled_program]") {
+  CHECK(source_window_compiled_routed_program_build_thread_count_for_testing(1, 0) == 1);
+  CHECK(source_window_compiled_routed_program_build_thread_count_for_testing(31, 0) == 1);
+  CHECK(source_window_compiled_routed_program_build_thread_count_for_testing(32, 0) > 1);
+  CHECK(source_window_compiled_routed_program_build_thread_count_for_testing(115, 0) > 1);
+  CHECK(source_window_compiled_routed_program_build_thread_count_for_testing(115, 1) == 1);
+  CHECK(source_window_compiled_routed_program_build_thread_count_for_testing(115, 16) == 16);
 }
 
 TEST_CASE(
@@ -1221,20 +1235,52 @@ TEST_CASE(
   };
 
   auto first_requests = make_requests(rank0_a.data(), rank1_a.data());
-  const auto first =
-      prepare_source_window_collective_routed_program_cache(absl::MakeConstSpan(first_requests), options);
-  REQUIRE(first.status.ok());
-  CHECK(first.prepared);
-  CHECK_FALSE(first.cache_hit);
-  CHECK_FALSE(first.plan_hash.empty());
-  CHECK(first.runtime_chunk_count == 2);
-  CHECK(first.compiled_chunk_count == 2);
+  const auto first_plan = prepare_source_window_collective_plan_cache(absl::MakeConstSpan(first_requests), options);
+  REQUIRE(first_plan.status.ok());
+  CHECK(first_plan.prepared);
+  CHECK_FALSE(first_plan.cache_hit);
+  CHECK_FALSE(first_plan.plan_hash.empty());
 
   auto plan_stats = source_window_collective_plan_cache_stats_for_testing();
   CHECK(plan_stats.misses == 1);
   CHECK(plan_stats.hits == 0);
   CHECK(plan_stats.entries == 1);
   auto program_stats = source_window_routed_program_cache_stats_for_testing();
+  CHECK(program_stats.misses == 0);
+  CHECK(program_stats.hits == 0);
+  CHECK(program_stats.entries == 0);
+
+  auto second_plan_requests = make_requests(rank0_b.data(), rank1_b.data());
+  const auto second_plan =
+      prepare_source_window_collective_plan_cache(absl::MakeConstSpan(second_plan_requests), options);
+  REQUIRE(second_plan.status.ok());
+  CHECK(second_plan.prepared);
+  CHECK(second_plan.cache_hit);
+  CHECK(second_plan.plan_hash == first_plan.plan_hash);
+
+  plan_stats = source_window_collective_plan_cache_stats_for_testing();
+  CHECK(plan_stats.misses == 1);
+  CHECK(plan_stats.hits == 1);
+  CHECK(plan_stats.entries == 1);
+  program_stats = source_window_routed_program_cache_stats_for_testing();
+  CHECK(program_stats.misses == 0);
+  CHECK(program_stats.hits == 0);
+  CHECK(program_stats.entries == 0);
+
+  const auto first =
+      prepare_source_window_collective_routed_program_cache(absl::MakeConstSpan(first_requests), options);
+  REQUIRE(first.status.ok());
+  CHECK(first.prepared);
+  CHECK_FALSE(first.cache_hit);
+  CHECK(first.plan_hash == first_plan.plan_hash);
+  CHECK(first.runtime_chunk_count == 1);
+  CHECK(first.compiled_chunk_count == 1);
+
+  plan_stats = source_window_collective_plan_cache_stats_for_testing();
+  CHECK(plan_stats.misses == 1);
+  CHECK(plan_stats.hits == 2);
+  CHECK(plan_stats.entries == 1);
+  program_stats = source_window_routed_program_cache_stats_for_testing();
   CHECK(program_stats.misses == 1);
   CHECK(program_stats.hits == 0);
   CHECK(program_stats.entries == 1);
@@ -1246,12 +1292,12 @@ TEST_CASE(
   CHECK(second.prepared);
   CHECK(second.cache_hit);
   CHECK(second.plan_hash == first.plan_hash);
-  CHECK(second.runtime_chunk_count == 2);
-  CHECK(second.compiled_chunk_count == 2);
+  CHECK(second.runtime_chunk_count == 1);
+  CHECK(second.compiled_chunk_count == 1);
 
   plan_stats = source_window_collective_plan_cache_stats_for_testing();
   CHECK(plan_stats.misses == 1);
-  CHECK(plan_stats.hits == 1);
+  CHECK(plan_stats.hits == 3);
   CHECK(plan_stats.entries == 1);
   program_stats = source_window_routed_program_cache_stats_for_testing();
   CHECK(program_stats.misses == 1);
@@ -1917,7 +1963,7 @@ TEST_CASE(
     CHECK(result.metrics.source_window_group_disk_read_bytes == kSourceBytes);
     CHECK(result.metrics.source_window_target_write_bytes == 2 * kTargetBytes);
     CHECK(result.metrics.source_window_peer_transfer_bytes == kTargetBytes);
-    CHECK(result.metrics.batch_count == 2);
+    CHECK(result.metrics.batch_count == 1);
   }
   CHECK(results[0].plan_hash == results[1].plan_hash);
 

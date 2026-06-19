@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 import threading
+import time
 from collections.abc import Mapping, MutableMapping, Sequence
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
@@ -17,6 +19,7 @@ if TYPE_CHECKING:
 _C_MODULE: ModuleType | None = None
 _C_LOCK = threading.Lock()
 _C_VALIDATED = False
+_LOGGER = logging.getLogger(__name__)
 
 
 def _load_c_ext() -> ModuleType:
@@ -60,7 +63,20 @@ def get_cuda_memory_ptr(
     device_id: int | torch.device,
     cuda_ipc_handle: bytes | Any,
 ) -> int:
-    return _load_c_ext().get_cuda_memory_ptr(device_id, cuda_ipc_handle)
+    start = time.perf_counter()
+    module = _load_c_ext()
+    loaded = time.perf_counter()
+    ptr = module.get_cuda_memory_ptr(device_id, cuda_ipc_handle)
+    done = time.perf_counter()
+    _LOGGER.info(
+        "tc_profile_py c_ext.get_cuda_memory_ptr timings "
+        "device_id=%s load_ext_sec=%.6f native_sec=%.6f total_sec=%.6f",
+        device_id,
+        loaded - start,
+        done - loaded,
+        done - start,
+    )
+    return ptr
 
 
 def restore_tensors(

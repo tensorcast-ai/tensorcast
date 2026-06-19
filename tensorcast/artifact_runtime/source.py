@@ -169,6 +169,87 @@ def _public_disk_source_payload(source: Any) -> dict[str, Any]:
     }
 
 
+_PUBLIC_DISK_TENSOR_PAYLOAD_KIND = "source_subject_public_disk_tensor_v1"
+
+
+def _bytes_to_uint8_tensor(data: Any) -> torch.Tensor:
+    return torch.frombuffer(bytearray(bytes(data)), dtype=torch.uint8)
+
+
+def _uint8_tensor_to_bytes(data: Any) -> bytes:
+    if isinstance(data, torch.Tensor):
+        tensor = data.detach()
+        if tensor.dtype is not torch.uint8:
+            raise SourceSubjectError(
+                "TensorCast source subject tensor payload expected uint8 tensor"
+            )
+        if tensor.device.type != "cpu":
+            tensor = tensor.cpu()
+        return tensor.contiguous().numpy().tobytes()
+    return bytes(data)
+
+
+def source_subject_payload_to_tensor_dict(
+    payload: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    payload_dict = dict(payload)
+    if str(payload_dict.get("kind") or "") != "public_disk":
+        return None
+    subject = payload_dict.get("subject")
+    if not isinstance(subject, Mapping):
+        return None
+    subject_dict = dict(subject)
+    canonical_index = subject_dict.pop("canonical_index_bytes", None)
+    if canonical_index is None:
+        return None
+    source_index = subject_dict.pop("source_index_bytes", None)
+    payload_dict["subject"] = subject_dict
+    tensor_payload: dict[str, Any] = {
+        "__tensorcast_payload_kind__": _PUBLIC_DISK_TENSOR_PAYLOAD_KIND,
+        "payload": payload_dict,
+        "canonical_index_bytes": _bytes_to_uint8_tensor(canonical_index),
+        "source_index_bytes_present": source_index is not None,
+    }
+    if source_index is not None:
+        tensor_payload["source_index_bytes"] = _bytes_to_uint8_tensor(source_index)
+    return tensor_payload
+
+
+def source_subject_payload_from_tensor_dict(
+    tensor_payload: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if tensor_payload is None:
+        return None
+    payload_kind = str(tensor_payload.get("__tensorcast_payload_kind__") or "")
+    if payload_kind != _PUBLIC_DISK_TENSOR_PAYLOAD_KIND:
+        raise SourceSubjectError(
+            "TensorCast source subject tensor payload has unexpected kind"
+        )
+    raw_payload = tensor_payload.get("payload")
+    if not isinstance(raw_payload, Mapping):
+        raise SourceSubjectError(
+            "TensorCast source subject tensor payload is missing payload"
+        )
+    payload = dict(raw_payload)
+    subject = payload.get("subject")
+    if not isinstance(subject, Mapping):
+        raise SourceSubjectError(
+            "TensorCast source subject tensor payload is missing subject"
+        )
+    subject_dict = dict(subject)
+    subject_dict["canonical_index_bytes"] = _uint8_tensor_to_bytes(
+        tensor_payload.get("canonical_index_bytes")
+    )
+    if bool(tensor_payload.get("source_index_bytes_present", False)):
+        subject_dict["source_index_bytes"] = _uint8_tensor_to_bytes(
+            tensor_payload.get("source_index_bytes")
+        )
+    else:
+        subject_dict["source_index_bytes"] = None
+    payload["subject"] = subject_dict
+    return payload
+
+
 def _source_subject_from_handle(source: Any) -> SourceSubject:
     artifact_ref = str(getattr(source, "artifact_id", "") or "")
     if not artifact_ref:
@@ -531,5 +612,7 @@ __all__ = [
     "source_catalog_from_manifest",
     "source_catalog_from_selected_safetensors",
     "source_subject_broadcast_payload",
+    "source_subject_payload_from_tensor_dict",
+    "source_subject_payload_to_tensor_dict",
     "source_subject_from_broadcast_payload",
 ]

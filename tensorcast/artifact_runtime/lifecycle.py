@@ -143,6 +143,8 @@ from tensorcast.artifact_runtime.source import (
     resolve_source_subject,
     source_subject_broadcast_payload,
     source_subject_from_broadcast_payload,
+    source_subject_payload_from_tensor_dict,
+    source_subject_payload_to_tensor_dict,
 )
 from tensorcast.artifact_runtime.view import (
     RuntimeWorkerView,
@@ -3177,6 +3179,12 @@ class ArtifactRuntimeIntegration:
     ) -> RetainedBindingResult:
         target_device = self._require_target_device(request.target_device)
         authority = request.authority
+        profile_extra = {
+            "target_device": str(target_device),
+            "authority_present": authority is not None,
+            "local_serving_ref_present": bool(request.local_serving_ref),
+            "expected_member": repr(request.expected_member),
+        }
         if authority is None and not request.local_serving_ref:
             raise RestoreBindingError(
                 "ArtifactRuntimeIntegration._restore_retained_for_intent requires "
@@ -3186,11 +3194,19 @@ class ArtifactRuntimeIntegration:
             rejection_reason = runtime_restore_rejection_reason(authority)
             if rejection_reason is not None:
                 raise RestoreBindingError(rejection_reason)
-        model = self._build_meta_model(
-            request.framework_config,
-            request.model_config,
-        )
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "retained_restore.build_meta_model",
+            logger=_LOGGER,
+            device=target_device,
+            extra=profile_extra,
+        ):
+            model = self._build_meta_model(
+                request.framework_config,
+                request.model_config,
+            )
         try:
+            acquire_restore_start = time.perf_counter()
             with restore_retained_binding(
                 authority=authority,
                 local_serving_ref=request.local_serving_ref,
@@ -3208,60 +3224,94 @@ class ArtifactRuntimeIntegration:
                 client=request.client,
                 restore_fn=request.restore_fn,
             ) as restored:
-                if authority is not None:
-                    expected = getattr(authority, "expected", None)
-                    expected_tensor_schema_hash = getattr(
-                        expected, "tensor_schema_hash", None
-                    )
-                    artifact_report = _runtime_attachment_report_for_retained(
-                        authority=authority,
-                        tensors=restored.tensors,
-                        binding_handle=restored,
-                        target_device=target_device,
-                        tensor_schema_hash=str(expected_tensor_schema_hash or ""),
-                        reservation_bytes=restored.reservation_bytes,
-                    )
-                    artifact_ref = (
-                        getattr(authority, "serving_artifact_id", None)
-                        or getattr(authority, "local_serving_ref", None)
-                        or ""
-                    )
-                    serving_artifact_ref = getattr(
-                        authority, "serving_artifact_id", None
-                    )
-                    local_serving_ref = getattr(authority, "local_serving_ref", None)
-                    readiness = str(
-                        getattr(authority, "readiness", "") or "runtime_local_ready"
-                    )
-                    verification_state = str(
-                        getattr(authority, "verification_state", "") or ""
-                    )
-                else:
-                    expected_tensor_schema_hash = request.expected_tensor_schema_hash
-                    artifact_ref = (
-                        request.serving_artifact_id or request.local_serving_ref or ""
-                    )
-                    serving_artifact_ref = request.serving_artifact_id
-                    local_serving_ref = request.local_serving_ref
-                    readiness = "runtime_local_ready"
-                    verification_state = ""
-                    artifact_report = _runtime_attachment_report_for_artifact_id(
-                        artifact_id=str(artifact_ref),
-                        tensors=restored.tensors,
-                        binding_handle=restored,
-                        target_device=target_device,
-                        tensor_schema_hash=str(expected_tensor_schema_hash or ""),
-                        artifact_profile="retained_binding",
-                        authority_scope="daemon_retained_runtime_attachment",
-                        retained=True,
-                        reservation_bytes=restored.reservation_bytes,
-                    )
-                expected_runtime_names = tuple(
-                    str(name)
-                    for name in restored.tensors
-                    if not is_reserved_runtime_tensor_name(str(name))
+                emit_tensorcast_profile_event(
+                    "tensorcast",
+                    "retained_restore.acquire_and_restore",
+                    logger=_LOGGER,
+                    payload={
+                        **profile_extra,
+                        "tensor_count": len(restored.tensors),
+                        "reservation_bytes": int(restored.reservation_bytes),
+                        "binding_layout_id": restored.binding_value_ref.binding_layout_id,
+                        "total_sec": time.perf_counter() - acquire_restore_start,
+                    },
                 )
-                self._align_runtime_tensor_names(model, expected_runtime_names)
+                with tensorcast_profile_stage(
+                    "tensorcast",
+                    "retained_restore.build_attachment_report",
+                    logger=_LOGGER,
+                    device=target_device,
+                    extra=profile_extra,
+                ):
+                    if authority is not None:
+                        expected = getattr(authority, "expected", None)
+                        expected_tensor_schema_hash = getattr(
+                            expected, "tensor_schema_hash", None
+                        )
+                        artifact_report = _runtime_attachment_report_for_retained(
+                            authority=authority,
+                            tensors=restored.tensors,
+                            binding_handle=restored,
+                            target_device=target_device,
+                            tensor_schema_hash=str(expected_tensor_schema_hash or ""),
+                            reservation_bytes=restored.reservation_bytes,
+                        )
+                        artifact_ref = (
+                            getattr(authority, "serving_artifact_id", None)
+                            or getattr(authority, "local_serving_ref", None)
+                            or ""
+                        )
+                        serving_artifact_ref = getattr(
+                            authority, "serving_artifact_id", None
+                        )
+                        local_serving_ref = getattr(
+                            authority, "local_serving_ref", None
+                        )
+                        readiness = str(
+                            getattr(authority, "readiness", "") or "runtime_local_ready"
+                        )
+                        verification_state = str(
+                            getattr(authority, "verification_state", "") or ""
+                        )
+                    else:
+                        expected_tensor_schema_hash = (
+                            request.expected_tensor_schema_hash
+                        )
+                        artifact_ref = (
+                            request.serving_artifact_id
+                            or request.local_serving_ref
+                            or ""
+                        )
+                        serving_artifact_ref = request.serving_artifact_id
+                        local_serving_ref = request.local_serving_ref
+                        readiness = "runtime_local_ready"
+                        verification_state = ""
+                        artifact_report = _runtime_attachment_report_for_artifact_id(
+                            artifact_id=str(artifact_ref),
+                            tensors=restored.tensors,
+                            binding_handle=restored,
+                            target_device=target_device,
+                            tensor_schema_hash=str(expected_tensor_schema_hash or ""),
+                            artifact_profile="retained_binding",
+                            authority_scope="daemon_retained_runtime_attachment",
+                            retained=True,
+                            reservation_bytes=restored.reservation_bytes,
+                        )
+                with tensorcast_profile_stage(
+                    "tensorcast",
+                    "retained_restore.align_runtime_tensor_names",
+                    logger=_LOGGER,
+                    device=target_device,
+                    extra=profile_extra,
+                ) as profile:
+                    expected_runtime_names = tuple(
+                        str(name)
+                        for name in restored.tensors
+                        if not is_reserved_runtime_tensor_name(str(name))
+                    )
+                    self._align_runtime_tensor_names(model, expected_runtime_names)
+                    if profile is not None:
+                        profile["runtime_tensor_count"] = len(expected_runtime_names)
                 state_seed = RuntimeStateSeed(
                     artifact_ref=artifact_ref,
                     serving_artifact_ref=serving_artifact_ref,
@@ -3278,26 +3328,35 @@ class ArtifactRuntimeIntegration:
                     },
                     realization_report=artifact_report,
                 )
-                runtime_state = self._materializer().attach_and_finalize(
-                    model=model,
-                    tensors=restored.tensors,
-                    binding_handle=restored,
-                    context=self._framework_context(
-                        request.framework_config,
-                        request.model_config,
-                    ),
-                    state_seed=state_seed,
-                    replace_meta_params=True,
-                    target_device=target_device,
-                    model_config=request.model_config,
-                    run_process_after_load=False,
-                    # Local-ready refs are admitted by daemon binding schema;
-                    # authority restores still validate the full runtime model.
-                    expected_tensor_schema_hash=(
-                        expected_tensor_schema_hash if authority is not None else None
-                    ),
-                    model_runtime_spec=request.model_runtime_spec,
-                )
+                with tensorcast_profile_stage(
+                    "tensorcast",
+                    "retained_restore.attach_and_finalize",
+                    logger=_LOGGER,
+                    device=target_device,
+                    extra=profile_extra,
+                ):
+                    runtime_state = self._materializer().attach_and_finalize(
+                        model=model,
+                        tensors=restored.tensors,
+                        binding_handle=restored,
+                        context=self._framework_context(
+                            request.framework_config,
+                            request.model_config,
+                        ),
+                        state_seed=state_seed,
+                        replace_meta_params=True,
+                        target_device=target_device,
+                        model_config=request.model_config,
+                        run_process_after_load=False,
+                        # Local-ready refs are admitted by daemon binding schema;
+                        # authority restores still validate the full runtime model.
+                        expected_tensor_schema_hash=(
+                            expected_tensor_schema_hash
+                            if authority is not None
+                            else None
+                        ),
+                        model_runtime_spec=request.model_runtime_spec,
+                    )
                 return RetainedBindingResult(
                     model=model,
                     runtime_state=runtime_state,
@@ -4760,19 +4819,137 @@ class ArtifactRuntimeIntegration:
         source_rank = int(getattr(coordinator, "source_rank", 0) or 0)
         is_source_rank = getattr(coordinator, "is_source_rank", None)
         resolve_locally = bool(is_source_rank()) if callable(is_source_rank) else True
-        subject = (
-            resolve_source_subject(path, verify_checksums=verify_checksums)
-            if resolve_locally
-            else None
-        )
-        payload = None if subject is None else source_subject_broadcast_payload(subject)
+        profile_extra = {
+            "source_rank": source_rank,
+            "resolve_locally": resolve_locally,
+            "verify_checksums": bool(verify_checksums),
+        }
+        subject = None
+        if resolve_locally:
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "local_ready.prepare.resolve_source_subject.coordinator.resolve_local",
+                logger=_LOGGER,
+                extra=profile_extra,
+            ):
+                subject = resolve_source_subject(
+                    path, verify_checksums=verify_checksums
+                )
+        payload = None
+        if subject is not None:
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "local_ready.prepare.resolve_source_subject.coordinator.build_payload",
+                logger=_LOGGER,
+                extra=profile_extra,
+            ) as profile:
+                payload = source_subject_broadcast_payload(subject)
+                if profile is not None:
+                    subject_payload = payload.get("subject")
+                    if isinstance(subject_payload, Mapping):
+                        profile["payload_kind"] = str(
+                            subject_payload.get("payload_kind") or "public_disk_full"
+                        )
+                        canonical_index = subject_payload.get("canonical_index_bytes")
+                        source_index = subject_payload.get("source_index_bytes")
+                        profile["canonical_index_bytes"] = len(
+                            bytes(canonical_index or b"")
+                        )
+                        profile["source_index_bytes"] = len(bytes(source_index or b""))
+                    profile["payload_source_kind"] = str(payload.get("kind") or "")
         broadcast = getattr(coordinator, "broadcast_object", None)
         if not callable(broadcast):
             raise SourceSubjectError(
                 "TensorCast source subject coordinator must provide "
                 "broadcast_object(payload, src)"
             )
-        payload = broadcast(payload, src=source_rank)
+        broadcast_tensor_dict = getattr(coordinator, "broadcast_tensor_dict", None)
+        can_broadcast_tensor_dict = callable(broadcast_tensor_dict)
+        if not can_broadcast_tensor_dict:
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "local_ready.prepare.resolve_source_subject.coordinator.broadcast",
+                logger=_LOGGER,
+                extra={
+                    **profile_extra,
+                    "payload_present_before_broadcast": payload is not None,
+                    "tensor_payload_available": False,
+                },
+            ) as profile:
+                payload = broadcast(payload, src=source_rank)
+                if profile is not None and isinstance(payload, Mapping):
+                    profile["broadcast_transport"] = "object"
+                    profile["tensor_payload_selected"] = False
+                    subject_payload = payload.get("subject")
+                    if isinstance(subject_payload, Mapping):
+                        profile["payload_kind"] = str(
+                            subject_payload.get("payload_kind") or "public_disk_full"
+                        )
+                        profile["has_canonical_index"] = (
+                            "canonical_index_bytes" in subject_payload
+                        )
+            if payload is None:
+                raise SourceSubjectError(
+                    "TensorCast source subject coordinator returned no payload"
+                )
+            if not isinstance(payload, Mapping):
+                raise SourceSubjectError(
+                    "TensorCast source subject coordinator must broadcast a mapping payload"
+                )
+            if resolve_locally and subject is not None:
+                return subject
+            with tensorcast_profile_stage(
+                "tensorcast",
+                "local_ready.prepare.resolve_source_subject.coordinator.from_payload",
+                logger=_LOGGER,
+                extra=profile_extra,
+            ):
+                return source_subject_from_broadcast_payload(payload)
+        tensor_payload = (
+            source_subject_payload_to_tensor_dict(payload)
+            if payload is not None
+            else None
+        )
+        local_decision = (
+            {
+                "tensor_payload": tensor_payload is not None,
+            }
+            if payload is not None
+            else None
+        )
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "local_ready.prepare.resolve_source_subject.coordinator.broadcast",
+            logger=_LOGGER,
+            extra={
+                **profile_extra,
+                "payload_present_before_broadcast": payload is not None,
+                "tensor_payload_available": tensor_payload is not None,
+            },
+        ) as profile:
+            decision = broadcast(local_decision, src=source_rank)
+            use_tensor_payload = bool(
+                isinstance(decision, Mapping) and decision.get("tensor_payload")
+            )
+            if use_tensor_payload:
+                payload = source_subject_payload_from_tensor_dict(
+                    broadcast_tensor_dict(tensor_payload, src=source_rank)
+                )
+            else:
+                payload = broadcast(payload, src=source_rank)
+            if profile is not None and isinstance(payload, Mapping):
+                profile["broadcast_transport"] = (
+                    "tensor_dict" if use_tensor_payload else "object"
+                )
+                profile["tensor_payload_selected"] = use_tensor_payload
+                subject_payload = payload.get("subject")
+                if isinstance(subject_payload, Mapping):
+                    profile["payload_kind"] = str(
+                        subject_payload.get("payload_kind") or "public_disk_full"
+                    )
+                    profile["has_canonical_index"] = (
+                        "canonical_index_bytes" in subject_payload
+                    )
         if payload is None:
             raise SourceSubjectError(
                 "TensorCast source subject coordinator returned no payload"
@@ -4781,10 +4958,19 @@ class ArtifactRuntimeIntegration:
             raise SourceSubjectError(
                 "TensorCast source subject coordinator must broadcast a mapping payload"
             )
-        return source_subject_from_broadcast_payload(payload)
+        if resolve_locally and subject is not None:
+            return subject
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "local_ready.prepare.resolve_source_subject.coordinator.from_payload",
+            logger=_LOGGER,
+            extra=profile_extra,
+        ):
+            return source_subject_from_broadcast_payload(payload)
 
     def source_subject_broadcast_payload(
-        self, subject: SourceSubject
+        self,
+        subject: SourceSubject,
     ) -> dict[str, Any]:
         return source_subject_broadcast_payload(subject)
 

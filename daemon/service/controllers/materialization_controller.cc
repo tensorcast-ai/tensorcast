@@ -19,6 +19,7 @@
 #include "daemon/service/controllers/materialization_policy_utils.h"
 #include "daemon/util/grpc_peer_utils.h"
 #include "daemon/util/status_utils.h"
+#include "google/protobuf/util/time_util.h"
 
 namespace tensorcast::daemon {
 
@@ -230,10 +231,89 @@ std::string make_daemon_session_id() {
   return absl::StrCat("session-", ::getpid(), "-", std::chrono::steady_clock::now().time_since_epoch().count());
 }
 
+google::protobuf::Any pack_operation_continuation_metadata(
+    const tensorcast::operation::v1::OperationRef& operation_ref) {
+  tensorcast::operation::v1::OperationContinuationMetadata metadata;
+  metadata.mutable_ref()->CopyFrom(operation_ref);
+  google::protobuf::Any any;
+  any.PackFrom(metadata);
+  return any;
+}
+
+std::string make_prefetch_serving_binding_operation_id(const v2::PrefetchServingBindingRequest& req) {
+  if (req.has_operation_id() && !req.operation_id().empty()) {
+    return req.operation_id();
+  }
+  return absl::StrCat(
+      "prefetch-serving-binding:",
+      req.source_selection().artifact_id(),
+      ":",
+      std::chrono::steady_clock::now().time_since_epoch().count());
+}
+
+void fill_prefetch_serving_binding_operation_ref(
+    const v2::PrefetchServingBindingRequest& req,
+    std::string_view operation_id,
+    std::string_view binding_id,
+    tensorcast::operation::v1::OperationRef* op_ref) {
+  op_ref->set_operation_id(std::string(operation_id));
+  op_ref->set_kind("prefetch_serving_binding");
+  op_ref->set_target_artifact_id(req.source_selection().artifact_id());
+  op_ref->set_authority_scope_kind("daemon_retained_binding");
+  op_ref->set_authority_scope_id(std::string(binding_id));
+  op_ref->set_attachment_kind("serving_binding_value");
+  op_ref->set_recovery_class("daemon_retained_local");
+}
+
+void fill_operation_status(
+    tensorcast::operation::v1::OperationStatus* status,
+    tensorcast::operation::v1::OperationState state,
+    std::string_view message,
+    double progress) {
+  status->set_state(state);
+  status->set_message(std::string(message));
+  status->set_progress(progress);
+  *status->mutable_as_of() = google::protobuf::util::TimeUtil::GetCurrentTime();
+}
+
+absl::Status preflight_prefetch_serving_binding_local_ready_request(
+    const v2::PrefetchServingBindingRequest& req) {
+  if (!req.has_source_selection() || req.source_selection().artifact_id().empty()) {
+    return absl::InvalidArgumentError("source_selection.artifact_id is required");
+  }
+  if (req.requested_readiness() == tensorcast::operation::v1::SERVING_BINDING_READINESS_PUBLISHED_READY) {
+    return absl::UnimplementedError("serving_published_ready promotion is not implemented");
+  }
+  const auto& layout = req.serving_binding_target().resolved_layout();
+  const auto reuse_mode = layout.source_reuse().mode();
+  if (reuse_mode == tensorcast::operation::v1::SERVING_BINDING_SOURCE_REUSE_MODE_SERVING_TRANSFORM_REQUIRED) {
+    return absl::FailedPreconditionError("serving transform required before allocation");
+  }
+  if (reuse_mode == tensorcast::operation::v1::SERVING_BINDING_SOURCE_REUSE_MODE_UNSUPPORTED ||
+      reuse_mode == tensorcast::operation::v1::SERVING_BINDING_SOURCE_REUSE_MODE_UNSPECIFIED) {
+    return absl::FailedPreconditionError("serving source reuse mode is unsupported");
+  }
+  auto target_layout_or = parse_serving_target_layout(layout.target_layout());
+  if (!target_layout_or.ok()) {
+    return target_layout_or.status();
+  }
+  if (!layout.copy_plan_bytes().empty()) {
+    return absl::UnimplementedError("serving binding mapped copy plans are not implemented");
+  }
+  if (!layout.realization_plan_bytes().empty()) {
+    v2::BindingRealizationPlan realization_plan;
+    if (!realization_plan.ParseFromString(layout.realization_plan_bytes())) {
+      return absl::InvalidArgumentError("serving binding realization_plan_bytes is invalid");
+    }
+  }
+  return absl::OkStatus();
+}
+
 } // namespace
 
 MaterializationController::MaterializationController(Dep d)
     : global_store_client_(d.global_store_client),
+      async_runtime_(&d.async_runtime),
       shutdown_signal_(&d.shutdown_signal),
       binding_registry_(&d.binding_registry),
       handle_leases_(d.handle_leases),
@@ -558,6 +638,9 @@ grpc::Status MaterializationController::prefetch_serving_binding(
     for (const auto& member_target : target_set.members()) {
       v2::PrefetchServingBindingRequest member_req;
       member_req.mutable_source_selection()->CopyFrom(req.source_selection());
+      if (req.has_public_disk_source()) {
+        member_req.mutable_public_disk_source()->CopyFrom(req.public_disk_source());
+      }
       member_req.mutable_source()->CopyFrom(req.source());
       member_req.mutable_serving_binding_target()->CopyFrom(member_target);
       member_req.set_requested_readiness(req.requested_readiness());
@@ -575,7 +658,14 @@ grpc::Status MaterializationController::prefetch_serving_binding(
       member_req.set_collective_policy(req.collective_policy());
 
       v2::PrefetchServingBindingResponse member_resp;
-      const grpc::Status member_status = prefetch_serving_binding(rctx, member_req, member_resp);
+      const auto execution_context =
+          OwnedBindingService::source_bound_execution_context_from_server_context(rctx.server_context());
+      ServingPrefetchLocalReadyResult member_local_result;
+      const grpc::Status member_status =
+          materialize_prefetch_serving_binding_local_ready(execution_context, &rctx, member_req, member_local_result);
+      if (member_status.ok()) {
+        member_resp.CopyFrom(member_local_result.response);
+      }
       if (!member_status.ok() || member_resp.status().state() != tensorcast::operation::v1::OPERATION_STATE_SUCCESS ||
           !member_resp.status().has_result()) {
         failed = true;
@@ -633,6 +723,155 @@ grpc::Status MaterializationController::prefetch_serving_binding(
     rctx.mark_success();
     return grpc::Status::OK;
   }
+  const auto execution_context =
+      OwnedBindingService::source_bound_execution_context_from_server_context(rctx.server_context());
+  if (auto status = preflight_prefetch_serving_binding_local_ready_request(req); !status.ok()) {
+    return to_grpc_status(status);
+  }
+  if (global_store_client_ != nullptr && global_store_client_->is_connected() && async_runtime_ != nullptr) {
+    const grpc::Status status = start_async_prefetch_serving_binding_local_ready(execution_context, req, resp);
+    if (!status.ok()) {
+      return status;
+    }
+    rctx.mark_success();
+    return grpc::Status::OK;
+  }
+
+  ServingPrefetchLocalReadyResult local_result;
+  const grpc::Status status =
+      materialize_prefetch_serving_binding_local_ready(execution_context, &rctx, req, local_result);
+  if (!status.ok()) {
+    return status;
+  }
+  resp.CopyFrom(local_result.response);
+  rctx.mark_success();
+  return grpc::Status::OK;
+}
+
+grpc::Status MaterializationController::start_async_prefetch_serving_binding_local_ready(
+    const OwnedBindingService::SourceBoundExecutionContext& execution_context,
+    const v2::PrefetchServingBindingRequest& req,
+    v2::PrefetchServingBindingResponse& resp) {
+  const std::string operation_id = make_prefetch_serving_binding_operation_id(req);
+  tensorcast::operation::v1::OperationRef operation_ref;
+  fill_prefetch_serving_binding_operation_ref(req, operation_id, /*binding_id=*/"", &operation_ref);
+
+  tensorcast::operation::v1::AcquireOperationLeaseRequest lease_req;
+  lease_req.set_operation_id(operation_id);
+  lease_req.set_kind(operation_ref.kind());
+  lease_req.set_target_artifact_id(operation_ref.target_artifact_id());
+  lease_req.set_owner_id(daemon_id_);
+  const uint64_t request_budget_ms =
+      execution_context.request_budget.count() > 0 ? static_cast<uint64_t>(execution_context.request_budget.count()) : 0;
+  lease_req.set_ttl_ms(std::max<uint64_t>(request_budget_ms, 600000));
+  auto lease_or = global_store_client_->acquire_operation_lease(lease_req);
+  if (!lease_or.ok()) {
+    return to_grpc_status(lease_or.status());
+  }
+  if (!lease_or->acquired()) {
+    tensorcast::operation::v1::GetOperationRequest get_req;
+    get_req.set_operation_id(operation_id);
+    get_req.mutable_ref()->CopyFrom(operation_ref);
+    auto get_or = global_store_client_->get_operation(get_req);
+    if (!get_or.ok()) {
+      return {grpc::StatusCode::FAILED_PRECONDITION, "serving binding prefetch operation is already owned"};
+    }
+    resp.mutable_operation_ref()->CopyFrom(get_or->ref());
+    resp.mutable_status()->CopyFrom(get_or->status());
+    return grpc::Status::OK;
+  }
+
+  const uint64_t lease_generation = lease_or->lease().lease_generation();
+  const std::string lease_token = lease_or->lease().lease_token();
+  const google::protobuf::Any snapshot = pack_operation_continuation_metadata(operation_ref);
+  tensorcast::operation::v1::UpdateOperationRequest running_update;
+  running_update.set_operation_id(operation_id);
+  running_update.set_lease_generation(lease_generation);
+  fill_operation_status(
+      running_update.mutable_status(),
+      tensorcast::operation::v1::OPERATION_STATE_RUNNING,
+      "serving binding materialization running",
+      0.0);
+  running_update.mutable_snapshot()->CopyFrom(snapshot);
+  absl::Status update_status = global_store_client_->update_operation(running_update);
+  if (!update_status.ok()) {
+    tensorcast::operation::v1::ReleaseOperationLeaseRequest release_req;
+    release_req.set_lease_token(lease_token);
+    auto release_or = global_store_client_->release_operation_lease(release_req);
+    LOG_IF(WARNING, !release_or.ok())
+        << "release_operation_lease failed after prefetch running update failure for op=" << operation_id << ": "
+        << release_or.status();
+    return to_grpc_status(update_status);
+  }
+
+  resp.mutable_operation_ref()->CopyFrom(operation_ref);
+  resp.mutable_status()->CopyFrom(running_update.status());
+
+  v2::PrefetchServingBindingRequest req_copy = req;
+  auto client_sp = global_store_client_;
+  auto execution_context_copy = execution_context;
+  async_runtime_->blocking_executor()->add(
+      [this,
+       client_sp = std::move(client_sp),
+       execution_context_copy,
+       req_copy = std::move(req_copy),
+       operation_id,
+       lease_generation,
+       lease_token,
+       operation_ref = std::move(operation_ref)]() mutable {
+        ServingPrefetchLocalReadyResult local_result;
+        const grpc::Status materialize_status =
+            materialize_prefetch_serving_binding_local_ready(execution_context_copy, nullptr, req_copy, local_result);
+
+        tensorcast::operation::v1::UpdateOperationRequest final_update;
+        final_update.set_operation_id(operation_id);
+        final_update.set_lease_generation(lease_generation);
+        if (materialize_status.ok()) {
+          final_update.mutable_status()->CopyFrom(local_result.response.status());
+          *final_update.mutable_status()->mutable_as_of() = google::protobuf::util::TimeUtil::GetCurrentTime();
+          final_update.mutable_snapshot()->CopyFrom(
+              pack_operation_continuation_metadata(local_result.response.operation_ref()));
+        } else {
+          auto* status = final_update.mutable_status();
+          fill_operation_status(
+              status,
+              tensorcast::operation::v1::OPERATION_STATE_FAILED,
+              materialize_status.error_message(),
+              1.0);
+          auto* error = status->mutable_error();
+          error->set_status_code(grpc_code_name(materialize_status.error_code()));
+          error->set_message(materialize_status.error_message());
+          error->set_retryable(false);
+          final_update.mutable_snapshot()->CopyFrom(pack_operation_continuation_metadata(operation_ref));
+        }
+
+        const absl::Status final_status = client_sp->update_operation(final_update);
+        LOG_IF(WARNING, !final_status.ok())
+            << "update_operation(final) failed for prefetch op=" << operation_id << ": " << final_status;
+
+        tensorcast::operation::v1::ReleaseOperationLeaseRequest release_req;
+        release_req.set_lease_token(lease_token);
+        auto release_or = client_sp->release_operation_lease(release_req);
+        LOG_IF(WARNING, !release_or.ok())
+            << "release_operation_lease failed for prefetch op=" << operation_id << ": " << release_or.status();
+      });
+
+  return grpc::Status::OK;
+}
+
+grpc::Status MaterializationController::materialize_prefetch_serving_binding_local_ready(
+    const OwnedBindingService::SourceBoundExecutionContext& execution_context,
+    RpcContext* rctx,
+    const v2::PrefetchServingBindingRequest& req,
+    ServingPrefetchLocalReadyResult& local_result) {
+  const auto profile_start = std::chrono::steady_clock::now();
+  auto elapsed_sec = [](auto start, auto end) { return std::chrono::duration<double>(end - start).count(); };
+  double parse_target_sec = 0.0;
+  double create_owned_binding_sec = 0.0;
+  double record_lookup_sec = 0.0;
+  double retained_mark_sec = 0.0;
+  double lease_release_sec = 0.0;
+  double response_sec = 0.0;
   if (!req.has_source_selection() || req.source_selection().artifact_id().empty()) {
     return {grpc::StatusCode::INVALID_ARGUMENT, "source_selection.artifact_id is required"};
   }
@@ -651,12 +890,18 @@ grpc::Status MaterializationController::prefetch_serving_binding(
     return {grpc::StatusCode::FAILED_PRECONDITION, "serving source reuse mode is unsupported"};
   }
 
+  const auto parse_target_start = std::chrono::steady_clock::now();
   auto target_layout_or = parse_serving_target_layout(layout.target_layout());
+  const auto parse_target_done = std::chrono::steady_clock::now();
+  parse_target_sec = elapsed_sec(parse_target_start, parse_target_done);
   if (!target_layout_or.ok()) {
     return to_grpc_status(target_layout_or.status());
   }
   v2::CreateOwnedBindingRequest create_req;
   create_req.mutable_source_selection()->CopyFrom(req.source_selection());
+  if (req.has_public_disk_source()) {
+    create_req.mutable_public_disk_source()->CopyFrom(req.public_disk_source());
+  }
   create_req.mutable_target_layout()->CopyFrom(*target_layout_or);
   create_req.set_target_index_bytes(layout.target_index_bytes());
   create_req.set_pid(static_cast<int32_t>(::getpid()));
@@ -684,17 +929,25 @@ grpc::Status MaterializationController::prefetch_serving_binding(
   create_req.set_collective_policy(req.collective_policy());
 
   v2::CreateOwnedBindingResponse create_resp;
-  const grpc::Status create_status = owner_binding_service_.create_owned_binding(rctx, create_req, create_resp);
+  const auto create_owned_binding_start = std::chrono::steady_clock::now();
+  const grpc::Status create_status =
+      rctx != nullptr ? owner_binding_service_.create_owned_binding(*rctx, create_req, create_resp)
+                      : owner_binding_service_.create_owned_binding_with_context(execution_context, create_req, create_resp);
+  const auto create_owned_binding_done = std::chrono::steady_clock::now();
+  create_owned_binding_sec = elapsed_sec(create_owned_binding_start, create_owned_binding_done);
   if (!create_status.ok()) {
     return create_status;
   }
-  if (rctx.server_context().IsCancelled()) {
+  if (rctx != nullptr && rctx->server_context().IsCancelled()) {
     cleanup_prefetch_created_binding(
         *binding_registry_, handle_leases_, create_resp, "prefetch_serving_caller_cancelled");
     return {grpc::StatusCode::CANCELLED, "PrefetchServingBinding request was cancelled"};
   }
 
+  const auto record_lookup_start = std::chrono::steady_clock::now();
   auto record_or = binding_registry_->get(create_resp.binding_id());
+  const auto record_lookup_done = std::chrono::steady_clock::now();
+  record_lookup_sec = elapsed_sec(record_lookup_start, record_lookup_done);
   if (!record_or.ok()) {
     cleanup_prefetch_created_binding(
         *binding_registry_, handle_leases_, create_resp, "prefetch_serving_missing_record");
@@ -724,6 +977,7 @@ grpc::Status MaterializationController::prefetch_serving_binding(
       absl::StrCat("capability:", create_resp.binding_id(), ":", serving_value.binding_value_id());
   const absl::Time expires_at = now + absl::Milliseconds(unacquired_ttl.count());
 
+  const auto retained_mark_start = std::chrono::steady_clock::now();
   tensorcast::operation::v1::PrefetchServingBindingResult result;
   bool staged_value_missing = false;
   {
@@ -744,6 +998,7 @@ grpc::Status MaterializationController::prefetch_serving_binding(
     record->reservation_expires_at = expires_at;
     record->unacquired_deadline = expires_at;
     record->idle_deadline = absl::InfiniteFuture();
+    record->idle_ttl_after_last_release = absl::Milliseconds(idle_ttl.count());
     record->materialization_deadline = absl::InfiniteFuture();
     record->verification_state = v2::BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY;
     record->source_artifact_ref = target.source().has_source_artifact_ref() ? target.source().source_artifact_ref()
@@ -801,26 +1056,32 @@ grpc::Status MaterializationController::prefetch_serving_binding(
       capability->set_expires_at_ms(static_cast<uint64_t>(absl::ToUnixMillis(expires_at)));
     }
   }
+  const auto retained_mark_done = std::chrono::steady_clock::now();
+  retained_mark_sec = elapsed_sec(retained_mark_start, retained_mark_done);
 
   if (staged_value_missing) {
     cleanup_prefetch_created_binding(
         *binding_registry_, handle_leases_, create_resp, "prefetch_serving_missing_staged");
     return {grpc::StatusCode::FAILED_PRECONDITION, "staged serving binding value missing from registry"};
   }
-  if (rctx.server_context().IsCancelled()) {
+  if (rctx != nullptr && rctx->server_context().IsCancelled()) {
     cleanup_prefetch_created_binding(
         *binding_registry_, handle_leases_, create_resp, "prefetch_serving_caller_cancelled");
     return {grpc::StatusCode::CANCELLED, "PrefetchServingBinding request was cancelled"};
   }
 
   if (!create_resp.mem_handle().lease_token().empty()) {
+    const auto lease_release_start = std::chrono::steady_clock::now();
     auto release_status = handle_leases_->release(create_resp.mem_handle().lease_token());
+    const auto lease_release_done = std::chrono::steady_clock::now();
+    lease_release_sec = elapsed_sec(lease_release_start, lease_release_done);
     if (!release_status.ok()) {
       return to_grpc_status(release_status);
     }
   }
 
-  auto* op_ref = resp.mutable_operation_ref();
+  const auto response_start = std::chrono::steady_clock::now();
+  auto* op_ref = local_result.response.mutable_operation_ref();
   op_ref->set_operation_id(
       req.has_operation_id() && !req.operation_id().empty()
           ? req.operation_id()
@@ -832,12 +1093,36 @@ grpc::Status MaterializationController::prefetch_serving_binding(
   op_ref->set_attachment_kind("serving_binding_value");
   op_ref->set_recovery_class("daemon_retained_local");
 
-  auto* status = resp.mutable_status();
+  auto* status = local_result.response.mutable_status();
   status->set_state(tensorcast::operation::v1::OPERATION_STATE_SUCCESS);
   status->set_message("serving binding is local-ready");
   status->set_progress(1.0);
   status->mutable_result()->PackFrom(result);
-  rctx.mark_success();
+  const auto response_done = std::chrono::steady_clock::now();
+  response_sec = elapsed_sec(response_start, response_done);
+  const auto done = std::chrono::steady_clock::now();
+  local_result.binding_id = create_resp.binding_id();
+  local_result.target_device_uuid = target.device_uuid();
+  local_result.profile.parse_target_sec = parse_target_sec;
+  local_result.profile.create_owned_binding_sec = create_owned_binding_sec;
+  local_result.profile.record_lookup_sec = record_lookup_sec;
+  local_result.profile.retained_mark_sec = retained_mark_sec;
+  local_result.profile.lease_release_sec = lease_release_sec;
+  local_result.profile.response_sec = response_sec;
+  local_result.profile.total_sec = elapsed_sec(profile_start, done);
+  LOG(INFO) << "tc_profile prefetch_serving_binding timings"
+            << " operation_id=" << op_ref->operation_id()
+            << " artifact_id=" << req.source_selection().artifact_id()
+            << " binding_id=" << create_resp.binding_id()
+            << " target_device_uuid=" << target.device_uuid()
+            << " requested_readiness=" << req.requested_readiness()
+            << " parse_target_sec=" << parse_target_sec
+            << " create_owned_binding_sec=" << create_owned_binding_sec
+            << " record_lookup_sec=" << record_lookup_sec
+            << " retained_mark_sec=" << retained_mark_sec
+            << " lease_release_sec=" << lease_release_sec
+            << " response_sec=" << response_sec
+            << " total_sec=" << local_result.profile.total_sec;
   return grpc::Status::OK;
 }
 

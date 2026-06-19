@@ -754,7 +754,21 @@ absl::Status BindingRegistry::keepalive_attachment_ref(std::string_view binding_
 }
 
 void BindingRegistry::release_attachment_ref(std::string_view binding_id, absl::Time now) {
-  release_attachment_ref(binding_id, now, absl::InfiniteDuration());
+  absl::Duration idle_ttl = absl::InfiniteDuration();
+  std::shared_ptr<Record> record;
+  {
+    absl::MutexLock lock(&mu_);
+    auto it = records_.find(std::string(binding_id));
+    if (it == records_.end()) {
+      return;
+    }
+    record = it->second;
+  }
+  {
+    absl::MutexLock lock(&record->mu);
+    idle_ttl = record->idle_ttl_after_last_release;
+  }
+  release_attachment_ref(binding_id, now, idle_ttl);
 }
 
 void BindingRegistry::release_attachment_ref(std::string_view binding_id, absl::Time now, absl::Duration idle_ttl) {
@@ -774,7 +788,7 @@ void BindingRegistry::release_attachment_ref(std::string_view binding_id, absl::
     }
     if (record->active_attachment_refs == 0) {
       record->last_released_at = now;
-      if (idle_ttl != absl::InfiniteDuration()) {
+      if (idle_ttl != absl::InfiniteDuration() && record->first_acquired_at != absl::InfinitePast()) {
         record->idle_deadline = now + idle_ttl;
       }
     }

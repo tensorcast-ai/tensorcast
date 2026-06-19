@@ -3442,9 +3442,17 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
   const bool auto_can_select_source_window = source_window_eligible &&
       strategy_config.source_window_collective_selection_mode !=
           StrategyConfig::SourceWindowCollectiveSelectionMode::kDryRun;
+  const bool source_window_strict =
+      strategy_config.source_window_collective_selection_mode ==
+      StrategyConfig::SourceWindowCollectiveSelectionMode::kStrict;
   const std::optional<std::string> local_auto_reject =
       local_eligible ? local_auto_reject_reason(generic_estimate, local_estimate, local_plan_summary) : std::nullopt;
   const bool auto_prefers_local = local_eligible && !local_auto_reject.has_value();
+  const bool host_local_source =
+      environment.execution_topology.source_locality == loading::SourceLocalityHint::kHostLocal;
+  const bool shared_source =
+      environment.execution_topology.source_locality == loading::SourceLocalityHint::kSharedSource;
+  const bool source_window_auto_can_select = auto_can_select_source_window && shared_source;
   switch (strategy_config.executor_preference) {
     case StrategyConfig::ExecutorPreference::kGenericByteRange:
       choose_generic("executor_preference_generic");
@@ -3479,12 +3487,16 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
       break;
     case StrategyConfig::ExecutorPreference::kAuto:
     default:
-      if (auto_can_select_source_window) {
+      if (source_window_strict && auto_can_select_source_window) {
         plan.executor = strategy::ExecutionStrategyExecutor::kSourceWindowCollective;
-        plan.selection_reason = "auto_source_window_collective_candidate";
+        plan.selection_reason = "auto_source_window_collective_strict";
       } else if (auto_prefers_local) {
         plan.executor = strategy::ExecutionStrategyExecutor::kTensorBatchedLocal;
-        plan.selection_reason = "auto_prefers_local_batched";
+        plan.selection_reason = host_local_source ? "auto_host_local_prefers_local_batched"
+                                                  : "auto_prefers_local_batched";
+      } else if (source_window_auto_can_select) {
+        plan.executor = strategy::ExecutionStrategyExecutor::kSourceWindowCollective;
+        plan.selection_reason = "auto_source_window_collective_candidate";
       } else if (collective_eligible) {
         plan.executor = strategy::ExecutionStrategyExecutor::kOwnerFileCollective;
         plan.selection_reason = "auto_collective_after_local_rejection";

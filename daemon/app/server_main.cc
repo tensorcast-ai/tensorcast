@@ -1680,12 +1680,14 @@ int main(int argc, char** argv) {
   app_opts.startup_coordinator = std::make_shared<daemon::StartupCoordinator>();
   const bool owner_file_collective_prewarm_enabled = opts.materialization_strategy.enable_owner_file_collective;
   const bool source_window_collective_prewarm_enabled = opts.materialization_strategy.enable_source_window_collective;
+  const bool collective_clique_prewarm_enabled =
+      owner_file_collective_prewarm_enabled || source_window_collective_prewarm_enabled;
   const bool source_window_batched_scatter_prewarm_enabled = source_window_collective_prewarm_enabled &&
       opts.materialization_strategy.enable_source_window_batched_scatter_kernel;
   app_opts.deferred_startup_work = [pma,
                                     fake_cuda_backend,
                                     detected_gpu_count,
-                                    owner_file_collective_prewarm_enabled,
+                                    collective_clique_prewarm_enabled,
                                     source_window_batched_scatter_prewarm_enabled]() -> absl::Status {
     const absl::Status register_status = pma->register_all_pools();
     if (!register_status.ok()) {
@@ -1716,7 +1718,7 @@ int main(int argc, char** argv) {
         LOG(INFO) << "source-window batched scatter NVRTC prewarm complete for detected_gpu_count="
                   << detected_gpu_count;
       }
-      if (owner_file_collective_prewarm_enabled && detected_gpu_count > 1) {
+      if (collective_clique_prewarm_enabled && detected_gpu_count > 1) {
         std::vector<int> clique_devices;
         clique_devices.reserve(static_cast<size_t>(detected_gpu_count));
         for (int device_id = 0; device_id < detected_gpu_count; ++device_id) {
@@ -1728,8 +1730,8 @@ int main(int argc, char** argv) {
               clique_prewarm.code(),
               absl::StrCat("collective clique prewarm failed during deferred startup: ", clique_prewarm.message()));
         }
-      } else if (!owner_file_collective_prewarm_enabled && detected_gpu_count > 1) {
-        LOG(INFO) << "Skipping collective clique prewarm because owner-file collective is disabled";
+      } else if (!collective_clique_prewarm_enabled && detected_gpu_count > 1) {
+        LOG(INFO) << "Skipping collective clique prewarm because collective materialization is disabled";
       }
     }
     return absl::OkStatus();

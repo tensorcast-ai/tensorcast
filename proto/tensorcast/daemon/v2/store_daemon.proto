@@ -1455,6 +1455,7 @@ message CreateOwnedBindingRequest {
   SourceExecutionTopology execution_topology = 15;
   CollectivePolicy collective_policy = 16;
   BindingRealizationPlan realization_plan = 17;
+  PublicDiskSourceHandle public_disk_source = 18;
 }
 
 message CreateOwnedBindingResponse {
@@ -1488,6 +1489,7 @@ message PrefetchServingBindingRequest {
   GroupRealizationOptions group_realization = 8;
   SourceExecutionTopology execution_topology = 9;
   CollectivePolicy collective_policy = 10;
+  PublicDiskSourceHandle public_disk_source = 11;
 }
 
 message PrefetchServingBindingResponse {

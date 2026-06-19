@@ -117,6 +117,49 @@ using materialization_target_plan::TargetMaterializationPlan;
 using store::loading::MaterializationSource;
 namespace coordination = assembly_coordination;
 
+struct OwnedBindingDeviceMemorySnapshot {
+  bool ok{false};
+  int device_id{-1};
+  size_t free_bytes{0};
+  size_t total_bytes{0};
+  std::string error;
+};
+
+OwnedBindingDeviceMemorySnapshot capture_owned_binding_device_memory(int device_id) {
+  OwnedBindingDeviceMemorySnapshot snapshot;
+  snapshot.device_id = device_id;
+  const absl::Status status = tensorcast::cuda::get_memory_info(&snapshot.free_bytes, &snapshot.total_bytes, device_id);
+  if (status.ok()) {
+    snapshot.ok = true;
+  } else {
+    snapshot.error = status.ToString();
+  }
+  return snapshot;
+}
+
+void log_owned_binding_device_memory(
+    std::string_view stage,
+    std::string_view binding_id,
+    std::string_view artifact_id,
+    const OwnedBindingDeviceMemorySnapshot& snapshot,
+    const OwnedBindingDeviceMemorySnapshot* baseline = nullptr) {
+  std::string delta = "null";
+  if (baseline != nullptr && baseline->ok && snapshot.ok && baseline->device_id == snapshot.device_id) {
+    delta = absl::StrCat(
+        static_cast<long long>(snapshot.free_bytes) - static_cast<long long>(baseline->free_bytes));
+  }
+  LOG(INFO) << "tc_profile create_owned_binding_memory"
+            << " stage=" << stage
+            << " binding_id=" << binding_id
+            << " artifact_id=" << artifact_id
+            << " target_device=" << snapshot.device_id
+            << " ok=" << (snapshot.ok ? 1 : 0)
+            << " free_bytes=" << (snapshot.ok ? static_cast<long long>(snapshot.free_bytes) : -1)
+            << " total_bytes=" << (snapshot.ok ? static_cast<long long>(snapshot.total_bytes) : -1)
+            << " free_delta_from_before_allocate_bytes=" << delta
+            << " error=" << (snapshot.ok ? "ok" : snapshot.error);
+}
+
 constexpr size_t kBindingRealizationPlanCacheMaxEntries = 8;
 constexpr std::uint32_t kDefaultGroupPublishWaitTimeoutMs = 30000;
 
@@ -508,11 +551,20 @@ struct CachedMappedExecutionTemplate {
   std::optional<store::runtime::ingestion::strategy::SourceBoundStrategyPlan> strategy_plan;
 };
 
+struct CachedMappedTargetMaterializationPlan {
+  MappedTargetMaterializationPlan plan;
+  std::optional<std::string> source_window_realization_plan_hash;
+  std::optional<std::string> source_window_target_layout_template_hash;
+  std::optional<std::string> source_window_target_index_hash;
+};
+
 struct BindingRealizationPlanCacheState {
   absl::Mutex mu;
   absl::CondVar cv;
-  absl::flat_hash_map<std::string, MappedTargetMaterializationPlan> mapped_plans ABSL_GUARDED_BY(mu);
-  absl::flat_hash_map<std::string, CachedMappedExecutionTemplate> execution_templates ABSL_GUARDED_BY(mu);
+  absl::flat_hash_map<std::string, std::shared_ptr<const CachedMappedTargetMaterializationPlan>> mapped_plans
+      ABSL_GUARDED_BY(mu);
+  absl::flat_hash_map<std::string, std::shared_ptr<const CachedMappedExecutionTemplate>> execution_templates
+      ABSL_GUARDED_BY(mu);
   absl::flat_hash_set<std::string> mapped_plan_inflight ABSL_GUARDED_BY(mu);
   absl::flat_hash_set<std::string> execution_template_inflight ABSL_GUARDED_BY(mu);
   std::vector<std::string> mapped_plan_order ABSL_GUARDED_BY(mu);
@@ -2315,6 +2367,14 @@ struct SourceBoundMaterializationRequest {
   v2::TransformPlacement placement{v2::TRANSFORM_PLACEMENT_UNSPECIFIED};
 };
 
+OwnedBindingService::SourceBoundExecutionContext make_source_bound_execution_context(
+    const grpc::ServerContext& server_context) {
+  return OwnedBindingService::SourceBoundExecutionContext{
+      .loopback_peer = is_loopback_grpc_peer(server_context.peer()),
+      .request_budget = resolve_owner_request_budget(server_context),
+  };
+}
+
 struct PreparedSourceBoundPlan {
   std::string resolved_artifact_id;
   tensorcast::common::v1::ArtifactSelection current_selection;
@@ -2327,6 +2387,7 @@ struct PreparedSourceBoundPlan {
   std::optional<store::loading::DiskSource> disk_source;
   std::optional<store::loading::DiskMetadata> disk_metadata;
   std::optional<MappedTargetMaterializationPlan> mapped_plan;
+  std::shared_ptr<const CachedMappedTargetMaterializationPlan> mapped_plan_cache_entry;
   std::optional<std::string> mapped_plan_cache_key;
   bool mapped_plan_cache_hit{false};
   bool mapped_plan_cache_waited{false};
@@ -2340,6 +2401,16 @@ struct PreparedSourceBoundPlan {
   std::optional<GroupRealizationBeginContext> group_begin_context;
   bool execution_only_mutable{false};
 };
+
+const MappedTargetMaterializationPlan* mapped_plan_view(const PreparedSourceBoundPlan& prepared_plan) {
+  if (prepared_plan.mapped_plan_cache_entry != nullptr) {
+    return &prepared_plan.mapped_plan_cache_entry->plan;
+  }
+  if (prepared_plan.mapped_plan.has_value()) {
+    return &*prepared_plan.mapped_plan;
+  }
+  return nullptr;
+}
 
 struct PreparedSourceBoundExecution {
   store::loading::MaterializeHints hints;
@@ -2574,7 +2645,7 @@ grpc::Status validate_public_disk_source_hints(
 
 grpc::Status prepare_source_bound_plan(
     const OwnedBindingService::Dep& d,
-    RpcContext& rctx,
+    const OwnedBindingService::SourceBoundExecutionContext& execution_context,
     const store::DeviceKey& device,
     const SourceBoundMaterializationRequest& request,
     PreparedSourceBoundPlan& out) {
@@ -2590,6 +2661,13 @@ grpc::Status prepare_source_bound_plan(
   double mapped_plan_cache_lookup_sec = 0.0;
   double mapped_plan_cache_build_sec = 0.0;
   double mapped_plan_cache_store_sec = 0.0;
+  double mapped_plan_cache_restore_sec = 0.0;
+  double source_window_prepared_key_sec = 0.0;
+  double source_window_realization_plan_hash_sec = 0.0;
+  double source_window_target_layout_template_hash_sec = 0.0;
+  double source_window_target_index_hash_sec = 0.0;
+  double source_window_prepared_group_key_sec = 0.0;
+  double source_window_prepared_member_key_sec = 0.0;
   const bool group_realization_enabled = request.group_realization != nullptr && request.group_realization->enabled();
   if ((request.source_selection == nullptr && request.public_disk_source == nullptr && !group_realization_enabled) ||
       request.target_layout == nullptr) {
@@ -2638,7 +2716,7 @@ grpc::Status prepare_source_bound_plan(
   auto policy_done = std::chrono::steady_clock::now();
   policy_sec = elapsed_sec(profile_start, policy_done);
 
-  const bool loopback_peer = is_loopback_grpc_peer(rctx.server_context().peer());
+  const bool loopback_peer = execution_context.loopback_peer;
   tensorcast::common::v1::ArtifactSelection effective_source_selection;
   if (request.source_selection != nullptr) {
     effective_source_selection = *request.source_selection;
@@ -2822,9 +2900,20 @@ grpc::Status prepare_source_bound_plan(
   }
   if (request.realization_plan != nullptr) {
     MappedTargetMaterializationPlan mapped_plan;
+    std::shared_ptr<const CachedMappedTargetMaterializationPlan> cached_mapped_plan;
+    const MappedTargetMaterializationPlan* mapped_plan_for_output = nullptr;
     const auto& strategy_config = d.engine.options().materialization_strategy;
     const bool source_window_lightweight_coverage_plan = should_prepare_source_window_lightweight_coverage_plan(
         strategy_config, out.request_context.execution_topology, out.collective_policy);
+    const bool source_window_prepared_key_candidate = source_window_execution_template_uses_stable_runtime_group(
+        strategy_config,
+        out.disk_metadata,
+        out.collective_policy,
+        out.request_context.execution_topology,
+        out.disk_source.has_value());
+    std::optional<std::string> source_window_realization_plan_hash;
+    std::optional<std::string> source_window_target_layout_template_hash;
+    std::optional<std::string> source_window_target_index_hash;
     const BindingRealizationMaterializationPlanOptions mapped_plan_options{
         .build_byte_range_maps = !source_window_lightweight_coverage_plan,
         .canonical_index_parse_identity_key = out.disk_metadata.has_value() &&
@@ -2857,7 +2946,7 @@ grpc::Status prepare_source_bound_plan(
       while (true) {
         auto it = cache.mapped_plans.find(cache_key);
         if (it != cache.mapped_plans.end()) {
-          mapped_plan = it->second;
+          cached_mapped_plan = it->second;
           plan_cache_hit = true;
           break;
         }
@@ -2871,6 +2960,15 @@ grpc::Status prepare_source_bound_plan(
       }
       const auto mapped_plan_cache_lookup_done = std::chrono::steady_clock::now();
       mapped_plan_cache_lookup_sec = elapsed_sec(mapped_plan_cache_lookup_start, mapped_plan_cache_lookup_done);
+    }
+    if (cached_mapped_plan != nullptr) {
+      const auto mapped_plan_cache_restore_start = std::chrono::steady_clock::now();
+      mapped_plan_for_output = &cached_mapped_plan->plan;
+      source_window_realization_plan_hash = cached_mapped_plan->source_window_realization_plan_hash;
+      source_window_target_layout_template_hash = cached_mapped_plan->source_window_target_layout_template_hash;
+      source_window_target_index_hash = cached_mapped_plan->source_window_target_index_hash;
+      mapped_plan_cache_restore_sec =
+          elapsed_sec(mapped_plan_cache_restore_start, std::chrono::steady_clock::now());
     }
     if (!plan_cache_hit && plan_cache_builder) {
       const auto mapped_plan_build_start = std::chrono::steady_clock::now();
@@ -2897,34 +2995,33 @@ grpc::Status prepare_source_bound_plan(
         }
         return plan_status;
       }
-      auto& cache = binding_realization_plan_cache();
-      const auto mapped_plan_cache_store_start = std::chrono::steady_clock::now();
-      absl::MutexLock lock(&cache.mu);
-      put_bounded_binding_realization_cache_entry(
-          &cache.mapped_plans, &cache.mapped_plan_order, cache_key, mapped_plan);
-      cache.mapped_plan_inflight.erase(cache_key);
-      cache.cv.SignalAll();
-      const auto mapped_plan_cache_store_done = std::chrono::steady_clock::now();
-      mapped_plan_cache_store_sec = elapsed_sec(mapped_plan_cache_store_start, mapped_plan_cache_store_done);
+      mapped_plan_for_output = &mapped_plan;
     }
-    out.logical_total_size = mapped_plan.logical_total_size;
-    out.current_selection.Clear();
-    out.canonical_index_json = mapped_plan.canonical_index_json;
-    out.mapped_plan = std::move(mapped_plan);
-    out.mapped_plan_cache_key = cache_key;
-    out.mapped_plan_cache_hit = plan_cache_hit;
-    out.mapped_plan_cache_waited = plan_cache_waited;
-    const bool source_window_prepared_key_candidate = source_window_execution_template_uses_stable_runtime_group(
-        strategy_config,
-        out.disk_metadata,
-        out.collective_policy,
-        out.request_context.execution_topology,
-        out.disk_source.has_value());
     if (source_window_prepared_key_candidate) {
-      out.source_window_realization_plan_hash =
-          hash_cache_payload(serialize_proto_for_cache_key(*request.realization_plan));
-      out.source_window_target_layout_template_hash = compute_target_layout_template_hash(*request.target_layout);
-      out.source_window_target_index_hash = hash_cache_payload(request.target_index_json);
+      const auto source_window_prepared_key_start = std::chrono::steady_clock::now();
+      if (!source_window_realization_plan_hash.has_value()) {
+        const auto source_window_realization_plan_hash_start = std::chrono::steady_clock::now();
+        source_window_realization_plan_hash =
+            hash_cache_payload(serialize_proto_for_cache_key(*request.realization_plan));
+        source_window_realization_plan_hash_sec =
+            elapsed_sec(source_window_realization_plan_hash_start, std::chrono::steady_clock::now());
+      }
+      if (!source_window_target_layout_template_hash.has_value()) {
+        const auto source_window_target_layout_template_hash_start = std::chrono::steady_clock::now();
+        source_window_target_layout_template_hash = compute_target_layout_template_hash(*request.target_layout);
+        source_window_target_layout_template_hash_sec =
+            elapsed_sec(source_window_target_layout_template_hash_start, std::chrono::steady_clock::now());
+      }
+      if (!source_window_target_index_hash.has_value()) {
+        const auto source_window_target_index_hash_start = std::chrono::steady_clock::now();
+        source_window_target_index_hash = hash_cache_payload(request.target_index_json);
+        source_window_target_index_hash_sec =
+            elapsed_sec(source_window_target_index_hash_start, std::chrono::steady_clock::now());
+      }
+      out.source_window_realization_plan_hash = *source_window_realization_plan_hash;
+      out.source_window_target_layout_template_hash = *source_window_target_layout_template_hash;
+      out.source_window_target_index_hash = *source_window_target_index_hash;
+      const auto source_window_prepared_group_key_start = std::chrono::steady_clock::now();
       out.source_window_prepared_group_key = source_window_prepared_realization_group_key(
           out.resolved_artifact_id,
           effective_source_selection,
@@ -2937,12 +3034,53 @@ grpc::Status prepare_source_bound_plan(
           strategy_config,
           out.request_context.execution_topology,
           out.disk_source.has_value());
+      source_window_prepared_group_key_sec =
+          elapsed_sec(source_window_prepared_group_key_start, std::chrono::steady_clock::now());
+      const auto source_window_prepared_member_key_start = std::chrono::steady_clock::now();
       out.source_window_prepared_member_key = source_window_prepared_realization_member_key(
           *out.source_window_prepared_group_key,
-          *out.source_window_realization_plan_hash,
+          *source_window_realization_plan_hash,
           *request.target_layout,
           out.request_context.execution_topology);
+      source_window_prepared_member_key_sec =
+          elapsed_sec(source_window_prepared_member_key_start, std::chrono::steady_clock::now());
+      source_window_prepared_key_sec =
+          elapsed_sec(source_window_prepared_key_start, std::chrono::steady_clock::now());
     }
+    if (!plan_cache_hit && plan_cache_builder) {
+      auto mapped_plan_cache_entry = std::make_shared<const CachedMappedTargetMaterializationPlan>(
+          CachedMappedTargetMaterializationPlan{
+              .plan = mapped_plan,
+              .source_window_realization_plan_hash = source_window_realization_plan_hash,
+              .source_window_target_layout_template_hash = source_window_target_layout_template_hash,
+              .source_window_target_index_hash = source_window_target_index_hash,
+          });
+      auto& cache = binding_realization_plan_cache();
+      const auto mapped_plan_cache_store_start = std::chrono::steady_clock::now();
+      absl::MutexLock lock(&cache.mu);
+      put_bounded_binding_realization_cache_entry(
+          &cache.mapped_plans, &cache.mapped_plan_order, cache_key, mapped_plan_cache_entry);
+      cache.mapped_plan_inflight.erase(cache_key);
+      cache.cv.SignalAll();
+      const auto mapped_plan_cache_store_done = std::chrono::steady_clock::now();
+      mapped_plan_cache_store_sec = elapsed_sec(mapped_plan_cache_store_start, mapped_plan_cache_store_done);
+      cached_mapped_plan = std::move(mapped_plan_cache_entry);
+      mapped_plan_for_output = &cached_mapped_plan->plan;
+    }
+    if (mapped_plan_for_output == nullptr) {
+      return {StatusCode::INTERNAL, "binding realization mapped plan cache did not produce a plan"};
+    }
+    out.logical_total_size = mapped_plan_for_output->logical_total_size;
+    out.current_selection.Clear();
+    out.canonical_index_json = mapped_plan_for_output->canonical_index_json;
+    if (cached_mapped_plan != nullptr) {
+      out.mapped_plan_cache_entry = std::move(cached_mapped_plan);
+    } else {
+      out.mapped_plan = std::move(mapped_plan);
+    }
+    out.mapped_plan_cache_key = cache_key;
+    out.mapped_plan_cache_hit = plan_cache_hit;
+    out.mapped_plan_cache_waited = plan_cache_waited;
     out.execution_only_mutable = true;
   } else if (request.mapped && !mapped_direct_byte_space) {
     BindingRegistry::Record replay_record;
@@ -3017,6 +3155,13 @@ grpc::Status prepare_source_bound_plan(
             << " mapped_plan_cache_lookup_sec=" << mapped_plan_cache_lookup_sec
             << " mapped_plan_cache_build_sec=" << mapped_plan_cache_build_sec
             << " mapped_plan_cache_store_sec=" << mapped_plan_cache_store_sec
+            << " mapped_plan_cache_restore_sec=" << mapped_plan_cache_restore_sec
+            << " source_window_prepared_key_sec=" << source_window_prepared_key_sec
+            << " source_window_realization_plan_hash_sec=" << source_window_realization_plan_hash_sec
+            << " source_window_target_layout_template_hash_sec=" << source_window_target_layout_template_hash_sec
+            << " source_window_target_index_hash_sec=" << source_window_target_index_hash_sec
+            << " source_window_prepared_group_key_sec=" << source_window_prepared_group_key_sec
+            << " source_window_prepared_member_key_sec=" << source_window_prepared_member_key_sec
             << " source_window_prepared_group_key_present="
             << (out.source_window_prepared_group_key.has_value() ? 1 : 0)
             << " source_window_prepared_group_key=" << out.source_window_prepared_group_key.value_or("")
@@ -3034,7 +3179,7 @@ grpc::Status prepare_source_bound_plan(
 
 grpc::Status prepare_source_bound_execution(
     const OwnedBindingService::Dep& d,
-    RpcContext& rctx,
+    const OwnedBindingService::SourceBoundExecutionContext& execution_context,
     const v2::TargetLayout& target_layout,
     const OwnedStorageLayout& storage_layout,
     const PreparedSourceBoundPlan& prepared_plan,
@@ -3043,7 +3188,7 @@ grpc::Status prepare_source_bound_execution(
   auto elapsed_sec = [](auto start, auto end) { return std::chrono::duration<double>(end - start).count(); };
   out = PreparedSourceBoundExecution{};
 
-  const std::chrono::milliseconds request_budget = resolve_owner_request_budget(rctx.server_context());
+  const std::chrono::milliseconds request_budget = execution_context.request_budget;
   out.hints.request_budget = request_budget;
   out.hints.transport_wait_timeout = request_budget;
   out.hints.artifact_id = prepared_plan.resolved_artifact_id;
@@ -3084,8 +3229,9 @@ grpc::Status prepare_source_bound_execution(
   out.hints.require_collective_execution =
       prepared_plan.collective_policy == v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE;
 
-  if (prepared_plan.mapped_plan.has_value()) {
-    const auto& mapped_plan = *prepared_plan.mapped_plan;
+  const MappedTargetMaterializationPlan* mapped_plan_ptr = mapped_plan_view(prepared_plan);
+  if (mapped_plan_ptr != nullptr) {
+    const auto& mapped_plan = *mapped_plan_ptr;
     if (mapped_plan.view_plan.has_value() && mapped_plan.view_plan->transform.requires_materialization) {
       return {StatusCode::INVALID_ARGUMENT, "mapped binding does not support view transforms"};
     }
@@ -3120,10 +3266,17 @@ grpc::Status prepare_source_bound_execution(
         prepared_plan.request_context.execution_topology,
         prepared_plan.disk_source.has_value());
     std::optional<std::string> execution_template_cache_key;
-    std::optional<CachedMappedExecutionTemplate> cached_template;
+    std::shared_ptr<const CachedMappedExecutionTemplate> cached_template;
     bool execution_template_cache_waited = false;
     bool execution_template_cache_builder = false;
+    double execution_template_cache_key_sec = 0.0;
+    double execution_template_cache_lookup_sec = 0.0;
+    double execution_template_cache_wait_sec = 0.0;
+    double execution_template_hit_restore_sec = 0.0;
+    double execution_template_cache_store_sec = 0.0;
+    double routed_program_prepare_enqueue_sec = 0.0;
     if (prepared_plan.mapped_plan_cache_key.has_value()) {
+      const auto execution_template_cache_key_start = std::chrono::steady_clock::now();
       execution_template_cache_key = mapped_execution_template_cache_key(
           *prepared_plan.mapped_plan_cache_key,
           prepared_plan.disk_metadata,
@@ -3132,6 +3285,9 @@ grpc::Status prepare_source_bound_execution(
           prepared_plan.request_context.execution_topology,
           prepared_plan.disk_source.has_value(),
           /*include_runtime_group_id=*/!stable_source_window_execution_template_key);
+      execution_template_cache_key_sec =
+          elapsed_sec(execution_template_cache_key_start, std::chrono::steady_clock::now());
+      const auto execution_template_cache_lookup_start = std::chrono::steady_clock::now();
       auto& cache = binding_realization_plan_cache();
       absl::MutexLock lock(&cache.mu);
       while (true) {
@@ -3146,10 +3302,16 @@ grpc::Status prepare_source_bound_execution(
           break;
         }
         execution_template_cache_waited = true;
+        const auto execution_template_cache_wait_start = std::chrono::steady_clock::now();
         cache.cv.Wait(&cache.mu);
+        execution_template_cache_wait_sec +=
+            elapsed_sec(execution_template_cache_wait_start, std::chrono::steady_clock::now());
       }
+      execution_template_cache_lookup_sec =
+          elapsed_sec(execution_template_cache_lookup_start, std::chrono::steady_clock::now());
     }
-    if (cached_template.has_value()) {
+    if (cached_template != nullptr) {
+      const auto execution_template_hit_restore_start = std::chrono::steady_clock::now();
       store::runtime::ingestion::strategy::PreparedSourceBoundExecutionPlan prepared_execution_plan;
       prepared_execution_plan.resolved_plan.artifact_id = prepared_plan.resolved_artifact_id;
       prepared_execution_plan.resolved_plan.generation = generation;
@@ -3161,6 +3323,12 @@ grpc::Status prepare_source_bound_execution(
       prepared_execution_plan.resolved_plan.representation_work_plan = cached_template->representation_work_plan;
       prepared_execution_plan.strategy_plan = cached_template->strategy_plan;
       out.prepared_execution_plan = std::move(prepared_execution_plan);
+      execution_template_hit_restore_sec =
+          elapsed_sec(execution_template_hit_restore_start, std::chrono::steady_clock::now());
+      const auto routed_program_prepare_enqueue_start = std::chrono::steady_clock::now();
+      maybe_prepare_source_window_collective_routed_program_cache(d, storage_layout, prepared_plan, out);
+      routed_program_prepare_enqueue_sec =
+          elapsed_sec(routed_program_prepare_enqueue_start, std::chrono::steady_clock::now());
       const auto done = std::chrono::steady_clock::now();
       LOG(INFO) << "tc_profile prepare_source_bound_execution timings"
                 << " artifact_id=" << prepared_plan.resolved_artifact_id << " mapped=1"
@@ -3175,8 +3343,13 @@ grpc::Status prepare_source_bound_execution(
                 << prepared_plan.source_window_target_layout_template_hash.value_or("")
                 << " source_window_target_index_hash=" << prepared_plan.source_window_target_index_hash.value_or("")
                 << " build_resolved_plan_sec=0 strategy_plan_sec=0"
+                << " execution_template_cache_key_sec=" << execution_template_cache_key_sec
+                << " execution_template_cache_lookup_sec=" << execution_template_cache_lookup_sec
+                << " execution_template_cache_wait_sec=" << execution_template_cache_wait_sec
+                << " execution_template_hit_restore_sec=" << execution_template_hit_restore_sec
+                << " execution_template_cache_store_sec=0"
+                << " routed_program_prepare_enqueue_sec=" << routed_program_prepare_enqueue_sec
                 << " total_sec=" << elapsed_sec(profile_start, done);
-      maybe_prepare_source_window_collective_routed_program_cache(d, storage_layout, prepared_plan, out);
       return Status::OK;
     }
 
@@ -3240,19 +3413,27 @@ grpc::Status prepare_source_bound_execution(
     const auto strategy_done = std::chrono::steady_clock::now();
     prepared_execution_plan_or->strategy_plan = *strategy_plan_or;
     if (execution_template_cache_key.has_value() && execution_template_cache_builder) {
-      CachedMappedExecutionTemplate template_entry{
+      auto template_entry = std::make_shared<const CachedMappedExecutionTemplate>(CachedMappedExecutionTemplate{
           .representation_work_plan = prepared_execution_plan_or->resolved_plan.representation_work_plan,
           .strategy_plan = *strategy_plan_or,
-      };
+      });
+      const auto execution_template_cache_store_start = std::chrono::steady_clock::now();
       auto& cache = binding_realization_plan_cache();
       absl::MutexLock lock(&cache.mu);
       put_bounded_binding_realization_cache_entry(
           &cache.execution_templates, &cache.execution_template_order, *execution_template_cache_key, template_entry);
       cache.execution_template_inflight.erase(*execution_template_cache_key);
       cache.cv.SignalAll();
+      execution_template_cache_store_sec =
+          elapsed_sec(execution_template_cache_store_start, std::chrono::steady_clock::now());
     }
     prepared_execution_plan_or->lowering_artifacts.reset();
     out.prepared_execution_plan = std::move(*prepared_execution_plan_or);
+    const auto routed_program_prepare_enqueue_start = std::chrono::steady_clock::now();
+    maybe_prepare_source_window_collective_routed_program_cache(d, storage_layout, prepared_plan, out);
+    routed_program_prepare_enqueue_sec =
+        elapsed_sec(routed_program_prepare_enqueue_start, std::chrono::steady_clock::now());
+    const auto done = std::chrono::steady_clock::now();
     LOG(INFO) << "tc_profile prepare_source_bound_execution timings"
               << " artifact_id=" << prepared_plan.resolved_artifact_id << " mapped=1"
               << " target_total_size=" << storage_layout.total_size << " execution_template_cache_hit=0"
@@ -3267,9 +3448,14 @@ grpc::Status prepare_source_bound_execution(
               << " source_window_target_index_hash=" << prepared_plan.source_window_target_index_hash.value_or("")
               << " build_resolved_plan_sec=" << elapsed_sec(build_resolved_start, build_resolved_done)
               << " strategy_plan_sec=" << elapsed_sec(strategy_start, strategy_done)
-              << " total_sec=" << elapsed_sec(profile_start, strategy_done)
+              << " execution_template_cache_key_sec=" << execution_template_cache_key_sec
+              << " execution_template_cache_lookup_sec=" << execution_template_cache_lookup_sec
+              << " execution_template_cache_wait_sec=" << execution_template_cache_wait_sec
+              << " execution_template_hit_restore_sec=0"
+              << " execution_template_cache_store_sec=" << execution_template_cache_store_sec
+              << " routed_program_prepare_enqueue_sec=" << routed_program_prepare_enqueue_sec
+              << " total_sec=" << elapsed_sec(profile_start, done)
               << " physical_source_index_wait_sec=" << physical_source_index_wait_sec;
-    maybe_prepare_source_window_collective_routed_program_cache(d, storage_layout, prepared_plan, out);
     return Status::OK;
   }
 
@@ -3295,6 +3481,11 @@ grpc::Status prepare_source_bound_execution(
 }
 
 } // namespace
+
+OwnedBindingService::SourceBoundExecutionContext
+OwnedBindingService::source_bound_execution_context_from_server_context(const grpc::ServerContext& server_context) {
+  return make_source_bound_execution_context(server_context);
+}
 
 store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary summarize_source_bound_plan_for_testing(
     const store::runtime::ingestion::strategy::ResolvedMaterializationPlan& resolved_plan,
@@ -3665,6 +3856,42 @@ grpc::Status OwnedBindingService::create_owned_binding(
     RpcContext& rctx,
     const v2::CreateOwnedBindingRequest& req,
     v2::CreateOwnedBindingResponse& resp) {
+  const auto execution_context = make_source_bound_execution_context(rctx.server_context());
+  const grpc::Status status = create_owned_binding_impl(execution_context, &rctx, req, resp);
+  if (status.ok()) {
+    rctx.mark_success();
+  }
+  return status;
+}
+
+grpc::Status OwnedBindingService::create_owned_binding_with_context(
+    const SourceBoundExecutionContext& execution_context,
+    const v2::CreateOwnedBindingRequest& req,
+    v2::CreateOwnedBindingResponse& resp) {
+  return create_owned_binding_impl(execution_context, nullptr, req, resp);
+}
+
+grpc::Status OwnedBindingService::create_owned_binding_impl(
+    const SourceBoundExecutionContext& execution_context,
+    RpcContext* rctx,
+    const v2::CreateOwnedBindingRequest& req,
+    v2::CreateOwnedBindingResponse& resp) {
+  const auto profile_start = std::chrono::steady_clock::now();
+  auto elapsed_sec = [](auto start, auto end) { return std::chrono::duration<double>(end - start).count(); };
+  double prepare_plan_sec = 0.0;
+  double controller_plan_sec = 0.0;
+  double allocate_sec = 0.0;
+  double storage_layout_sec = 0.0;
+  double prepare_execution_sec = 0.0;
+  double materialize_sec = 0.0;
+  double preflight_sec = 0.0;
+  double descriptors_sec = 0.0;
+  double registry_insert_sec = 0.0;
+  double staged_insert_sec = 0.0;
+  double lease_sec = 0.0;
+  double publication_token_sec = 0.0;
+  double group_report_sec = 0.0;
+  double response_sec = 0.0;
   if (d_.shutdown_signal.is_shutting_down()) {
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
@@ -3702,15 +3929,17 @@ grpc::Status OwnedBindingService::create_owned_binding(
 
   std::vector<v2::MappedTensorSpec> mapped_dst_tensors(req.dst_tensors().begin(), req.dst_tensors().end());
   PreparedSourceBoundPlan prepared_plan;
+  const auto prepare_plan_start = std::chrono::steady_clock::now();
   auto prepare_status = prepare_source_bound_plan(
       d_,
-      rctx,
+      execution_context,
       device,
       SourceBoundMaterializationRequest{
           .mapped = mapped,
           .owner_pid = req.pid(),
           .device_uuid = req.device_uuid(),
           .source_selection = &req.source_selection(),
+          .public_disk_source = req.has_public_disk_source() ? &req.public_disk_source() : nullptr,
           .target_layout = &req.target_layout(),
           .target_index_json = std::string_view(req.target_index_bytes().data(), req.target_index_bytes().size()),
           .realization_plan = use_realization_plan ? &req.realization_plan() : nullptr,
@@ -3725,11 +3954,14 @@ grpc::Status OwnedBindingService::create_owned_binding(
           .placement = req.placement(),
       },
       prepared_plan);
+  const auto prepare_plan_done = std::chrono::steady_clock::now();
+  prepare_plan_sec = elapsed_sec(prepare_plan_start, prepare_plan_done);
   if (!prepare_status.ok()) {
     return prepare_status;
   }
   const auto* group_begin_context =
       prepared_plan.group_begin_context.has_value() ? &*prepared_plan.group_begin_context : nullptr;
+  const auto controller_plan_start = std::chrono::steady_clock::now();
   auto realization_plan_or = build_controller_realization_plan(
       req,
       prepared_plan.request_context,
@@ -3737,11 +3969,15 @@ grpc::Status OwnedBindingService::create_owned_binding(
       group_begin_context,
       prepared_plan.resolved_artifact_id,
       prepared_plan.current_selection);
+  const auto controller_plan_done = std::chrono::steady_clock::now();
+  controller_plan_sec = elapsed_sec(controller_plan_start, controller_plan_done);
   if (!realization_plan_or.ok()) {
     return to_grpc_status(realization_plan_or.status());
   }
   const ControllerRealizationPlan& realization_plan = *realization_plan_or;
-  attach_controller_realization_plan_span_attrs(rctx, realization_plan);
+  if (rctx != nullptr) {
+    attach_controller_realization_plan_span_attrs(*rctx, realization_plan);
+  }
   if (auto status = require_controller_export_kind(realization_plan, "cuda_ipc_lease", "CreateOwnedBinding");
       !status.ok()) {
     return to_grpc_status(status);
@@ -3761,6 +3997,14 @@ grpc::Status OwnedBindingService::create_owned_binding(
     group_daemon_id = d_.daemon_id;
   }
 
+  const auto memory_before_allocate = capture_owned_binding_device_memory(device.ordinal);
+  log_owned_binding_device_memory(
+      "before_allocate",
+      /*binding_id=*/"",
+      prepared_plan.resolved_artifact_id,
+      memory_before_allocate,
+      &memory_before_allocate);
+  const auto allocate_start = std::chrono::steady_clock::now();
   auto allocation = std::make_unique<common::memory::GpuDeviceMemory>();
   if (auto allocate_status = allocation->allocate(prepared_plan.logical_total_size, device.ordinal);
       !allocate_status.ok()) {
@@ -3770,21 +4014,36 @@ grpc::Status OwnedBindingService::create_owned_binding(
   if (!handle_bytes.is_valid()) {
     return {StatusCode::FAILED_PRECONDITION, "failed to export CUDA IPC handle for owner binding"};
   }
+  const auto allocate_done = std::chrono::steady_clock::now();
+  allocate_sec = elapsed_sec(allocate_start, allocate_done);
+  log_owned_binding_device_memory(
+      "after_allocate",
+      /*binding_id=*/"",
+      prepared_plan.resolved_artifact_id,
+      capture_owned_binding_device_memory(device.ordinal),
+      &memory_before_allocate);
 
+  const auto storage_layout_start = std::chrono::steady_clock::now();
   auto storage_layout_or = build_owned_storage_layout(
       req.target_layout(), device.ordinal, gsl::not_null<void*>{allocation->get()}, handle_bytes);
   if (!storage_layout_or.ok()) {
     return to_grpc_status(storage_layout_or.status());
   }
   OwnedStorageLayout storage_layout = std::move(*storage_layout_or);
+  const auto storage_layout_done = std::chrono::steady_clock::now();
+  storage_layout_sec = elapsed_sec(storage_layout_start, storage_layout_done);
 
   PreparedSourceBoundExecution prepared_execution;
-  auto execution_status =
-      prepare_source_bound_execution(d_, rctx, req.target_layout(), storage_layout, prepared_plan, prepared_execution);
+  const auto prepare_execution_start = std::chrono::steady_clock::now();
+  auto execution_status = prepare_source_bound_execution(
+      d_, execution_context, req.target_layout(), storage_layout, prepared_plan, prepared_execution);
+  const auto prepare_execution_done = std::chrono::steady_clock::now();
+  prepare_execution_sec = elapsed_sec(prepare_execution_start, prepare_execution_done);
   if (!execution_status.ok()) {
     return execution_status;
   }
 
+  const auto materialize_start = std::chrono::steady_clock::now();
   absl::StatusOr<store::loading::MaterializeIntoTargetResult> result_or = mapped
       ? d_.engine.materialize_mapped_into_target(
             device, *prepared_execution.prepared_execution_plan, prepared_execution.hints, prepared_plan.disk_source)
@@ -3795,9 +4054,18 @@ grpc::Status OwnedBindingService::create_owned_binding(
             materialization_payload::compute_generation_from_index(prepared_plan.canonical_index_json),
             prepared_execution.hints,
             prepared_plan.disk_source);
+  const auto materialize_done = std::chrono::steady_clock::now();
+  materialize_sec = elapsed_sec(materialize_start, materialize_done);
+  log_owned_binding_device_memory(
+      "after_materialize",
+      /*binding_id=*/"",
+      prepared_plan.resolved_artifact_id,
+      capture_owned_binding_device_memory(device.ordinal),
+      &memory_before_allocate);
   if (!result_or.ok()) {
     return to_grpc_status(result_or.status());
   }
+  const auto preflight_start = std::chrono::steady_clock::now();
   auto preflight_or = serving_artifact_manifest::preflight_serving_artifact(
       &d_.engine,
       serving_artifact_manifest::build_preflight_request(
@@ -3806,15 +4074,20 @@ grpc::Status OwnedBindingService::create_owned_binding(
           prepared_plan.disk_source,
           prepared_plan.disk_metadata,
           req.has_serving_artifact_policy() ? &req.serving_artifact_policy() : nullptr));
+  const auto preflight_done = std::chrono::steady_clock::now();
+  preflight_sec = elapsed_sec(preflight_start, preflight_done);
   if (!preflight_or.ok()) {
     return to_grpc_status(preflight_or.status());
   }
 
   google::protobuf::RepeatedPtrField<std::string> no_tensor_filter;
+  const auto descriptors_start = std::chrono::steady_clock::now();
   auto descriptors_or = build_descriptors_from_index(
       std::string_view(req.target_index_bytes().data(), req.target_index_bytes().size()),
       no_tensor_filter,
       req.device_uuid());
+  const auto descriptors_done = std::chrono::steady_clock::now();
+  descriptors_sec = elapsed_sec(descriptors_start, descriptors_done);
   if (!descriptors_or.ok()) {
     return to_grpc_status(descriptors_or.status());
   }
@@ -3827,6 +4100,7 @@ grpc::Status OwnedBindingService::create_owned_binding(
   std::string binding_id;
   std::shared_ptr<BindingRegistry::Record> record;
   absl::Status insert_status = absl::UnknownError("uninitialized");
+  const auto registry_insert_start = std::chrono::steady_clock::now();
   for (int attempt = 0; attempt < 4; ++attempt) {
     binding_id = mint_binding_id();
     record = std::make_shared<BindingRegistry::Record>();
@@ -3878,12 +4152,15 @@ grpc::Status OwnedBindingService::create_owned_binding(
       return to_grpc_status(insert_status);
     }
   }
+  const auto registry_insert_done = std::chrono::steady_clock::now();
+  registry_insert_sec = elapsed_sec(registry_insert_start, registry_insert_done);
   if (!insert_status.ok()) {
     return to_grpc_status(insert_status);
   }
 
   std::optional<BindingRegistry::StagedBindingValue> created_staged;
   if (create_staged_value) {
+    const auto staged_insert_start = std::chrono::steady_clock::now();
     BindingRegistry::StagedBindingValue staged;
     staged.transaction_id = prepared_plan.group_begin_context->transaction_id;
     staged.version_set_id = prepared_plan.group_begin_context->version_set.version_set_id();
@@ -3919,10 +4196,15 @@ grpc::Status OwnedBindingService::create_owned_binding(
       return to_grpc_status(staged_status);
     }
     created_staged = std::move(staged);
+    const auto staged_insert_done = std::chrono::steady_clock::now();
+    staged_insert_sec = elapsed_sec(staged_insert_start, staged_insert_done);
   }
 
+  const auto lease_start = std::chrono::steady_clock::now();
   auto token_or = d_.handle_leases->mint_external_cuda_lease(
       req.pid(), [registry = &d_.bindings, binding_id]() { registry->release_export_ref(binding_id); });
+  const auto lease_done = std::chrono::steady_clock::now();
+  lease_sec = elapsed_sec(lease_start, lease_done);
   if (!token_or.ok()) {
     const bool closed = d_.bindings.close_control(binding_id);
     if (!closed) {
@@ -3934,6 +4216,7 @@ grpc::Status OwnedBindingService::create_owned_binding(
 
   absl::StatusOr<std::string> binding_current_value_publication_token_or = std::string();
   if (!create_staged_value) {
+    const auto publication_token_start = std::chrono::steady_clock::now();
     binding_current_value_publication_token_or = maybe_mint_binding_current_value_publication_token(
         d_.capability_tokens,
         d_.identity,
@@ -3944,6 +4227,8 @@ grpc::Status OwnedBindingService::create_owned_binding(
         req.has_operation_id() ? std::string_view(req.operation_id()) : std::string_view(),
         std::move(storage_layout.publish_segments),
         std::move(storage_layout.publish_storages));
+    const auto publication_token_done = std::chrono::steady_clock::now();
+    publication_token_sec = elapsed_sec(publication_token_start, publication_token_done);
   }
   if (!binding_current_value_publication_token_or.ok()) {
     auto release_status = d_.handle_leases->release(*token_or);
@@ -3959,6 +4244,7 @@ grpc::Status OwnedBindingService::create_owned_binding(
   }
 
   if (create_staged_value) {
+    const auto group_report_start = std::chrono::steady_clock::now();
     GroupRealizationPreparedMemberContext prepared_member{
         .binding_id = binding_id,
         .binding_value_id = created_staged->binding_value_id,
@@ -3978,6 +4264,8 @@ grpc::Status OwnedBindingService::create_owned_binding(
         group_daemon_id,
         d_.daemon_session_id,
         d_.identity.worker_id());
+    const auto group_report_done = std::chrono::steady_clock::now();
+    group_report_sec = elapsed_sec(group_report_start, group_report_done);
     if (!report_or.ok()) {
       const auto remove_status =
           d_.bindings.remove_staged_value(binding_id, created_staged->binding_value_id, "prepared_report_failed");
@@ -3997,6 +4285,7 @@ grpc::Status OwnedBindingService::create_owned_binding(
     }
   }
 
+  const auto response_start = std::chrono::steady_clock::now();
   resp.set_binding_id(binding_id);
   resp.set_artifact_id(prepared_plan.resolved_artifact_id);
   resp.mutable_mem_handle()->set_cuda_ipc_handle(
@@ -4026,7 +4315,30 @@ grpc::Status OwnedBindingService::create_owned_binding(
   } else {
     fill_binding_value(*record, *resp.mutable_current_value());
   }
-  rctx.mark_success();
+  const auto response_done = std::chrono::steady_clock::now();
+  response_sec = elapsed_sec(response_start, response_done);
+  const auto done = std::chrono::steady_clock::now();
+  LOG(INFO) << "tc_profile create_owned_binding timings"
+            << " binding_id=" << binding_id << " artifact_id=" << prepared_plan.resolved_artifact_id
+            << " target_device=" << device.ordinal << " mapped=" << mapped
+            << " realization_plan=" << use_realization_plan
+            << " create_staged_value=" << (create_staged_value ? 1 : 0)
+            << " prepare_plan_sec=" << prepare_plan_sec
+            << " controller_plan_sec=" << controller_plan_sec
+            << " allocate_sec=" << allocate_sec
+            << " storage_layout_sec=" << storage_layout_sec
+            << " prepare_execution_sec=" << prepare_execution_sec
+            << " materialize_sec=" << materialize_sec
+            << " preflight_sec=" << preflight_sec
+            << " descriptors_sec=" << descriptors_sec
+            << " registry_insert_sec=" << registry_insert_sec
+            << " staged_insert_sec=" << staged_insert_sec
+            << " lease_sec=" << lease_sec
+            << " publication_token_sec=" << publication_token_sec
+            << " group_report_sec=" << group_report_sec
+            << " response_sec=" << response_sec
+            << " post_materialize_sec=" << elapsed_sec(materialize_done, done)
+            << " total_sec=" << elapsed_sec(profile_start, done);
   return Status::OK;
 }
 
@@ -5195,11 +5507,13 @@ grpc::Status OwnedBindingService::refill_owned_binding(
   const auto device = d_.devices.From(v2::DeviceType::DEVICE_TYPE_GPU, device_uuid, std::nullopt);
   const bool use_realization_plan = req.has_realization_plan() && req.realization_plan().entries_size() > 0;
   const bool use_mapped_materialization = mapped || use_realization_plan;
+  const SourceBoundExecutionContext execution_context =
+      make_source_bound_execution_context(rctx.server_context());
   PreparedSourceBoundPlan prepared_plan;
   const auto prepare_plan_start = std::chrono::steady_clock::now();
   auto prepare_status = prepare_source_bound_plan(
       d_,
-      rctx,
+      execution_context,
       device,
       SourceBoundMaterializationRequest{
           .mapped = use_mapped_materialization,
@@ -5277,8 +5591,8 @@ grpc::Status OwnedBindingService::refill_owned_binding(
 
   PreparedSourceBoundExecution prepared_execution;
   const auto prepare_execution_start = std::chrono::steady_clock::now();
-  auto execution_status =
-      prepare_source_bound_execution(d_, rctx, target_layout, storage_layout, prepared_plan, prepared_execution);
+  auto execution_status = prepare_source_bound_execution(
+      d_, execution_context, target_layout, storage_layout, prepared_plan, prepared_execution);
   if (!execution_status.ok()) {
     return execution_status;
   }
@@ -5297,7 +5611,7 @@ grpc::Status OwnedBindingService::refill_owned_binding(
   }
   const auto strict_preflight_done = std::chrono::steady_clock::now();
   strict_preflight_sec = elapsed_sec(strict_preflight_start, strict_preflight_done);
-  const bool effective_mapped_materialization = prepared_plan.mapped_plan.has_value();
+  const bool effective_mapped_materialization = mapped_plan_view(prepared_plan) != nullptr;
 
   const auto materialize_start = std::chrono::steady_clock::now();
   absl::StatusOr<store::loading::MaterializeIntoTargetResult> result_or = effective_mapped_materialization

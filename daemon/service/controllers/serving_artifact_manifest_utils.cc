@@ -644,15 +644,19 @@ absl::StatusOr<ServingArtifactPreflightResult> preflight_serving_artifact(
   if (request.canonical_index_json.empty()) {
     return absl::InvalidArgumentError("preflight_serving_artifact requires canonical_index_json");
   }
-  auto parsed_index_or = parse_canonical_index_json(request.canonical_index_json);
-  if (!parsed_index_or.ok()) {
-    return parsed_index_or.status();
-  }
   const std::string serving_manifest_ref =
       request.serving_manifest_ref.value_or(std::string(kPhase1ServingManifestRef));
   auto manifest_tensor_name_or = parse_tensor_manifest_ref(serving_manifest_ref);
   if (!manifest_tensor_name_or.ok()) {
     return manifest_tensor_name_or.status();
+  }
+  if (!request.require_manifest && !request.serving_manifest_ref.has_value() &&
+      std::string_view(request.canonical_index_json).find(kPhase1ServingManifestTensorName) == std::string_view::npos) {
+    return ServingArtifactPreflightResult{};
+  }
+  auto parsed_index_or = parse_canonical_index_json(request.canonical_index_json);
+  if (!parsed_index_or.ok()) {
+    return parsed_index_or.status();
   }
   auto manifest_tensor_or = find_manifest_tensor(parsed_index_or->tensors, *manifest_tensor_name_or);
   if (!manifest_tensor_or.ok()) {

@@ -151,6 +151,19 @@ tensorcast::store::StoreEngine make_store_engine(const std::filesystem::path& st
 
 } // namespace
 
+TEST_CASE(
+    "optional default serving manifest preflight skips full index parse when carrier is absent",
+    "[serving_manifest]") {
+  auto* engine = reinterpret_cast<tensorcast::store::StoreEngine*>(uintptr_t{1});
+  serving_manifest::ServingArtifactPreflightRequest request;
+  request.artifact_id = "msa1:test-session~policy~safetensors~absent-serving-manifest";
+  request.canonical_index_json = R"({"weight":[0,4,[1],[1],"torch.float32",0],"unterminated":)";
+
+  auto result_or = serving_manifest::preflight_serving_artifact(engine, request);
+  REQUIRE(result_or.ok());
+  CHECK_FALSE(result_or->serving_manifest_present);
+}
+
 TEST_CASE("serving manifest preflight accepts tensor payload inside a larger shared storage", "[serving_manifest]") {
   serving_manifest::ServingManifestPayloadPreflightRequest request;
   request.canonical_index_json = shared_storage_serving_index();

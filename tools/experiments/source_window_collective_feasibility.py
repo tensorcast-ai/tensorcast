@@ -29,8 +29,21 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-
+POSIX_FADV_NORMAL = 0
+POSIX_FADV_RANDOM = 1
+POSIX_FADV_SEQUENTIAL = 2
+POSIX_FADV_WILLNEED = 3
 POSIX_FADV_DONTNEED = 4
+POSIX_FADV_NOREUSE = 5
+
+FADVISE_MODES = {
+    "none": None,
+    "normal": POSIX_FADV_NORMAL,
+    "random": POSIX_FADV_RANDOM,
+    "sequential": POSIX_FADV_SEQUENTIAL,
+    "willneed": POSIX_FADV_WILLNEED,
+    "noreuse": POSIX_FADV_NOREUSE,
+}
 
 
 DTYPE_BYTES = {
@@ -94,7 +107,9 @@ def _read_safetensors_header(path: Path) -> tuple[int, dict[str, Any]]:
     return 8 + header_len, header
 
 
-def read_model_safetensors(model_dir: Path) -> tuple[list[FileSegment], list[TensorEntry]]:
+def read_model_safetensors(
+    model_dir: Path,
+) -> tuple[list[FileSegment], list[TensorEntry]]:
     files = sorted(model_dir.glob("*.safetensors"))
     if not files:
         raise FileNotFoundError(f"no .safetensors files found under {model_dir}")
@@ -237,12 +252,18 @@ def build_feasibility_summary(
 
     file_payload_bytes = sum(seg.payload_bytes for seg in segments)
     file_bytes = sum(seg.file_size for seg in segments)
-    window_count = sum((seg.payload_bytes + window_bytes - 1) // window_bytes for seg in segments)
+    window_count = sum(
+        (seg.payload_bytes + window_bytes - 1) // window_bytes for seg in segments
+    )
 
     current_read_amp = current_read_bytes_per_rank / max(1, target_bytes_per_rank)
     source_window_read_amp_vs_source = file_payload_bytes / max(1, total_source_bytes)
-    source_window_read_vs_current = source_window_disk_bytes_per_rank / max(1, current_read_bytes_per_rank)
-    source_window_disk_vs_target = source_window_disk_bytes_per_rank / max(1, target_bytes_per_rank)
+    source_window_read_vs_current = source_window_disk_bytes_per_rank / max(
+        1, current_read_bytes_per_rank
+    )
+    source_window_disk_vs_target = source_window_disk_bytes_per_rank / max(
+        1, target_bytes_per_rank
+    )
 
     profile_alignment: dict[str, Any] = {}
     if current_profile_read_bytes_per_rank is not None:
@@ -310,7 +331,9 @@ def _window_stripes_for_rank(
                 if max_bytes_per_rank > 0 and planned + size > max_bytes_per_rank:
                     size = max(0, max_bytes_per_rank - planned)
                 if size > 0:
-                    stripes.append((seg.file_path, seg.data_start + cursor + begin, size))
+                    stripes.append(
+                        (seg.file_path, seg.data_start + cursor + begin, size)
+                    )
                     planned += size
                 if max_bytes_per_rank > 0 and planned >= max_bytes_per_rank:
                     return stripes
@@ -318,30 +341,40 @@ def _window_stripes_for_rank(
     return stripes
 
 
-def fadvise_dontneed(segments: list[FileSegment]) -> list[dict[str, Any]]:
+def _posix_fadvise(fd: int, advice: int) -> dict[str, Any]:
     libc = ctypes.CDLL(None, use_errno=True)
     posix_fadvise = libc.posix_fadvise
-    posix_fadvise.argtypes = [ctypes.c_int, ctypes.c_longlong, ctypes.c_longlong, ctypes.c_int]
+    posix_fadvise.argtypes = [
+        ctypes.c_int,
+        ctypes.c_longlong,
+        ctypes.c_longlong,
+        ctypes.c_int,
+    ]
     posix_fadvise.restype = ctypes.c_int
 
+    ctypes.set_errno(0)
+    rc = posix_fadvise(
+        fd,
+        ctypes.c_longlong(0),
+        ctypes.c_longlong(0),
+        advice,
+    )
+    return {
+        "ok": rc == 0,
+        "returncode": rc,
+        "errno": ctypes.get_errno() if rc != 0 else 0,
+        "advice": advice,
+    }
+
+
+def fadvise_dontneed(segments: list[FileSegment]) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for seg in segments:
         fd = os.open(seg.file_path, os.O_RDONLY)
         try:
-            rc = posix_fadvise(
-                fd,
-                ctypes.c_longlong(0),
-                ctypes.c_longlong(0),
-                POSIX_FADV_DONTNEED,
-            )
-            results.append(
-                {
-                    "file_name": seg.file_name,
-                    "ok": rc == 0,
-                    "returncode": rc,
-                    "errno": ctypes.get_errno() if rc != 0 else 0,
-                }
-            )
+            item = _posix_fadvise(fd, POSIX_FADV_DONTNEED)
+            item["file_name"] = seg.file_name
+            results.append(item)
         finally:
             os.close(fd)
     return results
@@ -351,6 +384,7 @@ def _io_worker(
     rank: int,
     stripes: list[tuple[str, int, int]],
     chunk_bytes: int,
+    worker_fadvise: int | None,
     start_event: mp.synchronize.Event,
     result_queue: mp.Queue,
 ) -> None:
@@ -367,6 +401,14 @@ def _io_worker(
                 fd = fd_cache.get(path)
                 if fd is None:
                     fd = os.open(path, os.O_RDONLY)
+                    if worker_fadvise is not None:
+                        fadvise_result = _posix_fadvise(fd, worker_fadvise)
+                        if not fadvise_result["ok"]:
+                            raise OSError(
+                                f"posix_fadvise failed rank={rank} path={path} "
+                                f"advice={worker_fadvise} errno={fadvise_result['errno']} "
+                                f"returncode={fadvise_result['returncode']}"
+                            )
                     fd_cache[path] = fd
                 remaining = size
                 cursor = offset
@@ -374,7 +416,9 @@ def _io_worker(
                     todo = min(chunk_bytes, remaining)
                     got = os.preadv(fd, [view[:todo]], cursor)
                     if got <= 0:
-                        raise OSError(f"short read rank={rank} path={path} offset={cursor}")
+                        raise OSError(
+                            f"short read rank={rank} path={path} offset={cursor}"
+                        )
                     cursor += got
                     remaining -= got
                     read_bytes += got
@@ -411,6 +455,7 @@ def run_io_smoke(
     window_bytes: int,
     chunk_bytes: int,
     max_bytes_per_rank: int,
+    worker_fadvise: int | None,
 ) -> dict[str, Any]:
     stripes_by_rank = [
         _window_stripes_for_rank(
@@ -422,7 +467,9 @@ def run_io_smoke(
         )
         for rank in range(tp)
     ]
-    planned_bytes_by_rank = [sum(size for _, _, size in stripes) for stripes in stripes_by_rank]
+    planned_bytes_by_rank = [
+        sum(size for _, _, size in stripes) for stripes in stripes_by_rank
+    ]
 
     ctx = mp.get_context("spawn")
     start_event = ctx.Event()
@@ -430,7 +477,14 @@ def run_io_smoke(
     procs = [
         ctx.Process(
             target=_io_worker,
-            args=(rank, stripes_by_rank[rank], chunk_bytes, start_event, result_queue),
+            args=(
+                rank,
+                stripes_by_rank[rank],
+                chunk_bytes,
+                worker_fadvise,
+                start_event,
+                result_queue,
+            ),
         )
         for rank in range(tp)
     ]
@@ -445,19 +499,24 @@ def run_io_smoke(
 
     ok = all(bool(item.get("ok")) for item in results)
     total_read = sum(int(item.get("read_bytes", 0)) for item in results)
-    max_rank_elapsed = max((float(item.get("elapsed_sec", 0.0)) for item in results), default=0.0)
+    max_rank_elapsed = max(
+        (float(item.get("elapsed_sec", 0.0)) for item in results), default=0.0
+    )
     return {
         "ok": ok,
         "tp": tp,
         "window_bytes": window_bytes,
         "chunk_bytes": chunk_bytes,
         "max_bytes_per_rank": max_bytes_per_rank,
+        "worker_fadvise": worker_fadvise,
         "planned_bytes_by_rank": planned_bytes_by_rank,
         "total_planned_bytes": sum(planned_bytes_by_rank),
         "elapsed_wall_sec": elapsed,
         "max_rank_elapsed_sec": max_rank_elapsed,
         "total_read_bytes": total_read,
-        "aggregate_throughput_gb_s_by_wall": total_read / elapsed / 1e9 if elapsed > 0 else 0.0,
+        "aggregate_throughput_gb_s_by_wall": total_read / elapsed / 1e9
+        if elapsed > 0
+        else 0.0,
         "aggregate_throughput_gb_s_by_max_rank": (
             total_read / max_rank_elapsed / 1e9 if max_rank_elapsed > 0 else 0.0
         ),
@@ -496,6 +555,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Call posix_fadvise(DONTNEED) on safetensors files before --io-smoke.",
     )
+    parser.add_argument(
+        "--io-fadvise-mode",
+        choices=sorted(FADVISE_MODES),
+        default="none",
+        help="Optional posix_fadvise advice applied on each worker read fd after open.",
+    )
     parser.add_argument("--io-chunk-bytes", type=_parse_size, default=16 * 1024 * 1024)
     parser.add_argument(
         "--io-max-bytes-per-rank",
@@ -531,9 +596,12 @@ def main() -> int:
             window_bytes=args.window_bytes,
             chunk_bytes=args.io_chunk_bytes,
             max_bytes_per_rank=args.io_max_bytes_per_rank,
+            worker_fadvise=FADVISE_MODES[args.io_fadvise_mode],
         )
 
-    text = json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None, sort_keys=True)
+    text = json.dumps(
+        result, ensure_ascii=False, indent=2 if args.pretty else None, sort_keys=True
+    )
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(text + "\n", encoding="utf-8")

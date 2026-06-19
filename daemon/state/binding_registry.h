@@ -129,6 +129,7 @@ class BindingRegistry {
     absl::Time last_released_at{absl::InfinitePast()};
     absl::Time unacquired_deadline{absl::InfiniteFuture()};
     absl::Time idle_deadline{absl::InfiniteFuture()};
+    absl::Duration idle_ttl_after_last_release{absl::InfiniteDuration()};
     absl::Time materialization_deadline{absl::InfiniteFuture()};
     bool retired{false};
     std::string retired_reason;

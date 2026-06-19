@@ -1123,6 +1123,7 @@ class DaemonCtl:
         self,
         *,
         source_selection: common_pb2.ArtifactSelection,
+        public_disk_source: store_daemon_pb2.PublicDiskSourceHandle | None = None,
         target_layout: store_daemon_pb2.TargetLayout,
         target_index_bytes: bytes,
         device_uuid: str,
@@ -1161,6 +1162,8 @@ class DaemonCtl:
                 binding_layout_id=str(binding_layout_id),
                 pid=pid_value,
             )
+            if public_disk_source is not None:
+                request.public_disk_source.CopyFrom(public_disk_source)
             request.source_policy.CopyFrom(resolved_source_policy)
             if runtime_artifact_policy is not None:
                 request.serving_artifact_policy.CopyFrom(
@@ -1212,6 +1215,7 @@ class DaemonCtl:
         self,
         *,
         source_selection: common_pb2.ArtifactSelection,
+        public_disk_source: store_daemon_pb2.PublicDiskSourceHandle | None = None,
         target: RealizationTarget | RealizationTargetSet,
         requested_readiness: RuntimeBindingReadiness,
         retention_policy: PrefetchRetentionPolicy | None = None,
@@ -1231,6 +1235,8 @@ class DaemonCtl:
             requested_readiness=_SERVING_READINESS_TO_PROTO[requested_readiness],
         )
         request.source_selection.CopyFrom(source_selection)
+        if public_disk_source is not None:
+            request.public_disk_source.CopyFrom(public_disk_source)
         if isinstance(target, RealizationTarget):
             request.source.CopyFrom(target.source.to_proto())
             request.serving_binding_target.CopyFrom(target.to_proto())

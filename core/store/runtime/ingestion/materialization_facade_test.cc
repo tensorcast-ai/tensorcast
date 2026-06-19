@@ -1639,8 +1639,8 @@ TEST_CASE(
   REQUIRE(plan_or->candidates[2].eligible == false);
   REQUIRE(plan_or->candidates[2].reason == "shared_source_unproven");
   REQUIRE(plan_or->candidates[3].executor == strategy::ExecutionStrategyExecutor::kSourceWindowCollective);
-  REQUIRE(plan_or->candidates[3].eligible == false);
-  REQUIRE(plan_or->candidates[3].reason == "strategy_disabled");
+  REQUIRE(plan_or->candidates[3].eligible == true);
+  REQUIRE(plan_or->candidates[3].reason == "candidate_pending_group_final_admission");
 
   harness.shutdown();
   tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
@@ -1714,8 +1714,8 @@ TEST_CASE(
   REQUIRE(plan_or->candidates[2].eligible == true);
   REQUIRE(plan_or->candidates[2].reason == "eligible");
   REQUIRE(plan_or->candidates[3].executor == strategy::ExecutionStrategyExecutor::kSourceWindowCollective);
-  REQUIRE(plan_or->candidates[3].eligible == false);
-  REQUIRE(plan_or->candidates[3].reason == "strategy_disabled");
+  REQUIRE(plan_or->candidates[3].eligible == true);
+  REQUIRE(plan_or->candidates[3].reason == "candidate_pending_group_final_admission");
 
   harness.shutdown();
   tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
@@ -1802,7 +1802,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "MaterializationFacade AUTO selects source-window candidate when source-window auto mode is enabled",
+    "MaterializationFacade AUTO prefers local batched for host-local source-window candidates",
     "[materialization_facade][strategy_plan][source_window]") {
   SKIP_IF_NO_CUDA();
 
@@ -1826,12 +1826,75 @@ TEST_CASE(
   auto plan_or = harness.facade->build_ordinary_disk_execution_strategy_plan_for_testing(ctx);
   REQUIRE(plan_or.ok());
 
+  REQUIRE(plan_or->executor == strategy::ExecutionStrategyExecutor::kTensorBatchedLocal);
+  REQUIRE(plan_or->selection_reason == "auto_host_local_prefers_local_batched");
+  REQUIRE(plan_or->collective_load_group.has_value());
+  REQUIRE(plan_or->candidates.size() == 4);
+  REQUIRE(plan_or->candidates[1].eligible == true);
+  REQUIRE(plan_or->candidates[2].reason == "source_locality_host_local");
+  REQUIRE(plan_or->candidates[3].executor == strategy::ExecutionStrategyExecutor::kSourceWindowCollective);
+  REQUIRE(plan_or->candidates[3].eligible == true);
+  REQUIRE(plan_or->candidates[3].reason == "candidate_pending_group_final_admission");
+
+  harness.shutdown();
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(artifact_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade AUTO selects source-window for shared source after local rejection",
+    "[materialization_facade][strategy_plan][source_window]") {
+  SKIP_IF_NO_CUDA();
+
+  auto artifact_root = make_temp_dir("materialization_facade_strategy_auto_source_window_shared");
+  create_safetensors_file(
+      artifact_root / "weights.safetensors",
+      "{\"tensor\":{\"dtype\":\"U8\",\"shape\":[4,16],\"data_offsets\":[0,64]}}",
+      std::vector<unsigned char>(64, 29));
+
+  auto opts = MakeOptions(artifact_root);
+  opts.materialization_strategy.enable_local_batched_disk_load = true;
+  opts.materialization_strategy.enable_owner_file_collective = true;
+  opts.materialization_strategy.enable_source_window_collective = true;
+  opts.materialization_strategy.source_window_collective_selection_mode =
+      StoreEngineOptions::MaterializationStrategyConfig::SourceWindowCollectiveSelectionMode::kAuto;
+
+  FacadeHarness harness(opts);
+  harness.initialize();
+
+  auto ctx = make_strategy_context(
+      harness, artifact_root, loading::SourceLocalityHint::kSharedSource, std::string("shared-fs:test"));
+  REQUIRE(ctx.hints.variant.has_value());
+  ctx.hints.variant->view_id = "view:dim1";
+  ctx.hints.variant->view_spec = view_contracts::ViewSpec{
+      .tensors =
+          {
+              {
+                  "tensor",
+                  view_contracts::TensorViewOps{
+                      .ops =
+                          {
+                              view_contracts::ViewOp::Narrow(
+                                  view_contracts::NarrowOp{.dim = 1, .start = 0, .length = 4}),
+                          },
+                  },
+              },
+          },
+  };
+  ctx.resolved_view_plan = view_contracts::ViewPlan{
+      .is_identity = false,
+      .view_size_bytes = 16,
+      .view_index_json = R"({"tensor":[0,16,[4,4],[4,1],"torch.uint8",0]})",
+  };
+  auto plan_or = harness.facade->build_ordinary_disk_execution_strategy_plan_for_testing(ctx);
+  REQUIRE(plan_or.ok());
+
   REQUIRE(plan_or->executor == strategy::ExecutionStrategyExecutor::kSourceWindowCollective);
   REQUIRE(plan_or->selection_reason == "auto_source_window_collective_candidate");
   REQUIRE(plan_or->collective_load_group.has_value());
   REQUIRE(plan_or->candidates.size() == 4);
   REQUIRE(plan_or->candidates[1].eligible == true);
-  REQUIRE(plan_or->candidates[2].reason == "source_locality_host_local");
   REQUIRE(plan_or->candidates[3].executor == strategy::ExecutionStrategyExecutor::kSourceWindowCollective);
   REQUIRE(plan_or->candidates[3].eligible == true);
   REQUIRE(plan_or->candidates[3].reason == "candidate_pending_group_final_admission");
@@ -1894,8 +1957,8 @@ TEST_CASE(
   CHECK(plan_or->candidates[1].eligible);
   CHECK(plan_or->candidates[1].reason == "eligible");
   CHECK(plan_or->candidates[3].executor == strategy::ExecutionStrategyExecutor::kSourceWindowCollective);
-  CHECK_FALSE(plan_or->candidates[3].eligible);
-  CHECK(plan_or->candidates[3].reason == "strategy_disabled");
+  CHECK(plan_or->candidates[3].eligible);
+  CHECK(plan_or->candidates[3].reason == "candidate_pending_group_final_admission");
   CHECK(plan_or->selection_reason.find("local_source_amplification_exceeds_generic") != std::string::npos);
 
   harness.shutdown();

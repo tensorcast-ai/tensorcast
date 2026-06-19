@@ -409,9 +409,16 @@ absl::StatusOr<SourceBoundStrategyPlan> build_source_bound_execution_strategy_pl
   const bool can_execute_collective_plan = strategy_plan.summary.collective_lane_eligible &&
       mixed_generic_residual_allowed &&
       (strategy_config.allow_mixed_execution || strategy_plan.summary.strict_pure_collective_eligible);
+  const bool shared_source = execution_topology.source_locality == loading::SourceLocalityHint::kSharedSource;
+  const bool source_window_explicit_or_strict =
+      strategy_config.executor_preference == ExecutorPreference::kSourceWindowCollective ||
+      strategy_plan.summary.source_window_selection_mode == SourceWindowCollectiveSelectionMode::kStrict;
+  const bool source_window_auto_can_select =
+      strategy_config.executor_preference == ExecutorPreference::kAuto &&
+      strategy_plan.summary.source_window_selection_mode != SourceWindowCollectiveSelectionMode::kDryRun &&
+      shared_source;
   const bool source_window_can_select = strategy_plan.summary.source_window_collective_candidate &&
-      (strategy_config.executor_preference == ExecutorPreference::kSourceWindowCollective ||
-       strategy_plan.summary.source_window_selection_mode != SourceWindowCollectiveSelectionMode::kDryRun);
+      (source_window_explicit_or_strict || source_window_auto_can_select);
   const uint64_t required_data_bytes = strategy_plan.summary.planned_collective_candidate_bytes +
       strategy_plan.summary.planned_non_admitted_typed_bytes + strategy_plan.summary.planned_generic_residual_bytes;
   const uint64_t generic_backend_coverage_bytes =
