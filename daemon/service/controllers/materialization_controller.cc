@@ -6,10 +6,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <exception>
+#include <future>
 #include <limits>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -72,6 +76,18 @@ bool operation_state_is_terminal(tensorcast::operation::v1::OperationState state
   using State = tensorcast::operation::v1::OperationState;
   return state == State::OPERATION_STATE_SUCCESS || state == State::OPERATION_STATE_FAILED ||
       state == State::OPERATION_STATE_CANCELLED;
+}
+
+absl::Time timestamp_to_absl(const google::protobuf::Timestamp& ts) {
+  const int64_t nanos = ts.seconds() * 1000000000LL + ts.nanos();
+  return absl::UnixEpoch() + absl::Nanoseconds(nanos);
+}
+
+bool operation_lease_is_live(const tensorcast::operation::v1::GetOperationResponse& operation, absl::Time now) {
+  if (operation.lease_generation() == 0 || operation.lease_owner().empty() || !operation.has_lease_expires_at()) {
+    return false;
+  }
+  return timestamp_to_absl(operation.lease_expires_at()) > now;
 }
 
 absl::StatusOr<v2::TargetLayout> parse_serving_target_layout(std::string_view target_layout_bytes) {
@@ -276,8 +292,61 @@ void fill_operation_status(
   *status->mutable_as_of() = google::protobuf::util::TimeUtil::GetCurrentTime();
 }
 
-absl::Status preflight_prefetch_serving_binding_local_ready_request(
-    const v2::PrefetchServingBindingRequest& req) {
+bool live_local_ready_prefetch_result(
+    BindingRegistry* binding_registry,
+    const v2::PrefetchServingBindingRequest& req,
+    const tensorcast::operation::v1::OperationStatus& status,
+    absl::Time now) {
+  if (binding_registry == nullptr || status.state() != tensorcast::operation::v1::OPERATION_STATE_SUCCESS ||
+      !status.has_result()) {
+    return false;
+  }
+  tensorcast::operation::v1::PrefetchServingBindingResult result;
+  if (!status.result().UnpackTo(&result)) {
+    return false;
+  }
+  if (result.staged_value()) {
+    return false;
+  }
+  if (!result.has_local_serving_ref() || result.local_serving_ref().empty()) {
+    return false;
+  }
+
+  v2::AcquireBindingValueRequest acquire_req;
+  acquire_req.mutable_binding_value_ref()->CopyFrom(result.binding_value_ref());
+  acquire_req.mutable_reservation_capability()->CopyFrom(result.reservation_capability());
+  acquire_req.set_expected_daemon_id(result.daemon_id());
+  acquire_req.set_expected_daemon_session_id(result.daemon_session_id());
+  acquire_req.set_expected_device_uuid(result.device_uuid());
+  acquire_req.mutable_expected_member()->CopyFrom(result.member());
+  acquire_req.set_expected_target_layout_hash(req.serving_binding_target().resolved_layout().target_layout_hash());
+  acquire_req.set_expected_tensor_schema_hash(req.serving_binding_target().resolved_layout().tensor_schema_hash());
+  acquire_req.set_expected_serving_build_digest(req.serving_binding_target().serving_build_digest());
+  acquire_req.set_local_serving_ref(result.local_serving_ref());
+  acquire_req.set_caller_pid(static_cast<int32_t>(::getpid()));
+  return binding_registry->validate_acquire_request(acquire_req, now).ok();
+}
+
+bool reusable_prefetch_operation(
+    BindingRegistry* binding_registry,
+    const v2::PrefetchServingBindingRequest& req,
+    const tensorcast::operation::v1::GetOperationResponse& operation,
+    absl::Time now) {
+  const auto state = operation.status().state();
+  if (state == tensorcast::operation::v1::OPERATION_STATE_SUCCESS) {
+    return live_local_ready_prefetch_result(binding_registry, req, operation.status(), now);
+  }
+  return state == tensorcast::operation::v1::OPERATION_STATE_RUNNING && operation_lease_is_live(operation, now);
+}
+
+void copy_prefetch_operation_response(
+    const tensorcast::operation::v1::GetOperationResponse& operation,
+    v2::PrefetchServingBindingResponse* resp) {
+  resp->mutable_operation_ref()->CopyFrom(operation.ref());
+  resp->mutable_status()->CopyFrom(operation.status());
+}
+
+absl::Status preflight_prefetch_serving_binding_local_ready_request(const v2::PrefetchServingBindingRequest& req) {
   if (!req.has_source_selection() || req.source_selection().artifact_id().empty()) {
     return absl::InvalidArgumentError("source_selection.artifact_id is required");
   }
@@ -628,20 +697,40 @@ grpc::Status MaterializationController::prefetch_serving_binding(
     return to_grpc_status(status);
   }
   if (prefetch_target_set) {
+    const auto set_profile_start = std::chrono::steady_clock::now();
+    auto elapsed_sec = [](auto start, auto end) { return std::chrono::duration<double>(end - start).count(); };
     tensorcast::operation::v1::PrefetchServingBindingSetResult set_result;
     const auto& target_set = req.serving_binding_set_target();
     set_result.set_runtime(target_set.runtime());
     set_result.mutable_topology()->CopyFrom(target_set.topology());
     set_result.set_group_id(target_set.group_id());
     set_result.set_readiness(tensorcast::operation::v1::SERVING_BINDING_READINESS_LOCAL_READY);
-    bool failed = false;
+    const auto execution_context =
+        OwnedBindingService::source_bound_execution_context_from_server_context(rctx.server_context());
+
+    struct MemberMaterializationResult {
+      tensorcast::operation::v1::ServingBindingMemberRef member;
+      grpc::Status status;
+      v2::PrefetchServingBindingResponse response;
+      ServingPrefetchExecutionProfile profile;
+      double queue_wait_sec{0.0};
+      double total_sec{0.0};
+    };
+
+    std::vector<std::future<MemberMaterializationResult>> member_futures;
+    member_futures.reserve(static_cast<size_t>(target_set.members_size()));
+    auto executor = async_runtime_->blocking_executor();
     for (const auto& member_target : target_set.members()) {
+      auto promise = std::make_shared<std::promise<MemberMaterializationResult>>();
+      member_futures.emplace_back(promise->get_future());
+      const auto enqueue_time = std::chrono::steady_clock::now();
+
       v2::PrefetchServingBindingRequest member_req;
       member_req.mutable_source_selection()->CopyFrom(req.source_selection());
       if (req.has_public_disk_source()) {
         member_req.mutable_public_disk_source()->CopyFrom(req.public_disk_source());
       }
-      member_req.mutable_source()->CopyFrom(req.source());
+      member_req.mutable_source()->CopyFrom(member_target.source());
       member_req.mutable_serving_binding_target()->CopyFrom(member_target);
       member_req.set_requested_readiness(req.requested_readiness());
       member_req.mutable_retention_policy()->CopyFrom(req.retention_policy());
@@ -653,24 +742,64 @@ grpc::Status MaterializationController::prefetch_serving_binding(
         member_req.mutable_group_realization()->mutable_group()->set_part_id(member_target.member().member_id());
       }
       if (req.has_execution_topology()) {
-        member_req.mutable_execution_topology()->CopyFrom(req.execution_topology());
+        auto* execution_topology = member_req.mutable_execution_topology();
+        execution_topology->CopyFrom(req.execution_topology());
+        if (execution_topology->has_collective_load_group()) {
+          auto* collective_group = execution_topology->mutable_collective_load_group();
+          const uint32_t member_index = member_target.member().member_index();
+          if (member_index < collective_group->world_size()) {
+            collective_group->set_rank(member_index);
+          }
+        }
       }
       member_req.set_collective_policy(req.collective_policy());
 
-      v2::PrefetchServingBindingResponse member_resp;
-      const auto execution_context =
-          OwnedBindingService::source_bound_execution_context_from_server_context(rctx.server_context());
-      ServingPrefetchLocalReadyResult member_local_result;
-      const grpc::Status member_status =
-          materialize_prefetch_serving_binding_local_ready(execution_context, &rctx, member_req, member_local_result);
-      if (member_status.ok()) {
-        member_resp.CopyFrom(member_local_result.response);
-      }
+      executor->add([this,
+                     promise = std::move(promise),
+                     execution_context,
+                     member = member_target.member(),
+                     member_req = std::move(member_req),
+                     enqueue_time,
+                     elapsed_sec]() mutable {
+        MemberMaterializationResult result;
+        result.member.CopyFrom(member);
+        const auto task_start = std::chrono::steady_clock::now();
+        result.queue_wait_sec = elapsed_sec(enqueue_time, task_start);
+        try {
+          ServingPrefetchLocalReadyResult local_result;
+          result.status =
+              materialize_prefetch_serving_binding_local_ready(execution_context, nullptr, member_req, local_result);
+          if (result.status.ok()) {
+            result.response.CopyFrom(local_result.response);
+            result.profile = local_result.profile;
+          }
+        } catch (const std::exception& e) {
+          result.status = {grpc::StatusCode::UNKNOWN, e.what()};
+        } catch (...) {
+          result.status = {grpc::StatusCode::UNKNOWN, "serving binding set member materialization threw"};
+        }
+        const auto task_done = std::chrono::steady_clock::now();
+        result.total_sec = elapsed_sec(task_start, task_done);
+        promise->set_value(std::move(result));
+      });
+    }
+    const auto set_fanout_done = std::chrono::steady_clock::now();
+    bool failed = false;
+    double max_member_queue_wait_sec = 0.0;
+    double max_member_total_sec = 0.0;
+    double sum_member_total_sec = 0.0;
+    for (auto& member_future : member_futures) {
+      MemberMaterializationResult member_result_task = member_future.get();
+      max_member_queue_wait_sec = std::max(max_member_queue_wait_sec, member_result_task.queue_wait_sec);
+      max_member_total_sec = std::max(max_member_total_sec, member_result_task.total_sec);
+      sum_member_total_sec += member_result_task.total_sec;
+      const grpc::Status& member_status = member_result_task.status;
+      const auto& member_resp = member_result_task.response;
       if (!member_status.ok() || member_resp.status().state() != tensorcast::operation::v1::OPERATION_STATE_SUCCESS ||
           !member_resp.status().has_result()) {
         failed = true;
         auto* failure = set_result.add_member_failures();
-        failure->mutable_member()->CopyFrom(member_target.member());
+        failure->mutable_member()->CopyFrom(member_result_task.member);
         failure->set_code(member_status.ok() ? "FAILED_PRECONDITION" : grpc_code_name(member_status.error_code()));
         failure->set_message(
             member_status.ok() ? member_resp.status().message() : std::string(member_status.error_message()));
@@ -681,7 +810,7 @@ grpc::Status MaterializationController::prefetch_serving_binding(
       if (!member_resp.status().result().UnpackTo(&member_result)) {
         failed = true;
         auto* failure = set_result.add_member_failures();
-        failure->mutable_member()->CopyFrom(member_target.member());
+        failure->mutable_member()->CopyFrom(member_result_task.member);
         failure->set_code("INTERNAL");
         failure->set_message("member result did not contain PrefetchServingBindingResult");
         failure->set_phase("member_result_decode");
@@ -689,6 +818,7 @@ grpc::Status MaterializationController::prefetch_serving_binding(
       }
       set_result.add_members()->CopyFrom(member_result);
     }
+    const auto set_collect_done = std::chrono::steady_clock::now();
 
     if (failed) {
       for (const auto& member : set_result.members()) {
@@ -719,6 +849,18 @@ grpc::Status MaterializationController::prefetch_serving_binding(
     status->set_message(failed ? "serving binding set materialization failed" : "serving binding set is local-ready");
     status->set_progress(1.0);
     status->mutable_result()->PackFrom(set_result);
+    const auto set_done = std::chrono::steady_clock::now();
+    LOG(INFO) << "tc_profile prefetch_serving_binding_set timings"
+              << " operation_id=" << op_ref->operation_id() << " artifact_id=" << req.source_selection().artifact_id()
+              << " group_id=" << target_set.group_id() << " member_count=" << target_set.members_size()
+              << " successful_members=" << set_result.members_size()
+              << " failed_members=" << set_result.member_failures_size()
+              << " fanout_sec=" << elapsed_sec(set_profile_start, set_fanout_done)
+              << " collect_wait_sec=" << elapsed_sec(set_fanout_done, set_collect_done)
+              << " cleanup_response_sec=" << elapsed_sec(set_collect_done, set_done)
+              << " max_member_queue_wait_sec=" << max_member_queue_wait_sec
+              << " max_member_total_sec=" << max_member_total_sec << " sum_member_total_sec=" << sum_member_total_sec
+              << " total_sec=" << elapsed_sec(set_profile_start, set_done) << " failed=" << (failed ? 1 : 0);
     attach_controller_realization_plan_span_attrs(rctx, realization_plan);
     rctx.mark_success();
     return grpc::Status::OK;
@@ -756,13 +898,26 @@ grpc::Status MaterializationController::start_async_prefetch_serving_binding_loc
   tensorcast::operation::v1::OperationRef operation_ref;
   fill_prefetch_serving_binding_operation_ref(req, operation_id, /*binding_id=*/"", &operation_ref);
 
+  tensorcast::operation::v1::GetOperationRequest existing_req;
+  existing_req.set_operation_id(operation_id);
+  existing_req.mutable_ref()->CopyFrom(operation_ref);
+  if (auto existing_or = global_store_client_->get_operation(existing_req); existing_or.ok()) {
+    if (reusable_prefetch_operation(binding_registry_, req, *existing_or, absl::Now())) {
+      copy_prefetch_operation_response(*existing_or, &resp);
+      LOG(INFO) << "prefetch_serving_binding reusing existing operation"
+                << " operation_id=" << operation_id << " state=" << existing_or->status().state();
+      return grpc::Status::OK;
+    }
+  }
+
   tensorcast::operation::v1::AcquireOperationLeaseRequest lease_req;
   lease_req.set_operation_id(operation_id);
   lease_req.set_kind(operation_ref.kind());
   lease_req.set_target_artifact_id(operation_ref.target_artifact_id());
   lease_req.set_owner_id(daemon_id_);
-  const uint64_t request_budget_ms =
-      execution_context.request_budget.count() > 0 ? static_cast<uint64_t>(execution_context.request_budget.count()) : 0;
+  const uint64_t request_budget_ms = execution_context.request_budget.count() > 0
+      ? static_cast<uint64_t>(execution_context.request_budget.count())
+      : 0;
   lease_req.set_ttl_ms(std::max<uint64_t>(request_budget_ms, 600000));
   auto lease_or = global_store_client_->acquire_operation_lease(lease_req);
   if (!lease_or.ok()) {
@@ -783,6 +938,22 @@ grpc::Status MaterializationController::start_async_prefetch_serving_binding_loc
 
   const uint64_t lease_generation = lease_or->lease().lease_generation();
   const std::string lease_token = lease_or->lease().lease_token();
+  if (auto existing_or = global_store_client_->get_operation(existing_req); existing_or.ok()) {
+    if (reusable_prefetch_operation(binding_registry_, req, *existing_or, absl::Now())) {
+      copy_prefetch_operation_response(*existing_or, &resp);
+      if (existing_or->status().state() == tensorcast::operation::v1::OPERATION_STATE_SUCCESS) {
+        tensorcast::operation::v1::ReleaseOperationLeaseRequest release_req;
+        release_req.set_lease_token(lease_token);
+        auto release_or = global_store_client_->release_operation_lease(release_req);
+        LOG_IF(WARNING, !release_or.ok())
+            << "release_operation_lease failed after prefetch operation reuse for op=" << operation_id << ": "
+            << release_or.status();
+      }
+      LOG(INFO) << "prefetch_serving_binding reusing existing operation after lease"
+                << " operation_id=" << operation_id << " state=" << existing_or->status().state();
+      return grpc::Status::OK;
+    }
+  }
   const google::protobuf::Any snapshot = pack_operation_continuation_metadata(operation_ref);
   tensorcast::operation::v1::UpdateOperationRequest running_update;
   running_update.set_operation_id(operation_id);
@@ -798,9 +969,8 @@ grpc::Status MaterializationController::start_async_prefetch_serving_binding_loc
     tensorcast::operation::v1::ReleaseOperationLeaseRequest release_req;
     release_req.set_lease_token(lease_token);
     auto release_or = global_store_client_->release_operation_lease(release_req);
-    LOG_IF(WARNING, !release_or.ok())
-        << "release_operation_lease failed after prefetch running update failure for op=" << operation_id << ": "
-        << release_or.status();
+    LOG_IF(WARNING, !release_or.ok()) << "release_operation_lease failed after prefetch running update failure for op="
+                                      << operation_id << ": " << release_or.status();
     return to_grpc_status(update_status);
   }
 
@@ -810,51 +980,146 @@ grpc::Status MaterializationController::start_async_prefetch_serving_binding_loc
   v2::PrefetchServingBindingRequest req_copy = req;
   auto client_sp = global_store_client_;
   auto execution_context_copy = execution_context;
-  async_runtime_->blocking_executor()->add(
-      [this,
-       client_sp = std::move(client_sp),
-       execution_context_copy,
-       req_copy = std::move(req_copy),
-       operation_id,
-       lease_generation,
-       lease_token,
-       operation_ref = std::move(operation_ref)]() mutable {
-        ServingPrefetchLocalReadyResult local_result;
-        const grpc::Status materialize_status =
-            materialize_prefetch_serving_binding_local_ready(execution_context_copy, nullptr, req_copy, local_result);
+  execution_context_copy.attach_ready_callback =
+      [this, client_sp, req_copy, operation_id, lease_generation](
+          const std::shared_ptr<BindingRegistry::Record>& record) -> absl::Status {
+    if (record == nullptr) {
+      return absl::InvalidArgumentError("attach-ready binding record is required");
+    }
+    const auto& target = req_copy.serving_binding_target();
+    const auto& layout = target.resolved_layout();
+    const absl::Time now = absl::Now();
+    const auto& policy = req_copy.retention_policy();
+    const auto unacquired_ttl = duration_from_policy_ms(
+        policy.has_expire_if_unacquired_after_ms(),
+        policy.expire_if_unacquired_after_ms(),
+        serving_prefetch_.default_expire_if_unacquired);
+    const auto idle_ttl = duration_from_policy_ms(
+        policy.has_idle_ttl_after_last_release_ms(),
+        policy.idle_ttl_after_last_release_ms(),
+        serving_prefetch_.default_idle_ttl_after_last_release);
+    const auto materialization_timeout = duration_from_policy_ms(
+        policy.has_materialization_timeout_ms(),
+        policy.materialization_timeout_ms(),
+        serving_prefetch_.default_materialization_timeout);
+    const uint64_t reservation_bytes = logical_total_size(record->target_layout);
 
-        tensorcast::operation::v1::UpdateOperationRequest final_update;
-        final_update.set_operation_id(operation_id);
-        final_update.set_lease_generation(lease_generation);
-        if (materialize_status.ok()) {
-          final_update.mutable_status()->CopyFrom(local_result.response.status());
-          *final_update.mutable_status()->mutable_as_of() = google::protobuf::util::TimeUtil::GetCurrentTime();
-          final_update.mutable_snapshot()->CopyFrom(
-              pack_operation_continuation_metadata(local_result.response.operation_ref()));
-        } else {
-          auto* status = final_update.mutable_status();
-          fill_operation_status(
-              status,
-              tensorcast::operation::v1::OPERATION_STATE_FAILED,
-              materialize_status.error_message(),
-              1.0);
-          auto* error = status->mutable_error();
-          error->set_status_code(grpc_code_name(materialize_status.error_code()));
-          error->set_message(materialize_status.error_message());
-          error->set_retryable(false);
-          final_update.mutable_snapshot()->CopyFrom(pack_operation_continuation_metadata(operation_ref));
-        }
+    tensorcast::operation::v1::PrefetchServingBindingResult result;
+    {
+      absl::MutexLock lock(&record->mu);
+      if (record->current_binding_value_id.empty()) {
+        return absl::FailedPreconditionError("attach-ready binding has no reserved binding value");
+      }
+      const std::string capability_id =
+          absl::StrCat("capability:", record->binding_id, ":", record->current_binding_value_id);
+      const absl::Time expires_at = now + absl::Milliseconds(unacquired_ttl.count());
+      record->control_lifetime = BindingRegistry::ControlLifetime::kDaemonRetained;
+      record->retained_ref = true;
+      record->creator_pid = static_cast<int32_t>(::getpid());
+      record->owner_pid = 0;
+      record->daemon_id = daemon_id_;
+      record->daemon_session_id = daemon_session_id_;
+      record->serving_member = target.member();
+      record->serving_build_digest = target.serving_build_digest();
+      record->target_layout_hash = layout.target_layout_hash();
+      record->tensor_schema_hash = layout.tensor_schema_hash();
+      record->reservation_capability_id = capability_id;
+      record->reservation_expires_at = expires_at;
+      record->unacquired_deadline = expires_at;
+      record->idle_deadline = absl::InfiniteFuture();
+      record->idle_ttl_after_last_release = absl::Milliseconds(idle_ttl.count());
+      record->materialization_deadline = now + absl::Milliseconds(materialization_timeout.count());
+      record->verification_state = v2::BINDING_VALUE_VERIFICATION_STATE_PENDING;
+      record->source_artifact_ref = target.source().has_source_artifact_ref()
+          ? target.source().source_artifact_ref()
+          : req_copy.source_selection().artifact_id();
+      record->local_serving_ref =
+          absl::StrCat("binding-local:", record->binding_id, ":", record->current_binding_value_id);
+      record->serving_artifact_id.clear();
 
-        const absl::Status final_status = client_sp->update_operation(final_update);
-        LOG_IF(WARNING, !final_status.ok())
-            << "update_operation(final) failed for prefetch op=" << operation_id << ": " << final_status;
+      result.set_local_serving_ref(record->local_serving_ref);
+      fill_binding_value_ref(*record, result.mutable_binding_value_ref());
+      result.set_daemon_id(record->daemon_id);
+      result.set_daemon_session_id(record->daemon_session_id);
+      result.set_device_uuid(record->device_uuid);
+      result.mutable_member()->CopyFrom(record->serving_member);
+      result.set_reservation_bytes(reservation_bytes);
+      result.set_readiness(tensorcast::operation::v1::SERVING_BINDING_READINESS_RESERVED);
+      result.set_verification_state(verification_state_string(record->verification_state));
+      result.set_expires_at_ms(static_cast<uint64_t>(absl::ToUnixMillis(expires_at)));
+      result.set_staged_value(false);
+      auto* capability = result.mutable_reservation_capability();
+      capability->set_capability_id(capability_id);
+      capability->mutable_binding_value_ref()->CopyFrom(result.binding_value_ref());
+      capability->set_daemon_id(record->daemon_id);
+      capability->set_daemon_session_id(record->daemon_session_id);
+      capability->set_device_uuid(record->device_uuid);
+      capability->mutable_member()->CopyFrom(record->serving_member);
+      capability->set_reservation_bytes(reservation_bytes);
+      capability->set_scope_digest(
+          absl::StrCat(record->target_layout_hash, ":", record->tensor_schema_hash, ":", record->serving_build_digest));
+      capability->set_expires_at_ms(static_cast<uint64_t>(absl::ToUnixMillis(expires_at)));
+    }
 
-        tensorcast::operation::v1::ReleaseOperationLeaseRequest release_req;
-        release_req.set_lease_token(lease_token);
-        auto release_or = client_sp->release_operation_lease(release_req);
-        LOG_IF(WARNING, !release_or.ok())
-            << "release_operation_lease failed for prefetch op=" << operation_id << ": " << release_or.status();
-      });
+    tensorcast::operation::v1::UpdateOperationRequest progress_update;
+    progress_update.set_operation_id(operation_id);
+    progress_update.set_lease_generation(lease_generation);
+    fill_operation_status(
+        progress_update.mutable_status(),
+        tensorcast::operation::v1::OPERATION_STATE_RUNNING,
+        "serving binding attach metadata ready",
+        0.05);
+    progress_update.mutable_snapshot()->PackFrom(result);
+    const absl::Status update_status = client_sp->update_operation(progress_update);
+    LOG_IF(WARNING, !update_status.ok()) << "update_operation(attach-ready) failed for prefetch op=" << operation_id
+                                         << " binding_id=" << record->binding_id << ": " << update_status;
+    LOG(INFO) << "tc_profile prefetch_serving_binding attach_ready"
+              << " operation_id=" << operation_id << " binding_id=" << record->binding_id
+              << " local_serving_ref=" << result.local_serving_ref() << " reservation_bytes=" << reservation_bytes
+              << " update_ok=" << (update_status.ok() ? 1 : 0);
+    return absl::OkStatus();
+  };
+  async_runtime_->blocking_executor()->add([this,
+                                            client_sp = std::move(client_sp),
+                                            execution_context_copy,
+                                            req_copy = std::move(req_copy),
+                                            operation_id,
+                                            lease_generation,
+                                            lease_token,
+                                            operation_ref = std::move(operation_ref)]() mutable {
+    ServingPrefetchLocalReadyResult local_result;
+    const grpc::Status materialize_status =
+        materialize_prefetch_serving_binding_local_ready(execution_context_copy, nullptr, req_copy, local_result);
+
+    tensorcast::operation::v1::UpdateOperationRequest final_update;
+    final_update.set_operation_id(operation_id);
+    final_update.set_lease_generation(lease_generation);
+    if (materialize_status.ok()) {
+      final_update.mutable_status()->CopyFrom(local_result.response.status());
+      *final_update.mutable_status()->mutable_as_of() = google::protobuf::util::TimeUtil::GetCurrentTime();
+      final_update.mutable_snapshot()->CopyFrom(
+          pack_operation_continuation_metadata(local_result.response.operation_ref()));
+    } else {
+      auto* status = final_update.mutable_status();
+      fill_operation_status(
+          status, tensorcast::operation::v1::OPERATION_STATE_FAILED, materialize_status.error_message(), 1.0);
+      auto* error = status->mutable_error();
+      error->set_status_code(grpc_code_name(materialize_status.error_code()));
+      error->set_message(materialize_status.error_message());
+      error->set_retryable(false);
+      final_update.mutable_snapshot()->CopyFrom(pack_operation_continuation_metadata(operation_ref));
+    }
+
+    const absl::Status final_status = client_sp->update_operation(final_update);
+    LOG_IF(WARNING, !final_status.ok()) << "update_operation(final) failed for prefetch op=" << operation_id << ": "
+                                        << final_status;
+
+    tensorcast::operation::v1::ReleaseOperationLeaseRequest release_req;
+    release_req.set_lease_token(lease_token);
+    auto release_or = client_sp->release_operation_lease(release_req);
+    LOG_IF(WARNING, !release_or.ok()) << "release_operation_lease failed for prefetch op=" << operation_id << ": "
+                                      << release_or.status();
+  });
 
   return grpc::Status::OK;
 }
@@ -930,9 +1195,9 @@ grpc::Status MaterializationController::materialize_prefetch_serving_binding_loc
 
   v2::CreateOwnedBindingResponse create_resp;
   const auto create_owned_binding_start = std::chrono::steady_clock::now();
-  const grpc::Status create_status =
-      rctx != nullptr ? owner_binding_service_.create_owned_binding(*rctx, create_req, create_resp)
-                      : owner_binding_service_.create_owned_binding_with_context(execution_context, create_req, create_resp);
+  const grpc::Status create_status = rctx != nullptr
+      ? owner_binding_service_.create_owned_binding(*rctx, create_req, create_resp)
+      : owner_binding_service_.create_owned_binding_with_context(execution_context, create_req, create_resp);
   const auto create_owned_binding_done = std::chrono::steady_clock::now();
   create_owned_binding_sec = elapsed_sec(create_owned_binding_start, create_owned_binding_done);
   if (!create_status.ok()) {
@@ -1111,18 +1376,12 @@ grpc::Status MaterializationController::materialize_prefetch_serving_binding_loc
   local_result.profile.response_sec = response_sec;
   local_result.profile.total_sec = elapsed_sec(profile_start, done);
   LOG(INFO) << "tc_profile prefetch_serving_binding timings"
-            << " operation_id=" << op_ref->operation_id()
-            << " artifact_id=" << req.source_selection().artifact_id()
-            << " binding_id=" << create_resp.binding_id()
-            << " target_device_uuid=" << target.device_uuid()
-            << " requested_readiness=" << req.requested_readiness()
-            << " parse_target_sec=" << parse_target_sec
-            << " create_owned_binding_sec=" << create_owned_binding_sec
-            << " record_lookup_sec=" << record_lookup_sec
-            << " retained_mark_sec=" << retained_mark_sec
-            << " lease_release_sec=" << lease_release_sec
-            << " response_sec=" << response_sec
-            << " total_sec=" << local_result.profile.total_sec;
+            << " operation_id=" << op_ref->operation_id() << " artifact_id=" << req.source_selection().artifact_id()
+            << " binding_id=" << create_resp.binding_id() << " target_device_uuid=" << target.device_uuid()
+            << " requested_readiness=" << req.requested_readiness() << " parse_target_sec=" << parse_target_sec
+            << " create_owned_binding_sec=" << create_owned_binding_sec << " record_lookup_sec=" << record_lookup_sec
+            << " retained_mark_sec=" << retained_mark_sec << " lease_release_sec=" << lease_release_sec
+            << " response_sec=" << response_sec << " total_sec=" << local_result.profile.total_sec;
   return grpc::Status::OK;
 }
 

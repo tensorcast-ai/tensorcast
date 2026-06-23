@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import uuid
 import weakref
@@ -11,7 +12,6 @@ from typing import Any, cast
 import pytest
 
 import tensorcast as tc
-from tensorcast.api._device import device_uuid_for
 from tensorcast.api._materialize import MaterializationPayload
 from tensorcast.api.operation import OperationTimeoutError
 from tensorcast.api.store.artifact import Artifact
@@ -396,7 +396,10 @@ def _serving_artifact_realization_target_set() -> RealizationTargetSet:
     )
 
 
-def test_prefetch_uses_deterministic_operation_id() -> None:
+def test_prefetch_uses_deterministic_operation_id(monkeypatch) -> None:
+    artifact_mod = importlib.import_module("tensorcast.api.store.artifact")
+    monkeypatch.setattr(artifact_mod, "device_uuid_for",
+                        lambda device_id: f"GPU-{device_id}")
     store = _Store()
     artifact = Artifact(store_ref=_store_ref(store), artifact_id="aid")
     ctx = tc.context(request_id="req-1", idempotency_key="idem-1")
@@ -411,7 +414,7 @@ def test_prefetch_uses_deterministic_operation_id() -> None:
     logical_layout_hash = (
         artifact._resolve_realization_selection().proto.logical_layout_hash.hex()
     )
-    device_uuid = device_uuid_for(0)
+    device_uuid = "GPU-0"
     action_fingerprint = (
         f"prefetch|daemon={daemon_id}|artifact=aid|layout={logical_layout_hash}"
         f"|selection={selection_hash}|device=0|device_uuid={device_uuid}|lease=NO_LEASE|v2"
@@ -450,6 +453,45 @@ def test_prefetch_uses_deterministic_operation_id() -> None:
     )
     assert replica.report.lifecycle_plan is not None
     assert replica.report.lifecycle_plan.capability == "retained_replica"
+
+
+def test_retained_binding_prefetch_uses_deterministic_operation_id() -> None:
+    store = _Store()
+    artifact = Artifact(store_ref=_store_ref(store), artifact_id="aid")
+    target = _realization_target()
+    ctx = tc.context(request_id="req-1", idempotency_key="idem-1")
+
+    op = artifact.realize_async(
+        ArtifactRealizationSpec.retained_binding(target=target),
+        ctx=ctx,
+    )
+
+    daemon_id = store._runtime.daemon_id
+    selection = artifact._resolve_realization_selection().proto
+    target_bytes = target.to_proto().SerializeToString(deterministic=True)
+    action_fingerprint = hashlib.sha256(
+        b"prefetch_serving_binding|"
+        + selection.SerializeToString(deterministic=True)
+        + b"|"
+        + target_bytes
+        + b"|readiness=runtime_local_ready|daemon="
+        + daemon_id.encode("utf-8")
+    ).hexdigest()
+    ns = uuid.uuid5(uuid.NAMESPACE_DNS, "tensorcast.op.v1")
+    idempotency_key_hex = hashlib.sha256(
+        ctx.idempotency_key.encode("utf-8")
+    ).hexdigest()
+    expected = str(uuid.uuid5(ns, f"{idempotency_key_hex}|{action_fingerprint}"))
+
+    assert store._runtime.ensure_client().prefetch_binding_calls
+    call = store._runtime.ensure_client().prefetch_binding_calls[0]
+    assert call["operation_id"] == expected
+    assert op.operation_id == expected
+
+    result = op.result(timeout_s=1.0)
+    assert isinstance(result, PrefetchHandoff)
+    assert result.report is not None
+    assert result.report.operation_id == expected
 
 
 def test_prefetch_without_ctx_generates_operation_id() -> None:
@@ -757,3 +799,28 @@ def test_prefetch_target_set_uses_target_set_realization_spec() -> None:
     assert report.target_kind == "target_set"
     assert report.target_set is not None
     assert report.target_set.member_count == 2
+
+
+def test_prefetch_target_set_allows_per_member_source_reuse_contract() -> None:
+    store = _Store()
+    artifact = Artifact(store_ref=_store_ref(store), artifact_id="aid")
+    target = _realization_target_set()
+    member_1 = target.members[1]
+    member_1_layout = member_1.resolved_layout.model_copy(
+        update={
+            "source_reuse": RuntimeBindingSourceReuseDecision(
+                mode="checkpoint_to_runtime",
+                representation_contract_hash="repr-contract-member-1",
+            )
+        }
+    )
+    member_1 = member_1.model_copy(update={"resolved_layout": member_1_layout})
+    target = target.model_copy(
+        update={"members": (target.members[0], member_1)}
+    )
+
+    op = artifact.prefetch(target=target)
+    result = op.result(timeout_s=1.0)
+
+    assert isinstance(result, PrefetchHandoffSet)
+    assert store._runtime.ensure_client().prefetch_binding_calls[0]["target"] == target

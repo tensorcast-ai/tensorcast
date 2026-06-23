@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -85,6 +86,16 @@ constexpr std::chrono::milliseconds kGroupAssembleTimeout{15000};
 // synchronize_all() barriers. 8192 materially reduces barrier count while
 // remaining a bounded batch size.
 constexpr size_t kMaxMappedPeerPairsPerNcclGroup = 8192;
+constexpr size_t kDefaultSourceWindowPipelineSlotsCap = 16;
+constexpr size_t kMaxSourceWindowPipelineSlotsCap = 128;
+constexpr char kSourceWindowMaxPipelineSlotsEnv[] = "TENSORCAST_SOURCE_WINDOW_MAX_PIPELINE_SLOTS";
+constexpr char kSourceWindowReadAheadSlotsEnv[] = "TENSORCAST_SOURCE_WINDOW_READ_AHEAD_SLOTS";
+constexpr char kSourceWindowEvictCliqueOnCompleteEnv[] = "TENSORCAST_SOURCE_WINDOW_EVICT_CLIQUE_ON_COMPLETE";
+constexpr char kSourceWindowAsyncCliqueDestroyOnCompleteEnv[] =
+    "TENSORCAST_SOURCE_WINDOW_ASYNC_CLIQUE_DESTROY_ON_COMPLETE";
+constexpr char kNcclCliqueDestroyModeEnv[] = "TENSORCAST_NCCL_CLIQUE_DESTROY_MODE";
+constexpr std::chrono::milliseconds kNcclCliqueFinalizePollInterval{1};
+constexpr std::chrono::seconds kNcclCliqueFinalizeTimeout{10};
 using StrategyConfig = StoreEngineOptions::MaterializationStrategyConfig;
 using RepresentationWorkItem = materialization::contracts::RepresentationWorkItem;
 using RepresentationWorkItemKind = materialization::contracts::RepresentationWorkItemKind;
@@ -114,7 +125,129 @@ size_t compiled_routed_program_build_thread_count(size_t chunk_count, uint32_t c
     return 1;
   }
   const size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
-  return std::min<size_t>({chunk_count, size_t{16}, std::max<size_t>(2, hw / 4)});
+  return std::min<size_t>({chunk_count, size_t{32}, std::max<size_t>(2, hw / 4)});
+}
+
+size_t source_window_max_pipeline_slots_cap() {
+  const char* raw_value = std::getenv(kSourceWindowMaxPipelineSlotsEnv);
+  if (raw_value == nullptr || *raw_value == '\0') {
+    return kDefaultSourceWindowPipelineSlotsCap;
+  }
+  uint64_t parsed = 0;
+  if (!absl::SimpleAtoi(raw_value, &parsed) || parsed == 0) {
+    LOG(WARNING) << kSourceWindowMaxPipelineSlotsEnv
+                 << " must be a positive integer; using default cap=" << kDefaultSourceWindowPipelineSlotsCap
+                 << " raw_value=" << raw_value;
+    return kDefaultSourceWindowPipelineSlotsCap;
+  }
+  if (parsed > kMaxSourceWindowPipelineSlotsCap) {
+    LOG(WARNING) << kSourceWindowMaxPipelineSlotsEnv << " exceeds maximum cap=" << kMaxSourceWindowPipelineSlotsCap
+                 << "; clamping raw_value=" << raw_value;
+    return kMaxSourceWindowPipelineSlotsCap;
+  }
+  return static_cast<size_t>(parsed);
+}
+
+size_t source_window_effective_max_pipeline_slots(size_t requested_pipeline_slots) {
+  const size_t requested = std::max<size_t>(1, requested_pipeline_slots);
+  return std::min<size_t>(requested, source_window_max_pipeline_slots_cap());
+}
+
+std::optional<size_t> source_window_requested_read_ahead_slots() {
+  const char* raw_value = std::getenv(kSourceWindowReadAheadSlotsEnv);
+  if (raw_value == nullptr || *raw_value == '\0') {
+    return std::nullopt;
+  }
+  uint64_t parsed = 0;
+  if (!absl::SimpleAtoi(raw_value, &parsed) || parsed == 0) {
+    LOG(WARNING) << kSourceWindowReadAheadSlotsEnv
+                 << " must be a positive integer; using pipeline slot count raw_value=" << raw_value;
+    return std::nullopt;
+  }
+  if (parsed > kMaxSourceWindowPipelineSlotsCap) {
+    LOG(WARNING) << kSourceWindowReadAheadSlotsEnv << " exceeds maximum=" << kMaxSourceWindowPipelineSlotsCap
+                 << "; clamping raw_value=" << raw_value;
+    return kMaxSourceWindowPipelineSlotsCap;
+  }
+  return static_cast<size_t>(parsed);
+}
+
+size_t source_window_effective_read_ahead_slots(size_t active_pipeline_slots) {
+  const size_t active = std::max<size_t>(1, active_pipeline_slots);
+  const std::optional<size_t> requested = source_window_requested_read_ahead_slots();
+  if (!requested.has_value()) {
+    return active;
+  }
+  return std::min<size_t>(active, *requested);
+}
+
+bool source_window_evict_clique_on_complete() {
+  const char* raw_value = std::getenv(kSourceWindowEvictCliqueOnCompleteEnv);
+  if (raw_value == nullptr || *raw_value == '\0') {
+    return true;
+  }
+  std::string value(raw_value);
+  std::transform(
+      value.begin(), value.end(), value.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  if (value == "1" || value == "true" || value == "yes" || value == "on") {
+    return true;
+  }
+  if (value == "0" || value == "false" || value == "no" || value == "off") {
+    return false;
+  }
+  LOG(WARNING) << kSourceWindowEvictCliqueOnCompleteEnv
+               << " must be a boolean value; using default enabled raw_value=" << raw_value;
+  return true;
+}
+
+bool source_window_async_clique_destroy_on_complete() {
+  const char* raw_value = std::getenv(kSourceWindowAsyncCliqueDestroyOnCompleteEnv);
+  if (raw_value == nullptr || *raw_value == '\0') {
+    return true;
+  }
+  std::string value(raw_value);
+  std::transform(
+      value.begin(), value.end(), value.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  if (value == "1" || value == "true" || value == "yes" || value == "on") {
+    return true;
+  }
+  if (value == "0" || value == "false" || value == "no" || value == "off") {
+    return false;
+  }
+  LOG(WARNING) << kSourceWindowAsyncCliqueDestroyOnCompleteEnv
+               << " must be a boolean value; using default enabled raw_value=" << raw_value;
+  return true;
+}
+
+enum class NcclCliqueDestroyMode { kFinalize, kSerial };
+
+const char* nccl_clique_destroy_mode_name(NcclCliqueDestroyMode mode) {
+  switch (mode) {
+    case NcclCliqueDestroyMode::kFinalize:
+      return "finalize";
+    case NcclCliqueDestroyMode::kSerial:
+      return "serial";
+  }
+  return "serial";
+}
+
+NcclCliqueDestroyMode nccl_clique_destroy_mode() {
+  const char* raw_value = std::getenv(kNcclCliqueDestroyModeEnv);
+  if (raw_value == nullptr || *raw_value == '\0') {
+    return NcclCliqueDestroyMode::kSerial;
+  }
+  std::string value(raw_value);
+  std::transform(
+      value.begin(), value.end(), value.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  if (value == "finalize" || value == "finalize_poll" || value == "1" || value == "true") {
+    return NcclCliqueDestroyMode::kFinalize;
+  }
+  if (value == "serial" || value == "destroy" || value == "0" || value == "false") {
+    return NcclCliqueDestroyMode::kSerial;
+  }
+  LOG(WARNING) << kNcclCliqueDestroyModeEnv
+               << " must be one of finalize or serial; using serial raw_value=" << raw_value;
+  return NcclCliqueDestroyMode::kSerial;
 }
 
 struct SourceWindowRuntimeScatterGraph {
@@ -361,15 +494,100 @@ class NcclClique {
   };
 
   ~NcclClique() {
+    std::string device_ids;
+    for (size_t i = 0; i < ranks_.size(); ++i) {
+      if (i > 0) {
+        absl::StrAppend(&device_ids, ",");
+      }
+      absl::StrAppend(&device_ids, ranks_[i].device_id);
+    }
+    const auto destroy_start = std::chrono::steady_clock::now();
+    const NcclCliqueDestroyMode destroy_mode = nccl_clique_destroy_mode();
+    double stream_destroy_sec = 0.0;
+    double comm_finalize_sec = 0.0;
+    double comm_finalize_wait_sec = 0.0;
+    double comm_destroy_sec = 0.0;
+    size_t stream_destroy_count = 0;
+    size_t comm_finalize_count = 0;
+    size_t comm_finalize_poll_count = 0;
+    size_t comm_destroy_count = 0;
+    std::vector<ncclComm_t> comms_to_destroy;
+    comms_to_destroy.reserve(ranks_.size());
     for (auto& rank : ranks_) {
       if (rank.stream != nullptr) {
+        const auto stream_start = std::chrono::steady_clock::now();
         (void)tensorcast::cuda::set_device(rank.device_id);
         (void)tensorcast::cuda::stream_destroy(rank.stream);
+        stream_destroy_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - stream_start).count();
+        ++stream_destroy_count;
       }
       if (rank.comm != nullptr) {
-        (void)ncclCommDestroy(rank.comm);
+        comms_to_destroy.push_back(rank.comm);
+        rank.comm = nullptr;
       }
     }
+    if (destroy_mode == NcclCliqueDestroyMode::kFinalize) {
+      for (const ncclComm_t comm : comms_to_destroy) {
+        const auto finalize_start = std::chrono::steady_clock::now();
+        const ncclResult_t rc = ncclCommFinalize(comm);
+        comm_finalize_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - finalize_start).count();
+        if (rc == ncclSuccess || rc == ncclInProgress) {
+          ++comm_finalize_count;
+        } else {
+          LOG(WARNING) << "collective_disk_load nccl clique finalize failed rc=" << ncclGetErrorString(rc);
+        }
+      }
+      const auto wait_start = std::chrono::steady_clock::now();
+      while (!comms_to_destroy.empty()) {
+        bool all_ready = true;
+        for (const ncclComm_t comm : comms_to_destroy) {
+          ncclResult_t async_error = ncclSuccess;
+          const ncclResult_t rc = ncclCommGetAsyncError(comm, &async_error);
+          if (rc == ncclInProgress) {
+            all_ready = false;
+            continue;
+          }
+          if (rc != ncclSuccess) {
+            LOG(WARNING) << "collective_disk_load nccl clique finalize poll failed rc=" << ncclGetErrorString(rc);
+            continue;
+          }
+          if (async_error == ncclInProgress) {
+            all_ready = false;
+          } else if (async_error != ncclSuccess) {
+            LOG(WARNING) << "collective_disk_load nccl clique finalize async error rc="
+                         << ncclGetErrorString(async_error);
+          }
+        }
+        if (all_ready) {
+          break;
+        }
+        ++comm_finalize_poll_count;
+        if (std::chrono::steady_clock::now() - wait_start >= kNcclCliqueFinalizeTimeout) {
+          LOG(WARNING) << "collective_disk_load nccl clique finalize timed out after polls="
+                       << comm_finalize_poll_count;
+          break;
+        }
+        std::this_thread::sleep_for(kNcclCliqueFinalizePollInterval);
+      }
+      comm_finalize_wait_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - wait_start).count();
+    }
+    for (const ncclComm_t comm : comms_to_destroy) {
+      if (comm != nullptr) {
+        const auto comm_start = std::chrono::steady_clock::now();
+        (void)ncclCommDestroy(comm);
+        comm_destroy_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - comm_start).count();
+        ++comm_destroy_count;
+      }
+    }
+    const double total_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - destroy_start).count();
+    LOG(INFO) << "collective_disk_load nccl clique destroy"
+              << " device_ids=" << device_ids << " destroy_mode=" << nccl_clique_destroy_mode_name(destroy_mode)
+              << " ranks=" << ranks_.size() << " stream_count=" << stream_destroy_count
+              << " comm_finalize_count=" << comm_finalize_count
+              << " comm_finalize_poll_count=" << comm_finalize_poll_count << " comm_count=" << comm_destroy_count
+              << " stream_destroy_sec=" << stream_destroy_sec << " comm_finalize_sec=" << comm_finalize_sec
+              << " comm_finalize_wait_sec=" << comm_finalize_wait_sec << " comm_destroy_sec=" << comm_destroy_sec
+              << " total_sec=" << total_sec;
   }
 
   static absl::StatusOr<std::shared_ptr<NcclClique>> create(const std::vector<int>& device_ids) {
@@ -1652,8 +1870,7 @@ struct SourceWindowDeviceMemorySnapshot {
   std::string error;
 };
 
-std::vector<SourceWindowDeviceMemorySnapshot> capture_source_window_device_memory(
-    const std::vector<int>& device_ids) {
+std::vector<SourceWindowDeviceMemorySnapshot> capture_source_window_device_memory(const std::vector<int>& device_ids) {
   std::vector<SourceWindowDeviceMemorySnapshot> snapshots;
   snapshots.reserve(device_ids.size());
   for (int device_id : device_ids) {
@@ -1674,8 +1891,7 @@ std::vector<SourceWindowDeviceMemorySnapshot> capture_source_window_device_memor
   return snapshots;
 }
 
-std::string join_source_window_memory_bool_field(
-    const std::vector<SourceWindowDeviceMemorySnapshot>& snapshots) {
+std::string join_source_window_memory_bool_field(const std::vector<SourceWindowDeviceMemorySnapshot>& snapshots) {
   std::string out = "[";
   for (size_t i = 0; i < snapshots.size(); ++i) {
     if (i != 0) {
@@ -1716,9 +1932,7 @@ std::string join_source_window_memory_delta_field(
     if (baseline != nullptr && i < baseline->size() && snapshots[i].ok && (*baseline)[i].ok &&
         snapshots[i].device_id == (*baseline)[i].device_id) {
       absl::StrAppend(
-          &out,
-          static_cast<long long>(snapshots[i].free_bytes) -
-              static_cast<long long>((*baseline)[i].free_bytes));
+          &out, static_cast<long long>(snapshots[i].free_bytes) - static_cast<long long>((*baseline)[i].free_bytes));
     } else {
       absl::StrAppend(&out, "null");
     }
@@ -1727,8 +1941,7 @@ std::string join_source_window_memory_delta_field(
   return out;
 }
 
-std::string join_source_window_memory_error_field(
-    const std::vector<SourceWindowDeviceMemorySnapshot>& snapshots) {
+std::string join_source_window_memory_error_field(const std::vector<SourceWindowDeviceMemorySnapshot>& snapshots) {
   std::string out = "[";
   for (size_t i = 0; i < snapshots.size(); ++i) {
     if (i != 0) {
@@ -1751,9 +1964,7 @@ void log_source_window_collective_memory(
     const std::vector<SourceWindowDeviceMemorySnapshot>& snapshots,
     const std::vector<SourceWindowDeviceMemorySnapshot>* baseline = nullptr) {
   LOG(INFO) << "source_window_collective_memory"
-            << " stage=" << stage
-            << " artifact_id=" << artifact_id
-            << " group_id=" << group_id
+            << " stage=" << stage << " artifact_id=" << artifact_id << " group_id=" << group_id
             << " ok=" << join_source_window_memory_bool_field(snapshots)
             << " free_bytes=" << join_source_window_memory_size_field(snapshots, /*total_bytes=*/false)
             << " total_bytes=" << join_source_window_memory_size_field(snapshots, /*total_bytes=*/true)
@@ -1791,36 +2002,111 @@ absl::StatusOr<std::shared_ptr<NcclClique>> get_or_create_cached_clique(
   }
 }
 
+std::shared_ptr<common::AsyncRuntime> source_window_clique_cleanup_fallback_runtime() {
+  static auto runtime = std::make_shared<common::AsyncRuntime>(common::AsyncRuntime::Options{
+      .cpu_threads = 1,
+      .blocking_threads = 1,
+      .thread_name_prefix = "tc-clique-cleanup",
+  });
+  return runtime;
+}
+
+void destroy_evicted_clique_sync(
+    std::shared_ptr<NcclClique> evicted_clique,
+    const std::string& key,
+    const std::string& reason,
+    const char* log_label) {
+  const auto destroy_start = std::chrono::steady_clock::now();
+  evicted_clique.reset();
+  const double destroy_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - destroy_start).count();
+  LOG(INFO) << log_label << " device_ids=" << key << " destroy_sec=" << destroy_sec << " reason=" << reason;
+}
+
+bool schedule_evicted_clique_destroy(
+    std::shared_ptr<NcclClique> evicted_clique,
+    const std::string& key,
+    const std::string& reason,
+    std::shared_ptr<common::AsyncRuntime> cleanup_runtime) {
+  std::string cleanup_runtime_kind = "injected";
+  if (cleanup_runtime == nullptr) {
+    cleanup_runtime = source_window_clique_cleanup_fallback_runtime();
+    cleanup_runtime_kind = "source_window_fallback";
+  }
+  if (cleanup_runtime->is_shutting_down()) {
+    LOG(INFO) << "collective_disk_load clique cache async destroy skipped"
+              << " device_ids=" << key << " cleanup_runtime=" << cleanup_runtime_kind << " reason=runtime_shutting_down"
+              << " evict_reason=" << reason;
+    return false;
+  }
+  const auto queued_at = std::chrono::steady_clock::now();
+  auto executor = cleanup_runtime->blocking_executor();
+  const std::string queued_runtime_kind = cleanup_runtime_kind;
+  executor->add([clique = std::move(evicted_clique),
+                 key,
+                 reason,
+                 cleanup_runtime = std::move(cleanup_runtime),
+                 cleanup_runtime_kind = std::move(cleanup_runtime_kind),
+                 queued_at]() mutable {
+    const auto destroy_start = std::chrono::steady_clock::now();
+    const double queue_wait_sec = std::chrono::duration<double>(destroy_start - queued_at).count();
+    clique.reset();
+    const double destroy_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - destroy_start).count();
+    LOG(INFO) << "collective_disk_load clique cache async destroy complete"
+              << " device_ids=" << key << " cleanup_runtime=" << cleanup_runtime_kind
+              << " queue_wait_sec=" << queue_wait_sec << " destroy_sec=" << destroy_sec << " reason=" << reason;
+  });
+  LOG(INFO) << "collective_disk_load clique cache async destroy queued"
+            << " device_ids=" << key << " cleanup_runtime=" << queued_runtime_kind << " reason=" << reason;
+  return true;
+}
+
 void try_evict_cached_clique_if_idle(
     const std::vector<int>& device_ids,
     const std::weak_ptr<NcclClique>& expected_clique,
-    absl::string_view reason) {
+    absl::string_view reason,
+    bool async_destroy,
+    std::shared_ptr<common::AsyncRuntime> cleanup_runtime) {
   const std::string key = clique_cache_key(device_ids);
+  const std::string reason_string(reason);
   bool found = false;
   bool same_entry = false;
   bool erased = false;
   long use_count = 0;
+  std::shared_ptr<NcclClique> evicted_clique;
   std::owner_less<void> owner_less;
+  const auto evict_start = std::chrono::steady_clock::now();
   {
     absl::MutexLock lock(&g_clique_mu);
     auto it = g_clique_cache.find(key);
     if (it != g_clique_cache.end()) {
       found = true;
-      same_entry =
-          !owner_less(expected_clique, it->second) && !owner_less(it->second, expected_clique);
+      same_entry = !owner_less(expected_clique, it->second) && !owner_less(it->second, expected_clique);
       use_count = it->second.use_count();
       if (same_entry && use_count == 1) {
+        evicted_clique = std::move(it->second);
         g_clique_cache.erase(it);
         erased = true;
       }
     }
   }
-  LOG(INFO) << "collective_disk_load clique cache idle evict device_ids=" << key
-            << " found=" << (found ? 1 : 0)
-            << " same_entry=" << (same_entry ? 1 : 0)
-            << " use_count=" << use_count
-            << " erased=" << (erased ? 1 : 0)
-            << " reason=" << reason;
+  const double evict_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - evict_start).count();
+  LOG(INFO) << "collective_disk_load clique cache idle evict device_ids=" << key << " found=" << (found ? 1 : 0)
+            << " same_entry=" << (same_entry ? 1 : 0) << " use_count=" << use_count << " erased=" << (erased ? 1 : 0)
+            << " async_destroy=" << (async_destroy ? 1 : 0) << " evict_sec=" << evict_sec
+            << " reason=" << reason_string;
+  if (evicted_clique == nullptr) {
+    return;
+  }
+  if (async_destroy &&
+      schedule_evicted_clique_destroy(evicted_clique, key, reason_string, std::move(cleanup_runtime))) {
+    return;
+  }
+  destroy_evicted_clique_sync(
+      std::move(evicted_clique),
+      key,
+      reason_string,
+      async_destroy ? "collective_disk_load clique cache sync destroy fallback complete"
+                    : "collective_disk_load clique cache sync destroy complete");
 }
 
 std::optional<uint64_t> dtype_element_size(std::string_view dtype) {
@@ -2966,9 +3252,9 @@ LocalMappedDirectProbeResult probe_direct_source_capability(
     const uint64_t data_begin = segment.data_start;
     const uint64_t data_end = segment.data_start + segment.data_size;
     const uint64_t probe_begin = align_up_u64(data_begin, kLocalMappedDirectIoAlignment);
-    const uint64_t probe_limit =
-        std::min<uint64_t>(align_down_u64(data_end, kLocalMappedDirectIoAlignment),
-                           align_down_u64(file_size, kLocalMappedDirectIoAlignment));
+    const uint64_t probe_limit = std::min<uint64_t>(
+        align_down_u64(data_end, kLocalMappedDirectIoAlignment),
+        align_down_u64(file_size, kLocalMappedDirectIoAlignment));
     if (probe_begin + kLocalMappedDirectIoAlignment > probe_limit) {
       continue;
     }
@@ -3096,8 +3382,7 @@ absl::StatusOr<LocalMappedSafetensorsAutoIoDecision> choose_auto_local_mapped_sa
     }
     const auto probe = probe_direct_source_capability(segments);
     if (probe.supported) {
-      return decision_with_direct_probe(
-          true, -1.0, probe, "page_cache_residency_unavailable_direct_probe_supported");
+      return decision_with_direct_probe(true, -1.0, probe, "page_cache_residency_unavailable_direct_probe_supported");
     }
     return decision_with_direct_probe(
         false, -1.0, probe, "page_cache_residency_unavailable_direct_probe_unsupported_buffered");
@@ -3159,10 +3444,10 @@ absl::StatusOr<LocalMappedSafetensorsAutoIoDecision> choose_auto_local_mapped_sa
   if (!all_direct_friendly) {
     const auto direct_probe = probe_direct_source_capability(segments);
     if (direct_probe.supported) {
-      return decision_with_direct_probe(true, page_cache_residency, direct_probe, "direct_probe_cold_or_partial_direct");
+      return decision_with_direct_probe(
+          true, page_cache_residency, direct_probe, "direct_probe_cold_or_partial_direct");
     }
-    return decision_with_direct_probe(
-        false, page_cache_residency, direct_probe, "direct_probe_unsupported_buffered");
+    return decision_with_direct_probe(false, page_cache_residency, direct_probe, "direct_probe_unsupported_buffered");
   }
   return LocalMappedSafetensorsAutoIoDecision{
       .use_direct_aligned_edges = true,
@@ -10423,7 +10708,8 @@ absl::StatusOr<std::vector<SourceWindowRuntimeChunk>> build_source_window_runtim
       const size_t chunk_len = static_cast<size_t>(chunk_end - chunk_start);
       const size_t stripe_bytes = local_only_window ? chunk_len : (chunk_len + world_size - 1) / world_size;
       const size_t gathered_bytes = local_only_window ? chunk_len : stripe_bytes * world_size;
-      const size_t max_stripe_bytes = local_only_window ? configured_chunk_bytes : max_collective_chunk_bytes / world_size;
+      const size_t max_stripe_bytes =
+          local_only_window ? configured_chunk_bytes : max_collective_chunk_bytes / world_size;
       if (stripe_bytes == 0 || stripe_bytes > max_stripe_bytes || gathered_bytes > max_collective_chunk_bytes) {
         return absl::InternalError("source-window collective stripe sizing exceeded staging buffers");
       }
@@ -10992,17 +11278,18 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
   if (participants.empty()) {
     return absl::InvalidArgumentError("source-window collective participants are empty");
   }
+  const bool evict_clique_on_complete = source_window_evict_clique_on_complete();
+  const bool async_clique_destroy_on_complete = source_window_async_clique_destroy_on_complete();
   double logged_total_sec = 0.0;
   bool logged_success = false;
   absl::Cleanup exit_profile = [&]() {
-    const double exit_total_sec =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - total_start).count();
+    const double exit_total_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - total_start).count();
     LOG(INFO) << "tc_profile source_window_collective_mapped_target exit"
-              << " artifact_id=" << participants.front().artifact_id
-              << " group_id=" << plan.group.group_id
+              << " artifact_id=" << participants.front().artifact_id << " group_id=" << plan.group.group_id
               << " logged_success=" << (logged_success ? 1 : 0)
-              << " logged_total_sec=" << logged_total_sec
-              << " exit_total_sec=" << exit_total_sec
+              << " evict_clique_on_complete=" << (evict_clique_on_complete ? 1 : 0)
+              << " async_clique_destroy_on_complete=" << (async_clique_destroy_on_complete ? 1 : 0)
+              << " logged_total_sec=" << logged_total_sec << " exit_total_sec=" << exit_total_sec
               << " post_log_teardown_sec=" << (logged_success ? exit_total_sec - logged_total_sec : 0.0);
   };
   if (pinned_pool == nullptr) {
@@ -11043,11 +11330,7 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
   }
   const auto memory_entry = capture_source_window_device_memory(device_ids);
   log_source_window_collective_memory(
-      "entry",
-      participants.front().artifact_id,
-      plan.group.group_id,
-      memory_entry,
-      &memory_entry);
+      "entry", participants.front().artifact_id, plan.group.group_id, memory_entry, &memory_entry);
   const auto clique_start = std::chrono::steady_clock::now();
   bool clique_cache_hit = false;
   auto clique_or = get_or_create_cached_clique(device_ids, &clique_cache_hit);
@@ -11057,13 +11340,24 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
   auto clique = std::move(clique_or).value();
   std::weak_ptr<NcclClique> clique_identity = clique;
   bool evict_clique_on_exit = false;
-  absl::Cleanup clique_cache_cleanup = [&clique, &device_ids, &clique_identity, &evict_clique_on_exit]() {
+  std::shared_ptr<common::AsyncRuntime> async_clique_destroy_runtime = options.async_runtime;
+  absl::Cleanup clique_cache_cleanup = [&clique,
+                                        &device_ids,
+                                        &clique_identity,
+                                        &evict_clique_on_exit,
+                                        async_clique_destroy_on_complete,
+                                        async_clique_destroy_runtime]() {
     if (!evict_clique_on_exit) {
       return;
     }
     // Drop this call's handle first; an idle cache entry then has use_count() == 1.
     clique.reset();
-    try_evict_cached_clique_if_idle(device_ids, clique_identity, "source_window_collective_complete");
+    try_evict_cached_clique_if_idle(
+        device_ids,
+        clique_identity,
+        "source_window_collective_complete",
+        async_clique_destroy_on_complete,
+        async_clique_destroy_runtime);
   };
   const auto clique_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - clique_start).count();
   log_source_window_collective_memory(
@@ -11084,8 +11378,7 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
   // reads can safely run several chunks ahead as long as each chunk owns a
   // distinct pinned slot until its H2D copy has been issued and synchronized by
   // the downstream collective/scatter step.
-  constexpr size_t kMaxSourceWindowPipelineSlots = 8;
-  const size_t max_pipeline_slots = std::min<size_t>(requested_pipeline_slots, kMaxSourceWindowPipelineSlots);
+  const size_t max_pipeline_slots = source_window_effective_max_pipeline_slots(requested_pipeline_slots);
   size_t active_pipeline_slots = 1;
   bool parallel_host_buffers = false;
   for (size_t slot_count = max_pipeline_slots; slot_count >= 1; --slot_count) {
@@ -11413,10 +11706,15 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
   std::atomic<uint64_t> direct_pinned_read_success_bytes{0};
   std::atomic<uint64_t> direct_pinned_read_fallback_bytes{0};
   std::atomic<uint64_t> direct_pinned_fallback_unaligned_host{0};
+  std::atomic<uint64_t> direct_pinned_fallback_unaligned_host_bytes{0};
   std::atomic<uint64_t> direct_pinned_fallback_outside_segment{0};
+  std::atomic<uint64_t> direct_pinned_fallback_outside_segment_bytes{0};
   std::atomic<uint64_t> direct_pinned_fallback_cross_segment{0};
+  std::atomic<uint64_t> direct_pinned_fallback_cross_segment_bytes{0};
   std::atomic<uint64_t> direct_pinned_fallback_file_edge{0};
+  std::atomic<uint64_t> direct_pinned_fallback_file_edge_bytes{0};
   std::atomic<uint64_t> direct_pinned_fallback_capacity{0};
+  std::atomic<uint64_t> direct_pinned_fallback_capacity_bytes{0};
   size_t chunk_count = 0;
 
   auto chunk_uses_local_only = [&](const SourceWindowRuntimeChunk& chunk) {
@@ -11547,6 +11845,44 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
   auto host_h2d_offset_for_slot = [&](size_t slot, size_t rank) -> size_t& {
     return host_h2d_offsets[slot * world_size + rank];
   };
+  std::vector<cudaEvent_t> host_slot_h2d_done_events(active_pipeline_slots * world_size, nullptr);
+  std::vector<std::atomic<uint8_t>> host_slot_h2d_in_flight(active_pipeline_slots * world_size);
+  for (auto& in_flight : host_slot_h2d_in_flight) {
+    in_flight.store(0, std::memory_order_relaxed);
+  }
+  auto host_slot_h2d_index = [&](size_t slot, size_t rank) { return slot * world_size + rank; };
+  auto cleanup_host_slot_h2d_events = absl::Cleanup([&]() {
+    for (size_t slot = 0; slot < active_pipeline_slots; ++slot) {
+      for (size_t rank = 0; rank < world_size; ++rank) {
+        const size_t index = host_slot_h2d_index(slot, rank);
+        cudaEvent_t event = host_slot_h2d_done_events[index];
+        if (event == nullptr) {
+          continue;
+        }
+        const absl::Status set_device_status = tensorcast::cuda::set_device(participants[rank].device_id);
+        if (!set_device_status.ok()) {
+          LOG(WARNING) << "source-window host slot H2D event cleanup set_device failed: " << set_device_status;
+        }
+        const absl::Status destroy_status = tensorcast::cuda::event_destroy(event);
+        if (!destroy_status.ok()) {
+          LOG(WARNING) << "source-window host slot H2D event destroy failed: " << destroy_status;
+        }
+        host_slot_h2d_done_events[index] = nullptr;
+      }
+    }
+  });
+  for (size_t slot = 0; slot < active_pipeline_slots; ++slot) {
+    for (size_t rank = 0; rank < world_size; ++rank) {
+      TC_RETURN_IF_ERROR(set_device_cached(participants[rank].device_id));
+      TC_RETURN_IF_ERROR(
+          tensorcast::cuda::event_create_with_flags(
+              &host_slot_h2d_done_events[host_slot_h2d_index(slot, rank)], cudaEventDisableTiming));
+    }
+  }
+  std::atomic<uint64_t> host_slot_h2d_wait_ns{0};
+  std::mutex host_slot_h2d_wait_samples_mu;
+  std::vector<double> host_slot_h2d_wait_samples_sec;
+  host_slot_h2d_wait_samples_sec.reserve(runtime_chunks.size() * world_size);
   std::vector<std::atomic<uint64_t>> rank_read_bytes(world_size);
   std::vector<std::atomic<uint64_t>> rank_read_calls(world_size);
   std::vector<std::atomic<uint64_t>> rank_read_ns(world_size);
@@ -11559,6 +11895,23 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
     rank_zero_fill_bytes[rank].store(0, std::memory_order_relaxed);
     rank_zero_fill_calls[rank].store(0, std::memory_order_relaxed);
   }
+
+  auto wait_host_slot_h2d_ready = [&](size_t slot, size_t rank) -> absl::Status {
+    const size_t index = host_slot_h2d_index(slot, rank);
+    if (host_slot_h2d_in_flight[index].exchange(0, std::memory_order_acq_rel) == 0) {
+      return absl::OkStatus();
+    }
+    const auto wait_start = std::chrono::steady_clock::now();
+    TC_RETURN_IF_ERROR(tensorcast::cuda::event_synchronize(host_slot_h2d_done_events[index]));
+    const uint64_t wait_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_start).count());
+    host_slot_h2d_wait_ns.fetch_add(wait_ns, std::memory_order_relaxed);
+    {
+      std::lock_guard<std::mutex> lock(host_slot_h2d_wait_samples_mu);
+      host_slot_h2d_wait_samples_sec.push_back(static_cast<double>(wait_ns) / 1e9);
+    }
+    return absl::OkStatus();
+  };
 
   struct SourceWindowReaderSlotState {
     std::mutex mu;
@@ -11581,6 +11934,7 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
     state->statuses.resize(world_size);
     reader_slots.push_back(std::move(state));
   }
+  const size_t read_ahead_slots = source_window_effective_read_ahead_slots(active_pipeline_slots);
   std::vector<std::thread> reader_threads;
   reader_threads.reserve(active_pipeline_slots * world_size);
   for (size_t slot = 0; slot < active_pipeline_slots; ++slot) {
@@ -11605,77 +11959,90 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
           if (chunk == nullptr) {
             status = absl::InternalError("source-window reader received empty chunk");
           } else {
-            char* host_buffer = host_buffer_for_slot(slot, rank);
-            const bool local_only_chunk = chunk_uses_local_only(*chunk);
-            const bool rank_reads_chunk = !local_only_chunk || rank == chunk->window->owner_rank;
-            const uint64_t stripe_start = local_only_chunk
-                ? chunk->chunk_start
-                : chunk->chunk_start + static_cast<uint64_t>(rank * chunk->stripe_bytes);
-            const size_t read_len = rank_reads_chunk && stripe_start < chunk->chunk_end
-                ? static_cast<size_t>(std::min<uint64_t>(chunk->stripe_bytes, chunk->chunk_end - stripe_start))
-                : 0;
-            if (read_len > 0) {
-              const auto rank_read_start = std::chrono::steady_clock::now();
-              auto* direct_source = dynamic_cast<DirectAlignedSafetensorsSource*>(rank_sources[rank].get());
-              if (direct_source != nullptr) {
-                direct_pinned_read_attempts.fetch_add(1, std::memory_order_relaxed);
-                DirectAlignedSafetensorsSource::PinnedWindowFallbackReason fallback_reason =
-                    DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kNone;
-                auto h2d_offset_or = direct_source->read_at_for_pinned_window(
-                    stripe_start, host_buffer, read_len, chunk->stripe_bytes, configured_chunk_bytes, &fallback_reason);
-                if (h2d_offset_or.ok()) {
-                  h2d_offset = *h2d_offset_or;
-                  direct_pinned_read_successes.fetch_add(1, std::memory_order_relaxed);
-                  direct_pinned_read_success_bytes.fetch_add(read_len, std::memory_order_relaxed);
-                } else if (absl::IsUnimplemented(h2d_offset_or.status())) {
-                  direct_pinned_read_fallbacks.fetch_add(1, std::memory_order_relaxed);
-                  direct_pinned_read_fallback_bytes.fetch_add(read_len, std::memory_order_relaxed);
-                  switch (fallback_reason) {
-                    case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kUnalignedHostBuffer:
-                      direct_pinned_fallback_unaligned_host.fetch_add(1, std::memory_order_relaxed);
-                      break;
-                    case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kOutsideSegment:
-                      direct_pinned_fallback_outside_segment.fetch_add(1, std::memory_order_relaxed);
-                      break;
-                    case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kCrossSegment:
-                      direct_pinned_fallback_cross_segment.fetch_add(1, std::memory_order_relaxed);
-                      break;
-                    case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kFileEdge:
-                      direct_pinned_fallback_file_edge.fetch_add(1, std::memory_order_relaxed);
-                      break;
-                    case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kCapacity:
-                      direct_pinned_fallback_capacity.fetch_add(1, std::memory_order_relaxed);
-                      break;
-                    case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kNone:
-                      break;
+            status = wait_host_slot_h2d_ready(slot, rank);
+            if (status.ok()) {
+              char* host_buffer = host_buffer_for_slot(slot, rank);
+              const bool local_only_chunk = chunk_uses_local_only(*chunk);
+              const bool rank_reads_chunk = !local_only_chunk || rank == chunk->window->owner_rank;
+              const uint64_t stripe_start = local_only_chunk
+                  ? chunk->chunk_start
+                  : chunk->chunk_start + static_cast<uint64_t>(rank * chunk->stripe_bytes);
+              const size_t read_len = rank_reads_chunk && stripe_start < chunk->chunk_end
+                  ? static_cast<size_t>(std::min<uint64_t>(chunk->stripe_bytes, chunk->chunk_end - stripe_start))
+                  : 0;
+              if (read_len > 0) {
+                const auto rank_read_start = std::chrono::steady_clock::now();
+                auto* direct_source = dynamic_cast<DirectAlignedSafetensorsSource*>(rank_sources[rank].get());
+                if (direct_source != nullptr) {
+                  direct_pinned_read_attempts.fetch_add(1, std::memory_order_relaxed);
+                  DirectAlignedSafetensorsSource::PinnedWindowFallbackReason fallback_reason =
+                      DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kNone;
+                  auto h2d_offset_or = direct_source->read_at_for_pinned_window(
+                      stripe_start,
+                      host_buffer,
+                      read_len,
+                      chunk->stripe_bytes,
+                      configured_chunk_bytes,
+                      &fallback_reason);
+                  if (h2d_offset_or.ok()) {
+                    h2d_offset = *h2d_offset_or;
+                    direct_pinned_read_successes.fetch_add(1, std::memory_order_relaxed);
+                    direct_pinned_read_success_bytes.fetch_add(read_len, std::memory_order_relaxed);
+                  } else if (absl::IsUnimplemented(h2d_offset_or.status())) {
+                    direct_pinned_read_fallbacks.fetch_add(1, std::memory_order_relaxed);
+                    direct_pinned_read_fallback_bytes.fetch_add(read_len, std::memory_order_relaxed);
+                    switch (fallback_reason) {
+                      case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kUnalignedHostBuffer:
+                        direct_pinned_fallback_unaligned_host.fetch_add(1, std::memory_order_relaxed);
+                        direct_pinned_fallback_unaligned_host_bytes.fetch_add(read_len, std::memory_order_relaxed);
+                        break;
+                      case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kOutsideSegment:
+                        direct_pinned_fallback_outside_segment.fetch_add(1, std::memory_order_relaxed);
+                        direct_pinned_fallback_outside_segment_bytes.fetch_add(read_len, std::memory_order_relaxed);
+                        break;
+                      case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kCrossSegment:
+                        direct_pinned_fallback_cross_segment.fetch_add(1, std::memory_order_relaxed);
+                        direct_pinned_fallback_cross_segment_bytes.fetch_add(read_len, std::memory_order_relaxed);
+                        break;
+                      case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kFileEdge:
+                        direct_pinned_fallback_file_edge.fetch_add(1, std::memory_order_relaxed);
+                        direct_pinned_fallback_file_edge_bytes.fetch_add(read_len, std::memory_order_relaxed);
+                        break;
+                      case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kCapacity:
+                        direct_pinned_fallback_capacity.fetch_add(1, std::memory_order_relaxed);
+                        direct_pinned_fallback_capacity_bytes.fetch_add(read_len, std::memory_order_relaxed);
+                        break;
+                      case DirectAlignedSafetensorsSource::PinnedWindowFallbackReason::kNone:
+                        break;
+                    }
+                    status = read_exact(*rank_sources[rank], stripe_start, host_buffer, read_len);
+                    if (status.ok() && read_len < chunk->stripe_bytes) {
+                      std::memset(host_buffer + read_len, 0, chunk->stripe_bytes - read_len);
+                      rank_zero_fill_bytes[rank].fetch_add(chunk->stripe_bytes - read_len, std::memory_order_relaxed);
+                      rank_zero_fill_calls[rank].fetch_add(1, std::memory_order_relaxed);
+                    }
+                  } else {
+                    status = h2d_offset_or.status();
                   }
+                } else {
                   status = read_exact(*rank_sources[rank], stripe_start, host_buffer, read_len);
                   if (status.ok() && read_len < chunk->stripe_bytes) {
                     std::memset(host_buffer + read_len, 0, chunk->stripe_bytes - read_len);
                     rank_zero_fill_bytes[rank].fetch_add(chunk->stripe_bytes - read_len, std::memory_order_relaxed);
                     rank_zero_fill_calls[rank].fetch_add(1, std::memory_order_relaxed);
                   }
-                } else {
-                  status = h2d_offset_or.status();
                 }
+                const auto rank_read_elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                      std::chrono::steady_clock::now() - rank_read_start)
+                                                      .count();
+                rank_read_ns[rank].fetch_add(static_cast<uint64_t>(rank_read_elapsed_ns), std::memory_order_relaxed);
+                rank_read_bytes[rank].fetch_add(read_len, std::memory_order_relaxed);
+                rank_read_calls[rank].fetch_add(1, std::memory_order_relaxed);
               } else {
-                status = read_exact(*rank_sources[rank], stripe_start, host_buffer, read_len);
-                if (status.ok() && read_len < chunk->stripe_bytes) {
-                  std::memset(host_buffer + read_len, 0, chunk->stripe_bytes - read_len);
-                  rank_zero_fill_bytes[rank].fetch_add(chunk->stripe_bytes - read_len, std::memory_order_relaxed);
-                  rank_zero_fill_calls[rank].fetch_add(1, std::memory_order_relaxed);
-                }
+                std::memset(host_buffer, 0, chunk->stripe_bytes);
+                rank_zero_fill_bytes[rank].fetch_add(chunk->stripe_bytes, std::memory_order_relaxed);
+                rank_zero_fill_calls[rank].fetch_add(1, std::memory_order_relaxed);
               }
-              const auto rank_read_elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                    std::chrono::steady_clock::now() - rank_read_start)
-                                                    .count();
-              rank_read_ns[rank].fetch_add(static_cast<uint64_t>(rank_read_elapsed_ns), std::memory_order_relaxed);
-              rank_read_bytes[rank].fetch_add(read_len, std::memory_order_relaxed);
-              rank_read_calls[rank].fetch_add(1, std::memory_order_relaxed);
-            } else {
-              std::memset(host_buffer, 0, chunk->stripe_bytes);
-              rank_zero_fill_bytes[rank].fetch_add(chunk->stripe_bytes, std::memory_order_relaxed);
-              rank_zero_fill_calls[rank].fetch_add(1, std::memory_order_relaxed);
             }
           }
 
@@ -11755,13 +12122,17 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
     for (size_t rank = 0; rank < world_size; ++rank) {
       TC_RETURN_IF_ERROR(set_device_cached(participants[rank].device_id));
       const size_t h2d_offset = host_h2d_offset_for_slot(slot, rank);
+      cudaStream_t stream = clique->stream(static_cast<int>(rank));
       TC_RETURN_IF_ERROR(
           tensorcast::cuda::memcpy_async(
               rank_send_stages[rank]->get(),
               host_buffer_for_slot(slot, rank) + h2d_offset,
               chunk.stripe_bytes,
               cudaMemcpyHostToDevice,
-              clique->stream(static_cast<int>(rank))));
+              stream));
+      const size_t index = host_slot_h2d_index(slot, rank);
+      TC_RETURN_IF_ERROR(tensorcast::cuda::event_record(host_slot_h2d_done_events[index], stream));
+      host_slot_h2d_in_flight[index].store(1, std::memory_order_release);
     }
     h2d_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
     return absl::OkStatus();
@@ -13098,13 +13469,56 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
     return issue_gpu_chunk_from_parallel_slot(chunk, /*slot=*/0, /*issue_h2d_from_host_slot=*/false);
   };
 
+  struct H2DSlotWaitStats {
+    uint64_t count{0};
+    double p50_sec{0.0};
+    double p90_sec{0.0};
+    double p99_sec{0.0};
+    double max_sec{0.0};
+  };
+
+  auto read_ahead_h2d_slot_wait_stats = [&]() -> H2DSlotWaitStats {
+    std::vector<double> samples;
+    {
+      std::lock_guard<std::mutex> lock(host_slot_h2d_wait_samples_mu);
+      samples = host_slot_h2d_wait_samples_sec;
+    }
+    if (samples.empty()) {
+      return {};
+    }
+    std::sort(samples.begin(), samples.end());
+    auto percentile = [&](uint64_t percentile) {
+      const size_t nearest_rank = ((samples.size() * static_cast<size_t>(percentile)) + 99) / 100;
+      const size_t index = std::min<size_t>(samples.size() - 1, nearest_rank == 0 ? 0 : nearest_rank - 1);
+      return samples[index];
+    };
+    return H2DSlotWaitStats{
+        .count = static_cast<uint64_t>(samples.size()),
+        .p50_sec = percentile(50),
+        .p90_sec = percentile(90),
+        .p99_sec = percentile(99),
+        .max_sec = samples.back(),
+    };
+  };
+  H2DSlotWaitStats h2d_slot_wait_stats;
+
   if (parallel_host_buffers) {
     size_t next_launch_chunk = 0;
-    const size_t initial_read_ahead = std::min(active_pipeline_slots, runtime_chunks.size());
+    const size_t initial_read_ahead = std::min(read_ahead_slots, runtime_chunks.size());
     for (; next_launch_chunk < initial_read_ahead; ++next_launch_chunk) {
       TC_RETURN_IF_ERROR(launch_parallel_chunk_read(next_launch_chunk));
     }
+    auto launch_next_read_if_available = [&]() -> absl::Status {
+      if (next_launch_chunk >= runtime_chunks.size()) {
+        return absl::OkStatus();
+      }
+      TC_RETURN_IF_ERROR(launch_parallel_chunk_read(next_launch_chunk));
+      ++next_launch_chunk;
+      return absl::OkStatus();
+    };
     double read_job_max_sec = 0.0;
+    std::vector<double> read_job_samples_sec;
+    read_job_samples_sec.reserve(runtime_chunks.size());
     for (size_t chunk_index = 0; chunk_index < runtime_chunks.size(); ++chunk_index) {
       const size_t slot = chunk_index % active_pipeline_slots;
       SourceWindowReadAheadResult read_result = wait_parallel_chunk_read(chunk_index);
@@ -13114,29 +13528,59 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
       read_sec += read_result.read_sec;
       read_job_sec += read_result.read_job_sec;
       read_job_max_sec = std::max(read_job_max_sec, read_result.read_job_sec);
+      read_job_samples_sec.push_back(read_result.read_job_sec);
       bytes_read += runtime_chunks[chunk_index].chunk_len;
       chunk_count += 1;
+      bool launched_next_read = false;
       if (chunk_uses_consumer_routed(runtime_chunks[chunk_index])) {
+        TC_RETURN_IF_ERROR(issue_h2d_from_slot(runtime_chunks[chunk_index], slot));
+        TC_RETURN_IF_ERROR(launch_next_read_if_available());
+        launched_next_read = true;
         TC_RETURN_IF_ERROR(issue_consumer_routed_chunk_from_parallel_slot(
-            runtime_chunks[chunk_index], slot, /*issue_h2d_from_host_slot=*/true));
+            runtime_chunks[chunk_index], slot, /*issue_h2d_from_host_slot=*/false));
       } else if (chunk_uses_local_only(runtime_chunks[chunk_index])) {
         TC_RETURN_IF_ERROR(issue_local_only_chunk_from_parallel_slot(
             runtime_chunks[chunk_index], slot, /*issue_h2d_from_host_slot=*/true));
       } else {
+        TC_RETURN_IF_ERROR(issue_h2d_from_slot(runtime_chunks[chunk_index], slot));
+        TC_RETURN_IF_ERROR(launch_next_read_if_available());
+        launched_next_read = true;
         TC_RETURN_IF_ERROR(
-            issue_gpu_chunk_from_parallel_slot(runtime_chunks[chunk_index], slot, /*issue_h2d_from_host_slot=*/true));
+            issue_gpu_chunk_from_parallel_slot(runtime_chunks[chunk_index], slot, /*issue_h2d_from_host_slot=*/false));
       }
-      if (next_launch_chunk < runtime_chunks.size()) {
-        TC_RETURN_IF_ERROR(launch_parallel_chunk_read(next_launch_chunk));
-        ++next_launch_chunk;
+      if (!launched_next_read) {
+        TC_RETURN_IF_ERROR(launch_next_read_if_available());
       }
     }
+    auto read_job_percentile = [&](uint64_t percentile) {
+      if (read_job_samples_sec.empty()) {
+        return 0.0;
+      }
+      std::vector<double> sorted = read_job_samples_sec;
+      std::sort(sorted.begin(), sorted.end());
+      const size_t nearest_rank = ((sorted.size() * static_cast<size_t>(percentile)) + 99) / 100;
+      const size_t index = std::min<size_t>(sorted.size() - 1, nearest_rank == 0 ? 0 : nearest_rank - 1);
+      return sorted[index];
+    };
+    const double read_ahead_h2d_slot_wait_sec =
+        static_cast<double>(host_slot_h2d_wait_ns.load(std::memory_order_relaxed)) / 1e9;
+    h2d_slot_wait_stats = read_ahead_h2d_slot_wait_stats();
     LOG(INFO) << "source_window_collective_read_ahead_profile"
               << " artifact_id=" << participants.front().artifact_id << " group_id=" << plan.group.group_id
               << " chunks=" << runtime_chunks.size()
-              << " active_pipeline_slots=" << active_pipeline_slots
+              << " max_pipeline_slots_cap=" << source_window_max_pipeline_slots_cap()
+              << " active_pipeline_slots=" << active_pipeline_slots << " read_ahead_slots=" << read_ahead_slots
               << " read_job_avg=" << (runtime_chunks.empty() ? 0.0 : read_job_sec / runtime_chunks.size()) << "s"
-              << " read_job_max=" << read_job_max_sec << "s";
+              << " read_job_p50=" << read_job_percentile(50) << "s"
+              << " read_job_p90=" << read_job_percentile(90) << "s"
+              << " read_job_p99=" << read_job_percentile(99) << "s"
+              << " read_job_max=" << read_job_max_sec << "s"
+              << " read_ahead_h2d_slot_wait=" << read_ahead_h2d_slot_wait_sec << "s"
+              << " read_ahead_h2d_slot_wait_count=" << h2d_slot_wait_stats.count
+              << " read_ahead_h2d_slot_wait_p50=" << h2d_slot_wait_stats.p50_sec << "s"
+              << " read_ahead_h2d_slot_wait_p90=" << h2d_slot_wait_stats.p90_sec << "s"
+              << " read_ahead_h2d_slot_wait_p99=" << h2d_slot_wait_stats.p99_sec << "s"
+              << " read_ahead_h2d_slot_wait_max=" << h2d_slot_wait_stats.max_sec << "s";
   } else {
     for (const auto& chunk : runtime_chunks) {
       bytes_read += chunk.chunk_len;
@@ -13151,7 +13595,7 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
       plan.group.group_id,
       capture_source_window_device_memory(device_ids),
       &memory_entry);
-  evict_clique_on_exit = true;
+  evict_clique_on_exit = evict_clique_on_complete;
 
   auto metrics = source_window_metrics_from_summary(plan.summary);
   metrics.unique_source_bytes = bytes_read;
@@ -13205,14 +13649,14 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
   LOG(INFO) << "source_window_collective_mapped_target timings"
             << " artifact_id=" << participants.front().artifact_id << " group_id=" << plan.group.group_id
             << " windows=" << plan.windows.size() << " chunks=" << chunk_count
-            << " chunk_bytes=" << configured_chunk_bytes
-            << " stripe_buffer_bytes=" << chunk_sizing.stripe_buffer_bytes
-            << " max_collective_chunk_bytes=" << max_collective_chunk_bytes
-            << " max_stripe_bytes=" << max_stripe_bytes
+            << " chunk_bytes=" << configured_chunk_bytes << " stripe_buffer_bytes=" << chunk_sizing.stripe_buffer_bytes
+            << " max_collective_chunk_bytes=" << max_collective_chunk_bytes << " max_stripe_bytes=" << max_stripe_bytes
             << " parallel_host_buffers=" << (parallel_host_buffers ? 1 : 0)
             << " requested_pipeline_slots=" << requested_pipeline_slots
-            << " active_pipeline_slots=" << active_pipeline_slots << " bytes_read=" << bytes_read
-            << " peer_transfer_bytes=" << actual_peer_transfer_bytes << " scatter_ops=" << actual_scatter_ops
+            << " max_pipeline_slots_cap=" << source_window_max_pipeline_slots_cap()
+            << " active_pipeline_slots=" << active_pipeline_slots << " read_ahead_slots=" << read_ahead_slots
+            << " bytes_read=" << bytes_read << " peer_transfer_bytes=" << actual_peer_transfer_bytes
+            << " scatter_ops=" << actual_scatter_ops
             << " target_storage_fast_path_pieces=" << target_storage_fast_path_pieces
             << " target_storage_fast_path_bytes=" << target_storage_fast_path_bytes
             << " runtime_chunk_unfiltered_consumer_span_refs=" << runtime_chunk_unfiltered_consumer_span_refs
@@ -13275,23 +13719,40 @@ absl::StatusOr<runtime::ingestion::strategy::CollectiveExecutionMetrics> execute
             << direct_pinned_read_fallback_bytes.load(std::memory_order_relaxed)
             << " direct_pinned_fallback_unaligned_host="
             << direct_pinned_fallback_unaligned_host.load(std::memory_order_relaxed)
+            << " direct_pinned_fallback_unaligned_host_bytes="
+            << direct_pinned_fallback_unaligned_host_bytes.load(std::memory_order_relaxed)
             << " direct_pinned_fallback_outside_segment="
             << direct_pinned_fallback_outside_segment.load(std::memory_order_relaxed)
+            << " direct_pinned_fallback_outside_segment_bytes="
+            << direct_pinned_fallback_outside_segment_bytes.load(std::memory_order_relaxed)
             << " direct_pinned_fallback_cross_segment="
             << direct_pinned_fallback_cross_segment.load(std::memory_order_relaxed)
+            << " direct_pinned_fallback_cross_segment_bytes="
+            << direct_pinned_fallback_cross_segment_bytes.load(std::memory_order_relaxed)
             << " direct_pinned_fallback_file_edge=" << direct_pinned_fallback_file_edge.load(std::memory_order_relaxed)
+            << " direct_pinned_fallback_file_edge_bytes="
+            << direct_pinned_fallback_file_edge_bytes.load(std::memory_order_relaxed)
             << " direct_pinned_fallback_capacity=" << direct_pinned_fallback_capacity.load(std::memory_order_relaxed)
-            << " clique_init=" << clique_sec << "s"
-            << " clique_cache_hit=" << (clique_cache_hit ? 1 : 0) << " pinned_alloc=" << pinned_alloc_sec << "s"
+            << " direct_pinned_fallback_capacity_bytes="
+            << direct_pinned_fallback_capacity_bytes.load(std::memory_order_relaxed) << " clique_init=" << clique_sec
+            << "s"
+            << " clique_cache_hit=" << (clique_cache_hit ? 1 : 0)
+            << " evict_clique_on_complete=" << (evict_clique_on_complete ? 1 : 0)
+            << " pinned_alloc=" << pinned_alloc_sec << "s"
             << " stage_alloc=" << stage_alloc_sec << "s"
             << " read=" << read_sec << "s"
             << " read_job_sum=" << read_job_sec << "s"
-            << " rank_read_sec=" << join_rank_read_sec()
-            << " rank_read_bytes=" << join_atomic_u64(rank_read_bytes)
+            << " read_ahead_h2d_slot_wait="
+            << (static_cast<double>(host_slot_h2d_wait_ns.load(std::memory_order_relaxed)) / 1e9) << "s"
+            << " read_ahead_h2d_slot_wait_count=" << h2d_slot_wait_stats.count
+            << " read_ahead_h2d_slot_wait_p50=" << h2d_slot_wait_stats.p50_sec << "s"
+            << " read_ahead_h2d_slot_wait_p90=" << h2d_slot_wait_stats.p90_sec << "s"
+            << " read_ahead_h2d_slot_wait_p99=" << h2d_slot_wait_stats.p99_sec << "s"
+            << " read_ahead_h2d_slot_wait_max=" << h2d_slot_wait_stats.max_sec << "s"
+            << " rank_read_sec=" << join_rank_read_sec() << " rank_read_bytes=" << join_atomic_u64(rank_read_bytes)
             << " rank_read_calls=" << join_atomic_u64(rank_read_calls)
             << " rank_zero_fill_bytes=" << join_atomic_u64(rank_zero_fill_bytes)
-            << " rank_zero_fill_calls=" << join_atomic_u64(rank_zero_fill_calls)
-            << " h2d=" << h2d_sec << "s"
+            << " rank_zero_fill_calls=" << join_atomic_u64(rank_zero_fill_calls) << " h2d=" << h2d_sec << "s"
             << " collective_issue=" << collective_sec << "s"
             << " collective_sync=" << collective_sync_sec << "s"
             << " scatter_issue=" << scatter_issue_sec << "s"
@@ -13796,8 +14257,37 @@ SourceWindowCollectivePlanCacheStats source_window_routed_program_cache_stats_fo
 }
 
 size_t source_window_compiled_routed_program_build_thread_count_for_testing(
-    size_t chunk_count, uint32_t configured_thread_count) {
+    size_t chunk_count,
+    uint32_t configured_thread_count) {
   return compiled_routed_program_build_thread_count(chunk_count, configured_thread_count);
+}
+
+size_t source_window_max_pipeline_slots_cap_for_testing() {
+  return source_window_max_pipeline_slots_cap();
+}
+
+size_t source_window_effective_max_pipeline_slots_for_testing(size_t requested_pipeline_slots) {
+  return source_window_effective_max_pipeline_slots(requested_pipeline_slots);
+}
+
+std::optional<size_t> source_window_requested_read_ahead_slots_for_testing() {
+  return source_window_requested_read_ahead_slots();
+}
+
+size_t source_window_effective_read_ahead_slots_for_testing(size_t active_pipeline_slots) {
+  return source_window_effective_read_ahead_slots(active_pipeline_slots);
+}
+
+bool source_window_evict_clique_on_complete_for_testing() {
+  return source_window_evict_clique_on_complete();
+}
+
+bool source_window_async_clique_destroy_on_complete_for_testing() {
+  return source_window_async_clique_destroy_on_complete();
+}
+
+std::string nccl_clique_destroy_mode_for_testing() {
+  return nccl_clique_destroy_mode_name(nccl_clique_destroy_mode());
 }
 
 absl::StatusOr<std::string> source_window_routed_program_cache_key_for_testing(

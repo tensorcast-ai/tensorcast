@@ -9,9 +9,11 @@ import pytest
 import tensorcast.api as api
 from tensorcast.api import operation as operation_module
 from tensorcast.api.context import CallContext
+from tensorcast.api.errors import ArtifactError
 from tensorcast.api.operation import (
     DaemonGlobalStoreOperation,
     DaemonReplicaOperation,
+    OperationRefMetadata,
     OperationStatus,
     OperationTimeoutError,
     PollingOperation,
@@ -72,6 +74,7 @@ class _GlobalClient:
         self.attachment_kind = ""
         self.recovery_class = ""
         self.fencing_digest = ""
+        self.get_result = None
         self.last_get_ref: operation_pb2.OperationRef | None = None
         self.last_wait_ref: operation_pb2.OperationRef | None = None
 
@@ -98,6 +101,8 @@ class _GlobalClient:
         resp.status.state = self.get_state
         if self.error is not None:
             resp.status.error.CopyFrom(self.error)
+        if self.get_result is not None:
+            resp.status.result.Pack(self.get_result)
         return resp
 
     def wait_operation(
@@ -216,6 +221,43 @@ def test_public_operation_surface_excludes_internal_routed_carriers() -> None:
         assert not hasattr(operation_module, name)
 
 
+def test_operation_ref_metadata_round_trips_dict_and_proto() -> None:
+    metadata = OperationRefMetadata(
+        operation_id="op-6",
+        kind="prefetch_serving_binding",
+        target_artifact_id="artifact-6",
+        authority_scope_kind="workflow_owner",
+        authority_scope_id="workflow-6",
+        attachment_kind="target_publication",
+        recovery_class="ephemeral_process_local",
+        fencing_digest="digest-6",
+    )
+
+    payload = metadata.to_dict()
+    assert payload == {
+        "operation_id": "op-6",
+        "kind": "prefetch_serving_binding",
+        "target_artifact_id": "artifact-6",
+        "authority_scope_kind": "workflow_owner",
+        "authority_scope_id": "workflow-6",
+        "attachment_kind": "target_publication",
+        "recovery_class": "ephemeral_process_local",
+        "fencing_digest": "digest-6",
+    }
+    assert OperationRefMetadata.from_dict(payload) == metadata
+
+    proto = metadata.to_proto()
+    assert proto.operation_id == "op-6"
+    assert proto.kind == "prefetch_serving_binding"
+    assert proto.authority_scope_id == "workflow-6"
+    assert OperationRefMetadata.from_proto(proto) == metadata
+
+
+def test_operation_ref_metadata_rejects_missing_operation_id() -> None:
+    with pytest.raises(ValueError, match="operation_id"):
+        OperationRefMetadata.from_dict({"kind": "prefetch_serving_binding"})
+
+
 def test_daemon_global_store_operation_retains_explicit_operation_ref() -> None:
     client = _GlobalClient()
     client.get_state = operation_pb2.OPERATION_STATE_FAILED
@@ -266,6 +308,12 @@ def test_daemon_global_store_operation_retains_explicit_operation_ref() -> None:
     assert client.last_get_ref is not None
     assert client.last_get_ref.authority_scope_id == "workflow-6"
     assert client.last_get_ref.attachment_kind == "target_publication"
+    metadata = op.operation_ref_metadata
+    assert metadata.operation_id == "op-6"
+    assert metadata.kind == "seal_assembly"
+    assert metadata.target_artifact_id == "assembly-6"
+    assert metadata.authority_scope_id == "workflow-6"
+    assert op.operation_ref_proto().attachment_kind == "target_publication"
 
 
 def test_daemon_global_store_operation_refreshes_operation_ref_from_backend() -> None:
@@ -310,6 +358,7 @@ def test_daemon_global_store_operation_refreshes_operation_ref_from_backend() ->
     assert descriptor.fencing_digest == "digest-7"
     assert client.last_get_ref is not None
     assert client.last_get_ref.operation_id == "op-7"
+    assert op.operation_ref_metadata.authority_scope_id == "workflow-7"
 
 
 def test_daemon_global_store_operation_cancel_still_uses_operation_ref() -> None:
@@ -338,3 +387,69 @@ def test_daemon_global_store_operation_cancel_still_uses_operation_ref() -> None
     assert client.last_get_ref is not None
     assert client.last_get_ref.authority_scope_id == "workflow-8"
     assert client.last_get_ref.attachment_kind == "target_publication"
+
+
+def test_daemon_global_store_operation_exposes_running_latest_result() -> None:
+    client = _GlobalClient()
+    client.get_state = operation_pb2.OPERATION_STATE_RUNNING
+    client.get_result = operation_pb2.OperationRef(
+        operation_id="op-9",
+        kind="prefetch_serving_binding",
+        target_artifact_id="artifact-9",
+    )
+    runtime = _Runtime(client)
+
+    def _result_factory(resp: operation_pb2.GetOperationResponse) -> str:
+        result = operation_pb2.OperationRef()
+        assert resp.status.result.Unpack(result)
+        return result.target_artifact_id
+
+    op = DaemonGlobalStoreOperation(
+        operation_id="op-9",
+        runtime_ref=weakref.ref(runtime),
+        ctx=None,
+        context={},
+        result_factory=_result_factory,
+    )
+
+    assert op.done() is False
+    assert op.latest_result() == "artifact-9"
+
+
+def test_daemon_global_store_operation_latest_result_missing_returns_none() -> None:
+    client = _GlobalClient()
+    client.get_state = operation_pb2.OPERATION_STATE_RUNNING
+    runtime = _Runtime(client)
+    op = DaemonGlobalStoreOperation(
+        operation_id="op-10",
+        runtime_ref=weakref.ref(runtime),
+        ctx=None,
+        context={},
+        result_factory=lambda _: "unreachable",
+    )
+
+    assert op.latest_result() is None
+
+
+def test_daemon_global_store_operation_latest_result_transient_error_returns_none(
+) -> None:
+
+    class _NotFoundClient(_GlobalClient):
+
+        def get_operation(self, *args, **kwargs):
+            raise ArtifactError(
+                "operation not visible yet",
+                status_code="NOT_FOUND",
+                retryable=False,
+            )
+
+    runtime = _Runtime(_NotFoundClient())
+    op = DaemonGlobalStoreOperation(
+        operation_id="op-11",
+        runtime_ref=weakref.ref(runtime),
+        ctx=None,
+        context={},
+        result_factory=lambda _: "unreachable",
+    )
+
+    assert op.latest_result() is None

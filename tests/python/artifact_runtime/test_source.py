@@ -6,9 +6,13 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
+import tensorcast.artifact_runtime.source as source_mod
 from tensorcast.api.store.common import canonical_index_to_bytes
-from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry
-from tensorcast.api.store.types import ArtifactError
+from tensorcast.api.store.types import (
+    ArtifactError,
+    CanonicalIndex,
+    CanonicalIndexEntry,
+)
 from tensorcast.artifact_runtime.source import (
     SOURCE_CATALOG_SCHEMA_VERSION,
     SourceCatalog,
@@ -192,6 +196,64 @@ def test_source_catalog_from_canonical_index_bytes_matches_index_path() -> None:
     assert from_bytes.canonical_index_bytes == index_bytes
     assert from_bytes.meta_by_name["a"] == from_index.meta_by_name["a"]
     assert from_bytes.meta_by_name["b"] == from_index.meta_by_name["b"]
+
+
+def test_source_catalog_from_canonical_index_bytes_defers_meta_conversion(
+    monkeypatch,
+) -> None:
+    index = CanonicalIndex(
+        entries=(
+            CanonicalIndexEntry(
+                name="a",
+                dtype=torch.bfloat16,
+                shape=(2, 4),
+                stride=(4, 1),
+                storage_offset=0,
+                segment_offset=0,
+                size_bytes=16,
+            ),
+            CanonicalIndexEntry(
+                name="b",
+                dtype=torch.float32,
+                shape=(3,),
+                stride=(1,),
+                storage_offset=2,
+                segment_offset=16,
+                size_bytes=12,
+            ),
+        ),
+        total_size_bytes=28,
+        avbs_hash="",
+    )
+    index_bytes = canonical_index_to_bytes(index)
+    parse_calls = []
+    real_parse = source_mod._parse_canonical_index_bytes
+
+    def parse_spy(*args, **kwargs):
+        parse_calls.append((args, kwargs))
+        return real_parse(*args, **kwargs)
+
+    monkeypatch.setattr(source_mod, "_parse_canonical_index_bytes", parse_spy)
+
+    catalog = source_catalog_from_canonical_index_bytes(
+        index_bytes,
+        source_artifact_ref="mi2:test:source",
+    )
+
+    assert parse_calls == []
+    assert catalog.tensor_count == 2
+    assert catalog.canonical_index_bytes == index_bytes
+    assert catalog.metadata_fingerprint == compute_source_metadata_fingerprint(
+        ordered_names=(),
+        meta_by_name={},
+        canonical_index_hash=catalog.canonical_index_hash,
+        tensor_count=2,
+    )
+    assert parse_calls == []
+
+    assert catalog.ordered_names == ("a", "b")
+    assert catalog.meta_by_name["a"].dtype == torch.bfloat16
+    assert len(parse_calls) == 1
 
 
 def test_source_catalog_from_canonical_index_bytes_rejects_invalid_json() -> None:

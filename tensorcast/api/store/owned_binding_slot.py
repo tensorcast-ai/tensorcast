@@ -142,10 +142,20 @@ def _require_execution_only_realize_contract(
 def restore_owned_binding_tensors(
     *,
     response: store_daemon_pb2.CreateBindingResponse
-    | store_daemon_pb2.CreateOwnedBindingResponse,
+    | store_daemon_pb2.CreateOwnedBindingResponse
+    | store_daemon_pb2.AcquireBindingValueResponse,
     runtime: "StoreRuntimeContext",
     device_id: int,
+    preopened_cuda_memory_ptr: int | None = None,
 ) -> dict[str, torch.Tensor]:
+    """Restore tensor views from a daemon-owned binding response.
+
+    When ``preopened_cuda_memory_ptr`` is provided, the caller has already
+    opened the CUDA IPC handle on ``device_id``. Ownership of that opened
+    mapping is transferred to the returned tensors through ``restore_tensors``;
+    callers must not close the pointer separately after a successful restore.
+    """
+
     profile_start = time.perf_counter()
     profile_last = profile_start
     logger.info(
@@ -244,13 +254,27 @@ def restore_owned_binding_tensors(
         now - profile_start,
     )
     profile_last = now
-    logger.info("tc_profile_py restore_owned_binding_tensors get_cuda_memory_ptr_start")
-    cuda_memory_ptr = get_cuda_memory_ptr(device_id, cuda_ipc_handle)
+    if preopened_cuda_memory_ptr is None:
+        logger.info(
+            "tc_profile_py restore_owned_binding_tensors get_cuda_memory_ptr_start"
+        )
+        cuda_memory_ptr = get_cuda_memory_ptr(device_id, cuda_ipc_handle)
+        ptr_source = "open"
+    else:
+        cuda_memory_ptr = int(preopened_cuda_memory_ptr)
+        if cuda_memory_ptr <= 0:
+            raise ArtifactError(
+                "preopened_cuda_memory_ptr must be a positive CUDA pointer",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        ptr_source = "preopened"
     now = time.perf_counter()
     logger.info(
         "tc_profile_py restore_owned_binding_tensors get_cuda_memory_ptr_done "
-        "ptr=%d step_sec=%.6f total_sec=%.6f",
+        "ptr=%d source=%s step_sec=%.6f total_sec=%.6f",
         int(cuda_memory_ptr),
+        ptr_source,
         now - profile_last,
         now - profile_start,
     )

@@ -21,6 +21,7 @@
 
 #include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
@@ -117,6 +118,7 @@ class OperationClient final : public tensorcast::store::testing::GlobalStoreClie
   global_store::ReportGroupRealizationPreparedRequest last_prepared_group_request;
   global_store::WaitGroupRealizationPublishedRequest last_wait_group_request;
   std::function<void(operation::OperationRef*)> fill_ref;
+  std::function<absl::Status(const global_store::ReportGroupRealizationPreparedRequest&)> report_prepared_hook;
 
   absl::StatusOr<operation::AcquireOperationLeaseResponse> acquire_operation_lease(
       const operation::AcquireOperationLeaseRequest& req) override {
@@ -210,8 +212,7 @@ class OperationClient final : public tensorcast::store::testing::GlobalStoreClie
     auto* status = resp.mutable_status();
     const size_t idx = static_cast<size_t>(std::max(0, get_calls.load(std::memory_order_relaxed) - 1));
     const size_t state_idx = states.empty() ? 0 : std::min(idx, states.size() - 1);
-    status->set_state(
-        states.empty() ? operation::OperationState::OPERATION_STATE_UNSPECIFIED : states[state_idx]);
+    status->set_state(states.empty() ? operation::OperationState::OPERATION_STATE_UNSPECIFIED : states[state_idx]);
     return resp;
   }
 
@@ -219,7 +220,10 @@ class OperationClient final : public tensorcast::store::testing::GlobalStoreClie
       const global_store::RegisterGroupVersionSetRequest& req,
       const tensorcast::store::components::RpcOptions&) override {
     register_group_version_set_calls.fetch_add(1, std::memory_order_relaxed);
-    last_register_group_version_set_request.CopyFrom(req);
+    {
+      absl::MutexLock lock(&operation_mu_);
+      last_register_group_version_set_request.CopyFrom(req);
+    }
     global_store::RegisterGroupVersionSetResponse resp;
     resp.set_status(global_store::STATUS_OK);
     resp.mutable_version_set()->set_version_set_id("gvs-registered");
@@ -236,7 +240,10 @@ class OperationClient final : public tensorcast::store::testing::GlobalStoreClie
       const global_store::BeginOrJoinGroupRealizationRequest& req,
       const tensorcast::store::components::RpcOptions&) override {
     begin_group_calls.fetch_add(1, std::memory_order_relaxed);
-    last_begin_group_request.CopyFrom(req);
+    {
+      absl::MutexLock lock(&operation_mu_);
+      last_begin_group_request.CopyFrom(req);
+    }
     if (!begin_group_error.ok()) {
       return begin_group_error;
     }
@@ -260,7 +267,16 @@ class OperationClient final : public tensorcast::store::testing::GlobalStoreClie
       const global_store::ReportGroupRealizationPreparedRequest& req,
       const tensorcast::store::components::RpcOptions&) override {
     prepared_group_calls.fetch_add(1, std::memory_order_relaxed);
-    last_prepared_group_request.CopyFrom(req);
+    if (report_prepared_hook != nullptr) {
+      const absl::Status hook_status = report_prepared_hook(req);
+      if (!hook_status.ok()) {
+        return hook_status;
+      }
+    }
+    {
+      absl::MutexLock lock(&operation_mu_);
+      last_prepared_group_request.CopyFrom(req);
+    }
     if (!prepared_group_error.ok()) {
       return prepared_group_error;
     }
@@ -276,7 +292,10 @@ class OperationClient final : public tensorcast::store::testing::GlobalStoreClie
       const global_store::WaitGroupRealizationPublishedRequest& req,
       const tensorcast::store::components::RpcOptions&) override {
     wait_group_calls.fetch_add(1, std::memory_order_relaxed);
-    last_wait_group_request.CopyFrom(req);
+    {
+      absl::MutexLock lock(&operation_mu_);
+      last_wait_group_request.CopyFrom(req);
+    }
     if (!wait_group_error.ok()) {
       return wait_group_error;
     }
@@ -1034,6 +1053,48 @@ TEST_CASE(
   REQUIRE_FALSE(harness->kernel().binding_registry().get(result.binding_value_ref().binding_id()).ok());
 }
 
+TEST_CASE("PrefetchServingBinding reuses live completed operation", "[daemon][operation][serving]") {
+  auto client = std::make_shared<OperationClient>();
+  auto harness = make_harness(client, true);
+  const std::string artifact_id = "msa1:test-session~policy~partitioned~serving-reuse";
+  seed_mounted_source_artifact(*harness, artifact_id);
+
+  auto req = make_serving_prefetch_request(true);
+  req.mutable_source_selection()->set_artifact_id(artifact_id);
+  req.set_operation_id("prefetch-serving-reuse-op");
+  req.mutable_retention_policy()->set_idle_ttl_after_last_release_ms(30000);
+  tensorcast::daemon::v2::PrefetchServingBindingResponse resp;
+  grpc::ServerContext ctx;
+  const auto st = harness->service().PrefetchServingBinding(&ctx, &req, &resp);
+
+  INFO("PrefetchServingBinding status: " << st.error_code() << " " << st.error_message());
+  REQUIRE(st.ok());
+  REQUIRE(resp.operation_ref().operation_id() == "prefetch-serving-reuse-op");
+  REQUIRE(resp.status().state() == operation::OPERATION_STATE_RUNNING);
+  const auto result = wait_prefetch_serving_binding_result(*harness, resp.operation_ref().operation_id());
+  REQUIRE_FALSE(result.local_serving_ref().empty());
+
+  const auto binding_count_after_first = harness->kernel().binding_registry().size();
+  const int acquire_calls_after_first = client->acquire_operation_calls.load(std::memory_order_relaxed);
+  const int update_calls_after_first = client->update_operation_calls.load(std::memory_order_relaxed);
+
+  tensorcast::daemon::v2::PrefetchServingBindingResponse second_resp;
+  grpc::ServerContext second_ctx;
+  const auto second_st = harness->service().PrefetchServingBinding(&second_ctx, &req, &second_resp);
+
+  INFO("Second PrefetchServingBinding status: " << second_st.error_code() << " " << second_st.error_message());
+  REQUIRE(second_st.ok());
+  REQUIRE(second_resp.operation_ref().operation_id() == "prefetch-serving-reuse-op");
+  REQUIRE(second_resp.status().state() == operation::OPERATION_STATE_SUCCESS);
+  operation::PrefetchServingBindingResult second_result;
+  REQUIRE(second_resp.status().result().UnpackTo(&second_result));
+  REQUIRE(second_result.local_serving_ref() == result.local_serving_ref());
+  REQUIRE(second_result.binding_value_ref().binding_id() == result.binding_value_ref().binding_id());
+  REQUIRE(harness->kernel().binding_registry().size() == binding_count_after_first);
+  REQUIRE(client->acquire_operation_calls.load(std::memory_order_relaxed) == acquire_calls_after_first);
+  REQUIRE(client->update_operation_calls.load(std::memory_order_relaxed) == update_calls_after_first);
+}
+
 TEST_CASE("PrefetchServingBinding set reports per-member failures", "[daemon][operation][serving]") {
   auto client = std::make_shared<OperationClient>();
   auto harness = make_harness(client, true);
@@ -1054,6 +1115,61 @@ TEST_CASE("PrefetchServingBinding set reports per-member failures", "[daemon][op
   REQUIRE(result.members_size() == 0);
   REQUIRE_FALSE(result.partial());
   REQUIRE(result.member_failures(0).phase() == "member_materialization");
+}
+
+TEST_CASE("PrefetchServingBinding set fans out members before collecting", "[daemon][operation][serving]") {
+  auto client = std::make_shared<OperationClient>();
+  client->report_prepared_hook = [client](const global_store::ReportGroupRealizationPreparedRequest&) -> absl::Status {
+    const absl::Time deadline = absl::Now() + absl::Seconds(2);
+    while (client->prepared_group_calls.load(std::memory_order_relaxed) < 2 && absl::Now() < deadline) {
+      absl::SleepFor(absl::Milliseconds(10));
+    }
+    if (client->prepared_group_calls.load(std::memory_order_relaxed) < 2) {
+      return absl::DeadlineExceededError("serving binding set members were not materialized concurrently");
+    }
+    return absl::OkStatus();
+  };
+  auto harness = make_harness(client, true);
+  const std::string artifact_id = "msa1:test-session~policy~partitioned~serving-set-fanout";
+  seed_mounted_source_artifact(*harness, artifact_id);
+
+  auto req = make_serving_prefetch_set_request();
+  req.mutable_source_selection()->set_artifact_id(artifact_id);
+  req.set_operation_id("prefetch-set-fanout-op");
+  auto* target_set = req.mutable_serving_binding_set_target();
+  const std::string device_uuid = ensure_fake_gpu_uuid();
+  for (auto& member : *target_set->mutable_members()) {
+    member.set_device("cuda:0");
+    member.set_device_uuid(device_uuid);
+  }
+  auto* group_realization = req.mutable_group_realization();
+  group_realization->set_enabled(true);
+  group_realization->set_require_staged_publish(true);
+  group_realization->mutable_version()->mutable_explicit_selection()->CopyFrom(req.source_selection());
+  auto* group = group_realization->mutable_group();
+  group->set_group_kind("serving_prefetch");
+  group->set_group_id("group-1");
+  group->set_epoch(1);
+  group->set_total_parts(2);
+  group->add_required_part_ids("member-0");
+  group->add_required_part_ids("member-1");
+
+  tensorcast::daemon::v2::PrefetchServingBindingResponse resp;
+  grpc::ServerContext ctx;
+  const auto st = harness->service().PrefetchServingBinding(&ctx, &req, &resp);
+
+  INFO("PrefetchServingBinding set fanout status: " << st.error_code() << " " << st.error_message());
+  REQUIRE(st.ok());
+  REQUIRE(resp.operation_ref().operation_id() == "prefetch-set-fanout-op");
+  REQUIRE(resp.status().state() == operation::OPERATION_STATE_SUCCESS);
+  operation::PrefetchServingBindingSetResult result;
+  REQUIRE(resp.status().result().UnpackTo(&result));
+  REQUIRE_FALSE(result.partial());
+  REQUIRE(result.member_failures_size() == 0);
+  REQUIRE(result.members_size() == 2);
+  REQUIRE(result.members(0).member().member_id() == "member-0");
+  REQUIRE(result.members(1).member().member_id() == "member-1");
+  REQUIRE(client->prepared_group_calls.load(std::memory_order_relaxed) == 2);
 }
 
 TEST_CASE("PrefetchServingBinding validates layout then requires source selection", "[daemon][operation][serving]") {

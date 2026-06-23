@@ -79,6 +79,13 @@ def get_cuda_memory_ptr(
     return ptr
 
 
+def close_cuda_memory_handle(
+    device_id: int | torch.device,
+    cuda_memory_ptr: int,
+) -> bool:
+    return bool(_load_c_ext().close_cuda_memory_handle(device_id, int(cuda_memory_ptr)))
+
+
 def restore_tensors(
     meta_state_dict: Mapping[str, tuple[Sequence[int], Sequence[int], str, int]],
     memory_base_address: Mapping[int | torch.device, int],

@@ -49,6 +49,7 @@ struct CollectiveMappedTargetLoadOptions {
   uint64_t merge_max_amplification{4};
   StoreEngineOptions::MaterializationStrategyConfig strategy_config;
   bool enable_source_window_plan_cache{true};
+  std::shared_ptr<common::AsyncRuntime> async_runtime{nullptr};
 };
 
 struct CollectiveMappedTargetLoadRequest {
@@ -218,7 +219,22 @@ void clear_source_window_routed_program_cache_for_testing();
 SourceWindowCollectivePlanCacheStats source_window_routed_program_cache_stats_for_testing();
 
 size_t source_window_compiled_routed_program_build_thread_count_for_testing(
-    size_t chunk_count, uint32_t configured_thread_count);
+    size_t chunk_count,
+    uint32_t configured_thread_count);
+
+size_t source_window_max_pipeline_slots_cap_for_testing();
+
+size_t source_window_effective_max_pipeline_slots_for_testing(size_t requested_pipeline_slots);
+
+std::optional<size_t> source_window_requested_read_ahead_slots_for_testing();
+
+size_t source_window_effective_read_ahead_slots_for_testing(size_t active_pipeline_slots);
+
+bool source_window_evict_clique_on_complete_for_testing();
+
+bool source_window_async_clique_destroy_on_complete_for_testing();
+
+std::string nccl_clique_destroy_mode_for_testing();
 
 absl::StatusOr<std::string> source_window_routed_program_cache_key_for_testing(
     std::string_view artifact_id,

@@ -44,6 +44,7 @@ from tensorcast.api.directory import (
 from tensorcast.api.operation import (
     Operation,
     OperationError,
+    OperationRefMetadata,
     OperationState,
     OperationStatus,
     OperationTimeoutError,
@@ -238,6 +239,7 @@ __all__ = [
     "InstanceExecutionRoute",
     "Operation",
     "OperationError",
+    "OperationRefMetadata",
     "OperationState",
     "OperationStatus",
     "OperationTimeoutError",

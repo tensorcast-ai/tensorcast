@@ -14,7 +14,9 @@ import logging
 import os
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, NoReturn, cast
 
@@ -47,6 +49,11 @@ from tensorcast.api.store.realization_kernel import (
     model_runtime_report_for,
     report_for_runtime_attachment,
     resolve_artifact_selection,
+)
+from tensorcast.api.store.runtime_realization_spec_cache import (
+    RuntimeRealizationSpecCacheRecord,
+    read_resolved_spec_cache_entry,
+    write_resolved_spec_cache_entry,
 )
 from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry
 from tensorcast.artifact_runtime.artifact.resolver import (
@@ -182,6 +189,10 @@ LOCAL_READY_BOOTSTRAP_BUILD_PIPELINE_VERSION = (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_LOCAL_READY_TARGET_LAYOUT_BLOB = "target_layout.bin"
+_LOCAL_READY_TARGET_INDEX_BLOB = "target_index.json"
+_LOCAL_READY_REALIZATION_PLAN_BLOB = "realization_plan.pb"
+_MOUNTED_SOURCE_SNAPSHOT_CACHE_PREFIX = "mounted-source-snapshot-cache:v1:"
 PublishedModelVersion = tc.PublishedModelVersion
 GroupRealizationAcquireRef = tc.GroupRealizationAcquireRef
 SOURCE_BOUND_CONTRACT_PATH_COLLECTIVE_FIRST_V4 = (
@@ -692,6 +703,7 @@ class _RetainedBindingAcquire:
     runtime: Any | None = None
     client: Any | None = None
     restore_fn: Any | None = None
+    preopened_lease: Any | None = None
     timeout_s: float | None = 30.0
     model_runtime_spec: ArtifactRealizationSpec | None = None
 
@@ -734,6 +746,7 @@ class _LocalReadyBootstrap:
     source_subject: Any | None = None
     placement: Any | None = None
     source_artifact_ref: str | None = None
+    source_metadata_fingerprint: str | None = None
     source_selection: ResolvedArtifactSelection | None = None
     serving_manifest_ref: str | None = None
     representation_contract_hash: str | None = None
@@ -828,6 +841,7 @@ class LocalReadyPreparationResult:
     recipe: Any
     source_subject: Any
     source_artifact_ref: str
+    source_metadata_fingerprint: str | None = None
     source_catalog: Any | None = None
     cache_config: Any | None = None
     placement: Any | None = None
@@ -849,6 +863,8 @@ class LocalReadyRetainedTargetPlan:
     serving_build_digest: str
     target_layout_hash: str
     source_selection_digest: str
+    spec_cache_key_digest: str | None = None
+    spec_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -883,6 +899,16 @@ class LocalReadyManifestCarrierResult:
     manifest_bytes: bytes
     serving_manifest_ref: str
     serving_build_digest: str
+    source_index_bytes: bytes | None = None
+    tensor_schema_hash: str | None = None
+
+
+@dataclass(frozen=True)
+class _LocalReadyManifestCarrierComponents:
+    representation_contract_hash: str
+    manifest_bytes: bytes
+    source_index_bytes: bytes | None
+    tensor_schema_hash: str
 
 
 def _binding_tensors(binding: Any) -> Mapping[str, torch.Tensor]:
@@ -1260,6 +1286,83 @@ def _optional_str(value: Any) -> str | None:
 
 def _sha256_hex_bytes(payload: bytes) -> str:
     return hashlib.sha256(bytes(payload)).hexdigest()
+
+
+def _mounted_source_snapshot_cache_ref(artifact_id: str) -> str | None:
+    text = str(artifact_id)
+    if not text.startswith("msa1:"):
+        return None
+    body = text[len("msa1:") :]
+    session_token, separator, snapshot_identity = body.partition("~")
+    if not session_token or not separator or not snapshot_identity:
+        return None
+    if snapshot_identity.count("~") < 2:
+        return None
+    return f"{_MOUNTED_SOURCE_SNAPSHOT_CACHE_PREFIX}{snapshot_identity}"
+
+
+def _unique_cache_roots(paths: Sequence[Path]) -> tuple[Path, ...]:
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = os.fspath(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(path)
+    return tuple(roots)
+
+
+def _bootstrap_cache_root_from_child(path: str | os.PathLike[str]) -> Path:
+    root = Path(path).expanduser()
+    if root.name in {"trace_plans", "compiled_recipes"}:
+        return root.parent
+    return root
+
+
+def _local_ready_spec_cache_roots(
+    cache_config: Any,
+    *,
+    write: bool,
+) -> tuple[Path, ...]:
+    if cache_config is None:
+        return ()
+    if isinstance(cache_config, RecipeBuildCacheConfig):
+        if not bool(getattr(cache_config, "allow_cache", True)):
+            return ()
+        attrs = (
+            ("trace_write_dirs", "recipe_cache_write_dirs")
+            if write
+            else ("cache_dirs", "recipe_cache_dirs")
+        )
+        roots: list[Path] = []
+        for attr in attrs:
+            roots.extend(
+                _bootstrap_cache_root_from_child(cache_dir)
+                for cache_dir in tuple(getattr(cache_config, attr, ()) or ())
+            )
+        return _unique_cache_roots(roots)
+    if isinstance(cache_config, RecipeCachePolicy):
+        fields = dict(getattr(cache_config, "fields", None) or {})
+        if not bool(fields.get("allow_cache", True)):
+            return ()
+        cache_root = fields.get("cache_root")
+        if cache_root is None:
+            return ()
+        return (Path(str(cache_root)).expanduser(),)
+
+    roots_value = getattr(
+        cache_config,
+        "runtime_realization_spec_cache_write_dirs"
+        if write
+        else "runtime_realization_spec_cache_dirs",
+        (),
+    )
+    roots = [
+        _bootstrap_cache_root_from_child(cache_dir)
+        for cache_dir in tuple(roots_value or ())
+    ]
+    return _unique_cache_roots(roots)
 
 
 def _optional_text(value: Any) -> str | None:
@@ -1840,6 +1943,7 @@ class ArtifactRuntimeIntegration:
                         intent, "expected_daemon_session_id", None
                     ),
                     serving_artifact_id=getattr(intent, "serving_artifact_id", None),
+                    preopened_lease=getattr(intent, "preopened_lease", None),
                     timeout_s=context.timeout_s,
                 )
             )
@@ -1881,6 +1985,14 @@ class ArtifactRuntimeIntegration:
     ) -> LocalReadyPreparationResult:
         """Prepare local-ready recipe/source metadata without materializing target tensors."""
 
+        request = self._prepare_local_ready_request(intent, context)
+        return self._local_ready_preparation_result_from_request(request)
+
+    def _prepare_local_ready_request(
+        self,
+        intent: LocalSourceBootstrap,
+        context: RequestContext,
+    ) -> _LocalReadyBootstrap:
         if not isinstance(intent, LocalSourceBootstrap):
             raise ArtifactRuntimeIntegrationError(
                 "ArtifactRuntimeIntegration.prepare_local_ready_recipe requires "
@@ -1898,8 +2010,20 @@ class ArtifactRuntimeIntegration:
             request = self._local_ready_prepare_with_built_recipe(request)
         if request.recipe is None or request.source_subject is None:
             self._lifecycle_not_implemented("prepare_local_ready_recipe", "P5")
-        self._validate_prepared_local_ready_request_identity(request)
-        identity = self.local_ready_materialization_identity(request.recipe)
+        identity = self._validate_prepared_local_ready_request_identity(request)
+        if identity is not None:
+            request = replace(
+                request,
+                source_artifact_ref=identity.source_artifact_ref,
+                source_metadata_fingerprint=identity.source_metadata_fingerprint,
+            )
+        return request
+
+    def _local_ready_preparation_result_from_request(
+        self,
+        request: _LocalReadyBootstrap,
+    ) -> LocalReadyPreparationResult:
+        identity = self._local_ready_materialization_identity_from_request(request)
         source_subject = getattr(
             request.source_subject, "subject", request.source_subject
         )
@@ -1907,6 +2031,7 @@ class ArtifactRuntimeIntegration:
             recipe=request.recipe,
             source_subject=source_subject,
             source_artifact_ref=identity.source_artifact_ref,
+            source_metadata_fingerprint=identity.source_metadata_fingerprint,
             source_catalog=request.source_catalog,
             cache_config=request.cache_config,
             placement=request.placement,
@@ -1927,11 +2052,26 @@ class ArtifactRuntimeIntegration:
         prefetch target.
         """
 
-        prepared = self.prepare_local_ready_recipe(intent, context)
-        retained_target_plan = self.build_local_ready_retained_target_plan(
-            intent,
-            context,
-            prepared=prepared,
+        request = self._prepare_local_ready_request(intent, context)
+        prepared = self._local_ready_preparation_result_from_request(request)
+        request = replace(
+            request,
+            recipe=prepared.recipe,
+            source_subject=prepared.source_subject,
+            source_artifact_ref=prepared.source_artifact_ref,
+            source_metadata_fingerprint=prepared.source_metadata_fingerprint,
+            source_catalog=prepared.source_catalog,
+            cache_config=prepared.cache_config,
+            placement=prepared.placement or request.placement,
+            family=prepared.family,
+            tp_rank=int(prepared.tp_rank),
+            tp_world_size=int(prepared.tp_world_size),
+            build_recipe_from_framework_context=False,
+            build_model_from_framework_context=False,
+            build_manifest_carrier_from_framework_context=True,
+        )
+        retained_target_plan = (
+            self._build_local_ready_retained_target_plan_from_request(request)
         )
         return PreparedLocalReadyBundle(
             prepared=prepared,
@@ -1963,6 +2103,7 @@ class ArtifactRuntimeIntegration:
             recipe=prepared.recipe,
             source_subject=prepared.source_subject,
             source_artifact_ref=prepared.source_artifact_ref,
+            source_metadata_fingerprint=prepared.source_metadata_fingerprint,
             source_catalog=prepared.source_catalog,
             cache_config=prepared.cache_config,
             placement=prepared.placement or request.placement,
@@ -2010,6 +2151,12 @@ class ArtifactRuntimeIntegration:
             )
 
         profile = self.host.runtime_profile or RuntimeProfile()
+        profile_extra = {
+            "family": request.family,
+            "target_device": str(request.target_device),
+            "tp_rank": int(request.tp_rank),
+            "tp_world_size": int(request.tp_world_size),
+        }
         framework_identity = self.host.framework.identity(request.model_config)
         runtime_binding_schema_version = (
             request.runtime_binding_schema_version
@@ -2024,39 +2171,52 @@ class ArtifactRuntimeIntegration:
         manifest_tensor_name = str(
             request.manifest_tensor_name or profile.manifest_policy.manifest_tensor_name
         )
-        carrier = self.prepare_local_ready_manifest_carrier_from_framework_context(
-            recipe=request.recipe,
-            manifest_tensor_name=manifest_tensor_name,
-            model_config=request.model_config,
-            placement=request.placement,
-            runtime_binding_schema_version=int(runtime_binding_schema_version),
-            serving_artifact_schema_version=int(serving_artifact_schema_version),
-            framework_name=request.framework_name or framework_identity.framework_name,
-            framework_version=(
-                request.framework_version or framework_identity.framework_version
-            ),
-            adapter_version=request.adapter_version
-            or framework_identity.adapter_version,
-            serving_abi_version=(
-                request.serving_abi_version or framework_identity.serving_abi_version
-            ),
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "local_ready.prepare.retained_target.manifest_carrier",
+            logger=_LOGGER,
+            device=request.target_device,
+            extra=profile_extra,
+        ) as carrier_profile:
+            carrier = self.prepare_local_ready_manifest_carrier_from_framework_context(
+                recipe=request.recipe,
+                manifest_tensor_name=manifest_tensor_name,
+                model_config=request.model_config,
+                placement=request.placement,
+                runtime_binding_schema_version=int(runtime_binding_schema_version),
+                serving_artifact_schema_version=int(serving_artifact_schema_version),
+                framework_name=(
+                    request.framework_name or framework_identity.framework_name
+                ),
+                framework_version=(
+                    request.framework_version or framework_identity.framework_version
+                ),
+                adapter_version=request.adapter_version
+                or framework_identity.adapter_version,
+                serving_abi_version=(
+                    request.serving_abi_version
+                    or framework_identity.serving_abi_version
+                ),
+            )
+            if carrier_profile is not None:
+                carrier_profile["manifest_bytes"] = len(carrier.manifest_bytes)
+                carrier_profile["has_source_index_bytes"] = (
+                    carrier.source_index_bytes is not None
+                )
+                if carrier.source_index_bytes is not None:
+                    carrier_profile["source_index_bytes"] = len(
+                        carrier.source_index_bytes
+                    )
+                carrier_profile["serving_manifest_ref"] = carrier.serving_manifest_ref
+                carrier_profile["serving_build_digest"] = carrier.serving_build_digest
+        source_identity = self._local_ready_materialization_identity_from_request(
+            request
         )
-        layout = tc_local_ready.build_binding_layout_for_recipe(
-            request.recipe,
-            target_device=target_device,
-            manifest_tensor_name=manifest_tensor_name,
-            manifest_bytes=carrier.manifest_bytes,
-        )
-        realization_plan = tc_local_ready.realization_plan_proto_with_manifest(
-            bytes(getattr(request.recipe, "realization_plan_proto", b"") or b""),
-            carrier.manifest_bytes,
-            manifest_tensor_name=manifest_tensor_name,
-        )
-        realization_plan_bytes = realization_plan.SerializeToString(deterministic=True)
-        source_identity = self.local_ready_materialization_identity(request.recipe)
-        source_index_bytes = canonical_index_to_bytes(
-            tc_local_ready.canonical_index_from_recipe(request.recipe)
-        )
+        source_index_bytes = carrier.source_index_bytes
+        if source_index_bytes is None:
+            source_index_bytes = canonical_index_to_bytes(
+                tc_local_ready.canonical_index_from_recipe(request.recipe)
+            )
         selection = resolve_artifact_selection(
             artifact_id=source_identity.source_artifact_ref,
             canonical_index_bytes=source_index_bytes,
@@ -2072,6 +2232,98 @@ class ArtifactRuntimeIntegration:
             mode="checkpoint_to_runtime",
             representation_contract_hash=carrier.representation_contract_hash,
         )
+        compute_hash = getattr(request.model_config, "compute_hash", None)
+        model_config_digest = (
+            str(compute_hash())
+            if callable(compute_hash)
+            else str(getattr(request.model_config, "model", "unknown"))
+        )
+        cache_source, cache_source_mode = (
+            self._local_ready_retained_target_cache_source(
+                request=request,
+                source=source,
+                source_index_bytes=source_index_bytes,
+            )
+        )
+        profile_extra = dict(profile_extra)
+        profile_extra["spec_cache_source_mode"] = cache_source_mode
+        if cache_source.source_artifact_ref != source.source_artifact_ref:
+            profile_extra["spec_cache_source_ref"] = (
+                cache_source.source_artifact_ref or ""
+            )
+        probe_entry = self._local_ready_retained_target_probe_entry(
+            runtime=framework_identity.framework_name,
+            source=cache_source,
+            source_reuse=source_reuse,
+            topology=topology,
+            member=member,
+            source_schema_hash=source_identity.source_metadata_fingerprint,
+            model_config_digest=model_config_digest,
+            runtime_build_digest=carrier.serving_build_digest,
+        )
+        cache_key_digest = probe_entry.computed_cache_key_digest()
+        record = self._read_local_ready_retained_target_spec_cache(
+            request,
+            cache_key_digest=cache_key_digest,
+            profile_extra=profile_extra,
+        )
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "local_ready.prepare.retained_target.materialization_options",
+            logger=_LOGGER,
+            device=request.target_device,
+            extra=profile_extra,
+        ) as options_profile:
+            options = request.options
+            if options is None:
+                options = self._local_ready_materialization_options(request)
+                options_source = "built"
+            else:
+                options_source = "request"
+            if options_profile is not None:
+                options_profile["options_source"] = options_source
+                options_profile["options_available"] = options is not None
+                options_profile["source_bound_contract_ready"] = bool(
+                    getattr(
+                        request.source_bound_contract_state,
+                        "source_bound_contract_ready",
+                        False,
+                    )
+                )
+                options_profile["has_request_execution_facts"] = (
+                    request.execution_facts is not None
+                )
+        if record is not None:
+            return self._local_ready_retained_target_plan_from_spec_cache_record(
+                request,
+                record,
+                target_device=target_device,
+                materialization_options=options,
+                manifest_tensor_name=manifest_tensor_name,
+                manifest_bytes=carrier.manifest_bytes,
+                runtime=framework_identity.framework_name,
+                source=source,
+                source_reuse=source_reuse,
+                topology=topology,
+                member=member,
+                source_schema_hash=source_identity.source_metadata_fingerprint,
+                model_config_digest=model_config_digest,
+                representation_contract_hash=carrier.representation_contract_hash,
+                serving_build_digest=carrier.serving_build_digest,
+                source_selection_digest=selection.source_selection_digest,
+            )
+        layout = tc_local_ready.build_binding_layout_for_recipe(
+            request.recipe,
+            target_device=target_device,
+            manifest_tensor_name=manifest_tensor_name,
+            manifest_bytes=carrier.manifest_bytes,
+        )
+        realization_plan = tc_local_ready.realization_plan_proto_with_manifest(
+            bytes(getattr(request.recipe, "realization_plan_proto", b"") or b""),
+            carrier.manifest_bytes,
+            manifest_tensor_name=manifest_tensor_name,
+        )
+        realization_plan_bytes = realization_plan.SerializeToString(deterministic=True)
         target_layout_bytes = layout.target_layout.SerializeToString(deterministic=True)
         target_index_bytes = bytes(layout.target_index_bytes)
         target_layout_hash = _sha256_hex_bytes(target_layout_bytes)
@@ -2080,28 +2332,39 @@ class ArtifactRuntimeIntegration:
             manifest_tensor_name=manifest_tensor_name,
             manifest_bytes=carrier.manifest_bytes,
         )
-        compute_hash = getattr(request.model_config, "compute_hash", None)
-        model_config_digest = (
-            str(compute_hash())
-            if callable(compute_hash)
-            else str(getattr(request.model_config, "model", "unknown"))
-        )
         blob_refs = {
-            "target_layout.bin": BlobRef(
-                path="target_layout.bin",
+            _LOCAL_READY_TARGET_LAYOUT_BLOB: BlobRef(
+                path=_LOCAL_READY_TARGET_LAYOUT_BLOB,
                 sha256=_sha256_hex_bytes(target_layout_bytes),
                 size_bytes=len(target_layout_bytes),
             ),
-            "target_index.json": BlobRef(
-                path="target_index.json",
+            _LOCAL_READY_TARGET_INDEX_BLOB: BlobRef(
+                path=_LOCAL_READY_TARGET_INDEX_BLOB,
                 sha256=_sha256_hex_bytes(target_index_bytes),
                 size_bytes=len(target_index_bytes),
             ),
+            _LOCAL_READY_REALIZATION_PLAN_BLOB: BlobRef(
+                path=_LOCAL_READY_REALIZATION_PLAN_BLOB,
+                sha256=_sha256_hex_bytes(realization_plan_bytes),
+                size_bytes=len(realization_plan_bytes),
+            ),
         }
-        draft_entry = RuntimeRealizationSpecCacheEntry(
-            schema_version=1,
-            cache_key_digest="placeholder",
-            spec_digest="placeholder",
+        cache_entry = self._local_ready_retained_target_spec_entry(
+            runtime=framework_identity.framework_name,
+            source=cache_source,
+            source_reuse=source_reuse,
+            topology=topology,
+            member=member,
+            source_schema_hash=source_identity.source_metadata_fingerprint,
+            model_config_digest=model_config_digest,
+            runtime_build_digest=carrier.serving_build_digest,
+            binding_layout_id=layout.binding_layout_id,
+            target_layout_hash=target_layout_hash,
+            tensor_schema_hash=tensor_schema_hash,
+            blob_refs=blob_refs,
+            cache_key_digest=cache_key_digest,
+        )
+        runtime_entry = self._local_ready_retained_target_spec_entry(
             runtime=framework_identity.framework_name,
             source=source,
             source_reuse=source_reuse,
@@ -2115,12 +2378,6 @@ class ArtifactRuntimeIntegration:
             tensor_schema_hash=tensor_schema_hash,
             blob_refs=blob_refs,
         )
-        keyed_entry = draft_entry.model_copy(
-            update={"cache_key_digest": draft_entry.computed_cache_key_digest()}
-        )
-        spec_entry = keyed_entry.model_copy(
-            update={"spec_digest": keyed_entry.computed_spec_digest()}
-        )
         resolved_layout = RuntimeBindingResolvedLayout(
             binding_layout_id=layout.binding_layout_id,
             source=source,
@@ -2131,7 +2388,7 @@ class ArtifactRuntimeIntegration:
             target_index_bytes=target_index_bytes,
             target_layout_hash=target_layout_hash,
             tensor_schema_hash=tensor_schema_hash,
-            spec_digest=spec_entry.spec_digest,
+            spec_digest=runtime_entry.spec_digest,
             source_schema_hash=source_identity.source_metadata_fingerprint,
             realization_plan_bytes=realization_plan_bytes,
         )
@@ -2146,9 +2403,16 @@ class ArtifactRuntimeIntegration:
             runtime_build_digest=carrier.serving_build_digest,
             resolved_layout=resolved_layout,
         )
-        options = request.options
-        if options is None:
-            options = self._local_ready_materialization_options(request)
+        self._write_local_ready_retained_target_spec_cache(
+            request,
+            entry=cache_entry,
+            blobs={
+                _LOCAL_READY_TARGET_LAYOUT_BLOB: target_layout_bytes,
+                _LOCAL_READY_TARGET_INDEX_BLOB: target_index_bytes,
+                _LOCAL_READY_REALIZATION_PLAN_BLOB: realization_plan_bytes,
+            },
+            profile_extra=profile_extra,
+        )
         return LocalReadyRetainedTargetPlan(
             target=target,
             materialization_options=options,
@@ -2159,6 +2423,335 @@ class ArtifactRuntimeIntegration:
             serving_build_digest=carrier.serving_build_digest,
             target_layout_hash=target_layout_hash,
             source_selection_digest=selection.source_selection_digest,
+            spec_cache_key_digest=cache_entry.cache_key_digest,
+            spec_digest=runtime_entry.spec_digest,
+        )
+
+    @staticmethod
+    def _local_ready_retained_target_cache_source(
+        *,
+        request: _LocalReadyBootstrap,
+        source: RuntimeBindingSourceRef,
+        source_index_bytes: bytes,
+    ) -> tuple[RuntimeBindingSourceRef, str]:
+        current_ref = str(source.source_artifact_ref or "")
+        source_subject = getattr(
+            request.source_subject, "subject", request.source_subject
+        )
+        trusted_ref = _optional_str(
+            getattr(source_subject, "trusted_content_artifact_id", None)
+        )
+        if current_ref.startswith("msa1:") and trusted_ref is not None:
+            cache_ref = trusted_ref
+            cache_mode = "trusted_content_artifact"
+        else:
+            subject_ref = _optional_str(getattr(source_subject, "artifact_id", None))
+            cache_ref = None
+            if subject_ref == current_ref:
+                cache_ref = _mounted_source_snapshot_cache_ref(current_ref)
+            cache_mode = "mounted_source_snapshot" if cache_ref else "source_artifact"
+
+        if cache_ref is None or cache_ref == current_ref:
+            return source, cache_mode
+
+        cache_selection = resolve_artifact_selection(
+            artifact_id=cache_ref,
+            canonical_index_bytes=source_index_bytes,
+            artifact_profile="mounted_source_snapshot_cache",
+            authority_scope="local_ready_retained_target_spec_cache",
+        )
+        return (
+            source.model_copy(
+                update={
+                    "artifact_selection_digest": (
+                        cache_selection.source_selection_digest
+                    ),
+                    "source_artifact_ref": cache_ref,
+                }
+            ),
+            cache_mode,
+        )
+
+    @staticmethod
+    def _local_ready_retained_target_probe_entry(
+        *,
+        runtime: str,
+        source: RuntimeBindingSourceRef,
+        source_reuse: RuntimeBindingSourceReuseDecision,
+        topology: Any,
+        member: Any,
+        source_schema_hash: str,
+        model_config_digest: str,
+        runtime_build_digest: str,
+    ) -> RuntimeRealizationSpecCacheEntry:
+        placeholder = b"placeholder"
+        return RuntimeRealizationSpecCacheEntry(
+            schema_version=1,
+            cache_key_digest="placeholder",
+            spec_digest="placeholder",
+            runtime=runtime,
+            source=source,
+            source_reuse=source_reuse,
+            topology=topology,
+            member=member,
+            source_schema_hash=source_schema_hash,
+            model_config_digest=model_config_digest,
+            runtime_build_digest=runtime_build_digest,
+            binding_layout_id="placeholder",
+            target_layout_hash="placeholder",
+            tensor_schema_hash="placeholder",
+            blob_refs={
+                _LOCAL_READY_TARGET_LAYOUT_BLOB: BlobRef(
+                    path=_LOCAL_READY_TARGET_LAYOUT_BLOB,
+                    sha256=_sha256_hex_bytes(placeholder),
+                    size_bytes=len(placeholder),
+                )
+            },
+        )
+
+    @staticmethod
+    def _local_ready_retained_target_spec_entry(
+        *,
+        runtime: str,
+        source: RuntimeBindingSourceRef,
+        source_reuse: RuntimeBindingSourceReuseDecision,
+        topology: Any,
+        member: Any,
+        source_schema_hash: str,
+        model_config_digest: str,
+        runtime_build_digest: str,
+        binding_layout_id: str,
+        target_layout_hash: str,
+        tensor_schema_hash: str,
+        blob_refs: Mapping[str, BlobRef],
+        load_config_digest: str | None = None,
+        schema_version: int = 1,
+        cache_key_digest: str | None = None,
+    ) -> RuntimeRealizationSpecCacheEntry:
+        draft_entry = RuntimeRealizationSpecCacheEntry(
+            schema_version=int(schema_version),
+            cache_key_digest=cache_key_digest or "placeholder",
+            spec_digest="placeholder",
+            runtime=runtime,
+            source=source,
+            source_reuse=source_reuse,
+            topology=topology,
+            member=member,
+            source_schema_hash=source_schema_hash,
+            model_config_digest=model_config_digest,
+            load_config_digest=load_config_digest,
+            runtime_build_digest=runtime_build_digest,
+            binding_layout_id=binding_layout_id,
+            target_layout_hash=target_layout_hash,
+            tensor_schema_hash=tensor_schema_hash,
+            blob_refs=blob_refs,
+        )
+        computed_cache_key_digest = draft_entry.computed_cache_key_digest()
+        if (
+            cache_key_digest is not None
+            and str(cache_key_digest) != computed_cache_key_digest
+        ):
+            raise ArtifactRuntimeIntegrationError(
+                "local-ready retained target spec cache key digest mismatch"
+            )
+        entry = draft_entry.model_copy(
+            update={"cache_key_digest": computed_cache_key_digest}
+        )
+        return entry.model_copy(update={"spec_digest": entry.computed_spec_digest()})
+
+    def _read_local_ready_retained_target_spec_cache(
+        self,
+        request: _LocalReadyBootstrap,
+        *,
+        cache_key_digest: str,
+        profile_extra: Mapping[str, object],
+    ) -> RuntimeRealizationSpecCacheRecord | None:
+        roots = _local_ready_spec_cache_roots(request.cache_config, write=False)
+        required_blobs = {
+            _LOCAL_READY_TARGET_LAYOUT_BLOB,
+            _LOCAL_READY_TARGET_INDEX_BLOB,
+            _LOCAL_READY_REALIZATION_PLAN_BLOB,
+        }
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "local_ready.prepare.retained_target.spec_cache_lookup",
+            logger=_LOGGER,
+            device=request.target_device,
+            extra=profile_extra,
+        ) as profile:
+            if profile is not None:
+                profile["cache_key_digest"] = cache_key_digest
+                profile["cache_root_count"] = len(roots)
+            for root in roots:
+                try:
+                    record = read_resolved_spec_cache_entry(root, cache_key_digest)
+                except FileNotFoundError:
+                    continue
+                except (OSError, ValueError) as exc:
+                    _LOGGER.warning(
+                        "Ignoring local-ready retained target spec cache root=%s "
+                        "key=%s: %s",
+                        root,
+                        cache_key_digest,
+                        exc,
+                    )
+                    if profile is not None:
+                        profile["cache_error"] = type(exc).__name__
+                    continue
+                missing_blobs = required_blobs - set(record.blobs)
+                if missing_blobs:
+                    _LOGGER.warning(
+                        "Ignoring local-ready retained target spec cache root=%s "
+                        "key=%s with missing blobs: %s",
+                        root,
+                        cache_key_digest,
+                        ", ".join(sorted(missing_blobs)),
+                    )
+                    continue
+                if profile is not None:
+                    profile["cache_hit"] = 1
+                    profile["cache_hit_root"] = os.fspath(root)
+                return record
+            if profile is not None:
+                profile["cache_hit"] = 0
+            return None
+
+    def _write_local_ready_retained_target_spec_cache(
+        self,
+        request: _LocalReadyBootstrap,
+        *,
+        entry: RuntimeRealizationSpecCacheEntry,
+        blobs: Mapping[str, bytes],
+        profile_extra: Mapping[str, object],
+    ) -> None:
+        roots = _local_ready_spec_cache_roots(request.cache_config, write=True)
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "local_ready.prepare.retained_target.spec_cache_write",
+            logger=_LOGGER,
+            device=request.target_device,
+            extra=profile_extra,
+        ) as profile:
+            write_count = 0
+            if profile is not None:
+                profile["cache_key_digest"] = entry.cache_key_digest
+                profile["cache_root_count"] = len(roots)
+            for root in roots:
+                try:
+                    write_resolved_spec_cache_entry(
+                        root,
+                        entry=entry,
+                        blobs=blobs,
+                    )
+                except (OSError, ValueError) as exc:
+                    _LOGGER.warning(
+                        "Could not write local-ready retained target spec cache "
+                        "root=%s key=%s: %s",
+                        root,
+                        entry.cache_key_digest,
+                        exc,
+                    )
+                    if profile is not None:
+                        profile["cache_error"] = type(exc).__name__
+                    continue
+                write_count += 1
+            if profile is not None:
+                profile["cache_write_count"] = write_count
+
+    def _local_ready_retained_target_plan_from_spec_cache_record(
+        self,
+        request: _LocalReadyBootstrap,
+        record: RuntimeRealizationSpecCacheRecord,
+        *,
+        target_device: torch.device,
+        materialization_options: Any | None,
+        manifest_tensor_name: str,
+        manifest_bytes: bytes,
+        runtime: str,
+        source: RuntimeBindingSourceRef,
+        source_reuse: RuntimeBindingSourceReuseDecision,
+        topology: Any,
+        member: Any,
+        source_schema_hash: str,
+        model_config_digest: str,
+        representation_contract_hash: str,
+        serving_build_digest: str,
+        source_selection_digest: str,
+    ) -> LocalReadyRetainedTargetPlan:
+        entry = record.entry
+        target_layout_bytes = record.blobs.get(_LOCAL_READY_TARGET_LAYOUT_BLOB)
+        target_index_bytes = record.blobs.get(_LOCAL_READY_TARGET_INDEX_BLOB)
+        realization_plan_bytes = record.blobs.get(_LOCAL_READY_REALIZATION_PLAN_BLOB)
+        if (
+            target_layout_bytes is None
+            or target_index_bytes is None
+            or realization_plan_bytes is None
+        ):
+            raise ArtifactRuntimeIntegrationError(
+                "local-ready retained target spec cache record is missing required blobs"
+            )
+        if entry.runtime_build_digest != serving_build_digest:
+            raise ArtifactRuntimeIntegrationError(
+                "local-ready retained target spec cache runtime_build_digest mismatch"
+            )
+        if entry.source_schema_hash != source_schema_hash:
+            raise ArtifactRuntimeIntegrationError(
+                "local-ready retained target spec cache source_schema_hash mismatch"
+            )
+        runtime_entry = self._local_ready_retained_target_spec_entry(
+            runtime=runtime,
+            source=source,
+            source_reuse=source_reuse,
+            topology=topology,
+            member=member,
+            source_schema_hash=source_schema_hash,
+            model_config_digest=model_config_digest,
+            load_config_digest=entry.load_config_digest,
+            runtime_build_digest=serving_build_digest,
+            binding_layout_id=entry.binding_layout_id,
+            target_layout_hash=entry.target_layout_hash,
+            tensor_schema_hash=entry.tensor_schema_hash,
+            blob_refs=entry.blob_refs,
+            schema_version=entry.schema_version,
+        )
+        resolved_layout = RuntimeBindingResolvedLayout(
+            binding_layout_id=runtime_entry.binding_layout_id,
+            source=runtime_entry.source,
+            source_reuse=runtime_entry.source_reuse,
+            topology=runtime_entry.topology,
+            member=runtime_entry.member,
+            target_layout=target_layout_bytes,
+            target_index_bytes=target_index_bytes,
+            target_layout_hash=runtime_entry.target_layout_hash,
+            tensor_schema_hash=runtime_entry.tensor_schema_hash,
+            spec_digest=runtime_entry.spec_digest,
+            source_schema_hash=runtime_entry.source_schema_hash,
+            realization_plan_bytes=realization_plan_bytes,
+        )
+        target = RealizationTarget(
+            runtime=runtime_entry.runtime,
+            device=str(target_device),
+            device_uuid=device_uuid_for(int(target_device.index)),
+            source=runtime_entry.source,
+            topology=runtime_entry.topology,
+            member=runtime_entry.member,
+            model_config_digest=runtime_entry.model_config_digest,
+            load_config_digest=runtime_entry.load_config_digest,
+            runtime_build_digest=runtime_entry.runtime_build_digest,
+            resolved_layout=resolved_layout,
+        )
+        return LocalReadyRetainedTargetPlan(
+            target=target,
+            materialization_options=materialization_options,
+            manifest_tensor_name=manifest_tensor_name,
+            manifest_bytes=manifest_bytes,
+            tensor_schema_hash=runtime_entry.tensor_schema_hash,
+            representation_contract_hash=representation_contract_hash,
+            serving_build_digest=serving_build_digest,
+            target_layout_hash=runtime_entry.target_layout_hash,
+            source_selection_digest=source_selection_digest,
+            spec_cache_key_digest=entry.cache_key_digest,
+            spec_digest=runtime_entry.spec_digest,
         )
 
     def _retained_expected_member(
@@ -3205,25 +3798,52 @@ class ArtifactRuntimeIntegration:
                 request.framework_config,
                 request.model_config,
             )
+
+        @contextmanager
+        def _restore_retained_context() -> Any:
+            if request.preopened_lease is None:
+                with restore_retained_binding(
+                    authority=authority,
+                    local_serving_ref=request.local_serving_ref,
+                    target_device=target_device,
+                    expected_member=request.expected_member,
+                    expected_tensor_schema_hash=request.expected_tensor_schema_hash,
+                    expected_serving_build_digest=request.expected_serving_build_digest,
+                    expected_target_layout_hash=request.expected_target_layout_hash,
+                    expected_daemon_id=request.expected_daemon_id,
+                    expected_daemon_session_id=request.expected_daemon_session_id,
+                    serving_artifact_id=request.serving_artifact_id,
+                    caller_pid=os.getpid(),
+                    timeout_s=request.timeout_s,
+                    runtime=request.runtime,
+                    client=request.client,
+                    restore_fn=request.restore_fn,
+                ) as restored:
+                    yield restored
+                return
+
+            if authority is None:
+                raise RestoreBindingError(
+                    "preopened retained binding restore requires authority"
+                )
+            replace_authority = getattr(
+                request.preopened_lease, "replace_authority", None
+            )
+            if callable(replace_authority):
+                replace_authority(authority)
+            attached = request.preopened_lease.restore(
+                target_device=target_device,
+                restore_fn=request.restore_fn,
+            )
+            restored = RestoredRetainedBinding(attached)
+            try:
+                yield restored
+            finally:
+                restored.close()
+
         try:
             acquire_restore_start = time.perf_counter()
-            with restore_retained_binding(
-                authority=authority,
-                local_serving_ref=request.local_serving_ref,
-                target_device=target_device,
-                expected_member=request.expected_member,
-                expected_tensor_schema_hash=request.expected_tensor_schema_hash,
-                expected_serving_build_digest=request.expected_serving_build_digest,
-                expected_target_layout_hash=request.expected_target_layout_hash,
-                expected_daemon_id=request.expected_daemon_id,
-                expected_daemon_session_id=request.expected_daemon_session_id,
-                serving_artifact_id=request.serving_artifact_id,
-                caller_pid=os.getpid(),
-                timeout_s=request.timeout_s,
-                runtime=request.runtime,
-                client=request.client,
-                restore_fn=request.restore_fn,
-            ) as restored:
+            with _restore_retained_context() as restored:
                 emit_tensorcast_profile_event(
                     "tensorcast",
                     "retained_restore.acquire_and_restore",
@@ -3686,8 +4306,10 @@ class ArtifactRuntimeIntegration:
                 source_artifact_ref=str(source_artifact_ref),
             )
             if profile is not None:
-                ordered_names = getattr(source_catalog, "ordered_names", ())
-                profile["source_tensor_count"] = len(ordered_names)
+                tensor_count = getattr(source_catalog, "tensor_count", None)
+                if tensor_count is None:
+                    tensor_count = len(getattr(source_catalog, "ordered_names", ()))
+                profile["source_tensor_count"] = int(tensor_count)
         with tensorcast_profile_stage(
             "tensorcast",
             "local_ready.prepare.recipe_cache_config",
@@ -3951,12 +4573,27 @@ class ArtifactRuntimeIntegration:
             )
         )
 
+    def _local_ready_materialization_identity_from_request(
+        self,
+        request: _LocalReadyBootstrap,
+    ) -> LocalReadyMaterializationIdentity:
+        if request.source_artifact_ref and request.source_metadata_fingerprint:
+            return LocalReadyMaterializationIdentity(
+                source_artifact_ref=str(request.source_artifact_ref),
+                source_metadata_fingerprint=str(request.source_metadata_fingerprint),
+            )
+        if request.recipe is None:
+            raise ArtifactRuntimeIntegrationError(
+                "TensorCast local-ready identity requires a prepared recipe"
+            )
+        return self.local_ready_materialization_identity(request.recipe)
+
     def _validate_prepared_local_ready_request_identity(
         self,
         request: _LocalReadyBootstrap,
-    ) -> None:
+    ) -> LocalReadyMaterializationIdentity | None:
         if request.recipe is None:
-            return
+            return None
         try:
             recipe_identity = self.local_ready_materialization_identity(request.recipe)
             recipe_source_ref = tc_source_catalog.resolve_source_artifact_ref(
@@ -4019,6 +4656,10 @@ class ArtifactRuntimeIntegration:
                     "TensorCast local-ready prepared recipe source metadata "
                     "fingerprint does not match prepared source catalog"
                 )
+        return LocalReadyMaterializationIdentity(
+            source_artifact_ref=str(recipe_source_ref),
+            source_metadata_fingerprint=recipe_identity.source_metadata_fingerprint,
+        )
 
     def _local_ready_materialization_options(
         self,
@@ -4046,7 +4687,7 @@ class ArtifactRuntimeIntegration:
                 "ArtifactRuntimeIntegration.start(LocalSourceBootstrap) requires "
                 "ready source-bound contract state"
             )
-        identity = self.local_ready_materialization_identity(request.recipe)
+        identity = self._local_ready_materialization_identity_from_request(request)
         options, _profile = self.build_materialization_options(
             artifact_ref=identity.source_artifact_ref,
             operation_scope=request.operation_scope,
@@ -4414,6 +5055,7 @@ class ArtifactRuntimeIntegration:
         representation_contract_hash: str,
         logical_topology_json_payload: str | None = None,
         topology_admission_digest: str | None = None,
+        base_canonical_index: Any | None = None,
     ) -> tuple[str, bytes]:
         return tc_local_ready.prepare_same_binding_manifest_carrier(
             recipe,
@@ -4421,6 +5063,7 @@ class ArtifactRuntimeIntegration:
             representation_contract_hash=representation_contract_hash,
             logical_topology_json_payload=logical_topology_json_payload,
             topology_admission_digest=topology_admission_digest,
+            base_canonical_index=base_canonical_index,
         )
 
     def build_local_ready_manifest_carrier_from_contract(
@@ -4456,6 +5099,7 @@ class ArtifactRuntimeIntegration:
             representation_contract_hash=representation_contract_hash,
             logical_topology_json_payload=logical_topology_json_payload,
             topology_admission_digest=topology_admission_digest,
+            base_canonical_index=base_canonical_index,
         )
 
     def local_ready_representation_contract_hash(
@@ -4530,24 +5174,83 @@ class ArtifactRuntimeIntegration:
         adapter_version: str | None = None,
         serving_abi_version: str | None = None,
     ) -> tuple[str, bytes]:
-        return self.build_local_ready_manifest_carrier_from_contract(
+        components = (
+            self._local_ready_manifest_carrier_components_from_framework_context(
+                recipe=recipe,
+                manifest_tensor_name=manifest_tensor_name,
+                model_config=model_config,
+                placement=placement,
+                runtime_binding_schema_version=runtime_binding_schema_version,
+                serving_artifact_schema_version=serving_artifact_schema_version,
+                framework_name=framework_name,
+                framework_version=framework_version,
+                adapter_version=adapter_version,
+                serving_abi_version=serving_abi_version,
+                include_source_index_bytes=False,
+            )
+        )
+        return components.representation_contract_hash, components.manifest_bytes
+
+    def _local_ready_manifest_carrier_components_from_framework_context(
+        self,
+        *,
+        recipe: Any,
+        manifest_tensor_name: str,
+        model_config: Any,
+        placement: Any,
+        runtime_binding_schema_version: int,
+        serving_artifact_schema_version: int,
+        framework_name: str | None = None,
+        framework_version: str | None = None,
+        adapter_version: str | None = None,
+        serving_abi_version: str | None = None,
+        include_source_index_bytes: bool = True,
+    ) -> _LocalReadyManifestCarrierComponents:
+        base_canonical_index = tc_local_ready.canonical_index_from_recipe(recipe)
+        tensor_schema_hash = tc_contract.compute_canonical_runtime_tensor_schema_hash(
+            base_canonical_index,
+            manifest_tensor_name=manifest_tensor_name,
+        )
+        representation_contract_hash = self.local_ready_representation_contract_hash(
+            tensor_schema_hash=tensor_schema_hash,
+            model_config=model_config,
+            placement=placement,
+            runtime_binding_schema_version=runtime_binding_schema_version,
+            serving_artifact_schema_version=serving_artifact_schema_version,
+            framework_name=framework_name,
+            framework_version=framework_version,
+            adapter_version=adapter_version,
+            serving_abi_version=serving_abi_version,
+        )
+        logical_topology_json_payload = (
+            tc_local_ready.logical_topology_json_from_recipe(
+                recipe,
+                topology=getattr(placement, "topology", None),
+                framework_payload=getattr(placement, "framework_payload", {}),
+            )
+        )
+        topology_admission_digest = _optional_text(
+            getattr(
+                getattr(placement, "topology", None), "schema_topology_digest", None
+            )
+        )
+        _, manifest_bytes = self.build_local_ready_manifest_carrier(
             recipe=recipe,
             manifest_tensor_name=manifest_tensor_name,
-            representation_contract_hash_factory=lambda tensor_schema_hash: (
-                self.local_ready_representation_contract_hash(
-                    tensor_schema_hash=tensor_schema_hash,
-                    model_config=model_config,
-                    placement=placement,
-                    runtime_binding_schema_version=runtime_binding_schema_version,
-                    serving_artifact_schema_version=serving_artifact_schema_version,
-                    framework_name=framework_name,
-                    framework_version=framework_version,
-                    adapter_version=adapter_version,
-                    serving_abi_version=serving_abi_version,
-                )
+            representation_contract_hash=representation_contract_hash,
+            logical_topology_json_payload=logical_topology_json_payload,
+            topology_admission_digest=topology_admission_digest,
+            base_canonical_index=base_canonical_index,
+        )
+        return _LocalReadyManifestCarrierComponents(
+            representation_contract_hash=representation_contract_hash,
+            manifest_bytes=manifest_bytes,
+            source_index_bytes=(
+                canonical_index_to_bytes(base_canonical_index)
+                if include_source_index_bytes
+                else None
             ),
-            topology=getattr(placement, "topology", None),
-            framework_payload=getattr(placement, "framework_payload", {}),
+            tensor_schema_hash=tensor_schema_hash,
         )
 
     def prepare_local_ready_manifest_carrier_from_framework_context(
@@ -4564,8 +5267,8 @@ class ArtifactRuntimeIntegration:
         adapter_version: str | None = None,
         serving_abi_version: str | None = None,
     ) -> LocalReadyManifestCarrierResult:
-        representation_contract_hash, manifest_bytes = (
-            self.build_local_ready_manifest_carrier_from_framework_context(
+        components = (
+            self._local_ready_manifest_carrier_components_from_framework_context(
                 recipe=recipe,
                 manifest_tensor_name=manifest_tensor_name,
                 model_config=model_config,
@@ -4578,12 +5281,14 @@ class ArtifactRuntimeIntegration:
                 serving_abi_version=serving_abi_version,
             )
         )
-        manifest = RuntimeArtifactManifest.from_bytes(manifest_bytes)
+        manifest = RuntimeArtifactManifest.from_bytes(components.manifest_bytes)
         return LocalReadyManifestCarrierResult(
-            representation_contract_hash=representation_contract_hash,
-            manifest_bytes=manifest_bytes,
+            representation_contract_hash=components.representation_contract_hash,
+            manifest_bytes=components.manifest_bytes,
             serving_manifest_ref=manifest.serving_manifest_ref,
             serving_build_digest=manifest.serving_build_digest,
+            source_index_bytes=components.source_index_bytes,
+            tensor_schema_hash=components.tensor_schema_hash,
         )
 
     def local_ready_tensor_schema_hash(
@@ -4864,7 +5569,12 @@ class ArtifactRuntimeIntegration:
                 "broadcast_object(payload, src)"
             )
         broadcast_tensor_dict = getattr(coordinator, "broadcast_tensor_dict", None)
-        can_broadcast_tensor_dict = callable(broadcast_tensor_dict)
+        tensor_payload_enabled = bool(
+            getattr(coordinator, "tensor_payload_broadcast_enabled", True)
+        )
+        can_broadcast_tensor_dict = tensor_payload_enabled and callable(
+            broadcast_tensor_dict
+        )
         if not can_broadcast_tensor_dict:
             with tensorcast_profile_stage(
                 "tensorcast",

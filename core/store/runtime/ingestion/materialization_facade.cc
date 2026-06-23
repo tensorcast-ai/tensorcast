@@ -3442,8 +3442,7 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
   const bool auto_can_select_source_window = source_window_eligible &&
       strategy_config.source_window_collective_selection_mode !=
           StrategyConfig::SourceWindowCollectiveSelectionMode::kDryRun;
-  const bool source_window_strict =
-      strategy_config.source_window_collective_selection_mode ==
+  const bool source_window_strict = strategy_config.source_window_collective_selection_mode ==
       StrategyConfig::SourceWindowCollectiveSelectionMode::kStrict;
   const std::optional<std::string> local_auto_reject =
       local_eligible ? local_auto_reject_reason(generic_estimate, local_estimate, local_plan_summary) : std::nullopt;
@@ -3492,8 +3491,8 @@ absl::StatusOr<strategy::ExecutionStrategyPlan> MaterializationFacade::build_ord
         plan.selection_reason = "auto_source_window_collective_strict";
       } else if (auto_prefers_local) {
         plan.executor = strategy::ExecutionStrategyExecutor::kTensorBatchedLocal;
-        plan.selection_reason = host_local_source ? "auto_host_local_prefers_local_batched"
-                                                  : "auto_prefers_local_batched";
+        plan.selection_reason =
+            host_local_source ? "auto_host_local_prefers_local_batched" : "auto_prefers_local_batched";
       } else if (source_window_auto_can_select) {
         plan.executor = strategy::ExecutionStrategyExecutor::kSourceWindowCollective;
         plan.selection_reason = "auto_source_window_collective_candidate";
@@ -3819,6 +3818,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               .strategy_config = config_.options->materialization_strategy,
               .enable_source_window_plan_cache =
                   config_.options->materialization_strategy.enable_source_window_plan_cache,
+              .async_runtime = config_.runtime_context->async_runtime(),
           };
           auto collective_result = execute_collective_mapped_target_load(
               config_.hooks,
@@ -4653,6 +4653,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
               .strategy_config = strategy_config,
               .enable_source_window_plan_cache = strategy_config.enable_source_window_plan_cache,
+              .async_runtime = config_.runtime_context->async_runtime(),
           };
           const std::string source_index_digest =
               source_index_json.has_value() ? index_hash(*source_index_json) : index_hash(canonical_index_json);
@@ -4781,6 +4782,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
               .strategy_config = strategy_config,
               .enable_source_window_plan_cache = strategy_config.enable_source_window_plan_cache,
+              .async_runtime = config_.runtime_context->async_runtime(),
           };
           const auto collective_start = std::chrono::steady_clock::now();
           auto collective_result = execute_collective_mapped_target_load(
@@ -5037,6 +5039,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
               .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
               .strategy_config = strategy_config,
               .enable_source_window_plan_cache = strategy_config.enable_source_window_plan_cache,
+              .async_runtime = config_.runtime_context->async_runtime(),
           };
           const auto local_start = std::chrono::steady_clock::now();
           auto local_result = replica::try_local_mapped_target_load(

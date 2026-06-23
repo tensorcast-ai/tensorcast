@@ -73,6 +73,73 @@ class SourceCatalog:
             resolve_source_artifact_ref(self.source_artifact_ref),
         )
 
+    @property
+    def tensor_count(self) -> int:
+        return len(self.ordered_names)
+
+
+class CanonicalIndexBytesSourceCatalog:
+    """SourceCatalog-compatible view backed by canonical-index JSON bytes.
+
+    The compiled recipe cache hit path only needs source identity,
+    metadata_fingerprint, selected_files, and canonical_index_hash. Defer the
+    heavier JSON object materialization until trace capture or validation asks
+    for tensor metadata.
+    """
+
+    schema_version = SOURCE_CATALOG_SCHEMA_VERSION
+
+    def __init__(
+        self,
+        canonical_index_bytes: bytes,
+        *,
+        source_artifact_ref: str,
+        selected_files: Sequence[SourceFileEntry] = (),
+    ) -> None:
+        self.source_artifact_ref = resolve_source_artifact_ref(source_artifact_ref)
+        self.selected_files = tuple(selected_files)
+        self.canonical_index_bytes = bytes(canonical_index_bytes)
+        self.canonical_index_hash = hashlib.sha256(
+            self.canonical_index_bytes
+        ).hexdigest()
+        self._tensor_count = _canonical_index_top_level_entry_count(
+            self.canonical_index_bytes
+        )
+        self.metadata_fingerprint = compute_source_metadata_fingerprint(
+            ordered_names=(),
+            meta_by_name={},
+            canonical_index_hash=self.canonical_index_hash,
+            selected_files=self.selected_files,
+            tensor_count=self._tensor_count,
+        )
+        self._ordered_names: tuple[str, ...] | None = None
+        self._meta_by_name: Mapping[str, SourceTensorMeta] | None = None
+
+    @property
+    def tensor_count(self) -> int:
+        return self._tensor_count
+
+    @property
+    def ordered_names(self) -> tuple[str, ...]:
+        self._ensure_loaded()
+        assert self._ordered_names is not None
+        return self._ordered_names
+
+    @property
+    def meta_by_name(self) -> Mapping[str, SourceTensorMeta]:
+        self._ensure_loaded()
+        assert self._meta_by_name is not None
+        return self._meta_by_name
+
+    def _ensure_loaded(self) -> None:
+        if self._ordered_names is not None and self._meta_by_name is not None:
+            return
+        ordered_names, meta_by_name = _parse_canonical_index_bytes(
+            self.canonical_index_bytes
+        )
+        self._ordered_names = ordered_names
+        self._meta_by_name = meta_by_name
+
 
 @dataclass(frozen=True)
 class SourceSubject:
@@ -388,7 +455,16 @@ def source_catalog_from_canonical_index_bytes(
     per-rank Python object churn.
     """
 
-    source_ref = resolve_source_artifact_ref(source_artifact_ref)
+    return CanonicalIndexBytesSourceCatalog(
+        canonical_index_bytes,
+        source_artifact_ref=source_artifact_ref,
+        selected_files=selected_files,
+    )
+
+
+def _parse_canonical_index_bytes(
+    canonical_index_bytes: bytes,
+) -> tuple[tuple[str, ...], Mapping[str, SourceTensorMeta]]:
     index_bytes = bytes(canonical_index_bytes)
     try:
         raw = json.loads(index_bytes.decode("utf-8"))
@@ -431,21 +507,25 @@ def source_catalog_from_canonical_index_bytes(
 
     ordered_names_tuple = tuple(ordered_names)
     meta_proxy = MappingProxyType(meta_by_name)
-    canonical_index_hash = hashlib.sha256(index_bytes).hexdigest()
-    return SourceCatalog(
-        ordered_names=ordered_names_tuple,
-        meta_by_name=meta_proxy,
-        selected_files=tuple(selected_files),
-        source_artifact_ref=source_ref,
-        canonical_index_hash=canonical_index_hash,
-        metadata_fingerprint=compute_source_metadata_fingerprint(
-            ordered_names=ordered_names_tuple,
-            meta_by_name=meta_proxy,
-            canonical_index_hash=canonical_index_hash,
-            selected_files=selected_files,
-        ),
-        canonical_index_bytes=index_bytes,
-    )
+    return ordered_names_tuple, meta_proxy
+
+
+def _canonical_index_top_level_entry_count(index_bytes: bytes) -> int:
+    try:
+        raw = json.loads(bytes(index_bytes).decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise ArtifactError(
+            "Failed to parse canonical index JSON",
+            status_code="DATA_LOSS",
+            retryable=False,
+        ) from exc
+    if not isinstance(raw, dict):
+        raise ArtifactError(
+            "Canonical index JSON must be an object",
+            status_code="DATA_LOSS",
+            retryable=False,
+        )
+    return len(raw)
 
 
 def source_catalog_from_canonical_index(
@@ -496,11 +576,16 @@ def compute_source_metadata_fingerprint(
     meta_by_name: Mapping[str, SourceTensorMeta],
     canonical_index_hash: str = "",
     selected_files: Sequence[SourceFileEntry] = (),
+    tensor_count: int | None = None,
 ) -> str:
     digest = hashlib.sha256()
     digest.update(_SOURCE_CATALOG_FINGERPRINT_VERSION.encode("utf-8"))
     digest.update(b"\0")
-    digest.update(str(len(ordered_names)).encode("utf-8"))
+    digest.update(
+        str(len(ordered_names) if tensor_count is None else int(tensor_count)).encode(
+            "utf-8"
+        )
+    )
     digest.update(b"\0")
     digest.update(str(canonical_index_hash or "").encode("utf-8"))
     digest.update(b"\n")
@@ -597,6 +682,7 @@ def resolve_source_artifact_ref(source_artifact_ref: str) -> str:
 
 __all__ = [
     "SOURCE_CATALOG_SCHEMA_VERSION",
+    "CanonicalIndexBytesSourceCatalog",
     "SourceCatalog",
     "SourceFileEntry",
     "SourceManifest",

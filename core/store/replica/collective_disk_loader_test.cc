@@ -7,9 +7,11 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -213,6 +215,36 @@ struct RectCopyCase {
   int64_t dst_col_end;
 };
 
+class ScopedEnvVar {
+ public:
+  explicit ScopedEnvVar(const char* name) : name_(name) {
+    const char* value = std::getenv(name_);
+    if (value != nullptr) {
+      old_value_ = value;
+    }
+  }
+
+  ~ScopedEnvVar() {
+    if (old_value_.has_value()) {
+      (void)setenv(name_, old_value_->c_str(), /*overwrite=*/1);
+    } else {
+      (void)unsetenv(name_);
+    }
+  }
+
+  void set(const char* value) {
+    (void)setenv(name_, value, /*overwrite=*/1);
+  }
+
+  void unset() {
+    (void)unsetenv(name_);
+  }
+
+ private:
+  const char* name_;
+  std::optional<std::string> old_value_;
+};
+
 void append_rect_segments(
     const RectCopyCase& copy,
     uint64_t dst_tensor_offset,
@@ -293,8 +325,7 @@ TEST_CASE(
   }
 
   CHECK(decision_or->use_direct_aligned_edges);
-  const bool cold_direct_reason =
-      decision_or->reason == "page_cache_cold_or_partial_direct" ||
+  const bool cold_direct_reason = decision_or->reason == "page_cache_cold_or_partial_direct" ||
       decision_or->reason == "direct_probe_cold_or_partial_direct";
   CHECK(cold_direct_reason);
 
@@ -605,7 +636,7 @@ TEST_CASE(
     CHECK_FALSE(result.plan_cache_hit);
   }
   CHECK(first[0].plan_hash == second[0].plan_hash);
-  CHECK(first[0].plan_hash == facts_changed[0].plan_hash);
+  CHECK(first[0].plan_hash != facts_changed[0].plan_hash);
 
   const auto stats = source_window_collective_plan_cache_stats_for_testing();
   CHECK(stats.misses == 2);
@@ -775,8 +806,169 @@ TEST_CASE(
   CHECK(source_window_compiled_routed_program_build_thread_count_for_testing(31, 0) == 1);
   CHECK(source_window_compiled_routed_program_build_thread_count_for_testing(32, 0) > 1);
   CHECK(source_window_compiled_routed_program_build_thread_count_for_testing(115, 0) > 1);
+  CHECK(source_window_compiled_routed_program_build_thread_count_for_testing(885, 0) <= 32);
   CHECK(source_window_compiled_routed_program_build_thread_count_for_testing(115, 1) == 1);
   CHECK(source_window_compiled_routed_program_build_thread_count_for_testing(115, 16) == 16);
+  CHECK(source_window_compiled_routed_program_build_thread_count_for_testing(115, 32) == 32);
+}
+
+TEST_CASE(
+    "source-window pipeline slot cap is configurable for controlled profiling",
+    "[collective_disk_loader][source_window][pipeline]") {
+  ScopedEnvVar env("TENSORCAST_SOURCE_WINDOW_MAX_PIPELINE_SLOTS");
+
+  env.unset();
+  CHECK(source_window_max_pipeline_slots_cap_for_testing() == 16);
+  CHECK(source_window_effective_max_pipeline_slots_for_testing(0) == 1);
+  CHECK(source_window_effective_max_pipeline_slots_for_testing(8) == 8);
+  CHECK(source_window_effective_max_pipeline_slots_for_testing(32) == 16);
+
+  env.set("32");
+  CHECK(source_window_max_pipeline_slots_cap_for_testing() == 32);
+  CHECK(source_window_effective_max_pipeline_slots_for_testing(16) == 16);
+  CHECK(source_window_effective_max_pipeline_slots_for_testing(64) == 32);
+
+  env.set("0");
+  CHECK(source_window_max_pipeline_slots_cap_for_testing() == 16);
+
+  env.set("not-a-number");
+  CHECK(source_window_max_pipeline_slots_cap_for_testing() == 16);
+
+  env.set("256");
+  CHECK(source_window_max_pipeline_slots_cap_for_testing() == 128);
+}
+
+TEST_CASE(
+    "source-window read-ahead slot count can be limited independently",
+    "[collective_disk_loader][source_window][pipeline]") {
+  ScopedEnvVar env("TENSORCAST_SOURCE_WINDOW_READ_AHEAD_SLOTS");
+
+  env.unset();
+  CHECK(!source_window_requested_read_ahead_slots_for_testing().has_value());
+  CHECK(source_window_effective_read_ahead_slots_for_testing(0) == 1);
+  CHECK(source_window_effective_read_ahead_slots_for_testing(16) == 16);
+
+  env.set("8");
+  REQUIRE(source_window_requested_read_ahead_slots_for_testing().has_value());
+  CHECK(*source_window_requested_read_ahead_slots_for_testing() == 8);
+  CHECK(source_window_effective_read_ahead_slots_for_testing(4) == 4);
+  CHECK(source_window_effective_read_ahead_slots_for_testing(16) == 8);
+
+  env.set("0");
+  CHECK(!source_window_requested_read_ahead_slots_for_testing().has_value());
+  CHECK(source_window_effective_read_ahead_slots_for_testing(16) == 16);
+
+  env.set("not-a-number");
+  CHECK(!source_window_requested_read_ahead_slots_for_testing().has_value());
+  CHECK(source_window_effective_read_ahead_slots_for_testing(16) == 16);
+
+  env.set("256");
+  REQUIRE(source_window_requested_read_ahead_slots_for_testing().has_value());
+  CHECK(*source_window_requested_read_ahead_slots_for_testing() == 128);
+  CHECK(source_window_effective_read_ahead_slots_for_testing(64) == 64);
+  CHECK(source_window_effective_read_ahead_slots_for_testing(256) == 128);
+}
+
+TEST_CASE(
+    "source-window clique completion eviction is configurable for controlled profiling",
+    "[collective_disk_loader][source_window][clique]") {
+  ScopedEnvVar env("TENSORCAST_SOURCE_WINDOW_EVICT_CLIQUE_ON_COMPLETE");
+
+  env.unset();
+  CHECK(source_window_evict_clique_on_complete_for_testing());
+
+  env.set("0");
+  CHECK_FALSE(source_window_evict_clique_on_complete_for_testing());
+
+  env.set("false");
+  CHECK_FALSE(source_window_evict_clique_on_complete_for_testing());
+
+  env.set("off");
+  CHECK_FALSE(source_window_evict_clique_on_complete_for_testing());
+
+  env.set("no");
+  CHECK_FALSE(source_window_evict_clique_on_complete_for_testing());
+
+  env.set("1");
+  CHECK(source_window_evict_clique_on_complete_for_testing());
+
+  env.set("true");
+  CHECK(source_window_evict_clique_on_complete_for_testing());
+
+  env.set("on");
+  CHECK(source_window_evict_clique_on_complete_for_testing());
+
+  env.set("yes");
+  CHECK(source_window_evict_clique_on_complete_for_testing());
+
+  env.set("not-a-bool");
+  CHECK(source_window_evict_clique_on_complete_for_testing());
+}
+
+TEST_CASE(
+    "source-window async clique destroy is enabled by default and configurable",
+    "[collective_disk_loader][source_window][clique]") {
+  ScopedEnvVar env("TENSORCAST_SOURCE_WINDOW_ASYNC_CLIQUE_DESTROY_ON_COMPLETE");
+
+  env.unset();
+  CHECK(source_window_async_clique_destroy_on_complete_for_testing());
+
+  env.set("1");
+  CHECK(source_window_async_clique_destroy_on_complete_for_testing());
+
+  env.set("true");
+  CHECK(source_window_async_clique_destroy_on_complete_for_testing());
+
+  env.set("on");
+  CHECK(source_window_async_clique_destroy_on_complete_for_testing());
+
+  env.set("yes");
+  CHECK(source_window_async_clique_destroy_on_complete_for_testing());
+
+  env.set("0");
+  CHECK_FALSE(source_window_async_clique_destroy_on_complete_for_testing());
+
+  env.set("false");
+  CHECK_FALSE(source_window_async_clique_destroy_on_complete_for_testing());
+
+  env.set("off");
+  CHECK_FALSE(source_window_async_clique_destroy_on_complete_for_testing());
+
+  env.set("no");
+  CHECK_FALSE(source_window_async_clique_destroy_on_complete_for_testing());
+
+  env.set("not-a-bool");
+  CHECK(source_window_async_clique_destroy_on_complete_for_testing());
+}
+
+TEST_CASE(
+    "NCCL clique destroy mode is configurable for controlled profiling",
+    "[collective_disk_loader][source_window][clique]") {
+  ScopedEnvVar env("TENSORCAST_NCCL_CLIQUE_DESTROY_MODE");
+
+  env.unset();
+  CHECK(nccl_clique_destroy_mode_for_testing() == "serial");
+
+  env.set("finalize");
+  CHECK(nccl_clique_destroy_mode_for_testing() == "finalize");
+
+  env.set("finalize_poll");
+  CHECK(nccl_clique_destroy_mode_for_testing() == "finalize");
+
+  env.set("true");
+  CHECK(nccl_clique_destroy_mode_for_testing() == "finalize");
+
+  env.set("serial");
+  CHECK(nccl_clique_destroy_mode_for_testing() == "serial");
+
+  env.set("destroy");
+  CHECK(nccl_clique_destroy_mode_for_testing() == "serial");
+
+  env.set("false");
+  CHECK(nccl_clique_destroy_mode_for_testing() == "serial");
+
+  env.set("not-a-mode");
+  CHECK(nccl_clique_destroy_mode_for_testing() == "serial");
 }
 
 TEST_CASE(

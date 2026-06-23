@@ -3,12 +3,14 @@
 #pragma once
 
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/controllers/materialization_layout_utils.h"
@@ -21,6 +23,8 @@ namespace tensorcast::daemon::materialization_target_plan {
 
 using RecordMaterializeResultFn =
     void (*)(std::string_view result, std::string_view reason, v2::MaterializationSource source);
+using CanonicalIndexTablePtr = std::shared_ptr<const materialization_layout::CanonicalIndexTable>;
+using CanonicalIndexTableFuture = std::shared_future<absl::StatusOr<CanonicalIndexTablePtr>>;
 
 struct TargetMaterializationPlan {
   std::vector<std::string> layout_names;
@@ -54,6 +58,8 @@ struct MappedTargetMaterializationPlan {
 struct BindingRealizationMaterializationPlanOptions {
   bool build_byte_range_maps{true};
   std::optional<std::string> canonical_index_parse_identity_key;
+  CanonicalIndexTablePtr preparsed_canonical_index_table;
+  CanonicalIndexTableFuture preparsed_canonical_index_table_future;
 };
 
 struct ResolvedMappedMaterializationPlanOptions {

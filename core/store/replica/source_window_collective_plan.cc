@@ -1836,6 +1836,174 @@ absl::StatusOr<std::string> compute_plan_hash(
   return common::multibase_multihash_sha256(digest);
 }
 
+void append_source_window_config_identity(std::string* payload, const SourceWindowCollectiveConfig& config) {
+  absl::StrAppend(
+      payload,
+      "{enabled=",
+      config.enabled,
+      ",selection=",
+      strategy::source_window_collective_selection_mode_name(config.selection_mode),
+      ",window=",
+      config.window_bytes,
+      ",max_gap=",
+      config.max_gap_bytes,
+      ",max_window_amp=",
+      config.max_window_amplification_x1000,
+      ",max_plan_read_amp=",
+      config.max_plan_read_amplification_x1000,
+      ",max_scatter_ops=",
+      config.max_scatter_ops_per_window,
+      ",peak=",
+      config.peak_bytes_budget,
+      ",min_rank_saving=",
+      config.min_rank_read_saving_bytes,
+      ",max_peer_ratio=",
+      config.max_peer_to_read_ratio_x1000,
+      ",min_routed_peer_saving=",
+      config.min_routed_peer_saving_bytes,
+      ",distribution=",
+      strategy::source_window_collective_distribution_mode_name(config.distribution_mode),
+      ",allow_mixed_residual=",
+      config.allow_mixed_residual,
+      "}");
+}
+
+std::optional<std::string> compute_prepared_identity_plan_hash(
+    const SourceWindowCollectiveGroupInput& input,
+    const SourceWindowCollectivePlan& plan) {
+  if (input.members.empty()) {
+    return std::nullopt;
+  }
+
+  struct PreparedMemberIdentity {
+    uint32_t rank{0};
+    int device_id{-1};
+    std::string group_key;
+    std::string member_key;
+    std::string realization_plan_hash;
+    std::string target_layout_template_hash;
+    std::string target_index_hash;
+    uint64_t target_total_size{0};
+    std::vector<uint64_t> storage_lengths;
+    std::vector<std::pair<uint64_t, uint64_t>> storage_spans;
+  };
+
+  std::vector<PreparedMemberIdentity> members;
+  members.reserve(input.members.size());
+  for (const auto& member : input.members) {
+    if (!member.prepared_realization.has_value()) {
+      return std::nullopt;
+    }
+    const auto& facts = *member.prepared_realization;
+    if (facts.group_key.empty() || facts.member_key.empty() || facts.realization_plan_hash.empty() ||
+        facts.target_layout_template_hash.empty() || facts.target_index_hash.empty()) {
+      return std::nullopt;
+    }
+
+    const auto& target_layout = member_target_layout(member);
+    PreparedMemberIdentity identity{
+        .rank = member.rank,
+        .device_id = member.device_id,
+        .group_key = facts.group_key,
+        .member_key = facts.member_key,
+        .realization_plan_hash = facts.realization_plan_hash,
+        .target_layout_template_hash = facts.target_layout_template_hash,
+        .target_index_hash = facts.target_index_hash,
+        .target_total_size = target_layout.total_size,
+    };
+    identity.storage_lengths.reserve(target_layout.storages.size());
+    for (const auto& storage : target_layout.storages) {
+      identity.storage_lengths.push_back(storage.length);
+    }
+    identity.storage_spans.reserve(member.storage_spans.size());
+    for (const auto& storage_span : member.storage_spans) {
+      identity.storage_spans.emplace_back(storage_span.base_offset, storage_span.length);
+    }
+    members.push_back(std::move(identity));
+  }
+
+  std::sort(members.begin(), members.end(), [](const PreparedMemberIdentity& lhs, const PreparedMemberIdentity& rhs) {
+    return std::tie(lhs.rank, lhs.device_id, lhs.member_key) < std::tie(rhs.rank, rhs.device_id, rhs.member_key);
+  });
+
+  std::string payload;
+  payload.reserve(1024 + members.size() * 512);
+  absl::StrAppend(&payload, "source_window_collective_prepared_plan_hash_v1|artifact_path=");
+  if (input.disk_context != nullptr) {
+    absl::StrAppend(&payload, input.disk_context->artifact_path().generic_string());
+  }
+  absl::StrAppend(
+      &payload,
+      "|source_index_digest=",
+      input.source_index_digest,
+      "|world_size=",
+      input.group.world_size,
+      "|resolved_distribution=",
+      strategy::source_window_collective_distribution_mode_name(plan.distribution_mode),
+      "|config=");
+  append_source_window_config_identity(&payload, input.config);
+  absl::StrAppend(
+      &payload,
+      "|summary=",
+      plan.residual_bytes,
+      ":",
+      plan.summary.source_window_group_disk_read_bytes,
+      ":",
+      plan.summary.source_window_rank_read_bytes_max,
+      ":",
+      plan.summary.source_window_local_rank_read_bytes_max,
+      ":",
+      plan.summary.source_window_unique_payload_bytes,
+      ":",
+      plan.summary.source_window_target_write_bytes,
+      ":",
+      plan.summary.source_window_peer_transfer_bytes,
+      ":",
+      plan.summary.source_window_peer_useful_bytes,
+      ":",
+      plan.summary.source_window_peer_waste_bytes,
+      ":",
+      plan.summary.source_window_read_amplification_x1000,
+      ":",
+      plan.summary.source_window_scatter_op_count,
+      ":",
+      plan.summary.source_window_window_count,
+      "|members=",
+      members.size());
+  for (const auto& member : members) {
+    absl::StrAppend(
+        &payload,
+        "|member=",
+        member.rank,
+        ",device=",
+        member.device_id,
+        ",group_key=",
+        member.group_key,
+        ",member_key=",
+        member.member_key,
+        ",realization_plan_hash=",
+        member.realization_plan_hash,
+        ",target_layout_template_hash=",
+        member.target_layout_template_hash,
+        ",target_index_hash=",
+        member.target_index_hash,
+        ",target_total=",
+        member.target_total_size,
+        ",storages=",
+        member.storage_lengths.size());
+    for (const auto length : member.storage_lengths) {
+      absl::StrAppend(&payload, "/storage_length=", length);
+    }
+    absl::StrAppend(&payload, ",storage_spans=", member.storage_spans.size());
+    for (const auto& [base_offset, length] : member.storage_spans) {
+      absl::StrAppend(&payload, "/span=", base_offset, ":", length);
+    }
+  }
+  const auto digest = common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  return common::multibase_multihash_sha256(digest);
+}
+
 } // namespace
 
 SourceWindowCollectiveConfig source_window_collective_config_from_strategy(
@@ -2048,11 +2216,17 @@ absl::StatusOr<SourceWindowCollectivePlan> build_source_window_collective_plan(
   };
   const double metrics_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - metrics_start).count();
   const auto hash_start = std::chrono::steady_clock::now();
-  auto hash_or = compute_plan_hash(input, plan);
-  if (!hash_or.ok()) {
-    return hash_or.status();
+  const auto prepared_identity_hash = compute_prepared_identity_plan_hash(input, plan);
+  bool prepared_identity_hash_used = prepared_identity_hash.has_value();
+  if (prepared_identity_hash_used) {
+    plan.plan_hash = *prepared_identity_hash;
+  } else {
+    auto hash_or = compute_plan_hash(input, plan);
+    if (!hash_or.ok()) {
+      return hash_or.status();
+    }
+    plan.plan_hash = *hash_or;
   }
-  plan.plan_hash = *hash_or;
   const double hash_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - hash_start).count();
   const double total_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - total_start).count();
   LOG(INFO) << "tc_profile source_window_collective_plan_builder total"
@@ -2073,7 +2247,7 @@ absl::StatusOr<SourceWindowCollectivePlan> build_source_window_collective_plan(
             << " rank_read_saving_bytes=" << rank_read_saving
             << " read_amplification_x1000=" << read_amplification_x1000 << " append_sec=" << append_sec
             << " windows_sec=" << windows_sec << " metrics_sec=" << metrics_sec << " hash_sec=" << hash_sec
-            << " total_sec=" << total_sec;
+            << " prepared_identity_hash=" << (prepared_identity_hash_used ? 1 : 0) << " total_sec=" << total_sec;
   return plan;
 }
 

@@ -124,8 +124,10 @@ def prepare_same_binding_manifest_carrier(
     representation_contract_hash: str,
     logical_topology_json_payload: str | None = None,
     topology_admission_digest: str | None = None,
+    base_canonical_index: tc.CanonicalIndex | None = None,
 ) -> tuple[str, bytes]:
-    base_canonical_index = canonical_index_from_recipe(recipe)
+    if base_canonical_index is None:
+        base_canonical_index = canonical_index_from_recipe(recipe)
     build_pipeline_version = LOCAL_READY_BOOTSTRAP_BUILD_PIPELINE_VERSION
     publication_context = publication_context_from_recipe(
         recipe,

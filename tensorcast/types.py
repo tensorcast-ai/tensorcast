@@ -2383,10 +2383,6 @@ class RealizationTargetSet(BaseModel):
         for member in self.members:
             if member.runtime != self.runtime:
                 raise ValueError("all members must use the set runtime")
-            if member.source != self.source:
-                raise ValueError("all members must use the set source")
-            if member.topology != self.topology:
-                raise ValueError("all members must use the set topology")
             if member.member.group_id not in {None, self.group_id}:
                 raise ValueError("member group_id must match set group_id")
         return self

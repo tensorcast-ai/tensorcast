@@ -7,6 +7,7 @@ import uuid
 import weakref
 from dataclasses import dataclass
 from typing import (
+    Any,
     Callable,
     Generic,
     Literal,
@@ -76,6 +77,70 @@ class _OperationRefDescriptor:
     fencing_digest: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class OperationRefMetadata:
+    """Serializable daemon operation identity for cross-process handoff."""
+
+    operation_id: str
+    kind: str | None = None
+    target_artifact_id: str | None = None
+    authority_scope_kind: str | None = None
+    authority_scope_id: str | None = None
+    attachment_kind: str | None = None
+    recovery_class: str | None = None
+    fencing_digest: str | None = None
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "OperationRefMetadata":
+        operation_id = str(payload.get("operation_id") or "")
+        if not operation_id:
+            raise ValueError("operation_ref.operation_id is required")
+        return cls(
+            operation_id=operation_id,
+            kind=_optional_str(payload.get("kind")),
+            target_artifact_id=_optional_str(payload.get("target_artifact_id")),
+            authority_scope_kind=_optional_str(payload.get("authority_scope_kind")),
+            authority_scope_id=_optional_str(payload.get("authority_scope_id")),
+            attachment_kind=_optional_str(payload.get("attachment_kind")),
+            recovery_class=_optional_str(payload.get("recovery_class")),
+            fencing_digest=_optional_str(payload.get("fencing_digest")),
+        )
+
+    @classmethod
+    def from_proto(
+        cls,
+        operation_ref: operation_pb2.OperationRef,
+        *,
+        operation_id: str | None = None,
+    ) -> "OperationRefMetadata":
+        descriptor = _operation_ref_descriptor_from_proto(
+            operation_id or str(operation_ref.operation_id or ""),
+            operation_ref,
+        )
+        return _operation_ref_metadata_from_descriptor(descriptor)
+
+    def to_dict(self) -> dict[str, str]:
+        payload = {"operation_id": self.operation_id}
+        for key in (
+            "kind",
+            "target_artifact_id",
+            "authority_scope_kind",
+            "authority_scope_id",
+            "attachment_kind",
+            "recovery_class",
+            "fencing_digest",
+        ):
+            value = getattr(self, key)
+            if value:
+                payload[key] = value
+        return payload
+
+    def to_proto(self) -> operation_pb2.OperationRef:
+        return _operation_ref_proto_from_descriptor(
+            _operation_ref_descriptor_from_metadata(self)
+        )
+
+
 class OperationTimeoutError(ArtifactError):
     def __init__(self, message: str, *, retryable: bool) -> None:
         super().__init__(message, status_code="DEADLINE_EXCEEDED", retryable=retryable)
@@ -93,6 +158,9 @@ class Operation(Generic[T]):
 
     def result(self, *, timeout_s: float | None = None) -> T:
         return self.wait(timeout_s=timeout_s)
+
+    def latest_result(self) -> T | None:
+        return None
 
     def wait(self, *, timeout_s: float | None = None) -> T:
         raise NotImplementedError
@@ -269,6 +337,11 @@ def _global_store_status_to_operation_status(
     )
 
 
+def _optional_str(value: Any) -> str | None:
+    text = str(value or "")
+    return text or None
+
+
 def _operation_ref_descriptor_from_proto(
     operation_id: str,
     operation_ref: operation_pb2.OperationRef | None,
@@ -285,6 +358,36 @@ def _operation_ref_descriptor_from_proto(
         attachment_kind=str(operation_ref.attachment_kind or "") or None,
         recovery_class=str(operation_ref.recovery_class or "") or None,
         fencing_digest=str(operation_ref.fencing_digest or "") or None,
+    )
+
+
+def _operation_ref_descriptor_from_metadata(
+    metadata: OperationRefMetadata,
+) -> _OperationRefDescriptor:
+    return _OperationRefDescriptor(
+        operation_id=metadata.operation_id,
+        kind=metadata.kind,
+        target_artifact_id=metadata.target_artifact_id,
+        authority_scope_kind=metadata.authority_scope_kind,
+        authority_scope_id=metadata.authority_scope_id,
+        attachment_kind=metadata.attachment_kind,
+        recovery_class=metadata.recovery_class,
+        fencing_digest=metadata.fencing_digest,
+    )
+
+
+def _operation_ref_metadata_from_descriptor(
+    descriptor: _OperationRefDescriptor,
+) -> OperationRefMetadata:
+    return OperationRefMetadata(
+        operation_id=descriptor.operation_id,
+        kind=descriptor.kind,
+        target_artifact_id=descriptor.target_artifact_id,
+        authority_scope_kind=descriptor.authority_scope_kind,
+        authority_scope_id=descriptor.authority_scope_id,
+        attachment_kind=descriptor.attachment_kind,
+        recovery_class=descriptor.recovery_class,
+        fencing_digest=descriptor.fencing_digest,
     )
 
 
@@ -506,6 +609,13 @@ class DaemonGlobalStoreOperation(Operation[T]):
         )
         self._result_factory = result_factory
 
+    @property
+    def operation_ref_metadata(self) -> OperationRefMetadata:
+        return _operation_ref_metadata_from_descriptor(self._operation_ref)
+
+    def operation_ref_proto(self) -> operation_pb2.OperationRef:
+        return _operation_ref_proto_from_descriptor(self._operation_ref)
+
     def _runtime(self) -> _Runtime:
         runtime = self._runtime_ref()
         if runtime is None or getattr(runtime, "closed", False):
@@ -621,6 +731,40 @@ class DaemonGlobalStoreOperation(Operation[T]):
         return _global_store_status_to_operation_status(
             resp.status, context=self._operation_context()
         )
+
+    def latest_result(self) -> T | None:
+        """Return the latest typed result if the operation has published one.
+
+        Some daemon operations can safely publish an artifact-scoped handoff
+        before the operation reaches a terminal state. This method exposes that
+        handoff without changing wait()/result() semantics: consumers that need
+        local-ready data must still wait for terminal success before using it.
+        """
+
+        timeout_s = self._ctx_remaining_timeout_s()
+        if timeout_s is not None and timeout_s <= 0:
+            return None
+        try:
+            resp = self._client().get_operation(
+                self.operation_id,
+                operation_ref=_operation_ref_proto_from_descriptor(self._operation_ref),
+                timeout_s=timeout_s if timeout_s is not None else 10.0,
+            )
+        except grpc.RpcError:
+            return None
+        except ArtifactError as exc:
+            if exc.retryable or exc.status_code in {
+                "NOT_FOUND",
+                "UNAVAILABLE",
+                "DEADLINE_EXCEEDED",
+            }:
+                return None
+            raise
+        if resp.HasField("ref"):
+            self._refresh_operation_ref(resp.ref)
+        if resp.status.HasField("result") or resp.HasField("snapshot"):
+            return self._result_factory(resp)
+        return None
 
     def wait(self, *, timeout_s: float | None = None) -> T:
         overall_timeout_s = timeout_s
@@ -739,6 +883,12 @@ class PollingOperation(Operation[T]):
     def status(self) -> OperationStatus:
         return self._status_fn()
 
+    def latest_result(self) -> T | None:
+        status = self.status()
+        if status.state == "success":
+            return self._result_fn()
+        return None
+
     def wait(self, *, timeout_s: float | None = None) -> T:
         overall_timeout_s = timeout_s
         ctx_remaining = self._ctx_remaining_timeout_s()
@@ -803,6 +953,7 @@ __all__ = [
     "DaemonGlobalStoreOperation",
     "Operation",
     "OperationError",
+    "OperationRefMetadata",
     "OperationState",
     "OperationStatus",
     "OperationTimeoutError",

@@ -1487,6 +1487,8 @@ Status build_binding_realization_materialization_plan(
   double view_plan_sec = 0.0;
   double parse_source_tables_sec = 0.0;
   bool source_table_reused = false;
+  const bool preparsed_canonical_source_table =
+      options.preparsed_canonical_index_table != nullptr || options.preparsed_canonical_index_table_future.valid();
   double representation_contract_sec = 0.0;
   double selection_identity_sec = 0.0;
   const bool build_byte_range_maps = options.build_byte_range_maps;
@@ -1624,24 +1626,39 @@ Status build_binding_realization_materialization_plan(
     source_index_json = plan.view_plan->view_index_json;
   }
   const auto parse_source_tables_start = std::chrono::steady_clock::now();
-  auto canonical_source_table_or =
-      options.canonical_index_parse_identity_key.has_value() && !options.canonical_index_parse_identity_key->empty()
-      ? parse_canonical_index_shared_with_identity(
-            plan.canonical_index_json, *options.canonical_index_parse_identity_key)
-      : parse_canonical_index_shared(plan.canonical_index_json);
-  if (!canonical_source_table_or.ok()) {
-    record_error(record_result, "index_parse_failed");
-    return to_grpc_status(canonical_source_table_or.status());
+  std::shared_ptr<const CanonicalIndexTable> canonical_source_table_holder = options.preparsed_canonical_index_table;
+  if (canonical_source_table_holder == nullptr && options.preparsed_canonical_index_table_future.valid()) {
+    auto canonical_source_table_or = options.preparsed_canonical_index_table_future.get();
+    if (!canonical_source_table_or.ok()) {
+      record_error(record_result, "index_parse_failed");
+      return to_grpc_status(canonical_source_table_or.status());
+    }
+    canonical_source_table_holder = std::move(*canonical_source_table_or);
+  }
+  if (canonical_source_table_holder == nullptr) {
+    auto canonical_source_table_or =
+        options.canonical_index_parse_identity_key.has_value() && !options.canonical_index_parse_identity_key->empty()
+        ? parse_canonical_index_shared_with_identity(
+              plan.canonical_index_json, *options.canonical_index_parse_identity_key)
+        : parse_canonical_index_shared(plan.canonical_index_json);
+    if (!canonical_source_table_or.ok()) {
+      record_error(record_result, "index_parse_failed");
+      return to_grpc_status(canonical_source_table_or.status());
+    }
+    canonical_source_table_holder = std::move(*canonical_source_table_or);
   }
   source_table_reused = source_index_json == plan.canonical_index_json;
-  auto source_table_or =
-      source_table_reused ? canonical_source_table_or : parse_canonical_index_shared(source_index_json);
-  if (!source_table_or.ok()) {
-    record_error(record_result, "index_parse_failed");
-    return to_grpc_status(source_table_or.status());
+  std::shared_ptr<const CanonicalIndexTable> source_table_holder = canonical_source_table_holder;
+  if (!source_table_reused) {
+    auto source_table_or = parse_canonical_index_shared(source_index_json);
+    if (!source_table_or.ok()) {
+      record_error(record_result, "index_parse_failed");
+      return to_grpc_status(source_table_or.status());
+    }
+    source_table_holder = std::move(*source_table_or);
   }
-  const CanonicalIndexTable& canonical_source_table = **canonical_source_table_or;
-  const CanonicalIndexTable& source_table = **source_table_or;
+  const CanonicalIndexTable& canonical_source_table = *canonical_source_table_holder;
+  const CanonicalIndexTable& source_table = *source_table_holder;
   parse_source_tables_sec = elapsed_sec(parse_source_tables_start, std::chrono::steady_clock::now());
 
   const auto representation_contract_start = std::chrono::steady_clock::now();
@@ -1706,6 +1723,7 @@ Status build_binding_realization_materialization_plan(
             << " view_narrows_sec=" << view_narrows_sec << " view_plan_sec=" << view_plan_sec
             << " parse_source_tables_sec=" << parse_source_tables_sec
             << " source_table_reused=" << (source_table_reused ? 1 : 0)
+            << " preparsed_canonical_source_table=" << (preparsed_canonical_source_table ? 1 : 0)
             << " representation_contract_sec=" << representation_contract_sec
             << " selection_identity_sec=" << selection_identity_sec
             << " collective_segments=" << plan.representation.collective_lowered_map.segments.size()

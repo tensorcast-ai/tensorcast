@@ -52,6 +52,7 @@ class RetainedBindingAcquire(RuntimeIntent):
     expected_daemon_id: str | None = None
     expected_daemon_session_id: str | None = None
     serving_artifact_id: str | None = None
+    preopened_lease: Any | None = None
 
     def __post_init__(self) -> None:
         has_authority = self.authority is not None
@@ -67,6 +68,10 @@ class RetainedBindingAcquire(RuntimeIntent):
             raise AuthorityValidationError(
                 "RetainedBindingAcquire.authority must be "
                 "ParsedRetainedRealizationAuthority"
+            )
+        if self.preopened_lease is not None and not has_authority:
+            raise AuthorityValidationError(
+                "RetainedBindingAcquire.preopened_lease requires authority"
             )
         if has_local_ref and (
             not self.expected_tensor_schema_hash

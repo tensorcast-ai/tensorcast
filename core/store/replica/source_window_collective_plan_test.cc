@@ -429,6 +429,20 @@ SourceWindowCollectiveGroupInput make_hybrid_dense_shared_window_group(SourceWin
   };
 }
 
+void attach_prepared_realization_facts(SourceWindowCollectiveGroupInput* input, std::string_view version) {
+  REQUIRE(input != nullptr);
+  for (auto& member : input->members) {
+    const std::string suffix = std::string(version) + "-" + std::to_string(member.rank);
+    member.prepared_realization = loading::SourceWindowPreparedRealizationFacts{
+        .group_key = "prepared-group-" + std::string(version),
+        .member_key = "prepared-member-" + suffix,
+        .realization_plan_hash = "prepared-realization-" + suffix,
+        .target_layout_template_hash = "prepared-layout-template",
+        .target_index_hash = "prepared-target-index",
+    };
+  }
+}
+
 TEST_CASE("source-window group planner estimates TP dim1 windows without per-rank full reads", "[source_window]") {
   auto input = make_two_rank_dim1_group();
 
@@ -588,6 +602,28 @@ TEST_CASE("source-window group planner admits local-only windows with owner-only
   CHECK(plan.summary.source_window_peer_useful_bytes == 0);
   CHECK(plan.summary.source_window_peer_waste_bytes == 0);
   CHECK(plan.summary.group_final_admitted);
+}
+
+TEST_CASE("source-window group planner keys plan hash by prepared realization identity", "[source_window]") {
+  auto first_input = make_two_rank_dim1_group();
+  attach_prepared_realization_facts(&first_input, "v1");
+  auto second_input = make_two_rank_dim1_group();
+  second_input.group.group_id = "tp-test-second";
+  attach_prepared_realization_facts(&second_input, "v1");
+  auto changed_input = make_two_rank_dim1_group();
+  changed_input.group.group_id = "tp-test-changed";
+  attach_prepared_realization_facts(&changed_input, "v2");
+
+  auto first_or = build_source_window_collective_plan(first_input);
+  REQUIRE(first_or.ok());
+  auto second_or = build_source_window_collective_plan(second_input);
+  REQUIRE(second_or.ok());
+  auto changed_or = build_source_window_collective_plan(changed_input);
+  REQUIRE(changed_or.ok());
+
+  CHECK_FALSE(first_or->plan_hash.empty());
+  CHECK(first_or->plan_hash == second_or->plan_hash);
+  CHECK(first_or->plan_hash != changed_or->plan_hash);
 }
 
 TEST_CASE("source-window auto distribution selects local-only for owner-only windows", "[source_window]") {
@@ -1129,30 +1165,27 @@ TEST_CASE("source-window group planner hash is sensitive to source, members, lay
   CHECK(group_plan_or->plan_hash == base_plan_or->plan_hash);
 }
 
-TEST_CASE("source-window prepared realization facts are non-semantic plan inputs", "[source_window]") {
+TEST_CASE("source-window prepared realization facts keep plan shape but key prepared hash", "[source_window]") {
   auto base = make_two_rank_dim1_group();
   auto base_plan_or = build_source_window_collective_plan(base);
   REQUIRE(base_plan_or.ok());
 
   auto with_facts = base;
-  with_facts.members[0].prepared_realization = loading::SourceWindowPreparedRealizationFacts{
-      .group_key = "rank0-group-key",
-      .member_key = "rank0-member-key",
-      .realization_plan_hash = "rank0-realization-plan",
-      .target_layout_template_hash = "shared-target-layout-template",
-      .target_index_hash = "shared-target-index",
-  };
-  with_facts.members[1].prepared_realization = loading::SourceWindowPreparedRealizationFacts{
-      .group_key = "rank1-group-key",
-      .member_key = "rank1-member-key",
-      .realization_plan_hash = "rank1-realization-plan",
-      .target_layout_template_hash = "shared-target-layout-template",
-      .target_index_hash = "shared-target-index",
-  };
+  attach_prepared_realization_facts(&with_facts, "shape");
 
   auto plan_or = build_source_window_collective_plan(with_facts);
   REQUIRE(plan_or.ok());
-  CHECK(plan_or->plan_hash == base_plan_or->plan_hash);
+  CHECK(plan_or->distribution_mode == base_plan_or->distribution_mode);
+  CHECK(plan_or->rank_read_bytes == base_plan_or->rank_read_bytes);
+  CHECK(plan_or->residual_bytes == base_plan_or->residual_bytes);
+  CHECK(plan_or->windows.size() == base_plan_or->windows.size());
+  CHECK(
+      plan_or->summary.source_window_group_disk_read_bytes ==
+      base_plan_or->summary.source_window_group_disk_read_bytes);
+  CHECK(plan_or->summary.source_window_target_write_bytes == base_plan_or->summary.source_window_target_write_bytes);
+  CHECK(plan_or->summary.source_window_scatter_op_count == base_plan_or->summary.source_window_scatter_op_count);
+  CHECK(plan_or->summary.group_final_admitted == base_plan_or->summary.group_final_admitted);
+  CHECK(plan_or->plan_hash != base_plan_or->plan_hash);
 }
 
 } // namespace

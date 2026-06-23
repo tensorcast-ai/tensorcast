@@ -472,17 +472,25 @@ def _serving_target_source_reuse(
             status_code="FAILED_PRECONDITION",
             retryable=False,
         )
-    reuse_decision = target.members[0].resolved_layout.source_reuse
-    if any(
-        member.resolved_layout.source_reuse != reuse_decision
-        for member in target.members[1:]
-    ):
+    reuse_decisions = [member.resolved_layout.source_reuse for member in target.members]
+    blocked_decision = next(
+        (
+            decision
+            for decision in reuse_decisions
+            if decision.mode in {"runtime_transform_required", "unsupported"}
+        ),
+        None,
+    )
+    if blocked_decision is not None:
+        return blocked_decision
+    reuse_mode = reuse_decisions[0].mode
+    if any(decision.mode != reuse_mode for decision in reuse_decisions[1:]):
         raise ArtifactError(
             "Realization target set members must use one source reuse decision",
             status_code="FAILED_PRECONDITION",
             retryable=False,
         )
-    return reuse_decision
+    return reuse_decisions[0]
 
 
 @dataclass(frozen=True, slots=True)

@@ -632,6 +632,88 @@ def _build_attempt_ref(
     )
 
 
+def test_restore_owned_binding_tensors_uses_preopened_cuda_memory_ptr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = store_daemon_pb2.AcquireBindingValueResponse()
+    response.mem_handle.cuda_ipc_handle = b"fake-cuda-ipc-handle"
+    response.mem_handle.lease_token = b"lease-token"
+    payload = response.payloads.add()
+    payload.name = "alpha"
+    payload.shape.append(1)
+    payload.stride.append(1)
+    payload.buffer_offset = 0
+    payload.byte_length = 4
+    payload.storage_offset = 0
+    payload.dtype = "torch.float32"
+
+    runtime = types.SimpleNamespace(
+        capabilities=StoreCapabilities(
+            mem_pool_bytes=0,
+            tx_slice_bytes=0,
+            artifact_chunk_bytes=0,
+            server_config=ServerConfig(
+                tx_slice_bytes=0,
+                mem_pool_size=0,
+                artifact_chunk_bytes=0,
+                local_handle_socket_path="/tmp/tc-local-handle.sock",
+                cpu_shared_memory_enabled=True,
+            ),
+        )
+    )
+    restore_calls: list[dict[str, Any]] = []
+
+    def fail_get_cuda_memory_ptr(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("get_cuda_memory_ptr should not be called")
+
+    def fake_restore_tensors(
+        meta_state_dict: dict[str, Any],
+        memory_base_address: dict[int, int],
+        tensor_device_offsets: dict[int, dict[str, int]],
+        from_ipc_shm: bool,
+        *,
+        lease_token: bytes | None = None,
+        local_handle_socket_path: str | None = None,
+    ) -> dict[str, torch.Tensor]:
+        restore_calls.append(
+            {
+                "meta_state_dict": meta_state_dict,
+                "memory_base_address": memory_base_address,
+                "tensor_device_offsets": tensor_device_offsets,
+                "from_ipc_shm": from_ipc_shm,
+                "lease_token": lease_token,
+                "local_handle_socket_path": local_handle_socket_path,
+            }
+        )
+        return {"alpha": torch.empty((1,), dtype=torch.float32)}
+
+    monkeypatch.setattr(
+        owned_binding_slot_mod,
+        "get_cuda_memory_ptr",
+        fail_get_cuda_memory_ptr,
+    )
+    monkeypatch.setattr(
+        owned_binding_slot_mod,
+        "restore_tensors",
+        fake_restore_tensors,
+    )
+
+    tensors = owned_binding_slot_mod.restore_owned_binding_tensors(
+        response=response,
+        runtime=runtime,
+        device_id=3,
+        preopened_cuda_memory_ptr=0xABCDEF,
+    )
+
+    assert sorted(tensors) == ["alpha"]
+    assert len(restore_calls) == 1
+    assert restore_calls[0]["memory_base_address"] == {3: 0xABCDEF}
+    assert restore_calls[0]["tensor_device_offsets"] == {3: {"alpha": 0}}
+    assert restore_calls[0]["from_ipc_shm"] is True
+    assert restore_calls[0]["lease_token"] == b"lease-token"
+    assert restore_calls[0]["local_handle_socket_path"] == "/tmp/tc-local-handle.sock"
+
+
 def test_binding_swap_preserves_data_ptr(monkeypatch: pytest.MonkeyPatch) -> None:
     store, _runtime, _client = _setup_store(monkeypatch)
     artifact1 = store.artifact(artifact_id="artifact-1")

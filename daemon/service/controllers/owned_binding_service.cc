@@ -78,6 +78,7 @@ using materialization_index_source::load_descriptor_metadata;
 using materialization_layout::CanonicalIndexTable;
 using materialization_layout::parse_canonical_index;
 using materialization_layout::parse_canonical_index_shared;
+using materialization_layout::parse_canonical_index_shared_with_identity;
 using materialization_layout::resolve_target_offsets;
 using materialization_payload::build_descriptors_from_index;
 using materialization_policy::apply_group_realization_begin_context_to_transport_context;
@@ -112,6 +113,7 @@ using materialization_target_plan::build_binding_realization_materialization_pla
 using materialization_target_plan::build_mapped_target_materialization_plan;
 using materialization_target_plan::build_resolved_mapped_materialization_plan;
 using materialization_target_plan::build_target_materialization_plan;
+using materialization_target_plan::CanonicalIndexTableFuture;
 using materialization_target_plan::MappedTargetMaterializationPlan;
 using materialization_target_plan::TargetMaterializationPlan;
 using store::loading::MaterializationSource;
@@ -123,6 +125,12 @@ struct OwnedBindingDeviceMemorySnapshot {
   size_t free_bytes{0};
   size_t total_bytes{0};
   std::string error;
+};
+
+struct AsyncDescriptorBuildResult {
+  absl::StatusOr<materialization_payload::DescriptorBuildResult> result;
+  std::chrono::steady_clock::time_point start;
+  std::chrono::steady_clock::time_point done;
 };
 
 OwnedBindingDeviceMemorySnapshot capture_owned_binding_device_memory(int device_id) {
@@ -145,19 +153,14 @@ void log_owned_binding_device_memory(
     const OwnedBindingDeviceMemorySnapshot* baseline = nullptr) {
   std::string delta = "null";
   if (baseline != nullptr && baseline->ok && snapshot.ok && baseline->device_id == snapshot.device_id) {
-    delta = absl::StrCat(
-        static_cast<long long>(snapshot.free_bytes) - static_cast<long long>(baseline->free_bytes));
+    delta = absl::StrCat(static_cast<long long>(snapshot.free_bytes) - static_cast<long long>(baseline->free_bytes));
   }
   LOG(INFO) << "tc_profile create_owned_binding_memory"
-            << " stage=" << stage
-            << " binding_id=" << binding_id
-            << " artifact_id=" << artifact_id
-            << " target_device=" << snapshot.device_id
-            << " ok=" << (snapshot.ok ? 1 : 0)
+            << " stage=" << stage << " binding_id=" << binding_id << " artifact_id=" << artifact_id
+            << " target_device=" << snapshot.device_id << " ok=" << (snapshot.ok ? 1 : 0)
             << " free_bytes=" << (snapshot.ok ? static_cast<long long>(snapshot.free_bytes) : -1)
             << " total_bytes=" << (snapshot.ok ? static_cast<long long>(snapshot.total_bytes) : -1)
-            << " free_delta_from_before_allocate_bytes=" << delta
-            << " error=" << (snapshot.ok ? "ok" : snapshot.error);
+            << " free_delta_from_before_allocate_bytes=" << delta << " error=" << (snapshot.ok ? "ok" : snapshot.error);
 }
 
 constexpr size_t kBindingRealizationPlanCacheMaxEntries = 8;
@@ -255,6 +258,13 @@ std::string serialize_proto_for_cache_key(const google::protobuf::MessageLite& p
   std::string out;
   proto.SerializeToString(&out);
   return out;
+}
+
+std::string public_disk_source_canonical_index_parse_identity_key(const v2::PublicDiskSourceHandle& source) {
+  if (source.artifact_id().empty()) {
+    return std::string();
+  }
+  return absl::StrCat("public-disk-source:", source.artifact_id(), ":canonical-index");
 }
 
 std::string compute_target_layout_geometry_hash(const v2::TargetLayout& layout) {
@@ -2554,18 +2564,19 @@ void maybe_prepare_source_window_collective_routed_program_cache(
       .strategy_config = strategy_config,
       .enable_source_window_plan_cache = strategy_config.enable_source_window_plan_cache,
   };
-  auto executor = d.async_runtime.blocking_executor();
+  auto executor = d.async_runtime.cpu_executor();
   executor->add([requests = std::move(ready_requests), options, collection_key, total_start]() mutable {
     const auto prepare_start = std::chrono::steady_clock::now();
     auto result =
         store::replica::prepare_source_window_collective_routed_program_cache(absl::MakeConstSpan(requests), options);
     const auto prepare_done = std::chrono::steady_clock::now();
     LOG(INFO) << "source_window_collective_routed_program_prepare complete"
-              << " collection_key=" << collection_key << " prepared=" << (result.prepared ? 1 : 0)
-              << " status_ok=" << (result.status.ok() ? 1 : 0) << " skip_reason=" << result.skip_reason
-              << " plan_hash=" << result.plan_hash << " cache_hit=" << (result.cache_hit ? 1 : 0)
-              << " runtime_chunks=" << result.runtime_chunk_count << " compiled_chunks=" << result.compiled_chunk_count
-              << " program_build=" << result.program_build_sec << "s"
+              << " collection_key=" << collection_key << " executor=cpu"
+              << " prepared=" << (result.prepared ? 1 : 0) << " status_ok=" << (result.status.ok() ? 1 : 0)
+              << " skip_reason=" << result.skip_reason << " plan_hash=" << result.plan_hash
+              << " cache_hit=" << (result.cache_hit ? 1 : 0) << " runtime_chunks=" << result.runtime_chunk_count
+              << " compiled_chunks=" << result.compiled_chunk_count << " program_build=" << result.program_build_sec
+              << "s"
               << " program_build_threads=" << result.program_build_threads
               << " queue_to_start_sec=" << std::chrono::duration<double>(prepare_start - total_start).count()
               << " prepare_sec=" << std::chrono::duration<double>(prepare_done - prepare_start).count()
@@ -2682,6 +2693,26 @@ grpc::Status prepare_source_bound_plan(
   if (request.mapped && request.realization_plan == nullptr &&
       (request.copy_plan == nullptr || request.dst_tensors == nullptr)) {
     return {StatusCode::INVALID_ARGUMENT, "mapped source-bound materialization request is incomplete"};
+  }
+
+  CanonicalIndexTableFuture public_canonical_index_table_future;
+  bool public_canonical_index_preparse_started = false;
+  if (request.realization_plan != nullptr && request.public_disk_source != nullptr &&
+      !request.public_disk_source->canonical_index_bytes().empty()) {
+    std::string canonical_index_json = request.public_disk_source->canonical_index_bytes();
+    const std::string identity_key = public_disk_source_canonical_index_parse_identity_key(*request.public_disk_source);
+    public_canonical_index_preparse_started = true;
+    public_canonical_index_table_future =
+        std::async(
+            std::launch::async,
+            [canonical_index_json = std::move(canonical_index_json),
+             identity_key]() -> absl::StatusOr<std::shared_ptr<const CanonicalIndexTable>> {
+              if (!identity_key.empty()) {
+                return parse_canonical_index_shared_with_identity(canonical_index_json, identity_key);
+              }
+              return parse_canonical_index_shared(canonical_index_json);
+            })
+            .share();
   }
 
   out = PreparedSourceBoundPlan{};
@@ -2923,6 +2954,7 @@ grpc::Status prepare_source_bound_plan(
             ? std::optional<std::string>(absl::StrCat(
                   "artifact:", out.resolved_artifact_id, ":canonical_index:", *out.disk_metadata->index_multihash))
             : std::nullopt,
+        .preparsed_canonical_index_table_future = public_canonical_index_table_future,
     };
     const auto mapped_plan_cache_key_start = std::chrono::steady_clock::now();
     const std::string cache_key = binding_realization_plan_cache_key(
@@ -2967,8 +2999,7 @@ grpc::Status prepare_source_bound_plan(
       source_window_realization_plan_hash = cached_mapped_plan->source_window_realization_plan_hash;
       source_window_target_layout_template_hash = cached_mapped_plan->source_window_target_layout_template_hash;
       source_window_target_index_hash = cached_mapped_plan->source_window_target_index_hash;
-      mapped_plan_cache_restore_sec =
-          elapsed_sec(mapped_plan_cache_restore_start, std::chrono::steady_clock::now());
+      mapped_plan_cache_restore_sec = elapsed_sec(mapped_plan_cache_restore_start, std::chrono::steady_clock::now());
     }
     if (!plan_cache_hit && plan_cache_builder) {
       const auto mapped_plan_build_start = std::chrono::steady_clock::now();
@@ -3044,12 +3075,11 @@ grpc::Status prepare_source_bound_plan(
           out.request_context.execution_topology);
       source_window_prepared_member_key_sec =
           elapsed_sec(source_window_prepared_member_key_start, std::chrono::steady_clock::now());
-      source_window_prepared_key_sec =
-          elapsed_sec(source_window_prepared_key_start, std::chrono::steady_clock::now());
+      source_window_prepared_key_sec = elapsed_sec(source_window_prepared_key_start, std::chrono::steady_clock::now());
     }
     if (!plan_cache_hit && plan_cache_builder) {
-      auto mapped_plan_cache_entry = std::make_shared<const CachedMappedTargetMaterializationPlan>(
-          CachedMappedTargetMaterializationPlan{
+      auto mapped_plan_cache_entry =
+          std::make_shared<const CachedMappedTargetMaterializationPlan>(CachedMappedTargetMaterializationPlan{
               .plan = mapped_plan,
               .source_window_realization_plan_hash = source_window_realization_plan_hash,
               .source_window_target_layout_template_hash = source_window_target_layout_template_hash,
@@ -3149,6 +3179,7 @@ grpc::Status prepare_source_bound_plan(
             << " public_disk_source=" << (request.public_disk_source != nullptr) << " metadata_fast_public="
             << (request.public_disk_source != nullptr && !request.public_disk_source->canonical_index_bytes().empty() &&
                 resolution.local_import.has_value())
+            << " public_canonical_index_preparse_started=" << (public_canonical_index_preparse_started ? 1 : 0)
             << " mapped_plan_cache_hit=" << (out.mapped_plan_cache_hit ? 1 : 0)
             << " mapped_plan_cache_waited=" << (out.mapped_plan_cache_waited ? 1 : 0)
             << " mapped_plan_cache_key_sec=" << mapped_plan_cache_key_sec
@@ -3482,8 +3513,8 @@ grpc::Status prepare_source_bound_execution(
 
 } // namespace
 
-OwnedBindingService::SourceBoundExecutionContext
-OwnedBindingService::source_bound_execution_context_from_server_context(const grpc::ServerContext& server_context) {
+OwnedBindingService::SourceBoundExecutionContext OwnedBindingService::
+    source_bound_execution_context_from_server_context(const grpc::ServerContext& server_context) {
   return make_source_bound_execution_context(server_context);
 }
 
@@ -3886,6 +3917,7 @@ grpc::Status OwnedBindingService::create_owned_binding_impl(
   double materialize_sec = 0.0;
   double preflight_sec = 0.0;
   double descriptors_sec = 0.0;
+  double descriptors_wait_sec = 0.0;
   double registry_insert_sec = 0.0;
   double staged_insert_sec = 0.0;
   double lease_sec = 0.0;
@@ -3928,6 +3960,44 @@ grpc::Status OwnedBindingService::create_owned_binding_impl(
   }
 
   std::vector<v2::MappedTensorSpec> mapped_dst_tensors(req.dst_tensors().begin(), req.dst_tensors().end());
+  const auto descriptors_issue_start = std::chrono::steady_clock::now();
+  auto descriptors_future = std::async(
+      std::launch::async,
+      [target_index_json = std::string(req.target_index_bytes().data(), req.target_index_bytes().size()),
+       device_uuid = std::string(req.device_uuid())]() mutable {
+        google::protobuf::RepeatedPtrField<std::string> no_tensor_filter;
+        const auto descriptors_start = std::chrono::steady_clock::now();
+        auto descriptors_or = build_descriptors_from_index(
+            std::string_view(target_index_json.data(), target_index_json.size()), no_tensor_filter, device_uuid);
+        const auto descriptors_done = std::chrono::steady_clock::now();
+        return AsyncDescriptorBuildResult{
+            .result = std::move(descriptors_or),
+            .start = descriptors_start,
+            .done = descriptors_done,
+        };
+      });
+  std::optional<materialization_payload::DescriptorBuildResult> descriptor_result;
+  std::chrono::steady_clock::time_point descriptor_build_start;
+  std::chrono::steady_clock::time_point descriptor_build_done;
+  std::chrono::steady_clock::time_point descriptors_join_done;
+  auto join_descriptors = [&]() -> grpc::Status {
+    if (descriptor_result.has_value()) {
+      return grpc::Status::OK;
+    }
+    const auto descriptors_wait_start = std::chrono::steady_clock::now();
+    AsyncDescriptorBuildResult descriptor_build = descriptors_future.get();
+    descriptors_join_done = std::chrono::steady_clock::now();
+    descriptor_build_start = descriptor_build.start;
+    descriptor_build_done = descriptor_build.done;
+    descriptors_sec = elapsed_sec(descriptor_build_start, descriptor_build_done);
+    descriptors_wait_sec = elapsed_sec(descriptors_wait_start, descriptors_join_done);
+    absl::StatusOr<materialization_payload::DescriptorBuildResult> descriptors_or = std::move(descriptor_build.result);
+    if (!descriptors_or.ok()) {
+      return to_grpc_status(descriptors_or.status());
+    }
+    descriptor_result.emplace(std::move(*descriptors_or));
+    return grpc::Status::OK;
+  };
   PreparedSourceBoundPlan prepared_plan;
   const auto prepare_plan_start = std::chrono::steady_clock::now();
   auto prepare_status = prepare_source_bound_plan(
@@ -3992,6 +4062,11 @@ grpc::Status OwnedBindingService::create_owned_binding_impl(
   if (create_staged_value && !prepared_plan.group_begin_context.has_value()) {
     return {StatusCode::FAILED_PRECONDITION, "group realization begin context is required for staged binding"};
   }
+  const bool early_attach_enabled = static_cast<bool>(execution_context.attach_ready_callback) && !create_staged_value;
+  const std::string target_layout_hash = compute_target_layout_hash(req.target_layout());
+  std::string binding_id;
+  std::shared_ptr<BindingRegistry::Record> record;
+  bool record_inserted_before_materialize = false;
   std::string group_daemon_id = d_.identity.daemon_id();
   if (group_daemon_id.empty()) {
     group_daemon_id = d_.daemon_id;
@@ -4033,6 +4108,65 @@ grpc::Status OwnedBindingService::create_owned_binding_impl(
   const auto storage_layout_done = std::chrono::steady_clock::now();
   storage_layout_sec = elapsed_sec(storage_layout_start, storage_layout_done);
 
+  if (early_attach_enabled) {
+    const grpc::Status descriptor_status = join_descriptors();
+    if (!descriptor_status.ok()) {
+      return descriptor_status;
+    }
+    absl::Status insert_status = absl::UnknownError("uninitialized");
+    const auto registry_insert_start = std::chrono::steady_clock::now();
+    for (int attempt = 0; attempt < 4; ++attempt) {
+      binding_id = mint_binding_id();
+      record = std::make_shared<BindingRegistry::Record>();
+      record->binding_id = binding_id;
+      record->binding_layout_id = req.binding_layout_id();
+      record->owner_pid = req.pid();
+      record->creator_pid = req.pid();
+      record->daemon_id = !d_.identity.daemon_id().empty() ? d_.identity.daemon_id() : d_.daemon_id;
+      record->daemon_session_id = d_.daemon_session_id;
+      record->created_at = absl::Now();
+      record->reserved_at = record->created_at;
+      record->device_id = device.ordinal;
+      record->device_uuid = req.device_uuid();
+      record->ownership = v2::BINDING_OWNERSHIP_DAEMON;
+      record->state = v2::BINDING_STATE_ALLOCATED;
+      record->mapped = mapped;
+      record->closed = false;
+      record->export_refs = 1;
+      record->handle_bytes = handle_bytes;
+      record->source_selection = req.source_selection();
+      record->source_selection.set_artifact_id(prepared_plan.resolved_artifact_id);
+      record->target_layout = req.target_layout();
+      record->target_index_json = std::string(req.target_index_bytes().data(), req.target_index_bytes().size());
+      record->target_layout_hash = target_layout_hash;
+      record->current_binding_value_id = mint_binding_value_id();
+      record->seal_generation = 1;
+      record->verification_state = v2::BINDING_VALUE_VERIFICATION_STATE_PENDING;
+      if (mapped) {
+        record->copy_plan = req.copy_plan();
+        record->dst_tensors.assign(req.dst_tensors().begin(), req.dst_tensors().end());
+      }
+      record->payloads.assign(descriptor_result->descriptors.begin(), descriptor_result->descriptors.end());
+      insert_status = d_.bindings.insert(record);
+      if (insert_status.ok()) {
+        break;
+      }
+      if (!absl::IsAlreadyExists(insert_status)) {
+        return to_grpc_status(insert_status);
+      }
+    }
+    const auto registry_insert_done = std::chrono::steady_clock::now();
+    registry_insert_sec = elapsed_sec(registry_insert_start, registry_insert_done);
+    if (!insert_status.ok()) {
+      return to_grpc_status(insert_status);
+    }
+    record->allocation = std::move(allocation);
+    record_inserted_before_materialize = true;
+    const absl::Status attach_ready_status = execution_context.attach_ready_callback(record);
+    LOG_IF(WARNING, !attach_ready_status.ok())
+        << "attach_ready_callback failed for binding_id=" << binding_id << ": " << attach_ready_status;
+  }
+
   PreparedSourceBoundExecution prepared_execution;
   const auto prepare_execution_start = std::chrono::steady_clock::now();
   auto execution_status = prepare_source_bound_execution(
@@ -4040,6 +4174,13 @@ grpc::Status OwnedBindingService::create_owned_binding_impl(
   const auto prepare_execution_done = std::chrono::steady_clock::now();
   prepare_execution_sec = elapsed_sec(prepare_execution_start, prepare_execution_done);
   if (!execution_status.ok()) {
+    if (record_inserted_before_materialize) {
+      auto retire_status = d_.bindings.retire_retained(binding_id, "create_owned_binding_prepare_execution_failed");
+      LOG_IF(WARNING, !retire_status.ok())
+          << "failed to retire early attach binding after prepare execution failure binding_id=" << binding_id << ": "
+          << retire_status;
+      d_.bindings.release_export_ref(binding_id);
+    }
     return execution_status;
   }
 
@@ -4063,6 +4204,13 @@ grpc::Status OwnedBindingService::create_owned_binding_impl(
       capture_owned_binding_device_memory(device.ordinal),
       &memory_before_allocate);
   if (!result_or.ok()) {
+    if (record_inserted_before_materialize) {
+      auto retire_status = d_.bindings.retire_retained(binding_id, "create_owned_binding_materialize_failed");
+      LOG_IF(WARNING, !retire_status.ok())
+          << "failed to retire early attach binding after materialize failure binding_id=" << binding_id << ": "
+          << retire_status;
+      d_.bindings.release_export_ref(binding_id);
+    }
     return to_grpc_status(result_or.status());
   }
   const auto preflight_start = std::chrono::steady_clock::now();
@@ -4077,85 +4225,101 @@ grpc::Status OwnedBindingService::create_owned_binding_impl(
   const auto preflight_done = std::chrono::steady_clock::now();
   preflight_sec = elapsed_sec(preflight_start, preflight_done);
   if (!preflight_or.ok()) {
+    if (record_inserted_before_materialize) {
+      auto retire_status = d_.bindings.retire_retained(binding_id, "create_owned_binding_preflight_failed");
+      LOG_IF(WARNING, !retire_status.ok())
+          << "failed to retire early attach binding after preflight failure binding_id=" << binding_id << ": "
+          << retire_status;
+      d_.bindings.release_export_ref(binding_id);
+    }
     return to_grpc_status(preflight_or.status());
   }
 
-  google::protobuf::RepeatedPtrField<std::string> no_tensor_filter;
-  const auto descriptors_start = std::chrono::steady_clock::now();
-  auto descriptors_or = build_descriptors_from_index(
-      std::string_view(req.target_index_bytes().data(), req.target_index_bytes().size()),
-      no_tensor_filter,
-      req.device_uuid());
-  const auto descriptors_done = std::chrono::steady_clock::now();
-  descriptors_sec = elapsed_sec(descriptors_start, descriptors_done);
-  if (!descriptors_or.ok()) {
-    return to_grpc_status(descriptors_or.status());
+  const grpc::Status descriptor_status = join_descriptors();
+  if (!descriptor_status.ok()) {
+    if (record_inserted_before_materialize) {
+      auto retire_status = d_.bindings.retire_retained(binding_id, "create_owned_binding_descriptor_failed");
+      LOG_IF(WARNING, !retire_status.ok())
+          << "failed to retire early attach binding after descriptor failure binding_id=" << binding_id << ": "
+          << retire_status;
+      d_.bindings.release_export_ref(binding_id);
+    }
+    return descriptor_status;
   }
+  const auto attach_descriptor_ready = allocate_done > descriptor_build_done ? allocate_done : descriptor_build_done;
 
-  const std::string target_layout_hash = compute_target_layout_hash(req.target_layout());
   std::shared_ptr<common::memory::GpuDeviceMemory> staged_allocation;
   if (create_staged_value) {
     staged_allocation = std::shared_ptr<common::memory::GpuDeviceMemory>(std::move(allocation));
   }
-  std::string binding_id;
-  std::shared_ptr<BindingRegistry::Record> record;
-  absl::Status insert_status = absl::UnknownError("uninitialized");
-  const auto registry_insert_start = std::chrono::steady_clock::now();
-  for (int attempt = 0; attempt < 4; ++attempt) {
-    binding_id = mint_binding_id();
-    record = std::make_shared<BindingRegistry::Record>();
-    record->binding_id = binding_id;
-    record->binding_layout_id = req.binding_layout_id();
-    record->owner_pid = req.pid();
-    record->creator_pid = req.pid();
-    record->daemon_id = !d_.identity.daemon_id().empty() ? d_.identity.daemon_id() : d_.daemon_id;
-    record->daemon_session_id = d_.daemon_session_id;
-    record->created_at = absl::Now();
-    record->reserved_at = record->created_at;
-    record->device_id = device.ordinal;
-    record->device_uuid = req.device_uuid();
-    record->ownership = v2::BINDING_OWNERSHIP_DAEMON;
-    record->mapped = mapped;
-    record->closed = false;
-    record->export_refs = 1;
-    if (!create_staged_value) {
-      record->allocation = std::move(allocation);
+  if (record_inserted_before_materialize) {
+    absl::MutexLock lock(&record->mu);
+    record->current_artifact_id = prepared_plan.resolved_artifact_id;
+    record->current_artifact_canonical_index_json = prepared_plan.canonical_index_json;
+    record->current_selection = prepared_plan.current_selection;
+    record->binding_current_value_publication_token.clear();
+    record->state = v2::BINDING_STATE_READY_ARTIFACT;
+    record->active_update_epoch.clear();
+    record->ready_at = absl::Now();
+  } else {
+    absl::Status insert_status = absl::UnknownError("uninitialized");
+    const auto registry_insert_start = std::chrono::steady_clock::now();
+    for (int attempt = 0; attempt < 4; ++attempt) {
+      binding_id = mint_binding_id();
+      record = std::make_shared<BindingRegistry::Record>();
+      record->binding_id = binding_id;
+      record->binding_layout_id = req.binding_layout_id();
+      record->owner_pid = req.pid();
+      record->creator_pid = req.pid();
+      record->daemon_id = !d_.identity.daemon_id().empty() ? d_.identity.daemon_id() : d_.daemon_id;
+      record->daemon_session_id = d_.daemon_session_id;
+      record->created_at = absl::Now();
+      record->reserved_at = record->created_at;
+      record->device_id = device.ordinal;
+      record->device_uuid = req.device_uuid();
+      record->ownership = v2::BINDING_OWNERSHIP_DAEMON;
+      record->mapped = mapped;
+      record->closed = false;
+      record->export_refs = 1;
+      if (!create_staged_value) {
+        record->allocation = std::move(allocation);
+      }
+      record->handle_bytes = handle_bytes;
+      record->source_selection = req.source_selection();
+      record->source_selection.set_artifact_id(prepared_plan.resolved_artifact_id);
+      record->target_layout = req.target_layout();
+      record->target_index_json = std::string(req.target_index_bytes().data(), req.target_index_bytes().size());
+      record->target_layout_hash = target_layout_hash;
+      if (create_staged_value) {
+        record->state = v2::BINDING_STATE_READY_LOCAL;
+        record->active_update_epoch.clear();
+        record->ready_at = absl::Now();
+        clear_verification_metadata(record.get());
+      } else {
+        mark_ready_artifact(
+            record.get(),
+            prepared_plan.resolved_artifact_id,
+            prepared_plan.current_selection,
+            prepared_plan.canonical_index_json);
+      }
+      if (mapped) {
+        record->copy_plan = req.copy_plan();
+        record->dst_tensors.assign(req.dst_tensors().begin(), req.dst_tensors().end());
+      }
+      record->payloads.assign(descriptor_result->descriptors.begin(), descriptor_result->descriptors.end());
+      insert_status = d_.bindings.insert(record);
+      if (insert_status.ok()) {
+        break;
+      }
+      if (!absl::IsAlreadyExists(insert_status)) {
+        return to_grpc_status(insert_status);
+      }
     }
-    record->handle_bytes = handle_bytes;
-    record->source_selection = req.source_selection();
-    record->source_selection.set_artifact_id(prepared_plan.resolved_artifact_id);
-    record->target_layout = req.target_layout();
-    record->target_index_json = std::string(req.target_index_bytes().data(), req.target_index_bytes().size());
-    record->target_layout_hash = target_layout_hash;
-    if (create_staged_value) {
-      record->state = v2::BINDING_STATE_READY_LOCAL;
-      record->active_update_epoch.clear();
-      record->ready_at = absl::Now();
-      clear_verification_metadata(record.get());
-    } else {
-      mark_ready_artifact(
-          record.get(),
-          prepared_plan.resolved_artifact_id,
-          prepared_plan.current_selection,
-          prepared_plan.canonical_index_json);
-    }
-    if (mapped) {
-      record->copy_plan = req.copy_plan();
-      record->dst_tensors.assign(req.dst_tensors().begin(), req.dst_tensors().end());
-    }
-    record->payloads.assign(descriptors_or->descriptors.begin(), descriptors_or->descriptors.end());
-    insert_status = d_.bindings.insert(record);
-    if (insert_status.ok()) {
-      break;
-    }
-    if (!absl::IsAlreadyExists(insert_status)) {
+    const auto registry_insert_done = std::chrono::steady_clock::now();
+    registry_insert_sec = elapsed_sec(registry_insert_start, registry_insert_done);
+    if (!insert_status.ok()) {
       return to_grpc_status(insert_status);
     }
-  }
-  const auto registry_insert_done = std::chrono::steady_clock::now();
-  registry_insert_sec = elapsed_sec(registry_insert_start, registry_insert_done);
-  if (!insert_status.ok()) {
-    return to_grpc_status(insert_status);
   }
 
   std::optional<BindingRegistry::StagedBindingValue> created_staged;
@@ -4181,7 +4345,7 @@ grpc::Status OwnedBindingService::create_owned_binding_impl(
     staged.target_layout = req.target_layout();
     staged.target_index_json = std::string(req.target_index_bytes().data(), req.target_index_bytes().size());
     staged.target_layout_hash = target_layout_hash;
-    staged.payloads.assign(descriptors_or->descriptors.begin(), descriptors_or->descriptors.end());
+    staged.payloads.assign(descriptor_result->descriptors.begin(), descriptor_result->descriptors.end());
     staged.logical_total_size = prepared_plan.logical_total_size;
     staged.expected_previous_seal_generation = record->seal_generation;
     staged.verification_state = v2::BINDING_VALUE_VERIFICATION_STATE_LOCAL_ONLY;
@@ -4206,9 +4370,16 @@ grpc::Status OwnedBindingService::create_owned_binding_impl(
   const auto lease_done = std::chrono::steady_clock::now();
   lease_sec = elapsed_sec(lease_start, lease_done);
   if (!token_or.ok()) {
-    const bool closed = d_.bindings.close_control(binding_id);
-    if (!closed) {
-      LOG(WARNING) << "owner binding cleanup could not find binding_id=" << binding_id;
+    if (record_inserted_before_materialize) {
+      auto retire_status = d_.bindings.retire_retained(binding_id, "create_owned_binding_lease_failed");
+      LOG_IF(WARNING, !retire_status.ok())
+          << "failed to retire early attach binding after lease failure binding_id=" << binding_id << ": "
+          << retire_status;
+    } else {
+      const bool closed = d_.bindings.close_control(binding_id);
+      if (!closed) {
+        LOG(WARNING) << "owner binding cleanup could not find binding_id=" << binding_id;
+      }
     }
     d_.bindings.release_export_ref(binding_id);
     return to_grpc_status(token_or.status());
@@ -4236,9 +4407,17 @@ grpc::Status OwnedBindingService::create_owned_binding_impl(
       LOG(WARNING) << "failed to release owner binding bootstrap lease after publication token failure: "
                    << release_status;
     }
-    const bool closed = d_.bindings.close_control(binding_id);
-    if (!closed) {
-      LOG(WARNING) << "owner binding cleanup after publication token failure could not find binding_id=" << binding_id;
+    if (record_inserted_before_materialize) {
+      auto retire_status = d_.bindings.retire_retained(binding_id, "create_owned_binding_publication_token_failed");
+      LOG_IF(WARNING, !retire_status.ok())
+          << "failed to retire early attach binding after publication token failure binding_id=" << binding_id << ": "
+          << retire_status;
+    } else {
+      const bool closed = d_.bindings.close_control(binding_id);
+      if (!closed) {
+        LOG(WARNING) << "owner binding cleanup after publication token failure could not find binding_id="
+                     << binding_id;
+      }
     }
     return to_grpc_status(binding_current_value_publication_token_or.status());
   }
@@ -4292,8 +4471,8 @@ grpc::Status OwnedBindingService::create_owned_binding_impl(
       handle_bytes.as_string_view().data(), handle_bytes.as_string_view().size());
   resp.mutable_mem_handle()->set_lease_token(*token_or);
   resp.set_target_index_bytes(req.target_index_bytes());
-  for (auto& descriptor : descriptors_or->descriptors) {
-    *resp.add_payloads() = std::move(descriptor);
+  for (const auto& descriptor : descriptor_result->descriptors) {
+    *resp.add_payloads() = descriptor;
   }
   if (!binding_current_value_publication_token_or->empty()) {
     resp.set_binding_current_value_publication_token(*binding_current_value_publication_token_or);
@@ -4321,23 +4500,23 @@ grpc::Status OwnedBindingService::create_owned_binding_impl(
   LOG(INFO) << "tc_profile create_owned_binding timings"
             << " binding_id=" << binding_id << " artifact_id=" << prepared_plan.resolved_artifact_id
             << " target_device=" << device.ordinal << " mapped=" << mapped
-            << " realization_plan=" << use_realization_plan
-            << " create_staged_value=" << (create_staged_value ? 1 : 0)
-            << " prepare_plan_sec=" << prepare_plan_sec
-            << " controller_plan_sec=" << controller_plan_sec
-            << " allocate_sec=" << allocate_sec
-            << " storage_layout_sec=" << storage_layout_sec
-            << " prepare_execution_sec=" << prepare_execution_sec
-            << " materialize_sec=" << materialize_sec
-            << " preflight_sec=" << preflight_sec
-            << " descriptors_sec=" << descriptors_sec
-            << " registry_insert_sec=" << registry_insert_sec
-            << " staged_insert_sec=" << staged_insert_sec
-            << " lease_sec=" << lease_sec
-            << " publication_token_sec=" << publication_token_sec
-            << " group_report_sec=" << group_report_sec
-            << " response_sec=" << response_sec
-            << " post_materialize_sec=" << elapsed_sec(materialize_done, done)
+            << " realization_plan=" << use_realization_plan << " create_staged_value=" << (create_staged_value ? 1 : 0)
+            << " handle_export_ready_offset_sec=" << elapsed_sec(profile_start, allocate_done)
+            << " descriptors_issue_offset_sec=" << elapsed_sec(profile_start, descriptors_issue_start)
+            << " descriptors_done_offset_sec=" << elapsed_sec(profile_start, descriptor_build_done)
+            << " descriptors_join_offset_sec=" << elapsed_sec(profile_start, descriptors_join_done)
+            << " attach_descriptor_ready_offset_sec=" << elapsed_sec(profile_start, attach_descriptor_ready)
+            << " materialize_start_offset_sec=" << elapsed_sec(profile_start, materialize_start)
+            << " materialize_done_offset_sec=" << elapsed_sec(profile_start, materialize_done)
+            << " response_ready_offset_sec=" << elapsed_sec(profile_start, response_done)
+            << " prepare_plan_sec=" << prepare_plan_sec << " controller_plan_sec=" << controller_plan_sec
+            << " allocate_sec=" << allocate_sec << " storage_layout_sec=" << storage_layout_sec
+            << " prepare_execution_sec=" << prepare_execution_sec << " materialize_sec=" << materialize_sec
+            << " preflight_sec=" << preflight_sec << " descriptors_sec=" << descriptors_sec
+            << " descriptors_wait_sec=" << descriptors_wait_sec << " registry_insert_sec=" << registry_insert_sec
+            << " staged_insert_sec=" << staged_insert_sec << " lease_sec=" << lease_sec
+            << " publication_token_sec=" << publication_token_sec << " group_report_sec=" << group_report_sec
+            << " response_sec=" << response_sec << " post_materialize_sec=" << elapsed_sec(materialize_done, done)
             << " total_sec=" << elapsed_sec(profile_start, done);
   return Status::OK;
 }
@@ -5507,8 +5686,7 @@ grpc::Status OwnedBindingService::refill_owned_binding(
   const auto device = d_.devices.From(v2::DeviceType::DEVICE_TYPE_GPU, device_uuid, std::nullopt);
   const bool use_realization_plan = req.has_realization_plan() && req.realization_plan().entries_size() > 0;
   const bool use_mapped_materialization = mapped || use_realization_plan;
-  const SourceBoundExecutionContext execution_context =
-      make_source_bound_execution_context(rctx.server_context());
+  const SourceBoundExecutionContext execution_context = make_source_bound_execution_context(rctx.server_context());
   PreparedSourceBoundPlan prepared_plan;
   const auto prepare_plan_start = std::chrono::steady_clock::now();
   auto prepare_status = prepare_source_bound_plan(

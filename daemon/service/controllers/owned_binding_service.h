@@ -15,6 +15,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
 #include "core/common/async_runtime.h"
 #include "core/common/capability_token.h"
 #include "core/store/components/global_store_client.h"
@@ -43,6 +44,7 @@ class OwnedBindingService {
   struct SourceBoundExecutionContext {
     bool loopback_peer{false};
     std::chrono::milliseconds request_budget{std::chrono::milliseconds(0)};
+    std::function<absl::Status(const std::shared_ptr<BindingRegistry::Record>& record)> attach_ready_callback;
   };
 
   static SourceBoundExecutionContext source_bound_execution_context_from_server_context(
