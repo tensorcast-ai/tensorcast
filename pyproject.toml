@@ -67,7 +67,7 @@ dev = [
     "pytest-asyncio>=0.26.0",
     "pytest-xdist>=3.8.0",
     "rich-click>=1.8.9",
-    "ruff==0.15.14",
+    "ruff==0.15.15",
     "toml>=0.10.2",
     "types-protobuf==5.28.3.20241203",
     "safetensors==0.7.0"
