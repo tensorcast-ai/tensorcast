@@ -843,6 +843,8 @@ sc_header_only_library(
     hdrs = ["state/sweep_tasks.h"],
     deps = [
         ":background_scheduler_hdr",
+        ":binding_registry_lib",
+        ":derived_view_export_manager_lib",
         ":ipc_region_registry_lib",
         ":lip_manager_lib",
         ":ref_tracker_hdr",

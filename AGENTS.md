@@ -321,7 +321,10 @@ find ./external -name "header.h"            # Search for header
 cat third_party/<lib>/BUILD                 # Check target definitions
 ```
 
-**Note**: Run `bazel build //...` first if `./external/` is empty.
+**Note**: Run `bazel build //core/... //daemon/...` first if `./external/` is
+empty. The `third_party/*/BUILD` files are wrappers injected into fetched
+archives; a workspace-wide `//...` also analyzes those wrapper directories as
+local packages, where the archive payload is intentionally absent.
 
 ## Coding Standards
 
