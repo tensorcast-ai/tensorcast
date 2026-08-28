@@ -1454,6 +1454,10 @@ message CreateOwnedBindingRequest {
   string binding_layout_id = 12;
   ServingArtifactRuntimePolicy serving_artifact_policy = 13;
   GroupRealizationOptions group_realization = 14;
+  SourceExecutionTopology execution_topology = 15;
+  CollectivePolicy collective_policy = 16;
+  BindingRealizationPlan realization_plan = 17;
+  PublicDiskSourceHandle public_disk_source = 18;
 }
 
 message CreateOwnedBindingResponse {
@@ -1485,6 +1489,9 @@ message PrefetchServingBindingRequest {
   tensorcast.operation.v1.PrefetchRetentionPolicy retention_policy = 5;
   optional string operation_id = 6;
   GroupRealizationOptions group_realization = 8;
+  SourceExecutionTopology execution_topology = 9;
+  CollectivePolicy collective_policy = 10;
+  PublicDiskSourceHandle public_disk_source = 11;
 }
 
 message PrefetchServingBindingResponse {

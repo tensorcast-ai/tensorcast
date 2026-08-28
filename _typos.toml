@@ -4,6 +4,9 @@ extend-ignore-re = [
     "(?i)mis-[a-zA-Z0-9_-]*",
 ]
 
+[default.extend-identifiers]
+cudaMemcpy3DParms = "cudaMemcpy3DParms"
+
 [files]
 extend-exclude = [
     "daemon/util/grpc_daemon_transport_test.cc",

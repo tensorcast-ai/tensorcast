@@ -3,9 +3,11 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -13,9 +15,11 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
 #include "core/common/async_runtime.h"
 #include "core/common/capability_token.h"
 #include "core/store/components/global_store_client.h"
+#include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/runtime/ingestion/materialization_strategy_types.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/controllers/target_materialization_service.h"
@@ -37,6 +41,15 @@ namespace tensorcast::daemon {
 
 class OwnedBindingService {
  public:
+  struct SourceBoundExecutionContext {
+    bool loopback_peer{false};
+    std::chrono::milliseconds request_budget{std::chrono::milliseconds(0)};
+    std::function<absl::Status(const std::shared_ptr<BindingRegistry::Record>& record)> attach_ready_callback;
+  };
+
+  static SourceBoundExecutionContext source_bound_execution_context_from_server_context(
+      const grpc::ServerContext& server_context);
+
   struct Dep {
     store::StoreEngine& engine;
     DeviceResolver& devices;
@@ -67,6 +80,11 @@ class OwnedBindingService {
 
   grpc::Status create_owned_binding(
       RpcContext& rctx,
+      const v2::CreateOwnedBindingRequest& req,
+      v2::CreateOwnedBindingResponse& resp);
+
+  grpc::Status create_owned_binding_with_context(
+      const SourceBoundExecutionContext& execution_context,
       const v2::CreateOwnedBindingRequest& req,
       v2::CreateOwnedBindingResponse& resp);
 
@@ -133,6 +151,12 @@ class OwnedBindingService {
 
   void run_async_promotion_job(std::string job_id, v2::PromoteBindingCurrentValueRequest req);
 
+  grpc::Status create_owned_binding_impl(
+      const SourceBoundExecutionContext& execution_context,
+      RpcContext* rctx,
+      const v2::CreateOwnedBindingRequest& req,
+      v2::CreateOwnedBindingResponse& resp);
+
   void cancel_promotion_jobs_for_value(
       std::string_view binding_id,
       std::string_view binding_value_id,
@@ -164,5 +188,40 @@ store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary summarize_s
     const store::loading::ExecutionTopologyContext& execution_topology,
     v2::CollectivePolicy collective_policy,
     bool disk_source_available);
+
+std::string mapped_execution_template_cache_key_for_testing(
+    std::string_view plan_key,
+    const std::optional<store::loading::DiskMetadata>& disk_metadata,
+    v2::CollectivePolicy collective_policy,
+    const store::StoreEngineOptions::MaterializationStrategyConfig& strategy_config,
+    const store::loading::ExecutionTopologyContext& execution_topology,
+    bool disk_source_available,
+    bool include_runtime_group_id);
+
+bool source_window_execution_template_uses_stable_runtime_group_for_testing(
+    const store::StoreEngineOptions::MaterializationStrategyConfig& strategy_config,
+    const std::optional<store::loading::DiskMetadata>& disk_metadata,
+    v2::CollectivePolicy collective_policy,
+    const store::loading::ExecutionTopologyContext& execution_topology,
+    bool disk_source_available);
+
+std::string source_window_prepared_realization_group_key_for_testing(
+    std::string_view resolved_artifact_id,
+    const tensorcast::common::v1::ArtifactSelection& selection,
+    const v2::TargetLayout& target_layout,
+    std::string_view target_index_json,
+    std::string_view canonical_index_json,
+    const std::optional<store::loading::DiskMetadata>& disk_metadata,
+    v2::TransformPlacement placement,
+    v2::CollectivePolicy collective_policy,
+    const store::StoreEngineOptions::MaterializationStrategyConfig& strategy_config,
+    const store::loading::ExecutionTopologyContext& execution_topology,
+    bool disk_source_available);
+
+std::string source_window_prepared_realization_member_key_for_testing(
+    std::string_view group_key,
+    std::string_view realization_plan_hash,
+    const v2::TargetLayout& target_layout,
+    const store::loading::ExecutionTopologyContext& execution_topology);
 
 } // namespace tensorcast::daemon

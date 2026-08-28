@@ -59,6 +59,19 @@ struct MaterializeIntoTargetResult {
   uint64_t collective_peak_temporary_bytes{0};
   uint64_t collective_batch_count{0};
   uint64_t collective_dedup_saving_bytes{0};
+  uint64_t source_window_group_disk_read_bytes{0};
+  uint64_t source_window_rank_read_bytes_max{0};
+  uint64_t source_window_local_rank_read_bytes_max{0};
+  uint64_t source_window_rank_read_saving_bytes{0};
+  uint64_t source_window_unique_payload_bytes{0};
+  uint64_t source_window_target_write_bytes{0};
+  uint64_t source_window_peer_transfer_bytes{0};
+  uint64_t source_window_peer_useful_bytes{0};
+  uint64_t source_window_peer_waste_bytes{0};
+  uint64_t source_window_scatter_op_count{0};
+  uint64_t source_window_window_count{0};
+  uint64_t source_window_read_amplification_x1000{0};
+  std::string source_window_distribution_mode;
   std::string collective_skip_reason;
   bool collective_handled{false};
   bool direct_write_supported{false};
@@ -200,6 +213,14 @@ inline absl::Status validate_retrieval_policy(
   return absl::OkStatus();
 }
 
+struct SourceWindowPreparedRealizationFacts {
+  std::string group_key;
+  std::string member_key;
+  std::string realization_plan_hash;
+  std::string target_layout_template_hash;
+  std::string target_index_hash;
+};
+
 struct MaterializeHints {
   size_t max_buffer_bytes = 256ULL << 20; // 256 MB default
   std::chrono::milliseconds pinned_timeout{0};
@@ -225,6 +246,12 @@ struct MaterializeHints {
   std::string artifact_id;
   bool prefer_pageable_cpu{false};
   std::optional<DiskMetadata> disk_metadata;
+  // Optional source-window prepared-realization identity facts propagated from
+  // the artifact/binding realization boundary into the group executor. These
+  // facts are diagnostic/cache identity inputs only; source-window admission
+  // and execution must remain governed by the real RepresentationWorkPlan,
+  // target layout, source index digest, and strategy config.
+  std::optional<SourceWindowPreparedRealizationFacts> source_window_prepared_realization;
 
   enum class Verify : std::uint8_t { NONE, CHECKSUM, FULL_DIGEST };
   Verify verify = Verify::CHECKSUM;

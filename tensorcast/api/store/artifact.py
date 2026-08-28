@@ -73,6 +73,7 @@ from tensorcast.api.store.owned_binding_layout import (
 )
 from tensorcast.api.store.owned_binding_slot import (
     OwnedBindingSlot,
+    _build_source_execution_contract,
     restore_owned_binding_tensors,
 )
 from tensorcast.api.store.realization_kernel import (
@@ -138,6 +139,7 @@ from tensorcast.types import (
     PrefetchHandoff,
     PrefetchHandoffSet,
     PrefetchRetentionPolicy,
+    PublicDiskSourceHandle,
     RealizationTarget,
     RealizationTargetSet,
     RuntimeArtifactPolicy,
@@ -470,17 +472,25 @@ def _serving_target_source_reuse(
             status_code="FAILED_PRECONDITION",
             retryable=False,
         )
-    reuse_decision = target.members[0].resolved_layout.source_reuse
-    if any(
-        member.resolved_layout.source_reuse != reuse_decision
-        for member in target.members[1:]
-    ):
+    reuse_decisions = [member.resolved_layout.source_reuse for member in target.members]
+    blocked_decision = next(
+        (
+            decision
+            for decision in reuse_decisions
+            if decision.mode in {"runtime_transform_required", "unsupported"}
+        ),
+        None,
+    )
+    if blocked_decision is not None:
+        return blocked_decision
+    reuse_mode = reuse_decisions[0].mode
+    if any(decision.mode != reuse_mode for decision in reuse_decisions[1:]):
         raise ArtifactError(
             "Realization target set members must use one source reuse decision",
             status_code="FAILED_PRECONDITION",
             retryable=False,
         )
-    return reuse_decision
+    return reuse_decisions[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -828,6 +838,20 @@ class Artifact:
         self._lock = threading.RLock()
         self._released = False
 
+    def _public_disk_source_proto_hint(
+        self,
+        *,
+        artifact_id: str,
+    ) -> store_daemon_pb2.PublicDiskSourceHandle | None:
+        subject = self._source_subject
+        if not isinstance(subject, PublicDiskSourceHandle):
+            return None
+        if str(subject.artifact_id or "") != str(artifact_id):
+            return None
+        if not bytes(subject.canonical_index_bytes or b""):
+            return None
+        return subject.to_proto()
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -949,6 +973,7 @@ class Artifact:
         runtime_context: Any | None,
         runtime_resolver: Any | None,
         profile_sink: Any | None,
+        runtime_prepared_local_ready: Any | None,
     ) -> ArtifactRealizationHandle:
         if runtime_host is None:
             raise ArtifactError(
@@ -996,8 +1021,16 @@ class Artifact:
                     context=context,
                     source_selection=source_selection,
                     materialization=resolved_spec.options,
+                    prepared_local_ready=runtime_prepared_local_ready,
                 )
             else:
+                if runtime_prepared_local_ready is not None:
+                    raise ArtifactError(
+                        "runtime_prepared_local_ready is only valid for "
+                        "mounted-source model_runtime realization",
+                        status_code="INVALID_ARGUMENT",
+                        retryable=False,
+                    )
                 source_selection = self._resolve_model_runtime_source_selection(
                     artifact_id
                 )
@@ -1068,6 +1101,7 @@ class Artifact:
         runtime_context: Any | None = None,
         runtime_resolver: Any | None = None,
         profile_sink: Any | None = None,
+        runtime_prepared_local_ready: Any | None = None,
     ) -> ArtifactRealizationHandle:
         if spec.target_kind == "tensor_dict":
             if spec.device is None:
@@ -1427,6 +1461,7 @@ class Artifact:
                 runtime_context=runtime_context,
                 runtime_resolver=runtime_resolver,
                 profile_sink=profile_sink,
+                runtime_prepared_local_ready=runtime_prepared_local_ready,
             )
         raise ArtifactError(
             f"Unsupported realization target kind: {spec.target_kind}",
@@ -1474,6 +1509,7 @@ class Artifact:
                 target=cast(RealizationTarget | RealizationTargetSet, spec.target),
                 readiness=readiness,
                 retention=cast(PrefetchRetentionPolicy | None, spec.retention),
+                options=cast("GetArtifactOptions | None", spec.options),
                 ctx=ctx,
             )
         if spec.target_kind == "target_set":
@@ -1498,6 +1534,7 @@ class Artifact:
                 target=spec.target,
                 readiness=readiness,
                 retention=cast(PrefetchRetentionPolicy | None, spec.retention),
+                options=cast("GetArtifactOptions | None", spec.options),
                 ctx=ctx,
             )
         raise ArtifactError(
@@ -2607,6 +2644,9 @@ class Artifact:
             ) as profile:
                 response = runtime.ensure_client().create_owned_binding(
                     source_selection=source_selection,
+                    public_disk_source=self._public_disk_source_proto_hint(
+                        artifact_id=str(source_selection.artifact_id),
+                    ),
                     target_layout=owner_layout.target_layout,
                     target_index_bytes=owner_layout.target_index_bytes,
                     device_uuid=device_uuid_for(device_id),
@@ -2818,6 +2858,7 @@ class Artifact:
         target: RealizationTarget | RealizationTargetSet,
         readiness: RuntimeBindingReadiness,
         retention: PrefetchRetentionPolicy | None,
+        options: GetArtifactOptions | None,
         ctx: CallContext | None,
     ) -> Operation[RuntimePrefetchResult]:
         artifact_id = self._ensure_identified()
@@ -2859,14 +2900,27 @@ class Artifact:
             )
 
         client = runtime.ensure_client()
+        execution_topology, collective_policy = _build_source_execution_contract(
+            options=options,
+            ctx=ctx,
+        )
+        timeout_s: float | None = None
+        if ctx is not None and ctx.deadline_ms is not None:
+            timeout_s = max(0.001, float(ctx.deadline_ms) / 1000.0)
         try:
             response = client.prefetch_serving_binding(
                 source_selection=selection,
+                public_disk_source=self._public_disk_source_proto_hint(
+                    artifact_id=artifact_id,
+                ),
                 target=target,
                 requested_readiness=readiness,
                 retention_policy=retention,
+                execution_topology=execution_topology,
+                collective_policy=collective_policy,
                 operation_id=operation_id,
                 group_realization=ctx.group_realization if ctx is not None else None,
+                timeout_s=timeout_s if timeout_s is not None else 600.0,
             )
         except RuntimeError as exc:
             raise ArtifactError(
@@ -2945,12 +2999,14 @@ class Artifact:
                     target=target,
                     readiness=readiness,
                     retention=retention,
+                    options=options,
                 )
                 if isinstance(target, RealizationTargetSet)
                 else ArtifactRealizationSpec.retained_binding(
                     target=target,
                     readiness=readiness,
                     retention=retention,
+                    options=options,
                 )
             )
             return self.realize_async(spec, ctx=ctx)
@@ -3000,6 +3056,7 @@ class Artifact:
                 target=target,
                 readiness=readiness,
                 retention=retention,
+                options=options,
                 ctx=ctx,
             )
         if device is None:

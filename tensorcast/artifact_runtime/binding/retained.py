@@ -15,6 +15,7 @@ from typing import Any, Callable, ContextManager, Iterator
 import torch
 
 import tensorcast as tc
+from tensorcast._c_ext import close_cuda_memory_handle, get_cuda_memory_ptr
 from tensorcast.api.store.realization_kernel import (
     RealizationReleaseContract,
     envelope_for_runtime_attachment,
@@ -66,6 +67,8 @@ class _RetainedBindingLifecycleState:
         self.lease_token = lease_token
         self.tensors: Mapping[str, torch.Tensor] | None = None
         self.state = "acquired"
+        self.preopened_cuda_memory_ptr: int | None = None
+        self.preopened_device_id: int | None = None
         self._closed = False
         self._release_timeout_s: float | None = None
         self.release_contract = release_contract_for(
@@ -76,6 +79,17 @@ class _RetainedBindingLifecycleState:
             ),
             self._release_placement_lease,
         )
+
+    def _close_preopened_cuda_memory(self) -> None:
+        ptr = self.preopened_cuda_memory_ptr
+        device_id = self.preopened_device_id
+        if ptr is None:
+            return
+        self.preopened_cuda_memory_ptr = None
+        self.preopened_device_id = None
+        if device_id is None:
+            return
+        close_cuda_memory_handle(int(device_id), int(ptr))
 
     def _release_placement_lease(self) -> None:
         if not self.lease_token:
@@ -91,6 +105,12 @@ class _RetainedBindingLifecycleState:
             return
         self._closed = True
         self.state = "closed"
+        try:
+            self._close_preopened_cuda_memory()
+        except Exception:
+            _LOGGER.exception(
+                "Failed to close preopened retained CUDA IPC mapping",
+            )
         prior_timeout_s = self._release_timeout_s
         self._release_timeout_s = timeout_s
         try:
@@ -261,15 +281,90 @@ class BorrowedRetainedBindingLease:
     def debug_status(self) -> dict[str, Any]:
         return _retained_binding_debug_status(self._state)
 
+    def preopen(
+        self,
+        *,
+        target_device: torch.device,
+        open_fn: Callable[..., int] | None = None,
+    ) -> int:
+        if self._state.state == "preopened":
+            device_index = torch.device(target_device).index
+            if device_index is None:
+                raise RuntimeError(
+                    "TensorCast retained binding preopen requires an explicit "
+                    "CUDA device index"
+                )
+            if self._state.preopened_device_id != int(device_index):
+                raise RuntimeError(
+                    "BorrowedRetainedBindingLease.preopen() device mismatch"
+                )
+            assert self._state.preopened_cuda_memory_ptr is not None
+            return int(self._state.preopened_cuda_memory_ptr)
+        if self._state.state != "acquired":
+            raise RuntimeError(
+                "BorrowedRetainedBindingLease.preopen() requires an acquired lease"
+            )
+        device_index = torch.device(target_device).index
+        if device_index is None:
+            raise RuntimeError(
+                "TensorCast retained binding preopen requires an explicit "
+                "CUDA device index"
+            )
+        if open_fn is None:
+            open_fn = get_cuda_memory_ptr
+        cuda_ipc_handle = _cuda_ipc_handle_from_response(self._state.response)
+        try:
+            ptr = int(open_fn(int(device_index), cuda_ipc_handle))
+            if ptr <= 0:
+                raise RuntimeError("preopen returned an invalid CUDA pointer")
+        except Exception:
+            try:
+                self._state.release()
+            except Exception:
+                _LOGGER.exception(
+                    "Failed to release retained binding lease after preopen failure",
+                )
+            raise
+        self._state.preopened_cuda_memory_ptr = ptr
+        self._state.preopened_device_id = int(device_index)
+        self._state.state = "preopened"
+        return ptr
+
+    def replace_authority(
+        self,
+        authority: ParsedRetainedRealizationAuthority,
+    ) -> None:
+        if authority.binding_value_ref != self._state.authority.binding_value_ref:
+            raise RuntimeError(
+                "BorrowedRetainedBindingLease.replace_authority() binding value "
+                "mismatch"
+            )
+        if authority.member != self._state.authority.member:
+            raise RuntimeError(
+                "BorrowedRetainedBindingLease.replace_authority() member mismatch"
+            )
+        if int(authority.reservation_bytes) != int(self._state.reservation_bytes):
+            raise RuntimeError(
+                "BorrowedRetainedBindingLease.replace_authority() reservation "
+                "byte mismatch"
+            )
+        self._state.authority = authority
+
     def restore(
         self,
         *,
         target_device: torch.device,
         restore_fn: Callable[..., Mapping[str, torch.Tensor]] | None = None,
     ) -> AttachedRetainedBinding:
-        if self._state.state != "acquired":
+        if self._state.state not in {"acquired", "preopened"}:
             raise RuntimeError(
-                "BorrowedRetainedBindingLease.restore() requires an acquired lease"
+                "BorrowedRetainedBindingLease.restore() requires an acquired lease "
+                "or a preopened lease"
+            )
+        if self._state.authority.readiness == "runtime_reserved":
+            raise RuntimeError(
+                "BorrowedRetainedBindingLease.restore() requires local-ready "
+                "or published-ready authority"
             )
         device_index = torch.device(target_device).index
         if device_index is None:
@@ -282,16 +377,25 @@ class BorrowedRetainedBindingLease:
 
             restore_fn = restore_owned_binding_tensors
         try:
-            tensors = dict(
-                restore_fn(
-                    response=self._state.response,
-                    runtime=self._state.runtime,
-                    device_id=int(device_index),
+            restore_kwargs: dict[str, Any] = {
+                "response": self._state.response,
+                "runtime": self._state.runtime,
+                "device_id": int(device_index),
+            }
+            if self._state.preopened_cuda_memory_ptr is not None:
+                if self._state.preopened_device_id != int(device_index):
+                    raise RuntimeError(
+                        "BorrowedRetainedBindingLease.restore() device mismatch"
+                    )
+                restore_kwargs["preopened_cuda_memory_ptr"] = int(
+                    self._state.preopened_cuda_memory_ptr
                 )
-            )
+            tensors = dict(restore_fn(**restore_kwargs))
         except Exception:
             self._state.release()
             raise
+        self._state.preopened_cuda_memory_ptr = None
+        self._state.preopened_device_id = None
         self._state.tensors = tensors
         self._state.state = "restored"
         return AttachedRetainedBinding(
@@ -306,18 +410,20 @@ class BorrowedRetainedBindingLease:
     def close(self) -> None:
         if self._state.state in {"runtime_owned", "closed"}:
             return
-        if self._state.state not in {"acquired", "restored"}:
+        if self._state.state not in {"acquired", "preopened", "restored"}:
             raise RuntimeError(
-                "BorrowedRetainedBindingLease.close() requires an acquired or "
-                "restored lease"
+                "BorrowedRetainedBindingLease.close() requires an acquired, "
+                "preopened, or restored lease"
             )
         self._state.release()
 
 
 def _validate_authority_is_attachable(
     authority: ParsedRetainedRealizationAuthority,
+    *,
+    allow_runtime_reserved: bool = False,
 ) -> None:
-    if authority.readiness == "runtime_reserved":
+    if authority.readiness == "runtime_reserved" and not allow_runtime_reserved:
         raise ValueError(
             "retained_binding_acquire.authority.readiness='runtime_reserved' "
             "is not attachable"
@@ -362,6 +468,10 @@ def _retained_binding_debug_status(
         "reservation_scope_digest": capability.scope_digest,
         "reservation_expires_at_ms": capability.expires_at_ms,
         "lease_token_present": bool(state.lease_token),
+        "preopened_cuda_memory_ptr_present": (
+            state.preopened_cuda_memory_ptr is not None
+        ),
+        "preopened_device_id": state.preopened_device_id,
         "release_policy": state.release_contract.release_policy,
         "release_strictness": state.release_contract.release_strictness,
         "released": state.release_contract.released,
@@ -401,10 +511,47 @@ def _binding_value_ref_from_response(
 def _lease_token_from_response(response: Any) -> bytes:
     mem_handle = getattr(response, "mem_handle", None)
     if mem_handle is not None:
-        lease_token = bytes(getattr(mem_handle, "lease_token", b"") or b"")
+        try:
+            lease_token = bytes(getattr(mem_handle, "lease_token", b"") or b"")
+        except AttributeError:
+            lease_token = b""
         if lease_token:
             return lease_token
     return bytes(getattr(response, "lease_token", b"") or b"")
+
+
+def _cuda_ipc_handle_from_response(response: Any) -> bytes:
+    has_field = getattr(response, "HasField", None)
+    if callable(has_field):
+        try:
+            if not has_field("mem_handle"):
+                raise RuntimeError(
+                    "TensorCast retained binding response has no mem_handle"
+                )
+        except ValueError:
+            pass
+    mem_handle = getattr(response, "mem_handle", None)
+    if mem_handle is None:
+        raise RuntimeError("TensorCast retained binding response has no mem_handle")
+    which_oneof = getattr(mem_handle, "WhichOneof", None)
+    if callable(which_oneof):
+        handle_kind = which_oneof("handle")
+        if handle_kind != "cuda_ipc_handle":
+            raise RuntimeError(
+                "TensorCast retained binding response has non-CUDA handle "
+                f"kind={handle_kind!r}"
+            )
+    try:
+        cuda_ipc_handle = bytes(getattr(mem_handle, "cuda_ipc_handle", b"") or b"")
+    except AttributeError as exc:
+        raise RuntimeError(
+            "TensorCast retained binding response has no cuda_ipc_handle field"
+        ) from exc
+    if not cuda_ipc_handle:
+        raise RuntimeError(
+            "TensorCast retained binding response has no CUDA IPC handle"
+        )
+    return cuda_ipc_handle
 
 
 def _validate_acquire_response(
@@ -624,6 +771,7 @@ def acquire_retained_binding_lease(
     runtime: Any | None = None,
     client: Any | None = None,
     timeout_s: float | None = None,
+    allow_runtime_reserved: bool = False,
 ) -> Iterator[BorrowedRetainedBindingLease]:
     """Acquire a retained binding and yield the sole lease owner.
 
@@ -638,7 +786,10 @@ def acquire_retained_binding_lease(
         runtime = get_runtime_context()
     if client is None:
         client = runtime.ensure_client()
-    _validate_authority_is_attachable(authority)
+    _validate_authority_is_attachable(
+        authority,
+        allow_runtime_reserved=allow_runtime_reserved,
+    )
     response = _acquire_retained_binding_response(
         client,
         authority,

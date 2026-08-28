@@ -68,6 +68,11 @@ class DiskArtifactService {
     absl::Time cached_at{absl::Now()};
   };
 
+  struct MountedSourceResolveCacheEntry {
+    materialization_disk_resolve::ResolveMountedSourceResult resolved;
+    absl::Time cached_at{absl::Now()};
+  };
+
   struct InflightImport {
     absl::Mutex mu;
     absl::CondVar cv;
@@ -78,6 +83,13 @@ class DiskArtifactService {
     absl::StatusOr<materialization_disk_resolve::ImportArtifactFromPathResult> imported ABSL_GUARDED_BY(mu);
   };
 
+  struct InflightMountedSourceResolve {
+    absl::Mutex mu;
+    absl::CondVar cv;
+    bool done ABSL_GUARDED_BY(mu){false};
+    absl::StatusOr<materialization_disk_resolve::ResolveMountedSourceResult> resolved ABSL_GUARDED_BY(mu);
+  };
+
   static absl::Duration import_cache_ttl_from_env();
   static size_t import_cache_max_entries_from_env();
 
@@ -85,15 +97,28 @@ class DiskArtifactService {
       const std::filesystem::path& normalized_path,
       bool verify_checksums) const;
 
+  [[nodiscard]] std::string mounted_source_resolve_cache_key_for_path(
+      const std::filesystem::path& normalized_path,
+      bool verify_checksums,
+      std::string_view policy_cache_key) const;
+
   [[nodiscard]] std::string mounted_source_policy_id() const;
 
   void prune_expired_cache_locked(absl::Time now) ABSL_EXCLUSIVE_LOCKS_REQUIRED(import_mu_);
   void enforce_cache_capacity_locked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(import_mu_);
+  void prune_expired_mounted_source_resolve_cache_locked(absl::Time now)
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mounted_source_resolve_mu_);
+  void enforce_mounted_source_resolve_cache_capacity_locked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mounted_source_resolve_mu_);
 
   absl::StatusOr<materialization_disk_resolve::ImportArtifactFromPathResult> import_artifact_from_path_cached(
       const std::filesystem::path& normalized_path,
       bool verify_checksums,
       materialization_disk_resolve::ImportProgressCallback progress_cb = {});
+
+  absl::StatusOr<materialization_disk_resolve::ResolveMountedSourceResult> resolve_mounted_source_artifact_cached(
+      const std::filesystem::path& normalized_path,
+      bool verify_checksums,
+      const materialization_disk_resolve::MountedSourceAttestationPolicy& policy);
 
   absl::Status ensure_artifact_metadata_registered(
       const materialization_disk_resolve::ImportArtifactFromPathResult& imported) const;
@@ -107,6 +132,12 @@ class DiskArtifactService {
   mutable absl::Mutex import_mu_;
   absl::flat_hash_map<std::string, ImportCacheEntry> import_cache_ ABSL_GUARDED_BY(import_mu_);
   absl::flat_hash_map<std::string, std::shared_ptr<InflightImport>> inflight_imports_ ABSL_GUARDED_BY(import_mu_);
+
+  mutable absl::Mutex mounted_source_resolve_mu_;
+  absl::flat_hash_map<std::string, MountedSourceResolveCacheEntry> mounted_source_resolve_cache_
+      ABSL_GUARDED_BY(mounted_source_resolve_mu_);
+  absl::flat_hash_map<std::string, std::shared_ptr<InflightMountedSourceResolve>> inflight_mounted_source_resolves_
+      ABSL_GUARDED_BY(mounted_source_resolve_mu_);
 };
 
 } // namespace tensorcast::daemon

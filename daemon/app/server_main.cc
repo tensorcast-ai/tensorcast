@@ -44,6 +44,7 @@
 #include "core/store/components/communication_manager.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/replica/collective_disk_loader.h"
+#include "core/store/replica/source_window_batched_scatter_kernel.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "daemon/app/daemon_app.h"
@@ -867,6 +868,10 @@ int main(int argc, char** argv) {
         ms.has_enable_local_batched_disk_load() ? ms.enable_local_batched_disk_load() : true;
     strategy.enable_owner_file_collective =
         ms.has_enable_owner_file_collective() ? ms.enable_owner_file_collective() : false;
+    strategy.enable_source_window_collective =
+        ms.has_enable_source_window_collective() ? ms.enable_source_window_collective() : true;
+    strategy.enable_source_window_plan_cache =
+        ms.has_enable_source_window_plan_cache() ? ms.enable_source_window_plan_cache() : true;
     strategy.allow_mixed_execution = ms.has_allow_mixed_execution() ? ms.allow_mixed_execution() : true;
     strategy.prefer_local_canonical_for_mapped = ms.prefer_local_canonical_for_mapped();
     strategy.allow_source_ordered_for_mapped =
@@ -932,6 +937,10 @@ int main(int argc, char** argv) {
         strategy.executor_preference =
             store::StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference::kOwnerFileCollective;
         break;
+      case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_SOURCE_WINDOW_COLLECTIVE:
+        strategy.executor_preference =
+            store::StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference::kSourceWindowCollective;
+        break;
       case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO:
       case tensorcast::config::v1::Engine::MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_UNSPECIFIED:
       default:
@@ -955,6 +964,103 @@ int main(int argc, char** argv) {
             store::StoreEngineOptions::MaterializationStrategyConfig::DiagnosticsVerbosity::kBasic;
         break;
     }
+    using EngineConfig = tensorcast::config::v1::Engine;
+    using RuntimeIoMode = store::StoreEngineOptions::MaterializationStrategyConfig::LocalMappedSafetensorsIoMode;
+    switch (ms.local_mapped_safetensors_io_mode()) {
+      case EngineConfig::MATERIALIZATION_STRATEGY_LOCAL_MAPPED_SAFETENSORS_IO_MODE_BUFFERED:
+        strategy.local_mapped_safetensors_io_mode = RuntimeIoMode::kBuffered;
+        break;
+      case EngineConfig::MATERIALIZATION_STRATEGY_LOCAL_MAPPED_SAFETENSORS_IO_MODE_DIRECT_ALIGNED_EDGES:
+        strategy.local_mapped_safetensors_io_mode = RuntimeIoMode::kDirectAlignedEdges;
+        break;
+      case EngineConfig::MATERIALIZATION_STRATEGY_LOCAL_MAPPED_SAFETENSORS_IO_MODE_AUTO_BY_FILESYSTEM:
+      case EngineConfig::MATERIALIZATION_STRATEGY_LOCAL_MAPPED_SAFETENSORS_IO_MODE_UNSPECIFIED:
+      default:
+        strategy.local_mapped_safetensors_io_mode = RuntimeIoMode::kAutoByFilesystem;
+        break;
+    }
+    using RuntimeSourceWindowSelectionMode =
+        store::StoreEngineOptions::MaterializationStrategyConfig::SourceWindowCollectiveSelectionMode;
+    switch (ms.source_window_collective_selection_mode()) {
+      case EngineConfig::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_AUTO:
+        strategy.source_window_collective_selection_mode = RuntimeSourceWindowSelectionMode::kAuto;
+        break;
+      case EngineConfig::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_STRICT:
+        strategy.source_window_collective_selection_mode = RuntimeSourceWindowSelectionMode::kStrict;
+        break;
+      case EngineConfig::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_UNSPECIFIED:
+        strategy.source_window_collective_selection_mode = RuntimeSourceWindowSelectionMode::kAuto;
+        break;
+      case EngineConfig::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_SELECTION_MODE_DRY_RUN:
+      default:
+        strategy.source_window_collective_selection_mode = RuntimeSourceWindowSelectionMode::kDryRun;
+        break;
+    }
+    if (ms.source_window_collective_window_bytes() > 0) {
+      strategy.source_window_collective_window_bytes = ms.source_window_collective_window_bytes();
+    }
+    if (ms.source_window_collective_max_gap_bytes() > 0) {
+      strategy.source_window_collective_max_gap_bytes = ms.source_window_collective_max_gap_bytes();
+    }
+    if (ms.source_window_collective_max_window_amplification_x1000() > 0) {
+      strategy.source_window_collective_max_window_amplification_x1000 =
+          ms.source_window_collective_max_window_amplification_x1000();
+    }
+    if (ms.source_window_collective_max_plan_read_amplification_x1000() > 0) {
+      strategy.source_window_collective_max_plan_read_amplification_x1000 =
+          ms.source_window_collective_max_plan_read_amplification_x1000();
+    }
+    if (ms.source_window_collective_max_scatter_ops_per_window() > 0) {
+      strategy.source_window_collective_max_scatter_ops_per_window =
+          ms.source_window_collective_max_scatter_ops_per_window();
+    }
+    if (ms.source_window_collective_peak_bytes_budget() > 0) {
+      strategy.source_window_collective_peak_bytes_budget = ms.source_window_collective_peak_bytes_budget();
+    }
+    if (ms.source_window_collective_min_rank_read_saving_bytes() > 0) {
+      strategy.source_window_collective_min_rank_read_saving_bytes =
+          ms.source_window_collective_min_rank_read_saving_bytes();
+    }
+    if (ms.source_window_collective_max_peer_to_read_ratio_x1000() > 0) {
+      strategy.source_window_collective_max_peer_to_read_ratio_x1000 =
+          ms.source_window_collective_max_peer_to_read_ratio_x1000();
+    }
+    if (ms.source_window_collective_min_routed_peer_saving_bytes() > 0) {
+      strategy.source_window_collective_min_routed_peer_saving_bytes =
+          ms.source_window_collective_min_routed_peer_saving_bytes();
+    }
+    using RuntimeSourceWindowDistributionMode =
+        store::StoreEngineOptions::MaterializationStrategyConfig::SourceWindowCollectiveDistributionMode;
+    switch (ms.source_window_collective_distribution_mode()) {
+      case EngineConfig::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_DISTRIBUTION_MODE_FULL_WINDOW_ALL_GATHER:
+        strategy.source_window_collective_distribution_mode = RuntimeSourceWindowDistributionMode::kFullWindowAllGather;
+        break;
+      case EngineConfig::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_DISTRIBUTION_MODE_CONSUMER_ROUTED:
+        strategy.source_window_collective_distribution_mode = RuntimeSourceWindowDistributionMode::kConsumerRouted;
+        break;
+      case EngineConfig::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_DISTRIBUTION_MODE_HYBRID_WINDOW:
+        strategy.source_window_collective_distribution_mode = RuntimeSourceWindowDistributionMode::kHybridWindow;
+        break;
+      case EngineConfig::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_DISTRIBUTION_MODE_LOCAL_ONLY:
+        strategy.source_window_collective_distribution_mode = RuntimeSourceWindowDistributionMode::kLocalOnly;
+        break;
+      case EngineConfig::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_DISTRIBUTION_MODE_AUTO:
+      case EngineConfig::MATERIALIZATION_STRATEGY_SOURCE_WINDOW_COLLECTIVE_DISTRIBUTION_MODE_UNSPECIFIED:
+      default:
+        strategy.source_window_collective_distribution_mode = RuntimeSourceWindowDistributionMode::kAuto;
+        break;
+    }
+    strategy.source_window_collective_allow_mixed_residual = ms.has_source_window_collective_allow_mixed_residual()
+        ? ms.source_window_collective_allow_mixed_residual()
+        : false;
+    strategy.enable_source_window_batched_scatter_kernel =
+        ms.has_enable_source_window_batched_scatter_kernel() ? ms.enable_source_window_batched_scatter_kernel() : true;
+    strategy.enable_source_window_compiled_routed_program = ms.has_enable_source_window_compiled_routed_program()
+        ? ms.enable_source_window_compiled_routed_program()
+        : true;
+    strategy.enable_source_window_scatter_cuda_graph =
+        ms.has_enable_source_window_scatter_cuda_graph() ? ms.enable_source_window_scatter_cuda_graph() : false;
+    strategy.source_window_compiled_program_build_threads = ms.source_window_compiled_program_build_threads();
   }
 
   if (cfg.engine().has_progressive_replication()) {
@@ -1583,7 +1689,17 @@ int main(int argc, char** argv) {
   app_opts.worker_lifecycle = lifecycle_opts;
   app_opts.global_store_client = shared_global_store_client;
   app_opts.startup_coordinator = std::make_shared<daemon::StartupCoordinator>();
-  app_opts.deferred_startup_work = [pma, fake_cuda_backend, detected_gpu_count]() -> absl::Status {
+  const bool owner_file_collective_prewarm_enabled = opts.materialization_strategy.enable_owner_file_collective;
+  const bool source_window_collective_prewarm_enabled = opts.materialization_strategy.enable_source_window_collective;
+  const bool collective_clique_prewarm_enabled =
+      owner_file_collective_prewarm_enabled || source_window_collective_prewarm_enabled;
+  const bool source_window_batched_scatter_prewarm_enabled = source_window_collective_prewarm_enabled &&
+      opts.materialization_strategy.enable_source_window_batched_scatter_kernel;
+  app_opts.deferred_startup_work = [pma,
+                                    fake_cuda_backend,
+                                    detected_gpu_count,
+                                    collective_clique_prewarm_enabled,
+                                    source_window_batched_scatter_prewarm_enabled]() -> absl::Status {
     const absl::Status register_status = pma->register_all_pools();
     if (!register_status.ok()) {
       return absl::Status(
@@ -1600,7 +1716,20 @@ int main(int argc, char** argv) {
             absl::StrCat("GPU hash NVRTC prewarm failed during deferred startup: ", gpu_hash_prewarm.message()));
       }
       LOG(INFO) << "GPU hash NVRTC prewarm complete for detected_gpu_count=" << detected_gpu_count;
-      if (detected_gpu_count > 1) {
+      if (source_window_batched_scatter_prewarm_enabled) {
+        const absl::Status scatter_prewarm =
+            store::replica::prewarm_source_window_batched_scatter_kernel_for_visible_devices();
+        if (!scatter_prewarm.ok()) {
+          return absl::Status(
+              scatter_prewarm.code(),
+              absl::StrCat(
+                  "source-window batched scatter NVRTC prewarm failed during deferred startup: ",
+                  scatter_prewarm.message()));
+        }
+        LOG(INFO) << "source-window batched scatter NVRTC prewarm complete for detected_gpu_count="
+                  << detected_gpu_count;
+      }
+      if (collective_clique_prewarm_enabled && detected_gpu_count > 1) {
         std::vector<int> clique_devices;
         clique_devices.reserve(static_cast<size_t>(detected_gpu_count));
         for (int device_id = 0; device_id < detected_gpu_count; ++device_id) {
@@ -1612,6 +1741,8 @@ int main(int argc, char** argv) {
               clique_prewarm.code(),
               absl::StrCat("collective clique prewarm failed during deferred startup: ", clique_prewarm.message()));
         }
+      } else if (!collective_clique_prewarm_enabled && detected_gpu_count > 1) {
+        LOG(INFO) << "Skipping collective clique prewarm because collective materialization is disabled";
       }
     }
     return absl::OkStatus();

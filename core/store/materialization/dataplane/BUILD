@@ -114,6 +114,7 @@ sc_cc_library(
         ":index_reader",
         ":safetensors_util",
         "//core/checkpoint:tensor_writer_lib",
+        "//core/common:artifact_hash_lib",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/strings",

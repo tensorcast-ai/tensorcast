@@ -13,6 +13,8 @@ import pytest
 import torch
 
 from tensorcast.api._config import (
+    CollectiveLoadGroup,
+    ExecutionTopologyContext,
     GetArtifactOptions,
     RegionBackedMode,
     RetrievalPolicy,
@@ -30,6 +32,7 @@ from tensorcast.api.store.types import ArtifactError, StoreOptions
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import (
     BuilderMode,
+    PublicDiskSourceHandle,
     RuntimeArtifactManifest,
     RuntimeArtifactPolicy,
     build_serving_manifest_ref,
@@ -511,6 +514,51 @@ def test_realize_emits_report_shaped_profile_event(
     assert event["lifecycle_capability"] == "tensor_dict"
     assert event["publishable"] is False
     assert event["source_selection_digest"]
+
+
+def test_tensor_dict_realization_reports_execution_topology_policy() -> None:
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+    )
+    options = GetArtifactOptions(
+        source=RetrievalPolicy(
+            preference=RetrievalPreference.PREFER_DISK,
+            allow_p2p=False,
+            allow_disk=True,
+        ),
+        execution_topology=ExecutionTopologyContext(
+            collective_group=CollectiveLoadGroup(
+                group_id="same-host-tp-load",
+                world_size=8,
+                rank=3,
+            ),
+            collective_policy="collective_first",
+            source_locality="shared_source",
+            source_sharing_domain="node-a",
+        ),
+    )
+
+    handle = artifact.realize(
+        ArtifactRealizationSpec.tensor_dict(device="cpu", options=options))
+
+    report = handle.report
+    assert pipeline.calls
+    assert pipeline.calls[0]["options"] is options
+    assert report.target_kind == "tensor_dict"
+    assert report.operation_backend == "daemon_materialization"
+    assert report.strategy_plan is not None
+    assert report.strategy_plan.source_policy["topology_collective_policy"] == (
+        "collective_first")
+    assert report.strategy_plan.source_policy["source_locality"] == (
+        "shared_source")
+    assert report.strategy_plan.source_policy["source_sharing_domain"] == (
+        "node-a")
 
 
 def test_caller_tensors_realization_reports_temporary_copy_costs() -> None:
@@ -1145,6 +1193,63 @@ def test_from_disk_resolves_once_and_caches_generation():
     assert cached is not None
     assert cached.canonical_index_bytes == canonical_bytes
     assert cached.generation == 11
+
+
+def test_from_resolved_public_disk_source_builds_artifact_without_resolve():
+    canonical_bytes, _payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(canonical_bytes)
+    runtime = _RuntimeStub(client)
+    store = Store("daemon", runtime=cast(Any, runtime))
+    source = PublicDiskSourceHandle(
+        path="/tmp/artifact",
+        canonical_index_bytes=canonical_bytes,
+        artifact_id="msa1:test-session~policy~safetensors~prepared",
+        generation=17,
+        verify_checksums=False,
+        trusted_content_artifact_id="mi2:idx:data",
+    )
+
+    artifact = store.from_resolved_public_disk_source(
+        source,
+        expected_path="/tmp/artifact",
+        expected_verify_checksums=False,
+    )
+    desc = artifact.describe()
+
+    assert artifact.artifact_id == "msa1:test-session~policy~safetensors~prepared"
+    assert desc.generation == 17
+    assert client.resolve_public_disk_calls == []
+    assert client.import_calls == []
+    assert client.get_index_calls == 0
+    cached = runtime.get_artifact_index_cached(
+        "msa1:test-session~policy~safetensors~prepared"
+    )
+    assert cached is not None
+    assert cached.canonical_index_bytes == canonical_bytes
+    assert cached.generation == 17
+
+
+def test_from_resolved_public_disk_source_rejects_mismatch():
+    canonical_bytes, _payload = _build_payload({"foo": torch.ones(1)})
+    store = Store("daemon", runtime=cast(Any, _RuntimeStub(_ClientStub(canonical_bytes))))
+    source = PublicDiskSourceHandle(
+        path="/tmp/artifact",
+        canonical_index_bytes=canonical_bytes,
+        artifact_id="msa1:test-session~policy~safetensors~prepared",
+        verify_checksums=True,
+    )
+
+    with pytest.raises(ArtifactError, match="path does not match"):
+        store.from_resolved_public_disk_source(
+            source,
+            expected_path="/tmp/other",
+        )
+    with pytest.raises(ArtifactError, match="checksum policy"):
+        store.from_resolved_public_disk_source(
+            source,
+            expected_path="/tmp/artifact",
+            expected_verify_checksums=False,
+        )
 
 
 def test_from_disk_progress_mode_uses_stream_resolution():

@@ -6,15 +6,23 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry
+import tensorcast.artifact_runtime.source as source_mod
+from tensorcast.api.store.common import canonical_index_to_bytes
+from tensorcast.api.store.types import (
+    ArtifactError,
+    CanonicalIndex,
+    CanonicalIndexEntry,
+)
 from tensorcast.artifact_runtime.source import (
     SOURCE_CATALOG_SCHEMA_VERSION,
     SourceCatalog,
     SourceManifest,
     SourceTensorMeta,
+    compute_source_metadata_fingerprint,
     resolve_source_artifact_ref,
     source_catalog_from_all_safetensors_dir,
     source_catalog_from_canonical_index,
+    source_catalog_from_canonical_index_bytes,
     source_catalog_from_manifest,
     source_catalog_from_selected_safetensors,
 )
@@ -143,6 +151,168 @@ def test_source_catalog_from_canonical_index_preserves_stride_storage_offset() -
     assert catalog.ordered_names == ("view",)
     assert catalog.meta_by_name["view"].stride == (4, 1)
     assert catalog.meta_by_name["view"].storage_offset == 3
+
+
+def test_source_catalog_from_canonical_index_bytes_matches_index_path() -> None:
+    index = CanonicalIndex(
+        entries=(
+            CanonicalIndexEntry(
+                name="a",
+                dtype=torch.bfloat16,
+                shape=(2, 4),
+                stride=(4, 1),
+                storage_offset=0,
+                segment_offset=0,
+                size_bytes=16,
+            ),
+            CanonicalIndexEntry(
+                name="b",
+                dtype=torch.float32,
+                shape=(3,),
+                stride=(1,),
+                storage_offset=2,
+                segment_offset=16,
+                size_bytes=12,
+            ),
+        ),
+        total_size_bytes=28,
+        avbs_hash="",
+    )
+    index_bytes = canonical_index_to_bytes(index)
+
+    from_index = source_catalog_from_canonical_index(
+        index,
+        source_artifact_ref="mi2:test:source",
+        canonical_index_bytes=index_bytes,
+    )
+    from_bytes = source_catalog_from_canonical_index_bytes(
+        index_bytes,
+        source_artifact_ref="mi2:test:source",
+    )
+
+    assert from_bytes.ordered_names == from_index.ordered_names
+    assert from_bytes.canonical_index_hash == from_index.canonical_index_hash
+    assert from_bytes.metadata_fingerprint == from_index.metadata_fingerprint
+    assert from_bytes.canonical_index_bytes == index_bytes
+    assert from_bytes.meta_by_name["a"] == from_index.meta_by_name["a"]
+    assert from_bytes.meta_by_name["b"] == from_index.meta_by_name["b"]
+
+
+def test_source_catalog_from_canonical_index_bytes_defers_meta_conversion(
+    monkeypatch,
+) -> None:
+    index = CanonicalIndex(
+        entries=(
+            CanonicalIndexEntry(
+                name="a",
+                dtype=torch.bfloat16,
+                shape=(2, 4),
+                stride=(4, 1),
+                storage_offset=0,
+                segment_offset=0,
+                size_bytes=16,
+            ),
+            CanonicalIndexEntry(
+                name="b",
+                dtype=torch.float32,
+                shape=(3,),
+                stride=(1,),
+                storage_offset=2,
+                segment_offset=16,
+                size_bytes=12,
+            ),
+        ),
+        total_size_bytes=28,
+        avbs_hash="",
+    )
+    index_bytes = canonical_index_to_bytes(index)
+    parse_calls = []
+    real_parse = source_mod._parse_canonical_index_bytes
+
+    def parse_spy(*args, **kwargs):
+        parse_calls.append((args, kwargs))
+        return real_parse(*args, **kwargs)
+
+    monkeypatch.setattr(source_mod, "_parse_canonical_index_bytes", parse_spy)
+
+    catalog = source_catalog_from_canonical_index_bytes(
+        index_bytes,
+        source_artifact_ref="mi2:test:source",
+    )
+
+    assert parse_calls == []
+    assert catalog.tensor_count == 2
+    assert catalog.canonical_index_bytes == index_bytes
+    assert catalog.metadata_fingerprint == compute_source_metadata_fingerprint(
+        ordered_names=(),
+        meta_by_name={},
+        canonical_index_hash=catalog.canonical_index_hash,
+        tensor_count=2,
+    )
+    assert parse_calls == []
+
+    assert catalog.ordered_names == ("a", "b")
+    assert catalog.meta_by_name["a"].dtype == torch.bfloat16
+    assert len(parse_calls) == 1
+
+
+def test_source_catalog_from_canonical_index_bytes_rejects_invalid_json() -> None:
+    with pytest.raises(ArtifactError, match="Failed to parse canonical index JSON"):
+        source_catalog_from_canonical_index_bytes(
+            b"{not-json",
+            source_artifact_ref="mi2:test:source",
+        )
+
+    with pytest.raises(ArtifactError, match="Canonical index JSON must be an object"):
+        source_catalog_from_canonical_index_bytes(
+            b"[]",
+            source_artifact_ref="mi2:test:source",
+        )
+
+
+def test_source_metadata_fingerprint_uses_canonical_hash_as_identity() -> None:
+    base_meta = {
+        "w": SourceTensorMeta(
+            dtype=torch.float16,
+            shape=(4,),
+            stride=(1,),
+            storage_offset=0,
+        )
+    }
+    changed_meta = {
+        "w": SourceTensorMeta(
+            dtype=torch.float32,
+            shape=(8,),
+            stride=(1,),
+            storage_offset=0,
+        )
+    }
+
+    assert compute_source_metadata_fingerprint(
+        ordered_names=("w",),
+        meta_by_name=base_meta,
+        canonical_index_hash="index-hash",
+    ) == compute_source_metadata_fingerprint(
+        ordered_names=("w",),
+        meta_by_name=changed_meta,
+        canonical_index_hash="index-hash",
+    )
+    assert compute_source_metadata_fingerprint(
+        ordered_names=("w",),
+        meta_by_name=base_meta,
+        canonical_index_hash="index-hash-a",
+    ) != compute_source_metadata_fingerprint(
+        ordered_names=("w",),
+        meta_by_name=base_meta,
+        canonical_index_hash="index-hash-b",
+    )
+    assert compute_source_metadata_fingerprint(
+        ordered_names=("w",),
+        meta_by_name=base_meta,
+    ) != compute_source_metadata_fingerprint(
+        ordered_names=("w",),
+        meta_by_name=changed_meta,
+    )
 
 
 def test_source_catalog_direct_construction_requires_real_source_identity() -> None:

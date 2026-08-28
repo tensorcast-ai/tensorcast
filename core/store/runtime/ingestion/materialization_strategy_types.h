@@ -40,6 +40,28 @@ enum class SourceBoundExecutionMode : std::uint8_t {
   kLocalTypedOnly = 3,
   kRejected = 4,
   kLocalMappedTyped = 5,
+  kSourceWindowCollective = 6,
+  kSourceWindowCollectiveMixed = 7,
+};
+
+enum class SourceBoundCollectiveExecutor : std::uint8_t {
+  kNone = 0,
+  kOwnerFile = 1,
+  kSourceWindow = 2,
+};
+
+enum class SourceWindowCollectiveSelectionMode : std::uint8_t {
+  kDryRun = 0,
+  kAuto = 1,
+  kStrict = 2,
+};
+
+enum class SourceWindowCollectiveDistributionMode : std::uint8_t {
+  kAuto = 0,
+  kFullWindowAllGather = 1,
+  kConsumerRouted = 2,
+  kHybridWindow = 3,
+  kLocalOnly = 4,
 };
 
 struct SourceBoundSourceFacts {
@@ -55,6 +77,10 @@ inline std::string_view source_bound_execution_mode_name(SourceBoundExecutionMod
       return "collective_first_mixed";
     case SourceBoundExecutionMode::kLocalMappedTyped:
       return "local_mapped_typed";
+    case SourceBoundExecutionMode::kSourceWindowCollective:
+      return "source_window_collective";
+    case SourceBoundExecutionMode::kSourceWindowCollectiveMixed:
+      return "source_window_collective_mixed";
     case SourceBoundExecutionMode::kLocalTypedOnly:
       return "local_typed_only";
     case SourceBoundExecutionMode::kRejected:
@@ -65,12 +91,76 @@ inline std::string_view source_bound_execution_mode_name(SourceBoundExecutionMod
   }
 }
 
+inline std::string_view source_bound_collective_executor_name(SourceBoundCollectiveExecutor executor) {
+  switch (executor) {
+    case SourceBoundCollectiveExecutor::kOwnerFile:
+      return "owner_file";
+    case SourceBoundCollectiveExecutor::kSourceWindow:
+      return "source_window";
+    case SourceBoundCollectiveExecutor::kNone:
+    default:
+      return "none";
+  }
+}
+
+inline std::string_view source_window_collective_selection_mode_name(
+    SourceWindowCollectiveSelectionMode selection_mode) {
+  switch (selection_mode) {
+    case SourceWindowCollectiveSelectionMode::kAuto:
+      return "auto";
+    case SourceWindowCollectiveSelectionMode::kStrict:
+      return "strict";
+    case SourceWindowCollectiveSelectionMode::kDryRun:
+    default:
+      return "dry_run";
+  }
+}
+
+inline std::string_view source_window_collective_distribution_mode_name(
+    SourceWindowCollectiveDistributionMode distribution_mode) {
+  switch (distribution_mode) {
+    case SourceWindowCollectiveDistributionMode::kFullWindowAllGather:
+      return "full_window_all_gather";
+    case SourceWindowCollectiveDistributionMode::kConsumerRouted:
+      return "consumer_routed";
+    case SourceWindowCollectiveDistributionMode::kHybridWindow:
+      return "hybrid_window";
+    case SourceWindowCollectiveDistributionMode::kLocalOnly:
+      return "local_only";
+    case SourceWindowCollectiveDistributionMode::kAuto:
+    default:
+      return "auto";
+  }
+}
+
 struct ResolvedSourceBinding {
   loading::MaterializationSource source{loading::MaterializationSource::kDisk};
   SourceByteSpace source_byte_space{SourceByteSpace::kCanonical};
   bool source_layout_available{false};
   bool direct_write_capable{false};
   bool collective_eligible{false};
+};
+
+struct SourceWindowCollectiveCandidateSummary {
+  bool candidate{false};
+  bool group_final_admitted{false};
+  SourceWindowCollectiveSelectionMode selection_mode{SourceWindowCollectiveSelectionMode::kAuto};
+  SourceWindowCollectiveDistributionMode distribution_mode{SourceWindowCollectiveDistributionMode::kAuto};
+  std::string pre_admission_reason;
+  std::string group_reject_reason;
+  uint64_t source_window_group_disk_read_bytes{0};
+  uint64_t source_window_rank_read_bytes_max{0};
+  uint64_t source_window_local_rank_read_bytes_max{0};
+  uint64_t source_window_rank_read_saving_bytes{0};
+  uint64_t source_window_unique_payload_bytes{0};
+  uint64_t source_window_target_write_bytes{0};
+  uint64_t source_window_peer_transfer_bytes{0};
+  uint64_t source_window_peer_useful_bytes{0};
+  uint64_t source_window_peer_waste_bytes{0};
+  uint64_t source_window_read_amplification_x1000{0};
+  uint64_t source_window_scatter_op_count{0};
+  uint64_t source_window_window_count{0};
+  uint64_t source_window_residual_bytes{0};
 };
 
 struct SourceBoundExecutionPlanSummary {
@@ -89,6 +179,10 @@ struct SourceBoundExecutionPlanSummary {
   uint64_t estimated_collective_dedup_saving_bytes{0};
   bool collective_lane_eligible{false};
   bool strict_pure_collective_eligible{false};
+  bool source_window_collective_candidate{false};
+  SourceWindowCollectiveSelectionMode source_window_selection_mode{SourceWindowCollectiveSelectionMode::kAuto};
+  SourceWindowCollectiveCandidateSummary source_window_candidate_summary;
+  std::string source_window_group_reject_reason;
 };
 
 struct SourceBoundLoweringStats {
@@ -117,14 +211,17 @@ struct ResolvedMaterializationPlan {
 
 struct SourceBoundLoweringArtifacts {
   std::optional<loader::ByteRangeMap> executor_generic_data_map;
+  bool executor_generic_data_map_coverage_only{false};
   std::optional<loader::ByteRangeMap> collective_data_map;
   SourceBoundLoweringStats lowering_stats;
 };
 
 struct SourceBoundLanePlan {
   SourceBoundExecutionMode mode{SourceBoundExecutionMode::kGenericOnly};
+  SourceBoundCollectiveExecutor collective_executor{SourceBoundCollectiveExecutor::kNone};
   loader::ByteRangeMap collective_lane_map;
   loader::ByteRangeMap generic_backend_map;
+  bool generic_backend_map_coverage_only{false};
   loader::ByteRangeMap true_residual_map;
   uint64_t local_typed_bytes{0};
   uint64_t local_pad_bytes{0};
@@ -152,6 +249,7 @@ enum class ExecutionStrategyExecutor : std::uint8_t {
   kGenericByteRange = 0,
   kTensorBatchedLocal = 1,
   kOwnerFileCollective = 2,
+  kSourceWindowCollective = 3,
 };
 
 inline std::string_view execution_strategy_executor_name(ExecutionStrategyExecutor executor) {
@@ -160,6 +258,8 @@ inline std::string_view execution_strategy_executor_name(ExecutionStrategyExecut
       return "TensorBatchedLocalExecutor";
     case ExecutionStrategyExecutor::kOwnerFileCollective:
       return "OwnerFileCollectiveExecutor";
+    case ExecutionStrategyExecutor::kSourceWindowCollective:
+      return "SourceWindowCollectiveExecutor";
     case ExecutionStrategyExecutor::kGenericByteRange:
     default:
       return "GenericByteRangeExecutor";
@@ -205,6 +305,20 @@ struct ExecutionEnvironmentFacts {
   std::chrono::milliseconds owner_file_collective_group_assemble_timeout{0};
   bool owner_file_collective_allow_mixed_residual{false};
   uint32_t owner_file_collective_planner_cache_entries{0};
+  bool enable_source_window_collective{true};
+  SourceWindowCollectiveSelectionMode source_window_collective_selection_mode{
+      SourceWindowCollectiveSelectionMode::kAuto};
+  uint64_t source_window_collective_window_bytes{0};
+  uint64_t source_window_collective_max_gap_bytes{0};
+  uint32_t source_window_collective_max_window_amplification_x1000{0};
+  uint32_t source_window_collective_max_plan_read_amplification_x1000{0};
+  uint32_t source_window_collective_max_scatter_ops_per_window{0};
+  uint64_t source_window_collective_peak_bytes_budget{0};
+  uint64_t source_window_collective_min_rank_read_saving_bytes{0};
+  uint32_t source_window_collective_max_peer_to_read_ratio_x1000{0};
+  SourceWindowCollectiveDistributionMode source_window_collective_distribution_mode{
+      SourceWindowCollectiveDistributionMode::kAuto};
+  bool source_window_collective_allow_mixed_residual{false};
 };
 
 struct ExecutionStrategyPlan {
@@ -224,6 +338,19 @@ struct CollectiveExecutionMetrics {
   uint64_t peak_temporary_bytes{0};
   uint64_t batch_count{0};
   uint64_t dedup_saving_bytes{0};
+  uint64_t source_window_group_disk_read_bytes{0};
+  uint64_t source_window_rank_read_bytes_max{0};
+  uint64_t source_window_local_rank_read_bytes_max{0};
+  uint64_t source_window_rank_read_saving_bytes{0};
+  uint64_t source_window_unique_payload_bytes{0};
+  uint64_t source_window_target_write_bytes{0};
+  uint64_t source_window_peer_transfer_bytes{0};
+  uint64_t source_window_peer_useful_bytes{0};
+  uint64_t source_window_peer_waste_bytes{0};
+  uint64_t source_window_scatter_op_count{0};
+  uint64_t source_window_window_count{0};
+  uint64_t source_window_read_amplification_x1000{0};
+  std::string source_window_distribution_mode;
 };
 
 struct ExecutionCommitReport {

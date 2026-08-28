@@ -68,6 +68,7 @@ using tensorcast::store::runtime::ingestion::open_single_loader_sources;
 using tensorcast::store::testing::RecordingGlobalStoreClient;
 namespace ingestion_testing = tensorcast::store::runtime::ingestion::testing;
 namespace pipeline_runtime = tensorcast::store::materialization::runtime::pipeline;
+namespace strategy = tensorcast::store::runtime::ingestion::strategy;
 namespace view_contracts = tensorcast::store::materialization::view;
 
 namespace loading = tensorcast::store::loading;
@@ -1634,9 +1635,12 @@ TEST_CASE(
       plan_or->executor ==
       tensorcast::store::runtime::ingestion::strategy::ExecutionStrategyExecutor::kTensorBatchedLocal);
   REQUIRE(plan_or->selection_reason == "auto_prefers_local_batched");
-  REQUIRE(plan_or->candidates.size() == 3);
+  REQUIRE(plan_or->candidates.size() == 4);
   REQUIRE(plan_or->candidates[2].eligible == false);
   REQUIRE(plan_or->candidates[2].reason == "shared_source_unproven");
+  REQUIRE(plan_or->candidates[3].executor == strategy::ExecutionStrategyExecutor::kSourceWindowCollective);
+  REQUIRE(plan_or->candidates[3].eligible == true);
+  REQUIRE(plan_or->candidates[3].reason == "candidate_pending_group_final_admission");
 
   harness.shutdown();
   tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
@@ -1679,7 +1683,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "MaterializationFacade AUTO prefers owner-file collective for explicit shared source",
+    "MaterializationFacade AUTO prefers local batched even for explicit shared source",
     "[materialization_facade][strategy_plan]") {
   SKIP_IF_NO_CUDA();
 
@@ -1704,11 +1708,196 @@ TEST_CASE(
 
   REQUIRE(
       plan_or->executor ==
-      tensorcast::store::runtime::ingestion::strategy::ExecutionStrategyExecutor::kOwnerFileCollective);
-  REQUIRE(plan_or->selection_reason == "auto_prefers_owner_file_collective_shared_source");
-  REQUIRE(plan_or->candidates.size() == 3);
+      tensorcast::store::runtime::ingestion::strategy::ExecutionStrategyExecutor::kTensorBatchedLocal);
+  REQUIRE(plan_or->selection_reason == "auto_prefers_local_batched");
+  REQUIRE(plan_or->candidates.size() == 4);
   REQUIRE(plan_or->candidates[2].eligible == true);
   REQUIRE(plan_or->candidates[2].reason == "eligible");
+  REQUIRE(plan_or->candidates[3].executor == strategy::ExecutionStrategyExecutor::kSourceWindowCollective);
+  REQUIRE(plan_or->candidates[3].eligible == true);
+  REQUIRE(plan_or->candidates[3].reason == "candidate_pending_group_final_admission");
+
+  harness.shutdown();
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(artifact_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade explicit owner-file preference selects collective for shared source",
+    "[materialization_facade][strategy_plan]") {
+  SKIP_IF_NO_CUDA();
+
+  auto artifact_root = make_temp_dir("materialization_facade_strategy_explicit_collective");
+  create_safetensors_file(
+      artifact_root / "weights.safetensors",
+      "{\"tensor\":{\"dtype\":\"U8\",\"shape\":[64],\"data_offsets\":[0,64]}}",
+      std::vector<unsigned char>(64, 17));
+
+  auto opts = MakeOptions(artifact_root);
+  opts.materialization_strategy.enable_local_batched_disk_load = true;
+  opts.materialization_strategy.enable_owner_file_collective = true;
+  opts.materialization_strategy.executor_preference =
+      tensorcast::store::StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference::kOwnerFileCollective;
+  opts.materialization_strategy.owner_file_collective_min_dedup_saving_bytes = 1;
+
+  FacadeHarness harness(opts);
+  harness.initialize();
+
+  auto ctx = make_strategy_context(
+      harness, artifact_root, loading::SourceLocalityHint::kSharedSource, std::string("shared-fs:test"));
+  auto plan_or = harness.facade->build_ordinary_disk_execution_strategy_plan_for_testing(ctx);
+  REQUIRE(plan_or.ok());
+
+  REQUIRE(
+      plan_or->executor ==
+      tensorcast::store::runtime::ingestion::strategy::ExecutionStrategyExecutor::kOwnerFileCollective);
+  REQUIRE(plan_or->selection_reason == "executor_preference_owner_file_collective");
+
+  harness.shutdown();
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(artifact_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade explicit source-window preference reports pre-admission planner state",
+    "[materialization_facade][strategy_plan][source_window]") {
+  SKIP_IF_NO_CUDA();
+
+  auto artifact_root = make_temp_dir("materialization_facade_strategy_explicit_source_window");
+  create_safetensors_file(
+      artifact_root / "weights.safetensors",
+      "{\"tensor\":{\"dtype\":\"U8\",\"shape\":[64],\"data_offsets\":[0,64]}}",
+      std::vector<unsigned char>(64, 19));
+
+  auto opts = MakeOptions(artifact_root);
+  opts.materialization_strategy.enable_local_batched_disk_load = true;
+  opts.materialization_strategy.enable_owner_file_collective = true;
+  opts.materialization_strategy.enable_source_window_collective = true;
+  opts.materialization_strategy.executor_preference =
+      StoreEngineOptions::MaterializationStrategyConfig::ExecutorPreference::kSourceWindowCollective;
+
+  FacadeHarness harness(opts);
+  harness.initialize();
+
+  auto ctx = make_strategy_context(harness, artifact_root, loading::SourceLocalityHint::kHostLocal, std::nullopt);
+  auto plan_or = harness.facade->build_ordinary_disk_execution_strategy_plan_for_testing(ctx);
+  REQUIRE(plan_or.ok());
+
+  REQUIRE(plan_or->executor == strategy::ExecutionStrategyExecutor::kSourceWindowCollective);
+  REQUIRE(plan_or->selection_reason == "executor_preference_source_window_collective");
+  REQUIRE(plan_or->collective_load_group.has_value());
+  REQUIRE(plan_or->candidates.size() == 4);
+  REQUIRE(plan_or->candidates[2].executor == strategy::ExecutionStrategyExecutor::kOwnerFileCollective);
+  REQUIRE(plan_or->candidates[2].reason == "source_locality_host_local");
+  REQUIRE(plan_or->candidates[3].executor == strategy::ExecutionStrategyExecutor::kSourceWindowCollective);
+  REQUIRE(plan_or->candidates[3].eligible == true);
+  REQUIRE(plan_or->candidates[3].reason == "candidate_pending_group_final_admission");
+
+  harness.shutdown();
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(artifact_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade AUTO prefers local batched for host-local source-window candidates",
+    "[materialization_facade][strategy_plan][source_window]") {
+  SKIP_IF_NO_CUDA();
+
+  auto artifact_root = make_temp_dir("materialization_facade_strategy_auto_source_window");
+  create_safetensors_file(
+      artifact_root / "weights.safetensors",
+      "{\"tensor\":{\"dtype\":\"U8\",\"shape\":[64],\"data_offsets\":[0,64]}}",
+      std::vector<unsigned char>(64, 23));
+
+  auto opts = MakeOptions(artifact_root);
+  opts.materialization_strategy.enable_local_batched_disk_load = true;
+  opts.materialization_strategy.enable_owner_file_collective = true;
+  opts.materialization_strategy.enable_source_window_collective = true;
+  opts.materialization_strategy.source_window_collective_selection_mode =
+      StoreEngineOptions::MaterializationStrategyConfig::SourceWindowCollectiveSelectionMode::kAuto;
+
+  FacadeHarness harness(opts);
+  harness.initialize();
+
+  auto ctx = make_strategy_context(harness, artifact_root, loading::SourceLocalityHint::kHostLocal, std::nullopt);
+  auto plan_or = harness.facade->build_ordinary_disk_execution_strategy_plan_for_testing(ctx);
+  REQUIRE(plan_or.ok());
+
+  REQUIRE(plan_or->executor == strategy::ExecutionStrategyExecutor::kTensorBatchedLocal);
+  REQUIRE(plan_or->selection_reason == "auto_host_local_prefers_local_batched");
+  REQUIRE(plan_or->collective_load_group.has_value());
+  REQUIRE(plan_or->candidates.size() == 4);
+  REQUIRE(plan_or->candidates[1].eligible == true);
+  REQUIRE(plan_or->candidates[2].reason == "source_locality_host_local");
+  REQUIRE(plan_or->candidates[3].executor == strategy::ExecutionStrategyExecutor::kSourceWindowCollective);
+  REQUIRE(plan_or->candidates[3].eligible == true);
+  REQUIRE(plan_or->candidates[3].reason == "candidate_pending_group_final_admission");
+
+  harness.shutdown();
+  tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(artifact_root, cleanup_ec);
+}
+
+TEST_CASE(
+    "MaterializationFacade AUTO selects source-window for shared source after local rejection",
+    "[materialization_facade][strategy_plan][source_window]") {
+  SKIP_IF_NO_CUDA();
+
+  auto artifact_root = make_temp_dir("materialization_facade_strategy_auto_source_window_shared");
+  create_safetensors_file(
+      artifact_root / "weights.safetensors",
+      "{\"tensor\":{\"dtype\":\"U8\",\"shape\":[4,16],\"data_offsets\":[0,64]}}",
+      std::vector<unsigned char>(64, 29));
+
+  auto opts = MakeOptions(artifact_root);
+  opts.materialization_strategy.enable_local_batched_disk_load = true;
+  opts.materialization_strategy.enable_owner_file_collective = true;
+  opts.materialization_strategy.enable_source_window_collective = true;
+  opts.materialization_strategy.source_window_collective_selection_mode =
+      StoreEngineOptions::MaterializationStrategyConfig::SourceWindowCollectiveSelectionMode::kAuto;
+
+  FacadeHarness harness(opts);
+  harness.initialize();
+
+  auto ctx = make_strategy_context(
+      harness, artifact_root, loading::SourceLocalityHint::kSharedSource, std::string("shared-fs:test"));
+  REQUIRE(ctx.hints.variant.has_value());
+  ctx.hints.variant->view_id = "view:dim1";
+  ctx.hints.variant->view_spec = view_contracts::ViewSpec{
+      .tensors =
+          {
+              {
+                  "tensor",
+                  view_contracts::TensorViewOps{
+                      .ops =
+                          {
+                              view_contracts::ViewOp::Narrow(
+                                  view_contracts::NarrowOp{.dim = 1, .start = 0, .length = 4}),
+                          },
+                  },
+              },
+          },
+  };
+  ctx.resolved_view_plan = view_contracts::ViewPlan{
+      .is_identity = false,
+      .view_size_bytes = 16,
+      .view_index_json = R"({"tensor":[0,16,[4,4],[4,1],"torch.uint8",0]})",
+  };
+  auto plan_or = harness.facade->build_ordinary_disk_execution_strategy_plan_for_testing(ctx);
+  REQUIRE(plan_or.ok());
+
+  REQUIRE(plan_or->executor == strategy::ExecutionStrategyExecutor::kSourceWindowCollective);
+  REQUIRE(plan_or->selection_reason == "auto_source_window_collective_candidate");
+  REQUIRE(plan_or->collective_load_group.has_value());
+  REQUIRE(plan_or->candidates.size() == 4);
+  REQUIRE(plan_or->candidates[1].eligible == true);
+  REQUIRE(plan_or->candidates[3].executor == strategy::ExecutionStrategyExecutor::kSourceWindowCollective);
+  REQUIRE(plan_or->candidates[3].eligible == true);
+  REQUIRE(plan_or->candidates[3].reason == "candidate_pending_group_final_admission");
 
   harness.shutdown();
   tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
@@ -1764,9 +1953,12 @@ TEST_CASE(
   REQUIRE(
       plan_or->executor ==
       tensorcast::store::runtime::ingestion::strategy::ExecutionStrategyExecutor::kGenericByteRange);
-  REQUIRE(plan_or->candidates.size() == 3);
+  REQUIRE(plan_or->candidates.size() == 4);
   CHECK(plan_or->candidates[1].eligible);
   CHECK(plan_or->candidates[1].reason == "eligible");
+  CHECK(plan_or->candidates[3].executor == strategy::ExecutionStrategyExecutor::kSourceWindowCollective);
+  CHECK(plan_or->candidates[3].eligible);
+  CHECK(plan_or->candidates[3].reason == "candidate_pending_group_final_admission");
   CHECK(plan_or->selection_reason.find("local_source_amplification_exceeds_generic") != std::string::npos);
 
   harness.shutdown();
@@ -2726,7 +2918,7 @@ TEST_CASE(
   SKIP_IF_NO_CUDA();
 
   auto artifact_root = make_temp_dir("materialization_facade_generic_source_ordered");
-  std::vector<unsigned char> payload(8);
+  std::vector<unsigned char> payload(12);
   for (size_t index = 0; index < payload.size(); ++index) {
     payload[index] = static_cast<unsigned char>(0x40 + index);
   }
@@ -2989,6 +3181,17 @@ TEST_CASE(
                     .peak_temporary_bytes = 128,
                     .batch_count = 2,
                     .dedup_saving_bytes = 16,
+                    .source_window_group_disk_read_bytes = 512,
+                    .source_window_rank_read_bytes_max = 256,
+                    .source_window_unique_payload_bytes = 384,
+                    .source_window_target_write_bytes = 320,
+                    .source_window_peer_transfer_bytes = 1024,
+                    .source_window_peer_useful_bytes = 640,
+                    .source_window_peer_waste_bytes = 384,
+                    .source_window_scatter_op_count = 7,
+                    .source_window_window_count = 3,
+                    .source_window_read_amplification_x1000 = 1100,
+                    .source_window_distribution_mode = "full_window_all_gather",
                 },
         };
       };
@@ -3079,6 +3282,17 @@ TEST_CASE(
   CHECK(result_or->collective_peak_temporary_bytes == 128);
   CHECK(result_or->collective_batch_count == 2);
   CHECK(result_or->collective_dedup_saving_bytes == 16);
+  CHECK(result_or->source_window_group_disk_read_bytes == 512);
+  CHECK(result_or->source_window_rank_read_bytes_max == 256);
+  CHECK(result_or->source_window_unique_payload_bytes == 384);
+  CHECK(result_or->source_window_target_write_bytes == 320);
+  CHECK(result_or->source_window_peer_transfer_bytes == 1024);
+  CHECK(result_or->source_window_peer_useful_bytes == 640);
+  CHECK(result_or->source_window_peer_waste_bytes == 384);
+  CHECK(result_or->source_window_scatter_op_count == 7);
+  CHECK(result_or->source_window_window_count == 3);
+  CHECK(result_or->source_window_read_amplification_x1000 == 1100);
+  CHECK(result_or->source_window_distribution_mode == "full_window_all_gather");
 
   harness.shutdown();
   tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing();
@@ -3772,7 +3986,7 @@ TEST_CASE(
   create_safetensors_file(
       artifact_root / "weights.safetensors",
       "{\"rep\":{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[0,4]},"
-      "\"src3d\":{\"dtype\":\"U8\",\"shape\":[2,2,1],\"data_offsets\":[4,8]}}",
+      "\"src3d\":{\"dtype\":\"U8\",\"shape\":[2,2,2],\"data_offsets\":[4,12]}}",
       payload);
 
   auto opts = MakeOptions(artifact_root);
@@ -3879,11 +4093,11 @@ TEST_CASE(
 
   const auto src3d_spec = tensorcast::store::materialization::contracts::RepresentationTensorSpec{
       .name = "src3d",
-      .shape = {2, 2, 1},
-      .stride = {2, 1, 1},
+      .shape = {2, 2, 2},
+      .stride = {4, 2, 1},
       .dtype = "torch.uint8",
       .logical_offset = 4,
-      .logical_length = 4,
+      .logical_length = 8,
       .storage_offset = 0,
       .element_size = 1,
   };

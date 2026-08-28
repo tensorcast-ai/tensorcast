@@ -11,6 +11,7 @@ from typing import cast
 import pytest
 import torch
 
+import tensorcast.artifact_runtime.binding.retained as retained_binding_module
 import tensorcast.retained_realization as retained_realization_module
 import tensorcast.retained_realization_authority as retained_authority_module
 from tensorcast.artifact_runtime.binding.retained import (
@@ -179,7 +180,10 @@ def test_retained_realization_module_hides_prefetched_compat_helpers() -> None:
 def _response(*, reservation_bytes: int = 4096, lease_token: bytes = b"lease"):
     return SimpleNamespace(
         reservation_bytes=reservation_bytes,
-        mem_handle=SimpleNamespace(lease_token=lease_token),
+        mem_handle=SimpleNamespace(
+            lease_token=lease_token,
+            cuda_ipc_handle=b"cuda-ipc-handle",
+        ),
         current_value=SimpleNamespace(
             binding_id="binding-1",
             binding_layout_id="layout-1",
@@ -392,6 +396,111 @@ def test_retained_binding_debug_status_tracks_capability_ttl_and_lifecycle():
         runtime_handle.close()
         assert runtime_handle.status() == "closed"
         assert runtime_handle.debug_status()["released"] is True
+
+    assert client.released_tokens == [b"lease"]
+
+
+def test_preopened_retained_binding_restore_reuses_cuda_memory_ptr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority()
+    client = _Client(_response())
+    open_calls: list[tuple[int, bytes]] = []
+    close_calls: list[tuple[int, int]] = []
+    restore_calls: list[dict[str, object]] = []
+
+    def fake_open(device_id: int, cuda_ipc_handle: bytes) -> int:
+        open_calls.append((device_id, bytes(cuda_ipc_handle)))
+        return 0x1234
+
+    def fake_close(device_id: int, cuda_memory_ptr: int) -> bool:
+        close_calls.append((device_id, cuda_memory_ptr))
+        return True
+
+    def fake_restore(**kwargs: object) -> dict[str, torch.Tensor]:
+        restore_calls.append(dict(kwargs))
+        return {"w": torch.empty((1,), dtype=torch.float32)}
+
+    monkeypatch.setattr(retained_binding_module, "get_cuda_memory_ptr", fake_open)
+    monkeypatch.setattr(
+        retained_binding_module,
+        "close_cuda_memory_handle",
+        fake_close,
+    )
+
+    with acquire_retained_binding_lease(
+        authority, runtime=_Runtime(client)
+    ) as lease:
+        ptr = lease.preopen(target_device=torch.device("cuda:0"))
+        assert ptr == 0x1234
+        assert lease.status() == "preopened"
+        status = lease.debug_status()
+        assert status["preopened_cuda_memory_ptr_present"] is True
+        assert status["preopened_device_id"] == 0
+
+        attached = lease.restore(
+            target_device=torch.device("cuda:0"),
+            restore_fn=fake_restore,
+        )
+        assert attached.status() == "restored"
+        assert lease.debug_status()["preopened_cuda_memory_ptr_present"] is False
+        attached.close()
+
+    assert open_calls == [(0, b"cuda-ipc-handle")]
+    assert close_calls == []
+    assert len(restore_calls) == 1
+    assert restore_calls[0]["preopened_cuda_memory_ptr"] == 0x1234
+    assert restore_calls[0]["device_id"] == 0
+    assert client.released_tokens == [b"lease"]
+
+
+def test_preopened_retained_binding_close_releases_mapping_and_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority()
+    client = _Client(_response())
+    close_calls: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(
+        retained_binding_module,
+        "get_cuda_memory_ptr",
+        lambda _device_id, _handle: 0x5678,
+    )
+    monkeypatch.setattr(
+        retained_binding_module,
+        "close_cuda_memory_handle",
+        lambda device_id, ptr: close_calls.append((device_id, ptr)) or True,
+    )
+
+    with acquire_retained_binding_lease(
+        authority, runtime=_Runtime(client)
+    ) as lease:
+        lease.preopen(target_device=torch.device("cuda:0"))
+        assert lease.status() == "preopened"
+
+    assert close_calls == [(0, 0x5678)]
+    assert client.released_tokens == [b"lease"]
+    assert lease.debug_status()["released"] is True
+
+
+def test_preopen_failure_releases_acquired_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority()
+    client = _Client(_response())
+
+    def fail_open(_device_id: int, _handle: bytes) -> int:
+        raise RuntimeError("open failed")
+
+    monkeypatch.setattr(retained_binding_module, "get_cuda_memory_ptr", fail_open)
+
+    with (
+        pytest.raises(RuntimeError, match="open failed"),
+        acquire_retained_binding_lease(
+            authority, runtime=_Runtime(client)
+        ) as lease,
+    ):
+        lease.preopen(target_device=torch.device("cuda:0"))
 
     assert client.released_tokens == [b"lease"]
 
@@ -687,6 +796,47 @@ def test_acquire_retained_binding_rejects_reserved_authority_before_daemon_call(
 
     assert client.acquire_calls == []
     assert client.released_tokens == []
+
+
+def test_reserved_retained_binding_can_preopen_then_restore_after_authority_replace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reserved_authority = replace(_authority(), readiness="runtime_reserved")
+    local_ready_authority = replace(reserved_authority, readiness="runtime_local_ready")
+    client = _Client(_response())
+    open_calls: list[tuple[int, bytes]] = []
+    restore_calls: list[dict[str, object]] = []
+
+    def fake_open(device_id: int, cuda_ipc_handle: bytes) -> int:
+        open_calls.append((device_id, bytes(cuda_ipc_handle)))
+        return 0x5678
+
+    def fake_restore(**kwargs: object) -> dict[str, torch.Tensor]:
+        restore_calls.append(dict(kwargs))
+        return {"w": torch.empty((1,), dtype=torch.float32)}
+
+    monkeypatch.setattr(retained_binding_module, "get_cuda_memory_ptr", fake_open)
+
+    with acquire_retained_binding_lease(
+        reserved_authority,
+        runtime=_Runtime(client),
+        allow_runtime_reserved=True,
+    ) as lease:
+        assert lease.preopen(target_device=torch.device("cuda:0")) == 0x5678
+        with pytest.raises(RuntimeError, match="local-ready"):
+            lease.restore(target_device=torch.device("cuda:0"), restore_fn=fake_restore)
+        lease.replace_authority(local_ready_authority)
+        attached = lease.restore(
+            target_device=torch.device("cuda:0"),
+            restore_fn=fake_restore,
+        )
+        assert attached.status() == "restored"
+        attached.close()
+
+    assert open_calls == [(0, b"cuda-ipc-handle")]
+    assert len(restore_calls) == 1
+    assert restore_calls[0]["preopened_cuda_memory_ptr"] == 0x5678
+    assert client.released_tokens == [b"lease"]
 
 
 def test_acquire_retained_binding_requires_group_publish_wait_before_attach():

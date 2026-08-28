@@ -22,14 +22,12 @@ public_disk_source:
 
 engine:
   artifact_chunk_bytes: 256MB
-  streaming_buffer_chunks: 2
+  streaming_buffer_chunks: 8
   enable_external_target_verification: false
   materialization_strategy:
     enable_local_batched_disk_load: true
     enable_tensor_aware_mapped_executor: true
     allow_mixed_execution: true
-    enable_owner_file_collective: true
-    executor_preference: MATERIALIZATION_STRATEGY_EXECUTOR_PREFERENCE_AUTO
   cpu_shared_memory:
     enabled: true
   memory_tiers:
@@ -48,7 +46,7 @@ pinned_memory:
   classes:
     - name: engine
       slice_bytes: 64MB
-      pool_bytes: 2GB
+      pool_bytes: 4GB
     - name: comm_gpu
       slice_bytes: 16MB
       pool_bytes: 1GB

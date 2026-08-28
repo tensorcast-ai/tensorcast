@@ -43,13 +43,43 @@ class LocalSourceBootstrap(RuntimeIntent):
 
 @dataclass(frozen=True)
 class RetainedBindingAcquire(RuntimeIntent):
-    authority: ParsedRetainedRealizationAuthority
+    authority: ParsedRetainedRealizationAuthority | None = None
+    local_serving_ref: str | None = None
+    expected_member: Any | None = None
+    expected_tensor_schema_hash: str | None = None
+    expected_serving_build_digest: str | None = None
+    expected_target_layout_hash: str | None = None
+    expected_daemon_id: str | None = None
+    expected_daemon_session_id: str | None = None
+    serving_artifact_id: str | None = None
+    preopened_lease: Any | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.authority, ParsedRetainedRealizationAuthority):
+        has_authority = self.authority is not None
+        has_local_ref = bool(self.local_serving_ref)
+        if has_authority == has_local_ref:
+            raise AuthorityValidationError(
+                "RetainedBindingAcquire requires exactly one of authority "
+                "or local_serving_ref"
+            )
+        if has_authority and not isinstance(
+            self.authority, ParsedRetainedRealizationAuthority
+        ):
             raise AuthorityValidationError(
                 "RetainedBindingAcquire.authority must be "
                 "ParsedRetainedRealizationAuthority"
+            )
+        if self.preopened_lease is not None and not has_authority:
+            raise AuthorityValidationError(
+                "RetainedBindingAcquire.preopened_lease requires authority"
+            )
+        if has_local_ref and (
+            not self.expected_tensor_schema_hash
+            or not self.expected_serving_build_digest
+        ):
+            raise AuthorityValidationError(
+                "RetainedBindingAcquire(local_serving_ref=...) requires "
+                "expected_tensor_schema_hash and expected_serving_build_digest"
             )
 
 

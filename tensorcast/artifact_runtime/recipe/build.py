@@ -577,15 +577,16 @@ class RecipeBuildSession:
                     cached_recipe,
                     source_catalog=source_catalog,
                 )
-                self._dump_trace_plan_debug(
-                    recipe.trace_plan,
-                    model_config=model_config,
-                    cache_path=recipe_cache_hit_path,
-                    cache_hit=True,
-                    output_dir=debug_output_dir,
-                    trace_cache_schema_version=trace_cache_schema_version,
-                    extra=debug_extra,
-                )
+                if debug_dump_trace:
+                    self._dump_trace_plan_debug(
+                        recipe.trace_plan,
+                        model_config=model_config,
+                        cache_path=recipe_cache_hit_path,
+                        cache_hit=True,
+                        output_dir=debug_output_dir,
+                        trace_cache_schema_version=trace_cache_schema_version,
+                        extra=debug_extra,
+                    )
                 diagnostics = self._recipe_build_diagnostics(
                     recipe,
                     total_start=total_start,
@@ -672,7 +673,7 @@ class RecipeBuildSession:
                     "cache_hit_path": cache_hit_path,
                 },
             )
-            if trace_plan is not None:
+            if trace_plan is not None and debug_dump_trace:
                 self._dump_trace_plan_debug(
                     trace_plan,
                     model_config=model_config,
@@ -734,15 +735,16 @@ class RecipeBuildSession:
                 source_catalog=source_catalog,
                 cache_dirs=trace_write_dirs,
             )
-            self._dump_trace_plan_debug(
-                trace_plan,
-                model_config=model_config,
-                cache_path=trace_cache_paths[0] if trace_cache_paths else None,
-                cache_hit=False,
-                output_dir=debug_output_dir,
-                trace_cache_schema_version=trace_cache_schema_version,
-                extra=debug_extra,
-            )
+            if debug_dump_trace:
+                self._dump_trace_plan_debug(
+                    trace_plan,
+                    model_config=model_config,
+                    cache_path=trace_cache_paths[0] if trace_cache_paths else None,
+                    cache_hit=False,
+                    output_dir=debug_output_dir,
+                    trace_cache_schema_version=trace_cache_schema_version,
+                    extra=debug_extra,
+                )
             for cache_path in trace_cache_paths:
                 if synchronous_cache_write:
                     write_result = self.store_trace_plan_cache(

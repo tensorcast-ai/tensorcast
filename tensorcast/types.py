@@ -2143,6 +2143,7 @@ class RuntimeBindingResolvedLayout(BaseModel):
     source_schema_hash: str | None = None
     copy_plan_bytes: bytes | None = None
     dst_specs_bytes: bytes | None = None
+    realization_plan_bytes: bytes | None = None
 
     @model_validator(mode="after")
     def _validate_layout(self) -> "RuntimeBindingResolvedLayout":
@@ -2229,6 +2230,8 @@ class RuntimeBindingResolvedLayout(BaseModel):
             proto.copy_plan_bytes = bytes(self.copy_plan_bytes)
         if self.dst_specs_bytes is not None:
             proto.dst_specs_bytes = bytes(self.dst_specs_bytes)
+        if self.realization_plan_bytes is not None:
+            proto.realization_plan_bytes = bytes(self.realization_plan_bytes)
         return proto
 
     @classmethod
@@ -2261,6 +2264,11 @@ class RuntimeBindingResolvedLayout(BaseModel):
             dst_specs_bytes=(
                 bytes(proto.dst_specs_bytes)
                 if proto.HasField("dst_specs_bytes")
+                else None
+            ),
+            realization_plan_bytes=(
+                bytes(proto.realization_plan_bytes)
+                if proto.HasField("realization_plan_bytes")
                 else None
             ),
         )
@@ -2375,10 +2383,6 @@ class RealizationTargetSet(BaseModel):
         for member in self.members:
             if member.runtime != self.runtime:
                 raise ValueError("all members must use the set runtime")
-            if member.source != self.source:
-                raise ValueError("all members must use the set source")
-            if member.topology != self.topology:
-                raise ValueError("all members must use the set topology")
             if member.member.group_id not in {None, self.group_id}:
                 raise ValueError("member group_id must match set group_id")
         return self

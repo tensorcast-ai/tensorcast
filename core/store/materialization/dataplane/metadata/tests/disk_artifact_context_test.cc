@@ -109,6 +109,46 @@ TEST_CASE("DiskArtifactContext reuses cached safetensors scan and index info", "
   std::filesystem::remove_all(dir, ec);
 }
 
+TEST_CASE(
+    "DiskArtifactContext persists safetensors index metadata across in-memory cache reset",
+    "[disk_artifact_context][safetensors][persistent_cache]") {
+  using tensorcast::store::loader::get_disk_artifact_context;
+  using tensorcast::store::loader::get_disk_artifact_context_cache_stats;
+  using tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing;
+
+  reset_disk_artifact_context_cache_for_testing();
+
+  auto dir = make_temp_dir("disk-artifact-context-persistent");
+  const auto file = dir / "weights.safetensors";
+  create_st_file(
+      file, "{\"t\":{\"dtype\":\"U8\",\"shape\":[64],\"data_offsets\":[0,64]}}", std::vector<unsigned char>(64, 7));
+
+  auto first_ctx_or = get_disk_artifact_context(dir);
+  REQUIRE(first_ctx_or.ok());
+  auto first_index_or = (*first_ctx_or)->get_index_info(/*target_device_id=*/0);
+  REQUIRE(first_index_or.ok());
+
+  auto stats = get_disk_artifact_context_cache_stats();
+  REQUIRE(stats.index_misses == 1);
+
+  first_ctx_or = absl::StatusOr<std::shared_ptr<const tensorcast::store::loader::DiskArtifactContext>>(
+      std::shared_ptr<const tensorcast::store::loader::DiskArtifactContext>());
+  reset_disk_artifact_context_cache_for_testing();
+
+  auto second_ctx_or = get_disk_artifact_context(dir);
+  REQUIRE(second_ctx_or.ok());
+  auto second_index_or = (*second_ctx_or)->get_index_info(/*target_device_id=*/0);
+  REQUIRE(second_index_or.ok());
+  CHECK(second_index_or->canonical_index_json == first_index_or->canonical_index_json);
+
+  stats = get_disk_artifact_context_cache_stats();
+  REQUIRE(stats.index_misses == 0);
+  REQUIRE(stats.index_hits >= 1);
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
 TEST_CASE("DiskArtifactContext orders multipart partitions numerically", "[disk_artifact_context][partitioned]") {
   using tensorcast::store::loader::get_disk_artifact_context;
   using tensorcast::store::loader::reset_disk_artifact_context_cache_for_testing;

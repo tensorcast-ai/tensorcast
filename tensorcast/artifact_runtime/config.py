@@ -28,7 +28,14 @@ DEFAULT_RUNTIME_PROFILE = "serving_single_node"
 _RUNTIME_MODES = {"auto", "connect", "create"}
 _GLOBAL_STORE_MODES = {"auto", "connect", "start", "none"}
 _BOOTSTRAP_MODES = {"disabled", "auto", "required"}
-_COLLECTIVE_MODES = {"auto", "required", "disabled"}
+_COLLECTIVE_MODES = {
+    "auto",
+    "required",
+    "disabled",
+    "collective_first",
+    "require_collective",
+    "disable_collective",
+}
 _RETAINED_BINDING_ACQUIRE_MODES = {"disabled", "external"}
 _REPLICA_PUBLICATION_MODES = {"disabled", "optional", "required"}
 _REPLICA_PUBLICATION_TRIGGERS = {"after_vllm_ready"}
@@ -357,9 +364,12 @@ class MaterializationSettings(BaseModel):
 
     def collective_policy_value(self) -> str:
         return {
-            "auto": "collective_first",
+            "auto": "auto",
             "required": "require_collective",
             "disabled": "disable_collective",
+            "collective_first": "collective_first",
+            "require_collective": "require_collective",
+            "disable_collective": "disable_collective",
         }[self.collective]
 
 

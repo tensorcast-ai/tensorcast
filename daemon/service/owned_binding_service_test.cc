@@ -660,6 +660,293 @@ TEST_CASE("RefillOwnedBinding strict preflight rejection preserves ready artifac
   REQUIRE(record->current_binding_value_id == "value-1");
 }
 
+TEST_CASE("RefillOwnedBinding strict preflight admits source-window collective", "[daemon][binding][source_window]") {
+  const auto plan_summary = tensorcast::store::runtime::ingestion::strategy::SourceBoundExecutionPlanSummary{
+      .execution_plan_kind = "source_window_collective_mixed",
+      .planned_collective_candidate_bytes = 4,
+      .planned_collective_admitted_bytes = 0,
+      .planned_local_typed_bytes = 0,
+      .planned_non_admitted_typed_bytes = 4,
+      .planned_generic_residual_bytes = 0,
+      .collective_lane_eligible = false,
+      .strict_pure_collective_eligible = false,
+      .source_window_collective_candidate = true,
+      .source_window_selection_mode =
+          tensorcast::store::runtime::ingestion::strategy::SourceWindowCollectiveSelectionMode::kStrict,
+  };
+
+  const auto status = tensorcast::daemon::evaluate_strict_collective_preflight_for_testing(
+      /*rctx=*/nullptr, &plan_summary, v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE);
+
+  REQUIRE(status.ok());
+}
+
+TEST_CASE(
+    "Source-window execution-template cache key ignores runtime group id for selectable source-window modes",
+    "[daemon][binding][source_window]") {
+  using StrategyConfig = tensorcast::store::StoreEngineOptions::MaterializationStrategyConfig;
+  using SelectionMode = StrategyConfig::SourceWindowCollectiveSelectionMode;
+  using DistributionMode = StrategyConfig::SourceWindowCollectiveDistributionMode;
+  using ExecutorPreference = StrategyConfig::ExecutorPreference;
+
+  StrategyConfig strategy_config;
+  strategy_config.enable_source_window_collective = true;
+  strategy_config.source_window_collective_selection_mode = SelectionMode::kStrict;
+  strategy_config.source_window_collective_distribution_mode = DistributionMode::kFullWindowAllGather;
+
+  tensorcast::store::loading::DiskMetadata disk_metadata;
+  disk_metadata.source_index_json = R"({"alpha":[0,4,[1],[1],"torch.float32",0]})";
+  disk_metadata.is_safetensors = true;
+
+  tensorcast::store::loading::ExecutionTopologyContext topology_a;
+  topology_a.source_locality = tensorcast::store::loading::SourceLocalityHint::kSharedSource;
+  topology_a.source_sharing_domain = "shared-domain";
+  topology_a.collective_load_group =
+      tensorcast::store::loading::CollectiveLoadGroupHint{.group_id = "runtime-group-a", .world_size = 8, .rank = 3};
+
+  auto topology_b = topology_a;
+  topology_b.collective_load_group->group_id = "runtime-group-b";
+
+  const auto uses_stable_group_key = [&](const StrategyConfig& config,
+                                         const std::optional<tensorcast::store::loading::DiskMetadata>& metadata,
+                                         v2::CollectivePolicy policy,
+                                         const tensorcast::store::loading::ExecutionTopologyContext& topology,
+                                         bool disk_source_available) {
+    return tensorcast::daemon::source_window_execution_template_uses_stable_runtime_group_for_testing(
+        config, metadata, policy, topology, disk_source_available);
+  };
+
+  CHECK(uses_stable_group_key(
+      strategy_config,
+      disk_metadata,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE,
+      topology_a,
+      /*disk_source_available=*/true));
+
+  auto auto_config = strategy_config;
+  auto_config.source_window_collective_selection_mode = SelectionMode::kAuto;
+  CHECK(uses_stable_group_key(
+      auto_config,
+      disk_metadata,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST,
+      topology_a,
+      /*disk_source_available=*/true));
+
+  auto dry_run_config = strategy_config;
+  dry_run_config.source_window_collective_selection_mode = SelectionMode::kDryRun;
+  CHECK_FALSE(uses_stable_group_key(
+      dry_run_config,
+      disk_metadata,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST,
+      topology_a,
+      /*disk_source_available=*/true));
+  dry_run_config.executor_preference = ExecutorPreference::kSourceWindowCollective;
+  CHECK(uses_stable_group_key(
+      dry_run_config,
+      disk_metadata,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST,
+      topology_a,
+      /*disk_source_available=*/true));
+
+  auto disabled_config = strategy_config;
+  disabled_config.enable_source_window_collective = false;
+  CHECK_FALSE(uses_stable_group_key(
+      disabled_config,
+      disk_metadata,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST,
+      topology_a,
+      /*disk_source_available=*/true));
+  CHECK_FALSE(uses_stable_group_key(
+      strategy_config,
+      disk_metadata,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_DISABLE_COLLECTIVE,
+      topology_a,
+      /*disk_source_available=*/true));
+  CHECK_FALSE(uses_stable_group_key(
+      strategy_config,
+      std::nullopt,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST,
+      topology_a,
+      /*disk_source_available=*/true));
+  auto non_safetensors_metadata = disk_metadata;
+  non_safetensors_metadata.is_safetensors = false;
+  CHECK_FALSE(uses_stable_group_key(
+      strategy_config,
+      non_safetensors_metadata,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST,
+      topology_a,
+      /*disk_source_available=*/true));
+  auto single_rank_topology = topology_a;
+  single_rank_topology.collective_load_group->world_size = 1;
+  CHECK_FALSE(uses_stable_group_key(
+      strategy_config,
+      disk_metadata,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST,
+      single_rank_topology,
+      /*disk_source_available=*/true));
+
+  const bool include_runtime_group_id = !uses_stable_group_key(
+      auto_config,
+      disk_metadata,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST,
+      topology_a,
+      /*disk_source_available=*/true);
+  const std::string stable_a = tensorcast::daemon::mapped_execution_template_cache_key_for_testing(
+      "mapped-plan-key",
+      disk_metadata,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST,
+      auto_config,
+      topology_a,
+      /*disk_source_available=*/true,
+      include_runtime_group_id);
+  const std::string stable_b = tensorcast::daemon::mapped_execution_template_cache_key_for_testing(
+      "mapped-plan-key",
+      disk_metadata,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST,
+      auto_config,
+      topology_b,
+      /*disk_source_available=*/true,
+      include_runtime_group_id);
+  CHECK(stable_a == stable_b);
+
+  const std::string runtime_a = tensorcast::daemon::mapped_execution_template_cache_key_for_testing(
+      "mapped-plan-key",
+      disk_metadata,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE,
+      strategy_config,
+      topology_a,
+      /*disk_source_available=*/true,
+      /*include_runtime_group_id=*/true);
+  const std::string runtime_b = tensorcast::daemon::mapped_execution_template_cache_key_for_testing(
+      "mapped-plan-key",
+      disk_metadata,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE,
+      strategy_config,
+      topology_b,
+      /*disk_source_available=*/true,
+      /*include_runtime_group_id=*/true);
+  CHECK(runtime_a != runtime_b);
+
+  auto rank_changed = topology_a;
+  rank_changed.collective_load_group->rank = 4;
+  const std::string stable_rank_changed = tensorcast::daemon::mapped_execution_template_cache_key_for_testing(
+      "mapped-plan-key",
+      disk_metadata,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_COLLECTIVE_FIRST,
+      auto_config,
+      rank_changed,
+      /*disk_source_available=*/true,
+      include_runtime_group_id);
+  CHECK(stable_rank_changed != stable_a);
+}
+
+TEST_CASE(
+    "Source-window prepared realization keys split group template from member target facts",
+    "[daemon][binding][source_window]") {
+  using StrategyConfig = tensorcast::store::StoreEngineOptions::MaterializationStrategyConfig;
+  using SelectionMode = StrategyConfig::SourceWindowCollectiveSelectionMode;
+  using DistributionMode = StrategyConfig::SourceWindowCollectiveDistributionMode;
+
+  StrategyConfig strategy_config;
+  strategy_config.enable_source_window_collective = true;
+  strategy_config.source_window_collective_selection_mode = SelectionMode::kStrict;
+  strategy_config.source_window_collective_distribution_mode = DistributionMode::kFullWindowAllGather;
+
+  tensorcast::common::v1::ArtifactSelection selection;
+  selection.set_artifact_id("msa1:test-session~policy~safetensors~source");
+
+  v2::BindingRealizationPlan realization_plan;
+  realization_plan.set_version(1);
+  auto* entry = realization_plan.add_entries();
+  entry->set_op_kind(v2::BINDING_REALIZATION_OP_KIND_COPY);
+  entry->set_source_name("alpha");
+  entry->set_dst_name("alpha");
+  auto* source_range = entry->add_source_ranges();
+  source_range->set_dim(0);
+  source_range->set_start(0);
+  source_range->set_end(1);
+  auto* dst_range = entry->add_dst_ranges();
+  dst_range->set_dim(0);
+  dst_range->set_start(0);
+  dst_range->set_end(1);
+
+  tensorcast::store::loading::DiskMetadata disk_metadata;
+  disk_metadata.canonical_index_json = make_target_index_json();
+  disk_metadata.source_index_json = make_target_index_json();
+  disk_metadata.index_multihash = "sha256:index";
+  disk_metadata.is_safetensors = true;
+
+  tensorcast::store::loading::ExecutionTopologyContext topology_a;
+  topology_a.source_locality = tensorcast::store::loading::SourceLocalityHint::kSharedSource;
+  topology_a.source_sharing_domain = "shared-domain";
+  topology_a.collective_load_group =
+      tensorcast::store::loading::CollectiveLoadGroupHint{.group_id = "runtime-group-a", .world_size = 8, .rank = 3};
+
+  v2::TargetLayout target_layout_a = make_target_layout();
+  v2::TargetLayout target_layout_b = target_layout_a;
+  target_layout_b.mutable_storages(0)->set_device_id(1);
+
+  auto topology_b = topology_a;
+  topology_b.collective_load_group->group_id = "runtime-group-b";
+  topology_b.collective_load_group->rank = 4;
+
+  const std::string group_a = tensorcast::daemon::source_window_prepared_realization_group_key_for_testing(
+      "msa1:test-session~policy~safetensors~source",
+      selection,
+      target_layout_a,
+      make_target_index_json(),
+      make_target_index_json(),
+      disk_metadata,
+      v2::TRANSFORM_PLACEMENT_SERVER,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE,
+      strategy_config,
+      topology_a,
+      /*disk_source_available=*/true);
+  const std::string group_b = tensorcast::daemon::source_window_prepared_realization_group_key_for_testing(
+      "msa1:test-session~policy~safetensors~source",
+      selection,
+      target_layout_b,
+      make_target_index_json(),
+      make_target_index_json(),
+      disk_metadata,
+      v2::TRANSFORM_PLACEMENT_SERVER,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE,
+      strategy_config,
+      topology_b,
+      /*disk_source_available=*/true);
+  CHECK(group_a == group_b);
+
+  const std::string member_a = tensorcast::daemon::source_window_prepared_realization_member_key_for_testing(
+      group_a, "realization-plan-a", target_layout_a, topology_a);
+  const std::string member_realization_changed =
+      tensorcast::daemon::source_window_prepared_realization_member_key_for_testing(
+          group_a, "realization-plan-b", target_layout_a, topology_a);
+  const std::string member_rank_changed = tensorcast::daemon::source_window_prepared_realization_member_key_for_testing(
+      group_a, "realization-plan-a", target_layout_a, topology_b);
+  const std::string member_device_changed =
+      tensorcast::daemon::source_window_prepared_realization_member_key_for_testing(
+          group_a, "realization-plan-a", target_layout_b, topology_a);
+  CHECK(member_a != member_realization_changed);
+  CHECK(member_a != member_rank_changed);
+  CHECK(member_a != member_device_changed);
+
+  auto target_layout_size_changed = target_layout_a;
+  target_layout_size_changed.mutable_storages(0)->set_storage_length(8);
+  const std::string group_size_changed = tensorcast::daemon::source_window_prepared_realization_group_key_for_testing(
+      "msa1:test-session~policy~safetensors~source",
+      selection,
+      target_layout_size_changed,
+      make_target_index_json(),
+      make_target_index_json(),
+      disk_metadata,
+      v2::TRANSFORM_PLACEMENT_SERVER,
+      v2::CollectivePolicy::COLLECTIVE_POLICY_REQUIRE_COLLECTIVE,
+      strategy_config,
+      topology_a,
+      /*disk_source_available=*/true);
+  CHECK(group_size_changed != group_a);
+}
+
 TEST_CASE(
     "RefillOwnedBinding directly refills mapped binding from selected serving artifact view",
     "[daemon][binding][mapped]") {

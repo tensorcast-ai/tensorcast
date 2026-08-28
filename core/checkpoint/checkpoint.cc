@@ -1278,20 +1278,29 @@ absl::StatusOr<std::pair<std::string, std::uint64_t>> get_cuda_memory_handle_wit
 }
 
 absl::StatusOr<std::uint64_t> get_cuda_memory_ptr(int device_id, const std::string& cuda_ipc_handle) {
+  const auto profile_start = std::chrono::steady_clock::now();
   if (cuda_ipc_handle.size() != cuda::IpcHandleBytes::kHandleSize) {
     return absl::InvalidArgumentError("invalid CUDA IPC handle size");
   }
   cuda::IpcHandleBytes bytes;
   std::memcpy(bytes.bytes.data(), cuda_ipc_handle.data(), bytes.bytes.size());
   cudaIpcMemHandle_t ipc_handle = bytes.to_native();
+  const auto after_handle = std::chrono::steady_clock::now();
 
   auto set_device_status = cuda::set_device(device_id);
+  const auto after_set_device = std::chrono::steady_clock::now();
   if (!set_device_status.ok()) {
     return set_device_status;
   }
 
   void* opened_ptr = nullptr;
   auto ipc_open_status = cuda::open_ipc_mem_handle(&opened_ptr, ipc_handle, cudaIpcMemLazyEnablePeerAccess);
+  const auto after_open = std::chrono::steady_clock::now();
+  LOG(INFO) << "tc_profile_cpp checkpoint.get_cuda_memory_ptr timings device_id=" << device_id
+            << " handle_sec=" << std::chrono::duration<double>(after_handle - profile_start).count()
+            << " set_device_sec=" << std::chrono::duration<double>(after_set_device - after_handle).count()
+            << " open_ipc_sec=" << std::chrono::duration<double>(after_open - after_set_device).count()
+            << " total_sec=" << std::chrono::duration<double>(after_open - profile_start).count();
   if (!ipc_open_status.ok()) {
     return ipc_open_status;
   }

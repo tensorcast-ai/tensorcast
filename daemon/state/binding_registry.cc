@@ -16,6 +16,10 @@ bool is_ready_state(v2::BindingState state) {
   return state == v2::BINDING_STATE_READY_ARTIFACT || state == v2::BINDING_STATE_READY_LOCAL;
 }
 
+bool is_retained_attachable_state(v2::BindingState state) {
+  return is_ready_state(state) || state == v2::BINDING_STATE_ALLOCATED;
+}
+
 bool finite_deadline_due(absl::Time deadline, absl::Time now) {
   return deadline != absl::InfiniteFuture() && now >= deadline;
 }
@@ -445,7 +449,7 @@ absl::Status BindingRegistry::validate_acquire_request(const v2::AcquireBindingV
   if (!record->retained_ref) {
     return absl::FailedPreconditionError("binding is not retained");
   }
-  if (!is_ready_state(record->state)) {
+  if (!is_retained_attachable_state(record->state)) {
     return absl::FailedPreconditionError("binding is not ready");
   }
   if (record->binding_layout_id != ref.binding_layout_id()) {
@@ -531,7 +535,32 @@ absl::Status BindingRegistry::validate_and_acquire_attachment_ref(
   if (auto status = validate_acquire_request(request, now); !status.ok()) {
     return status;
   }
-  return acquire_attachment_ref(request.binding_value_ref().binding_id(), now);
+  std::shared_ptr<Record> record;
+  {
+    absl::MutexLock lock(&mu_);
+    auto it = records_.find(request.binding_value_ref().binding_id());
+    if (it == records_.end()) {
+      return absl::NotFoundError("binding_id not found");
+    }
+    record = it->second;
+  }
+  absl::MutexLock lock(&record->mu);
+  if (record->retired) {
+    return absl::FailedPreconditionError("binding is retired");
+  }
+  if (!record->retained_ref) {
+    return absl::FailedPreconditionError("binding is not retained");
+  }
+  if (!is_retained_attachable_state(record->state)) {
+    return absl::FailedPreconditionError("binding is not attachable");
+  }
+  if (record->active_attachment_refs == 0 && record->first_acquired_at == absl::InfinitePast()) {
+    record->first_acquired_at = now;
+  }
+  record->last_acquired_at = now;
+  record->idle_deadline = absl::InfiniteFuture();
+  record->active_attachment_refs++;
+  return absl::OkStatus();
 }
 
 absl::Status BindingRegistry::validate_group_staged_acquire_request(
@@ -754,7 +783,21 @@ absl::Status BindingRegistry::keepalive_attachment_ref(std::string_view binding_
 }
 
 void BindingRegistry::release_attachment_ref(std::string_view binding_id, absl::Time now) {
-  release_attachment_ref(binding_id, now, absl::InfiniteDuration());
+  absl::Duration idle_ttl = absl::InfiniteDuration();
+  std::shared_ptr<Record> record;
+  {
+    absl::MutexLock lock(&mu_);
+    auto it = records_.find(std::string(binding_id));
+    if (it == records_.end()) {
+      return;
+    }
+    record = it->second;
+  }
+  {
+    absl::MutexLock lock(&record->mu);
+    idle_ttl = record->idle_ttl_after_last_release;
+  }
+  release_attachment_ref(binding_id, now, idle_ttl);
 }
 
 void BindingRegistry::release_attachment_ref(std::string_view binding_id, absl::Time now, absl::Duration idle_ttl) {
@@ -774,7 +817,7 @@ void BindingRegistry::release_attachment_ref(std::string_view binding_id, absl::
     }
     if (record->active_attachment_refs == 0) {
       record->last_released_at = now;
-      if (idle_ttl != absl::InfiniteDuration()) {
+      if (idle_ttl != absl::InfiniteDuration() && record->first_acquired_at != absl::InfinitePast()) {
         record->idle_deadline = now + idle_ttl;
       }
     }

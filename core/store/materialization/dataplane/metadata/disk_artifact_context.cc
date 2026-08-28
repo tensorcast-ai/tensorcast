@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <numeric>
@@ -23,10 +25,12 @@
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/escaping.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "core/checkpoint/tensor_writer.h"
+#include "core/common/artifact_hash.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
 #include "core/store/materialization/dataplane/metadata/safetensors_util.h"
 #include "nlohmann/json.hpp"
@@ -51,6 +55,7 @@ struct CacheState {
 };
 
 constexpr size_t kMaxCachedDiskArtifactContexts = 16;
+constexpr int kPersistentIndexCacheSchemaVersion = 1;
 
 CacheState& cache_state() {
   static CacheState state;
@@ -77,25 +82,32 @@ absl::StatusOr<std::string> artifact_directory_cache_fingerprint(const std::file
       return absl::ErrnoToStatus(
           ec.value(), absl::StrCat("Failed to enumerate artifact directory '", artifact_path.string(), "'"));
     }
-    if (!entry.is_regular_file(ec)) {
-      if (ec) {
-        return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat '", entry.path().string(), "'"));
-      }
+    struct stat st{};
+    if (::stat(entry.path().c_str(), &st) != 0) {
+      return absl::ErrnoToStatus(errno, absl::StrCat("Failed to stat '", entry.path().string(), "'"));
+    }
+    if (!S_ISREG(st.st_mode)) {
       continue;
     }
     const std::string filename = entry.path().filename().string();
     if (!is_cache_relevant_file(filename)) {
       continue;
     }
-    const uint64_t size = entry.file_size(ec);
-    if (ec) {
-      return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat size for '", entry.path().string(), "'"));
-    }
-    const auto mtime = entry.last_write_time(ec);
-    if (ec) {
-      return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat mtime for '", entry.path().string(), "'"));
-    }
-    entries.push_back(absl::StrCat(filename, ":", size, ":", mtime.time_since_epoch().count()));
+#if defined(__linux__)
+    const int64_t mtime_ns =
+        static_cast<int64_t>(st.st_mtim.tv_sec) * 1000000000LL + static_cast<int64_t>(st.st_mtim.tv_nsec);
+#else
+    const int64_t mtime_ns = static_cast<int64_t>(st.st_mtime) * 1000000000LL;
+#endif
+    entries.push_back(
+        absl::StrCat(
+            filename,
+            ":inode=",
+            static_cast<uint64_t>(st.st_ino),
+            ":size=",
+            static_cast<uint64_t>(st.st_size),
+            ":mtime_ns=",
+            mtime_ns));
   }
   std::ranges::sort(entries);
   return absl::StrJoin(entries, "|");
@@ -153,6 +165,131 @@ absl::Status validate_safetensors_header_json(int fd, uint64_t header_length) {
     return absl::InvalidArgumentError("Malformed safetensors header: must start with '{'");
   }
   return absl::OkStatus();
+}
+
+std::string sha256_hex(std::string_view payload) {
+  const auto digest = common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  return absl::BytesToHexString(absl::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
+}
+
+std::filesystem::path persistent_index_cache_dir(const std::filesystem::path& artifact_path) {
+  return artifact_path / ".tensorcast" / "metadata_cache";
+}
+
+std::string persistent_index_cache_key(
+    const std::filesystem::path& artifact_path, std::string_view fingerprint, int target_device_id) {
+  return sha256_hex(absl::StrCat(
+      "tensorcast.disk_artifact_context.index.v1\n",
+      "path=",
+      artifact_path.string(),
+      "\nfp=",
+      fingerprint,
+      "\ntarget=",
+      target_device_id));
+}
+
+std::filesystem::path persistent_index_cache_path(
+    const std::filesystem::path& artifact_path, std::string_view fingerprint, int target_device_id) {
+  return persistent_index_cache_dir(artifact_path) /
+      absl::StrCat(persistent_index_cache_key(artifact_path, fingerprint, target_device_id), ".json");
+}
+
+absl::StatusOr<IndexInfo> load_persistent_index_cache(
+    const std::filesystem::path& artifact_path, std::string_view fingerprint, int target_device_id) {
+  const auto path = persistent_index_cache_path(artifact_path, fingerprint, target_device_id);
+  std::ifstream in(path, std::ios::binary);
+  if (!in.is_open()) {
+    return absl::NotFoundError("persistent disk index cache not found");
+  }
+  try {
+    nlohmann::json j;
+    in >> j;
+    if (!j.is_object()) {
+      return absl::InvalidArgumentError("persistent disk index cache is not an object");
+    }
+    if (j.value("schema_version", 0) != kPersistentIndexCacheSchemaVersion) {
+      return absl::InvalidArgumentError("persistent disk index cache schema mismatch");
+    }
+    if (j.value("artifact_path", std::string()) != artifact_path.string()) {
+      return absl::InvalidArgumentError("persistent disk index cache path mismatch");
+    }
+    if (j.value("directory_fingerprint", std::string()) != std::string(fingerprint)) {
+      return absl::InvalidArgumentError("persistent disk index cache fingerprint mismatch");
+    }
+    if (j.value("target_device_id", -1) != target_device_id) {
+      return absl::InvalidArgumentError("persistent disk index cache target mismatch");
+    }
+    IndexInfo info;
+    info.is_safetensors = j.value("is_safetensors", false);
+    info.total_size_bytes = j.value("total_size_bytes", uint64_t{0});
+    info.source_total_size_bytes = j.value("source_total_size_bytes", uint64_t{0});
+    info.index_multihash = j.value("index_multihash", std::string());
+    info.canonical_index_json = j.value("canonical_index_json", std::string());
+    if (j.contains("source_index_json") && j["source_index_json"].is_string()) {
+      info.source_index_json = j["source_index_json"].get<std::string>();
+    }
+    if (info.canonical_index_json.empty()) {
+      return absl::InvalidArgumentError("persistent disk index cache has empty canonical_index_json");
+    }
+    return info;
+  } catch (const std::exception& e) {
+    return absl::InvalidArgumentError(absl::StrCat("failed to parse persistent disk index cache: ", e.what()));
+  }
+}
+
+void maybe_write_persistent_index_cache(
+    const std::filesystem::path& artifact_path,
+    std::string_view fingerprint,
+    int target_device_id,
+    const IndexInfo& info) {
+  if (!info.is_safetensors || target_device_id != 0 || info.canonical_index_json.empty()) {
+    return;
+  }
+  const auto dir = persistent_index_cache_dir(artifact_path);
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  if (ec) {
+    LOG(INFO) << "DiskArtifactContext persistent index cache disabled for " << artifact_path.string()
+              << ": create_directories failed: " << ec.message();
+    return;
+  }
+  const auto final_path = persistent_index_cache_path(artifact_path, fingerprint, target_device_id);
+  const auto tmp_path = final_path.string() + ".tmp." + std::to_string(::getpid());
+  nlohmann::json j;
+  j["schema_version"] = kPersistentIndexCacheSchemaVersion;
+  j["artifact_path"] = artifact_path.string();
+  j["directory_fingerprint"] = std::string(fingerprint);
+  j["target_device_id"] = target_device_id;
+  j["is_safetensors"] = info.is_safetensors;
+  j["total_size_bytes"] = info.total_size_bytes;
+  j["source_total_size_bytes"] = info.source_total_size_bytes;
+  j["index_multihash"] = info.index_multihash;
+  j["canonical_index_json"] = info.canonical_index_json;
+  if (info.source_index_json.has_value()) {
+    j["source_index_json"] = *info.source_index_json;
+  }
+  {
+    std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+      LOG(INFO) << "DiskArtifactContext persistent index cache disabled for " << artifact_path.string()
+                << ": open failed for " << tmp_path;
+      return;
+    }
+    out << j.dump();
+    out.flush();
+    if (!out.good()) {
+      LOG(INFO) << "DiskArtifactContext persistent index cache write failed for " << tmp_path;
+      std::filesystem::remove(tmp_path, ec);
+      return;
+    }
+  }
+  if (::rename(tmp_path.c_str(), final_path.c_str()) != 0) {
+    const int saved_errno = errno;
+    LOG(INFO) << "DiskArtifactContext persistent index cache rename failed for " << final_path.string() << ": "
+              << strerror(saved_errno);
+    std::filesystem::remove(tmp_path, ec);
+  }
 }
 
 absl::StatusOr<std::shared_ptr<SharedFileHandle>> open_shared_file(const std::filesystem::path& path) {
@@ -452,6 +589,7 @@ absl::StatusOr<std::shared_ptr<const DiskArtifactContext>> build_disk_artifact_c
   std::vector<std::filesystem::path> partition_paths;
   std::vector<size_t> partition_sizes;
   std::vector<SharedSafetensorsSegment> safetensors_segments;
+  std::optional<IndexInfo> initial_index_info;
   uint64_t total_size = 0;
   bool is_safetensors = false;
 
@@ -478,6 +616,19 @@ absl::StatusOr<std::shared_ptr<const DiskArtifactContext>> build_disk_artifact_c
   } else if (!safetensors_paths.empty()) {
     is_safetensors = true;
     std::ranges::sort(safetensors_paths, [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
+    std::optional<std::string> directory_fingerprint;
+    auto fingerprint_or = artifact_directory_cache_fingerprint(artifact_path);
+    if (fingerprint_or.ok()) {
+      directory_fingerprint = *fingerprint_or;
+      auto cached_index_or = load_persistent_index_cache(artifact_path, *directory_fingerprint, /*target_device_id=*/0);
+      if (cached_index_or.ok()) {
+        initial_index_info = *cached_index_or;
+        LOG(INFO) << "DiskArtifactContext persistent index cache hit path=" << artifact_path.string();
+      } else if (!absl::IsNotFound(cached_index_or.status())) {
+        LOG(INFO) << "DiskArtifactContext ignored persistent index cache for " << artifact_path.string() << ": "
+                  << cached_index_or.status();
+      }
+    }
     partition_paths.reserve(safetensors_paths.size());
     partition_sizes.reserve(safetensors_paths.size());
     safetensors_segments.reserve(safetensors_paths.size());
@@ -491,9 +642,11 @@ absl::StatusOr<std::shared_ptr<const DiskArtifactContext>> build_disk_artifact_c
       if (!header_or.ok()) {
         return header_or.status();
       }
-      auto header_status = validate_safetensors_header_json((*handle_or)->fd(), header_or->header_length);
-      if (!header_status.ok()) {
-        return header_status;
+      if (!initial_index_info.has_value()) {
+        auto header_status = validate_safetensors_header_json((*handle_or)->fd(), header_or->header_length);
+        if (!header_status.ok()) {
+          return header_status;
+        }
       }
       partition_paths.push_back(path);
       partition_sizes.push_back(static_cast<size_t>(header_or->data_size));
@@ -546,7 +699,8 @@ absl::StatusOr<std::shared_ptr<const DiskArtifactContext>> build_disk_artifact_c
       descriptor_present,
       tensor_index_json_present,
       tensor_index_cbor_present,
-      std::move(safetensors_segments)));
+      std::move(safetensors_segments),
+      std::move(initial_index_info)));
 }
 
 } // namespace
@@ -596,7 +750,8 @@ DiskArtifactContext::DiskArtifactContext(
     bool descriptor_present,
     bool tensor_index_json_present,
     bool tensor_index_cbor_present,
-    std::vector<SharedSafetensorsSegment> safetensors_segments)
+    std::vector<SharedSafetensorsSegment> safetensors_segments,
+    std::optional<IndexInfo> initial_index_info)
     : artifact_path_(std::move(artifact_path)),
       partition_paths_(std::move(partition_paths)),
       partition_sizes_(std::move(partition_sizes)),
@@ -605,7 +760,11 @@ DiskArtifactContext::DiskArtifactContext(
       descriptor_present_(descriptor_present),
       tensor_index_json_present_(tensor_index_json_present),
       tensor_index_cbor_present_(tensor_index_cbor_present),
-      safetensors_segments_(std::move(safetensors_segments)) {}
+      safetensors_segments_(std::move(safetensors_segments)) {
+  if (initial_index_info.has_value()) {
+    index_cache_.push_back({0, std::move(*initial_index_info)});
+  }
+}
 
 absl::StatusOr<IndexInfo> DiskArtifactContext::get_index_info(int target_device_id) const {
   {
@@ -626,6 +785,15 @@ absl::StatusOr<IndexInfo> DiskArtifactContext::get_index_info(int target_device_
   auto info_or = read_from_artifact_dir(artifact_path_, target_device_id);
   if (!info_or.ok()) {
     return info_or.status();
+  }
+  if (is_safetensors_ && target_device_id == 0) {
+    auto fingerprint_or = artifact_directory_cache_fingerprint(artifact_path_);
+    if (fingerprint_or.ok()) {
+      maybe_write_persistent_index_cache(artifact_path_, *fingerprint_or, target_device_id, *info_or);
+    } else {
+      LOG(INFO) << "DiskArtifactContext skipped persistent index cache write for " << artifact_path_.string() << ": "
+                << fingerprint_or.status();
+    }
   }
 
   {

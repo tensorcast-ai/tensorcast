@@ -360,6 +360,17 @@ grpc::Status LeaseController::release_placement_lease(
   }
   auto resolution_or = resolve_placement_lease_token(req.lease_token(), d_, /*require_not_expired=*/false);
   if (!resolution_or.ok()) {
+    if (absl::IsNotFound(resolution_or.status()) && d_.handle_leases != nullptr) {
+      auto handle_release_status = d_.handle_leases->release(req.lease_token());
+      if (handle_release_status.ok()) {
+        resp.set_released(true);
+        rctx.mark_success();
+        return Status::OK;
+      }
+      if (!absl::IsNotFound(handle_release_status)) {
+        return to_grpc_status(handle_release_status);
+      }
+    }
     return to_grpc_status(resolution_or.status());
   }
   const uint64_t lease_id = resolution_or->lease_id;

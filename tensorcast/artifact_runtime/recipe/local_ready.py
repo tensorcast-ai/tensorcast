@@ -35,6 +35,7 @@ from tensorcast.artifact_runtime.recipe.compiler import (
 from tensorcast.artifact_runtime.recipe.compiler import (
     compiled_recipe_realization_plan_count as _compiled_recipe_realization_plan_count,
 )
+from tensorcast.profile_utils import tensorcast_profile_stage
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 LOCAL_READY_BOOTSTRAP_BUILD_PIPELINE_VERSION = "tensorcast-bootstrap-v1"
@@ -123,8 +124,10 @@ def prepare_same_binding_manifest_carrier(
     representation_contract_hash: str,
     logical_topology_json_payload: str | None = None,
     topology_admission_digest: str | None = None,
+    base_canonical_index: tc.CanonicalIndex | None = None,
 ) -> tuple[str, bytes]:
-    base_canonical_index = canonical_index_from_recipe(recipe)
+    if base_canonical_index is None:
+        base_canonical_index = canonical_index_from_recipe(recipe)
     build_pipeline_version = LOCAL_READY_BOOTSTRAP_BUILD_PIPELINE_VERSION
     publication_context = publication_context_from_recipe(
         recipe,
@@ -272,29 +275,74 @@ def realize_local_ready_binding_from_source(
     options: Any | None,
     binding_factory: Callable[..., Any] | None = None,
 ) -> LocalReadyBindingRealizationResult:
-    source_view = source_view_for_recipe(recipe, source_subject)
-    layout = build_binding_layout_for_recipe(
-        recipe,
-        target_device=target_device,
-        manifest_tensor_name=manifest_tensor_name,
-        manifest_bytes=manifest_bytes,
-    )
-    binding = create_local_ready_binding(
-        layout,
-        target_device=target_device,
-        binding_factory=binding_factory,
-    )
-    realization_plan = realization_plan_proto_with_manifest(
-        bytes(getattr(recipe, "realization_plan_proto", b"") or b""),
-        manifest_bytes,
-        manifest_tensor_name=manifest_tensor_name,
-    )
-    try:
-        update_epoch = binding.realize_from(
-            source_view,
-            realization_plan=realization_plan,
-            options=options,
+    with tensorcast_profile_stage(
+        "tensorcast",
+        "local_ready.realize.prepare_layout",
+        logger=_LOGGER,
+        device=target_device,
+        extra={
+            "target_device": str(target_device),
+            "manifest_tensor_name": manifest_tensor_name,
+            "manifest_bytes": len(manifest_bytes or b""),
+        },
+    ) as profile:
+        source_view = source_view_for_recipe(recipe, source_subject)
+        layout = build_binding_layout_for_recipe(
+            recipe,
+            target_device=target_device,
+            manifest_tensor_name=manifest_tensor_name,
+            manifest_bytes=manifest_bytes,
         )
+        if profile is not None:
+            profile["target_tensor_count"] = len(layout.target_layout.offsets)
+            profile["target_index_bytes_len"] = len(layout.target_index_bytes)
+            profile["dst_spec_count"] = len(layout.dst_specs)
+    with tensorcast_profile_stage(
+        "tensorcast",
+        "local_ready.realize.create_binding",
+        logger=_LOGGER,
+        device=target_device,
+        extra={
+            "target_device": str(target_device),
+            "target_tensor_count": len(layout.target_layout.offsets),
+            "target_index_bytes_len": len(layout.target_index_bytes),
+        },
+    ):
+        binding = create_local_ready_binding(
+            layout,
+            target_device=target_device,
+            binding_factory=binding_factory,
+        )
+    with tensorcast_profile_stage(
+        "tensorcast",
+        "local_ready.realize.prepare_plan",
+        logger=_LOGGER,
+        device=target_device,
+        extra={"manifest_tensor_name": manifest_tensor_name},
+    ) as profile:
+        realization_plan = realization_plan_proto_with_manifest(
+            bytes(getattr(recipe, "realization_plan_proto", b"") or b""),
+            manifest_bytes,
+            manifest_tensor_name=manifest_tensor_name,
+        )
+        if profile is not None:
+            profile["realization_entry_count"] = len(realization_plan.entries)
+    try:
+        with tensorcast_profile_stage(
+            "tensorcast",
+            "local_ready.realize.realize_from",
+            logger=_LOGGER,
+            device=target_device,
+            extra={
+                "target_device": str(target_device),
+                "realization_entry_count": len(realization_plan.entries),
+            },
+        ):
+            update_epoch = binding.realize_from(
+                source_view,
+                realization_plan=realization_plan,
+                options=options,
+            )
     except Exception:
         _close_binding_after_failure(binding, phase="realize_from")
         raise
