@@ -1,0 +1,3728 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0120-artifact-centered-model-runtime-realization/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Artifact-Centered Model Runtime Realization - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Artifact-Centered Model Runtime Realization
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p>This design defines the target model for TensorCast model-runtime realization.
+The target is artifact-centered: durable identity, source selection, movement,
+target planning, lifecycle, diagnostics, publication, and reuse all start from
+<code>Artifact</code> and flow through one realization model.</p>
+<p>"Serving" is not a primary TensorCast system concept in the target state. It is
+one model-runtime workload profile layered on top of artifact realization.</p>
+<p><code>0121</code> is the companion kernel design for the realization model described here.
+This document owns the artifact-centered target state; <code>0121</code> owns the shared
+selection, target, strategy, representation, lifecycle, execution, and report
+spine that prevents TensorDict, binding, retained prefetch, runtime attach, and
+TP from becoming separate materialization systems.</p>
+<p>The companion plan records current implementation status and migration steps.
+This design intentionally describes the desired end state: direct artifact
+model-runtime realization is the professional framework boundary; a separate
+public serving session is not the long-term API.</p>
+<p>The decision is:</p>
+<ul>
+<li>keep <code>Artifact</code> as the durable identity, routing, discovery, lifecycle, and
+  replica-publication root;</li>
+<li>treat "serving" as a model-runtime workload profile, not as a second artifact
+  system;</li>
+<li>keep <code>Binding</code> as the daemon-owned local realization boundary;</li>
+<li>keep <code>RuntimeAttachment</code> as the process-local framework boundary;</li>
+<li>make TensorDict materialization, daemon binding, model-runtime attachment,
+  retained prefetch, TP/P2P, reload, and local-ready promotion converge on one
+  artifact realization model;</li>
+<li>expose model-runtime realization through <code>Artifact.realize(...)</code> and a
+  completed <code>ArtifactRealizationHandle</code>, not through a second public
+  <code>ServingRuntimeSession</code> root;</li>
+<li>keep framework construction, tensor surface, finalize hooks, placement facts,
+  source catalog, and collective behavior in a runtime host capability bundle
+  outside <code>Artifact</code>;</li>
+<li>delete old serving-rooted public entrypoints, compatibility adapters, duplicate
+  diagnostics paths, and redundant tests once the artifact-runtime replacement
+  is wired; the target state must not require maintaining two materialization or
+  model-runtime stacks;</li>
+<li>preserve the current vLLM scenario semantics, fastest compatible data path,
+  retained memory-credit timing, and zero-extra-weight-residency behavior even
+  when TensorCast and vLLM APIs are changed incompatibly.</li>
+</ul>
+<pre class="mermaid"><code>flowchart LR
+  A["Artifact&lt;br&gt;durable identity"] --&gt; B["ArtifactSelection&lt;br&gt;what bytes and view"]
+  B --&gt; C["ArtifactRealizationSpec&lt;br&gt;target profile strategy admission"]
+  C --&gt; K["RuntimeHostCapabilities&lt;br&gt;framework and placement facts"]
+  C --&gt; D["ArtifactRealizationHandle&lt;br&gt;completed realized value lifecycle"]
+  D --&gt; E["TensorDict projection&lt;br&gt;ordinary retrieval"]
+  D --&gt; F["BindingValue projection&lt;br&gt;daemon-owned local value"]
+  D --&gt; G["RuntimeAttachment&lt;br&gt;framework-owned process boundary"]
+  D --&gt; H["PrefetchHandoff&lt;br&gt;retained acquire claim"]
+  D --&gt; I["ArtifactReplica&lt;br&gt;published data source"]
+  G --&gt; J["vLLM or SGLang adapter&lt;br&gt;runtime-only finalize and reload"]</code></pre>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Define the canonical artifact-centered target state for the current serving
+  runtime baseline.</li>
+<li>Reduce user-facing concepts by making artifact realization the shared path for
+  TensorDict retrieval, durable load, binding, local source bootstrap, retained
+  prefetch acquire, TP realization, P2P reuse, reload, and runtime replica
+  publication.</li>
+<li>Preserve vLLM functionality and performance semantics as hard constraints,
+  not compatibility accidents.</li>
+<li>Separate public/professional APIs from internal execution objects:
+  user-facing flows should speak in artifacts, realization specs, realization
+  handles, and projections; execution code may keep richer target, profile,
+  binding, layout, reservation, and publication details.</li>
+<li>Keep device facts and framework facts out of durable artifact identity while
+  still making them explicit in realization admission.</li>
+<li>Make P2P and TP more consistent by treating them as realization strategies
+  under artifact selection, not as separate serving-only workflows.</li>
+</ul>
+<h2 id="non-goals">Non-Goals<a class="headerlink" href="#non-goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Do not treat <code>tensorcast.serving</code> as a compatibility boundary. It is the
+  current implementation namespace and may be reshaped directly when the final
+  artifact-centered model is clearer.</li>
+<li>Do not collapse every runtime concern into <code>Artifact</code>. Artifact is the root,
+  not a god object.</li>
+<li>Do not make local-ready binding values durable or globally routable without an
+  explicit representation publication.</li>
+<li>Do not let P2P imply representation conversion or TP reshaping. P2P moves
+  compatible bytes; transforms remain representation contracts and realization
+  plans.</li>
+<li>Do not preserve Python API compatibility as a requirement. Behavior, scenario
+  depth, and performance-sensitive semantics are the requirements.</li>
+<li>Do not keep compatibility shims, aliases, or duplicate lowerings after their
+  artifact-centered replacements are in use. Transitional code is allowed only
+  inside a bounded migration phase tracked by the plan.</li>
+<li>Do not put direct Global Store access in the Python SDK.</li>
+</ul>
+<h1 id="relationship-to-the-migration-plan">Relationship To The Migration Plan<a class="headerlink" href="#relationship-to-the-migration-plan" title="Permanent link">&para;</a></h1>
+<p>The plan paired with this design owns current code status, phase tracking,
+implementation gaps, and rollout order. This design should not be read as an
+implementation snapshot.</p>
+<p>The serving-runtime baseline remains important only as a regression contract:</p>
+<ul>
+<li>vLLM behavior is a regression baseline;</li>
+<li>runtime attachment, retained acquire, reload, runtime view, publication, and
+  retirement behavior must not regress;</li>
+<li>serving-centered names may be renamed, absorbed, or kept internal only after
+  the artifact-centered replacement preserves the same behavior;</li>
+<li>current implementation names do not define target terminology.</li>
+</ul>
+<h1 id="prior-constraints-reviewed">Prior Constraints Reviewed<a class="headerlink" href="#prior-constraints-reviewed" title="Permanent link">&para;</a></h1>
+<h2 id="unified-artifact-sdk-entrypoint-0039">Unified Artifact SDK Entrypoint (<code>0039</code>)<a class="headerlink" href="#unified-artifact-sdk-entrypoint-0039" title="Permanent link">&para;</a></h2>
+<p>Kept and upgraded. <code>0039</code> now owns the public SDK entrance: users obtain or
+create an <code>Artifact</code>, then realize, bind, prefetch, attach, or publish through
+that root. This design extends that rule by treating TensorDict retrieval,
+binding, and model-runtime attach as projections over one realization model. A
+model runtime is a profiled realization of an artifact or source artifact, not a
+separate serving object graph.</p>
+<h2 id="selection-first-retrieval-0078">Selection-first retrieval (<code>0078</code>)<a class="headerlink" href="#selection-first-retrieval-0078" title="Permanent link">&para;</a></h2>
+<p>Kept. <code>ArtifactSelection</code> remains the identity for what artifact/view/subset is
+being materialized. Realization targets, topology, collective settings, and P2P
+source choices do not replace selection identity.</p>
+<h2 id="binding-model-0084">Binding model (<code>0084</code>)<a class="headerlink" href="#binding-model-0084" title="Permanent link">&para;</a></h2>
+<p>Kept and narrowed. <code>Binding</code> is the local daemon-owned realization boundary. It
+is not durable identity and is not automatically a global artifact replica.
+Serving-specific binding values should be understood as binding-value
+projections with a model-runtime profile. TensorDict retrieval should not remain
+a separate fallback around binding semantics when the target state is a durable
+or retained local value.</p>
+<h2 id="materialization-strategy-0108">Materialization strategy (<code>0108</code>)<a class="headerlink" href="#materialization-strategy-0108" title="Permanent link">&para;</a></h2>
+<p>Kept. Disk, P2P, typed copy, collective, and fallback lanes belong in the shared
+strategy plane. The next model-runtime layer should not reimplement strategy
+selection inside a serving-only branch.</p>
+<h2 id="representation-contract-0110">Representation contract (<code>0110</code>)<a class="headerlink" href="#representation-contract-0110" title="Permanent link">&para;</a></h2>
+<p>Kept. TP slicing, runtime tensor schema, layout, and semantic placement safety
+must be represented by the representation contract and realization plan. P2P
+may only reuse a source when the source representation is compatible with the
+target member layout.</p>
+<h2 id="source-to-serving-publication-0111">Source-to-serving publication (<code>0111</code>)<a class="headerlink" href="#source-to-serving-publication-0111" title="Permanent link">&para;</a></h2>
+<p>Kept but renamed conceptually. The durable output is a published representation
+artifact. The fact that vLLM uses it for serving is profile metadata and
+operator intent, not a separate identity system.</p>
+<h2 id="binding-native-realization-0112">Binding-native realization (<code>0112</code>)<a class="headerlink" href="#binding-native-realization-0112" title="Permanent link">&para;</a></h2>
+<p>Kept. Same-binding local-ready realization is the correct deep primitive: source
+artifact bytes are realized into a binding, framework finalize runs against the
+same binding-backed tensors, and promotion to a durable artifact is explicit.</p>
+<h2 id="collective-first-tp-startup-0114">Collective-first TP startup (<code>0114</code>)<a class="headerlink" href="#collective-first-tp-startup-0114" title="Permanent link">&para;</a></h2>
+<p>Kept and generalized. Collective-first TP startup is a realization strategy for
+a target set. It should be available through the same artifact realization
+pipeline as P2P and disk load, not only through serving-local code.</p>
+<h2 id="prefetch-serving-binding-target-0116">Prefetch serving binding target (<code>0116</code>)<a class="headerlink" href="#prefetch-serving-binding-target-0116" title="Permanent link">&para;</a></h2>
+<p>Superseded as a standalone public serving-target design and absorbed into this
+artifact-realization direction. Its retained residency and acquire-validation
+semantics are kept: prefetch prepares retained daemon-owned realization, and the
+serialized handoff is a retained binding claim/capability for a realization
+target. It is not user-facing preload vocabulary and should not remain a
+separate serving materialization family.</p>
+<h2 id="serving-runtime-cleanup-baseline">Serving runtime cleanup baseline<a class="headerlink" href="#serving-runtime-cleanup-baseline" title="Permanent link">&para;</a></h2>
+<p>Kept as current behavior baseline, not as an API compatibility boundary. Its
+<code>ServingRuntimeSession</code>, <code>RuntimeAttachment</code>, retained acquire, runtime view,
+and runtime replica publication behavior become inputs to this successor design,
+and their interfaces may be changed when the replacement preserves or improves
+the scenario semantics.</p>
+<h1 id="target-runtime-boundary">Target Runtime Boundary<a class="headerlink" href="#target-runtime-boundary" title="Permanent link">&para;</a></h1>
+<p>The target runtime boundary has one public root and two explicit layers below
+it:</p>
+<ul>
+<li><code>Artifact</code> is the durable root for identity, discovery, selection, replica
+  lifecycle, and publication.</li>
+<li><code>ArtifactRealizationSpec</code> expresses target kind, model-runtime profile,
+  representation/admission requirements, strategy preferences, and lifecycle
+  intent.</li>
+<li><code>RuntimeHostCapabilities</code> is the professional framework boundary for model
+  construction, tensor surface, finalize hooks, semantic probes, placement
+  facts, source catalog, and collective behavior. It is an adapter capability
+  bundle, not durable artifact identity.</li>
+<li><code>ArtifactRealizationHandle</code> is a completed realization facade. It exposes
+  only projections/actions granted by the realization lifecycle plan.</li>
+<li><code>RuntimeAttachment</code> remains process-local framework state. It owns the model
+  object, runtime-only tensors, reload projection, publication hooks, and close
+  semantics.</li>
+</ul>
+<p>The target API should not require frameworks to construct a serving-named
+session. A framework integration should provide host capabilities to
+<code>Artifact.realize(...)</code> and receive a completed realization handle whose
+runtime-attachment projection can be stored on the framework model object.</p>
+<p>The target design may keep implementation modules under <code>tensorcast.serving</code>
+during migration. Those modules are lowerings of the artifact-runtime model, not
+the public conceptual center.</p>
+<h1 id="final-module-ownership">Final Module Ownership<a class="headerlink" href="#final-module-ownership" title="Permanent link">&para;</a></h1>
+<p>The final shape does not require the current <code>tensorcast.serving</code> package to
+disappear completely, but it does require it to become shallow. The package may
+remain as an internal implementation namespace for model-serving ABI details,
+builder recipes, and migration-local lowerings. It must not remain a public
+source of truth for artifact identity, source selection, routing, lifecycle,
+publication, or diagnostics.</p>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Target responsibility</th>
+<th>Must not own</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tensorcast.api.store</code> / public <code>tensorcast</code></td>
+<td><code>Artifact</code>, <code>ArtifactRealizationSpec</code>, <code>ArtifactRealizationHandle</code>, <code>ArtifactRealizationReport</code>, ordinary TensorDict/binding/prefetch conveniences</td>
+<td>framework model objects, vLLM-specific placement logic, serving-session compatibility facades</td>
+</tr>
+<tr>
+<td>artifact/runtime professional API</td>
+<td><code>RuntimeHostCapabilities</code>, <code>RuntimeAttachment</code>, runtime view/report projections, retained realization claims, publication actions</td>
+<td>durable artifact identity, direct Global Store access, vLLM private objects</td>
+</tr>
+<tr>
+<td><code>tensorcast.serving</code></td>
+<td>internal serving ABI helpers, optional private lowerings, builder/publication implementation details while they remain serving-ABI-specific</td>
+<td>public runtime session root, public locator authority, independent retained acquire model, independent diagnostics/report model</td>
+</tr>
+<tr>
+<td>Store Daemon</td>
+<td>binding values, leases, mounted-source attestation, local realization ownership, PID/session safety, device-local movement</td>
+<td>framework construction/finalize hooks, durable metadata authority</td>
+</tr>
+<tr>
+<td>Global Store</td>
+<td>durable artifact metadata, replica metadata, coordination records, publication visibility</td>
+<td>SDK direct control path, process-local attachment state</td>
+</tr>
+<tr>
+<td>vLLM <code>vllm.tensorcast.*</code></td>
+<td>runtime host capability construction, vLLM placement/source/collective facts, model construction/finalize hooks, reload/publication calls</td>
+<td>TensorCast artifact selection authority, daemon lease authority, duplicate serving runtime session model</td>
+</tr>
+</tbody>
+</table>
+<p>The intended end state is one public root and one professional framework
+boundary. If a serving-named object remains after migration, it must satisfy one
+of these conditions:</p>
+<ul>
+<li>it is private implementation under a bounded internal module;</li>
+<li>it describes a true model-serving ABI payload rather than TensorCast artifact
+  semantics;</li>
+<li>it is scheduled for deletion by the paired plan's deletion ledger.</li>
+</ul>
+<h1 id="decision-logic-for-boundary-choices">Decision Logic For Boundary Choices<a class="headerlink" href="#decision-logic-for-boundary-choices" title="Permanent link">&para;</a></h1>
+<p>Implementers should use the following decision sequence when adding or migrating
+any runtime capability:</p>
+<ol>
+<li>If the capability changes durable identity, artifact discovery, replica
+   visibility, routing, or lifecycle, it belongs to the artifact model or
+   artifact replica metadata.</li>
+<li>If the capability chooses what bytes/view/subset are requested, it belongs to
+   <code>ArtifactSelection</code> or a locator that resolves into an artifact selection.</li>
+<li>If the capability describes where/how a selection is realized, it belongs to
+   <code>ArtifactRealizationSpec</code>, <code>RealizationTarget</code>, <code>RealizationTargetSet</code>, a
+   strategy plan, or a representation admission plan.</li>
+<li>If the capability depends on framework construction, tensor surface,
+   runtime-only tensors, finalize hooks, live EP/EPLB facts, or framework
+   admission probes, it belongs to <code>RuntimeHostCapabilities</code> or
+   <code>RuntimeAttachment</code>.</li>
+<li>If the capability prepares a value for later acquire and memory admission, it
+   belongs to <code>RetainedRealizationClaim</code> or <code>PrefetchHandoff</code>; it must not
+   become a new source authority.</li>
+<li>If the capability makes a realized value reusable by other daemons or future
+   loads, it is an explicit publication/promote action that creates or updates
+   artifact replica metadata.</li>
+<li>If the only reason to keep a serving-named API is source compatibility, delete
+   or internalize it after the replacement is wired. Source compatibility is not
+   a design requirement.</li>
+</ol>
+<p>This decision logic is intentionally stricter than "move everything from
+serving to artifact." The correct target is not a large <code>Artifact</code> object. The
+correct target is a small artifact root plus explicit realization specs,
+handles, runtime host capabilities, retained claims, and publication actions.</p>
+<h1 id="vllm-reference-case-contract">vLLM Reference Case Contract<a class="headerlink" href="#vllm-reference-case-contract" title="Permanent link">&para;</a></h1>
+<p>The vLLM scenario is the reference case because it needs simple concepts at the
+boundary and deep behavior behind them. The target boundary is still small:</p>
+<ol>
+<li>select an artifact or source artifact;</li>
+<li>realize it for a model-runtime target;</li>
+<li>provide runtime host capabilities for construction, attach, finalize, and
+   semantic admission;</li>
+<li>project runtime view, reload, publication, or TensorDict results from the
+   same handle.</li>
+</ol>
+<p>vLLM does not need TensorCast <code>Artifact.tensor_dict(...)</code> as its steady
+model-loading path. The TensorDict requirement is stronger: TensorDict must
+prove the same realization semantics that runtime attach relies on. If
+TensorDict remains a separate <code>MaterializeReplica</code> convenience path with
+independent selection, strategy, diagnostics, lifetime, or P2P behavior,
+TensorCast would keep two incompatible materialization models.</p>
+<table>
+<thead>
+<tr>
+<th>vLLM requirement</th>
+<th>Target contract</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Conceptual integration surface</td>
+<td>vLLM sees artifact selection, realization spec/handle, runtime host capabilities, <code>RuntimeAttachment</code>, and runtime view. It does not need a public serving session root.</td>
+</tr>
+<tr>
+<td>TensorDict equivalence</td>
+<td><code>Artifact.tensor_dict(...)</code> and caller-tensor materialization are projections of the same realization model used by binding/runtime attach, with shared selection, strategy, diagnostics, and lifetime facts.</td>
+</tr>
+<tr>
+<td>Retained pre-admission memory credit</td>
+<td>A retained realization claim exposes trusted reservation bytes before vLLM model construction and validates expected member/device/layout both at credit time and acquire time.</td>
+</tr>
+<tr>
+<td>Local HF/safetensors cold start</td>
+<td>vLLM source catalog output becomes a daemon-attested mounted-source artifact subject such as <code>msa1:...</code>; no source-handle-only path bypasses artifact selection or admission.</td>
+</tr>
+<tr>
+<td>Runtime model attach</td>
+<td>vLLM owns only host capabilities: meta/runtime model construction, trace capture, runtime-only tensors, finalize hooks, tensor surface operations, and semantic probes. TensorCast owns artifact selection, binding, lifecycle, and report state.</td>
+</tr>
+<tr>
+<td>Reload and publication</td>
+<td>Runtime attachment reload and async replica publication compare active attachment or binding-value generation before replacing state or retiring stale published results.</td>
+</tr>
+<tr>
+<td>EP/EPLB safety</td>
+<td>Static semantic digests are representation/admission facts; live EP world size and EPLB maps are re-read by the framework admission hook before reload.</td>
+</tr>
+<tr>
+<td>Main plus drafter models</td>
+<td>Either model them as a target set with one reload transaction, or declare the sequential main-then-draft behavior with worker-unhealthy marking on partial failure.</td>
+</tr>
+</tbody>
+</table>
+<p>This means the TensorDict refactor is sufficient for vLLM only when it is not
+just an API cleanup. It must remove semantic split-brain: the same selection
+digest, source selection digest, target layout digest, strategy decision,
+lifecycle capability, and realization report must be observable whether the
+projection is TensorDict, binding, retained handoff, or runtime attachment.</p>
+<h1 id="performance-and-memory-contract">Performance And Memory Contract<a class="headerlink" href="#performance-and-memory-contract" title="Permanent link">&para;</a></h1>
+<p>The target API change must not add a data-plane hop. Direct
+<code>Artifact.realize(... model_runtime ..., runtime_host=...)</code> is a control-plane
+and ownership-boundary change over the same daemon-backed fast paths; it must
+not first materialize a TensorDict, clone framework weights, or create a second
+serving session that owns another binding value.</p>
+<p>The intended weight-loading source order is compatibility-driven and explicit:</p>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Required target behavior</th>
+<th>Disallowed behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Retained prefetch startup</td>
+<td>Validate the retained realization claim before vLLM memory admission, acquire the daemon-owned binding lease, then attach the existing CUDA IPC or memfd-backed tensors.</td>
+<td>Re-materializing the artifact, opening a second binding, or crediting memory after vLLM admission.</td>
+</tr>
+<tr>
+<td>Durable artifact with local resident replica</td>
+<td>Prefer the local replica/LIP path and return a process-visible CUDA IPC lease when representation, layout, device, and member facts match.</td>
+<td>Falling through to disk/P2P/TensorDict because the public entrypoint changed.</td>
+</tr>
+<tr>
+<td>Compatible remote replica</td>
+<td>Use the P2P strategy only after representation, topology, member, layout, and schema compatibility checks pass.</td>
+<td>Treating P2P as a semantic transform or silently reshaping TP/member layout.</td>
+</tr>
+<tr>
+<td>Local HF/safetensors cold source</td>
+<td>Resolve the framework source to a daemon-attested mounted-source artifact, then stream directly into the target binding/source-bound plan.</td>
+<td>Loading a full Python state dict or full host staging buffer in normal startup.</td>
+</tr>
+<tr>
+<td>Incompatible representation or target layout</td>
+<td>Run an explicit realization transform with copy/temporary bytes reported in the resource envelope.</td>
+<td>Generic fallback that hides the slower path or makes diagnostics indistinguishable from the fast path.</td>
+</tr>
+</tbody>
+</table>
+<p>The steady-state memory invariant is one live owner for the model weight bytes
+per active runtime attachment:</p>
+<ul>
+<li>runtime attach replaces meta parameters with daemon-owned binding tensors or
+  equivalent process-visible handles; it does not allocate another full set of
+  PyTorch weight tensors;</li>
+<li><code>ArtifactRealizationHandle.attachment()</code> is a completed-handle projection and
+  must not perform another realization, session start, retained acquire, or
+  CUDA IPC restore beyond binding the already-owned handle to the framework
+  surface;</li>
+<li>runtime-only tensors, finalize-hook allocations, CUDAGraph capture, and KV
+  cache remain framework-owned memory and must be reported separately from
+  TensorCast weight realization bytes;</li>
+<li>reload may temporarily overlap old and new weight residency only when the
+  chosen swap semantics require it; the overlap must be bounded, observable in
+  diagnostics, and retired promptly by active-generation checks;</li>
+<li>compatibility shims must not keep an extra Python reference, binding handle,
+  or publication lease after the artifact-runtime attachment owns the value.</li>
+</ul>
+<p>Host-memory behavior follows the same rule. Normal durable, retained, and
+mounted-source model-runtime startup must not construct a full Python
+<code>dict[str, torch.Tensor]</code>, full safetensors state dict, or full CPU copy of the
+model weights. Bounded streaming buffers, canonical-index bytes, trace/recipe
+metadata, and small projection objects are allowed. The Python builder paths
+that intentionally materialize serving tensors in host memory are offline/admin
+workflows and are not part of normal vLLM startup.</p>
+<p>Latency is validated by resolved strategy and stage timings, not by naming. A
+successful direct artifact-runtime start should expose the selected source kind
+(<code>local_replica</code>, <code>p2p</code>, <code>disk</code>, retained acquire, or explicit transform),
+fallback reason, copy bytes, temporary bytes, retained bytes, direct-write
+bytes, IPC-open time, attach/finalize time, and publication timing in one
+artifact-realization report. A slower fallback is acceptable only when it is the
+planned outcome for the resolved compatibility class.</p>
+<h1 id="concept-ownership">Concept Ownership<a class="headerlink" href="#concept-ownership" title="Permanent link">&para;</a></h1>
+<p>The next model should reduce public concepts without hiding necessary internal
+state.</p>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Public role</th>
+<th>Internal owner</th>
+<th>Kept separate from</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Artifact</code></td>
+<td>Durable identity, discovery, lifecycle, replica source</td>
+<td>Store API, daemon, Global Store</td>
+<td>device ordinal, framework process state</td>
+</tr>
+<tr>
+<td><code>ArtifactSelection</code></td>
+<td>What artifact/view/subset is requested</td>
+<td>materialization request</td>
+<td>topology, strategy, retry policy</td>
+</tr>
+<tr>
+<td><code>RealizationTarget</code></td>
+<td>Where and in what representation a selection should be realized</td>
+<td>runtime/materialization planner</td>
+<td>durable artifact identity</td>
+</tr>
+<tr>
+<td><code>RealizationTargetSet</code></td>
+<td>Multi-member realization intent for TP/PP/DP groups</td>
+<td>group realization planner</td>
+<td>mutable key resolution</td>
+</tr>
+<tr>
+<td><code>ArtifactRealizationSpec</code></td>
+<td>Target, profile, representation contract, and strategy intent</td>
+<td>SDK/runtime planner</td>
+<td>execution attempt state</td>
+</tr>
+<tr>
+<td><code>ArtifactRealizationHandle</code></td>
+<td>User/professional handle for one realized value lifecycle</td>
+<td>SDK/runtime facade</td>
+<td>framework model internals</td>
+</tr>
+<tr>
+<td><code>RetainedRealizationClaim</code></td>
+<td>Serialized prefetch handoff and trusted pre-admission credit</td>
+<td>retained lifecycle/admission</td>
+<td>durable artifact identity</td>
+</tr>
+<tr>
+<td><code>TensorDictProjection</code></td>
+<td>Ordinary tensor-dict view of a realized selection</td>
+<td>Store SDK</td>
+<td>daemon-owned binding lifecycle</td>
+</tr>
+<tr>
+<td><code>RepresentationTransformContract</code></td>
+<td>Semantic tensor/layout contract</td>
+<td>representation plane</td>
+<td>transport source choice</td>
+</tr>
+<tr>
+<td><code>MaterializationStrategy</code></td>
+<td>Disk/P2P/collective/local execution choice</td>
+<td>shared strategy plane</td>
+<td>user-facing API naming</td>
+</tr>
+<tr>
+<td><code>BindingValue</code></td>
+<td>Daemon-owned local realization value</td>
+<td>binding lifecycle</td>
+<td>durable artifact replica until published</td>
+</tr>
+<tr>
+<td><code>RuntimeAttachment</code></td>
+<td>Process-local framework model attachment</td>
+<td>runtime adapter</td>
+<td>Global Store metadata</td>
+</tr>
+<tr>
+<td><code>RuntimeHostCapabilities</code></td>
+<td>vLLM/SGLang-specific construction, tensor surface, placement, source, collective, finalize, and semantic hooks</td>
+<td>integration layer</td>
+<td>Artifact core</td>
+</tr>
+<tr>
+<td><code>RuntimeAdmissionFacts</code></td>
+<td>Live framework/device/rank facts checked before attach or reload</td>
+<td>integration host/admission</td>
+<td>artifact key or durable replica identity</td>
+</tr>
+<tr>
+<td><code>ArtifactReplica</code></td>
+<td>Published data source for future loads/P2P</td>
+<td>artifact lifecycle</td>
+<td>local-ready binding values</td>
+</tr>
+</tbody>
+</table>
+<p><code>Serving</code> should remain only as one model-runtime profile where useful:</p>
+<ul>
+<li>acceptable as package namespace during migration;</li>
+<li>acceptable in profile names such as <code>serving_abi_version</code> when the payload is
+  specifically the model-serving runtime ABI;</li>
+<li>not acceptable as a second root for artifact identity, source discovery,
+  P2P routing, or publication.</li>
+</ul>
+<h1 id="proposed-architecture">Proposed Architecture<a class="headerlink" href="#proposed-architecture" title="Permanent link">&para;</a></h1>
+<h2 id="artifact-realization-request">Artifact realization request<a class="headerlink" href="#artifact-realization-request" title="Permanent link">&para;</a></h2>
+<p>The long-term public shape should be artifact-centered:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="n">artifact</span> <span class="o">=</span> <span class="n">tc</span><span class="o">.</span><span class="n">artifact</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="s2">"model:qwen:runtime:tp8"</span><span class="p">)</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">realization</span> <span class="o">=</span> <span class="n">artifact</span><span class="o">.</span><span class="n">realize</span><span class="p">(</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>    <span class="n">spec</span><span class="o">=</span><span class="n">tc</span><span class="o">.</span><span class="n">ArtifactRealizationSpec</span><span class="o">.</span><span class="n">model_runtime</span><span class="p">(</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>        <span class="n">framework</span><span class="o">=</span><span class="s2">"vllm"</span><span class="p">,</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>        <span class="n">device</span><span class="o">=</span><span class="s2">"cuda:0"</span><span class="p">,</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>        <span class="n">topology</span><span class="o">=</span><span class="n">topology</span><span class="p">,</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>        <span class="n">member</span><span class="o">=</span><span class="n">member</span><span class="p">,</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>        <span class="n">adapter_version</span><span class="o">=</span><span class="s2">"..."</span><span class="p">,</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>        <span class="n">runtime_abi_version</span><span class="o">=</span><span class="s2">"..."</span><span class="p">,</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>    <span class="p">),</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>    <span class="n">runtime_host</span><span class="o">=</span><span class="n">vllm_host</span><span class="p">,</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="p">)</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="n">attachment</span> <span class="o">=</span> <span class="n">realization</span><span class="o">.</span><span class="n">attachment</span><span class="p">()</span>
+</span></code></pre></div>
+<p>This is the target professional model-runtime API. <code>Artifact.realize(...)</code>
+executes realization and runtime attachment through the supplied runtime host
+capabilities. The returned <code>ArtifactRealizationHandle</code> is already complete; it
+does not represent a pending second attach step. <code>attachment()</code> is the preferred
+projection name for the process-local <code>RuntimeAttachment</code>. If an <code>attach(...)</code>
+method is kept for ergonomics, it is a projection/delegation over the completed
+realization, not the operation that performs realization.</p>
+<p>The target rules are:</p>
+<ul>
+<li>users start from <code>Artifact</code>;</li>
+<li>one realization spec expresses target, profile, strategy, and admission
+  intent;</li>
+<li>framework-specific construction, tensor surface, placement, source, collective,
+  finalize, and semantic hooks enter through runtime host capabilities;</li>
+<li><code>Artifact.realize(...)</code> returns a completed realization handle, not directly a
+  framework attachment and not an unexecuted plan;</li>
+<li>TensorDict, Binding, RuntimeAttachment, retained handoff, and publication are
+  projections or actions of that handle;</li>
+<li>current <code>tensorcast.serving.runtime</code> APIs may be reshaped directly toward this
+  model because source compatibility is not a goal.</li>
+</ul>
+<p>Ordinary retrieval already uses this path:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">tensors</span> <span class="o">=</span> <span class="n">tc</span><span class="o">.</span><span class="n">artifact</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="s2">"model:qwen:weights"</span><span class="p">)</span><span class="o">.</span><span class="n">realize</span><span class="p">(</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>    <span class="n">spec</span><span class="o">=</span><span class="n">tc</span><span class="o">.</span><span class="n">ArtifactRealizationSpec</span><span class="o">.</span><span class="n">tensor_dict</span><span class="p">(</span><span class="n">device</span><span class="o">=</span><span class="s2">"cuda:0"</span><span class="p">)</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="p">)</span><span class="o">.</span><span class="n">tensor_dict</span><span class="p">()</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="n">binding</span> <span class="o">=</span> <span class="n">tc</span><span class="o">.</span><span class="n">artifact</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="s2">"model:qwen:weights"</span><span class="p">)</span><span class="o">.</span><span class="n">realize</span><span class="p">(</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>    <span class="n">spec</span><span class="o">=</span><span class="n">tc</span><span class="o">.</span><span class="n">ArtifactRealizationSpec</span><span class="o">.</span><span class="n">binding</span><span class="p">(</span><span class="n">device</span><span class="o">=</span><span class="s2">"cuda:0"</span><span class="p">,</span> <span class="n">mapping</span><span class="o">=</span><span class="n">copy_plan</span><span class="p">)</span>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="p">)</span><span class="o">.</span><span class="n">binding</span><span class="p">()</span>
+</span></code></pre></div>
+<p>The existing <code>artifact.tensor_dict(...)</code>, <code>artifact.tensor_dict_into(...)</code>,
+<code>artifact.tensor_into(...)</code>, <code>artifact.bind(...)</code>, and <code>artifact.bind_into(...)</code>
+methods remain as convenience forms and now lower into this model. They should
+stay thin wrappers and must not regain independent materialization architecture.</p>
+<h2 id="realization-handle-and-projections">Realization handle and projections<a class="headerlink" href="#realization-handle-and-projections" title="Permanent link">&para;</a></h2>
+<p>The public/professional result is a single <code>ArtifactRealizationHandle</code> with
+explicit projections:</p>
+<table>
+<thead>
+<tr>
+<th>Projection/action</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tensor_dict()</code></td>
+<td>Return ordinary TensorDict materialization for the realized selection</td>
+</tr>
+<tr>
+<td><code>binding()</code></td>
+<td>Return or expose the daemon-owned local binding value</td>
+</tr>
+<tr>
+<td><code>attachment()</code></td>
+<td>Return the framework-owned <code>RuntimeAttachment</code> created by model-runtime realization</td>
+</tr>
+<tr>
+<td><code>prefetch_handoff()</code></td>
+<td>Return a retained realization claim for later acquire</td>
+</tr>
+<tr>
+<td><code>publish_replica(...)</code></td>
+<td>Publish an artifact-backed replica when the realized value is eligible</td>
+</tr>
+<tr>
+<td><code>promote(...)</code></td>
+<td>Enter explicit representation publication for local-ready values</td>
+</tr>
+</tbody>
+</table>
+<p>This keeps <code>Artifact</code> small while preventing TensorDict, binding, retained
+prefetch, and model-runtime attach from becoming parallel top-level concepts.</p>
+<h2 id="startup-paths-under-one-model">Startup paths under one model<a class="headerlink" href="#startup-paths-under-one-model" title="Permanent link">&para;</a></h2>
+<p>All startup and retrieval paths are target kinds or lifecycle policies under
+artifact realization:</p>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Artifact-centered meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tensor_dict</code> / <code>tensor_dict_into</code> / <code>tensor_into</code></td>
+<td>Realize an artifact selection into a TensorDict or caller-tensor projection</td>
+</tr>
+<tr>
+<td><code>bind</code> / <code>bind_into</code></td>
+<td>Realize an artifact selection into a daemon-owned or adopted binding projection</td>
+</tr>
+<tr>
+<td><code>prefetch(device=...)</code></td>
+<td>Prepare a retained replica through async realization</td>
+</tr>
+<tr>
+<td><code>prefetch(target=...)</code></td>
+<td>Prepare retained binding or target-set handoff</td>
+</tr>
+<tr>
+<td>durable artifact startup</td>
+<td>Realize a durable representation artifact into a runtime binding and runtime attachment</td>
+</tr>
+<tr>
+<td>local source bootstrap</td>
+<td>Normalize local source into a mounted-source artifact, then realize into target binding</td>
+</tr>
+<tr>
+<td>retained acquire startup</td>
+<td>Attach to a retained realization prepared by artifact prefetch</td>
+</tr>
+<tr>
+<td>model-runtime startup</td>
+<td>Realize an artifact selection through runtime host capabilities and project a <code>RuntimeAttachment</code></td>
+</tr>
+</tbody>
+</table>
+<p>The internal plans remain explicit. The change is that they are variants under
+artifact realization, not serving lifecycle branches or TensorDict-specific
+fallback paths.</p>
+<h2 id="tp-as-target-set-realization">TP as target-set realization<a class="headerlink" href="#tp-as-target-set-realization" title="Permanent link">&para;</a></h2>
+<p>TP should be represented as a <code>RealizationTargetSet</code>:</p>
+<ul>
+<li>each member has stable topology/member identity;</li>
+<li>each member has a target layout and representation contract;</li>
+<li>source reuse and collective execution are planned for the set;</li>
+<li>same-node collective-first is a strategy, not a separate serving feature;</li>
+<li>P2P direct member copy is allowed only when representation, topology, member,
+  layout, and schema are compatible.</li>
+</ul>
+<p>This keeps TP deep without making TP a special user-facing artifact type.</p>
+<h2 id="p2p-as-compatible-replica-movement">P2P as compatible replica movement<a class="headerlink" href="#p2p-as-compatible-replica-movement" title="Permanent link">&para;</a></h2>
+<p>P2P remains a data-plane source strategy:</p>
+<ul>
+<li>source selection consumes <code>ArtifactSelection</code> and compatible replica metadata;</li>
+<li>P2P never converts TP size, tensor schema, or semantic placement;</li>
+<li>mismatched representation requires a realization plan or transform executor;</li>
+<li>runtime-published replicas are ordinary artifact replicas only after explicit
+  publication and correct metadata registration.</li>
+</ul>
+<h2 id="retained-prefetch-as-retained-realization">Retained prefetch as retained realization<a class="headerlink" href="#retained-prefetch-as-retained-realization" title="Permanent link">&para;</a></h2>
+<p>The retained acquire payload should be treated as a serialized retained
+realization claim:</p>
+<ul>
+<li>reservation capability;</li>
+<li>trusted reservation bytes visible before framework memory admission;</li>
+<li>daemon/session/device/member facts;</li>
+<li>binding value ref;</li>
+<li>expected layout/schema/build/spec digests;</li>
+<li>readiness and verification state;</li>
+<li>optional group realization acquire facts.</li>
+</ul>
+<p>Names such as <code>RetainedServingBindingAuthority</code> are acceptable only as internal
+implementation names when they describe current code. The public concept should
+be a retained realization handoff/claim. It authorizes an acquire; it is not a
+new source of truth.</p>
+<h2 id="runtime-attachment-remains-separate">Runtime attachment remains separate<a class="headerlink" href="#runtime-attachment-remains-separate" title="Permanent link">&para;</a></h2>
+<p>Do not move framework model state into <code>Artifact</code>.</p>
+<p><code>RuntimeAttachment</code> should remain the boundary for:</p>
+<ul>
+<li>vLLM model object ownership;</li>
+<li>runtime-only tensor allocation and rehydration;</li>
+<li>finalize hooks;</li>
+<li>tensor invariant checks;</li>
+<li>after-ready publication hooks;</li>
+<li>reload response and weight-version projections;</li>
+<li>close/retire process-local lifecycle.</li>
+</ul>
+<p>This is the correct separation: artifact is durable identity; attachment is
+process-local runtime state.</p>
+<h2 id="framework-reference-flow">Framework reference flow<a class="headerlink" href="#framework-reference-flow" title="Permanent link">&para;</a></h2>
+<p>A vLLM implementation should be able to follow this flow without constructing a
+parallel TensorDict or source subsystem:</p>
+<ol>
+<li>Normalize <code>model_loader_extra_config</code> into artifact selection, source
+   bootstrap policy, retained claim, strategy, diagnostics, and publication
+   policy.</li>
+<li>Before vLLM memory admission, parse any retained claim and credit only the
+   trusted reservation bytes for the expected placement member.</li>
+<li>Build an <code>ArtifactRealizationSpec.model_runtime(...)</code> with vLLM placement,
+   target device, runtime ABI, representation policy, and adapter identity.</li>
+<li>Resolve source identity through artifact selection: durable artifact for
+   normal startup, or daemon-attested <code>msa1:</code> mounted-source artifact for local
+   HF/safetensors bootstrap.</li>
+<li>Realize through runtime host capabilities; vLLM supplies construction, trace,
+   tensor surface, runtime-only tensor, finalize, placement, source, collective,
+   and semantic probe hooks.</li>
+<li>After vLLM readiness, publish an artifact-backed runtime replica only if the
+   attachment is still the active generation.</li>
+<li>On reload, re-run runtime admission, reject live EP/EPLB drift, retire or mark
+   current publication state, swap the active binding value, and project the
+   reload response from the new attachment.</li>
+</ol>
+<h2 id="vllm-target-integration-flow">vLLM target integration flow<a class="headerlink" href="#vllm-target-integration-flow" title="Permanent link">&para;</a></h2>
+<p>vLLM should become a client of the artifact-runtime professional API,
+not a client of a public TensorCast serving session. The expected final flow is:</p>
+<ol>
+<li><code>model_loader_extra_config</code> is normalized into an artifact/runtime request:
+   artifact locator or mounted-source policy, realization strategy, retained
+   claim, runtime profile, diagnostics, and publication policy.</li>
+<li><code>vllm.tensorcast.host</code> builds <code>RuntimeHostCapabilities</code> from adapter,
+   placement, source, collective, tensor-surface, finalize, and semantic probe
+   owners.</li>
+<li>Before vLLM memory admission, <code>memory_accounting.py</code> reads a neutral
+   retained realization claim and credits only trusted reservation bytes for the
+   expected member/device/layout.</li>
+<li>Durable startup calls
+   <code>tc.artifact(...).realize(ArtifactRealizationSpec.model_runtime(...),
+   runtime_host=host)</code> and stores <code>handle.attachment()</code> on the vLLM model state.</li>
+<li>Local HF/safetensors startup first admits the source as a daemon-attested
+   <code>msa1:</code> mounted-source artifact, then uses the same model-runtime realization
+   path.</li>
+<li>Retained startup validates the retained claim, acquires the daemon-owned
+   value, and then projects the same <code>RuntimeAttachment</code> shape as durable and
+   local-source startup.</li>
+<li>Reload reuses the artifact/runtime request path, re-runs live vLLM admission
+   hooks, checks EP/EPLB drift, compares active generation, and swaps the active
+   binding value only after validation.</li>
+<li>After-ready publication, reload retirement, shutdown retirement, and
+   local-ready durable promotion call artifact-runtime publication actions. They
+   do not call a separate serving publication authority.</li>
+</ol>
+<table>
+<thead>
+<tr>
+<th>vLLM concern</th>
+<th>Target TensorCast interaction</th>
+<th>Decision logic</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>loader startup</td>
+<td><code>Artifact.realize(... model_runtime ..., runtime_host=...)</code></td>
+<td>model loading is a realization of an artifact selection</td>
+</tr>
+<tr>
+<td>placement/topology facts</td>
+<td><code>ArtifactRealizationSpec</code> plus runtime host admission facts</td>
+<td>topology affects realization/admission, not artifact identity</td>
+</tr>
+<tr>
+<td>source catalog</td>
+<td>mounted-source artifact or durable artifact selection</td>
+<td>local paths must become admitted subjects before planning</td>
+</tr>
+<tr>
+<td>fast-path source selection</td>
+<td>retained claim, local replica/LIP, P2P, disk, mounted-source, or explicit transform in the realization report</td>
+<td>performance is a resolved strategy fact, not an API naming side effect</td>
+</tr>
+<tr>
+<td>adapter/finalize/tensor surface</td>
+<td><code>RuntimeHostCapabilities</code> and <code>RuntimeAttachment</code></td>
+<td>framework-owned behavior stays out of artifact identity</td>
+</tr>
+<tr>
+<td>retained memory credit</td>
+<td><code>RetainedRealizationClaim</code></td>
+<td>pre-admission reservation is a retained realization fact</td>
+</tr>
+<tr>
+<td>reload/runtime view</td>
+<td><code>RuntimeAttachment</code> projection from completed handle</td>
+<td>runtime state is process-local and generation-checked</td>
+</tr>
+<tr>
+<td>publication/shutdown</td>
+<td>handle or attachment publication actions with active-generation CAS</td>
+<td>publication is artifact replica lifecycle</td>
+</tr>
+<tr>
+<td>main/draft models</td>
+<td>target-set transaction or documented sequential semantics</td>
+<td>partial reload behavior must be explicit</td>
+</tr>
+</tbody>
+</table>
+<p>At the end of migration, vLLM should not import public
+<code>tensorcast.serving.*</code> session/config/retained/publication APIs for normal
+startup, reload, memory accounting, runtime view, or shutdown. Any remaining
+serving import must be either an internal implementation dependency with no
+public contract or a serving-ABI-specific builder path with a documented owner.</p>
+<h1 id="vllm-scenario-contract">vLLM Scenario Contract<a class="headerlink" href="#vllm-scenario-contract" title="Permanent link">&para;</a></h1>
+<p>The following vLLM facts are semantic requirements, not legacy compatibility
+fields.</p>
+<table>
+<thead>
+<tr>
+<th>vLLM scenario</th>
+<th>Must remain true after this design</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TensorDict projection equivalence</td>
+<td>Current vLLM does not use TensorCast TensorDict as the steady loader path, but TensorDict loads must still be projections of artifact realization and share selection, strategy, diagnostics, lifetime, and P2P semantics with binding/runtime realization</td>
+</tr>
+<tr>
+<td>Local HF/safetensors cold start</td>
+<td>Local path is normalized into a mounted-source artifact before planning; recipe/trace caches are keyed by source, model, topology, member, schema, and realization identity</td>
+</tr>
+<tr>
+<td>Durable artifact startup</td>
+<td>A locator resolves to a durable artifact; manifest and policy preflight validate schema, representation contract, serving build, topology, and readiness before attach</td>
+</tr>
+<tr>
+<td>Weight-loading fast path</td>
+<td>Direct artifact-runtime startup does not construct a TensorDict or Python state dict; it attaches daemon-owned binding tensors through the selected retained/local-replica/P2P/disk/mounted-source path</td>
+</tr>
+<tr>
+<td>Retained prefetch attach</td>
+<td>vLLM can credit trusted reservation bytes before model construction and later acquire a fresh lease for the exact member/device/layout/value</td>
+</tr>
+<tr>
+<td>vLLM memory admission</td>
+<td>Retained reservation bytes stay visible before vLLM memory admission; this timing is a behavior requirement</td>
+</tr>
+<tr>
+<td>TP multi-rank load</td>
+<td>Same-node source coordination, collective execution facts, TP ranks, rank-local target layouts, and local-ready barrier remain explicit</td>
+</tr>
+<tr>
+<td>EP/EPLB reload safety</td>
+<td>Expert placement and EPLB digests remain part of topology admission, and live EP world size/EPLB maps are checked before reload</td>
+</tr>
+<tr>
+<td>Runtime-only tensors</td>
+<td>Runtime-only tensor names, allocation, post-bind finalize, and invariant validation remain adapter-owned</td>
+</tr>
+<tr>
+<td>In-place reload</td>
+<td>Reload swaps the active binding value without reconstructing the vLLM model, and returns stable reload response projection</td>
+</tr>
+<tr>
+<td>Runtime view</td>
+<td>Weight-version and endpoint projections expose artifact ref, local ref, binding value ref, schema, contract, readiness, publication state, and failure state</td>
+</tr>
+<tr>
+<td>Runtime replica publication</td>
+<td>After-ready publication stays async, artifact-backed, active-generation checked, and explicitly retired on reload/shutdown</td>
+</tr>
+<tr>
+<td>Local-ready durable promotion</td>
+<td>Promotion from local-ready binding to durable artifact remains an explicit representation publication workflow</td>
+</tr>
+<tr>
+<td>Drafter models</td>
+<td>Main and draft model TensorCast attachments can reload through the same artifact locator path with either target-set transaction semantics or explicit sequential failure/unhealthy semantics</td>
+</tr>
+</tbody>
+</table>
+<p>The existing vLLM <code>model_loader_extra_config</code> fields should be reclassified:</p>
+<table>
+<thead>
+<tr>
+<th>Current field family</th>
+<th>Future classification</th>
+<th>Keep why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>serving.artifact_locator</code></td>
+<td><code>artifact.locator</code> or artifact selection input</td>
+<td>durable startup/reload identity</td>
+</tr>
+<tr>
+<td><code>serving.policy</code></td>
+<td>representation/artifact preflight policy</td>
+<td>pinned manifest/build/contract safety</td>
+</tr>
+<tr>
+<td><code>bootstrap.*</code></td>
+<td>source artifact bootstrap and cache policy</td>
+<td>local cold start and trace/recipe reuse</td>
+</tr>
+<tr>
+<td><code>materialization.collective</code></td>
+<td>realization strategy preference</td>
+<td>TP performance and fail-closed behavior</td>
+</tr>
+<tr>
+<td><code>retained_binding_acquire.*</code></td>
+<td>retained realization handoff/claim</td>
+<td>prefetch handoff and memory accounting</td>
+</tr>
+<tr>
+<td><code>replica_publication.*</code></td>
+<td>runtime artifact replica publication policy</td>
+<td>P2P source creation after model ready</td>
+</tr>
+<tr>
+<td><code>diagnostics.*</code></td>
+<td>realization diagnostics/profile controls</td>
+<td>operator debugging and validation</td>
+</tr>
+</tbody>
+</table>
+<p>These fields may be renamed, moved, or deleted as standalone user-facing fields,
+but their semantics should not be silently removed.</p>
+<h1 id="public-framework-and-internal-apis">Public, Framework, And Internal APIs<a class="headerlink" href="#public-framework-and-internal-apis" title="Permanent link">&para;</a></h1>
+<h2 id="public-user-api">Public user API<a class="headerlink" href="#public-user-api" title="Permanent link">&para;</a></h2>
+<p>Public APIs should stay artifact-first and small:</p>
+<ul>
+<li><code>tc.artifact(...)</code> and <code>tc.from_disk(...)</code> remain the root.</li>
+<li><code>ArtifactRealizationSpec</code>, <code>ArtifactRealizationHandle</code>, and
+  <code>ArtifactRealizationReport</code> are public SDK symbols available from the same
+  public package level as <code>Artifact</code>.</li>
+<li><code>Artifact.realize(spec=...)</code> is the direct public/professional entrypoint for
+  TensorDict, caller tensors, owned/adopted binding, mounted-source, and
+  model-runtime realization.</li>
+<li><code>Artifact.realize_async(spec=...)</code> is the async entrypoint for retained
+  replica, retained binding, and target-set handoff where operation semantics
+  are required.</li>
+<li><code>Artifact.prefetch(...)</code> remains a convenience method that lowers to async
+  realization while preserving <code>Operation[T]</code> status/wait/cancel behavior.</li>
+<li>TensorDict and binding helpers remain convenience methods because they now lower
+  to <code>Artifact.realize(...)</code>.</li>
+<li>Publication belongs to the realization handle or binding value, not to a
+  second serving-specific authority.</li>
+<li>Serving-rooted public entrypoints are removed or made internal once the
+  artifact-centered entrypoints cover the same behavior. They are not retained as
+  compatibility aliases.</li>
+<li>Boundary choices follow the decision logic above: artifact for durable
+  identity/lifecycle, spec/target/strategy for realization intent, runtime host
+  capabilities for framework facts, retained claims for prefetch acquire, and
+  publication actions for reusable replicas.</li>
+</ul>
+<h2 id="framework-integration-api">Framework integration API<a class="headerlink" href="#framework-integration-api" title="Permanent link">&para;</a></h2>
+<p>Frameworks such as vLLM and SGLang need a professional API that is more
+explicit than the public API:</p>
+<ul>
+<li><code>RuntimeHostCapabilities</code> for model construction, tensor surface, finalize
+  hooks, semantic probes, placement facts, source catalog, source coordination,
+  and collective behavior;</li>
+<li><code>ArtifactRealizationSpec.model_runtime(...)</code> fields for framework identity,
+  ABI, topology/member facts, and adapter identity;</li>
+<li><code>ArtifactRealizationHandle</code> for completed projection, acquire,
+  runtime-attachment projection, release-contract, promotion, and publication
+  actions;</li>
+<li>retained realization claim semantics for pre-admission trusted reservation
+  credit and acquire validation;</li>
+<li><code>RuntimeAttachment</code> for process-local state and close/reload/publication
+  projection;</li>
+<li>framework admission hooks for live runtime facts that cannot be durable
+  artifact identity, such as EP/EPLB reload checks;</li>
+<li><code>RuntimeView</code> for operator and framework response payloads.</li>
+</ul>
+<p>This layer should be stable enough for vLLM/SGLang maintainers but should not
+expose private lifecycle helpers as a broad compatibility facade.</p>
+<h2 id="internal-execution-objects">Internal execution objects<a class="headerlink" href="#internal-execution-objects" title="Permanent link">&para;</a></h2>
+<p>Internal objects can stay rich:</p>
+<ul>
+<li><code>ServingBindingPlan</code> or its successor realization-plan identity;</li>
+<li>resolved spec cache entries;</li>
+<li>binding layout ids and binding value refs;</li>
+<li>reservation capabilities and lease tokens;</li>
+<li>group realization acquire refs;</li>
+<li>materialization diagnostics;</li>
+<li>publication projections.</li>
+</ul>
+<p>These objects should not become the everyday user API.</p>
+<h1 id="naming-and-api-direction">Naming And API Direction<a class="headerlink" href="#naming-and-api-direction" title="Permanent link">&para;</a></h1>
+<p>The following names are the preferred long-term conceptual direction. They do
+not require compatibility aliases; the implementation may rename or reshape the
+current serving-runtime interfaces directly once the vLLM scenario matrix is
+covered. When a replacement is wired and tested, the old public name should be
+deleted or narrowed to an internal implementation name; it should not remain as a
+parallel compatibility path.</p>
+<table>
+<thead>
+<tr>
+<th>Current name</th>
+<th>Future direction</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ServingRuntimeSession</code></td>
+<td>removed as a public root; internal lifecycle lowering only if still useful</td>
+<td>public runtime entry starts at <code>Artifact.realize(...)</code></td>
+</tr>
+<tr>
+<td><code>ServingArtifactLocator</code></td>
+<td><code>ArtifactLocator</code> or <code>ArtifactSelectionLocator</code></td>
+<td>locator resolves artifact identity</td>
+</tr>
+<tr>
+<td><code>ServingBindingTarget</code></td>
+<td><code>RealizationTarget</code> or fields inside <code>ArtifactRealizationSpec</code></td>
+<td>target is runtime/layout intent</td>
+</tr>
+<tr>
+<td><code>ServingBindingPlan</code></td>
+<td><code>ArtifactRealizationPlan</code> for public docs; internal name may remain</td>
+<td>plan identity covers source, target, transform, cache, and layout</td>
+</tr>
+<tr>
+<td><code>PrefetchedServingBinding</code></td>
+<td><code>PrefetchHandoff</code> or <code>RetainedRealizationClaim</code></td>
+<td>serialized acquire capability, not a tensor handle</td>
+</tr>
+<tr>
+<td><code>RetainedServingBindingAuthority</code></td>
+<td><code>RetainedRealizationClaim</code> internally, <code>PrefetchHandoff</code> publicly</td>
+<td>serialized acquire capability, not authority of truth</td>
+</tr>
+<tr>
+<td><code>ServingRuntimeAttachment</code></td>
+<td><code>RuntimeAttachment</code></td>
+<td>already generalized in current code</td>
+</tr>
+<tr>
+<td><code>ServingRealizationReport</code></td>
+<td><code>ArtifactRealizationReport</code></td>
+<td>report is not serving-only</td>
+</tr>
+<tr>
+<td><code>ServingArtifactManifest</code></td>
+<td><code>RuntimeRepresentationManifest</code> unless the payload is truly serving ABI-specific</td>
+<td>durable representation metadata should not be serving-rooted</td>
+</tr>
+<tr>
+<td><code>serving_build_digest</code></td>
+<td><code>runtime_build_digest</code> or <code>representation_build_digest</code> unless tied to serving ABI</td>
+<td>build identity belongs to representation/runtime profile</td>
+</tr>
+</tbody>
+</table>
+<p>Do not perform a broad rename first. Names should follow behavior ownership.
+Migrate once the vLLM scenario matrix is covered by tests and docs, then remove
+the old public surface in the same cleanup window.</p>
+<h1 id="naming-compliance">Naming Compliance<a class="headerlink" href="#naming-compliance" title="Permanent link">&para;</a></h1>
+<p>Any new Python API proposed here must follow repository style. This is the
+target naming model, not an implementation-status table:</p>
+<table>
+<thead>
+<tr>
+<th>Symbol</th>
+<th>Target role</th>
+<th>Kind</th>
+<th>Required style</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ArtifactRealizationSpec</code></td>
+<td>public target intent DTO</td>
+<td>Python class</td>
+<td><code>PascalCase</code></td>
+<td>includes model-runtime target/profile/admission intent</td>
+</tr>
+<tr>
+<td><code>ArtifactRealizationHandle</code></td>
+<td>public/professional completed realization facade</td>
+<td>Python class</td>
+<td><code>PascalCase</code></td>
+<td>projection and lifecycle actions only</td>
+</tr>
+<tr>
+<td><code>ArtifactRealizationReport</code></td>
+<td>public/professional report DTO</td>
+<td>Python class</td>
+<td><code>PascalCase</code></td>
+<td>shared diagnostics and lifecycle report</td>
+</tr>
+<tr>
+<td><code>ResolvedArtifactSelection</code></td>
+<td>internal/professional resolver result</td>
+<td>Python class</td>
+<td><code>PascalCase</code></td>
+<td>canonical selection facts</td>
+</tr>
+<tr>
+<td><code>RealizationTargetPlan</code></td>
+<td>internal/professional target-plan identity</td>
+<td>Python class</td>
+<td><code>PascalCase</code></td>
+<td>target layout/profile facts</td>
+</tr>
+<tr>
+<td><code>RealizationStrategyPlan</code></td>
+<td>internal/professional strategy facts</td>
+<td>Python class</td>
+<td><code>PascalCase</code></td>
+<td>source/P2P/disk/collective/fallback policy</td>
+</tr>
+<tr>
+<td><code>RepresentationAdmissionPlan</code></td>
+<td>internal/professional compatibility facts</td>
+<td>Python class</td>
+<td><code>PascalCase</code></td>
+<td>representation/schema/layout admission</td>
+</tr>
+<tr>
+<td><code>RealizationLifecyclePlan</code></td>
+<td>internal/professional lifecycle facts</td>
+<td>Python class</td>
+<td><code>PascalCase</code></td>
+<td>retained/current/publishable/release capability</td>
+</tr>
+<tr>
+<td><code>RealizationResourceEnvelope</code></td>
+<td>report/plan envelope</td>
+<td>Python class</td>
+<td><code>PascalCase</code></td>
+<td>backing/export/projection/owner/cost model</td>
+</tr>
+<tr>
+<td><code>RealizationReleaseContract</code></td>
+<td>release action contract</td>
+<td>Python class</td>
+<td><code>PascalCase</code></td>
+<td>idempotent cleanup and ownership transfer</td>
+</tr>
+<tr>
+<td><code>RealizationModelRuntimeReport</code></td>
+<td>model-runtime report payload</td>
+<td>Python class</td>
+<td><code>PascalCase</code></td>
+<td>framework/profile report</td>
+</tr>
+<tr>
+<td><code>RealizationMountedSourceReport</code></td>
+<td>mounted-source report payload</td>
+<td>Python class</td>
+<td><code>PascalCase</code></td>
+<td><code>msa1:</code> promotion report payload</td>
+</tr>
+<tr>
+<td><code>RealizationPublicationReport</code></td>
+<td>runtime publication report payload</td>
+<td>Python class</td>
+<td><code>PascalCase</code></td>
+<td>publication state and generation facts</td>
+</tr>
+<tr>
+<td><code>RuntimeHostCapabilities</code></td>
+<td>professional framework capability bundle</td>
+<td>Python class/protocol</td>
+<td><code>PascalCase</code></td>
+<td>successor name for host capability surface</td>
+</tr>
+<tr>
+<td><code>RuntimeAttachment</code></td>
+<td>process-local framework boundary</td>
+<td>Python class</td>
+<td><code>PascalCase</code></td>
+<td>owns model object state and close/reload projection</td>
+</tr>
+<tr>
+<td><code>Artifact.realize</code></td>
+<td>primary realization method</td>
+<td>Python method</td>
+<td><code>snake_case</code></td>
+<td>direct model-runtime lowering is required in target state</td>
+</tr>
+<tr>
+<td><code>Artifact.realize_async</code></td>
+<td>async retained realization method</td>
+<td>Python method</td>
+<td><code>snake_case</code></td>
+<td>retained operation targets</td>
+</tr>
+<tr>
+<td><code>Artifact.prefetch</code></td>
+<td>convenience wrapper over async realization</td>
+<td>Python method</td>
+<td><code>snake_case</code></td>
+<td>must stay a thin facade</td>
+</tr>
+<tr>
+<td><code>ArtifactRealizationHandle.attachment</code></td>
+<td>runtime attachment projection</td>
+<td>Python method</td>
+<td><code>snake_case</code></td>
+<td>preferred completed-handle projection</td>
+</tr>
+<tr>
+<td><code>publish_replica</code></td>
+<td>publication action naming</td>
+<td>Python function/method</td>
+<td><code>snake_case</code></td>
+<td>binding/handle publication action</td>
+</tr>
+<tr>
+<td><code>retire_replica</code></td>
+<td>publication retirement naming</td>
+<td>Python function/method</td>
+<td><code>snake_case</code></td>
+<td>publication cleanup action</td>
+</tr>
+<tr>
+<td><code>ModelRuntimeProfile</code></td>
+<td>optional public profile DTO</td>
+<td>Python class</td>
+<td><code>PascalCase</code></td>
+<td>add only if profile fields do not fit <code>ArtifactRealizationSpec</code></td>
+</tr>
+<tr>
+<td><code>RetainedRealizationClaim</code></td>
+<td>retained handoff naming</td>
+<td>Python class</td>
+<td><code>PascalCase</code></td>
+<td>successor for retained serving authority semantics</td>
+</tr>
+<tr>
+<td><code>PrefetchHandoff</code></td>
+<td>optional ergonomic retained result name</td>
+<td>Python class</td>
+<td><code>PascalCase</code></td>
+<td>public handoff name if retained result types are renamed</td>
+</tr>
+</tbody>
+</table>
+<h1 id="error-model-and-invariants">Error Model And Invariants<a class="headerlink" href="#error-model-and-invariants" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Startup planning must resolve exactly one plan. Ambiguous retained acquire,
+  durable artifact bind, and source bootstrap combinations fail before GPU
+  allocation.</li>
+<li>Retained realization claims must expose trusted reservation bytes before
+  framework memory admission and must validate member/device/layout before both
+  credit and acquire.</li>
+<li>TensorDict retrieval, binding, retained prefetch, and model-runtime attach must
+  build the same resolved <code>ArtifactSelection</code> for the same artifact/view/subset.</li>
+<li>Model-runtime realization must not lower through a TensorDict projection or
+  Python state-dict materialization in normal startup; TensorDict is an
+  equivalence projection, not an intermediate weight-loading buffer.</li>
+<li>No target kind may keep an independent selection, fallback, lifecycle,
+  diagnostics, publication, or cleanup path once the shared realization lowering
+  exists.</li>
+<li>Artifact locator resolution must happen through the daemon-backed SDK path,
+  not direct Global Store calls.</li>
+<li>Source bootstrap must resolve to a daemon-attested mounted-source artifact or a
+  durable artifact subject before realization planning.</li>
+<li>A local-ready binding value is not a durable artifact and is not eligible for
+  cross-daemon P2P until explicit publication.</li>
+<li>A runtime-published replica must be artifact-backed and tied to the active
+  binding value generation.</li>
+<li>Reload must reject active publication states that would make source ownership
+  ambiguous.</li>
+<li>Steady-state runtime attachment must have one TensorCast-owned weight
+  residency per active model. Any reload overlap must be explicit, bounded,
+  reported, and retired through active-generation checks.</li>
+<li>Extra full-weight <code>torch.clone</code>, <code>.to(...)</code>, <code>.copy_(...)</code>, or host state-dict
+  staging is allowed only for an explicit realization transform or offline
+  builder workflow, and the report must account for the copy or temporary bytes.</li>
+<li>Source selection diagnostics must distinguish local replica/LIP, retained
+  acquire, P2P, disk, mounted-source, direct-write, and fallback paths.</li>
+<li>P2P source reuse must validate representation/layout/schema/member
+  compatibility before data movement.</li>
+<li>Device ordinal, CUDA UUID, daemon session, lease token, and process id are
+  runtime facts. They must not become durable artifact identity.</li>
+<li>EP/EPLB semantic placement digests and live EP/EPLB framework facts must
+  participate in reload admission.</li>
+<li>Main/draft TensorCast reload must declare either target-set transaction
+  semantics or explicit sequential failure/unhealthy semantics.</li>
+<li>Unexpected runtime state should fail clearly rather than falling back to a
+  slower or less precise path.</li>
+<li>Compatibility aliases and adapter shims must have an owner, deletion trigger,
+  and test proving the replacement path. Unbounded compatibility code is a
+  design violation.</li>
+</ul>
+<h1 id="architecture-risks">Architecture Risks<a class="headerlink" href="#architecture-risks" title="Permanent link">&para;</a></h1>
+<h2 id="risk-artifact-becomes-too-broad">Risk: Artifact becomes too broad<a class="headerlink" href="#risk-artifact-becomes-too-broad" title="Permanent link">&para;</a></h2>
+<p>If every serving/runtime concern is placed directly on <code>Artifact</code>, the class
+will mix durable identity, device placement, framework state, publication,
+leases, and runtime hooks. That would make the public API simpler in name but
+less coherent in behavior.</p>
+<p>Mitigation: artifact owns durable identity and lifecycle. A realization spec and
+realization handle own target/profile/strategy, projection, and publication
+actions. Bindings and attachments remain separate realized projections.</p>
+<h2 id="risk-tensordict-remains-a-second-materialization-system">Risk: TensorDict remains a second materialization system<a class="headerlink" href="#risk-tensordict-remains-a-second-materialization-system" title="Permanent link">&para;</a></h2>
+<p>TensorDict APIs are the easiest path for users and tests, so they can silently
+remain outside the model-runtime realization work. That would preserve two
+loading systems: TensorDict materialization and binding/runtime realization.</p>
+<p>Mitigation: make TensorDict a first-class projection of artifact realization.
+Convenience methods may remain, but tests and docs should assert that selection,
+source strategy, diagnostics, and P2P compatibility flow through the same
+realization model.</p>
+<h2 id="risk-runtime-facts-pollute-durable-identity">Risk: Runtime facts pollute durable identity<a class="headerlink" href="#risk-runtime-facts-pollute-durable-identity" title="Permanent link">&para;</a></h2>
+<p>vLLM needs device UUIDs, ranks, daemon sessions, reservations, and topology
+digests. These are necessary, but they are realization/admission facts, not
+artifact identity.</p>
+<p>Mitigation: keep them in target/profile/admission/claim payloads and preserve
+artifact identity as artifact id plus selection/representation metadata.</p>
+<h2 id="risk-p2p-hides-representation-conversion">Risk: P2P hides representation conversion<a class="headerlink" href="#risk-p2p-hides-representation-conversion" title="Permanent link">&para;</a></h2>
+<p>Direct P2P between serving workers is attractive, but TP4-to-TP8 or EP/EPLB
+layout changes are semantic transforms, not byte-copy choices.</p>
+<p>Mitigation: direct P2P only for compatible representation and member layout.
+Otherwise use a representation transform or realization plan.</p>
+<h2 id="risk-vllm-memory-accounting-regresses">Risk: vLLM memory accounting regresses<a class="headerlink" href="#risk-vllm-memory-accounting-regresses" title="Permanent link">&para;</a></h2>
+<p>Retained reservation bytes are credited before vLLM model construction. Moving
+this under a later runtime attachment API would be too late.</p>
+<p>Mitigation: retained realization claims must expose trusted reservation bytes
+before admission, with member validation.</p>
+<h2 id="risk-weight-loading-falls-off-the-fast-path">Risk: Weight loading falls off the fast path<a class="headerlink" href="#risk-weight-loading-falls-off-the-fast-path" title="Permanent link">&para;</a></h2>
+<p>The artifact-runtime API could accidentally become a wrapper around TensorDict
+materialization or a second serving session. That would add IPC-open work,
+Python tensor projection objects, possible extra references, and sometimes
+full-weight-copy latency.</p>
+<p>Mitigation: direct model-runtime realization must lower to binding, retained,
+local-replica/LIP, P2P, disk, and mounted-source daemon paths directly. Tests
+and profile events must assert selected source kind, fallback reason, copy
+bytes, temporary bytes, and attach timing for retained, local replica, P2P,
+disk, mounted-source, and explicit-transform cases.</p>
+<h2 id="risk-hidden-memory-duplication">Risk: Hidden memory duplication<a class="headerlink" href="#risk-hidden-memory-duplication" title="Permanent link">&para;</a></h2>
+<p>During migration, old serving compatibility wrappers can retain a binding
+handle while the new artifact-runtime attachment owns the replacement. Reload
+can also double-reside weights longer than necessary if active-generation
+retirement is not enforced.</p>
+<p>Mitigation: completed-handle projection must transfer or share ownership
+exactly once. Normal startup must not keep both <code>ServingRuntimeSession</code> state
+and artifact-runtime state as live owners. Reload overlap must be bounded by the
+declared swap semantics and reported in the realization resource envelope.</p>
+<h2 id="risk-simplification-removes-real-scenario-depth">Risk: Simplification removes real scenario depth<a class="headerlink" href="#risk-simplification-removes-real-scenario-depth" title="Permanent link">&para;</a></h2>
+<p>Many current vLLM fields look like compatibility baggage but encode real timing,
+placement, or safety semantics.</p>
+<p>Mitigation: classify every field before removal. Remove names only after the
+semantic replacement exists and is wired into vLLM.</p>
+<h2 id="risk-two-stacks-drift-after-migration">Risk: Two stacks drift after migration<a class="headerlink" href="#risk-two-stacks-drift-after-migration" title="Permanent link">&para;</a></h2>
+<p>Keeping serving-session entrypoints, retained-serving handoffs, publication
+helpers, and artifact-runtime entrypoints alive as peers would recreate the
+split-brain this design is meant to remove. The two stacks would accumulate
+different fallback behavior, report fields, cleanup rules, and race handling.</p>
+<p>Mitigation: migration is delete-forward. Each replacement must name the old
+entrypoints it absorbs, the guardrail tests that prove equivalent behavior, and
+the cleanup commit that removes or internalizes the old public surface.</p>
+<h2 id="risk-serving-module-stays-deep">Risk: Serving module stays deep<a class="headerlink" href="#risk-serving-module-stays-deep" title="Permanent link">&para;</a></h2>
+<p>If <code>tensorcast.serving</code> remains the place where public config, sessions,
+retained acquire, publication, reports, and diagnostics are all defined, the
+system will still be serving-centered even if <code>Artifact.realize(...)</code> exists.</p>
+<p>Mitigation: final ownership is shallow. <code>tensorcast.serving</code> may contain private
+lowerings and serving-ABI-specific builder helpers, but normal startup, reload,
+retained credit, runtime view, and publication flow through the artifact-runtime
+professional API.</p>
+<h1 id="design-commitments">Design Commitments<a class="headerlink" href="#design-commitments" title="Permanent link">&para;</a></h1>
+<p>No source compatibility guarantee is required. The target state is a single
+artifact-realization stack:</p>
+<ol>
+<li>TensorDict, caller tensors, binding, retained prefetch, target sets, mounted
+   source, runtime attachment, model-runtime reports, and publication all lower
+   through one artifact realization model.</li>
+<li>Direct model-runtime realization is reached from <code>Artifact.realize(...)</code> with
+   runtime host capabilities, not from a public serving session.</li>
+<li>Compatibility layers are temporary migration tools, not accepted target-state
+   architecture.</li>
+<li>Serving-centered names survive only when they describe an internal module,
+   implementation detail, or model-serving ABI field more precisely than the
+   artifact/runtime vocabulary.</li>
+<li>Execution decisions follow the boundary decision logic in this design; when
+   a concept could live in multiple places, choose the owner that matches the
+   durable identity, realization intent, runtime host, retained claim, or
+   publication responsibility.</li>
+</ol>
+<h1 id="acceptance-criteria">Acceptance Criteria<a class="headerlink" href="#acceptance-criteria" title="Permanent link">&para;</a></h1>
+<ul>
+<li>A design and plan exist for the artifact-centered model-runtime direction;
+  this design defines the target state and the paired plan tracks migration from
+  current code.</li>
+<li><code>ArtifactRealizationSpec</code>, <code>ArtifactRealizationHandle</code>, and
+  <code>ArtifactRealizationReport</code> are public SDK symbols at the same API level as
+  <code>Artifact</code>.</li>
+<li>Direct public/professional model-runtime realization enters through
+  <code>Artifact.realize(ArtifactRealizationSpec.model_runtime(...), runtime_host=...)</code>
+  or an equivalent artifact-rooted signature.</li>
+<li><code>ArtifactRealizationHandle</code> is a completed-value facade; runtime attachment is
+  a projection/action on that completed handle, not a second execution path.</li>
+<li>The vLLM scenario matrix in this design is treated as a required migration
+  checklist.</li>
+<li>The vLLM reference case is feasible without a vLLM-owned parallel TensorDict,
+  source, or control path.</li>
+<li>Durable artifact bind, local source bootstrap, retained prefetch acquire, TP
+  local-ready realization, TensorDict retrieval, P2P reuse, in-place reload,
+  runtime replica publication, shutdown retirement, and local-ready durable
+  promotion all have an artifact-centered explanation.</li>
+<li>TensorDict, Binding, RuntimeAttachment, retained prefetch handoff, and artifact
+  replica publication are projections or actions of one realization model, not
+  parallel user-facing source authorities.</li>
+<li>Old serving-rooted public runtime entrypoints, compatibility wrappers,
+  duplicate diagnostics, and redundant tests are removed or internalized once the
+  artifact-centered replacement covers the behavior.</li>
+<li>The final <code>tensorcast.serving</code> module is shallow: normal startup, reload,
+  retained memory credit, runtime view, and shutdown/publication do not require
+  public serving-session/config/retained/publication APIs.</li>
+<li>vLLM normal paths use the direct artifact-runtime API and runtime
+  host capabilities; remaining serving imports are private implementation or
+  serving-ABI-specific builder paths with owners.</li>
+<li>Retained pre-admission credit, mounted-source bootstrap, active-generation
+  publication, live EP/EPLB reload checks, and main/draft reload semantics are
+  covered as vLLM migration constraints.</li>
+<li>Retained startup applies trusted reservation credit before vLLM memory
+  admission, then acquires and attaches the existing daemon-owned value without
+  re-materializing the weights.</li>
+<li>Durable and mounted-source model-runtime startup reports the expected fast
+  source (<code>local_replica</code>, <code>p2p</code>, <code>disk</code>, mounted source/direct write, or
+  explicit transform) and does not go through TensorDict or a Python state-dict
+  intermediate.</li>
+<li>Steady-state GPU and host memory accounting shows no additional full-weight
+  residency beyond the active TensorCast binding/attachment, framework
+  runtime-only tensors, and explicitly reported reload overlap.</li>
+<li>Direct artifact-runtime startup and reload expose per-stage timing and
+  resource-envelope diagnostics sufficient to catch added control-plane hops,
+  copy bytes, temporary bytes, and fallback latency.</li>
+<li>No design path requires direct Python SDK Global Store access.</li>
+<li>Device and framework facts remain realization/admission/runtime facts, not
+  durable artifact identity.</li>
+<li>P2P remains a compatible-byte transport strategy, not a transform system.</li>
+<li>A future SGLang integration can reuse the same artifact realization/profile
+  model without inheriting vLLM-specific public names.</li>
+</ul>
+<h1 id="schema-changes">Schema Changes<a class="headerlink" href="#schema-changes" title="Permanent link">&para;</a></h1>
+<p>No durable metadata schema change is required by this design alone. Later
+implementation work may still change Python DTOs or proto wire messages if
+<code>ServingBindingTarget</code>, retained binding results, runtime-view projections, or
+representation manifests are renamed or generalized. Such changes should be
+treated as API/schema changes for implementation review, but they should not add
+a second durable metadata authority. When such changes replace serving-rooted
+wire or Python DTOs, the old public DTOs should be deleted or made internal in
+the same migration window instead of kept as permanent compatibility aliases.</p>
+<h1 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h1>
+<ul>
+<li><code>docs/designs/0039-artifact-first-sdk.md</code></li>
+<li><code>docs/designs/0078-selection-first-artifact-retrieval.md</code></li>
+<li><code>docs/designs/0084-binding-unified-model-and-contract.md</code></li>
+<li><code>docs/designs/0108-tensor-aware-materialization-strategy-plane.md</code></li>
+<li><code>docs/designs/0110-artifact-representation-contract-and-transform-unification.md</code></li>
+<li><code>docs/designs/0111-source-to-serving-builder-and-representation-publication.md</code></li>
+<li><code>docs/designs/0112-binding-native-serving-realization-and-publication.md</code></li>
+<li><code>docs/designs/0114-collective-first-binding-realization-for-tp-serving-startup.md</code></li>
+<li><code>docs/designs/0116-prefetch-serving-binding-target.md</code></li>
+<li><code>docs/architecture/p2p-transfer-strategies.md</code></li>
+<li><code>vllm/tensorcast/loader.py</code></li>
+<li><code>vllm/tensorcast/placement.py</code></li>
+<li><code>vllm/tensorcast/source.py</code></li>
+<li><code>vllm/tensorcast/collective.py</code></li>
+<li><code>vllm/tensorcast/adapter.py</code></li>
+<li><code>vllm/model_executor/model_loader/memory_accounting.py</code></li>
+<li><code>vllm/v1/worker/gpu_model_runner.py</code></li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

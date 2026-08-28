@@ -1,0 +1,2623 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0072-replica-promotion-export/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Replica Promotion and Export for P2P Routing (Design) - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Replica Promotion and Export for P2P Routing (Design)
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p>Materialization currently publishes <em>presence-only</em> replicas: they are reusable locally and visible to HA, but they may be missing the remote-memory metadata required for P2P transport (<code>remote_memory_keys</code> + <code>buffer_sizes</code>). Global Store routing can still select these replicas today, causing P2P failures, avoidable disk fallbacks, and poor tail latency.</p>
+<p>This design introduces <strong>Replica Promotion and Export</strong> as a policy-driven, best-effort capability lifecycle that:</p>
+<ul>
+<li>Defines <strong>exportability</strong> as an explicit, ByteSpace-scoped control-plane state (<code>export_state</code> + <code>export_generation</code>), rather than inferring it implicitly from “replica exists” or from repeated-field emptiness.</li>
+<li>Promotes selected local replicas into P2P sources by exporting communicator keys and publishing <strong>authoritative transport metadata</strong> through HA state sync (single writer).</li>
+<li>Demotes exports safely with a barriered protocol (<strong>withdraw routing → drain → unexport</strong>) that minimizes in-flight breakage and makes forced demotion observable and bounded.</li>
+<li>Tightens Global Store routing so it <strong>never</strong> selects a replica unless it is explicitly exportable and has valid transport metadata, with fast-fail behavior when no exportable sources exist.</li>
+</ul>
+<h1 id="context-project-wide">Context (Project-Wide)<a class="headerlink" href="#context-project-wide" title="Permanent link">&para;</a></h1>
+<p>TensorCast data-plane P2P reads use communicator-registered tensor keys (<code>remote_memory_keys</code>) and <code>buffer_sizes</code> to read remote memory regions. A replica can exist and be locally readable without being a valid P2P source. Long-term correctness requires treating “exportability” as a governed capability with explicit lifecycle, rather than inferring it implicitly from “replica exists”.</p>
+<h1 id="background-current-behavior-and-systemic-gaps">Background: Current Behavior and Systemic Gaps<a class="headerlink" href="#background-current-behavior-and-systemic-gaps" title="Permanent link">&para;</a></h1>
+<p>At a high level:</p>
+<ul>
+<li><strong>Presence publishing</strong> (local reuse + HA visibility) happens via <code>RegisterReplica</code> during materialization completion. This path does <em>not</em> export communicator keys.</li>
+<li><strong>Transport metadata publishing</strong> (remote keys + sizes) is produced during <em>registration</em> flows (put/register/LIP), but not for post-materialization replicas.</li>
+<li><strong>Routing selection</strong> in Global Store is primarily driven by availability, worker heartbeat, and load counters; it must be hardened to avoid selecting replicas that cannot serve P2P reads.</li>
+</ul>
+<p>The following gaps are consistency-critical and must be fixed as part of this design:</p>
+<p>1) <strong>ByteSpace-scoped identity is not consistently enforced end-to-end.</strong>
+   - Project-wide semantics require replicas to be ByteSpace-scoped (canonical vs view). Global Store models and docs already assume this.
+   - HA state sync must therefore include <code>MemoryInfo.byte_space</code> and Global Store must include ByteSpace in its reconciliation key. Otherwise view replicas can collide with canonical replicas.</p>
+<p>2) <strong>Repeated-field semantics are not strong enough for safe withdrawal.</strong>
+   - In proto3, repeated fields have no presence; “empty” is ambiguous between “not reported” and “intentionally cleared”.
+   - Safe demotion requires “intentional clear” semantics to be unambiguous, otherwise Global Store can retain stale keys and continue routing to revoked exports.</p>
+<p>3) <strong>Demotion needs an explicit barrier.</strong>
+   - “Request a state sync tick” is not a barrier. Demotion must not proceed to unexport until Global Store has applied the withdraw update (or demotion remains racy).</p>
+<p>This design upgrades exportability into an explicit control-plane state to close these gaps in a principled, long-lived way.</p>
+<h1 id="problem-statement">Problem Statement<a class="headerlink" href="#problem-statement" title="Permanent link">&para;</a></h1>
+<p>Materialization currently registers replicas via <code>register_replica</code> (presence-only) without remote memory keys. Global Store transport selection can still route to these replicas, leading to:</p>
+<ul>
+<li><strong>Immediate P2P failures</strong> when a selected source has no usable transport metadata.</li>
+<li><strong>Timeout-driven tail latency</strong> when replicas exist but none are actually eligible as P2P sources (e.g., all are presence-only).</li>
+<li><strong>Demotion races</strong> if exported keys are revoked while Global Store can still route new transports (or while existing transports are in flight).</li>
+</ul>
+<p>We need a long-term, consistent way to:</p>
+<ul>
+<li>Keep presence-only semantics for local reuse.</li>
+<li>Promote eligible replicas into exportable, P2P-capable sources.</li>
+<li>Ensure Global Store routes only to P2P-capable replicas.</li>
+<li>Avoid exporting every read path by default (resource amplification).</li>
+<li>Make demotion safe and observable, with bounded waiting and predictable failure modes.</li>
+</ul>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<p>Goals
+- Make materialized replicas P2P-eligible when policy and runtime conditions allow (best-effort, not required for materialization success).
+- Enforce routing invariants: P2P routing must only select replicas that are <strong>explicitly exportable</strong> and have valid transport metadata for the requested ByteSpace.
+- Provide explicit policy controls for export, with predictable failure modes and observability.
+- Define a demotion protocol that withdraws routing before revoking keys, includes an explicit barrier, and drains in-flight transports with bounded waiting.
+- Make “no exportable sources” a fast-fail condition (NOT_FOUND) rather than a timeout loop.</p>
+<p>Non-Goals
+- Renaming public RPCs in this iteration (naming clarity may follow).
+- Introducing new user-facing data models or breaking changes to SDK APIs.
+- Guaranteeing P2P availability for all replicas (promotion is best-effort).
+- Redesigning Global Store scheduling beyond eligibility, safety, and observability guardrails (fairness and topology-aware routing are follow-ups).</p>
+<h1 id="consistency-model-and-invariants-authoritative">Consistency Model and Invariants (Authoritative)<a class="headerlink" href="#consistency-model-and-invariants-authoritative" title="Permanent link">&para;</a></h1>
+<p>This section defines the long-lived correctness constraints that inform the design.</p>
+<h2 id="control-plane-replica-identity-bytespace-scoped">Control-Plane Replica Identity (ByteSpace-Scoped)<a class="headerlink" href="#control-plane-replica-identity-bytespace-scoped" title="Permanent link">&para;</a></h2>
+<p>All control-plane operations that reason about “a replica” must disambiguate ByteSpaces.</p>
+<p>Define a <strong>ReplicaRoutingKey</strong> (used by routing, HA sync diffing, and safety protocols) as:</p>
+<ul>
+<li><code>artifact_id</code> (content-addressed identity; assembly_id for unsealed flows is still an artifact_id string)</li>
+<li><code>byte_space</code> (<code>tensorcast.common.v1.ByteSpaceRef</code>):</li>
+<li><code>kind = CANONICAL</code> and <code>id = ""</code> for canonical</li>
+<li><code>kind = VIEW</code> and <code>id = view_id</code> for view replicas / pieces</li>
+<li><code>memory_type</code> and <code>device_id</code> (GPU ordinal for GPU; <code>device_id=0</code> for RAM)</li>
+<li><code>worker_id</code> (and/or <code>daemon_id</code> as stable identity) plus node endpoints used for routing</li>
+</ul>
+<p><strong>Invariant:</strong> Global Store must never merge or overwrite replicas from distinct ByteSpaces under the same routing key.</p>
+<h2 id="exportability-is-separate-from-presence">Exportability Is Separate from Presence<a class="headerlink" href="#exportability-is-separate-from-presence" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Presence answers: “does a local copy exist and should it be tracked for HA/local reuse?”</li>
+<li>Exportability answers: “may Global Store route new P2P transports to this replica as a source?”</li>
+</ul>
+<p>Exportability must be modeled explicitly; it must not be inferred from implicit signals (e.g., “replica exists”) or ambiguous encodings (e.g., empty repeated fields).</p>
+<h2 id="single-writer-for-transport-metadata">Single Writer for Transport Metadata<a class="headerlink" href="#single-writer-for-transport-metadata" title="Permanent link">&para;</a></h2>
+<p>To avoid “double writers” and racey partial updates:</p>
+<ul>
+<li>Presence may still be registered through existing <code>RegisterReplica</code> / <code>register_replica_with_global_store</code> paths.</li>
+<li>The daemon is the <strong>single writer</strong> for “is this replica exportable and what keys does it serve?”. Global Store must treat <code>MemoryInfo.transport</code> presence as the explicit intent signal:</li>
+<li>If <code>MemoryInfo.transport</code> is <strong>absent</strong>, the update is presence-only and must not overwrite stored transport metadata.</li>
+<li>If <code>MemoryInfo.transport</code> is <strong>present</strong>, the payload is authoritative (including intentional clears), and Global Store must apply it.</li>
+</ul>
+<h2 id="routing-invariants">Routing Invariants<a class="headerlink" href="#routing-invariants" title="Permanent link">&para;</a></h2>
+<p>Global Store may select a replica as a P2P source <strong>only if</strong>:</p>
+<ul>
+<li><code>export_state == EXPORT_STATE_EXPORTABLE</code>, and</li>
+<li>transport metadata is valid (keys + sizes, matching lengths, all sizes &gt; 0, sum(sizes) == memory_size), and</li>
+<li>replica and worker availability predicates pass (<code>stats.is_available</code>, heartbeat freshness, accepting_new_requests, capacity).</li>
+</ul>
+<p>If these predicates fail, the replica is presence-only from a routing perspective.</p>
+<h2 id="demotion-safety-and-barriers">Demotion Safety and Barriers<a class="headerlink" href="#demotion-safety-and-barriers" title="Permanent link">&para;</a></h2>
+<p>Demotion must be safe by construction:</p>
+<ul>
+<li><strong>Withdraw barrier:</strong> demotion must not proceed to unexport until Global Store has applied the withdraw update that prevents new routing to this replica.</li>
+<li><strong>Drain definition:</strong> “drained” requires both:</li>
+<li>Global Store drain (<code>WaitReplicaDrain</code> based on <code>current_requests</code>), and</li>
+<li>daemon-local drain (transport locks / local retire gates) when applicable.</li>
+<li>Waiting is bounded. If timeouts expire and memory must be reclaimed, demotion may proceed with explicit degraded behavior and observability.</li>
+</ul>
+<h1 id="architecture-interfaces">Architecture &amp; Interfaces<a class="headerlink" href="#architecture-interfaces" title="Permanent link">&para;</a></h1>
+<h2 id="terminology">Terminology<a class="headerlink" href="#terminology" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Presence-only replica: Registered for metadata visibility and local reuse, but not eligible as a P2P transport source.</li>
+<li>Exported replica: A local replica with communicator-exported remote-memory keys registered in-process (keys are currently usable by the daemon).</li>
+<li>Exportable replica: A replica that Global Store may route as a P2P source. Concretely, it has <code>export_state=EXPORT_STATE_EXPORTABLE</code> and valid transport metadata for the requested ByteSpace.</li>
+<li>Promotion: Transition from presence-only → exported/exportable.</li>
+<li>Demotion: Transition from exportable → presence-only, including withdrawal from routing and eventual unexport.</li>
+<li>Drain: Waiting for in-flight transports to complete before revoking exports.</li>
+</ul>
+<h2 id="state-model">State Model<a class="headerlink" href="#state-model" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>stateDiagram-v2
+  [*] --&gt; LocalOnly
+  LocalOnly --&gt; Exporting
+  Exporting --&gt; Exportable
+  Exporting --&gt; PromotionFailed
+  PromotionFailed --&gt; LocalOnly
+  Exportable --&gt; Draining
+  Draining --&gt; LocalOnly</code></pre>
+<p>Key notes:
+- <strong>Exportable</strong> is defined by <em>routing eligibility</em> (Global Store-facing metadata). It is not synonymous with “replica exists”.
+- <strong>Draining</strong> represents “do not route new transports” while allowing existing transports to finish.</p>
+<pre class="mermaid"><code>flowchart LR
+  A[Materialize success] --&gt; B[ReplicaPromotionManager]
+  B --&gt; C{Policy allows}
+  C --&gt;|No| D[Remain presence-only]
+  C --&gt;|Yes| E[Export via communicator]
+  E --&gt;|Success| F[Publish transport metadata via HA state sync]
+  E --&gt;|Fail| G[Remain presence-only]
+  F --&gt; H[Eligible for P2P routing]</code></pre>
+<h2 id="component-responsibilities">Component Responsibilities<a class="headerlink" href="#component-responsibilities" title="Permanent link">&para;</a></h2>
+<p>ReplicaPromotionManager (StoreEngine runtime)
+- Observes materialization completions and relevant lifecycle events.
+- Evaluates promotion policy, applying operator-configured guardrails.
+- Performs export/unexport using the communicator integration (<code>Replica::enable_remote_memory_access</code> and <code>MemoryExportRegistry</code>).
+- Triggers publication of updated transport metadata (best-effort immediate HA sync tick; demotion uses a barriered sync).</p>
+<p>Memory export
+- Exports communicator keys for selected replicas and caches export registrations for clean unexport.
+- Must be rollback-safe and idempotent under retries.</p>
+<p>Global Store routing
+- Enforces eligibility: only exportable replicas can be selected as P2P sources.
+- Makes “no exportable replicas” a first-class result (fast NOT_FOUND), not a timeout loop.</p>
+<p>Lifecycle integration
+- Demotion is triggered on eviction/unload/communication disablement.
+- Demotion follows a protocol: withdraw routing → drain → unexport.
+- HA state sync is the primary mechanism for publishing and withdrawing routing eligibility.</p>
+<h2 id="data-model-explicit-transport-metadata-export_state-export_generation">Data Model: Explicit Transport Metadata (<code>export_state</code> + <code>export_generation</code>)<a class="headerlink" href="#data-model-explicit-transport-metadata-export_state-export_generation" title="Permanent link">&para;</a></h2>
+<h3 id="motivation">Motivation<a class="headerlink" href="#motivation" title="Permanent link">&para;</a></h3>
+<p>Safe withdrawal requires a non-ambiguous control-plane signal that can express:</p>
+<ul>
+<li>“This replica is exportable and here are its keys”</li>
+<li>“This replica is not exportable (presence-only)”</li>
+<li>“This replica is draining (withdrawn from routing, but keys may still exist locally to serve in-flight reads)”</li>
+<li>“This update is authoritative even if keys are empty” (presence)</li>
+</ul>
+<p>Proto3 repeated fields cannot express “intentional clear” because they have no presence. Therefore we introduce a transport metadata message with presence.</p>
+<h3 id="proposed-proto-shape-conceptual">Proposed Proto Shape (conceptual)<a class="headerlink" href="#proposed-proto-shape-conceptual" title="Permanent link">&para;</a></h3>
+<p>Add a new message under <code>tensorcast.common.v1</code> and embed it in <code>MemoryInfo</code>:</p>
+<div class="language-proto highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kd">message</span><span class="w"> </span><span class="nc">ReplicaTransportMetadata</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="kd">enum</span><span class="w"> </span><span class="n">ExportState</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">    </span><span class="na">EXPORT_STATE_UNSPECIFIED</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">    </span><span class="na">EXPORT_STATE_PRESENCE_ONLY</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">    </span><span class="na">EXPORT_STATE_EXPORTABLE</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">    </span><span class="na">EXPORT_STATE_DRAINING</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">  </span><span class="p">}</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="w">  </span><span class="n">ExportState</span><span class="w"> </span><span class="na">export_state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="w">  </span><span class="kt">uint64</span><span class="w"> </span><span class="na">export_generation</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="w">  </span><span class="k">repeated</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="na">remote_memory_keys</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="w">  </span><span class="k">repeated</span><span class="w"> </span><span class="kt">uint64</span><span class="w"> </span><span class="na">buffer_sizes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="w">  </span><span class="c1">// Optional, mirrors existing MemoryInfo.verification_json when present.</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="w">  </span><span class="kt">string</span><span class="w"> </span><span class="na">verification_json</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="p">;</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="p">}</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a><span class="kd">message</span><span class="w"> </span><span class="nc">MemoryInfo</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a><span class="w">  </span><span class="o">...</span>
+</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a><span class="w">  </span><span class="n">ByteSpaceRef</span><span class="w"> </span><span class="na">byte_space</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">16</span><span class="p">;</span>
+</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>
+</span><span id="__span-0-23"><a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a><span class="w">  </span><span class="c1">// Presence is critical: when present, the payload is authoritative even if</span>
+</span><span id="__span-0-24"><a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a><span class="w">  </span><span class="c1">// keys/sizes are empty (intentional withdraw/clear).</span>
+</span><span id="__span-0-25"><a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a><span class="w">  </span><span class="k">optional</span><span class="w"> </span><span class="n">ReplicaTransportMetadata</span><span class="w"> </span><span class="na">transport</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">17</span><span class="p">;</span>
+</span><span id="__span-0-26"><a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a><span class="p">}</span>
+</span></code></pre></div>
+<p>Canonical routing semantics:</p>
+<ul>
+<li>If <code>memory_info.transport</code> is present, Global Store uses it as the canonical routing/source-of-truth for exportability and keys (including empty clears).</li>
+<li>If absent, the update is <strong>presence-only</strong>: Global Store must preserve stored transport metadata and must not derive exportability from <code>MemoryInfo.remote_memory_keys</code> / <code>buffer_sizes</code> (deprecated).</li>
+</ul>
+<h3 id="export-generation-what-it-buys">Export Generation (what it buys)<a class="headerlink" href="#export-generation-what-it-buys" title="Permanent link">&para;</a></h3>
+<p><code>export_generation</code> is a monotonic counter per <code>ReplicaRoutingKey</code> that increments on each successful export. It provides:</p>
+<ul>
+<li>A stable “epoch” for debugging and metrics (promotion churn).</li>
+<li>A strong guardrail against stale routes: key names may embed the generation so that an outdated route fails fast (optional but recommended).</li>
+<li>A future hook for CAS-style updates (“apply withdraw only if generation matches”) if needed.</li>
+</ul>
+<h2 id="publication-channel-and-authority-single-writer">Publication Channel and Authority (Single Writer)<a class="headerlink" href="#publication-channel-and-authority-single-writer" title="Permanent link">&para;</a></h2>
+<p>To minimize distributed “double writers” and make HA behavior predictable:</p>
+<ul>
+<li><strong>Presence publishing</strong>: materialization continues to register presence-only replicas through existing paths (<code>register_replica_with_global_store</code> → <code>register_replica</code>).</li>
+<li><strong>Presence updates must not clobber transport metadata</strong>: Global Store must treat <code>RegisterReplica</code> with <strong>absent</strong> <code>MemoryInfo.transport</code> as a presence-only update and <strong>must not</strong> overwrite stored transport metadata (<code>export_state</code>, <code>export_generation</code>, keys/sizes, <code>verification_json</code>). Implementation detail: <code>ArtifactService.register_replica(... preserve_transport=True)</code> updates only liveness fields and preserves transport fields in the DB.</li>
+<li><strong>Authoritative transport reconciliation</strong>: promotion/demotion updates transport metadata (<code>export_state</code>, <code>export_generation</code>, keys/sizes, <code>verification_json</code>) primarily through <strong>HA state sync</strong>, and Global Store treats the latest accepted sync as authoritative for routing.</li>
+<li>Some flows (e.g., LIP routable view leases) may publish transport metadata via <code>RegisterReplica</code> by including <code>MemoryInfo.transport</code>. Those updates must be treated as authoritative transport updates (not presence-only), and may later be reconciled by HA sync for drift.</li>
+<li><strong>Authoritative withdrawal</strong>: when the daemon includes <code>MemoryInfo.transport</code> (presence), Global Store must treat it as authoritative even when keys are empty, so demotion can reliably withdraw routing eligibility.</li>
+</ul>
+<p>Rationale: state sync already handles drift reconciliation and is the natural place to keep Global Store in lock-step with daemon-local truth. Direct “update keys” RPCs can be added later if HA is unavailable, but are out of scope here.</p>
+<h2 id="no-mixed-version-support-simplified">No Mixed-Version Support (Simplified)<a class="headerlink" href="#no-mixed-version-support-simplified" title="Permanent link">&para;</a></h2>
+<p>This project does not require mixed-version worker compatibility at this stage. The design therefore treats the new transport metadata model as <strong>mandatory</strong>:</p>
+<ul>
+<li>Daemons publish <code>MemoryInfo.transport</code> for all replicas (presence is the authoritative signal, including clears).</li>
+<li>Global Store routing and reconciliation always use <code>export_state</code>/<code>export_generation</code> + <code>transport</code> validity.</li>
+<li>Legacy semantics based on <code>MemoryInfo.remote_memory_keys</code> / <code>buffer_sizes</code> are considered deprecated.</li>
+</ul>
+<h2 id="routing-eligibility-global-store">Routing Eligibility (Global Store)<a class="headerlink" href="#routing-eligibility-global-store" title="Permanent link">&para;</a></h2>
+<p>Global Store must treat exportability as an explicit eligibility predicate, not an implicit side-effect of “replica exists”.</p>
+<h3 id="eligibility-predicate-canonical">Eligibility Predicate (Canonical)<a class="headerlink" href="#eligibility-predicate-canonical" title="Permanent link">&para;</a></h3>
+<p>A replica is eligible as a P2P source when all are true:</p>
+<ul>
+<li>Worker is present, accepting new requests, and heartbeat is fresh.</li>
+<li><code>is_available = true</code>.</li>
+<li><code>export_state = EXPORT_STATE_EXPORTABLE</code>.</li>
+<li><code>remote_memory_keys</code> is non-empty.</li>
+<li><code>buffer_sizes</code> is non-empty.</li>
+<li><code>len(remote_memory_keys) == len(buffer_sizes)</code>.</li>
+<li>All <code>buffer_sizes[i] &gt; 0</code>.</li>
+<li><code>sum(buffer_sizes) == memory_size</code>.</li>
+</ul>
+<p>If any condition fails, the replica is <strong>presence-only</strong> from a routing perspective (still visible for HA/local reuse) and must not be selected for transport.</p>
+<h3 id="is_available-semantics-orthogonal-to-exportability"><code>is_available</code> Semantics (Orthogonal to Exportability)<a class="headerlink" href="#is_available-semantics-orthogonal-to-exportability" title="Permanent link">&para;</a></h3>
+<p><code>ReplicaStats.is_available</code> remains the coarse “may route new transports” switch:</p>
+<ul>
+<li><code>is_available=false</code> must always exclude a replica from routing, even if it is exported and has valid keys.</li>
+<li><code>MarkReplicaUnavailable</code> continues to be the mechanism to quiesce a replica for swap-safety and retirement flows.</li>
+</ul>
+<p>Exportability (<code>export_state</code>) is distinct:</p>
+<ul>
+<li><code>export_state=PRESENCE_ONLY</code> means “do not route”, even if <code>is_available=true</code> (healthy local presence, not a P2P source).</li>
+<li><code>export_state=DRAINING</code> means “withdrawn from routing”; keys may still exist locally to serve in-flight reads until drain completes.</li>
+</ul>
+<h3 id="fast-fail-behavior">Fast-Fail Behavior<a class="headerlink" href="#fast-fail-behavior" title="Permanent link">&para;</a></h3>
+<p>When <strong>no exportable replicas exist</strong> for an artifact (and view, if applicable), <code>RequestReplicaTransport</code> should return NOT_FOUND quickly rather than waiting until timeout. “Wait for availability” applies only when there exists at least one exportable replica that is temporarily unavailable (capacity/heartbeat).</p>
+<h3 id="observability">Observability<a class="headerlink" href="#observability" title="Permanent link">&para;</a></h3>
+<p>Global Store should expose counters/gauges for:
+- Total candidates vs eligible candidates.
+- Filter reasons (missing keys, size mismatch, stale heartbeat, over capacity, worker not accepting).
+- Transport requests that fail due to “no exportable sources”.</p>
+<h2 id="demotion-protocol-safety">Demotion Protocol (Safety)<a class="headerlink" href="#demotion-protocol-safety" title="Permanent link">&para;</a></h2>
+<p>Demotion must avoid the unsafe ordering “unexport keys first, then stop routing”. The recommended protocol is:</p>
+<p>1) <strong>Withdraw routing eligibility</strong>: publish <code>export_state=EXPORT_STATE_DRAINING</code> (or presence-only) through HA sync.
+   - <strong>Barrier requirement:</strong> demotion must wait until Global Store confirms the update was applied (e.g., via sync response/version bump) before proceeding.
+2) <strong>Drain</strong>: wait for in-flight transports to complete (bounded timeout).
+3) <strong>Unexport</strong>: revoke communicator registrations locally.
+4) <strong>Clear export metadata</strong>: publish <code>export_state=EXPORT_STATE_PRESENCE_ONLY</code> with empty keys/sizes (authoritative clear) via HA sync.
+5) <strong>Proceed with eviction/unload</strong>: only after unexport is complete (or after bounded timeout with explicit degraded behavior).</p>
+<pre class="mermaid"><code>sequenceDiagram
+  participant PM as ReplicaPromotionManager
+  participant HA as WorkerLifecycleManager
+  participant GS as Global Store
+  participant COMM as Communicator
+
+  PM-&gt;&gt;HA: force state sync (set export_state=DRAINING)
+  HA-&gt;&gt;GS: ReconcileWorkerState (withdraw applied)
+  PM-&gt;&gt;GS: WaitReplicaDrain (bounded)
+  PM-&gt;&gt;COMM: unexport (best-effort cleanup)
+  PM-&gt;&gt;HA: force state sync (set export_state=PRESENCE_ONLY, clear keys)</code></pre>
+<p>If drain times out but memory must be reclaimed (eviction/unload), demotion may proceed and break in-flight reads. This must be logged, counted, and surfaced as a user-visible degraded condition (see Error Model).</p>
+<h2 id="ha-synchronization-semantics-bytespace-authoritative-clears">HA Synchronization Semantics (ByteSpace + Authoritative Clears)<a class="headerlink" href="#ha-synchronization-semantics-bytespace-authoritative-clears" title="Permanent link">&para;</a></h2>
+<p>To make the above protocols implementable, HA state sync must satisfy:</p>
+<ul>
+<li><strong>ByteSpace correctness:</strong> <code>MemoryInfo.byte_space</code> must be populated for all replicas in <code>ReconcileWorkerStateRequest.inventory</code> so Global Store can reconcile canonical vs view replicas without collision.</li>
+<li><strong>Authoritative transport updates:</strong> when <code>MemoryInfo.transport</code> is present, Global Store must apply it even if keys/sizes are empty (withdraw/clear).</li>
+<li><strong>Fail-safe on invalid transport metadata:</strong> mismatched lengths or invalid size sums must result in the replica being treated as non-exportable (and should not “skip update” in a way that leaves stale exportable metadata in place).</li>
+</ul>
+<h2 id="implementation-notes-and-refactors-guidance">Implementation Notes and Refactors (Guidance)<a class="headerlink" href="#implementation-notes-and-refactors-guidance" title="Permanent link">&para;</a></h2>
+<p>This section is non-normative but highlights refactors that make the design easier to implement correctly.</p>
+<ul>
+<li><strong>Global Store (routing):</strong> centralize the eligibility predicate so selection and diagnostics use identical rules (avoid drift between <code>find_available_for_transport</code> and <code>get_transport_eligibility_snapshot</code>).</li>
+<li><strong>Global Store (HA):</strong> make reconciliation keys ByteSpace-aware (<code>view_id</code> / <code>byte_space</code>) and treat <code>MemoryInfo.transport</code> presence as the switch for authoritative clears.</li>
+<li><strong>Daemon (HA state sync payload):</strong> always set <code>MemoryInfo.byte_space</code> from the local <code>ReplicaKey</code> and include transport metadata from runtime state; never “skip update” on invalid metadata—prefer fail-safe withdrawal.</li>
+<li><strong>Daemon (demotion barrier):</strong> add an internal helper that can run a state-sync tick and wait for the applied response (or for state_version bump) so demotion does not rely on background loops.</li>
+<li><strong>Core runtime:</strong> introduce a small runtime-owned transport state struct (export_state + export_generation + last export registration) so promotion/demotion is not encoded implicitly via <code>is_available</code> or the presence of comm registration alone.</li>
+</ul>
+<h2 id="policy-and-configuration">Policy and Configuration<a class="headerlink" href="#policy-and-configuration" title="Permanent link">&para;</a></h2>
+<p>Promotion policy must be wired into the unified runtime config system (<code>docs/designs/0004-unified-runtime-config.md</code>).</p>
+<p>Proposed config surface (daemon runtime config; names illustrative, final schema lives in <code>tensorcast.config.v1.DaemonConfig</code>):
+- <code>promotion.policy</code>: <code>never | on_materialize | on_hotness | on_policy</code>
+- <code>promotion.require_verified</code> (gate promotion on available verification metadata)
+- <code>promotion.demotion_drain_timeout</code> (bounded wait before forced unexport on eviction/unload)</p>
+<p>Precedence (operator vs caller):
+- Daemon config is authoritative and defines allowed modes.
+- Per-call intent from the SDK is advisory (“request”) and must be constrained by daemon policy.</p>
+<p>SDK surface (optional):
+- Add <code>GetArtifactOptions.export_policy</code>: <code>auto | never | force</code>
+  - Default: <code>never</code> (do not promote on read).
+  - <code>auto</code>: allow policy-driven promotion when daemon policy permits.
+  - <code>force</code>: request immediate promotion attempt (still bounded by daemon policy).
+- (Optional ergonomics) A <code>publish=</code> alias on <code>Artifact.tensor_dict*</code> may be provided, but should be a thin wrapper around <code>GetArtifactOptions.export_policy</code> to avoid two sources of truth.</p>
+<h2 id="routing-invariants_1">Routing Invariants<a class="headerlink" href="#routing-invariants_1" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Global Store must never route to a replica without valid <code>remote_memory_keys</code>.</li>
+<li>Presence-only replicas remain visible for local reuse and HA state but are not transport targets.</li>
+</ul>
+<h2 id="error-model">Error Model<a class="headerlink" href="#error-model" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Promotion failures never fail materialization.</li>
+<li>Export failures are logged and exposed via metrics; replicas remain presence-only.</li>
+<li>Demotion withdraws routing eligibility via <code>export_state</code> before revoking keys, includes an explicit barrier, drains with a bounded timeout, and may degrade under forced eviction/unload.</li>
+<li>When Global Store has replicas but none are exportable, transport requests fail fast with NOT_FOUND and emit diagnostics.</li>
+</ul>
+<h2 id="naming-compliance">Naming Compliance<a class="headerlink" href="#naming-compliance" title="Permanent link">&para;</a></h2>
+<p>New interfaces in this design comply with repository naming rules:
+- Classes or structs: <code>ReplicaPromotionManager</code>, <code>PromotionPolicy</code>, <code>PromotionDecision</code>
+- Functions: <code>evaluate_promotion</code>, <code>promote_replica</code>, <code>export_replica</code>, <code>demote_replica</code>
+- Constants or enums: <code>PROMOTION_POLICY_NEVER</code>, <code>PROMOTION_POLICY_ON_MATERIALIZE</code>
+- SDK parameters: <code>export_policy</code> (snake_case), <code>publish</code> (snake_case, optional alias)</p>
+<h1 id="alternatives-considered">Alternatives Considered<a class="headerlink" href="#alternatives-considered" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Export on every materialize by default.</li>
+<li>Rejected due to resource amplification and unnecessary export overhead on cold reads.</li>
+<li>Allow GS to route to presence-only replicas and rely on fallback.</li>
+<li>Rejected due to inconsistent behavior and avoidable P2P failures.</li>
+<li>Always require disk fallback for promotion.</li>
+<li>Rejected because it blocks P2P-only deployments and adds extra IO.</li>
+<li>Use <code>is_available=false</code> as the sole demotion mechanism.</li>
+<li>Rejected because availability conflates “daemon can serve” with “replica is exportable”, and it does not encode safe drain semantics.</li>
+<li>Add an explicit <code>export_state</code> column/field immediately.</li>
+<li>Accepted: explicit state is required for correct withdrawal semantics.</li>
+</ul>
+<h1 id="schema-changes">Schema Changes<a class="headerlink" href="#schema-changes" title="Permanent link">&para;</a></h1>
+<p>Global Store DB schema:
+- Add explicit exportability columns to <code>artifact_replicas</code>:
+  - <code>export_state</code> (enum/int or text) to represent <code>PRESENCE_ONLY | EXPORTABLE | DRAINING</code>.
+  - <code>export_generation</code> (BIGINT) for monotonic export epochs.
+  - (Optional) <code>exported_at</code> timestamp for observability.
+- Migration semantics:
+  - Existing rows default to <code>export_state=PRESENCE_ONLY</code> (or <code>NULL</code> treated as presence-only) until updated by an HA-capable worker.</p>
+<p>Protocol buffers:
+- Add <code>tensorcast.common.v1.ReplicaTransportMetadata</code> and <code>MemoryInfo.transport</code> (optional message with presence).</p>
+<p>Unified runtime config schema:
+- Add a <code>promotion</code> section to <code>tensorcast.config.v1.DaemonConfig</code> (Protobuf + examples/config updates).</p>
+<p>Follow-up (optional):
+- Add CAS-style guards to withdraw/demotion (<code>apply only if export_generation matches</code>) if operators require stricter sequencing under high churn.</p>
+<h1 id="trade-offs-risks">Trade-offs &amp; Risks<a class="headerlink" href="#trade-offs-risks" title="Permanent link">&para;</a></h1>
+<p>Trade-offs
+- Exporting after materialization adds latency and resource use, but makes hot replicas P2P-capable.
+- Strict routing avoids failures but may reduce available sources if promotion is disabled.</p>
+<p>Risks
+- Export storms if policy is too permissive.
+- Stale exports if demotion is incomplete.
+- Increased schema/proto surface area to model exportability explicitly (mitigated by clear invariants).
+- Forced demotion under eviction/unload can still break in-flight reads; this must be observable and bounded.</p>
+<h1 id="compatibility-acceptance-criteria">Compatibility &amp; Acceptance Criteria<a class="headerlink" href="#compatibility-acceptance-criteria" title="Permanent link">&para;</a></h1>
+<p>Compatibility
+- Existing <code>put/register</code> behavior unchanged.
+- Materialization remains best-effort; promotion is additive and optional.
+- SDK defaults do not promote on read (<code>export_policy=never</code>).
+- No mixed-version support is required at this stage; all daemons/workers are expected to publish/consume <code>MemoryInfo.transport</code> for authoritative transport metadata.</p>
+<p>Rollout (recommended)
+- Phase 0: ByteSpace-scoped HA identity correctness (populate <code>byte_space</code>, include <code>view_id</code> in reconciliation keys).
+- Phase 1: Introduce <code>transport</code> (presence) + <code>export_state</code>/<code>export_generation</code> model and treat <code>MemoryInfo.transport</code> presence as authoritative.
+- Phase 2: Tighten routing to require <code>export_state=EXPORTABLE</code>; add fast-fail NOT_FOUND.
+- Phase 3+: Enable promotion behind config (<code>promotion.policy=never</code> by default); gradually enable policies in controlled environments.</p>
+<p>Acceptance Criteria
+- A replica created by materialization becomes a P2P source when policy permits.
+- Global Store never routes to a replica unless <code>export_state=EXPORTABLE</code> and transport metadata is valid.
+- Promotion failure does not break materialization.
+- Demotion withdraws routing eligibility with an explicit barrier before unexport, drains with a bounded timeout, and clears export metadata authoritatively.
+- When replicas exist but none are exportable, transport requests fail fast with NOT_FOUND (not timeout).
+- View replicas (ByteSpace VIEW) never collide with canonical replicas (ByteSpace CANONICAL) in HA sync reconciliation and routing.</p>
+<h1 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h1>
+<ul>
+<li>docs/architecture/api/materialization-flow.md</li>
+<li>docs/architecture/p2p-transfer-strategies.md</li>
+<li>docs/architecture/high-availability-design.md</li>
+<li>core/store/materialization/control/materialize_orchestrator.cc</li>
+<li>core/store/runtime/metadata/registration_backend.cc</li>
+<li>core/store/replica/memory_export_registry.cc</li>
+<li>daemon/ha/worker_lifecycle_manager.cc</li>
+<li>tensorcast/global_store/repositories/replica_repository.py</li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

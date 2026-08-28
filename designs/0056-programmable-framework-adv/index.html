@@ -1,0 +1,3433 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0056-programmable-framework-adv/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>0056 programmable framework adv - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              0056 programmable framework adv
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<hr />
+<p>slug: 0056-programmable-framework-adv
+title: Programmable Framework Advanced Runtime, Daemon Ingress, and Signals (Design)
+description: Thin runtime and ingress layer on top of 0055: single-daemon process runtime, daemon-served low-cardinality signals, terminal-only plan ingress, and <code>ArtifactSetRef</code>-backed set-level orchestration without redefining artifact profile, authority, lifecycle, workflow, or engine integration semantics.
+status: draft
+areas:
+  - sdk
+  - daemon
+  - global_store
+  - proto
+  - docs
+created: 2026-02-04
+last_updated: 2026-03-19
+related_code:
+  - tensorcast/api/plan/plan.py
+  - tensorcast/node_agent/executor.py
+  - tensorcast/engine_adapter/adapter.py
+  - proto/tensorcast/daemon/v2/store_daemon.proto
+  - proto/tensorcast/plan/v1/plan.proto
+  - proto/tensorcast/node_agent/v1/node_agent.proto
+  - proto/tensorcast/global_store/v1/global_store.proto
+related_docs:
+  - docs/designs/0055-programmable-framework.md
+  - docs/designs/0078-selection-first-artifact-retrieval.md
+  - docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
+  - docs/designs/0092-artifact-profiles-shared-dataplane-and-truth-layering.md
+  - docs/designs/0090-existence-semantics-and-single-authority-truth.md
+  - docs/designs/0093-backing-identity-and-retained-backing-ownership.md
+  - docs/designs/0094-unified-lifecycle-kernel-and-capability-families.md
+  - docs/designs/0096-workflow-companion-admission-and-fencing.md
+  - docs/designs/0100-distributed-authority-handoff-security-and-public-surfaces.md
+  - docs/designs/0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md
+  - docs/designs/0106-daemon-served-directory-and-target-resolution.md
+  - docs/designs/0104-artifact-realization-and-cluster-rollout.md
+  - docs/designs/0001-docs-system-design.md
+  - docs/designs/0004-unified-runtime-config.md
+links:
+  plan: ../plans/0056-programmable-framework-adv.md
+  predecessors:
+    - ./0055-programmable-framework.md
+  dependencies:
+    - ./0055-programmable-framework.md
+    - ./0078-selection-first-artifact-retrieval.md
+    - ./0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md
+    - ./0092-artifact-profiles-shared-dataplane-and-truth-layering.md
+    - ./0090-existence-semantics-and-single-authority-truth.md
+    - ./0093-backing-identity-and-retained-backing-ownership.md
+    - ./0094-unified-lifecycle-kernel-and-capability-families.md
+    - ./0096-workflow-companion-admission-and-fencing.md
+    - ./0100-distributed-authority-handoff-security-and-public-surfaces.md
+    - ./0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md
+    - ./0106-daemon-served-directory-and-target-resolution.md
+    - ./0004-unified-runtime-config.md
+  schema: ../../schema.sql</p>
+<hr />
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p><code>docs/designs/0055-programmable-framework.md</code> already defines the artifact-first programmable substrate:</p>
+<ul>
+<li><code>CallContext</code></li>
+<li><code>Operation[T]</code></li>
+<li><code>Plan</code> and <code>PlanSpec</code></li>
+<li>caller-local <code>PlanExecutor</code></li>
+<li>the Instance Agent / Engine Adapter boundary</li>
+</ul>
+<p>This design intentionally stays thinner than earlier <code>0056</code> drafts.
+It owns only the framework layer above that substrate:</p>
+<ul>
+<li>one process runtime handle bound to one daemon endpoint,</li>
+<li>daemon ingress for the same <code>PlanSpec</code> semantics as the local runner,</li>
+<li>daemon-served low-cardinality signals and directory snapshots,</li>
+<li>and a framework-owned <code>ArtifactSetRef</code> contract for high-cardinality artifact sets.</li>
+</ul>
+<p>The long-term convergence rule is:</p>
+<ul>
+<li><code>0056</code> is the programmable front door,</li>
+<li>not a second semantic owner beside <code>0087</code>, <code>0093</code>, <code>0094</code>, <code>0096</code>, <code>0100</code>, or <code>0102</code>,</li>
+<li>and not a second instance-hosting or continuation system beside today's NodeAgent and <code>Operation[T]</code> families.</li>
+</ul>
+<p>Current repo reality already supports that direction:</p>
+<ul>
+<li><code>PlanSpec</code> is the canonical orchestration IR,</li>
+<li>canonical instance actions already exist in <code>plan.proto</code> and <code>node_agent.proto</code>,</li>
+<li>NodeAgent already exposes <code>ExecutePlan</code>,</li>
+<li>and <code>SelectionIdentity</code> already exists as the canonical per-item identity.</li>
+</ul>
+<p>Current implementation posture is narrower than the full long-term shape:</p>
+<ul>
+<li>the first real daemon ingress slice is only worker-targeted plus <code>terminal_only</code>,</li>
+<li>NodeAgent remains the only dependency-ready instance-scoped execution host,</li>
+<li>the exact daemon-served directory and <code>NodeAgentDirectory</code> contract is now
+  factored into <code>0106</code>,</li>
+<li>and inter-daemon control-plane dispatch is still follow-on work rather than
+  ready substrate.</li>
+</ul>
+<p>The remaining problem is therefore front-door convergence, not invention of another execution substrate.</p>
+<p><code>0056</code> does not own:</p>
+<ul>
+<li>artifact value semantics, <code>ArtifactSelection</code>, or <code>byte_artifact</code> profile rules,</li>
+<li>routed truth, backing truth, lifecycle truth, workflow truth, or public continuation algebra,</li>
+<li>engine-local request inspection, target-capability minting, or engine-private aliases,</li>
+<li>or any profile-specific or business-specific high-cardinality set semantics.</li>
+</ul>
+<p>The key long-term rule is:</p>
+<ul>
+<li>the value unit remains <code>Artifact</code>,</li>
+<li>the scalable control unit for high cardinality becomes a neutral set reference,</li>
+<li>and engine or application aliases stay outside framework core.</li>
+</ul>
+<p>That split keeps the repository converged around:</p>
+<ul>
+<li>one artifact object model,</li>
+<li>one truth and lifecycle layering,</li>
+<li>one shared dataplane,</li>
+<li>one distributed public continuation model,</li>
+<li>and zero business-specific control dialects in the framework core.</li>
+</ul>
+<h1 id="problem-statement">Problem Statement<a class="headerlink" href="#problem-statement" title="Permanent link">&para;</a></h1>
+<p>External applications increasingly need to:</p>
+<ul>
+<li>connect to exactly one TensorCast endpoint because of network policy,</li>
+<li>execute plans across many daemons and instances,</li>
+<li>observe low-cardinality cluster signals with bounded staleness,</li>
+<li>and orchestrate high-cardinality artifact sets without direct coupling to Global Store or engine-private RPCs.</li>
+</ul>
+<p>The wrong way to solve that problem is to turn the framework into:</p>
+<ul>
+<li>an engine-specific API surface that hard-codes KV or LLM nouns into the core,</li>
+<li>a second distributed continuation protocol beside <code>0096</code> and <code>0100</code>,</li>
+<li>a second instance-hosting model beside the existing NodeAgent or Instance Agent boundary,</li>
+<li>a control plane that expands every high-cardinality set into caller-enumerated item lists on the hot path,</li>
+<li>or a design that pushes high-cardinality per-item truth back into Global Store.</li>
+</ul>
+<p><code>0056</code> exists to solve the entrypoint and orchestration transport problem without breaking the deeper repository
+invariants from <code>0055</code>, <code>0087</code>, <code>0090</code>, <code>0093</code>, <code>0094</code>, <code>0096</code>, <code>0100</code>, and <code>0102</code>.</p>
+<h1 id="ownership-boundary">Ownership Boundary<a class="headerlink" href="#ownership-boundary" title="Permanent link">&para;</a></h1>
+<p>The long-term ownership split is:</p>
+<table>
+<thead>
+<tr>
+<th>Concern</th>
+<th>Owning design</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Runtime</code>, <code>connect(...)</code>, daemon ingress, daemon-served signals</td>
+<td><code>0056</code></td>
+</tr>
+<tr>
+<td>artifact-first <code>PlanSpec</code>, local runner semantics, <code>Operation[T]</code></td>
+<td><code>0055</code></td>
+</tr>
+<tr>
+<td>front-door convergence over the existing <code>PlanSpec -&gt; daemon/node-agent</code> execution spine</td>
+<td><code>0056</code></td>
+</tr>
+<tr>
+<td>selection contract and artifact value model</td>
+<td><code>0078</code> and <code>0087</code></td>
+</tr>
+<tr>
+<td>generic set digest, <code>ArtifactSetRef</code>, and worker batch orchestration over normalized selection identities</td>
+<td><code>0056</code></td>
+</tr>
+<tr>
+<td>routed existence and visibility truth</td>
+<td><code>0090</code></td>
+</tr>
+<tr>
+<td>backing truth and <code>ResolvedSourceCapability</code></td>
+<td><code>0093</code></td>
+</tr>
+<tr>
+<td>lifecycle capability mint and redeem semantics</td>
+<td><code>0094</code></td>
+</tr>
+<tr>
+<td>workflow replay, currentness, fencing, wait, and status semantics</td>
+<td><code>0096</code></td>
+</tr>
+<tr>
+<td>distributed request or reply algebra and public continuation</td>
+<td><code>0100</code></td>
+</tr>
+<tr>
+<td>engine manifest production, engine request context, domain aliases, and engine projection bridge into <code>ArtifactSetRef</code></td>
+<td><code>0102</code></td>
+</tr>
+</tbody>
+</table>
+<p>Normative rules:</p>
+<ol>
+<li><code>0056</code> may route to or compose with deeper layers, but it must not redefine them.</li>
+<li>Any byte-moving distributed success path still converges on <code>ResolvedSourceCapability</code> and shared lowering.</li>
+<li><code>0056</code> may own <code>ArtifactSetRef</code> and generic set orchestration, but it must not own profile-specific set semantics or
+   engine request inspection.</li>
+<li><code>ManifestResult</code> is the current concrete engine-side high-cardinality result carrier today; <code>0102</code> owns the mapping
+   between engine manifest production and <code>0056</code> <code>ArtifactSetRef</code> orchestration.</li>
+</ol>
+<h1 id="layering-contract">Layering Contract<a class="headerlink" href="#layering-contract" title="Permanent link">&para;</a></h1>
+<p>The repository needs one explicit stack for programmable execution:</p>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Canonical object</th>
+<th>Owner</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>value and truth</td>
+<td><code>Artifact</code>, <code>ArtifactSelection</code>, <code>ResolvedSourceCapability</code></td>
+<td><code>0055</code>, <code>0078</code>, <code>0087</code>, <code>0090</code>, <code>0093</code></td>
+</tr>
+<tr>
+<td>set reference</td>
+<td><code>ArtifactSetRef</code> over normalized selection identities</td>
+<td><code>0056</code></td>
+</tr>
+<tr>
+<td>orchestration IR</td>
+<td><code>PlanSpec</code> and canonical action vocabulary</td>
+<td><code>0055</code> plus <code>0056</code></td>
+</tr>
+<tr>
+<td>runtime and ingress</td>
+<td><code>Runtime</code>, daemon ingress, daemon-served signals</td>
+<td><code>0056</code></td>
+</tr>
+<tr>
+<td>engine integration</td>
+<td>engine manifest production, aliases, target capability helpers, engine projection bridge</td>
+<td><code>0102</code></td>
+</tr>
+</tbody>
+</table>
+<p>This layer split is the core consistency rule for long-term evolution:</p>
+<ul>
+<li>values stay artifact-first,</li>
+<li>high-cardinality control becomes set-first,</li>
+<li>runtime stays a thin transport and orchestration layer,</li>
+<li>and integrations remain the place where engine-private concepts are translated into canonical framework actions.</li>
+</ul>
+<h2 id="front-door-convergence">Front-door convergence<a class="headerlink" href="#front-door-convergence" title="Permanent link">&para;</a></h2>
+<p>Repository rule:</p>
+<ul>
+<li>all programmable entrypoints must lower into one execution spine,</li>
+<li>and that spine must reuse the canonical <code>PlanSpec</code> plus canonical action vocabulary already present in the repo.</li>
+</ul>
+<p>The intended spine is:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>Runtime / tensorcast.plan / gateway ingress
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>  -&gt; PlanSpec
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>  -&gt; worker execution on Store Daemons
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>  -&gt; instance execution on NodeAgent / Instance Agent
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>  -&gt; deeper owner layers for truth, lifecycle, workflow, and continuation
+</span></code></pre></div>
+<p>Normative rules:</p>
+<ol>
+<li>gateway ingress is a front-door adapter over this spine, not a second plan semantic owner,</li>
+<li>NodeAgent or the in-process Instance Agent boundary remains the unique instance-scoped execution host in this phase,</li>
+<li><code>0056</code> may add transport envelopes around <code>PlanSpec</code>, but it must not fork the action vocabulary or execution model,</li>
+<li>if a future convenience helper bootstraps local instance hosting, it must preserve the same NodeAgent-owned config,
+   registration, and execution semantics rather than creating a second host model.</li>
+</ol>
+<h1 id="extension-placement-rules">Extension Placement Rules<a class="headerlink" href="#extension-placement-rules" title="Permanent link">&para;</a></h1>
+<p>When adding a new scenario, the first question is not "how do we make <code>0056</code> support it?"
+The first question is "which repository layer actually owns the new concern?"</p>
+<h2 id="decision-table">Decision table<a class="headerlink" href="#decision-table" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>New concern</th>
+<th>Owning design layer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>new caller entrypoint, runtime handle, daemon ingress, signals, generic runtime routing</td>
+<td><code>0056</code></td>
+</tr>
+<tr>
+<td>new generic set digest, set ref, or worker batch orchestration over normalized selection identities</td>
+<td><code>0056</code></td>
+</tr>
+<tr>
+<td>new artifact value model, selection shape, artifact profile, or write mode</td>
+<td><code>0078</code> and <code>0087</code></td>
+</tr>
+<tr>
+<td>new routed existence or visibility truth rule</td>
+<td><code>0090</code></td>
+</tr>
+<tr>
+<td>new backing truth or source-capability bridge rule</td>
+<td><code>0093</code></td>
+</tr>
+<tr>
+<td>new lifecycle mint, redeem, or protection rule</td>
+<td><code>0094</code></td>
+</tr>
+<tr>
+<td>new workflow replay, attach, wait, or status rule</td>
+<td><code>0096</code></td>
+</tr>
+<tr>
+<td>new distributed continuation or public attach rule</td>
+<td><code>0100</code></td>
+</tr>
+<tr>
+<td>new engine-specific manifest production, request-context rule, alias helper, or target helper</td>
+<td><code>0102</code></td>
+</tr>
+<tr>
+<td>new cluster-wide config invariant or operator-facing knob</td>
+<td><code>0004</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="practical-rules">Practical rules<a class="headerlink" href="#practical-rules" title="Permanent link">&para;</a></h2>
+<ol>
+<li>If a scenario can be expressed with canonical instance actions <code>manifest/publish/hydrate/evict_local</code>, it should not
+   add a new framework instance action family.</li>
+<li>If a proposed API name contains <code>kvcache</code>, <code>weights</code>, <code>checkpoint</code>, <code>radix</code>, or an engine name, it is presumed to be
+   outside <code>0056</code>.</li>
+<li>If the real scaling problem is high cardinality, the primary control abstraction should be a neutral set reference,
+   not a larger caller-enumerated item list.</li>
+<li>If the scenario requires attach, replay, wait, cancel, or status beyond a single request lifetime, it belongs to
+   <code>0096</code> and <code>0100</code>, not to a plan-private sub-protocol inside <code>0056</code>.</li>
+<li>Global Store may hold only low-cardinality routing and registration data for <code>0056</code>; it must not become a
+   high-cardinality per-item or per-set hot path.</li>
+</ol>
+<h2 id="review-gate">Review gate<a class="headerlink" href="#review-gate" title="Permanent link">&para;</a></h2>
+<p>Every future extension proposed against <code>0056</code> should answer these questions explicitly:</p>
+<ol>
+<li>Is the new concept generic across artifact domains, or is it engine-specific?</li>
+<li>Is the control unit an item or a set, and why?</li>
+<li>Does the change affect transport or orchestration only, or does it change truth, lifecycle, workflow, or public
+   continuation semantics?</li>
+<li>If <code>0056</code> grows because of this change, what deeper layer is it intentionally not redefining?</li>
+</ol>
+<p>If those answers are unclear, the change should not land in <code>0056</code> yet.</p>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<p>Goals</p>
+<ul>
+<li>Support external applications that can reach only one Store Daemon endpoint.</li>
+<li>Keep the Python SDK a lightweight boundary: callers connect to one daemon and do not call Global Store directly.</li>
+<li>Preserve one <code>PlanSpec</code> execution semantics across caller-local execution and daemon ingress execution.</li>
+<li>Provide daemon-served <code>TensorCastSignals</code> with explicit staleness metadata.</li>
+<li>Model scalable high-cardinality orchestration through <code>ArtifactSetRef</code> and order-insensitive set digests.</li>
+<li>Keep canonical instance orchestration aligned around <code>manifest/publish/hydrate/evict_local</code>.</li>
+<li>Keep target-capability minting and resolution at the instance-bound engine adapter boundary.</li>
+<li>Allow <code>prefetch_many</code> as convenience only when it lowers to the same generic set abstraction.</li>
+</ul>
+<p>Non-Goals</p>
+<ul>
+<li>Define shard-home routing, byte-artifact leases, or <code>HomeBatch*</code> RPC semantics.</li>
+<li>Define capability minting, redemption, issuer handoff, or lifecycle truth.</li>
+<li>Define workflow replay, attach, or status semantics outside <code>0096</code> and <code>0100</code>.</li>
+<li>Introduce plan-private <code>attach</code>, <code>wait</code>, <code>cancel</code>, or <code>status</code> families for daemon ingress.</li>
+<li>Move engine request tables, target-capability minting, or request-context persistence into framework core.</li>
+<li>Require truly high-cardinality callers to enumerate all items inline on the hot path.</li>
+<li>Replace TensorCast's existing dataplane or introduce a second distributed execution substrate.</li>
+<li>Derive canonical framework set identity directly from engine-local result carriers such as <code>ManifestResult</code> without an
+  explicit bridge owned by <code>0102</code>.</li>
+</ul>
+<h1 id="architecture">Architecture<a class="headerlink" href="#architecture" title="Permanent link">&para;</a></h1>
+<h2 id="runtime-topology">Runtime topology<a class="headerlink" href="#runtime-topology" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>flowchart LR
+  subgraph APP["Caller process"]
+    USER["Application"]
+    RT["Runtime"]
+    USER --&gt; RT
+  end
+
+  subgraph CLUSTER["TensorCast cluster"]
+    GS["Global Store&lt;br&gt;low-cardinality registry and watches"]
+
+    subgraph GW["Gateway daemon role"]
+      DG["Store Daemon&lt;br&gt;Runtime ingress + signals cache"]
+    end
+
+    subgraph WA["Worker A"]
+      DA["Store Daemon A"]
+      IAA["Instance Agent A&lt;br&gt;in-process with engine"]
+      DA &lt;--&gt; IAA
+    end
+
+    subgraph WB["Worker B"]
+      DB["Store Daemon B"]
+      IAB["Instance Agent B&lt;br&gt;in-process with engine"]
+      DB &lt;--&gt; IAB
+    end
+
+    DG &lt;--&gt; DA
+    DG &lt;--&gt; DB
+    DA &lt;--&gt; DB
+    DG &lt;--&gt; GS
+    DA &lt;--&gt; GS
+    DB &lt;--&gt; GS
+  end
+
+  RT --&gt; DG</code></pre>
+<p>Key rule:</p>
+<ul>
+<li>moving the entrypoint into a daemon is a relocation of orchestration transport, not a new semantic layer.</li>
+</ul>
+<h2 id="component-responsibilities">Component responsibilities<a class="headerlink" href="#component-responsibilities" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Runtime</strong></li>
+<li>process-local handle bound to one daemon address,</li>
+<li>exposes <code>store()</code>, <code>signals()</code>, and <code>plan(ctx)</code>,</li>
+<li>lowers programmable requests onto the canonical execution spine.</li>
+<li><strong>Store Daemon</strong></li>
+<li>executes worker-scoped actions,</li>
+<li>accepts optional ingress <code>ExecutePlan</code>,</li>
+<li>caches low-cardinality directory and signals state from watches,</li>
+<li>routes instance actions to the target daemon and local NodeAgent or Instance Agent boundary.</li>
+<li><strong>NodeAgent / Instance Agent</strong></li>
+<li>the unique instance-scoped execution boundary in this phase,</li>
+<li>hosts engine adapters safely,</li>
+<li>is not exposed directly to caller networks.</li>
+<li><strong>Global Store</strong></li>
+<li>low-cardinality worker and instance registry,</li>
+<li>watch streams and other slow-path metadata inputs required by daemon caches,</li>
+<li>not a per-request caller dependency.</li>
+<li><strong>Artifact set reference</strong></li>
+<li>names an order-insensitive set of normalized selection identities for orchestration,</li>
+<li>is a control-plane reference only,</li>
+<li>does not replace <code>Artifact</code> or <code>ArtifactSelection</code> as the value layer.</li>
+</ul>
+<h1 id="runtime-model">Runtime Model<a class="headerlink" href="#runtime-model" title="Permanent link">&para;</a></h1>
+<h2 id="public-api">Public API<a class="headerlink" href="#public-api" title="Permanent link">&para;</a></h2>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">Runtime</span><span class="p">:</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>    <span class="n">daemon_address</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>    <span class="n">daemon_id</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">store</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"Store"</span><span class="p">:</span> <span class="o">...</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">directory</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"TensorCastDirectory"</span><span class="p">:</span> <span class="o">...</span>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">signals</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"TensorCastSignals"</span><span class="p">:</span> <span class="o">...</span>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">plan</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">ctx</span><span class="p">:</span> <span class="s2">"CallContext"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"Plan"</span><span class="p">:</span> <span class="o">...</span>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">close</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span> <span class="o">...</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="k">def</span><span class="w"> </span><span class="nf">connect</span><span class="p">(</span><span class="o">*</span><span class="p">,</span> <span class="n">daemon_address</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Runtime</span><span class="p">:</span> <span class="o">...</span>
+</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="k">def</span><span class="w"> </span><span class="nf">runtime</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="n">Runtime</span><span class="p">:</span> <span class="o">...</span>
+</span></code></pre></div>
+<p>Semantics:</p>
+<ul>
+<li><code>connect(...)</code> creates one lightweight runtime handle bound to one daemon endpoint.</li>
+<li><code>runtime().plan(ctx)</code> is the primary programmable entrypoint when an active runtime exists.</li>
+<li><code>tensorcast.plan(ctx)</code> should delegate to the active runtime when present and otherwise preserve <code>0055</code> local-run
+  behavior for tests and in-cluster debugging.</li>
+<li><code>tensorcast.init(mode="create")</code> remains local tooling and daemon lifecycle convenience; it is not a second control
+  plane.</li>
+<li>runtime configuration remains under the unified config model from <code>0004</code>; <code>0056</code> must not introduce ad hoc runtime
+  flags or environment-variable control paths.</li>
+</ul>
+<h2 id="instance-hosting-boundary">Instance hosting boundary<a class="headerlink" href="#instance-hosting-boundary" title="Permanent link">&para;</a></h2>
+<p>Current phase rule:</p>
+<ul>
+<li><code>0056</code> does not standardize a second public instance-hosting API.</li>
+<li>instance-scoped execution remains hosted by NodeAgent or the in-process Instance Agent boundary configured through the
+  existing process model from <code>0004</code>.</li>
+<li>if a future convenience helper is added at the runtime layer, it must be a bootstrap adapter for that same host model,
+  not a new execution boundary.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>the NodeAgent or Instance Agent boundary remains the unique instance-scoped execution host in this phase,</li>
+<li>callers never address instance hosts directly,</li>
+<li>stable caller-facing instance identity remains <code>instance_id</code>, while the
+   dependency-ready execution directory resolves <code>instance_id -&gt; execution
+   route facts</code> through the daemon-served bounded-staleness contract frozen in
+   <code>0106</code>,</li>
+<li><code>TargetSpec</code> minting and resolution remain engine-adapter responsibilities outside <code>0056</code>; framework code may carry
+   <code>TargetSpec</code>, but it does not own target-capability mint semantics,</li>
+<li><code>0056</code> must not introduce a second config surface, registration flow, or heartbeat contract for instance hosting.</li>
+</ol>
+<h1 id="plan-execution">Plan Execution<a class="headerlink" href="#plan-execution" title="Permanent link">&para;</a></h1>
+<h2 id="one-execution-semantics">One execution semantics<a class="headerlink" href="#one-execution-semantics" title="Permanent link">&para;</a></h2>
+<p>Current baseline from <code>0055</code>:</p>
+<ul>
+<li><code>Plan.run()</code> executes in the caller process,</li>
+<li>worker steps execute against Store Daemons,</li>
+<li>instance steps execute through the Instance Agent boundary.</li>
+</ul>
+<p>Planned extension from <code>0056</code>:</p>
+<ul>
+<li><code>StoreDaemonService.ExecutePlan(ExecutePlanRequest)</code> may execute the same <code>PlanSpec</code> through a daemon ingress role,</li>
+<li>a future non-local dispatcher may execute plan fragments on peer daemons, but
+  that dispatch substrate is not dependency-ready in the current repo,</li>
+<li>instance steps still resolve to <code>target daemon -&gt; local NodeAgent or Instance Agent</code>.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>gateway ingress is a daemon role, not a new service kind,</li>
+<li><code>ExecutePlan</code> must not introduce a second retry or idempotency model,</li>
+<li><code>ExecutePlan</code> may return an inline terminal result only when the declared ingress class is <code>terminal_only</code> and every
+   step is dependency-ready for terminal projection under that class,</li>
+<li>if execution may outlive the RPC budget, must continue after caller disconnect, or requires later attach, wait,
+   replay, or status, the public continuation must be <code>Operation[PlanResult]</code> or another explicit family surface owned
+   by <code>0096</code> and <code>0100</code>,</li>
+<li>ingress must not hide asynchronous continuation behind request-scoped success while privately continuing work after
+   the caller-visible request has ended,</li>
+<li><code>0056</code> must not invent <code>PlanHandle</code>, <code>AttachPlan</code>, <code>GetPlanStatus</code>, or another plan-private continuation family,</li>
+<li>plan targets are stable identities (<code>daemon_id</code>, <code>instance_id</code>), not caller-supplied addresses.</li>
+</ol>
+<h2 id="execution-spine-readiness-split">Execution spine readiness split<a class="headerlink" href="#execution-spine-readiness-split" title="Permanent link">&para;</a></h2>
+<p><code>0056</code> must separate long-term shape from dependency-ready closure.</p>
+<table>
+<thead>
+<tr>
+<th>Execution concern</th>
+<th>Current repo state</th>
+<th>Dependency readiness</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>local worker plan execution through caller-local <code>Plan.run()</code></td>
+<td>landed</td>
+<td>ready</td>
+</tr>
+<tr>
+<td>daemon ingress for worker-targeted <code>terminal_only</code> plans on the ingress daemon</td>
+<td>landed</td>
+<td>ready</td>
+</tr>
+<tr>
+<td>direct NodeAgent instance execution (<code>NodeAgent.ExecutePlan</code>)</td>
+<td>landed</td>
+<td>ready</td>
+</tr>
+<tr>
+<td>local runner closing instance steps through NodeAgent discovery and client routing</td>
+<td>not landed</td>
+<td>not ready</td>
+</tr>
+<tr>
+<td>daemon-local bridge from ingress daemon to local NodeAgent or in-process Instance Agent</td>
+<td>not landed</td>
+<td>not ready</td>
+</tr>
+<tr>
+<td>daemon-served full worker or instance directory and <code>NodeAgentDirectory</code> contract</td>
+<td>partially specified today; exact contract moved to <code>0106</code></td>
+<td>not ready</td>
+</tr>
+<tr>
+<td>inter-daemon control-plane plan dispatch</td>
+<td>transport helpers exist only for data-plane paths today</td>
+<td>not ready</td>
+</tr>
+</tbody>
+</table>
+<p>Repository rule:</p>
+<ul>
+<li>child designs may depend only on rows marked ready above,</li>
+<li>they must not treat declared future topology as already available substrate,</li>
+<li>and <code>0056</code> itself must document each phase boundary explicitly rather than
+  hiding it inside prose about the end state.</li>
+</ul>
+<h2 id="next-implementation-slice-local-only-terminal-ingress">Next implementation slice: local-only terminal ingress<a class="headerlink" href="#next-implementation-slice-local-only-terminal-ingress" title="Permanent link">&para;</a></h2>
+<p>The next dependency-ready daemon-execution closeout is intentionally narrower than
+the long-term topology above.</p>
+<p>Initial ingress execution scope:</p>
+<ul>
+<li>declared execution class must be <code>terminal_only</code>,</li>
+<li>worker-scoped execution may target the ingress daemon only,</li>
+<li>instance-scoped execution may target only instances hosted behind the ingress
+  daemon's own local NodeAgent or in-process Instance Agent boundary,</li>
+<li>cluster-scoped transport remains reserved in the IR but is not executable in
+  this slice,</li>
+<li>and cross-daemon plan-fragment dispatch remains a follow-up after the local
+  bridge is stable.</li>
+</ul>
+<p>Required bridge rule:</p>
+<ul>
+<li>the daemon must use one daemon-local typed bridge to the existing
+  instance-scoped execution host,</li>
+<li>that bridge is configuration-owned under <code>0004</code>,</li>
+<li>and it must not be inferred from caller-supplied addresses or hidden ambient
+  process discovery.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>the first daemon-side <code>ExecutePlan</code> implementation should fail closed on
+   <code>public_continuation_required</code>,</li>
+<li>the first daemon-side <code>ExecutePlan</code> implementation should fail closed on
+   worker targets that do not resolve to the ingress daemon,</li>
+<li>the first daemon-side <code>ExecutePlan</code> implementation should fail closed on
+   instance targets that do not resolve to a daemon-local instance execution
+   host,</li>
+<li>the first daemon-side <code>ExecutePlan</code> implementation should fail closed on
+   <code>TARGET_TYPE_CLUSTER</code> rather than smuggling workflow semantics through
+   gateway-private handling,</li>
+<li>local-only ingress is a phase boundary, not a second semantic contract; it
+   still reuses the same <code>PlanSpec</code>, <code>ArtifactSetRef</code>, governance transport, and
+   admission-class rules.</li>
+</ol>
+<h2 id="ingress-admission-classifier">Ingress admission classifier<a class="headerlink" href="#ingress-admission-classifier" title="Permanent link">&para;</a></h2>
+<p>The ingress role needs one framework-owned classifier before any side-effecting execution starts.</p>
+<p>Recommended admission classes:</p>
+<ul>
+<li><code>terminal_only</code></li>
+<li><code>public_continuation_required</code></li>
+</ul>
+<p><code>terminal_only</code> means:</p>
+<ul>
+<li>every step in the submitted plan is dependency-ready for terminal public projection under the declared ingress
+  surface,</li>
+<li>no non-terminal public continuation is required after the request ends,</li>
+<li>and the gateway can either complete the work inline or return a terminal result within the same declared request
+  class.</li>
+</ul>
+<p><code>public_continuation_required</code> means:</p>
+<ul>
+<li>at least one step may require a non-terminal public continuation surface after request end,</li>
+<li>or the requested ingress class explicitly allows non-terminal continuation that the current public request envelope does
+  not yet carry,</li>
+<li>or the deeper owning layer marks the requested path as not dependency-ready for terminal-only ingress.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>ingress must classify a submitted plan before dispatching any side-effecting work.</li>
+<li>classification must depend only on declared action semantics, stable plan structure, and dependency readiness exposed
+   by the owning layers; it must not depend on load heuristics or predicted wall-clock completion.</li>
+<li>plans classified as <code>public_continuation_required</code> must fail fast until the public continuation family from <code>0096</code>
+   and <code>0100</code> is explicitly carried by the ingress surface.</li>
+<li>request deadlines may cause terminal failure, but they must not silently change a plan from one admission class to
+   the other.</li>
+<li>ingress must not partially execute a plan, discover that it exceeded the terminal-only class, and then continue
+   behind caller-visible success or request-scoped failure.</li>
+<li>the admission classifier is framework-owned transport policy; it must not redefine workflow or continuation
+   semantics owned elsewhere.</li>
+</ol>
+<h2 id="deterministic-fingerprints">Deterministic fingerprints<a class="headerlink" href="#deterministic-fingerprints" title="Permanent link">&para;</a></h2>
+<p>Daemon-run execution must be gateway-independent and safe under at-least-once retries.</p>
+<p>Required step fingerprint inputs:</p>
+<ul>
+<li>canonical action name,</li>
+<li>stable target identity,</li>
+<li>either item identity or set identity,</li>
+<li>semantic placement,</li>
+<li>action-specific stable arguments.</li>
+</ul>
+<p>Required item identity:</p>
+<ul>
+<li><code>(artifact_id, logical_layout_hash, selection_hash)</code> from <code>0055</code> and <code>0078</code>.</li>
+</ul>
+<p>Required set identity:</p>
+<ul>
+<li><code>set_digest_hex</code> over sorted and deduplicated item identities.</li>
+</ul>
+<p>Required canonicalization rules:</p>
+<ul>
+<li>set digests must use sorted and deduplicated item identities before hashing,</li>
+<li>byte-artifact items must still include <code>artifact_id</code> because their profile hashes are fixed constants,</li>
+<li>execution windows or partitions may add stable chunk identifiers for progress accounting, but they must not redefine
+  the underlying set identity,</li>
+<li><code>depends_on</code> lists must be encoded in canonical order,</li>
+<li>deadline, qos, tags, and other observation metadata must not affect semantic step identity.</li>
+</ul>
+<h2 id="canonical-instance-actions">Canonical instance actions<a class="headerlink" href="#canonical-instance-actions" title="Permanent link">&para;</a></h2>
+<p>Framework-level canonical instance action vocabulary remains:</p>
+<ul>
+<li><code>manifest</code></li>
+<li><code>publish</code></li>
+<li><code>hydrate</code></li>
+<li><code>evict_local</code></li>
+</ul>
+<p>Rules:</p>
+<ol>
+<li>the canonical names above are the normative instance orchestration vocabulary,</li>
+<li>existing <code>transform_into</code> and <code>transform_register</code> surfaces from <code>0055</code> remain valid implementation surfaces and
+   compatibility helpers, but <code>0056</code> does not expand them into a second repository-wide integration vocabulary,</li>
+<li><code>mint_target</code> belongs to the engine-adapter capability boundary, not to required framework plan action vocabulary,</li>
+<li><code>materialize_into</code> remains a possible follow-up audit surface, but it is not part of required <code>0056</code> canonical
+   instance vocabulary in this phase,</li>
+<li>integration-specific aliases are outside framework core and are owned by <code>0102</code>.</li>
+</ol>
+<h1 id="governance-context-propagation">Governance Context Propagation<a class="headerlink" href="#governance-context-propagation" title="Permanent link">&para;</a></h1>
+<p><code>0056</code> does not own lane or coordination-policy semantics, but it does own their transport, auditability, and stable
+retry boundary.</p>
+<p>Minimum governance context carried through <code>Runtime</code>, <code>PlanSpec</code>, and daemon ingress:</p>
+<ul>
+<li><code>lane</code></li>
+<li><code>policy_version</code></li>
+<li><code>staleness_budget</code></li>
+<li>any other low-cardinality coordination hints required by the owning governance layer</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>the semantic definition of lane and policy remains outside <code>0056</code>,</li>
+<li><code>0056</code> owns end-to-end propagation of those values across runtime, ingress, daemon dispatch, and non-plan control
+   RPC boundaries,</li>
+<li>the same idempotency domain must not silently change lane or policy identity during retries,</li>
+<li>governance metadata is auditable and transport-visible, but it must not alter canonical item identity, set identity,
+   or plan step identity unless a deeper owning layer explicitly defines that behavior.</li>
+</ol>
+<h2 id="governance-wire-form">Governance wire form<a class="headerlink" href="#governance-wire-form" title="Permanent link">&para;</a></h2>
+<p>Propagation needs one canonical wire contract, not only free-form tags.</p>
+<p>Recommended transport shape:</p>
+<ul>
+<li>a typed governance sub-object in <code>PlanSpec</code> for plan execution,</li>
+<li>and canonical metadata keys for non-plan control RPCs until equivalent typed request fields exist.</li>
+</ul>
+<p>Minimum governance fields:</p>
+<ul>
+<li><code>lane</code></li>
+<li><code>policy_version</code></li>
+<li><code>staleness_budget</code></li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li><code>tags</code> alone are too weak as the long-term canonical wire contract for governance context.</li>
+<li><code>0056</code> should define one typed governance transport shape for plan execution, even if non-plan RPCs temporarily use
+   metadata-based propagation.</li>
+<li>non-plan propagation must use one canonical metadata vocabulary across SDK, gateway daemon, and worker daemon
+   rather than per-call ad hoc keys.</li>
+<li>governance metadata is audit-visible and retry-stable, but it must not silently alter item identity, set identity,
+   or deterministic step identity unless a deeper owning layer explicitly requires that behavior.</li>
+</ol>
+<h1 id="high-cardinality-set-model">High-Cardinality Set Model<a class="headerlink" href="#high-cardinality-set-model" title="Permanent link">&para;</a></h1>
+<p>High-cardinality orchestration needs a generic control abstraction that scales.
+That abstraction is not "many <code>Artifact</code> arguments".
+It is a neutral set reference over normalized selection identities.</p>
+<h2 id="value-unit-and-control-unit">Value unit and control unit<a class="headerlink" href="#value-unit-and-control-unit" title="Permanent link">&para;</a></h2>
+<p>Long-term repository rule:</p>
+<ul>
+<li><code>Artifact</code> remains the value unit,</li>
+<li><code>ArtifactSelection</code> remains the item selector contract,</li>
+<li>and high-cardinality orchestration uses a neutral set reference as the control unit.</li>
+</ul>
+<p>The set reference is not a second data object model.
+It is a control-plane handle to an order-insensitive set of normalized item identities derived from
+<code>ArtifactSelection</code>.</p>
+<h2 id="item-identity">Item identity<a class="headerlink" href="#item-identity" title="Permanent link">&para;</a></h2>
+<p>The normative item identity for generic set orchestration is <code>SelectionIdentity</code> from <code>0055</code>:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="k">class</span><span class="w"> </span><span class="nc">SelectionIdentity</span><span class="p">:</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>    <span class="n">artifact_id</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>    <span class="n">logical_layout_hash</span><span class="p">:</span> <span class="nb">bytes</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>    <span class="n">selection_hash</span><span class="p">:</span> <span class="nb">bytes</span>
+</span></code></pre></div>
+<p>Normative rules:</p>
+<ol>
+<li>generic set orchestration must not collapse item identity to <code>artifact_id</code> alone,</li>
+<li><code>ArtifactSelection</code> is the caller-facing selector input, but normalized <code>SelectionIdentity</code> is the canonical item
+   identity used by set digests, results, and stable retries,</li>
+<li>convenience fields such as <code>artifact_id</code> may appear in results, but they must not be the only returned identity,</li>
+<li>if proto or RPC surfaces need a dedicated wire message for set items, it must be a field-for-field projection of
+   <code>SelectionIdentity</code>, not a second semantic type.</li>
+</ol>
+<h2 id="artifactsetref-contract"><code>ArtifactSetRef</code> contract<a class="headerlink" href="#artifactsetref-contract" title="Permanent link">&para;</a></h2>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="k">class</span><span class="w"> </span><span class="nc">ArtifactSetRef</span><span class="p">:</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>    <span class="n">set_digest_hex</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>    <span class="n">item_count</span><span class="p">:</span> <span class="nb">int</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>    <span class="n">carrier_form</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>    <span class="n">inline_items</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="s2">"ArtifactSelection"</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>    <span class="n">manifest_selection</span><span class="p">:</span> <span class="s2">"ArtifactSelection"</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span></code></pre></div>
+<p>Normative rules:</p>
+<ol>
+<li><code>ArtifactSetRef</code> is the only framework-owned generic set contract in this phase.</li>
+<li>exactly one carrier form is active for a given <code>ArtifactSetRef</code>.</li>
+<li><code>carrier_form</code> is a typed discriminator whose dependency-ready values are <code>inline</code> and <code>manifest_backed</code>.</li>
+<li><code>set_digest_hex</code> identifies the semantic set, not any transport chunking, batch partitioning, or execution window.</li>
+<li><code>item_count</code> is the exact cardinality of the deduplicated canonical item set represented by the ref.</li>
+<li><code>ArtifactSetRef</code> is a control-plane reference only and does not replace per-item artifact identity.</li>
+<li><code>0056</code> owns the <code>ArtifactSetRef</code> contract itself:<ul>
+<li>field semantics,</li>
+<li>transport shape,</li>
+<li>set-digest identity rules,</li>
+<li>and fail-closed resolution rules.</li>
+</ul>
+</li>
+<li><code>0056</code> does not own engine manifest production or engine-local projection logic; those remain in <code>0102</code>.</li>
+</ol>
+<h2 id="artifactsetref-digest-and-cardinality"><code>ArtifactSetRef</code> digest and cardinality<a class="headerlink" href="#artifactsetref-digest-and-cardinality" title="Permanent link">&para;</a></h2>
+<p>Set identity is rooted in canonical per-item identity, not transport-local enumeration.</p>
+<p>Normative rules:</p>
+<ol>
+<li><code>set_digest_hex</code> must be computed over the deduplicated, order-insensitive set of normalized <code>SelectionIdentity</code>
+   values represented by the ref.</li>
+<li><code>item_count</code> must equal the number of canonical <code>SelectionIdentity</code> values that participate in
+   <code>set_digest_hex</code>.</li>
+<li>inline item ordering, manifest serialization ordering, and worker chunking are not part of set identity.</li>
+<li><code>artifact_id</code> alone is never sufficient to define framework set identity.</li>
+<li>if two refs advertise the same <code>set_digest_hex</code> and <code>item_count</code>, they are claiming the same canonical item set and
+   must resolve accordingly or fail closed.</li>
+</ol>
+<h2 id="artifactsetref-carrier-forms"><code>ArtifactSetRef</code> carrier forms<a class="headerlink" href="#artifactsetref-carrier-forms" title="Permanent link">&para;</a></h2>
+<p>The first dependency-ready carrier forms are intentionally narrow.</p>
+<h3 id="inline-carrier">Inline carrier<a class="headerlink" href="#inline-carrier" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>carrier_form="inline"</code></li>
+<li><code>inline_items</code> is populated</li>
+<li><code>manifest_selection</code> is unset</li>
+</ul>
+<p>Rules:</p>
+<ol>
+<li>inline sets are for small caller-enumerated inputs only.</li>
+<li>inline transport must preserve the exact caller-selected <code>ArtifactSelection</code> values used to derive the canonical
+   <code>SelectionIdentity</code> set.</li>
+<li><code>prefetch_many</code>, if exposed, lowers only to this form.</li>
+</ol>
+<h3 id="manifest-backed-carrier">Manifest-backed carrier<a class="headerlink" href="#manifest-backed-carrier" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>carrier_form="manifest_backed"</code></li>
+<li><code>manifest_selection</code> is populated</li>
+<li><code>inline_items</code> is unset</li>
+</ul>
+<p>Rules:</p>
+<ol>
+<li>manifest-backed is the first dependency-ready referenced form for truly high-cardinality sets.</li>
+<li><code>manifest_selection</code> identifies an artifact-backed manifest whose owning layer defines schema, owner, expiry or
+   currentness, and resolution authority.</li>
+<li><code>0056</code> does not define manifest content schema or engine-local annotations.</li>
+<li>more opaque referenced forms remain follow-up work until their owner and resolution contract are dependency-ready.</li>
+<li>Global Store must not become a per-item or per-set hot truth table for this abstraction.</li>
+</ol>
+<h2 id="artifactsetref-resolution-contract"><code>ArtifactSetRef</code> resolution contract<a class="headerlink" href="#artifactsetref-resolution-contract" title="Permanent link">&para;</a></h2>
+<p>Normative rules:</p>
+<ol>
+<li>resolving either carrier form must deterministically yield the same deduplicated <code>SelectionIdentity</code> set claimed by
+   <code>set_digest_hex</code> and <code>item_count</code>.</li>
+<li>manifest-backed resolution must fail closed on unresolved manifest content, unsupported manifest schema, digest
+   mismatch, or item-count mismatch.</li>
+<li>runtime partitioning or worker chunking may happen below <code>ArtifactSetRef</code> without changing public set identity.</li>
+<li>local runner and ingress must apply the same digest and resolution rules.</li>
+<li>framework code must consume <code>ArtifactSetRef</code> as the set contract; it must not silently invent a second referenced
+   form in one execution path only.</li>
+</ol>
+<h2 id="worker-set-orchestration-surface">Worker set orchestration surface<a class="headerlink" href="#worker-set-orchestration-surface" title="Permanent link">&para;</a></h2>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="k">class</span><span class="w"> </span><span class="nc">ArtifactSetItemResult</span><span class="p">:</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>    <span class="n">item_identity</span><span class="p">:</span> <span class="s2">"SelectionIdentity"</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>    <span class="n">artifact_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>    <span class="n">status</span><span class="p">:</span> <span class="s2">"OperationStatus"</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="k">class</span><span class="w"> </span><span class="nc">ArtifactSetResult</span><span class="p">:</span>
+</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>    <span class="n">set_digest_hex</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>    <span class="n">outcomes</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="n">ArtifactSetItemResult</span><span class="p">]</span>
+</span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a>
+</span><span id="__span-4-12"><a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a><span class="k">class</span><span class="w"> </span><span class="nc">WorkerStepBuilder</span><span class="p">:</span>
+</span><span id="__span-4-13"><a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">prefetch_set</span><span class="p">(</span>
+</span><span id="__span-4-14"><a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a>        <span class="bp">self</span><span class="p">,</span>
+</span><span id="__span-4-15"><a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a>        <span class="n">art_set</span><span class="p">:</span> <span class="n">ArtifactSetRef</span><span class="p">,</span>
+</span><span id="__span-4-16"><a id="__codelineno-4-16" name="__codelineno-4-16" href="#__codelineno-4-16"></a>        <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-4-17"><a id="__codelineno-4-17" name="__codelineno-4-17" href="#__codelineno-4-17"></a>        <span class="n">device</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="nb">int</span><span class="p">,</span>
+</span><span id="__span-4-18"><a id="__codelineno-4-18" name="__codelineno-4-18" href="#__codelineno-4-18"></a>        <span class="n">depends_on</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="n">PlanStepRef</span><span class="p">[</span><span class="n">Any</span><span class="p">]]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-4-19"><a id="__codelineno-4-19" name="__codelineno-4-19" href="#__codelineno-4-19"></a>    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PlanStepRef</span><span class="p">[</span><span class="n">ArtifactSetResult</span><span class="p">]:</span> <span class="o">...</span>
+</span><span id="__span-4-20"><a id="__codelineno-4-20" name="__codelineno-4-20" href="#__codelineno-4-20"></a>
+</span><span id="__span-4-21"><a id="__codelineno-4-21" name="__codelineno-4-21" href="#__codelineno-4-21"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">prefetch_many</span><span class="p">(</span>
+</span><span id="__span-4-22"><a id="__codelineno-4-22" name="__codelineno-4-22" href="#__codelineno-4-22"></a>        <span class="bp">self</span><span class="p">,</span>
+</span><span id="__span-4-23"><a id="__codelineno-4-23" name="__codelineno-4-23" href="#__codelineno-4-23"></a>        <span class="n">arts</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="s2">"Artifact"</span><span class="p">],</span>
+</span><span id="__span-4-24"><a id="__codelineno-4-24" name="__codelineno-4-24" href="#__codelineno-4-24"></a>        <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-4-25"><a id="__codelineno-4-25" name="__codelineno-4-25" href="#__codelineno-4-25"></a>        <span class="n">device</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="nb">int</span><span class="p">,</span>
+</span><span id="__span-4-26"><a id="__codelineno-4-26" name="__codelineno-4-26" href="#__codelineno-4-26"></a>        <span class="n">depends_on</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="n">PlanStepRef</span><span class="p">[</span><span class="n">Any</span><span class="p">]]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-4-27"><a id="__codelineno-4-27" name="__codelineno-4-27" href="#__codelineno-4-27"></a>    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PlanStepRef</span><span class="p">[</span><span class="n">ArtifactSetResult</span><span class="p">]:</span> <span class="o">...</span>
+</span></code></pre></div>
+<p>Normative rules:</p>
+<ol>
+<li><code>prefetch_set</code> is the normative scalable worker-layer batch action,</li>
+<li><code>prefetch_set</code> takes <code>ArtifactSetRef</code> directly so proto, SDK, runtime, and design all speak the same framework set
+   contract,</li>
+<li><code>prefetch_many</code>, if exposed, is SDK sugar that lowers to an inline <code>ArtifactSetRef</code>,</li>
+<li><code>prefetch_many</code> must be documented and implemented as non-scalable convenience rather than as the primary
+   high-cardinality abstraction,</li>
+<li>results are per-item and must preserve partial information,</li>
+<li>profile-specific miss, visibility, or fencing rules are delegated to the owning profile and authority layers.</li>
+<li>runtime partitioning or chunking may happen below the set ref without changing public set identity.</li>
+</ol>
+<h2 id="scope-aware-readiness-model">Scope-aware readiness model<a class="headerlink" href="#scope-aware-readiness-model" title="Permanent link">&para;</a></h2>
+<p>Readiness in programmable orchestration is scope-owned, not one flat repository-wide enum.</p>
+<p>Worker-layer readiness:</p>
+<ul>
+<li><code>local_replica_ready</code></li>
+<li><code>local_stable_ready</code></li>
+</ul>
+<p>Instance-layer realization:</p>
+<ul>
+<li><code>instance_hydrated</code></li>
+</ul>
+<p>Cluster progression:</p>
+<ul>
+<li>activation barriers, rollout progress, or cluster-scoped ready sets are workflow-owned and remain outside <code>0056</code>.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>worker actions report worker-local readiness only,</li>
+<li>instance actions report instance-local realization only,</li>
+<li><code>prefetch_set</code> must not be interpreted as a cluster publication barrier or an instance-hydration guarantee,</li>
+<li>if a worker action needs to promise stronger worker-local readiness than <code>local_replica_ready</code>, that stronger
+   readiness kind must be explicit in the action contract or owning placement policy rather than inferred from
+   <code>device="dram"</code> alone.</li>
+</ol>
+<h2 id="prefetch_set-readiness-floor"><code>prefetch_set</code> readiness floor<a class="headerlink" href="#prefetch_set-readiness-floor" title="Permanent link">&para;</a></h2>
+<p>To keep ingress and local execution behavior aligned, <code>prefetch_set</code> needs one explicit minimum contract.</p>
+<p>Phase intent:</p>
+<ul>
+<li>in this phase, <code>prefetch_set</code> should be treated as guaranteeing <code>local_replica_ready</code> only,</li>
+<li>and any stronger worker-local readiness must be introduced explicitly rather than inferred from placement aliases.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li><code>prefetch_set(device="dram")</code> must not, by default, be interpreted as <code>local_stable_ready</code>.</li>
+<li>if future phases need worker-local stable admission as part of the action contract, they should add an explicit
+   readiness selector or equivalent placement-contract field rather than overloading the existing <code>device</code> input.</li>
+<li>gateway and local runner implementations must share the same readiness floor; one implementation must not upgrade
+   <code>prefetch_set</code> to <code>local_stable_ready</code> while the other treats it as replica-only warmup.</li>
+</ol>
+<p>Cross-design consequence:</p>
+<ul>
+<li>the follow-on stronger worker action is owned by <code>0104</code>, not by <code>0056</code>,</li>
+<li>and <code>0104</code> may add <code>realize_set</code> or an equivalent explicit worker-local
+  readiness action while keeping <code>prefetch_set</code> unchanged.</li>
+</ul>
+<h2 id="engine-manifest-boundary">Engine manifest boundary<a class="headerlink" href="#engine-manifest-boundary" title="Permanent link">&para;</a></h2>
+<p>Current engine integrations already expose <code>ManifestResult</code>, but <code>0056</code> treats that as an integration-side carrier only.</p>
+<p>Normative rules:</p>
+<ol>
+<li><code>0056</code> does not define the <code>ManifestResult -&gt; ArtifactSetRef</code> bridge form.</li>
+<li><code>0056</code> runtime, ingress, gateway, and worker code must consume <code>ArtifactSetRef</code> or another explicit bridge output
+   owned by <code>0102</code>.</li>
+<li><code>0056</code> must not derive canonical framework set identity directly from raw <code>ManifestResult</code>, <code>artifact_ids</code>,
+   <code>key_set_digest_hex</code>, or <code>engine_request_id</code>.</li>
+<li>any explicit bridge from engine manifests into <code>ArtifactSetRef</code> must be versioned and fail closed, but that bridge
+   contract is owned by <code>0102</code>, not by <code>0056</code>.</li>
+</ol>
+<h2 id="cluster-workflow-extension-seam">Cluster workflow extension seam<a class="headerlink" href="#cluster-workflow-extension-seam" title="Permanent link">&para;</a></h2>
+<p>Some scenarios will need cluster-scoped artifact workflows such as distribute, activate, or retire.
+<code>0056</code> does not own those workflow semantics.</p>
+<p>What <code>0056</code> must provide is only:</p>
+<ul>
+<li>a transport slot for workflow-owned cluster actions,</li>
+<li>compatibility between runtime or ingress and the canonical <code>PlanSpec</code> execution substrate,</li>
+<li>and a guarantee that worker-set and instance actions do not exhaust the only available extension seam.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>cluster workflow truth, barriers, and continuation remain outside <code>0056</code>,</li>
+<li><code>0056</code> must not force future owners to encode cluster workflow semantics as ad hoc SDK DAG glue over
+   <code>prefetch_set</code>,</li>
+<li>reserving this extension seam does not grant <code>0056</code> ownership of cluster workflow state.</li>
+</ol>
+<p>Cross-design consequence:</p>
+<ul>
+<li><code>0104</code> is the first intended consumer of this reserved cluster seam for
+  rollout orchestration,</li>
+<li>but <code>0104</code> must still keep rollout truth, barriers, and source-closeout
+  semantics outside <code>0056</code>.</li>
+</ul>
+<h2 id="transport-slot-reservation-for-future-cluster-actions">Transport-slot reservation for future cluster actions<a class="headerlink" href="#transport-slot-reservation-for-future-cluster-actions" title="Permanent link">&para;</a></h2>
+<p>Preserving an extension seam in prose is not enough.
+The framework should also reserve an execution slot so future cluster-workflow owners do not need to smuggle
+cluster-scoped semantics through worker-only actions.</p>
+<p>Recommended direction:</p>
+<ul>
+<li>reserve a distinct cluster-scoped target or action envelope in the plan IR,</li>
+<li>allow that envelope to carry an opaque workflow-owned reference,</li>
+<li>and keep all barrier, continuation, and workflow-truth semantics outside <code>0056</code>.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li><code>0056</code> should reserve an explicit cluster-scoped transport slot rather than relying on <code>prefetch_set</code> as the only
+   future composition primitive.</li>
+<li>that slot must carry only transport and dispatch structure:</li>
+<li>stable target scope,</li>
+<li>opaque workflow action reference,</li>
+<li>deterministic fingerprint inputs.</li>
+<li>that slot must not define:</li>
+<li>workflow-owned state,</li>
+<li>workflow barriers,</li>
+<li>workflow replay or attach semantics,</li>
+<li>or cluster truth.</li>
+<li>if the plan IR cannot yet carry a cluster-scoped target or action envelope, the design must treat that as a known
+   follow-up gap rather than as "already reserved by convention."</li>
+</ol>
+<p>Cross-design consequence:</p>
+<ul>
+<li><code>0104</code> may compile rollout kernels through this slot in a later phase,</li>
+<li>but the slot itself remains an execution seam only; it is not the owner of
+  rollout barrier truth or <code>Operation[T]</code> semantics.</li>
+</ul>
+<h1 id="signals-and-directory">Signals and Directory<a class="headerlink" href="#signals-and-directory" title="Permanent link">&para;</a></h1>
+<p>Signals are daemon-served, low-cardinality, bounded-staleness control-loop inputs.</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="k">class</span><span class="w"> </span><span class="nc">SignalSnapshot</span><span class="p">(</span><span class="n">Generic</span><span class="p">[</span><span class="n">T</span><span class="p">]):</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>    <span class="n">value</span><span class="p">:</span> <span class="n">T</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>    <span class="n">as_of_ms</span><span class="p">:</span> <span class="nb">int</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    <span class="n">staleness_ms</span><span class="p">:</span> <span class="nb">int</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>    <span class="n">cache_epoch</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>    <span class="n">freshness_state</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"unknown"</span>
+</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>
+</span><span id="__span-5-9"><a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-5-10"><a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a><span class="k">class</span><span class="w"> </span><span class="nc">WorkerCapacitySnapshot</span><span class="p">:</span>
+</span><span id="__span-5-11"><a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a>    <span class="n">stable_total_bytes</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-5-12"><a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a>    <span class="n">stable_used_bytes</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-5-13"><a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a>    <span class="n">preemptible_total_bytes</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-5-14"><a id="__codelineno-5-14" name="__codelineno-5-14" href="#__codelineno-5-14"></a>    <span class="n">preemptible_marked_bytes</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-5-15"><a id="__codelineno-5-15" name="__codelineno-5-15" href="#__codelineno-5-15"></a>    <span class="n">control_plane_inflight</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-5-16"><a id="__codelineno-5-16" name="__codelineno-5-16" href="#__codelineno-5-16"></a>
+</span><span id="__span-5-17"><a id="__codelineno-5-17" name="__codelineno-5-17" href="#__codelineno-5-17"></a><span class="k">class</span><span class="w"> </span><span class="nc">TensorCastDirectory</span><span class="p">:</span>
+</span><span id="__span-5-18"><a id="__codelineno-5-18" name="__codelineno-5-18" href="#__codelineno-5-18"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">list_workers</span><span class="p">(</span><span class="o">...</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">DirectorySnapshot</span><span class="p">[</span><span class="nb">list</span><span class="p">[</span><span class="n">WorkerRoute</span><span class="p">]]:</span> <span class="o">...</span>
+</span><span id="__span-5-19"><a id="__codelineno-5-19" name="__codelineno-5-19" href="#__codelineno-5-19"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">list_instances</span><span class="p">(</span><span class="o">...</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">DirectorySnapshot</span><span class="p">[</span><span class="nb">list</span><span class="p">[</span><span class="n">InstanceExecutionRoute</span><span class="p">]]:</span> <span class="o">...</span>
+</span><span id="__span-5-20"><a id="__codelineno-5-20" name="__codelineno-5-20" href="#__codelineno-5-20"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">resolve_instance_execution</span><span class="p">(</span><span class="o">...</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">DirectorySnapshot</span><span class="p">[</span><span class="n">InstanceExecutionRoute</span><span class="p">]:</span> <span class="o">...</span>
+</span><span id="__span-5-21"><a id="__codelineno-5-21" name="__codelineno-5-21" href="#__codelineno-5-21"></a>
+</span><span id="__span-5-22"><a id="__codelineno-5-22" name="__codelineno-5-22" href="#__codelineno-5-22"></a><span class="k">class</span><span class="w"> </span><span class="nc">TensorCastSignals</span><span class="p">:</span>
+</span><span id="__span-5-23"><a id="__codelineno-5-23" name="__codelineno-5-23" href="#__codelineno-5-23"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">get_worker_status</span><span class="p">(</span><span class="o">...</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">SignalSnapshot</span><span class="p">[</span><span class="n">WorkerStatus</span><span class="p">]:</span> <span class="o">...</span>
+</span><span id="__span-5-24"><a id="__codelineno-5-24" name="__codelineno-5-24" href="#__codelineno-5-24"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">get_worker_capacity</span><span class="p">(</span><span class="o">...</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">SignalSnapshot</span><span class="p">[</span><span class="n">WorkerCapacitySnapshot</span><span class="p">]:</span> <span class="o">...</span>
+</span></code></pre></div>
+<p>Normative rules:</p>
+<ol>
+<li>external callers query directory and signals through the connected daemon,
+   not Global Store,</li>
+<li>directory and signals data must come from daemon caches backed by watches or
+   equivalent bounded-staleness inputs,</li>
+<li>low-cardinality worker capability bits and routing hints are part of the
+   directory surface, not a new truth layer,</li>
+<li>worker capacity and memory-tier snapshots are advisory only, bounded-staleness, and must not be treated as
+   reservation or truth guarantees,</li>
+<li>public directory and signal snapshots must expose enough freshness evidence
+   to distinguish bounded-current from degraded or stale answers,</li>
+<li>adapter-owned execution signals are advisory only and must not replace TensorCast truth or lifecycle state,</li>
+<li><code>0056</code> owns the rule that programmable callers consume daemon-served
+   directory surfaces, while <code>0106</code> owns the exact worker and instance
+   route-directory contract plus the migration off SDK-direct GS reads.</li>
+<li><code>Runtime.directory()</code> is the long-term home of route discovery; placing
+   <code>list_*</code> compatibility shims on <code>Runtime.signals()</code> is acceptable only as a
+   migration step.</li>
+</ol>
+<p>Read-model boundary:</p>
+<ul>
+<li>daemon-served directory and signals are bounded-staleness read models over
+  lower truth layers,</li>
+<li>they are not a new membership or workflow truth layer,</li>
+<li>and exact SoT ownership for those questions remains frozen in <code>0106</code> and the
+  deeper owner designs.</li>
+</ul>
+<h2 id="watch-correctness-contract">Watch correctness contract<a class="headerlink" href="#watch-correctness-contract" title="Permanent link">&para;</a></h2>
+<p>Bounded-staleness caches still need a correctness floor.</p>
+<p>Minimum watch contract for daemon-served directory and signal caches:</p>
+<ul>
+<li>initial snapshot barrier,</li>
+<li>monotonic cache epoch or equivalent version,</li>
+<li>resume token or equivalent replay cursor,</li>
+<li>fail-closed behavior when freshness cannot be re-established within the configured budget.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>daemon caches must not treat "watch connected once" as sufficient proof of currentness.</li>
+<li>every cache snapshot served through <code>TensorCastSignals</code> must be traceable to:</li>
+<li>a completed initial snapshot,</li>
+<li>a monotonic cache epoch or version,</li>
+<li>and either a current watch stream or an explicit degraded or stale state.</li>
+<li><code>as_of_ms</code>, <code>staleness_ms</code>, and bounded-current vs degraded or stale state are part of the public framework
+   contract; replay cursors such as resume tokens remain implementation detail unless and until a stronger public cache
+   protocol is required.</li>
+<li>if watch continuity is lost and freshness cannot be restored within the configured staleness budget, routing and
+   directory decisions that require bounded-current evidence must fail closed rather than continue on silent stale
+   guesses.</li>
+</ol>
+<h1 id="configuration-and-discovery">Configuration and Discovery<a class="headerlink" href="#configuration-and-discovery" title="Permanent link">&para;</a></h1>
+<p>All cluster-wide framework invariants introduced by <code>0056</code> must be typed config from <code>0004</code>, including:</p>
+<ul>
+<li>gateway ingress enablement,</li>
+<li>daemon-local instance-host bridge configuration needed for <code>ExecutePlan</code>
+  closeout,</li>
+<li>watch and cache staleness budgets,</li>
+<li>worker and instance registry discovery behavior,</li>
+<li>role and capability advertisement needed for low-cardinality routing,</li>
+<li>governance-context propagation and audit requirements,</li>
+<li>and any cluster-visible inline-set limits or set-reference fanout policies.</li>
+</ul>
+<p>Rules:</p>
+<ol>
+<li><code>0056</code> must not introduce ad hoc environment variables or hidden flag precedence,</li>
+<li>rolling incompatible control-plane values must have an explicit cutover strategy; mixed semantics are not acceptable,</li>
+<li>high-cardinality set transport must not rely on hidden size heuristics that silently change semantics between nodes.</li>
+</ol>
+<h1 id="proto-and-schema-changes">Proto and Schema Changes<a class="headerlink" href="#proto-and-schema-changes" title="Permanent link">&para;</a></h1>
+<p>Framework-owned additive changes:</p>
+<ul>
+<li><code>proto/tensorcast/daemon/v2/store_daemon.proto</code></li>
+<li><code>ExecutePlan(ExecutePlanRequest)</code> ingress for terminal-only execution with an explicit request envelope,</li>
+<li>that envelope should carry the submitted <code>PlanSpec</code> plus the declared public execution class,</li>
+<li>daemon-served worker and instance listing or signal RPCs,</li>
+<li>no hidden daemon-private continuation protocol beyond the <code>0096</code> and <code>0100</code> owned family.</li>
+<li><code>proto/tensorcast/plan/v1/plan.proto</code></li>
+<li>keep canonical instance actions <code>manifest/publish/hydrate/evict_local</code>,</li>
+<li>add a typed governance sub-object for plan execution rather than relying on free-form <code>tags</code> alone,</li>
+<li>add <code>ArtifactSetRef</code> as the framework-owned set wire contract with:<ul>
+<li><code>set_digest_hex</code>,</li>
+<li><code>item_count</code>,</li>
+<li><code>carrier_form</code>,</li>
+<li><code>inline_items</code>,</li>
+<li>and <code>manifest_selection</code>,</li>
+</ul>
+</li>
+<li>add worker <code>PrefetchSetAction</code> over <code>ArtifactSetRef</code>,</li>
+<li>if a dedicated wire carrier for canonical set items is needed, make it a field-for-field projection of
+    <code>SelectionIdentity</code>,</li>
+<li>reserve an explicit cluster-scoped transport slot if cluster-workflow owners need one, while keeping workflow
+    semantics outside <code>0056</code>,</li>
+<li>do not require <code>MintTargetAction</code> in framework core,</li>
+<li>do not add plan-private continuation carriers.</li>
+<li><code>proto/tensorcast/node_agent/v1/node_agent.proto</code></li>
+<li>generic instance action execution only,</li>
+<li>canonical instance actions stay aligned with <code>manifest/publish/hydrate/evict_local</code>.</li>
+<li><code>proto/tensorcast/global_store/v1/global_store.proto</code> and <code>schema.sql</code></li>
+<li>only low-cardinality worker and instance routing attributes, capability bits, and watch support needed by daemon
+    caches,</li>
+<li>no per-item high-cardinality truth tables and no per-set membership hot path for framework orchestration.</li>
+</ul>
+<p>Out of scope for <code>0056</code>:</p>
+<ul>
+<li>shard-home lease schemas,</li>
+<li><code>HomeBatch*</code> authority RPCs,</li>
+<li>lifecycle, issuer-handoff, or workflow continuation state,</li>
+<li>engine manifest tables or engine request-context persistence.</li>
+</ul>
+<h1 id="naming-compliance">Naming Compliance<a class="headerlink" href="#naming-compliance" title="Permanent link">&para;</a></h1>
+<p>The interfaces introduced or retained by this design follow repository naming rules.</p>
+<p>Classes and structs use <code>PascalCase</code>:</p>
+<ul>
+<li><code>Runtime</code></li>
+<li><code>TensorCastSignals</code></li>
+<li><code>SignalSnapshot</code></li>
+<li><code>SelectionIdentity</code></li>
+<li><code>ArtifactSetRef</code></li>
+<li><code>ArtifactSetResult</code></li>
+<li><code>ArtifactSetItemResult</code></li>
+<li><code>WorkerStatus</code></li>
+<li><code>WorkerCapacitySnapshot</code></li>
+</ul>
+<p>Functions and methods use <code>snake_case</code>:</p>
+<ul>
+<li><code>connect</code></li>
+<li><code>runtime</code></li>
+<li><code>list_workers</code></li>
+<li><code>get_worker_status</code></li>
+<li><code>list_instances</code></li>
+<li><code>prefetch_set</code></li>
+<li><code>prefetch_many</code></li>
+</ul>
+<p>Constants and enum values use <code>ALL_CAPS</code>:</p>
+<ul>
+<li><code>HOST_DRAM</code></li>
+<li><code>GPU_VRAM</code></li>
+</ul>
+<h1 id="schema-changes">Schema Changes<a class="headerlink" href="#schema-changes" title="Permanent link">&para;</a></h1>
+<p>This framework rewrite does not introduce a new persistent schema family of its own.</p>
+<p>If durable set references are needed, they must be expressed either as artifact-backed manifests or as authority-owned
+opaque refs in the owning layer.
+They must not be introduced as new Global Store per-item or per-set hot tables inside <code>0056</code>.</p>
+<h1 id="trade-offs-and-risks">Trade-offs and Risks<a class="headerlink" href="#trade-offs-and-risks" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Keeping the framework thin makes some domain integrations less ergonomic unless they provide helper aliases.</li>
+<li>Generic set references add an indirection layer, but that indirection is required to scale beyond caller-enumerated
+  lists.</li>
+<li>Immediate-only daemon ingress is less feature-rich than a full long-lived continuation model, but it avoids creating
+  a second public protocol before <code>0096</code> and <code>0100</code> are complete.</li>
+<li>Signals can be overused as truth if staleness and authority boundaries are not kept explicit.</li>
+<li>Referenced set implementations can drift into engine-private semantics unless <code>0102</code> ownership is enforced
+  consistently.</li>
+</ul>
+<h1 id="compatibility-and-acceptance-criteria">Compatibility and Acceptance Criteria<a class="headerlink" href="#compatibility-and-acceptance-criteria" title="Permanent link">&para;</a></h1>
+<ul>
+<li><code>connect(...)</code> is the primary process entrypoint for advanced control-plane use.</li>
+<li><code>Plan.run()</code> in local and daemon-ingress modes uses the same canonical action names and the same deterministic
+  fingerprint rules.</li>
+<li><code>0056</code> owns only runtime, ingress, signals, and the <code>ArtifactSetRef</code> contract.</li>
+<li>canonical instance orchestration remains aligned around <code>manifest/publish/hydrate/evict_local</code>.</li>
+<li>external callers can operate through one daemon endpoint and do not call Global Store directly.</li>
+<li>NodeAgent or the existing Instance Agent boundary remains the unique instance-scoped execution host in this phase.</li>
+<li>item and set identity are rooted in normalized <code>SelectionIdentity</code>, not <code>artifact_id</code> alone.</li>
+<li>no plan-private attach, wait, replay, or status family is introduced by <code>0056</code>.</li>
+<li>any execution that outlives the request lifetime uses a public continuation owned by <code>0096</code> and <code>0100</code>.</li>
+<li>ingress admission is based on declared public execution class and dependency readiness, not runtime completion
+  heuristics.</li>
+<li>high-cardinality framework orchestration does not require Global Store per-item hot truth.</li>
+<li>referenced set carriers fail closed if their resolved item set does not match the advertised digest and count.</li>
+<li>proto, SDK, runtime, and design all express the same framework-owned <code>ArtifactSetRef</code> contract rather than vague
+  set-carrier wording.</li>
+<li>worker and instance readiness remain scope-owned rather than flattened into one repository-wide readiness enum.</li>
+<li><code>prefetch_many</code>, if exposed, is explicitly a convenience helper over the <code>ArtifactSetRef</code> contract rather than the
+  primary scalable abstraction.</li>
+<li><code>ManifestResult</code> remains an integration-side carrier only, while any bridge into framework set orchestration is owned
+  by <code>0102</code>.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

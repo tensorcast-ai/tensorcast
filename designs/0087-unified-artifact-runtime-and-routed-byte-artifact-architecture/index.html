@@ -1,0 +1,4144 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Unified Artifact Runtime and Routed Byte Artifact Architecture - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Unified Artifact Runtime and Routed Byte Artifact Architecture
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p>TensorCast now has one canonical artifact-first runtime for both structured artifacts and routed byte artifacts.</p>
+<p>The unified model is:</p>
+<ul>
+<li><code>Artifact</code>: immutable bytes plus identity.</li>
+<li><code>ArtifactSelection</code>: the only selection contract.</li>
+<li><code>Binding</code> or registered region: mutable placement target.</li>
+<li>copy contract: canonical-byte or mapped-byte write ranges.</li>
+<li><code>WriteMode</code>: overwrite or <code>PUT_IF_ABSENT_JOIN</code>.</li>
+</ul>
+<p><code>byte_artifact</code> is a profile, not a parallel runtime. The final daemon shape keeps routed byte-artifact authority,
+local shared-region access, payload transport, and publication capabilities in separate modules with explicit trust
+boundaries.</p>
+<p>Engine-oriented alias policy and manifest-oriented integration guidance live in
+<code>docs/designs/0102-engine-artifact-integration-and-high-cardinality-manifest-orchestration.md</code>; <code>0087</code> remains
+authoritative for the artifact value model and routed byte-artifact runtime itself.</p>
+<h1 id="current-implementation-snapshot">Current Implementation Snapshot<a class="headerlink" href="#current-implementation-snapshot" title="Permanent link">&para;</a></h1>
+<p>As of 2026-04-26, the live implementation matches this design, with narrower
+RDMA realization follow-ons still in progress:</p>
+<ul>
+<li><code>StoreDaemonServiceImpl</code> delegates <code>Batch*</code>, <code>HomeBatch*</code>, <code>FetchPayloadRefChunk</code>, and <code>FetchBatchPayloadRefChunk</code>
+  through controller entrypoints.</li>
+<li><code>ByteArtifactController</code> owns byte-artifact batch ingress and home-authority orchestration.</li>
+<li><code>MaterializationController</code> continues to own <code>MaterializeIntoTarget</code>, <code>MaterializeIntoMappedTarget</code>,
+  <code>PublishTargetReplica</code>, and related artifact lifecycle RPCs.</li>
+<li><code>TransportController</code> owns <code>FetchPayloadRefChunk</code> and <code>FetchBatchPayloadRefChunk</code> delegation on top of
+  <code>PayloadTransportBroker</code>.</li>
+<li><code>DaemonKernel</code> owns long-lived routed byte-artifact state: runtime state, body store, route resolver, payload
+  transport broker, and shared worker directory cache.</li>
+<li><code>ExternalTargetAccessService</code> is the shared local region boundary used by both materialization flows and
+  byte-artifact ingress flows.</li>
+<li><code>RegisterRegion(memory_kind=VRAM|HOST_SHARED)</code> is live, and byte-artifact batch ingress accepts <code>RegionRef</code>
+  layouts over both memory kinds.</li>
+<li><code>BindingCurrentValuePublicationScope</code>, <code>TargetPublicationRegistry</code>,
+  <code>binding_current_value_publication_token</code>, <code>PayloadRefScope</code>, and
+  <code>BatchPayloadRefScope</code> are the live capability contracts.</li>
+<li><code>BatchGetIntoRegionRequest</code> no longer exposes <code>preference</code> or <code>source_policy</code>.</li>
+<li><code>HomeBatchGet</code> may now realize one transport either as a staged contiguous
+  pack (<code>grpc_chunk_ref</code>, MTCP-compatible <code>communicator_source</code>, or fallback)
+  or as a segmented <code>communicator_source</code> over retained-body export views for
+  eligible RDMA packs.</li>
+<li>Remote <code>communicator_source</code> consume paths now diverge by transport
+  realization on both get and put paths: eligible RDMA lowers remote pack
+  slices directly from the opened source without a mandatory full-pack local
+  mirror, while MTCP and staged fallback paths still materialize one full local
+  pack payload per <code>transport_id</code> before per-item slicing.</li>
+<li><code>HomeBatchPutIfAbsent</code> accepts batch transports on the put path and consumes
+  eligible remote RDMA <code>communicator_source</code> transports without a home-daemon
+  full-pack mirror.</li>
+<li>The put-side composite final-body staging cut is implemented for eligible
+  <code>LAYOUT_AND_SIZE_ONLY</code> byte artifacts: the home daemon prepares unpublished
+  retained body backings, lowers one remote pack source into a composite target
+  layout, and lets the shared <code>0115</code> dataplane execute one batched direct-write
+  materialization before authority join installation.</li>
+<li>The put-side source daemon now realizes eligible remote-home
+  <code>HOST_SHARED</code>/<code>LAYOUT_AND_SIZE_ONLY</code> source-layout batch-set transports as
+  segmented <code>communicator_source</code> exports over the original source spans. The
+  contiguous staged-slab realization remains the fallback for strict digest,
+  non-<code>HOST_SHARED</code>, capability-miss, and lifetime-gap cases.</li>
+<li>The next accepted put-side source optimization keeps that no-pack shape but
+  changes source MR ownership from per-batch broker-owned raw registrations to
+  stable-backed <code>HOST_SHARED</code> source-view keys whose chunk MRs are owned by
+  the activated stable backing and resolved on the requested RDMA rail.</li>
+<li><code>BodyHandle</code> now exposes the export-view API used by source-side segmented
+  communicator export.</li>
+<li>The remaining get-side RDMA follow-on is producer-side read-plan servicing:
+  source-side CPU byte-artifact slices may still be copied from retained
+  backing into pinned staged response buffers before the remote RDMA reads
+  them.</li>
+<li>NodeAgent preserves structured <code>manifest</code>, <code>publish</code>, <code>hydrate</code>, and <code>evict_local</code> artifact results over
+  <code>ExecutePlan</code>.</li>
+</ul>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<p>Goals</p>
+<ul>
+<li>Keep one artifact-first semantic model for weights, structured artifacts, and routed byte artifacts.</li>
+<li>Keep <code>ArtifactSelection</code> as the only selection envelope across SDK, daemon, NodeAgent, and plans.</li>
+<li>Keep routed byte-artifact truth off the Global Store per-blob hot path.</li>
+<li>Keep caller-accessible local region reads and writes inside one daemon-local safety boundary.</li>
+<li>Keep payload transport reusable and capability-scoped.</li>
+<li>Keep plan and NodeAgent artifact actions aligned with canonical <code>manifest/publish/hydrate/evict_local</code> semantics.</li>
+</ul>
+<p>Non-Goals</p>
+<ul>
+<li>Move token-to-key mapping, request tables, or paged-attention semantics into TensorCast core.</li>
+<li>Introduce a generic artifact-runtime controller shared by every profile.</li>
+<li>Reintroduce Global Store as a per-blob catalog for <code>cgid:byte_artifact~...</code>.</li>
+<li>Treat byte-artifact durability as equivalent to model-artifact durability.</li>
+</ul>
+<h1 id="architecture-interfaces">Architecture &amp; Interfaces<a class="headerlink" href="#architecture-interfaces" title="Permanent link">&para;</a></h1>
+<h2 id="1-unified-runtime-model">1. Unified runtime model<a class="headerlink" href="#1-unified-runtime-model" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>flowchart LR
+  A["Artifact&lt;br&gt;immutable bytes"] --&gt; B["ArtifactSelection&lt;br&gt;only selector"]
+  B --&gt; C["Copy Contract&lt;br&gt;ranges or copy plan"]
+  C --&gt; D["Binding or Region&lt;br&gt;mutable placement"]
+  D --&gt; E["WriteMode&lt;br&gt;overwrite or put-if-absent-join"]</code></pre>
+<p>Normative rules:</p>
+<ul>
+<li><code>Artifact</code> is the value layer.</li>
+<li><code>ArtifactSelection</code> is the only selection contract used for routing, validation, and result identity.</li>
+<li><code>Binding</code> or a caller-registered region is the placement layer.</li>
+<li>copy planning stays separate from semantic truth.</li>
+<li><code>WriteMode</code> changes write semantics without creating a second object model.</li>
+</ul>
+<h2 id="2-artifact-profiles">2. Artifact profiles<a class="headerlink" href="#2-artifact-profiles" title="Permanent link">&para;</a></h2>
+<h3 id="21-tensor-dict-artifacts">2.1 Tensor-dict artifacts<a class="headerlink" href="#21-tensor-dict-artifacts" title="Permanent link">&para;</a></h3>
+<p>Tensor-dict artifacts use the standard selection contract from <code>0078</code>:</p>
+<ul>
+<li>canonical selection, subset selection, and transform views are all encoded through <code>ArtifactSelection</code>,</li>
+<li><code>logical_layout_hash</code> and <code>selection_hash</code> are derived from canonical or selected index bytes,</li>
+<li>daemon validation resolves selection once and reuses the resolved selection through the whole flow.</li>
+</ul>
+<h3 id="22-byte-artifacts">2.2 Byte artifacts<a class="headerlink" href="#22-byte-artifacts" title="Permanent link">&para;</a></h3>
+<p>Byte artifacts are the routed high-cardinality profile used for paged KV-style caches and other opaque byte payloads.</p>
+<p>Schema contract:</p>
+<ul>
+<li>exactly one tensor named <code>payload</code>,</li>
+<li><code>payload.dtype == uint8</code>,</li>
+<li><code>payload.shape == [byte_length]</code>.</li>
+</ul>
+<p>Selection contract:</p>
+<ul>
+<li>canonical-only,</li>
+<li>full-selection-only,</li>
+<li><code>view_id == ""</code>,</li>
+<li><code>view_spec</code> absent,</li>
+<li><code>tensor_names</code> omitted,</li>
+<li><code>view_subset_hash</code> empty.</li>
+</ul>
+<p>Fixed profile digests:</p>
+<ul>
+<li><code>logical_layout_hash = sha256(utf8("tensorcast.byte_artifact.layout.v1\n")).digest()</code></li>
+<li><code>selection_hash = sha256(utf8("tensorcast.byte_artifact.selection.v1\n")).digest()</code></li>
+</ul>
+<p>Normative rules:</p>
+<ul>
+<li>byte-artifact selection identity must not depend on payload bytes, byte length, or any Global Store lookup,</li>
+<li><code>Artifact.view(...)</code> and subset selection must be rejected for byte artifacts,</li>
+<li>SDK and daemon must share the same byte-artifact selection helper contract,</li>
+<li><code>ArtifactProfileRegistry</code> is the daemon entrypoint for byte-artifact artifact-id validation, selection validation,
+  normalized selection construction, shard derivation, and invariant validation.</li>
+</ul>
+<h2 id="3-write-modes-and-sealing-boundary">3. Write modes and sealing boundary<a class="headerlink" href="#3-write-modes-and-sealing-boundary" title="Permanent link">&para;</a></h2>
+<p>TensorCast keeps one write model with two modes:</p>
+<ul>
+<li><code>OVERWRITE</code>: used by binding swap and mapped or inplace overwrite paths,</li>
+<li><code>PUT_IF_ABSENT_JOIN</code>: used by sealed byte-artifact publication.</li>
+</ul>
+<p>Byte-artifact publication requires an explicit sealing boundary.</p>
+<pre class="mermaid"><code>stateDiagram-v2
+  [*] --&gt; Open
+  Open --&gt; Sealed: seal_byte_artifact
+  Sealed --&gt; Published: put_if_absent_join
+  Published --&gt; Expired: ttl_or_eviction
+  Expired --&gt; [*]</code></pre>
+<p>Normative rules:</p>
+<ul>
+<li><code>Open</code> state is engine-owned mutable state and is not publishable.</li>
+<li><code>Sealed</code> state is the immutable byte snapshot that may enter routed publish paths.</li>
+<li>only sealed byte artifacts may use <code>PUT_IF_ABSENT_JOIN</code>.</li>
+</ul>
+<p>Verification modes for <code>PUT_IF_ABSENT_JOIN</code>:</p>
+<ul>
+<li><code>BYTE_ARTIFACT_VERIFICATION_MODE_STRICT_SHA256</code></li>
+<li><code>BYTE_ARTIFACT_VERIFICATION_MODE_LAYOUT_AND_SIZE_ONLY</code></li>
+</ul>
+<p>Normative rules:</p>
+<ul>
+<li>the default mode for generic routed byte artifacts remains
+  <code>BYTE_ARTIFACT_VERIFICATION_MODE_STRICT_SHA256</code>,</li>
+<li><code>BYTE_ARTIFACT_VERIFICATION_MODE_LAYOUT_AND_SIZE_ONLY</code> exists for
+  engine-owned logical byte artifacts whose <code>artifact_id</code> is the engine's
+  canonical logical page identity and whose producers do not guarantee
+  bitwise-identical payload bytes across repeated publications,</li>
+<li><code>STRICT_SHA256</code> joins on:</li>
+<li><code>layout_id</code>,</li>
+<li><code>byte_length</code>,</li>
+<li><code>payload_digest_alg = "sha256"</code>,</li>
+<li><code>payload_digest_hex = sha256(payload_bytes).hexdigest()</code>,</li>
+<li><code>LAYOUT_AND_SIZE_ONLY</code> joins on:</li>
+<li><code>layout_id</code>,</li>
+<li><code>byte_length</code>,</li>
+<li>and the routed <code>artifact_id</code> itself,</li>
+<li>in <code>LAYOUT_AND_SIZE_ONLY</code>, <code>payload_digest_alg</code> and <code>payload_digest_hex</code>
+  become optional per-item metadata:</li>
+<li>when present they are advisory verification metadata and observability
+    inputs,</li>
+<li>when absent they must not block publication, existence, or retrieval,</li>
+<li>and they must not become an implicit second equality channel beside the
+    engine-owned logical <code>artifact_id</code>.</li>
+</ul>
+<p>Multiple puts of the same logical byte artifact remain first-writer-wins:</p>
+<ul>
+<li><code>PUT_IF_ABSENT_JOIN</code> never means upsert,</li>
+<li>the first successful routed claim for the current home epoch fixes the visible
+  claim for that <code>artifact_id</code>,</li>
+<li>later <code>PUT_IF_ABSENT_JOIN</code> attempts with the same join key may adopt the
+  existing claim, but must not rewrite the retained backing in place,</li>
+<li>later writers must not silently replace the previously published bytes even if
+  their payload differs under <code>LAYOUT_AND_SIZE_ONLY</code>,</li>
+<li>a workflow that truly needs last-writer-wins or repair-by-rewrite must use an
+  explicit overwrite or delete-and-reissue flow rather than a second
+  <code>PUT_IF_ABSENT_JOIN</code>.</li>
+</ul>
+<p>TTL rules:</p>
+<ul>
+<li>TTL extension is monotonic increasing,</li>
+<li>immortal entries remain immortal under join and touch unless explicitly evicted.</li>
+</ul>
+<h2 id="4-identity-authority-and-routing-for-cgidbyte_artifact">4. Identity, authority, and routing for <code>cgid:byte_artifact~...</code><a class="headerlink" href="#4-identity-authority-and-routing-for-cgidbyte_artifact" title="Permanent link">&para;</a></h2>
+<p>Recommended identity profile:</p>
+<p><code>cgid:byte_artifact~&lt;namespace&gt;~&lt;engine&gt;~&lt;model_id_enc&gt;~&lt;model_version_enc&gt;~&lt;layout_id&gt;~&lt;engine_key_enc&gt;</code></p>
+<p>Identity rules:</p>
+<ul>
+<li>the suffix after <code>cgid:</code> must satisfy the shared CGID grammar <code>[-._~A-Za-z0-9]</code>,</li>
+<li>segments are separated by <code>~</code>,</li>
+<li>arbitrary bytes or strings should use <code>b64u.&lt;base64url_nopad(...)&gt;</code>,</li>
+<li>SDK and C++ runtime paths must share one parser, validator, and test-vector set,</li>
+<li><code>model_id_enc</code> identifies the logical model family, while <code>model_version_enc</code>
+  identifies the concrete served model revision or checkpoint generation that
+  produced the bytes,</li>
+<li><code>layout_id</code> must bind the byte-level page serialization contract, including
+  any format version, attention family, dtype or encoding contract, and page
+  size,</li>
+<li><code>engine_key_enc</code> must bind the engine-owned logical page identity and any
+  rank-local shard qualifier required for correctness, such as TP or PP
+  ownership,</li>
+<li>engine-owned logical byte artifacts must not encode run-local or host-local
+  values such as <code>run_id</code>, <code>instance_id</code>, <code>daemon_id</code>, or machine identity into
+  the routed <code>artifact_id</code>.</li>
+</ul>
+<p>Authority split:</p>
+<ul>
+<li>Global Store is the authority for shard-home leases only,</li>
+<li>the current shard-home daemon is the authority for per-blob existence truth, first-writer invariants, and TTL.</li>
+</ul>
+<p>Sharding:</p>
+<ul>
+<li><code>shard_id = hash64(utf8(artifact_id)) % S</code>,</li>
+<li><code>hash64</code> is <code>sha256(utf8(artifact_id)).digest()</code>, first 8 bytes interpreted as little-endian <code>uint64</code>,</li>
+<li><code>S</code> is a cluster-wide shard count, defaulting to <code>4096</code> unless configured otherwise.</li>
+</ul>
+<p>Fencing and route validity:</p>
+<ul>
+<li>every <code>HomeBatch*</code> request carries <code>RouteFence</code>,</li>
+<li><code>RouteFence</code> includes <code>{shard_id, lease_generation, holder_daemon_id, routing_epoch}</code>,</li>
+<li>stale or mismatched fence values fail closed and return redirect information when available,</li>
+<li>cached body validity is scoped by shard, lease generation, and routing epoch,</li>
+<li>ambiguous route freshness degrades to per-item miss or unavailable outcomes instead of unproven hits.</li>
+</ul>
+<p>Cluster-wide routing invariants:</p>
+<ul>
+<li>shard count,</li>
+<li>shard hash/version,</li>
+<li>inline payload threshold,</li>
+<li>lease TTL and keepalive policy,</li>
+<li>route staleness budget,</li>
+<li>worker-directory staleness budget,</li>
+<li>routing epoch,</li>
+<li>payload-transport policy,</li>
+<li>batch-transport protocol version and segmentation policy when enabled,</li>
+<li>digest enforcement behavior.</li>
+</ul>
+<p>Capability-directory rules:</p>
+<ul>
+<li><code>gateway_ingress_enabled</code> is an external-ingress role bit,</li>
+<li><code>shard_home_eligible</code> gates shard-home acquisition eligibility,</li>
+<li>capability-directory flags are discovery and routing signals, not peer authentication.</li>
+</ul>
+<h2 id="5-rpc-families-and-trust-model">5. RPC families and trust model<a class="headerlink" href="#5-rpc-families-and-trust-model" title="Permanent link">&para;</a></h2>
+<p>The runtime uses four distinct RPC classes.</p>
+<h3 id="51-external-ingress-authority-rpcs">5.1 External ingress authority RPCs<a class="headerlink" href="#51-external-ingress-authority-rpcs" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>BatchExists</code></li>
+<li><code>BatchTouchTtl</code></li>
+</ul>
+<p>Rules:</p>
+<ul>
+<li>these are public ingress RPCs,</li>
+<li>non-local callers require <code>gateway_ingress_enabled=true</code>,</li>
+<li>results are outcome-first and per item.</li>
+</ul>
+<h3 id="52-local-only-placement-adapters">5.2 Local-only placement adapters<a class="headerlink" href="#52-local-only-placement-adapters" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>BatchGetIntoRegion</code></li>
+<li><code>BatchPutIfAbsentFromRegion</code></li>
+</ul>
+<p>Rules:</p>
+<ul>
+<li>these RPCs remain loopback or UDS-only because they touch caller-accessible local shared regions,</li>
+<li>they validate <code>pid</code>, <code>device_uuid</code>, and <code>TargetLayout</code> through <code>ExternalTargetAccessService</code>,</li>
+<li><code>BatchGetIntoRegionRequest</code> carries only <code>selections</code>, <code>target_layout</code>, <code>pid</code>, <code>device_uuid</code>, and optional
+  <code>operation_id</code>,</li>
+<li><code>BatchPutIfAbsentFromRegionRequest</code> carries item selections plus invariants or payload refs, <code>source_layout</code>, optional
+  <code>ttl_ms</code>, <code>pid</code>, <code>device_uuid</code>, and optional <code>operation_id</code>,</li>
+<li><code>preference</code> and <code>source_policy</code> are not part of the final <code>BatchGetIntoRegion</code> contract.</li>
+</ul>
+<p>Current live implementation note:</p>
+<ul>
+<li>current region-backed byte-artifact ingress supports both <code>VRAM</code> and <code>HOST_SHARED</code>,</li>
+<li><code>HOST_SHARED</code> widens only the local placement layer,</li>
+<li>it does not change routed authority, <code>RouteFence</code>, per-item outcome shape, or transport ownership.</li>
+</ul>
+<h3 id="53-home-scoped-fenced-authority-rpcs">5.3 Home-scoped fenced authority RPCs<a class="headerlink" href="#53-home-scoped-fenced-authority-rpcs" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>HomeBatchExists</code></li>
+<li><code>HomeBatchGet</code></li>
+<li><code>HomeBatchPutIfAbsent</code></li>
+<li><code>HomeBatchTouchTtl</code></li>
+</ul>
+<p>Rules:</p>
+<ul>
+<li>these are inter-daemon authority RPCs,</li>
+<li>they do not accept caller PID, target layout, or direct caller-region access,</li>
+<li>they are governed by <code>RouteFence</code>, not by <code>gateway_ingress_enabled</code>,</li>
+<li>current live implementations may answer successful large items through inline payload, singular <code>payload_ref</code>, or
+  <code>batch_payload_slice</code> plus <code>BatchPayloadTransport</code>,</li>
+<li>batch-native transport changes only the payload-movement encoding; it does not change per-item authority outcomes.</li>
+</ul>
+<h3 id="54-inter-daemon-transport-rpc">5.4 Inter-daemon transport RPC<a class="headerlink" href="#54-inter-daemon-transport-rpc" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>FetchPayloadRefChunk</code></li>
+<li><code>FetchBatchPayloadRefChunk</code></li>
+</ul>
+<p>Rules:</p>
+<ul>
+<li>transport authorization comes from typed signed capability envelopes:
+  <code>payload_ref</code> for singular payloads and <code>batch_payload_ref</code> for batch payload transports,</li>
+<li>it is not an ingress RPC and is not gated by <code>gateway_ingress_enabled</code>,</li>
+<li>it carries consume-side <code>operation_id</code> when the capability requires operation binding.</li>
+</ul>
+<h3 id="55-implemented-delta-batch-native-inter-daemon-byte-transport">5.5 Implemented delta: batch-native inter-daemon byte transport<a class="headerlink" href="#55-implemented-delta-batch-native-inter-daemon-byte-transport" title="Permanent link">&para;</a></h3>
+<p>This section describes the current implementation state.</p>
+<p>The narrow goal is unchanged:</p>
+<ul>
+<li>keep page-level <code>byte_artifact</code> identity unchanged,</li>
+<li>keep shard-home lease, <code>RouteFence</code>, and home-authority truth unchanged,</li>
+<li>keep per-item status, digest, and TTL semantics unchanged,</li>
+<li>change only how large inter-daemon byte payloads move after authority has already made a per-item decision.</li>
+</ul>
+<p>The transport family is live today:</p>
+<ul>
+<li><code>v1 grpc_chunk_ref</code> is implemented and remains the required batch-native fallback,</li>
+<li><code>v2 communicator_source</code> is implemented and is the preferred realization when both peers advertise protocol
+  version <code>&gt;= 2</code> and host-memory export is enabled,</li>
+<li>the legacy per-item <code>payload_ref</code> path still exists as the fail-closed compatibility path when batch transport is
+  disabled, unsupported, or cannot be issued for a given pack.</li>
+</ul>
+<p>The remaining follow-ups are narrower than the original design delta:</p>
+<ul>
+<li>current <code>v2 communicator_source</code> already supports segmented retained-body
+  export on eligible RDMA get paths, and current RDMA consume paths already
+  avoid the old mandatory full-pack local mirror through the shared direct-write
+  dataplane,</li>
+<li>current <code>v1 grpc_chunk_ref</code> consumption and MTCP-compatible
+  <code>communicator_source</code> realizations still materialize one full local pack
+  payload per transport before local slicing,</li>
+<li>current RDMA producer servicing still copies CPU source slices into pinned
+  staged response windows before remote reads, and those response windows are
+  still bounded by staged-flow credit rather than descriptor/control limits,</li>
+<li>session-scoped <code>StreamingPinnedBuffer</code> reuse remains deferred and is not part
+  of the current implementation.</li>
+</ul>
+<p>This section should be read together with the existing split in the repository:</p>
+<ul>
+<li>ordinary artifact replica transfer already uses the communicator-backed daemon P2P data plane over RDMA or MTCP,</li>
+<li>routed <code>byte_artifact</code> uses home-authority <code>HomeBatch*</code> plus capability-scoped transport records,</li>
+<li>batch-native routed transport now keeps that authority split intact while replacing the old one-transport-per-artifact
+  shape with one transport object per pack.</li>
+</ul>
+<h4 id="551-semantic-hard-boundaries">5.5.1 Semantic hard boundaries<a class="headerlink" href="#551-semantic-hard-boundaries" title="Permanent link">&para;</a></h4>
+<p>Batch-native transport must preserve these invariants:</p>
+<ol>
+<li><code>HomeBatch*</code> remains the only authority decision point for routed byte artifacts. Batch transport is a byte movement
+   optimization after authority, not a second authority dialect.</li>
+<li><code>BatchExists</code>, <code>HomeBatchExists</code>, <code>PutIfAbsentJoin</code>, claim truth, visibility truth, and serving truth keep the same
+   meaning defined by <code>0087</code> and <code>0090</code>.</li>
+<li>Transport failure must not rewrite claim truth. A failed remote fetch may fail the current operation, but it must not
+   implicitly delete or reopen the routed claim.</li>
+<li>Per-item outcomes remain explicit. A mixed batch must still report which artifacts succeeded, missed, conflicted, or
+   failed verification.</li>
+<li>Digest, size, and invariant checks remain per artifact. Batch transport must not replace per-item verification with a
+   single opaque batch checksum.</li>
+<li>A batch transport object must never mix multiple directions, multiple issuer daemons, or multiple consumer
+   <code>operation_id</code> bindings.</li>
+<li>A batch transport object must never cross <code>RouteFence</code> boundaries. One object is scoped to one authority epoch.</li>
+</ol>
+<h4 id="552-transport-family-not-one-realization">5.5.2 Transport family, not one realization<a class="headerlink" href="#552-transport-family-not-one-realization" title="Permanent link">&para;</a></h4>
+<p>The live transport family introduces a batch-scoped transport object instead of overloading singular <code>payload_ref</code>.</p>
+<p>Current proto shape:</p>
+<div class="language-proto highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kd">message</span><span class="w"> </span><span class="nc">BatchPayloadEntry</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="kt">string</span><span class="w"> </span><span class="na">artifact_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span><span class="kt">uint64</span><span class="w"> </span><span class="na">offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">  </span><span class="kt">uint64</span><span class="w"> </span><span class="na">length</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">  </span><span class="kt">string</span><span class="w"> </span><span class="na">digest_alg</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">  </span><span class="kt">string</span><span class="w"> </span><span class="na">digest_hex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="p">;</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="p">}</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="kd">message</span><span class="w"> </span><span class="nc">BatchPayloadManifest</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="w">  </span><span class="k">repeated</span><span class="w"> </span><span class="n">BatchPayloadEntry</span><span class="w"> </span><span class="na">entries</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="w">  </span><span class="kt">uint64</span><span class="w"> </span><span class="na">total_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="p">}</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="kd">message</span><span class="w"> </span><span class="nc">BatchPayloadCommunicatorSource</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="w">  </span><span class="kt">bytes</span><span class="w"> </span><span class="na">batch_payload_ref</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="w">  </span><span class="kt">uint32</span><span class="w"> </span><span class="na">protocol_version</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="w">  </span><span class="kt">string</span><span class="w"> </span><span class="na">producer_daemon_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a><span class="w">  </span><span class="kt">string</span><span class="w"> </span><span class="na">consumer_daemon_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a><span class="w">  </span><span class="kt">string</span><span class="w"> </span><span class="na">producer_host</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="p">;</span>
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a><span class="w">  </span><span class="kt">uint32</span><span class="w"> </span><span class="na">producer_port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">6</span><span class="p">;</span>
+</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a><span class="w">  </span><span class="k">repeated</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="na">remote_memory_keys</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">7</span><span class="p">;</span>
+</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a><span class="w">  </span><span class="k">repeated</span><span class="w"> </span><span class="kt">uint64</span><span class="w"> </span><span class="na">buffer_sizes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8</span><span class="p">;</span>
+</span><span id="__span-0-23"><a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a><span class="w">  </span><span class="kt">string</span><span class="w"> </span><span class="na">remote_endpoint_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">9</span><span class="p">;</span>
+</span><span id="__span-0-24"><a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a><span class="w">  </span><span class="kt">string</span><span class="w"> </span><span class="na">local_endpoint_id_hint</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span>
+</span><span id="__span-0-25"><a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a><span class="w">  </span><span class="n">BatchPayloadMemoryLocation</span><span class="w"> </span><span class="na">memory_location</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">11</span><span class="p">;</span>
+</span><span id="__span-0-26"><a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a><span class="w">  </span><span class="kt">uint64</span><span class="w"> </span><span class="na">total_payload_bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">12</span><span class="p">;</span>
+</span><span id="__span-0-27"><a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a><span class="p">}</span>
+</span><span id="__span-0-28"><a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a>
+</span><span id="__span-0-29"><a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a><span class="kd">message</span><span class="w"> </span><span class="nc">BatchPayloadGrpcChunkRef</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-30"><a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a><span class="w">  </span><span class="kt">bytes</span><span class="w"> </span><span class="na">batch_payload_ref</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+</span><span id="__span-0-31"><a id="__codelineno-0-31" name="__codelineno-0-31" href="#__codelineno-0-31"></a><span class="w">  </span><span class="kt">uint32</span><span class="w"> </span><span class="na">protocol_version</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
+</span><span id="__span-0-32"><a id="__codelineno-0-32" name="__codelineno-0-32" href="#__codelineno-0-32"></a><span class="p">}</span>
+</span><span id="__span-0-33"><a id="__codelineno-0-33" name="__codelineno-0-33" href="#__codelineno-0-33"></a>
+</span><span id="__span-0-34"><a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a><span class="kd">message</span><span class="w"> </span><span class="nc">BatchPayloadTransport</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-35"><a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a><span class="w">  </span><span class="kt">string</span><span class="w"> </span><span class="na">transport_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+</span><span id="__span-0-36"><a id="__codelineno-0-36" name="__codelineno-0-36" href="#__codelineno-0-36"></a><span class="w">  </span><span class="n">BatchPayloadManifest</span><span class="w"> </span><span class="na">manifest</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
+</span><span id="__span-0-37"><a id="__codelineno-0-37" name="__codelineno-0-37" href="#__codelineno-0-37"></a><span class="w">  </span><span class="k">oneof</span><span class="w"> </span><span class="n">transport_kind</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-38"><a id="__codelineno-0-38" name="__codelineno-0-38" href="#__codelineno-0-38"></a><span class="w">    </span><span class="n">BatchPayloadGrpcChunkRef</span><span class="w"> </span><span class="na">grpc_chunk_ref</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span>
+</span><span id="__span-0-39"><a id="__codelineno-0-39" name="__codelineno-0-39" href="#__codelineno-0-39"></a><span class="w">    </span><span class="n">BatchPayloadCommunicatorSource</span><span class="w"> </span><span class="na">communicator_source</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span>
+</span><span id="__span-0-40"><a id="__codelineno-0-40" name="__codelineno-0-40" href="#__codelineno-0-40"></a><span class="w">  </span><span class="p">}</span>
+</span><span id="__span-0-41"><a id="__codelineno-0-41" name="__codelineno-0-41" href="#__codelineno-0-41"></a><span class="p">}</span>
+</span><span id="__span-0-42"><a id="__codelineno-0-42" name="__codelineno-0-42" href="#__codelineno-0-42"></a>
+</span><span id="__span-0-43"><a id="__codelineno-0-43" name="__codelineno-0-43" href="#__codelineno-0-43"></a><span class="kd">message</span><span class="w"> </span><span class="nc">BatchPayloadSlice</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-44"><a id="__codelineno-0-44" name="__codelineno-0-44" href="#__codelineno-0-44"></a><span class="w">  </span><span class="kt">string</span><span class="w"> </span><span class="na">transport_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+</span><span id="__span-0-45"><a id="__codelineno-0-45" name="__codelineno-0-45" href="#__codelineno-0-45"></a><span class="w">  </span><span class="kt">uint64</span><span class="w"> </span><span class="na">offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
+</span><span id="__span-0-46"><a id="__codelineno-0-46" name="__codelineno-0-46" href="#__codelineno-0-46"></a><span class="w">  </span><span class="kt">uint64</span><span class="w"> </span><span class="na">length</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span>
+</span><span id="__span-0-47"><a id="__codelineno-0-47" name="__codelineno-0-47" href="#__codelineno-0-47"></a><span class="p">}</span>
+</span></code></pre></div>
+<p>Current additive request and response evolution:</p>
+<ul>
+<li><code>HomeBatchGetResponse</code> may carry repeated <code>BatchPayloadTransport</code>, and successful items may refer to one transport via
+  <code>BatchPayloadSlice</code>.</li>
+<li><code>HomeBatchPutIfAbsentRequest</code> may carry repeated <code>BatchPayloadTransport</code>, and request items may refer to one transport
+  via <code>BatchPayloadSlice</code>.</li>
+<li>existing <code>inline_payload</code> and per-item <code>payload_ref</code> remain valid fallback encodings.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>The manifest is transport metadata only. It does not create a new artifact identity, content identity, or backing
+   identity.</li>
+<li><code>BatchPayloadManifest</code> is the explicit item table used for scatter or gather; transport bytes are interpreted only
+   through this manifest.</li>
+<li>Each manifest entry corresponds to exactly one artifact payload and keeps one exact <code>{artifact_id, offset, length,
+   digest}</code> tuple.</li>
+<li>A response or request may carry multiple transports. Batching is per remote-home bucket, and segmentation is still
+   allowed by size, item count, or staging constraints.</li>
+<li>Current realizations still differ by direction and transport:</li>
+<li><code>v1 grpc_chunk_ref</code> materializes one local payload buffer per transport,</li>
+<li>get-side RDMA <code>v2 communicator_source</code> already provides a reusable
+     remote slice loader over one open remote pack through the shared
+     direct-write path,</li>
+<li>put-side RDMA <code>v2 communicator_source</code> uses the same no-mirror
+     remote-slice consume shape for eligible direct-write-capable sources,</li>
+<li>MTCP or staged-fallback <code>v2 communicator_source</code> paths still mirror one
+     full pack into local host memory before serving subsequent item slices
+     from that local mirror.</li>
+<li>A per-item outcome or request item must choose exactly one payload encoding family at a time:
+   <code>inline_payload</code>, singular <code>payload_ref</code>, or <code>batch_payload_slice</code>.</li>
+<li>Only items whose semantic authority outcome is success may carry <code>batch_payload_slice</code>; <code>MISS</code>, conflict, and
+   authority-side rejection outcomes must not be encoded through the batch manifest.</li>
+<li><code>BatchPayloadTransport</code> is a transport-family envelope. The current realizations are <code>grpc_chunk_ref</code> and
+   <code>communicator_source</code>, and later optimizations must not change routed byte-artifact authority semantics or per-item
+   result shape.</li>
+</ol>
+<h4 id="553-current-batch-payload-transport-capability-family">5.5.3 Current batch payload transport capability family<a class="headerlink" href="#553-current-batch-payload-transport-capability-family" title="Permanent link">&para;</a></h4>
+<p>Per-item <code>PayloadRefScope</code> is intentionally singular:</p>
+<ul>
+<li>it binds one <code>artifact_id</code>,</li>
+<li>it binds one <code>payload_size</code>,</li>
+<li>it binds one digest,</li>
+<li>it is a clean front door for one verified payload.</li>
+</ul>
+<p>Batch transport needs different signed truth:</p>
+<ul>
+<li>one <code>transport_id</code>,</li>
+<li>one <code>total_payload_bytes</code>,</li>
+<li>one manifest digest,</li>
+<li>one direction,</li>
+<li>one consume-side <code>operation_id</code>,</li>
+<li>and a typed statement that the capability covers a manifest of many entries instead of one artifact.</li>
+</ul>
+<p>Current capability family:</p>
+<ul>
+<li><code>BatchPayloadRefScope</code></li>
+<li><code>CAPABILITY_AUDIENCE_BATCH_PAYLOAD_REF</code></li>
+<li><code>FetchBatchPayloadRefChunk</code></li>
+</ul>
+<p>Current <code>BatchPayloadRefScope</code> fields:</p>
+<ul>
+<li><code>transport_id</code></li>
+<li><code>payload_size</code></li>
+<li><code>direction</code></li>
+<li><code>operation_id</code></li>
+<li><code>manifest_digest_hex</code></li>
+<li><code>consumer_daemon_id</code></li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li><code>batch_payload_ref</code> is always a signed capability envelope over <code>BatchPayloadRefScope</code>; expiry and issuer identity
+   live in the outer <code>CapabilityTokenEnvelope</code>, not inside the scope body.</li>
+<li>The consumer must verify that the supplied manifest matches the signed digest before using any entry offsets. The
+   current implementation always computes and signs <code>manifest_digest_hex</code> at issuance time.</li>
+<li>The capability is single-consumer when <code>consumer_daemon_id</code> is set, and operation-scoped when <code>operation_id</code> is
+   set.</li>
+<li>The current scope does not sign <code>producer_daemon_id</code> or communicator endpoint metadata. <code>communicator_source</code> carries
+   producer endpoint information, and the broker validates structural consistency, consumer binding, and payload-size
+   consistency at open time.</li>
+<li>Per-entry payload digest verification remains item-scoped. If an entry omits digest fields, the consumer still
+   validates <code>{artifact_id, offset, length}</code> boundaries and transport success, but does not compute an additional
+   content hash for that item.</li>
+<li>Batch capability TTL, fetch deadline, cleanup, and batch-size controls live under the same payload-transport policy
+   family as per-item transport.</li>
+<li>Rollout still fails closed on mixed support. A daemon emits batch transport only when peer compatibility and routing
+   epoch permit it.</li>
+</ol>
+<h4 id="554-implemented-realizations-and-current-selection-policy">5.5.4 Implemented realizations and current selection policy<a class="headerlink" href="#554-implemented-realizations-and-current-selection-policy" title="Permanent link">&para;</a></h4>
+<p><code>v1 grpc_chunk_ref</code></p>
+<ul>
+<li>Implemented.</li>
+<li>Introduces <code>FetchBatchPayloadRefChunk</code> as a new inter-daemon transport RPC rather than overloading
+  <code>FetchPayloadRefChunk</code>.</li>
+<li>Stages one daemon-owned contiguous slab per pack and exposes that slab through <code>BatchPayloadGrpcChunkRef</code>.</li>
+<li>The current consume-side implementation fetches the full pack into one local payload buffer per <code>transport_id</code>, then
+  serves subsequent item slices from that local payload.</li>
+<li>It remains subject to gRPC frame sizing and <code>max_chunk_bytes</code>, so it is an optimization of the legacy path rather
+  than the final cross-daemon data plane.</li>
+</ul>
+<p><code>v2 communicator_source</code></p>
+<ul>
+<li>Implemented.</li>
+<li>Keeps the same <code>BatchPayloadTransport</code> envelope and manifest semantics, but realizes bytes through communicator export
+  descriptors instead of a transport RPC payload stream.</li>
+<li>The source shape is now transport-dependent:</li>
+<li>eligible RDMA get paths may export one logical pack as segmented retained
+    body views without building a daemon-owned pack slab first,</li>
+<li>MTCP-compatible and fallback paths may still export a staged host-memory
+    pack.</li>
+<li><code>BatchPayloadCommunicatorSource</code> is the serializable control-plane descriptor. The broker lowers it into a runtime
+  <code>RemoteKeySource</code> backed by the shared communicator rather than using <code>P2PSource</code> itself as the wire schema.</li>
+<li>The current remote consume path is also transport-dependent:</li>
+<li>RDMA get lowers item slices directly from the remote source into the
+    shared batched direct-write path without a mandatory full-pack local
+    mirror,</li>
+<li>RDMA put lowers item slices directly from the remote source into per-item
+    <code>SourceSlice</code> loaders and home staging without a mandatory full-pack local
+    mirror,</li>
+<li>MTCP and staged fallback paths still mirror one full pack into local host
+    memory before per-item slicing.</li>
+<li>The remaining accepted RDMA follow-on below is producer-side servicing:
+  source-backed response windows still use staged pinned buffers rather than
+  direct-readable retained CPU backings.</li>
+</ul>
+<p>Current selection rules:</p>
+<ol>
+<li>Default daemon configuration enables batch transport with protocol version <code>2</code>, which means <code>v2 communicator_source</code>
+   is preferred and <code>v1 grpc_chunk_ref</code> remains available as fallback.</li>
+<li><code>GetServerConfig</code> exposes:</li>
+<li><code>batch_transport_protocol_version</code></li>
+<li><code>batch_payload_grpc_chunk_ref_enabled</code></li>
+<li><code>batch_payload_communicator_source_enabled</code></li>
+<li><code>batch_payload_host_memory_export_enabled</code></li>
+<li><code>max_batch_payload_bytes</code></li>
+<li>A daemon that supports <code>v2 communicator_source</code> must still be able to speak <code>v1 grpc_chunk_ref</code> when the peer only
+   advertises protocol version <code>1</code> or when communicator export cannot be used for the specific pack.</li>
+<li>When peer capability, local export readiness, minimum TTL checks, or producer endpoint data do not permit
+   <code>communicator_source</code>, the daemon falls back per pack to <code>grpc_chunk_ref</code>, and may fall back further to per-item
+   <code>payload_ref</code> or inline payload when pack issuance itself fails.</li>
+</ol>
+<h4 id="555-v1-get-path">5.5.5 V1 get path<a class="headerlink" href="#555-v1-get-path" title="Permanent link">&para;</a></h4>
+<pre class="mermaid"><code>sequenceDiagram
+  participant C as Consumer Daemon
+  participant H as Home Daemon
+  participant T as PayloadTransportBroker
+
+  C-&gt;&gt;H: HomeBatchGet(fence, artifact_ids, operation_id)
+  H-&gt;&gt;H: decide per-item status under current authority
+  H-&gt;&gt;T: mint one or more batch payload refs for transport-eligible items
+  H--&gt;&gt;C: item outcomes + batch manifests + grpc_chunk_refs
+  C-&gt;&gt;H: FetchBatchPayloadRefChunk(batch_payload_ref, offset, max_bytes, operation_id)
+  H--&gt;&gt;C: chunk stream
+  C-&gt;&gt;C: verify manifest and materialize one local pack payload
+  C-&gt;&gt;C: slice the local pack by manifest, lower items, verify per-item digest</code></pre>
+<p>Get-path rules:</p>
+<ol>
+<li><code>HomeBatchGet</code> still decides per item whether the answer is <code>MISS</code>, <code>OK</code>, conflict, or unavailable before transport
+   starts.</li>
+<li>Only successful large items may be packed into batch transport objects. Small items may remain inline.</li>
+<li>The home daemon may choose any stable packing order; order is not semantic because items are re-identified by the
+   manifest.</li>
+<li>The current <code>v1 grpc_chunk_ref</code> implementation resolves one <code>batch_payload_ref</code> per pack and materializes the full
+   pack into one local payload buffer per <code>transport_id</code> before per-item slicing. It does not yet stream directly into
+   the target layout without an intermediate full-pack buffer.</li>
+<li><code>BatchGetIntoRegion</code> currently groups apply work by <code>transport_id</code>, so one pack becomes one apply work unit and the
+   same local pack payload can be reused across all items that reference that transport.</li>
+<li>When target ranges do not overlap, the controller currently executes those apply work units in parallel across the
+   byte-artifact apply pool. Final success remains item-scoped even though pack setup is shared.</li>
+<li>Final <code>BatchGetIntoRegion</code> success is still determined per item after digest verification and region fill complete.</li>
+</ol>
+<h4 id="556-v1-put-path">5.5.6 V1 put path<a class="headerlink" href="#556-v1-put-path" title="Permanent link">&para;</a></h4>
+<pre class="mermaid"><code>sequenceDiagram
+  participant S as Source Daemon
+  participant H as Home Daemon
+  participant T as PayloadTransportBroker
+
+  S-&gt;&gt;S: validate local source layout and invariants
+  S-&gt;&gt;T: build one or more daemon-owned batch transport records
+  S-&gt;&gt;H: HomeBatchPutIfAbsent(fence, items + batch refs, ttl, operation_id)
+  H-&gt;&gt;S: FetchBatchPayloadRefChunk(batch_payload_ref, offset, max_bytes, operation_id)
+  S--&gt;&gt;H: chunk stream
+  H-&gt;&gt;H: materialize one local pack payload per transport
+  H-&gt;&gt;H: stage local slices, verify invariants, install join truth
+  H--&gt;&gt;S: per-item outcomes</code></pre>
+<p>Put-path rules:</p>
+<ol>
+<li>Source-side batching is grouped by remote home bucket first; a transport pack must not mix different home daemons.</li>
+<li>The source daemon must not expose caller-accessible local regions as a
+   remote fetch source unless it owns a transport-lifetime lease, pin, or
+   equivalent keepalive that survives the local ingress RPC and prevents the
+   exported bytes from being recycled before transport release.</li>
+<li>Before issuing a batch capability on the put path, the source daemon must
+   adopt the bytes into daemon-owned transport-lifetime state. That state may
+   be a staged copy, or for an eligible <code>HOST_SHARED</code> no-pack path it may be
+   the original region span plus region lease, slot pin or generation token,
+   communicator export registration, and cleanup ownership.</li>
+<li>The current implementation realizes eligible <code>HOST_SHARED</code> source-layout
+   packs as segmented communicator exports and keeps the contiguous staged slab
+   as the fallback realization. The wire contract does not depend on either
+   physical choice.</li>
+<li>The home daemon still verifies each item's invariant and still installs routed join truth per artifact.</li>
+<li>The home-daemon consume path is transport-dependent. Eligible remote RDMA
+   <code>communicator_source</code> sources are consumed as per-item remote <code>SourceSlice</code>
+   loaders without a local full-pack mirror; non-direct communicator sources
+   and <code>grpc_chunk_ref</code> fallbacks still read one full pack per transport, then
+   stage or reuse per-item slices from that local pack payload before join
+   installation.</li>
+<li>When the consumed pack slice is already available as local host bytes, the home daemon currently prefers a
+   one-pass fast CPU staging path that copies into final backing while computing the required content digest, instead
+   of rereading the bytes through the generic loader pipeline.</li>
+<li><code>BatchPutIfAbsentFromRegion</code> currently runs shard-local put tasks concurrently up to
+   <code>min(shard_count, batch_get_apply_threads)</code>. Each task stages, emits, and dispatches its own local or remote-home
+   request as soon as that shard is ready; there is no global "all shards must be packed before any dispatch" barrier.</li>
+<li>Partial success remains legal. One failed item in a pack must not force unrelated items in the same pack to be
+   reported as semantic failure if their bytes verified and their join succeeded.</li>
+</ol>
+<h4 id="556a-implemented-put-side-no-mirror-consume">5.5.6a Implemented put-side no-mirror consume<a class="headerlink" href="#556a-implemented-put-side-no-mirror-consume" title="Permanent link">&para;</a></h4>
+<p>The put path is directionally symmetric with get after authority routing has
+selected a remote home: the source daemon owns a logical pack byte space, while
+the home daemon is the consumer that stages each successful item into retained
+home backing before installing <code>PUT_IF_ABSENT_JOIN</code> truth. The first put-side
+realization step removes only the home daemon's mandatory remote full-pack
+mirror. It does not change source-side pack construction, manifest semantics,
+home authority, or per-item join behavior.</p>
+<p>Eligibility rules:</p>
+<ol>
+<li>The candidate is a <code>HomeBatchPutIfAbsent</code> item with
+   <code>batch_payload_slice.transport_id</code> referring to a <code>v2 communicator_source</code>
+   transport opened with <code>PAYLOAD_REF_DIRECTION_PUT</code>.</li>
+<li>The opened source is remote from the home daemon and resolves to a
+   non-null <code>SeekableSource</code>.</li>
+<li>First-cut executable eligibility requires
+   <code>SeekableSource::supports_direct_write_at() == true</code>. The
+   <code>supports_batched_direct_write_at()</code> bit is logged for parity with get-side
+   composite execution and future put-side vectored work, but by itself is not
+   the first-cut per-item <code>SourceSlice</code> eligibility signal unless the source
+   also advertises scalar <code>read_into_at(...)</code> support.</li>
+<li>Manifest lookup must prove that the item slice exactly matches one
+   <code>{artifact_id, offset, length}</code> entry in the transport manifest before any
+   loader is constructed.</li>
+</ol>
+<p>Direct consume realization:</p>
+<ol>
+<li>The home daemon must not call <code>mirror_seekable_source_payload(...)</code> for an
+   eligible remote source.</li>
+<li>The home daemon builds a per-item <code>SourceSlice</code> over the opened remote
+   source and wraps it in <code>SeekableSourceLoader</code>.</li>
+<li>The item keeps <code>source_kind = kP2P</code> and is staged through
+   <code>BodyBackingManager::stage_body(...)</code>, preserving the existing body
+   placement, invariant validation, digest, and verified-content output
+   semantics.</li>
+<li>The direct-slice loader holds the resolved source through shared ownership
+   until item staging completes; there is no local full-pack owner buffer and
+   no <code>LocalByteSpan</code> pointing into a mirrored pack.</li>
+<li>This first cut may still execute one home staging operation per item. It is
+   not the put-side composite or vectored direct-write phase, and it is not
+   required to remove all per-item lowering, <code>StreamingPinnedBuffer</code>, or
+   final-backing copy costs.</li>
+</ol>
+<p>Fallback rules:</p>
+<ol>
+<li>Remote <code>communicator_source</code> paths that do not advertise scalar direct-write
+   support keep the current <code>full_pack_mirror</code> realization.</li>
+<li><code>grpc_chunk_ref</code> keeps the current full-pack fetch realization.</li>
+<li>Same-daemon or otherwise local <code>communicator_source</code> paths keep local source
+   slicing and do not count as remote no-mirror RDMA validation.</li>
+<li>Fallback must be pre-issue. After a direct-slice staging attempt has begun,
+   the controller must not silently retry the same item through full-pack
+   mirror because the staging path may already have performed partial writes
+   into transient backing. Such failures remain current-operation item
+   failures and must not rewrite routed truth.</li>
+</ol>
+<p>Correctness and authority rules:</p>
+<ol>
+<li><code>HomeBatchPutIfAbsent</code> remains the only authority point that installs
+   first-writer routed truth. Direct-slice consumption is only a byte-movement
+   realization.</li>
+<li>A failed transport open or manifest validation failure affects only items
+   that reference the invalid transport or slice, subject to existing
+   batch-scoped capability validation rules.</li>
+<li>If direct-slice staging fails for one item, the item must not be passed to
+   <code>ByteArtifactAuthorityService::batch_put_if_absent(...)</code>; unrelated items
+   in the same request or different transports may still complete.</li>
+<li>Digest and verification behavior remains item-scoped. The home daemon still
+   validates the item invariant against the staged body descriptor before join
+   installation.</li>
+<li>Implementation may serialize or parallelize direct-slice staging per
+   transport. The semantic contract requires explicit-offset reads and correct
+   lifetime ownership, not a particular scheduling order.</li>
+</ol>
+<p>Observability rules:</p>
+<ol>
+<li>Opening a put-side remote <code>communicator_source</code> must continue to log
+   source direct-write and batched direct-write capability.</li>
+<li>Eligible direct-slice consumption must emit a read-mode log such as
+   <code>byte_artifact.home_batch_put_if_absent_transport_read_mode</code> with
+   <code>read_mode=direct_remote_slice</code>, <code>realization=source_slice_loader</code>,
+   <code>mirror_ms=0</code>, and <code>subsequent_item_slices_local=false</code>.</li>
+<li>Fallback mirror consumption must continue to emit
+   <code>byte_artifact.home_batch_put_if_absent_transport_mirror</code> with
+   <code>realization=full_pack_mirror</code>.</li>
+<li>The home summary must distinguish remote direct-slice transports and items
+   from remote full-pack mirror transports and bytes so benchmark analysis can
+   prove that <code>remote_mirror_count</code> and <code>remote_mirror_bytes</code> collapse to zero
+   on the intended RDMA put path.</li>
+</ol>
+<h4 id="556b-accepted-put-side-composite-final-body-stage">5.5.6b Accepted put-side composite final-body stage<a class="headerlink" href="#556b-accepted-put-side-composite-final-body-stage" title="Permanent link">&para;</a></h4>
+<p>After the no-mirror consume cut, the remaining put-side batch-set cost is
+per-item home staging. The accepted next realization is to stage one eligible
+remote pack directly into the unpublished final retained body backings for all
+eligible items in that transport, using the shared composite/vectored
+direct-write execution contract from <code>0115</code>.</p>
+<p>Scope and eligibility:</p>
+<ol>
+<li>This path applies only inside <code>HomeBatchPutIfAbsent</code> after the home shard,
+   fence, route epoch, request operation, transport capability, and manifest
+   slice validation have already succeeded.</li>
+<li>The first implementation is limited to remote <code>v2 communicator_source</code>
+   transports opened with <code>PAYLOAD_REF_DIRECTION_PUT</code> whose resolved
+   <code>SeekableSource</code> is non-null and advertises
+   <code>supports_batched_direct_write_at() == true</code>.</li>
+<li>The group is initially per <code>transport_id</code>: all composite items share one
+   opened source and one transport manifest. Ineligible items in the same RPC
+   continue through the 5.5.6a per-item direct-slice path or the existing
+   full-pack fallback path.</li>
+<li>Each item must use
+   <code>BYTE_ARTIFACT_VERIFICATION_MODE_LAYOUT_AND_SIZE_ONLY</code>. Modes that require
+   payload digest verification, including the default strict SHA256 mode, stay
+   on the existing per-item staging path until a later stream or post-write
+   digest phase is accepted.</li>
+<li>The resolved body policy must produce CPU final backings that can be exposed
+   as writable target-layout storage for the shared materialization dataplane.
+   GPU-only, non-direct-writable, zero-length, or otherwise unsupported target
+   shapes are pre-issue fallback cases.</li>
+<li>Duplicate artifact ids or duplicate join keys inside one composite group are
+   pre-issue fallback cases until a batch-level de-duplication policy is
+   explicitly defined. This keeps authority join and cleanup semantics
+   identical to the existing item-scoped path.</li>
+</ol>
+<p>Body staging seam:</p>
+<ol>
+<li><code>BodyBackingManager</code> needs an internal batch staging seam such as
+   <code>stage_bodies_composite(...)</code>, or an equivalent
+   <code>prepare_body_stage_targets(...)</code> plus <code>finalize_staged_bodies(...)</code> split.</li>
+<li>That seam owns final body backing preparation. It creates one unpublished
+   retained backing per item, with the same logical body identity,
+   <code>BodyBackingIntent</code>, <code>ResolvedStorePolicy</code>, stable-retention admission, and
+   <code>BodyHandle</code> lifetime rules that single-item <code>stage_body(...)</code> uses.</li>
+<li>Prepared bodies are not routed truth. They are transient unpublished
+   candidates until <code>ByteArtifactAuthorityService::batch_put_if_absent(...)</code>
+   accepts the corresponding item.</li>
+<li>The first implementation may expose one all-in-one
+   <code>stage_bodies_composite(...)</code> API that prepares, materializes, finalizes,
+   and cleans up on failure. A later split is allowed if tests need finer
+   control over pre-issue preparation.</li>
+</ol>
+<p>Composite mapping semantics:</p>
+<ol>
+<li>The source byte space is the transport pack manifest byte space. Each item
+   contributes exactly one source slice
+   <code>{source_index=0, src_offset=manifest.offset, length=manifest.length}</code>.</li>
+<li>The target byte space is a synthetic concatenation of the unpublished final
+   body backings in composite item order. Item <code>i</code> owns target range
+   <code>[cursor_i, cursor_i + invariant.byte_length)</code>, and the backing storage for
+   that range must have exactly that length.</li>
+<li>The <code>ByteRangeMap</code> uses <code>total_bytes=sum(item.byte_length)</code>,
+   <code>num_sources=1</code>, and one segment per item mapping the source pack slice to
+   the corresponding composite target range. <code>mapping.total_bytes</code> is the
+   composite target byte count, not the remote pack's total advertised size.</li>
+<li>The <code>IntoTargetLayout</code> storages are the final body backing writable spans.
+   Stable local backing metadata may be attached when the backing manager can
+   prove the storage is daemon-managed and long-lived enough for the <code>0115</code>
+   direct-write grant, but this metadata remains local placement state and not
+   routed artifact identity.</li>
+<li>The controller calls the shared materialization seam with one source vector
+   entry, the composite <code>ByteRangeMap</code>, <code>source_kind=kP2P</code>, and a
+   transport-scoped operation hint. The expected fast path is
+   <code>readv_into_at(...)</code> / <code>ReadPlan</code> / RDMA vectored direct-write, not a
+   byte-artifact-private communicator API.</li>
+</ol>
+<p>Verification, authority, and cleanup:</p>
+<ol>
+<li>For <code>LAYOUT_AND_SIZE_ONLY</code>, successful composite materialization produces
+   the same per-item <code>StageResult</code> shape as <code>stage_body(...)</code>: descriptor,
+   observation, <code>BodyHandle</code>, <code>VerifiedContentDescriptor</code>, verification
+   record, and backing identity. Payload digest fields remain advisory and
+   must not block publication.</li>
+<li>Each finalized item still runs
+   <code>validate_invariant_body_descriptor(...)</code> through
+   <code>ByteArtifactAuthorityService::batch_put_if_absent(...)</code>; composite staging
+   does not install authority truth by itself.</li>
+<li>Conflict, duplicate-writer, invalid-artifact, or invariant failures after
+   finalization retire the corresponding unpublished body handle using the
+   existing authority cleanup path.</li>
+<li>If preparation, capability validation, policy resolution, target layout
+   construction, or mapping validation fails before the composite dataplane is
+   issued, the controller may fall back to the per-item 5.5.6a path for the
+   affected items.</li>
+<li>Once the composite materialization has crossed the <code>0115</code> issue boundary,
+   hidden full-pack mirror or per-item staged fallback is forbidden. A
+   post-issue failure marks the affected composite items failed and retires all
+   prepared body handles that were not installed.</li>
+<li>Partial success is item-scoped only after composite materialization
+   succeeds. A composite execution failure before per-item finalization fails
+   the whole composite group because individual final backings may have been
+   partially dirtied.</li>
+</ol>
+<p>Observability rules:</p>
+<ol>
+<li>Eligible composite execution must log a put-side apply summary such as
+   <code>byte_artifact.home_batch_put_if_absent_transport_apply_summary</code> with
+   <code>read_mode=batched_direct_write</code>,
+   <code>materialize_mode=single_source_composite</code>,
+   <code>stage_mode=composite_final_body</code>,
+   <code>batched_direct_write=true</code>, <code>source_count=1</code>, <code>mapping_segments</code>,
+   <code>item_count</code>, <code>item_bytes</code>, <code>transport_payload_bytes</code>, and <code>mirror_ms=0</code>.</li>
+<li>Pre-issue fallback must log a bounded <code>fallback_reason</code> and preserve the
+   existing <code>read_mode=direct_remote_slice</code> or <code>full_pack_mirror</code> records so
+   benchmarks can distinguish no-mirror scalar staging from composite staging.</li>
+<li>Home summaries should add composite counters for transport count, item
+   count, byte count, materialization calls, batched-direct-write calls,
+   fallback count, fallback items, and cleanup/retire count, while retaining
+   the existing remote mirror and direct-slice counters.</li>
+<li>Expected RDMA SGLang KV evidence is: source batch-set packs still show
+   <code>mode=staged_slab</code>, home full-pack mirror remains zero, eligible home
+   transports move from <code>read_mode=direct_remote_slice</code> to
+   <code>read_mode=batched_direct_write</code>, and <code>stage_loader_count</code> for eligible
+   layout-and-size items drops toward zero because per-item
+   <code>SeekableSourceLoader</code> staging is bypassed.</li>
+</ol>
+<h4 id="556c-accepted-put-side-source-no-pack-segmented-export">5.5.6c Accepted put-side source no-pack segmented export<a class="headerlink" href="#556c-accepted-put-side-source-no-pack-segmented-export" title="Permanent link">&para;</a></h4>
+<p>After composite final-body staging, the remaining batch-set transport copy is
+on the requester/source daemon: <code>BatchPutIfAbsentFromRegion</code> stages each
+remote-home source-layout item into a transient forwarding body and then packs
+those bodies into one contiguous host slab before issuing the
+<code>communicator_source</code>. The accepted Step-3 realization removes that put-side
+full-pack slab for eligible <code>HOST_SHARED</code> source-layout batches.</p>
+<p>Scope:</p>
+<ol>
+<li>This is a source-daemon optimization for remote-home
+   <code>BatchPutIfAbsentFromRegion</code>. It does not change <code>HomeBatchPutIfAbsent</code>,
+   routed authority, shard fencing, per-item outcomes, or the Phase-9
+   composite final-body target path.</li>
+<li>The home daemon still receives the same <code>BatchPayloadTransport</code> shape: a
+   manifest plus a <code>v2 communicator_source</code> opened with
+   <code>PAYLOAD_REF_DIRECTION_PUT</code>. The physical source may be a segmented export
+   over original source-layout spans rather than a staged slab.</li>
+<li>Same-home puts, inline payloads, per-item <code>payload_ref</code> inputs, VRAM source
+   layouts, and transports that cannot prove source lifetime keep the existing
+   staging and fallback behavior.</li>
+</ol>
+<p>Logical planning semantics:</p>
+<ol>
+<li>Logical pack planning remains manifest-first. Each admitted item contributes
+   exactly one <code>BatchPayloadManifest</code> entry with the same <code>{artifact_id,
+   offset, length, digest}</code> contract used by staged packs.</li>
+<li>Manifest offsets define a concatenated logical pack byte space. They do not
+   require the source daemon to allocate one contiguous physical slab.</li>
+<li>The first no-pack cut should admit <code>LAYOUT_AND_SIZE_ONLY</code> source-layout
+   items. Modes that require the source daemon to compute or prove a payload
+   digest before home publication remain on the staged path until streaming or
+   post-write digest support is designed.</li>
+<li>Pack grouping remains per remote home daemon and per shard task. A no-pack
+   pack must not mix different home daemons, mixed source kinds, or items whose
+   lifetime cannot be held by the same transport-lifetime contract.</li>
+</ol>
+<p>Eligibility:</p>
+<ol>
+<li>The target home is remote from the source daemon.</li>
+<li>The peer advertises <code>v2</code> batch transport and segmented communicator export;
+   the local <code>PayloadTransportBroker</code> has segmented communicator export
+   enabled; and the local producer endpoint has a usable P2P port.</li>
+<li>Every admitted entry comes directly from the validated <code>source_layout</code>.
+   Entries that already require inline bytes, per-item <code>payload_ref</code>, or a
+   transient <code>BodyHandle</code> are excluded from the no-pack group.</li>
+<li>The source layout is pure CPU <code>HOST_SHARED</code>. <code>VRAM</code>, mixed memory kinds, and
+   non-exportable host mappings fall back before transport issue.</li>
+<li>Each source-layout item resolves to a bounded exportable span whose length
+   exactly matches the manifest entry and the put invariant byte length.</li>
+<li>Allocator-backed <code>HOST_SHARED</code> regions require <code>slot_index</code> and
+   <code>slot_generation</code> on every admitted offset, plus a successful slot pin or
+   equivalent generation-validated keepalive that prevents slot reuse until the
+   batch transport is safe to release. Missing, stale, or unpinnable tokens are
+   pre-issue fallback reasons.</li>
+<li>Scratch-slab <code>HOST_SHARED</code> regions require a daemon-managed region lease
+   and an ownership or immutability proof that the source bytes cannot be
+   rewritten before transport release. If the current caller contract cannot
+   prove that lifetime, the controller must use the staged path.</li>
+<li>Segment count, payload bytes, control-plane size, and remote-key count must
+   stay within the existing batch payload limits and any communicator-specific
+   descriptor budget.</li>
+</ol>
+<p>Source export seam:</p>
+<ol>
+<li><code>ByteArtifactRegionLayout</code> should expose a region-source export view, or an
+   equivalent <code>SegmentExportView</code> abstraction shared with <code>BodyExportView</code>,
+   rather than forcing <code>BatchPutIfAbsentFromRegion</code> to create transient
+   forwarding bodies.</li>
+<li>A region-source export view must carry the CPU address range, length,
+   <code>HOST_SHARED</code> class, region lease or attach keepalive, slot token and pin
+   when applicable, memory location, communicator export registration or a
+   registration request, and explicit unregister ownership.</li>
+<li><code>PayloadTransportBroker</code> should accept segmented source entries from either
+   retained-body export views or region-source export views and concatenate
+   their remote keys and buffer sizes into one logical
+   <code>BatchPayloadCommunicatorSource</code>.</li>
+<li>If the broker registers raw <code>HOST_SHARED</code> region spans for this transport,
+   the batch record owns those registrations and must unregister them on issue
+   failure or transport expiry. If a future region export view reuses a
+   pre-existing export lease, that lease owns unregister and the batch record
+   must hold only the keepalive. A first implementation should avoid mixing
+   owned and externally owned registrations inside one batch record.</li>
+</ol>
+<p>Home consume compatibility:</p>
+<ol>
+<li><code>RemoteKeySource</code> already interprets <code>remote_memory_keys[]</code> and
+   <code>buffer_sizes[]</code> as a segmented logical byte space. A manifest offset maps
+   through that concatenation in the same way whether the source is a staged
+   slab or original <code>HOST_SHARED</code> segments.</li>
+<li>Phase-9 home composite staging therefore does not need a new mapping model:
+   it still maps manifest pack offsets into unpublished final body backing
+   offsets and delegates materialization to the shared <code>0115</code> dataplane.</li>
+<li>Same-daemon local slicing remains an implementation detail and is not the
+   validation target for this RDMA no-pack path.</li>
+</ol>
+<p>Fallback and failure rules:</p>
+<ol>
+<li>Fallback to the current staged path must happen before issuing the segmented
+   transport. The fallback path remains
+   <code>stage_pending_body(kTransientForward)</code> plus <code>pack_batch_payload_entries</code>.</li>
+<li>Pre-issue fallback covers peer capability misses, local config misses,
+   missing P2P endpoint, non-<code>HOST_SHARED</code> source layout, mixed source kinds,
+   strict digest, missing or unpinnable allocator slot tokens, scratch lifetime
+   uncertainty, segment-budget overflow, and export-registration failure.</li>
+<li>After a segmented no-pack transport has been issued, the controller must not
+   silently retry the same operation through a staged slab using the same
+   possibly mutable source bytes. The current operation should fail affected
+   items using existing transport or RPC failure semantics; an upper-layer
+   retry may submit a fresh request.</li>
+<li>Transport keepalives must outlive remote reads and be released only through
+   the broker's batch-record expiry or an equivalent explicit release path.</li>
+</ol>
+<p>Observability rules:</p>
+<ol>
+<li>Eligible no-pack source realization should log
+   <code>byte_artifact.batch_put_if_absent_from_region_pack_realization</code> with a
+   distinct mode such as <code>mode=segmented_region_export</code>, <code>staged_slab=false</code>,
+   <code>source_realization_mode=source_layout_host_shared</code>, <code>host_region_class</code>,
+   <code>pack_count</code>, <code>item_count</code>, <code>payload_bytes</code>, <code>source_segments</code>,
+   <code>remote_keys</code>, and registration ownership.</li>
+<li>Pre-issue fallback should log a bounded reason such as
+   <code>peer_lacks_segmented_export</code>, <code>local_segmented_export_disabled</code>,
+   <code>producer_endpoint_unavailable</code>, <code>not_source_layout</code>, <code>not_host_shared</code>,
+   <code>vram_source</code>, <code>slot_token_missing</code>, <code>slot_pin_unavailable</code>,
+   <code>slot_generation_mismatch</code>, <code>scratch_lifetime_unproven</code>,
+   <code>segment_budget_exceeded</code>, <code>export_registration_failed</code>, or
+   <code>mixed_source_kind</code>.</li>
+<li>The put summary should separately report staged-slab pack counts and bytes
+   versus segmented no-pack export counts and bytes. On the intended SGLang KV
+   path, staged batch-set pack bytes should collapse to zero while Phase-9 home
+   composite logs remain present.</li>
+</ol>
+<p>Phase-10 implementation status, first cut accepted on 2026-04-27:</p>
+<ol>
+<li><code>ByteArtifactRegionLayout::open_host_shared_source_span(...)</code> is the
+   source-layout export seam. It admits only daemon-managed <code>HOST_SHARED</code>
+   items with a live region keepalive, rejects zero-length or non-host spans,
+   and requires allocator-backed offsets to carry both <code>slot_index</code> and
+   <code>slot_generation</code>. There is still no separate allocator slot-pin API; the
+   accepted first cut relies on the validated source-layout token plus the
+   daemon-managed region keepalive while the synchronous put RPC is in flight.</li>
+<li><code>PayloadTransportBroker::issue_batch_payload_communicator_export(...)</code> now
+   accepts raw <code>HOST_SHARED</code> region-source segments, registers those CPU spans
+   with the communicator, stores the region keepalives in the batch transport
+   record, and marks the remote keys as broker-owned so expiry and failure
+   cleanup unregister them.</li>
+<li>Remote-home <code>BatchPutIfAbsentFromRegion</code> admits <code>LAYOUT_AND_SIZE_ONLY</code>
+   source-layout items into this no-pack path when the peer advertises v2
+   segmented communicator export and the local P2P endpoint is usable. Strict
+   digest modes, non-<code>HOST_SHARED</code> sources, missing tokens, capability misses,
+   and export failures still fall back before issue to
+   <code>stage_pending_body(kTransientForward)</code> plus <code>pack_batch_payload_entries</code>.</li>
+<li>The home daemon path is unchanged from Phase 9: the segmented source-layout
+   export still appears as one logical <code>RemoteKeySource</code> pack, and
+   <code>HomeBatchPutIfAbsent</code> applies it through composite final-body staging and
+   batched direct-write.</li>
+<li>Validation run
+   <code>20260427-132749_tensorcast_tp2_workers2_prompts10</code> showed source worker
+   <code>worker_00</code> emitted <code>364</code> <code>mode=segmented_region_export</code> pack realization
+   records for <code>5145</code> items / <code>21579694080</code> bytes, with
+   <code>remote_batch_pack_count=0</code> and <code>remote_batch_pack_bytes=0</code>; home worker
+   <code>worker_01</code> still emitted <code>364</code>
+   <code>home_batch_put_if_absent_transport_apply_summary</code> records with
+   <code>read_mode=batched_direct_write</code>,
+   <code>materialize_mode=single_source_composite</code>, and no full-pack mirror.</li>
+</ol>
+<h4 id="556d-accepted-put-side-source-stable-backed-mr-reuse">5.5.6d Accepted put-side source stable-backed MR reuse<a class="headerlink" href="#556d-accepted-put-side-source-stable-backed-mr-reuse" title="Permanent link">&para;</a></h4>
+<p>Phase 10 removes the put-side full-pack slab, but the first-cut source-region
+export still creates broker-owned raw registrations for each batch segment.
+The accepted Phase 11 optimization keeps the same logical manifest and
+segmented <code>communicator_source</code> wire shape while changing MR ownership to the
+source daemon's activated <code>HOST_SHARED</code> stable backing. This is an MR reuse
+optimization, not a new batch-set authority or digest semantic.</p>
+<p>Scope:</p>
+<ol>
+<li>This applies only to eligible remote-home
+   <code>BatchPutIfAbsentFromRegion</code> no-pack source-layout items whose bytes live
+   in daemon-managed CPU <code>HOST_SHARED</code> regions with a stable backing.</li>
+<li>It does not change <code>HomeBatchPutIfAbsent</code>, shard routing, manifest
+   offsets, per-item outcomes, Phase-9 composite final-body staging, or
+   Phase-10 staged-slab fallback semantics.</li>
+<li>The first accepted fallback order is:
+   stable-backed source-view export, then Phase-10 broker-owned raw segmented
+   region export when the miss is known before transport issue, then the
+   staged full-pack realization for non-exportable source layouts.</li>
+<li>Once a stable-backed transport has been issued, the source daemon must not
+   silently fall back to raw per-view registration in read-plan admission. A
+   requested-rail stable-backed ensure failure is a transport failure for the
+   current operation.</li>
+</ol>
+<p>Stable backing exposure on source spans:</p>
+<ol>
+<li><code>ByteArtifactRegionLayout::HostSharedSourceSpan</code> must carry the source
+   backing metadata needed to prove stable-backed export eligibility:
+   <code>StableLocalBackingRef</code>, stable-backing keepalive, region id, host-region
+   class, source address, length, and backing-local offset or enough
+   information to derive it from <code>backing_base_addr</code>.</li>
+<li>Source-layout validation already activates local stable backings through
+   <code>ExternalTargetAccessService::validate_local_source_layout(...)</code>; Phase 11
+   consumes that activated backing instead of adding a second preregistration
+   surface.</li>
+<li>The accepted eligible backing shape is
+   <code>StableLocalBackingKind::kHostSharedRegion</code> over CPU memory, with the span
+   fully contained in the backing. For allocator-backed slots, <code>slot_bytes</code>
+   must match the item length used for chunk geometry, and the source span
+   still requires <code>slot_index</code> and <code>slot_generation</code>.</li>
+<li>Missing stable backing, missing stable-backing keepalive, cross-backing
+   groups, invalid geometry, strict digest requirements, or source lifetime
+   gaps remain pre-issue fallback reasons.</li>
+</ol>
+<p>Stable-backed export API:</p>
+<ol>
+<li>The communicator boundary should expose a stable-backed source-view API
+   such as <code>export_stable_local_backing_views(...)</code> or an equivalent
+   <code>prepare_stable_local_backing_source_views(...)</code> seam. The API accepts the
+   manifest-aligned source spans and returns an <code>ExportRegistration</code>-compatible
+   view with <code>remote_memory_keys[]</code>, <code>buffer_sizes[]</code>, memory location, and
+   transport keepalives.</li>
+<li>The API must not call the generic broker-owned
+   <code>register_memory(span_addr, span_bytes)</code> path for eligible spans. It uses
+   <code>StableLocalBackingState</code> chunk records keyed by
+   <code>stable_backing_id + rail_id + chunk_index</code>.</li>
+<li>Stable-backed lazy chunk registration is allowed only as a stable backing
+   cache fill: the resulting MR is owned by <code>StableLocalBackingState</code>, is
+   reusable by later batch get/set operations that touch the same backing
+   chunk and rail, and is deregistered only when the backing is deactivated.</li>
+<li>The batch transport record may own source-view key cleanup, but it must not
+   own or deregister the stable chunk MR. The implementation should make this
+   split explicit rather than overloading one "registration owned" boolean.</li>
+</ol>
+<p>Remote key representation:</p>
+<ol>
+<li>The first implementation should keep the existing
+   <code>BatchPayloadCommunicatorSource</code> schema. Each source item is advertised as
+   a lightweight remote key whose <code>buffer_sizes[]</code> entry is exactly the item
+   length; <code>RemoteKeySource</code> continues to see one concatenated logical pack.</li>
+<li>A lightweight source-view key is a transport-scoped communicator tensor or
+   equivalent lookup record over the item span. Its base address and length
+   are item-local, but its RDMA MR is borrowed from the stable backing chunk.</li>
+<li>Unregistering the view key on transport expiry removes only the lookup
+   record and releases keepalives. It must not deregister the borrowed chunk
+   MR; the borrowed MR must be installed with non-owning semantics.</li>
+<li>A future protocol could advertise backing id plus chunk offset directly,
+   but Phase 11 intentionally avoids proto changes and preserves the existing
+   <code>remote_memory_keys[]</code> / <code>buffer_sizes[]</code> lowering.</li>
+</ol>
+<p>Requested-rail RDMA behavior:</p>
+<ol>
+<li>The stable backing cache is already per rail: prewarm and lazy ensure store
+   chunk MRs under <code>stable_backing_id + rail_id + chunk_index</code>.</li>
+<li>Phase 11 should use the requested-rail design. Export time creates
+   stable-backed view metadata; it does not have to eagerly <code>ensure_chunk(...)</code>
+   for every visible rail.</li>
+<li>Source-side <code>READ_PLAN_REQUEST</code> admission already receives the requested
+   or selected <code>rail_id</code>. When the advertised remote key resolves to a
+   stable-backed source view, admission resolves only that rail by calling the
+   stable backing chunk ensure path and uses the returned chunk MR for the
+   direct-source response.</li>
+<li>Admission must not route stable-backed views through the ordinary
+   <code>ensure_tensor_registered_on_dev(...)</code> raw tensor path, because that would
+   recreate per-batch/per-segment MR registrations.</li>
+<li>If prewarm has completed, requested-rail resolution should be a chunk-cache
+   hit. If not, the allowed fallback is a stable-backed lazy chunk registration
+   owned by the backing cache, not a broker-owned view registration.</li>
+</ol>
+<p>Controller integration and observability:</p>
+<ol>
+<li>Remote-home <code>BatchPutIfAbsentFromRegion</code> should prefer stable-backed
+   source-view export for admitted Phase-10 source-layout packs. The raw
+   broker-owned segmented region export remains a pre-issue compatibility
+   fallback for non-stable-backed sources, and staged slabs remain the final
+   compatibility fallback.</li>
+<li>The intended SGLang KV path should be fully stable-backed: source logs
+   should keep <code>mode=segmented_region_export</code> and <code>staged_slab=false</code>, but
+   change <code>source_realization_mode</code> to a stable-backed value and report
+   <code>mr_ownership=stable_backing</code> or equivalent.</li>
+<li>New counters should distinguish source-view key count from stable chunk MR
+   ownership, requested-rail chunk-cache hits, stable-backed lazy chunk
+   registrations, raw-register fallback count, and staged-slab fallback count.</li>
+<li>Path validation should prove that the source side no longer emits
+   broker-owned raw region registrations for intended SGLang <code>HOST_SHARED</code>
+   batch-set transports while home-side <code>read_mode=batched_direct_write</code> and
+   <code>materialize_mode=single_source_composite</code> remain unchanged.</li>
+</ol>
+<p>Phase-11 implementation status, first cut accepted on 2026-04-27:</p>
+<ol>
+<li><code>HOST_SHARED</code> source spans now carry the activated
+   <code>StableLocalBackingRef</code> plus stable-backing keepalive into the put-side
+   segmented region export path.</li>
+<li>The communicator exposes stable-backed lightweight source-view keys. Those
+   keys are unregistered with the batch transport record, while borrowed chunk
+   MRs remain owned by <code>StableLocalBackingState</code>.</li>
+<li>Source-side <code>READ_PLAN_REQUEST</code> admission detects stable-backed view keys,
+   resolves only the requested rail through <code>ensure_chunk(...)</code>, and bypasses
+   the ordinary raw tensor lazy-registration path.</li>
+<li>The SGLang share-remote Phase-11 replay showed all intended remote-home
+   batch-set packs using
+   <code>source_realization_mode=source_layout_host_shared_stable_backing</code>,
+   <code>registration_ownership=stable_backing_view</code>, and
+   <code>mr_ownership=stable_backing</code>, with no broker-owned raw registrations for
+   those packs and with home consume still on
+   <code>read_mode=batched_direct_write</code> /
+   <code>materialize_mode=single_source_composite</code>.</li>
+</ol>
+<h4 id="557-implemented-v2-communicator-backed-realization">5.5.7 Implemented v2 communicator-backed realization<a class="headerlink" href="#557-implemented-v2-communicator-backed-realization" title="Permanent link">&para;</a></h4>
+<p><code>v2 communicator_source</code> is the current communicator-backed realization. It moves routed byte-artifact remote transport
+toward the existing ordinary-artifact communicator data plane without reviving the Global Store per-blob hot path.</p>
+<p>Current control-plane schema for <code>BatchPayloadCommunicatorSource</code>:</p>
+<ul>
+<li><code>batch_payload_ref</code></li>
+<li><code>protocol_version</code></li>
+<li><code>producer_daemon_id</code></li>
+<li><code>consumer_daemon_id</code></li>
+<li><code>producer_host</code></li>
+<li><code>producer_port</code></li>
+<li><code>remote_memory_keys[]</code></li>
+<li><code>buffer_sizes[]</code></li>
+<li><code>remote_endpoint_id</code></li>
+<li>optional <code>local_endpoint_id_hint</code></li>
+<li><code>memory_location</code></li>
+<li><code>total_payload_bytes</code></li>
+</ul>
+<p>Rules:</p>
+<ol>
+<li><code>v2</code> still begins at <code>HomeBatch*</code>; communicator is a data-plane realization, not a new routing or authority owner.</li>
+<li><code>BatchPayloadCommunicatorSource</code> is a serializable control-plane descriptor, not a wire-serialized <code>P2PSource</code>.
+   The broker currently lowers it into a runtime <code>RemoteKeySource</code> backed by the shared communicator.</li>
+<li>Current <code>v2</code> support is intentionally narrow: the controller emits only host-memory exports. The proto already has a
+   <code>GPU_VRAM</code> enum value for future extensions, but the live controller path does not emit VRAM-backed packs.</li>
+<li>The producer pack defines one contiguous logical byte space over full byte-artifact payloads. Each manifest entry
+   owns exactly one whole-artifact slice <code>{offset, length}</code> inside that pack byte space.</li>
+<li>Current producer <code>v2</code> realizations are transport-dependent:</li>
+<li>eligible RDMA get paths may export one logical pack as segmented retained
+     body views,</li>
+<li>eligible RDMA put paths may export one logical pack as segmented
+     <code>HOST_SHARED</code> source-layout views; Phase 10 first realizes those views
+     through broker-owned raw registrations, while Phase 11 upgrades eligible
+     stable-backed spans to source-view keys that borrow chunk MRs from the
+     <code>HOST_SHARED</code> stable backing,</li>
+<li>MTCP-compatible and fallback paths may still realize one staged host pack.</li>
+<li>Current get-side remote <code>v2</code> consume paths open one communicator source per
+   <code>transport_id</code>:</li>
+<li>on RDMA get, item slices lower directly from that remote source into the
+     shared <code>0115</code> batched direct-write path without a mandatory full-pack
+     local mirror,</li>
+<li>on MTCP or staged fallback paths, the consumer still mirrors one full
+     pack into local host memory before per-item slicing,</li>
+<li>local same-daemon communicator packs can still serve source slices
+     directly.
+   Put-side home consume matches this no-mirror RDMA shape for eligible
+   direct-write-capable sources as described in 5.5.6a.</li>
+<li>Semantic success remains item-scoped and whole-artifact-scoped. <code>v2</code> does not introduce sub-artifact success,
+   partial artifact visibility, or sub-artifact digest semantics.</li>
+<li><code>v2</code> does not require per-pack Global Store transport sessions. Peer addressability and export descriptors come from
+   <code>BatchPayloadCommunicatorSource</code>, the shared communicator, and worker-directory resolution.</li>
+<li>Verification remains manifest-first. <code>v2</code> uses the signed <code>batch_payload_ref</code> manifest digest plus per-entry digests
+   when present; it does not require a full-pack payload hash.</li>
+<li><code>v1 grpc_chunk_ref</code> and legacy per-item <code>payload_ref</code> remain valid fallbacks beside <code>v2</code>.</li>
+</ol>
+<h4 id="558-failure-isolation-and-verification">5.5.8 Failure isolation and verification<a class="headerlink" href="#558-failure-isolation-and-verification" title="Permanent link">&para;</a></h4>
+<p>Batch transport must preserve failure granularity even when the wire movement is shared.</p>
+<p>Rules:</p>
+<ol>
+<li>Manifest verification is batch-scoped. If the consumer cannot validate the manifest against the signed
+   <code>BatchPayloadRefScope</code>, all items that reference that batch transport fail the current operation because their
+   offsets are untrusted.</li>
+<li>The signed batch capability currently binds <code>transport_id</code>, <code>payload_size</code>, <code>direction</code>, <code>operation_id</code>,
+   <code>manifest_digest_hex</code>, <code>consumer_daemon_id</code>, plus outer-envelope issuer and expiry. It does not sign
+   <code>producer_daemon_id</code> or communicator endpoint metadata.</li>
+<li>Transport-read failure is batch-scoped. If one pack transport fails or times out, only the items that reference
+   that pack fail the current operation; unrelated transports in the same <code>HomeBatch*</code> request may still complete.</li>
+<li>Per-entry digest mismatch or per-entry invariant failure remains item-scoped whenever the transport itself remains
+   readable and entry boundaries stay trustworthy.</li>
+<li>Per-entry payload digests are item-scoped. The current packer populates <code>{digest_alg, digest_hex}</code> from the source
+   descriptor when available, and consumers verify those digests before final item success.</li>
+<li>A batch-transport failure is an operation result, not an authority rewrite. The recorded routed claim truth,
+   visibility truth, and join semantics remain whatever <code>HomeBatch*</code> already decided before the transport attempt.</li>
+<li>Observability must distinguish authority-side miss or conflict from transport-side fetch failure and from post-fetch
+   verification failure. The live implementation does this through per-item outcomes plus <code>transport_open</code>,
+   <code>transport_mirror</code>, and summary logs.</li>
+</ol>
+<h4 id="559-lifecycle-and-backing-ownership">5.5.9 Lifecycle and backing ownership<a class="headerlink" href="#559-lifecycle-and-backing-ownership" title="Permanent link">&para;</a></h4>
+<p>Batch transport stays inside the shared lifecycle direction already established for <code>payload_ref</code>, but the current
+implementation is simpler than the original explicit-release sketch.</p>
+<pre class="mermaid"><code>stateDiagram-v2
+  [*] --&gt; Staged
+  Staged --&gt; RefIssued: batch_payload_ref minted and retention lease installed
+  RefIssued --&gt; Exported: communicator memory registered for v2
+  RefIssued --&gt; Reaped: lease expiry or issuance rollback
+  Exported --&gt; Reaped: lease expiry callback unregisters memory keys</code></pre>
+<p>Rules:</p>
+<ol>
+<li>A batch transport object is still a capability front door, not a new backing-truth family.</li>
+<li>Current expiry is derived by <code>resolve_payload_ref_expiry(now, ref_ttl, capability_expires_at)</code>, so the live expiry is
+   <code>min(now + ref_ttl, capability_expires_at)</code> when a caller-provided expiry exists.</li>
+<li><code>v2 communicator_source</code> adds one more gate: the remaining lifetime must be at least
+   <code>minimum_batch_transport_ttl</code>, otherwise the emitter falls back to <code>v1 grpc_chunk_ref</code> or older encodings.</li>
+<li><code>PayloadTransportBroker</code> owns the staged payload record and installs a retention-lease callback that erases the
+   batch record and unregisters communicator memory keys on expiry.</li>
+<li>Current batch transport cleanup is TTL or lease driven. There is no separate consumer-driven explicit batch-release
+   RPC in the current implementation.</li>
+<li><code>transport_release_guard</code> is already present in config and daemon options, but it is not yet consumed by the live
+   broker implementation.</li>
+<li><code>PayloadTransportBroker</code> remains the transport boundary. Batch transport does not create a second owner-side
+   lifecycle subsystem beside the lifecycle kernel.</li>
+</ol>
+<h4 id="5510-accepted-follow-on-optimization-rdma-source-side-direct-readable-batch-get-realization">5.5.10 Accepted follow-on optimization: RDMA source-side direct-readable batch-get realization<a class="headerlink" href="#5510-accepted-follow-on-optimization-rdma-source-side-direct-readable-batch-get-realization" title="Permanent link">&para;</a></h4>
+<p>The batch transport envelope is already correct. The accepted follow-on
+direction is to keep the manifest and capability semantics stable while
+splitting logical batch-pack planning from transport-specific physical
+realization.</p>
+<p>The generic shared execution capability this work depends on is now explicitly
+owned by <code>0115</code>. Routed byte-artifact code may consume that shared capability,
+but it must not define a byte-artifact-private batched RDMA direct-write API.</p>
+<p>Design intent:</p>
+<ul>
+<li>logical pack semantics remain manifest-first and transport-independent,</li>
+<li>MTCP-validated pack-plus-mirror optimization remains the intended realization for transports that do not expose
+  direct source-to-target writes,</li>
+<li>current RDMA get paths already remove the daemon-owned pack slab and the old
+  mandatory sink full-pack mirror on eligible paths,</li>
+<li>put-side <code>HomeBatchPutIfAbsent</code> now removes the same mandatory home-daemon
+  full-pack mirror for eligible RDMA <code>communicator_source</code> transports while
+  preserving source-side staged-slab pack construction,</li>
+<li>put-side <code>HomeBatchPutIfAbsent</code> now consumes the same shared <code>0115</code>
+  composite execution contract to batch-stage eligible remote packs into
+  unpublished final body backings for <code>LAYOUT_AND_SIZE_ONLY</code> items, while
+  preserving first-writer authority semantics,</li>
+<li>after put-side composite staging, the remaining put-side copy is the
+  requester/source daemon's staged full-pack slab for remote-home
+  source-layout batch-set transports,</li>
+<li>the remaining get-side RDMA bottleneck is producer-side servicing: CPU
+  source slices may still be copied from retained backing into pinned staged
+  response buffers before remote reads,</li>
+<li>RDMA should therefore converge toward direct-readable source servicing for
+  eligible retained CPU backings while keeping the existing shared <code>0115</code> sink
+  and transport execution path,</li>
+<li><code>BodyHandle</code> remains the source-side live-backing seam for export acquisition rather than teaching the transport
+  broker to inspect <code>StoreEngine</code> internals directly.</li>
+</ul>
+<pre class="mermaid"><code>flowchart LR
+  A["Retained CPU body backing"] --&gt;|MTCP / fallback| B["Staged response window&lt;br&gt;copy into pinned staging"]
+  A --&gt;|RDMA direct-source follow-on| C["Direct-source response window&lt;br&gt;descriptors over retained backings"]
+  B --&gt; D["RemoteKeySource / communicator"]
+  C --&gt; D
+  D --&gt; E["Sink read_multi()&lt;br&gt;one issue per response window"]
+  E --&gt; F["Shared direct-write target windows"]</code></pre>
+<p>Normative rules:</p>
+<ol>
+<li><code>HomeBatchGet</code> continues to decide authority truth, per-item status, manifest entries, digests, and slice ownership.
+   Follow-on work must not move routing, lease, or authority semantics into the communicator layer.</li>
+<li>Implementations must separate logical pack planning from physical realization. A <code>BatchPayloadManifest</code> is the
+   semantic truth; a daemon-owned contiguous slab is only one possible realization of that truth.</li>
+<li><code>v1 grpc_chunk_ref</code> keeps the staged contiguous pack realization. This remains the preferred realization for MTCP or
+   other non-direct-write transports, and it remains a valid per-pack fallback even when protocol version <code>2</code> is
+   available.</li>
+<li>Sink-side RDMA consume paths must not unconditionally mirror a full remote pack into local host memory. On the get
+   path, when a remote <code>communicator_source</code> lowers to a <code>SeekableSource</code> that supports <code>read_into_at(...)</code>, the
+   consumer should lower per-item <code>SourceSlice</code> loaders directly from that remote source and let the shared
+   materialization dataplane choose direct-write execution.</li>
+<li>Put-side home consume must follow the same no-mirror rule for eligible
+   remote <code>communicator_source</code> sources: <code>HomeBatchPutIfAbsent</code> should build
+   per-item <code>SourceSlice</code> loaders over the remote pack and stage those items
+   through <code>BodyBackingManager::stage_body(...)</code> instead of first materializing
+   a full local pack mirror.</li>
+<li>The accepted next put-side step is composite final-body staging, not a new
+   transport API: <code>HomeBatchPutIfAbsent</code> prepares unpublished final retained
+   backings through the body-backing seam, constructs a one-source
+   <code>ByteRangeMap</code> from pack offsets to those backing offsets, and delegates
+   materialization to the shared <code>0115</code> composite/vectored direct-write
+   dataplane before authority join installation.</li>
+<li>Source-side RDMA communicator export should continue to prefer no-pack-copy
+   segmented export over daemon-owned pack slab realization. The producer may
+   expose one logical pack byte space by concatenating per-entry or
+   per-backing exported segments through <code>remote_memory_keys[]</code>,
+   <code>buffer_sizes[]</code>, and <code>total_payload_bytes</code>; it does not need to copy those
+   bytes into one daemon-owned slab first. On the put path, this rule applies
+   only when the source daemon can hold the original <code>HOST_SHARED</code>
+   source-layout bytes with transport-lifetime leases or pins.</li>
+<li>The next RDMA get-side follow-on is source servicing, not a new sink API. Eligible
+   retained CPU backings should be served as direct-readable source segments in
+   the read-plan response instead of first being copied into pinned staged
+   buffers.</li>
+<li>The accepted source-side realization seam is <code>BodyHandle</code>, as further
+   specified by <code>0089</code>. <code>BodyHandle</code> provides the transport-neutral export-view
+   acquisition API that <code>PayloadTransportBroker</code> uses to obtain exportable
+   backing views and keepalive state without reimplementing replica-runtime
+   inspection or export logic.</li>
+<li>Direct-source RDMA response windows are descriptor-driven, not
+   staging-driven. They must not consume <code>FlowCreditLedger</code>, <code>StageLease</code>, or
+   staged ACK-release semantics, and they must not be split merely because
+   staged <code>buffers_per_flow</code> credit is exhausted.</li>
+<li>Direct-source window sizing should instead be bounded by descriptor/control
+   limits such as segment count, control payload bytes, and request budgeting.
+   The accepted benchmark target is that one routed transport's <code>32</code> source
+   segments fit in one direct-source response window and one sink
+   <code>read_multi()</code> call, even if transport realization still posts many RDMA
+   WRs internally.</li>
+<li>RDMA producer hot paths may optionally retain a publish-time export-view
+    keepalive keyed by backing identity as an optimization hint for later
+    direct-source servicing. This cache is RDMA-only, best-effort, and advisory:
+    missing, expired, or invalidated retained exports must never change
+    authority truth or manifest semantics, and they must not disable request-
+    time export acquisition or staged fallback.</li>
+<li>Publish-time retained exports must live outside <code>BackingRecord</code> snapshots.
+    Snapshot copies of backing metadata must not silently extend export
+    lifetime; source-side preregistration is a separate bounded cache over
+    previously acquired <code>BodyHandle</code> export views.</li>
+<li>Publish-time retained-export cache lifetime must be explicitly bounded by
+    TTL and live-entry/live-byte budgets, and it must be invalidated on backing
+    lifecycle changes such as invalidation, rebind, prune, or replacement.</li>
+<li>RDMA zero-copy in this design means "no mandatory pack copy, no mandatory
+    source-side staging copy, and no mandatory full-pack mirror" when direct-
+    write source and target paths exist. It does not remove item-scoped
+    digests, item-scoped lowering, or per-item success and failure outcomes.</li>
+<li>If a candidate pack or item cannot produce the required export view, cannot satisfy lifetime requirements, or
+   resolves to a non-direct-write transport, the daemon may fall back per pack to the staged contiguous realization and
+   the existing <code>grpc_chunk_ref</code> or staged <code>communicator_source</code> paths. MTCP-validated behavior must remain available.</li>
+<li>The intended implementation order is:<ul>
+<li>sink-side no-mirror consume path first, because the lower dataplane
+  already supports direct-write remote sources,</li>
+<li><code>BodyHandle</code> export-view API second,</li>
+<li>source-side no-pack segmented communicator export third,</li>
+<li>source-side direct-readable RDMA servicing fourth,</li>
+<li>put-side home no-mirror consume as the first batch-set parity step,</li>
+<li>put-side composite final-body staging as the second batch-set parity
+  step,</li>
+<li>put-side source-layout no-pack segmented export as the third batch-set
+  parity step,</li>
+<li>put-side source-layout stable-backed MR reuse as the fourth batch-set
+  parity step,</li>
+<li>and source-side publish-time retained-export warming as an optional
+  follow-on optimization on top of the same <code>BodyHandle</code> seam.</li>
+</ul>
+</li>
+<li>Session-scoped staging reuse remains complementary follow-on work after this transport-specific split. It must not
+    be used as a reason to keep RDMA on the forced pack-plus-mirror path.</li>
+<li>Shared composite direct-write and routed vectored pull semantics are
+    defined by <code>0115</code>. <code>0087</code> owns byte-artifact authority plus the consumer-
+    side and producer-side realization rules that decide whether a routed pack
+    is staged or direct-readable; it does not own a transport-private RDMA sink
+    API.</li>
+</ol>
+<h4 id="5511-potential-future-optimization-session-scoped-streaming-buffer-reuse">5.5.11 Potential future optimization: session-scoped streaming buffer reuse<a class="headerlink" href="#5511-potential-future-optimization-session-scoped-streaming-buffer-reuse" title="Permanent link">&para;</a></h4>
+<p><code>v1 grpc_chunk_ref</code> removes the per-artifact remote transport hot path, but it does not by itself remove per-artifact
+target-side lowering overhead. In the current <code>BatchGetIntoRegion</code> realization, the consumer daemon still executes one
+lowering plan per artifact and may initialize one <code>StreamingPinnedBuffer</code> per artifact while scattering bytes into the
+validated target region. This is semantically correct but leaves a large fixed cost when a request transfers many small
+byte artifacts.</p>
+<p>This optimization is deferred and is not part of the current implementation. After the transport-specific split above,
+it remains most relevant for staged consume paths and as a bounded internal reuse layer under item-scoped lowering.</p>
+<p>Recommended optimization:</p>
+<ul>
+<li>treat one <code>BatchGetIntoRegion</code> operation, or one remote-home pack within that operation, as a target-side lowering
+  session,</li>
+<li>allocate one session-scoped <code>StreamingPinnedBuffer</code> or a very small bounded pool per target device for that session,</li>
+<li>reuse that session-scoped staging resource across many item lowerings instead of allocate or initialize per artifact,</li>
+<li>keep the lowering plan and final outcome item-scoped even when the staging resource is reused.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>This optimization is internal to the consumer daemon data plane. It must not change caller API, artifact identity,
+   <code>RouteFence</code>, routed authority truth, or per-item <code>BatchGetIntoRegion</code> outcome shape.</li>
+<li>Reuse is scoped to one active operation, or to one bounded pack-local session within an operation. There is no
+   requirement to share staging state across unrelated operations.</li>
+<li>Digest verification, target-layout validation, and final success or failure remain per artifact even when multiple
+   items reuse the same session-scoped staging resource.</li>
+<li>Session-scoped reuse must remain bounded by the existing pinned-memory budget and GPU scheduling rules. Resource
+   pooling is allowed; unbounded staging growth is not.</li>
+<li>The optimization sits below <code>BatchPayloadTransport</code>. It must compose with:</li>
+<li><code>v1 grpc_chunk_ref</code></li>
+<li>staged <code>communicator_source</code> realizations used by MTCP or fallback paths</li>
+<li>RDMA direct-slice <code>communicator_source</code> realizations that bypass full-pack mirroring but still keep item-scoped
+     lowering and outcomes
+   because all of those realizations still terminate in the same target-region materialization contract.</li>
+<li>Implementations may later collapse multiple item lowerings into a shared executor session, but <code>v1</code> only requires
+   session-scoped staging reuse. It does not require changing the item-level lowering contract or result contract.</li>
+</ol>
+<p>Design intent:</p>
+<ul>
+<li><code>BatchPayloadTransport</code> solves inter-daemon wire inefficiency.</li>
+<li>Session-scoped streaming buffer reuse solves consumer-side lowering inefficiency.</li>
+<li>These optimizations are complementary and must compose cleanly.</li>
+</ul>
+<h4 id="5512-resource-controls-and-observability">5.5.12 Resource controls and observability<a class="headerlink" href="#5512-resource-controls-and-observability" title="Permanent link">&para;</a></h4>
+<p>Batch-native transport needs explicit guards so implementations do not silently diverge on pack shape or memory risk.</p>
+<p>Current additive policy knobs under <code>DaemonConfig.ByteArtifactRouting.PayloadTransport</code>:</p>
+<ul>
+<li><code>max_batch_payload_bytes</code></li>
+<li><code>max_batch_items</code></li>
+<li><code>max_batch_stage_bytes_per_peer</code></li>
+<li><code>batch_transport_protocol_version</code></li>
+<li><code>communicator_source_enabled</code></li>
+<li><code>host_memory_export_enabled</code></li>
+<li><code>minimum_batch_transport_ttl</code></li>
+<li><code>transport_release_guard</code></li>
+</ul>
+<p>Rules:</p>
+<ol>
+<li>Packers must segment before exhausting staging budgets. Resource pressure should produce more packs or fallback, not
+   unbounded temporary slabs.</li>
+<li><code>max_chunk_bytes</code> continues to cap each <code>v1 grpc_chunk_ref</code> fetch RPC payload. <code>v2 communicator_source</code> uses
+   exportable producer memory instead of RPC payload slicing, but logical pack shape still remains bounded by
+   <code>max_batch_payload_bytes</code> and <code>max_batch_items</code>.</li>
+<li>Current observability is log-first rather than metrics-first. The live implementation emits structured
+   <code>INFO</code> or <code>VLOG(1/2)</code> summaries; high-frequency put-side RDMA transport probes are <code>VLOG(2)</code> so production
+   runs do not print them unless verbose logging is explicitly enabled. Examples include:</li>
+<li><code>byte_artifact.home_batch_get_timing_summary</code></li>
+<li><code>byte_artifact.home_batch_get_response_shape</code></li>
+<li><code>byte_artifact.batch_get_into_region_home_rpc_result</code></li>
+<li><code>byte_artifact.batch_get_into_region_transport_open</code></li>
+<li><code>byte_artifact.batch_get_into_region_transport_mirror</code></li>
+<li><code>byte_artifact.batch_get_into_region_apply_plan</code></li>
+<li><code>byte_artifact.batch_get_into_region_transport_apply_summary</code></li>
+<li><code>byte_artifact.batch_get_into_region_summary</code></li>
+<li><code>byte_artifact.home_batch_put_if_absent_transport_open</code></li>
+<li><code>byte_artifact.home_batch_put_if_absent_transport_read_mode</code></li>
+<li><code>byte_artifact.home_batch_put_if_absent_transport_mirror</code></li>
+<li><code>byte_artifact.home_batch_put_if_absent_transport_apply_summary</code></li>
+<li><code>byte_artifact.home_batch_put_if_absent_stage_plan</code></li>
+<li><code>byte_artifact.home_batch_put_if_absent_summary</code></li>
+<li><code>byte_artifact.batch_put_if_absent_from_region_pack_realization</code></li>
+<li><code>byte_artifact.batch_put_if_absent_from_region_transport_emit</code></li>
+<li><code>byte_artifact.batch_put_if_absent_from_region_home_rpc_result</code></li>
+<li><code>byte_artifact.put_shard_task_summary</code></li>
+<li><code>byte_artifact.batch_put_if_absent_from_region_summary</code></li>
+<li><code>batch_payload_ref.communicator_export_summary</code></li>
+<li><code>batch_payload_ref.communicator_open_summary</code></li>
+<li>Current fallback accounting is also log-first. Response-shape and summary logs report inline items, per-item
+   <code>payload_ref</code> items, batch-slice items, <code>grpc_chunk_ref</code> vs <code>communicator_source</code> transport counts, and
+   remote-payload-ref fallback counts.</li>
+<li><code>GetServerConfig</code> exposes the batch-transport protocol version, <code>grpc_chunk_ref</code> enablement,
+   <code>communicator_source</code> enablement, host-memory export enablement, and <code>max_batch_payload_bytes</code> so observability can
+   correlate behavior with the active transport realization.</li>
+<li>Current controller parallelism is intentionally bounded rather than unbounded:</li>
+<li><code>BatchGetIntoRegion</code> and home-daemon put staging reuse the byte-artifact apply pool</li>
+<li><code>batch_get_apply_threads</code> defaults to the engine thread count when unset</li>
+<li>put-shard fanout is capped at <code>min(shard_count, batch_get_apply_threads)</code></li>
+<li>Current get-side parallel apply is safety-gated. The controller only parallelizes pack-scoped apply work when the
+   target layout ranges do not overlap on the same storage backing; otherwise it falls back to sequential apply.</li>
+</ol>
+<h4 id="5513-compatibility-and-fallback">5.5.13 Compatibility and fallback<a class="headerlink" href="#5513-compatibility-and-fallback" title="Permanent link">&para;</a></h4>
+<p>Batch-native transport is additive and must coexist with the current path.</p>
+<p>Rules:</p>
+<ol>
+<li>When both peers advertise compatible protocol version <code>&gt;= 2</code>, <code>communicator_source</code> is enabled, and host-memory
+   export is enabled, <code>v2 communicator_source</code> is the default selected batch transport realization.</li>
+<li>If peer compatibility, routing epoch, communicator readiness, host-memory export, producer endpoint data, export
+   setup, or minimum-lifetime checks do not permit <code>v2</code>, the daemon falls back per pack to <code>v1 grpc_chunk_ref</code>.</li>
+<li>If batch-transport issuance itself fails for a pack, the controller falls back further to per-item <code>payload_ref</code> or
+   inline payload, depending on item size and availability.</li>
+<li>Inline payload remains the preferred path for small items under the existing threshold policy.</li>
+<li>Existing caller APIs, artifact ids, and result shapes remain valid. The change is internal to daemon-to-daemon
+   transport and additive to <code>HomeBatch*</code> payload encodings.</li>
+<li>Observability reports both pack-level and per-item accounting through structured logs and response-shape summaries.</li>
+<li>Support is negotiated per peer and per routing epoch. A daemon must not emit <code>BatchPayloadTransport</code> only because it
+   is locally enabled; the remote peer must advertise support for the same batch-transport protocol version.</li>
+<li>Current code emits per-pack warnings when batch packing or transport issuance falls back all the way to per-item
+   <code>payload_ref</code>, and emits the actual selected transport kind in <code>transport_emit</code> or <code>transport_open</code> logs. A
+   dedicated rate-limited <code>v2 -&gt; v1</code> downgrade warning is still future work.</li>
+<li><code>v1 grpc_chunk_ref</code> is the required fallback realization whenever peers do not jointly advertise
+   <code>v2 communicator_source</code>.</li>
+</ol>
+<h4 id="5514-implemented-local-host_shared-region-support-for-byte-artifact-batch-ingress">5.5.14 Implemented local <code>HOST_SHARED</code> region support for byte-artifact batch ingress<a class="headerlink" href="#5514-implemented-local-host_shared-region-support-for-byte-artifact-batch-ingress" title="Permanent link">&para;</a></h4>
+<p>The local region-backed placement surface now supports <code>HOST_SHARED</code> in
+addition to <code>VRAM</code>.</p>
+<p>Live surface:</p>
+<ul>
+<li><code>RegisterRegion(memory_kind=VRAM|HOST_SHARED)</code> is the canonical registration
+  API,</li>
+<li>SDK <code>register_vram_region(...)</code> remains only as client-side syntax sugar over
+  <code>RegisterRegion(memory_kind=VRAM)</code>,</li>
+<li><code>StorageEntry.region_ref</code> is the generic storage reference for region-backed
+  placement,</li>
+<li>daemon-managed <code>HOST_SHARED</code> regions are attached and released through the
+  local handle plane using opaque attach tokens.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li><code>BatchGetIntoRegion</code> and <code>BatchPutIfAbsentFromRegion</code> remain loopback or
+   UDS-only. Remote or home daemons never write directly into a caller-visible
+   region.</li>
+<li><code>HOST_SHARED</code> widens only the local source or target placement type. It does
+   not alter <code>HomeBatch*</code>, <code>FetchBatchPayloadRefChunk</code>,
+   <code>communicator_source</code>, shard-home leases, or routed authority ownership.</li>
+<li>A pure <code>HOST_SHARED</code> byte-artifact layout uses
+   <code>StorageEntry.region_ref.memory_kind = HOST_SHARED</code>,
+   <code>storage.device_id = -1</code>, and an empty <code>device_uuid</code>.</li>
+<li>One byte-artifact region layout must use one memory kind. Mixed <code>VRAM</code> and
+   <code>HOST_SHARED</code> layouts are rejected.</li>
+<li>A region remains local placement state only. It is not part of artifact
+   identity, routing truth, authority truth, or publication truth.</li>
+<li><code>BatchPutIfAbsentFromRegion</code> reads bytes from the local host or VRAM region
+   mapping selected by <code>TargetLayout</code>.</li>
+<li><code>BatchGetIntoRegion</code> writes bytes directly into the local host or VRAM
+   region mapping selected by <code>TargetLayout</code>.</li>
+<li>Verification modes are unchanged. <code>HOST_SHARED</code> composes with both strict
+   digest validation and layout-and-size-only validation.</li>
+<li>For <code>HOST_SHARED</code> regions marked <code>ALLOCATOR</code>, every offset must be explicit
+   and must carry <code>slot_index</code> plus <code>slot_generation</code>.</li>
+<li>Slot tokens are caller-owned lifetime labels. TensorCast validates their
+    presence and echoes them in per-item outcomes, but slot allocation,
+    recycling, and stale-completion filtering remain caller responsibilities.
+    A remote no-pack put export is stricter: the source daemon must also hold a
+    transport-lifetime slot pin or equivalent generation-validated keepalive,
+    otherwise it must stage the bytes before export.</li>
+<li>Host pinning is an optional performance policy for ordinary local
+    <code>HOST_SHARED</code> access. RDMA no-pack export still needs an explicit
+    communicator registration or reusable export lease for the exported span,
+    and that registration must have clear cleanup ownership.</li>
+<li><code>MaterializeIntoMappedTarget</code> remains a separate mapped-target path and
+    currently rejects <code>HOST_SHARED</code> target layouts. <code>HOST_SHARED</code> direct-write
+    is currently defined for byte-artifact batch ingress, not the generic
+    mapped-target API.</li>
+</ol>
+<p>Current data flow:</p>
+<pre class="mermaid"><code>flowchart LR
+    A["Local caller VRAM or HOST_SHARED region"] --&gt;|"BatchPutIfAbsentFromRegion"| B["Local daemon ingress validation"]
+    B --&gt; C["Existing routed byte-artifact authority + transport"]
+    C --&gt; D["Home daemon commit or join"]
+
+    E["Local daemon ingress validation"] --&gt;|"BatchGetIntoRegion"| F["Local caller VRAM or HOST_SHARED region"]</code></pre>
+<p>Implementation notes:</p>
+<ul>
+<li><code>ExternalTargetAccessService</code> remains the shared trust boundary for local
+  region validation,</li>
+<li><code>ByteArtifactRegionLayout</code> owns byte-artifact layout validation for source and
+  target region access,</li>
+<li>host-backed target writes lower through <code>TargetLayoutHostSink</code>,</li>
+<li>daemon-managed <code>HOST_SHARED</code> slabs are still ordinary local regions with the
+  same TTL, bounds, and poison semantics as other region-backed placement
+  surfaces.</li>
+</ul>
+<h2 id="6-final-daemon-layering-and-state-ownership">6. Final daemon layering and state ownership<a class="headerlink" href="#6-final-daemon-layering-and-state-ownership" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>flowchart TB
+  A["StoreDaemonServiceImpl&lt;br&gt;RPC delegates only"] --&gt; B["MaterializationController"]
+  A --&gt; C["ByteArtifactController"]
+  A --&gt; D["TransportController"]
+
+  B --&gt; E["TargetMaterializationService"]
+  E --&gt; F["ExternalTargetAccessService"]
+  E --&gt; G["TargetPublishService"]
+
+  C --&gt; F
+  C --&gt; H["ByteArtifactAuthorityService"]
+  C --&gt; I["ByteArtifactRouteResolver"]
+  C --&gt; J["PayloadTransportBroker"]
+
+  D --&gt; J
+  H --&gt; K["ByteArtifactBodyStore"]
+  I --&gt; L["WorkerDirectoryCache"]
+  J --&gt; L
+
+  subgraph M["DaemonKernel owned state"]
+    N["ByteArtifactRuntimeState"]
+    K
+    I
+    J
+    L
+  end</code></pre>
+<p>Normative rules:</p>
+<ul>
+<li><code>StoreDaemonServiceImpl</code> is an RPC adapter and dependency wiring point, not the owner of routed byte-artifact state.</li>
+<li><code>ByteArtifactController</code> owns batch ingress and home-batch orchestration for the byte-artifact profile only.</li>
+<li><code>MaterializationController</code> remains the owner of materialize, mapped-materialize, publish-target, and related artifact
+  lifecycle flows.</li>
+<li><code>TransportController</code> owns transport RPC delegation, including <code>FetchPayloadRefChunk</code>,
+  <code>FetchBatchPayloadRefChunk</code>, and any future batch-transport companion RPC in the same trust boundary.</li>
+<li><code>DaemonKernel</code> owns long-lived routed byte-artifact state modules and the shared worker directory cache.</li>
+<li><code>WorkerDirectoryCache</code> is shared daemon infrastructure, not byte-artifact-private state.</li>
+</ul>
+<p>Service boundaries:</p>
+<table>
+<thead>
+<tr>
+<th>Service</th>
+<th>Responsibilities</th>
+<th>Must not own</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ArtifactProfileRegistry</code></td>
+<td>byte-artifact id classification, normalized selection, shard derivation, invariant validation</td>
+<td>TTL, leases, payload bytes</td>
+</tr>
+<tr>
+<td><code>ExternalTargetAccessService</code></td>
+<td>local-only peer enforcement, target or source layout validation, validated local-access descriptors</td>
+<td>shard routing, join truth</td>
+</tr>
+<tr>
+<td><code>ByteArtifactController</code></td>
+<td>front-door batch orchestration and fenced home RPC delegation</td>
+<td>long-lived payload state</td>
+</tr>
+<tr>
+<td><code>ByteArtifactAuthorityService</code></td>
+<td>exists, get, put-if-absent-join, touch-ttl semantic truth</td>
+<td>PID or device validation</td>
+</tr>
+<tr>
+<td><code>ByteArtifactBodyStore</code></td>
+<td>payload bytes, invariants, TTL, body validity</td>
+<td>route acquisition</td>
+</tr>
+<tr>
+<td><code>ByteArtifactRouteResolver</code></td>
+<td>shard-home acquisition, fence validation, redirect population</td>
+<td>payload bytes</td>
+</tr>
+<tr>
+<td><code>PayloadTransportBroker</code></td>
+<td>issue, inspect, resolve, and prune <code>payload_ref</code> and batch transport capabilities</td>
+<td>semantic existence truth</td>
+</tr>
+<tr>
+<td><code>WorkerDirectoryCache</code></td>
+<td>bounded-staleness <code>daemon_id -&gt; address</code> resolution</td>
+<td>byte-artifact semantic state</td>
+</tr>
+</tbody>
+</table>
+<h2 id="7-capability-contracts">7. Capability contracts<a class="headerlink" href="#7-capability-contracts" title="Permanent link">&para;</a></h2>
+<h3 id="71-publication-capability">7.1 Publication capability<a class="headerlink" href="#71-publication-capability" title="Permanent link">&para;</a></h3>
+<p>Publication remains publication-specific rather than becoming a universal target-access token.</p>
+<p>Final publication contract:</p>
+<ul>
+<li><code>BindingCurrentValuePublicationScope</code></li>
+<li><code>TargetPublicationRegistry</code></li>
+<li><code>binding_current_value_publication_token</code></li>
+<li><code>CAPABILITY_AUDIENCE_BINDING_CURRENT_VALUE_PUBLICATION</code></li>
+</ul>
+<p>Rules:</p>
+<ul>
+<li>the token is minted by binding current-value commit/promote paths,</li>
+<li>the token is consumed by <code>TargetPublishService</code>,</li>
+<li>consume-time verification checks currentness and, when present, exact <code>operation_id</code> match,</li>
+<li>scope identity includes publication id, selection, byte space, device UUID, owner PID, and target layout hash,</li>
+<li>the token is short-lived and replay-bounded by the registry currentness check.</li>
+</ul>
+<h3 id="72-per-item-payload-transport-capability">7.2 Per-item payload transport capability<a class="headerlink" href="#72-per-item-payload-transport-capability" title="Permanent link">&para;</a></h3>
+<p>Payload transport uses a generic but tightly typed capability:</p>
+<ul>
+<li><code>PayloadRefScope</code></li>
+<li><code>CAPABILITY_AUDIENCE_PAYLOAD_REF</code></li>
+</ul>
+<p><code>PayloadRefScope</code> fields:</p>
+<ul>
+<li><code>payload_id</code></li>
+<li><code>artifact_id</code></li>
+<li><code>payload_size</code></li>
+<li><code>digest_alg</code></li>
+<li><code>digest_hex</code></li>
+<li><code>direction</code></li>
+<li><code>operation_id</code></li>
+</ul>
+<p>Rules:</p>
+<ul>
+<li><code>payload_ref</code> issuance and verification are signed-only,</li>
+<li>unsigned fallback and ad-hoc JSON scopes are not part of the final runtime,</li>
+<li>consume-time verification checks artifact id, payload size, digest, direction, and operation identity,</li>
+<li>payload-ref TTL, fetch deadline, max chunk bytes, and cleanup interval are configured under
+  <code>DaemonConfig.ByteArtifactRouting.PayloadTransport</code>.</li>
+</ul>
+<h3 id="73-batch-payload-transport-capability">7.3 Batch payload transport capability<a class="headerlink" href="#73-batch-payload-transport-capability" title="Permanent link">&para;</a></h3>
+<p>Batch transport uses its own typed capability family instead of overloading singular <code>PayloadRefScope</code>.</p>
+<p>Current contract:</p>
+<ul>
+<li><code>BatchPayloadRefScope</code></li>
+<li><code>CAPABILITY_AUDIENCE_BATCH_PAYLOAD_REF</code></li>
+</ul>
+<p>Current <code>BatchPayloadRefScope</code> fields:</p>
+<ul>
+<li><code>transport_id</code></li>
+<li><code>payload_size</code></li>
+<li><code>direction</code></li>
+<li><code>operation_id</code></li>
+<li><code>manifest_digest_hex</code></li>
+<li><code>consumer_daemon_id</code></li>
+</ul>
+<p>Rules:</p>
+<ul>
+<li>the scope signs one batch manifest digest rather than one artifact digest,</li>
+<li>outer-envelope issuer and expiry remain in <code>CapabilityTokenEnvelope</code>, not inside the scope body,</li>
+<li>the consumer must verify the supplied manifest against the signed digest before reading any pack bytes,</li>
+<li>consume-time verification checks consumer binding, direction, payload size, manifest digest, expiry, and operation
+  identity,</li>
+<li>the capability is single-consumer and operation-scoped; reuse by a different consumer or later operation must fail
+  closed,</li>
+<li><code>producer_daemon_id</code> and communicator endpoint metadata are not currently signed inside the scope body; they are
+  carried by <code>BatchPayloadCommunicatorSource</code> and validated at open time,</li>
+<li>per-entry payload digests are optional; when present they must verify before a final per-item success outcome, and
+  when absent the consumer falls back to boundary or length verification plus transport success for that item,</li>
+<li>batch transport records may be segmented, but each signed capability still names exactly one logical batch transport
+  object,</li>
+<li>the capability family is transport-family-wide rather than <code>v1</code>-specific: <code>grpc_chunk_ref</code> and
+  <code>communicator_source</code> realizations both remain subordinate to the same batch manifest and capability semantics.</li>
+</ul>
+<h2 id="8-structured-artifact-execution-results">8. Structured artifact execution results<a class="headerlink" href="#8-structured-artifact-execution-results" title="Permanent link">&para;</a></h2>
+<p>Plan and NodeAgent semantics stay aligned with the artifact runtime instead of flattening outcomes into step status only.</p>
+<p>Canonical action names:</p>
+<ul>
+<li><code>manifest</code></li>
+<li><code>publish</code></li>
+<li><code>hydrate</code></li>
+<li><code>evict_local</code></li>
+</ul>
+<p>NodeAgent result contract:</p>
+<ul>
+<li><code>ArtifactManifestResult</code></li>
+<li><code>ArtifactPublishResult</code></li>
+<li><code>ArtifactHydrateResult</code></li>
+<li><code>ArtifactBatchResult</code></li>
+</ul>
+<p>Normative rules:</p>
+<ul>
+<li>NodeAgent must preserve structured artifact outcomes over <code>ExecutePlan</code>,</li>
+<li>SDK plan readers must decode them back into typed artifact-result objects,</li>
+<li>per-item byte-artifact outcomes remain visible to schedulers and callers.</li>
+</ul>
+<h2 id="9-naming-compliance">9. Naming Compliance<a class="headerlink" href="#9-naming-compliance" title="Permanent link">&para;</a></h2>
+<p>The current API names introduced or formalized by this design follow repository naming rules.</p>
+<p>Classes, structs, and messages use <code>PascalCase</code>:</p>
+<ul>
+<li><code>ByteArtifactController</code></li>
+<li><code>ExternalTargetAccessService</code></li>
+<li><code>ArtifactProfileRegistry</code></li>
+<li><code>ByteArtifactBodyStore</code></li>
+<li><code>ByteArtifactRouteResolver</code></li>
+<li><code>WorkerDirectoryCache</code></li>
+<li><code>BindingCurrentValuePublicationScope</code></li>
+<li><code>TargetPublicationRegistry</code></li>
+<li><code>PayloadRefScope</code></li>
+<li><code>PutIfAbsentInvariant</code></li>
+<li><code>RouteFence</code></li>
+</ul>
+<p>Functions and methods use <code>snake_case</code>:</p>
+<ul>
+<li><code>batch_get_into_region</code></li>
+<li><code>batch_put_if_absent_from_region</code></li>
+<li><code>home_batch_put_if_absent</code></li>
+<li><code>validate_local_target_layout</code></li>
+<li><code>validate_local_source_layout</code></li>
+<li><code>build_normalized_selection</code></li>
+<li><code>issue_payload_ref</code></li>
+<li><code>touch_ttl</code></li>
+</ul>
+<p>Constants and enum values use <code>ALL_CAPS</code>:</p>
+<ul>
+<li><code>CAPABILITY_AUDIENCE_BINDING_CURRENT_VALUE_PUBLICATION</code></li>
+<li><code>CAPABILITY_AUDIENCE_PAYLOAD_REF</code></li>
+<li><code>WORKER_CAPABILITY_FLAG_GATEWAY_INGRESS_ENABLED</code></li>
+<li><code>WORKER_CAPABILITY_FLAG_SHARD_HOME_ELIGIBLE</code></li>
+</ul>
+<h1 id="schema-changes">Schema Changes<a class="headerlink" href="#schema-changes" title="Permanent link">&para;</a></h1>
+<p>No new <code>schema.sql</code> changes are introduced by this consolidated design.</p>
+<p>The current architecture depends on already-landed shard-home lease metadata, worker capability flags, daemon config
+fields, and proto surfaces. Any future durable schema for routing-epoch persistence should be proposed as a separate
+design delta.</p>
+<h1 id="trade-offs-risks">Trade-offs &amp; Risks<a class="headerlink" href="#trade-offs-risks" title="Permanent link">&para;</a></h1>
+<ul>
+<li>byte artifacts remain a cache profile, so misses must degrade to recompute or prefill rather than relying on durable
+  retention,</li>
+<li><code>HomeBatch*</code>, <code>FetchPayloadRefChunk</code>, and <code>FetchBatchPayloadRefChunk</code> assume a trusted intra-cluster network unless a
+  separate peer-auth layer is introduced,</li>
+<li>batch-native transport is now implemented, but the remaining RDMA cost is no
+  longer daemon-owned pack slabs or mandatory sink/home full-pack mirrors on
+  eligible RDMA get/put consume paths; it is producer-side servicing that still
+  stages retained CPU backing bytes into pinned response buffers before remote
+  reads,</li>
+<li><code>v1 grpc_chunk_ref</code> improves transport shape but still inherits gRPC chunk framing and server or client memory-copy
+  costs; it should be treated as an incremental step rather than the final cross-host performance target,</li>
+<li><code>v2 communicator_source</code> reduces that gap but the current realization still pays unnecessary RDMA copy costs on both
+  source and sink sides, so the accepted follow-on work now explicitly separates logical pack semantics from
+  transport-specific physical realization,</li>
+<li>source-side remote-home <code>put</code> may still use transient per-item forwarding bodies as a pack or export shortcut; future
+  evolution should separate those transport-scoped objects from the retained-body registry hot path and converge toward
+  direct pack or forward execution as described by <code>0089</code>,</li>
+<li><code>v2 communicator_source</code> introduces more coupling to communicator export lifecycle and requires careful convergence
+  with the ordinary-artifact P2P stack without reviving Global Store coordination on the per-blob hot path,</li>
+<li>signed-only payload transport depends on capability-token configuration being available where routed large-payload
+  transport is required,</li>
+<li>routing and config drift must fail closed; mixed semantics inside one routing epoch are not allowed.</li>
+</ul>
+<h1 id="compatibility-acceptance-criteria">Compatibility &amp; Acceptance Criteria<a class="headerlink" href="#compatibility-acceptance-criteria" title="Permanent link">&para;</a></h1>
+<ul>
+<li><code>ArtifactSelection</code> remains the only selection contract across SDK, daemon, plan, and NodeAgent paths.</li>
+<li><code>cgid:byte_artifact~...</code> remains excluded from Global Store per-blob artifact and replica catalogs.</li>
+<li><code>BatchGetIntoRegion</code> and <code>BatchPutIfAbsentFromRegion</code> remain local-only because they operate on caller-accessible
+  local shared regions.</li>
+<li><code>BatchGetIntoRegionRequest</code> does not reintroduce <code>preference</code> or <code>source_policy</code>.</li>
+<li><code>StoreDaemonServiceImpl</code> keeps delegate-only live paths for <code>Batch*</code>, <code>HomeBatch*</code>, <code>FetchPayloadRefChunk</code>, and
+  <code>FetchBatchPayloadRefChunk</code>.</li>
+<li>routed byte-artifact state remains kernel-owned rather than being re-embedded into <code>StoreDaemonServiceImpl</code>.</li>
+<li>publication flows use <code>binding_current_value_publication_token</code> and
+  publication-specific state; new code must not revive superseded
+  pre-publication naming.</li>
+<li>payload transport uses typed signed capability scopes:
+  <code>payload_ref</code> for singular payloads and <code>batch_payload_ref</code> for batch payload transports.</li>
+<li>batch-native routed byte transport is defined as a transport family with <code>v1 grpc_chunk_ref</code> and implemented
+  <code>v2 communicator_source</code> realizations.</li>
+<li>logical batch-pack semantics remain independent of the transport-specific physical realization used to move bytes.</li>
+<li>staged contiguous pack realization remains supported for MTCP and non-direct-write fallback paths.</li>
+<li>RDMA-oriented <code>communicator_source</code> realization must not require staged
+  repack, source-side staged response copy, or full-pack mirror when the same
+  manifest and per-item semantics can be preserved through direct-write and
+  <code>BodyHandle</code>-backed export views.</li>
+<li>Put-side <code>HomeBatchPutIfAbsent</code> RDMA <code>communicator_source</code> consumption now
+  follows the same no-mirror remote-slice rule, which is the required baseline
+  for larger batch-set composite or vectored optimizations.</li>
+<li>Put-side composite final-body staging is accepted as the next
+  <code>LAYOUT_AND_SIZE_ONLY</code> batch-set optimization only if it uses the shared
+  <code>0115</code> composite/vectored direct-write dataplane, stages into unpublished
+  final body backings, and keeps authority join, conflict, and cleanup behavior
+  item-scoped after successful materialization.</li>
+<li><code>PayloadTransportBroker</code> remains the transport boundary, but source-side no-copy export must consume the <code>BodyHandle</code>
+  export-view seam described by <code>0089</code> rather than growing broker-private <code>StoreEngine</code> inspection logic.</li>
+<li><code>GetServerConfig</code> is the peer-discovery surface for batch-transport protocol version and realization support.</li>
+<li>default daemon configuration should advertise <code>v1 grpc_chunk_ref</code> capability when batch-native transport support is
+  compiled and enabled.</li>
+<li>ambiguous routing freshness or epoch mismatch degrades to refresh, miss, or unavailable outcomes rather than unproven
+  hits.</li>
+<li>NodeAgent returns structured artifact results for artifact actions instead of step-status-only flattening.</li>
+</ul>
+<h1 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h1>
+<ul>
+<li><a href="../0017-client-generated-artifact-id/">Client-Generated Artifact ID</a></li>
+<li><a href="../0056-programmable-framework-adv/">Programmable Framework Advanced Design</a></li>
+<li><a href="./0063-binding-first-inplace-updates.md">Binding First Inplace Updates</a></li>
+<li><a href="./0070-mapped-binding-requirements.md">Mapped Binding Requirements</a></li>
+<li><a href="../0078-selection-first-artifact-retrieval/">Selection-First Artifact Retrieval</a></li>
+<li><a href="../../architecture/api/region-backed/">Region-Backed API</a></li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

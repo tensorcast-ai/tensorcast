@@ -1,0 +1,2588 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0045-rdma-staging-vram-and-mr-prereg/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>RDMA Staging Backends (GPU VRAM) and MR Preregistration (Design) - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              RDMA Staging Backends (GPU VRAM) and MR Preregistration (Design)
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p>Add a GPU VRAM staged-RDMA backend (bounce buffers in device memory) for non-direct workloads where RDMA is desired but staging through host-pinned memory is suboptimal. Fix and complete the existing RDMA preregistration story so <code>rdma_preregister</code> materially reduces staging overhead for both CPU and GPU host-pinned staging. Clarify and de-ambiguate the staged-RDMA “pointer” contract by using <code>StageLease::exposed_ptr()</code> (renamed from <code>StageLease::host_ptr()</code>) to reflect that it may be a host pointer (host-pinned staging) or a device pointer (direct RDMA and GPU VRAM staging).</p>
+<p>This design is explicitly compatible with TensorCast’s user-driven <strong>direct vs non-direct</strong> modes:
+- <strong>Direct mode</strong> (e.g., region-backed): prefer direct RDMA when enabled and MR is available; otherwise fall back to staged RDMA.
+- <strong>Non-direct mode</strong>: provide high-throughput staged RDMA, including an explicit GPU VRAM staging backend when configured.</p>
+<h1 id="problem-statement">Problem Statement<a class="headerlink" href="#problem-statement" title="Permanent link">&para;</a></h1>
+<p>TensorCast currently has:</p>
+<ul>
+<li>A staged-RDMA path that stages server-side responses into <strong>host-pinned</strong> buffers (via <code>MemoryStager</code>) and exposes those buffers to the client for RDMA READ. This is correct and broadly compatible, but for GPU tensors it incurs <strong>GPU→CPU</strong> copies via <code>HostPinnedGpuStager</code> (<code>cudaMemcpyDeviceToHost</code>), which is avoidable on GPUDirect RDMA capable systems.</li>
+<li>A slab-level RDMA preregistration mechanism (<code>PinnedBufferPool::list_slabs()</code> preregistered once per NIC/PD) that is intended to reduce runtime registration cost. Historically, only <code>HostPinnedCpuStager</code>-backed staging reliably exploited this because <code>HostPinnedGpuStager</code> staging did not normalize MR registrations to slab bases; this design fixes that via stager-provided slab lookup (<code>MemoryStager::mr_slab_for_ptr(...)</code>).</li>
+<li>A naming/contract mismatch in the lease/pointer path: <code>StageLease::exposed_ptr()</code> (formerly <code>host_ptr()</code>) already carries a device pointer in the direct RDMA path (zero-copy). This makes it hard to safely extend staged RDMA to device memory without confusion in code and docs.</li>
+</ul>
+<p>We want:</p>
+<ol>
+<li><strong>P0</strong>: <code>rdma_preregister</code> actually reduces staged-RDMA overhead for GPU host-pinned staging as well as CPU host-pinned staging.</li>
+<li><strong>P1</strong>: a staged-RDMA backend that uses <strong>GPU VRAM</strong> bounce buffers (D2D) instead of host-pinned bounce buffers (D2H), selected explicitly by configuration and validated at initialization time (no runtime fallback).</li>
+</ol>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Preserve the existing transport protocol and credit/ACK semantics for RDMA windows (<code>RDMA_READ_DONE_EX</code> releases <code>StageLease</code>).</li>
+<li>Keep MTCP/TCP semantics unchanged; any new staging backend must not regress TCP paths.</li>
+<li>Make <code>pinned_memory.classes[comm_*].rdma_preregister</code> measurably effective for staged RDMA, including GPU-side staging where the underlying slices live in host-pinned slabs.</li>
+<li>Add an explicit GPU VRAM staged-RDMA backend with clear prerequisites and failure behavior (init-time validation; no runtime fallback when configured).</li>
+<li>De-ambiguate the lease pointer contract by renaming <code>StageLease::host_ptr()</code> to <code>StageLease::exposed_ptr()</code> and updating docs accordingly.</li>
+<li>Follow unified runtime config rules: no ad-hoc env vars; configuration lives in protobuf-backed config (<code>DaemonConfig.communicator</code>).</li>
+</ul>
+<h2 id="non-goals">Non-Goals<a class="headerlink" href="#non-goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Changing the wire protocol messages or handshake machinery (no new opcodes, no new response types).</li>
+<li>Forcing “direct” behavior in non-direct user scenarios; mode selection remains user-driven.</li>
+<li>Introducing new global allocators/budgets outside the unified config system.</li>
+<li>Making GPU VRAM staging available on systems without GPUDirect RDMA or where GPU MR registration is not supported.</li>
+<li>Solving end-to-end cross-process policy (e.g., “never expose any GPU MR to peers”) beyond explicit configuration.</li>
+<li>Supporting dma-buf MR registration or CUDA VMM/backed registrations in this design iteration.</li>
+</ul>
+<h1 id="current-state-grounded-in-code">Current State (Grounded in Code)<a class="headerlink" href="#current-state-grounded-in-code" title="Permanent link">&para;</a></h1>
+<h2 id="stagers-and-staging-buffers">Stagers and staging buffers<a class="headerlink" href="#stagers-and-staging-buffers" title="Permanent link">&para;</a></h2>
+<ul>
+<li><code>HostPinnedCpuStager</code> (formerly <code>DRAMStager</code>) stages CPU tensors into <strong>host-pinned</strong> slices allocated from <code>PinnedBufferPool</code> and uses <code>memcpy</code>:</li>
+<li><code>core/communicator/engine/host_pinned_cpu_stager.cc</code> (<code>PinnedBufferPool::allocate</code> → <code>std::memcpy</code>)</li>
+<li><code>HostPinnedGpuStager</code> (formerly <code>GpuNetStager</code>) stages GPU tensors into <strong>host-pinned</strong> slices allocated from <code>PinnedBufferPool</code> and uses <code>cudaMemcpyDeviceToHost</code>:</li>
+<li><code>core/communicator/engine/host_pinned_gpu_stager.h</code></li>
+<li><code>PinnedBufferPool</code> allocations are host memory that is pinned via CUDA (<code>cudaHostRegister</code>) at pool construction time:</li>
+<li><code>core/common/memory/pinned_buffer_pool.cc</code></li>
+</ul>
+<h2 id="staged-rdma-vs-direct-rdma-in-communicator">Staged RDMA vs direct RDMA in Communicator<a class="headerlink" href="#staged-rdma-vs-direct-rdma-in-communicator" title="Permanent link">&para;</a></h2>
+<p>In <code>core/communicator/engine/engine.cc</code>, the RDMA response path uses <code>MakeStageFunction(...)</code>:
+- <strong>Direct RDMA</strong>: <code>StageLease</code> references the tensor’s device pointer + MR (no staging buffer). This pointer is carried via <code>StageLease::exposed_ptr()</code>.
+- <strong>Staged RDMA</strong>: <code>fallback_stager-&gt;stage(...)</code> yields a staged pointer and registers an MR for that region (via <code>MrCache</code>).</p>
+<h2 id="preregistration">Preregistration<a class="headerlink" href="#preregistration" title="Permanent link">&para;</a></h2>
+<p>On startup (when <code>enable_rdma=true</code>), the Communicator preregisters MRs for selected staging pools at slab granularity (one MR per slab per NIC/PD) and caches them in <code>MrCache</code>:
+- <code>core/communicator/engine/engine.cc</code> prereg loop over <code>PinnedBufferPool::list_slabs()</code></p>
+<p>Staged-RDMA MR selection normalizes to slab bases via the <code>MemoryStager::mr_slab_for_ptr(...)</code> hook (implemented by <code>HostPinnedCpuStager</code> and <code>HostPinnedGpuStager</code>), so preregistered slab MRs are reused for both CPU and GPU host-pinned staging.</p>
+<h1 id="terminology-and-naming-contract-clarification">Terminology and Naming (Contract Clarification)<a class="headerlink" href="#terminology-and-naming-contract-clarification" title="Permanent link">&para;</a></h1>
+<p>This design makes the “RDMA-exposed address” explicit in naming:</p>
+<ul>
+<li><strong><code>StageLease</code> pointer contract</strong>: <code>StageLease::exposed_ptr()</code> (formerly <code>host_ptr()</code>) reflects that the returned address may refer to:</li>
+<li>host-pinned memory (host-pinned staged RDMA), or</li>
+<li>device memory (direct RDMA and GPU VRAM staged RDMA).</li>
+<li>The returned value is an exposed transport address; it must not be dereferenced by the server process.</li>
+<li><strong><code>ProtoReadResponseExHeader.staged</code> semantics</strong>: treat <code>staged=1</code> as “the client must ACK (<code>RDMA_READ_DONE_EX</code>) so the server can release the corresponding <code>StageLease</code> and return staging credit”, not as “host-pinned vs device staging”. (In current code, RDMA windows use <code>staged=1</code> even for direct RDMA.)</li>
+</ul>
+<p>We also rename staging classes to make “where the staged buffer lives” self-evident:</p>
+<ul>
+<li><code>HostPinnedCpuStager</code> (formerly <code>DRAMStager</code>)</li>
+<li><code>HostPinnedGpuStager</code> (formerly <code>GpuNetStager</code>)</li>
+<li><code>GpuVramRdmaStager</code> (RDMA-only; stages into GPU VRAM)</li>
+</ul>
+<h1 id="architecture-interfaces">Architecture &amp; Interfaces<a class="headerlink" href="#architecture-interfaces" title="Permanent link">&para;</a></h1>
+<h2 id="overview">Overview<a class="headerlink" href="#overview" title="Permanent link">&para;</a></h2>
+<p>We introduce a staged-RDMA backend selection that is <strong>explicitly</strong> separate from user-level “direct vs non-direct” mode:</p>
+<ul>
+<li>User-level mode determines whether direct writes / region-backed flows are used.</li>
+<li>RDMA staging backend determines <em>how staged RDMA behaves when it is selected by the transport and policy</em>.</li>
+</ul>
+<pre class="mermaid"><code>flowchart TD
+  A["Server tensor registered&lt;br&gt;direct_rdma_enabled flag"] --&gt; B{"direct_rdma_enabled = true?"}
+  B --&gt;|yes| C{"Direct MR available&lt;br&gt;for tensor on this NIC/PD?"}
+  C --&gt;|yes| D["Direct RDMA&lt;br&gt;(zero-copy)"]
+  C --&gt;|no| E["Staged RDMA fallback"]
+  B --&gt;|no| E
+  E --&gt; F{"Staged backend configured"}
+  F --&gt;|STAGED_RDMA_BACKEND_GPU_VRAM| G["GPU VRAM staged RDMA&lt;br&gt;(D2D into VRAM pool)"]
+  F --&gt;|STAGED_RDMA_BACKEND_HOST_PINNED| H["Host-pinned staged RDMA&lt;br&gt;(D2H/CPU memcpy into pinned pool)"]</code></pre>
+<h2 id="user-scenarios-and-expected-behavior">User Scenarios and Expected Behavior<a class="headerlink" href="#user-scenarios-and-expected-behavior" title="Permanent link">&para;</a></h2>
+<p>TensorCast exposes user-driven “direct vs non-direct” choices (for example, backed-region flows). This design makes staged-RDMA backend selection orthogonal and predictable:</p>
+<table>
+<thead>
+<tr>
+<th>User scenario</th>
+<th>Typical data-plane behavior</th>
+<th>Communicator policy expectation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Direct (region-backed)</td>
+<td><code>pump_ranges()</code> uses direct write tokens (<code>read_into</code>)</td>
+<td>Prefer direct RDMA when enabled; staged backend rarely used</td>
+</tr>
+<tr>
+<td>Non-direct (not region-backed)</td>
+<td>source reads into caller buffers</td>
+<td>staged RDMA is common for large reads; backend choice matters</td>
+</tr>
+</tbody>
+</table>
+<p>The key invariant is that staged backend selection must never “force direct mode”; it only optimizes the staged fallback behavior within a scenario.</p>
+<h2 id="error-model-and-failure-mapping">Error Model and Failure Mapping<a class="headerlink" href="#error-model-and-failure-mapping" title="Permanent link">&para;</a></h2>
+<p>This design intentionally preserves existing error surfaces (including <code>ENGINE_OP_READ_FAILED</code>) while making failures more diagnosable.</p>
+<h3 id="staged-rdma-failures">Staged RDMA failures<a class="headerlink" href="#staged-rdma-failures" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Host-pinned pool exhaustion / staging credit exhaustion</strong>: return <code>absl::ResourceExhaustedError(...)</code> and map to <code>TENSORCAST_READ_FAILED_RESOURCE_EXHAUSTED</code> on the control channel when serving a request.</li>
+<li><strong>VRAM pool exhaustion</strong> (P1): return <code>absl::ResourceExhaustedError(...)</code> with a stable message including <code>device_id</code>, <code>slice_bytes</code>, and <code>pool_bytes_per_gpu</code>.</li>
+<li><strong>MR registration failure</strong>:</li>
+<li>If direct mode was requested (<code>direct_rdma_enabled=true</code>) and MR registration fails, record a “direct fallback” reason and continue via staged backend selection.</li>
+<li>If staged backend MR registration fails, surface <code>absl::InternalError(...)</code> and map to <code>TENSORCAST_READ_FAILED_MEM_MISMATCH</code> (status quo), while incrementing a dedicated <code>tc_rdma_mr_register_failures_total</code> metric.</li>
+</ul>
+<h2 id="security-and-policy-model">Security and Policy Model<a class="headerlink" href="#security-and-policy-model" title="Permanent link">&para;</a></h2>
+<h3 id="threat-model-scoped">Threat model (scoped)<a class="headerlink" href="#threat-model-scoped" title="Permanent link">&para;</a></h3>
+<ul>
+<li>RDMA exposes memory ranges to remote peers via rkeys. Even with short lifetimes, exposing device memory MRs can be considered higher risk than exposing host-pinned staging MRs because:</li>
+<li>device memory may contain sensitive model weights/activations depending on workload;</li>
+<li>device memory access patterns can have different isolation and auditing properties than host memory.</li>
+</ul>
+<h3 id="policy-principles">Policy principles<a class="headerlink" href="#policy-principles" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Default behavior must not increase exposure surface: GPU VRAM staging is not enabled unless explicitly configured.</li>
+<li>In non-direct scenarios, GPU VRAM staging must be explicitly enabled and bounded; it must not “accidentally” expose arbitrary primary pointers.</li>
+<li>Observability must make exposure mode explicit (backend, method, bytes).</li>
+</ul>
+<h3 id="policy-knobs-config-level">Policy knobs (config-level)<a class="headerlink" href="#policy-knobs-config-level" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>rdma.staging_backend</code> is the explicit selector; <code>STAGED_RDMA_BACKEND_UNSPECIFIED</code> behaves as <code>STAGED_RDMA_BACKEND_HOST_PINNED</code>.</li>
+<li>There is no <code>AUTO</code> mode: operators must choose <code>STAGED_RDMA_BACKEND_HOST_PINNED</code> or <code>STAGED_RDMA_BACKEND_GPU_VRAM</code> explicitly.</li>
+<li>When <code>STAGED_RDMA_BACKEND_GPU_VRAM</code> is selected, the Communicator must validate support at initialization time and fail fast if unsupported. Runtime fallback is not permitted.</li>
+</ul>
+<h2 id="integration-points-code-level">Integration Points (Code-Level)<a class="headerlink" href="#integration-points-code-level" title="Permanent link">&para;</a></h2>
+<ul>
+<li><code>core/communicator/engine/engine.cc</code></li>
+<li>P0: update staged-RDMA MR normalization inside <code>MakeStageFunction(...)</code> to consult <code>MemoryStager</code> for slab-base normalization (no type-specific <code>dynamic_cast</code>).</li>
+<li>P1: extend staged backend selection for RDMA to choose <code>GpuVramRdmaStager</code> when configured.</li>
+<li>P1: add init-time validation and preregistration for GPU VRAM pool MRs using <code>ibv_reg_mr</code> (fail-fast; no runtime fallback).</li>
+<li><code>core/communicator/engine/memory_stager.h</code></li>
+<li>P0: add an optional “MR slab lookup” capability so <code>MakeStageFunction(...)</code> can normalize MR bases independent of concrete stager type.</li>
+<li><code>core/communicator/engine/host_pinned_gpu_stager.h</code> / <code>core/communicator/engine/host_pinned_cpu_stager.{h,cc}</code></li>
+<li>P0: implement the slab lookup capability (host-pinned pool slab base).</li>
+</ul>
+<h2 id="p0-make-preregistration-effective-for-gpu-host-pinned-staging">P0: Make preregistration effective for GPU host-pinned staging<a class="headerlink" href="#p0-make-preregistration-effective-for-gpu-host-pinned-staging" title="Permanent link">&para;</a></h2>
+<h3 id="change">Change<a class="headerlink" href="#change" title="Permanent link">&para;</a></h3>
+<p>Generalize MR-base normalization for staged buffers so that staged slices map to their containing slab base for both host-pinned CPU staging and host-pinned GPU staging:</p>
+<ul>
+<li>Add an optional “MR slab lookup” hook to <code>MemoryStager</code> (default: no slab).</li>
+<li>Implement it in:</li>
+<li><code>HostPinnedCpuStager</code> (formerly <code>DRAMStager</code>)</li>
+<li><code>HostPinnedGpuStager</code> (formerly <code>GpuNetStager</code>)</li>
+<li>In <code>MakeStageFunction</code> (staged path), normalize <code>(mr_base, mr_bytes)</code> using the stager-provided slab when available, so <code>MrCache</code> is keyed by slab base, not per-slice pointers.</li>
+</ul>
+<h3 id="expected-outcome">Expected outcome<a class="headerlink" href="#expected-outcome" title="Permanent link">&para;</a></h3>
+<p>When <code>pinned_memory.classes[name=comm_gpu].rdma_preregister=true</code>:
+- preregistration registers slab MRs once per NIC/PD
+- staged-RDMA uses those preregistered slab MRs (no per-slice registration churn)</p>
+<h2 id="p1-gpu-vram-staged-rdma-backend-bounce-buffer-in-device-memory">P1: GPU VRAM staged-RDMA backend (bounce buffer in device memory)<a class="headerlink" href="#p1-gpu-vram-staged-rdma-backend-bounce-buffer-in-device-memory" title="Permanent link">&para;</a></h2>
+<h3 id="motivation">Motivation<a class="headerlink" href="#motivation" title="Permanent link">&para;</a></h3>
+<p>For non-direct workloads where we cannot (or choose not to) expose the artifact’s primary device pointer for RDMA, staged RDMA currently requires GPU→CPU staging for GPU tensors. On GPUDirect RDMA capable systems, we can instead stage into GPU VRAM and let the NIC read the staged GPU memory directly (D2D staging).</p>
+<h3 id="new-components-daemon-communicator">New components (daemon / Communicator)<a class="headerlink" href="#new-components-daemon-communicator" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>GpuVramStagingPool</strong>: per-device fixed-size pool of device allocations carved into slices of size <code>communicator.rdma.vram_slice_bytes</code>.</li>
+<li>Supports non-blocking acquire (try) and release, mirroring the “do not block inside stage” philosophy.</li>
+<li>Required preregistration of pool MRs per NIC/PD at Communicator init when <code>STAGED_RDMA_BACKEND_GPU_VRAM</code> is selected (fail-fast; no runtime fallback).</li>
+<li><strong>GpuVramRdmaStager</strong>: RDMA-only staging implementation that stages a <code>(tensor, offset, bytes)</code> range into a slice from <code>GpuVramStagingPool</code> via D2D copy.</li>
+<li>Produces <code>StageLease</code> objects whose <code>exposed_ptr()</code> is a <strong>device pointer</strong>.</li>
+<li>Uses <code>ibv_reg_mr</code> only (no dma-buf path in this iteration).</li>
+</ul>
+<h3 id="interface-choice-reuse-existing-staging-abstractions">Interface choice: reuse existing staging abstractions<a class="headerlink" href="#interface-choice-reuse-existing-staging-abstractions" title="Permanent link">&para;</a></h3>
+<p>We keep the existing <code>StageFn</code> / <code>StagingWindow</code> / <code>StageLease</code> pipeline and implement GPU VRAM staging by:</p>
+<ul>
+<li>Making <code>StageLease</code>’s address contract explicit (<code>exposed_ptr()</code>).</li>
+<li>Implementing an RDMA-only <code>MemoryStager</code> (<code>GpuVramRdmaStager</code>) that returns a device pointer as the exposed address.</li>
+</ul>
+<p>MTCP staging remains untouched because MTCP is wired to the host-pinned stagers (<code>HostPinnedGpuStager</code> / <code>HostPinnedCpuStager</code>) at transport construction time.</p>
+<h3 id="invariants">Invariants<a class="headerlink" href="#invariants" title="Permanent link">&para;</a></h3>
+<ul>
+<li>GPU VRAM staging is used <strong>only</strong> for RDMA staged fallback, never for MTCP.</li>
+<li>Credit and lifecycle remain unchanged:</li>
+<li>Each staged segment corresponds to one <code>StageLease</code> in the per-channel registry.</li>
+<li>Release still occurs on <code>RDMA_READ_DONE_EX</code> and returns credit + buffer.</li>
+<li>Buffer sizing is fixed and derived from unified config; no unbounded growth.</li>
+</ul>
+<h3 id="init-time-validation-required-no-runtime-fallback">Init-time validation (required; no runtime fallback)<a class="headerlink" href="#init-time-validation-required-no-runtime-fallback" title="Permanent link">&para;</a></h3>
+<p>When <code>communicator.rdma.staging_backend=STAGED_RDMA_BACKEND_GPU_VRAM</code>, initialization must:</p>
+<ul>
+<li>allocate the configured per-GPU VRAM pool;</li>
+<li>preregister the pool memory with <code>ibv_reg_mr</code> for every active NIC/PD;</li>
+<li>fail fast if any required preregistration step fails (daemon startup fails; no runtime fallback).</li>
+</ul>
+<p>If initialization succeeds, runtime staging must not fall back to <code>STAGED_RDMA_BACKEND_HOST_PINNED</code> in response to capability or MR failures; failures are surfaced as request failures (or fatal errors if invariant-breaking).</p>
+<h1 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h1>
+<p>We extend the typed communicator config (embedded under <code>DaemonConfig.communicator</code>) with an explicit staged-RDMA backend selection.</p>
+<p>Proto additions in <code>proto/tensorcast/communicator/v1/communicator_config.proto</code>:</p>
+<div class="language-proto highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kd">message</span><span class="w"> </span><span class="nc">RdmaConfig</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="o">...</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span><span class="kd">enum</span><span class="w"> </span><span class="n">StagedRdmaBackend</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">    </span><span class="na">STAGED_RDMA_BACKEND_UNSPECIFIED</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="c1">// treated as STAGED_RDMA_BACKEND_HOST_PINNED (no behavior change by default)</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">    </span><span class="na">STAGED_RDMA_BACKEND_HOST_PINNED</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w">                     </span><span class="c1">// current behavior</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">    </span><span class="na">STAGED_RDMA_BACKEND_GPU_VRAM</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w">                        </span><span class="c1">// new P1 behavior (requires init-time validation)</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">  </span><span class="p">}</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="w">  </span><span class="n">StagedRdmaBackend</span><span class="w"> </span><span class="na">staging_backend</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">6</span><span class="p">;</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="w">  </span><span class="kt">uint64</span><span class="w"> </span><span class="na">vram_pool_bytes_per_gpu</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">7</span><span class="p">;</span><span class="w"> </span><span class="c1">// required when staging_backend=STAGED_RDMA_BACKEND_GPU_VRAM</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="w">  </span><span class="kt">uint64</span><span class="w"> </span><span class="na">vram_slice_bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8</span><span class="p">;</span><span class="w">        </span><span class="c1">// required when staging_backend=STAGED_RDMA_BACKEND_GPU_VRAM</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="p">}</span>
+</span></code></pre></div>
+<p>Notes:
+- Host-pinned sizing remains under <code>DaemonConfig.pinned_memory.classes[comm_gpu/comm_cpu]</code>.
+- GPU VRAM staging sizing is separate because it is not pinned host memory and should not consume <code>pinned_memory</code> budget.</p>
+<h2 id="configuration-examples">Configuration Examples<a class="headerlink" href="#configuration-examples" title="Permanent link">&para;</a></h2>
+<h3 id="keep-current-behavior-default">Keep current behavior (default)<a class="headerlink" href="#keep-current-behavior-default" title="Permanent link">&para;</a></h3>
+<p>No config changes required; <code>STAGED_RDMA_BACKEND_UNSPECIFIED</code> behaves as <code>STAGED_RDMA_BACKEND_HOST_PINNED</code>.</p>
+<h3 id="enable-p0-preregistration-for-host-pinned-staging-recommended-with-rdma">Enable P0 preregistration for host-pinned staging (recommended with RDMA)<a class="headerlink" href="#enable-p0-preregistration-for-host-pinned-staging-recommended-with-rdma" title="Permanent link">&para;</a></h3>
+<p><code>rdma_preregister</code> lives under daemon-wide pinned memory classes (not under <code>communicator.rdma</code>). When enabled and RDMA is on, the daemon preregisters pinned slabs once per NIC/PD so staged RDMA reuses slab MRs.</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nt">communicator</span><span class="p">:</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span><span class="nt">enable_rdma</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="nt">pinned_memory</span><span class="p">:</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">  </span><span class="nt">classes</span><span class="p">:</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">comm_gpu</span>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="w">      </span><span class="nt">slice_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">16MB</span>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="w">      </span><span class="nt">pool_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8GB</span>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="w">      </span><span class="nt">rdma_preregister</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">comm_cpu</span>
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="w">      </span><span class="nt">slice_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">16MB</span>
+</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="w">      </span><span class="nt">pool_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2GB</span>
+</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a><span class="w">      </span><span class="nt">rdma_preregister</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span></code></pre></div>
+<h3 id="enable-gpu-vram-staged-rdma-explicit">Enable GPU VRAM staged RDMA (explicit)<a class="headerlink" href="#enable-gpu-vram-staged-rdma-explicit" title="Permanent link">&para;</a></h3>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nt">communicator</span><span class="p">:</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span><span class="nt">enable_rdma</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">  </span><span class="nt">rdma</span><span class="p">:</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">    </span><span class="nt">staging_backend</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">STAGED_RDMA_BACKEND_GPU_VRAM</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w">    </span><span class="nt">vram_pool_bytes_per_gpu</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2GB</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="w">    </span><span class="nt">vram_slice_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">16MB</span>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="c1"># Still required for MTCP and host-pinned staging paths (and for CPU tensors).</span>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="nt">pinned_memory</span><span class="p">:</span>
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="w">  </span><span class="nt">classes</span><span class="p">:</span>
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">comm_gpu</span>
+</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="w">      </span><span class="nt">slice_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">16MB</span>
+</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="w">      </span><span class="nt">pool_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8GB</span>
+</span><span id="__span-2-14"><a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a><span class="w">      </span><span class="nt">rdma_preregister</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-2-15"><a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">comm_cpu</span>
+</span><span id="__span-2-16"><a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a><span class="w">      </span><span class="nt">slice_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">16MB</span>
+</span><span id="__span-2-17"><a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a><span class="w">      </span><span class="nt">pool_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2GB</span>
+</span><span id="__span-2-18"><a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a><span class="w">      </span><span class="nt">rdma_preregister</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span></code></pre></div>
+<h2 id="vram-pool-semantics-and-constraints-forced-mode">VRAM pool semantics and constraints (forced mode)<a class="headerlink" href="#vram-pool-semantics-and-constraints-forced-mode" title="Permanent link">&para;</a></h2>
+<p>When <code>communicator.rdma.staging_backend=STAGED_RDMA_BACKEND_GPU_VRAM</code>:</p>
+<ul>
+<li><strong>One pool per GPU</strong>: the daemon allocates exactly one contiguous VRAM pool per initialized CUDA device. Total reserved VRAM is approximately <code>vram_pool_bytes_per_gpu * num_initialized_gpus</code> (plus allocator overhead).</li>
+<li><strong>MR preregistration is not “one pool per NIC”</strong>: the same per-GPU pool is preregistered once per NIC/PD (multiple MRs referencing the same pool). This scales the <em>number of MRs</em> with NIC/PD count, but does not multiply VRAM allocation.</li>
+<li><strong>Sizing rules</strong>:</li>
+<li><code>vram_pool_bytes_per_gpu &gt; 0</code> and <code>vram_slice_bytes &gt; 0</code> are required.</li>
+<li><code>vram_pool_bytes_per_gpu &gt;= vram_slice_bytes</code> is required.</li>
+<li><code>vram_pool_bytes_per_gpu / vram_slice_bytes</code> determines the number of usable slices; if the division has a remainder, the implementation truncates the remainder and logs a warning.</li>
+<li><strong>Segment bound</strong>: staged RDMA segments into VRAM must satisfy <code>0 &lt; bytes &lt;= vram_slice_bytes</code>.</li>
+</ul>
+<h1 id="observability">Observability<a class="headerlink" href="#observability" title="Permanent link">&para;</a></h1>
+<p>Add/extend metrics (low cardinality):
+- <code>tc_rdma_staged_backend_total{backend="host_pinned|gpu_vram", mem="cpu|gpu"}</code> (segments)
+- <code>tc_rdma_staged_bytes_total{backend=..., mem=...}</code>
+- <code>tc_rdma_mr_register_total{method="ibv_reg_mr", location="host_pinned|gpu_vram"}</code>
+- <code>tc_rdma_mr_register_failures_total{method="ibv_reg_mr", reason=...}</code>
+- Keep existing <code>tc_pinned_rdma_prereg_*</code> for host-pinned pools.
+- VRAM preregistration exposes:
+  - <code>tc_vram_rdma_prereg_failures_total</code>
+  - <code>tc_vram_rdma_prereg_latency_ms</code>
+  - <code>tc_vram_rdma_prereg_bytes</code></p>
+<h1 id="naming-compliance-c-apis">Naming Compliance (C++ APIs)<a class="headerlink" href="#naming-compliance-c-apis" title="Permanent link">&para;</a></h1>
+<p>All proposed new interfaces obey repository naming conventions:</p>
+<table>
+<thead>
+<tr>
+<th>Kind</th>
+<th>Examples</th>
+<th>Convention</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Class/struct</td>
+<td><code>GpuVramStagingPool</code>, <code>GpuVramRdmaStager</code>, <code>HostPinnedGpuStager</code>, <code>HostPinnedCpuStager</code></td>
+<td><code>PascalCase</code></td>
+</tr>
+<tr>
+<td>Proto msg/enum</td>
+<td><code>RdmaConfig::StagedRdmaBackend</code></td>
+<td>generated <code>PascalCase</code></td>
+</tr>
+<tr>
+<td>Methods</td>
+<td><code>acquire_slice(...)</code>, <code>release_slice(...)</code>, <code>preregister_slabs(...)</code></td>
+<td><code>snake_case</code></td>
+</tr>
+<tr>
+<td>Constants/macros</td>
+<td><code>IBV_ACCESS_REMOTE_READ</code> (existing)</td>
+<td><code>ALL_CAPS</code></td>
+</tr>
+</tbody>
+</table>
+<h1 id="trade-offs-risks">Trade-offs &amp; Risks<a class="headerlink" href="#trade-offs-risks" title="Permanent link">&para;</a></h1>
+<ul>
+<li><strong>GPU VRAM staging increases GPU memory pressure</strong>: requires careful sizing; can compete with model memory.</li>
+<li><strong>Capability variability</strong>: GPU device-memory MR registration support varies by driver/kernel/NIC; <code>STAGED_RDMA_BACKEND_GPU_VRAM</code> must validate at initialization and fail fast if unsupported.</li>
+<li><strong>Non-direct semantics</strong>: “non-direct” user scenarios may intentionally avoid exposing primary GPU pointers; GPU VRAM staging still exposes a GPU MR to peers (temporary). This must be explicitly configured and documented.</li>
+</ul>
+<h2 id="alternatives-considered">Alternatives Considered<a class="headerlink" href="#alternatives-considered" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Keep host-pinned staged RDMA only</strong>: simplest, but forces GPU→CPU staging (<code>cudaMemcpyDeviceToHost</code>) and higher CPU involvement in GPU workloads.</li>
+<li><strong>Always require direct RDMA for GPU tensors</strong>: incompatible with non-direct user scenarios where exposing primary pointers is not desired or feasible.</li>
+<li><strong>Use a separate RDMA-only staging interface</strong>: reduces risk of accidentally using VRAM staging for MTCP, but introduces a parallel abstraction stack. We instead keep one stack and encode “RDMA-only” explicitly via naming (<code>GpuVramRdmaStager</code>) and wiring.</li>
+<li><strong>Rely on MTCP for GPU transfers</strong>: avoids RDMA staging complexity, but does not meet latency/bandwidth goals in RDMA environments.</li>
+</ul>
+<h1 id="compatibility-acceptance-criteria">Compatibility &amp; Acceptance Criteria<a class="headerlink" href="#compatibility-acceptance-criteria" title="Permanent link">&para;</a></h1>
+<ul>
+<li>No behavior change when config remains default (STAGED_RDMA_BACKEND_HOST_PINNED, preregistration as today).</li>
+<li>With <code>rdma_preregister=true</code> for <code>comm_gpu</code>:</li>
+<li>staged-RDMA for GPU tensors should reuse slab MRs rather than per-slice registrations.</li>
+<li>With <code>communicator.rdma.staging_backend=STAGED_RDMA_BACKEND_GPU_VRAM</code>:</li>
+<li>communicator initialization fails fast if GPU device-memory MR preregistration fails for any required NIC/PD.</li>
+<li>staged-RDMA for GPU tensors performs D2D staging (no D2H) and remains bounded by configured pool size.</li>
+<li>runtime does not fall back to STAGED_RDMA_BACKEND_HOST_PINNED due to capability detection (forced mode).</li>
+</ul>
+<h1 id="protobuf-and-build-hygiene">Protobuf and Build Hygiene<a class="headerlink" href="#protobuf-and-build-hygiene" title="Permanent link">&para;</a></h1>
+<ul>
+<li>This design introduces only additive protobuf fields; it is wire/backward compatible for config parsing.</li>
+<li>After modifying <code>proto/tensorcast/communicator/v1/communicator_config.proto</code>, regenerate code:</li>
+<li><code>bash tools/build_proto_python.sh</code></li>
+</ul>
+<h1 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h1>
+<ul>
+<li><code>core/communicator/engine/engine.cc</code> (RDMA stage policy and preregistration)</li>
+<li><code>core/communicator/engine/host_pinned_gpu_stager.h</code> / <code>core/communicator/engine/host_pinned_cpu_stager.cc</code> (host-pinned stagers)</li>
+<li><code>core/common/memory/pinned_buffer_pool.cc</code></li>
+<li><code>core/communicator/misc/ibv_wrap.{h,cc}</code> (<code>ibv_reg_mr</code> wrapper)</li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

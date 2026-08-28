@@ -1,0 +1,4135 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0094-unified-lifecycle-kernel-and-capability-families/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Phase 3 - Local Lifecycle Kernel, Fencing-Aware Capability Semantics, and Front-Door Convergence - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Phase 3 - Local Lifecycle Kernel, Fencing-Aware Capability Semantics, and Front-Door Convergence
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p><code>0092</code> already fixed the repository-wide constitution:</p>
+<ul>
+<li>semantic truth,</li>
+<li>workflow state,</li>
+<li>lifecycle promises,</li>
+<li>and shared execution</li>
+</ul>
+<p>must remain separate.</p>
+<p><code>0011</code>, <code>0090</code>, and <code>0093</code> then established three additional facts:</p>
+<ul>
+<li>the bounded-lifetime substrate is already <code>SessionLifecycleManager</code>,</li>
+<li>routed authority and serving truth are intentionally not recovered from daemon-local capability maps,</li>
+<li>and a valid serving promise must bind to concrete runtime ownership rather than to a convenient response projection.</li>
+</ul>
+<p>What Phase 3 still lacked was the long-term shape of the lifecycle layer itself.</p>
+<p>The previous draft of <code>0094</code> correctly rejected a cluster-global capability table, but it still blurred four different
+things:</p>
+<ol>
+<li>issuer-local lifecycle state,</li>
+<li>repo-wide redemption protocol,</li>
+<li>front-door compatibility adapters,</li>
+<li>workflow companion decisions such as currentness, replay, fencing, and status.</li>
+</ol>
+<p>This rewrite tightens that split.</p>
+<p>Phase 3 now standardizes five long-term rules:</p>
+<ol>
+<li>there is one repo-wide lifecycle constitution, but the lifecycle kernel is issuer-local per daemon,</li>
+<li>lifecycle identity is fencing-aware and adapter-neutral:</li>
+<li>stable <code>route_principal</code>,</li>
+<li><code>subject_id</code>,</li>
+<li><code>subject_generation</code>,</li>
+<li>optional <code>FencingContext</code>,</li>
+<li><code>capability_id</code>,</li>
+<li>and optional <code>binding_id</code>
+   are distinct and not interchangeable,</li>
+<li>redemption is a shared protocol seam:</li>
+<li>front-door parse or decode,</li>
+<li>then one or more distributed stages declared by <code>0100</code> when the path is non-local,</li>
+<li>with local lifecycle admission or adopted protection applied where the declared path family requires it,</li>
+<li>then family realization into the shared dataplane,</li>
+<li>the lifecycle kernel in this repository means the volatile protection kernel:</li>
+<li>it protects a bounded runtime promise that truth or workflow already authorized,</li>
+<li>it owns admission, renewal, draining, release, and finalization,</li>
+<li>it does not own future semantic truth after restart, failover, or handoff,</li>
+<li>front doors are compatibility adapters over shared family semantics; they are not long-term private lifecycle
+   systems.</li>
+</ol>
+<p>This design therefore makes three boundaries explicit:</p>
+<ol>
+<li><code>0094</code> owns the local kernel and local capability state machine,</li>
+<li><code>0100</code> owns distributed-authority ingress, issuer-routed redemption, endpoint resolution, and the handoff or
+   recovery boundary for issued capabilities,</li>
+<li><code>0096</code> owns the workflow-companion protocol for replay, currentness, fencing, and status.</li>
+</ol>
+<p>This document now serves as the accepted post-landing baseline for the <code>0094</code> cut.
+For this phase, the canonical executable lifecycle object model is the code-adjacent surface in
+<code>daemon/state/lifecycle_kernel.h</code>.
+Follow-up designs may extend that surface, but they must not redefine shared lifecycle types independently in prose and
+drift from the code.</p>
+<h1 id="implementation-status">Implementation Status<a class="headerlink" href="#implementation-status" title="Permanent link">&para;</a></h1>
+<p>Accepted and implemented for the <code>0094</code>-owned Phase-3 cut on 2026-03-10.</p>
+<p>Landed outcomes:</p>
+<ul>
+<li><code>SessionLifecycleManager</code> remains the only bounded-lifetime substrate for this cut.</li>
+<li><code>LifecycleKernel</code> is implemented under <code>daemon/state/lifecycle_kernel.{h,cc}</code> and wired from <code>DaemonKernel</code>.</li>
+<li><code>payload_ref</code>, local export handles, placement, retention, and publish all mint or redeem shared issuer-local lifecycle
+  records through that kernel.</li>
+<li>local transport security, raw token parsing, opaque-token decode, and route resolution remain outside the kernel.</li>
+<li>publish bounded admission is lifecycle-owned, while <code>TargetPublicationRegistry::latest_by_target_</code> remains workflow
+  currentness state.</li>
+<li>the landed executable baseline includes shared lifecycle types such as:</li>
+<li><code>LifecycleRoutePrincipal</code></li>
+<li><code>FencingContext</code></li>
+<li><code>WorkflowCompanionRef</code></li>
+<li><code>LifecycleEpochs</code></li>
+<li><code>LifecycleSubjectRecord</code></li>
+<li><code>LifecycleCapabilityRecord</code></li>
+<li><code>CapabilityBindingAddress</code></li>
+<li><code>LifecycleBindingRecord</code></li>
+<li><code>ParsedCredential</code></li>
+<li><code>LifecycleUseGuard</code></li>
+<li><code>AdmittedCapabilityUse</code></li>
+</ul>
+<p>Focused verification for the landed cut includes:</p>
+<ul>
+<li><code>bazel test //daemon:lifecycle_kernel_test</code></li>
+<li><code>bazel test //daemon:grpc_service_impl_batch_redirect_e2e_test --test_env=TENSORCAST_CUDA_BACKEND=fake</code></li>
+<li><code>bazel test //daemon:grpc_service_impl_publish_target_replica_test --test_env=TENSORCAST_CUDA_BACKEND=fake</code></li>
+<li><code>bazel test //daemon:grpc_service_impl_placement_lease_test --test_env=TENSORCAST_CUDA_BACKEND=fake</code></li>
+<li><code>bazel test //daemon:grpc_service_impl_cpu_memfd_e2e_test --test_env=TENSORCAST_CUDA_BACKEND=fake</code></li>
+</ul>
+<p>What remains outside the completed <code>0094</code> cut is not the local kernel itself, but the higher-level protocol work around
+it:</p>
+<ul>
+<li><code>0100</code> still needs to finish the shared distributed-authority protocol, route-directory contract, and issuer handoff
+  rules on top of the landed <code>LifecycleRoutePrincipal</code> boundary.</li>
+<li><code>0096</code> still needs to finish the shared workflow gate and workflow outcome protocol on top of the landed
+  <code>WorkflowCompanionRef</code> and lifecycle use-guard boundary.</li>
+<li>generic internal-record and standalone binding-issuance APIs remain reserved follow-up concepts; they are not part of
+  the accepted executable <code>0094</code> baseline.</li>
+</ul>
+<h1 id="decision-record">Decision Record<a class="headerlink" href="#decision-record" title="Permanent link">&para;</a></h1>
+<p>Accepted decisions for the landed Phase-3 cut:</p>
+<ol>
+<li><code>0094</code> is the repository baseline for issuer-local volatile lifecycle state.</li>
+<li>The lifecycle kernel is a daemon-local protection kernel over <code>SessionLifecycleManager</code>, not a second semantic-truth
+   plane and not a cluster-global capability registry.</li>
+<li>Route discovery, issuer handoff or recovery, and workflow semantic truth remain outside the kernel by design.</li>
+<li>The accepted source of truth for the shared lifecycle object model is the executable surface in
+   <code>daemon/state/lifecycle_kernel.h</code>; design prose must follow that surface unless a later change updates both together.</li>
+<li>The final execution record for this cut is captured in this design; no companion plan is retained after completion.</li>
+</ol>
+<h1 id="problem-statement">Problem Statement<a class="headerlink" href="#problem-statement" title="Permanent link">&para;</a></h1>
+<p>Historical note:</p>
+<p>The subsections below capture the pre-landing problem statement that motivated the accepted <code>0094</code> cut.
+They remain useful as rationale, but the local lifecycle kernel itself is no longer hypothetical.</p>
+<h2 id="1-the-repository-has-a-shared-lease-substrate-but-not-a-shared-lifecycle-kernel">1. The repository has a shared lease substrate but not a shared lifecycle kernel<a class="headerlink" href="#1-the-repository-has-a-shared-lease-substrate-but-not-a-shared-lifecycle-kernel" title="Permanent link">&para;</a></h2>
+<p><code>0011</code> already defines the bounded-lifetime substrate:</p>
+<ul>
+<li>leases,</li>
+<li>guards,</li>
+<li>generations,</li>
+<li>renewal,</li>
+<li>expiry,</li>
+<li>finalizers,</li>
+<li>and PID-bound cleanup.</li>
+</ul>
+<p>But higher-level promises still terminate in front-door-private or family-private owners:</p>
+<ul>
+<li><code>PayloadTransportBroker</code>,</li>
+<li><code>HandleLeaseRegistry</code>,</li>
+<li><code>PlacementLeaseTokens</code>,</li>
+<li><code>RetentionRegistry</code>,</li>
+<li><code>TargetPublicationRegistry</code>,</li>
+<li>and internal registration or commit paths.</li>
+</ul>
+<p>Without a real local kernel, Phase 3 would only rename those maps.</p>
+<h2 id="2-generation-and-fencing-semantics-are-still-fragmented">2. Generation and fencing semantics are still fragmented<a class="headerlink" href="#2-generation-and-fencing-semantics-are-still-fragmented" title="Permanent link">&para;</a></h2>
+<p>Three adjacent designs already depend on explicit non-reuse or fencing semantics:</p>
+<ul>
+<li><code>0011</code> uses lease and guard generations to prevent ABA,</li>
+<li><code>0093</code> requires <code>{BackingIdentity, instance_generation}</code> for serving promises,</li>
+<li><code>0060</code> requires epoch-fenced queue-issued tokens.</li>
+</ul>
+<p>The previous <code>0094</code> draft acknowledged future fencing but did not make runtime generations part of the core object model.</p>
+<p>That is not durable.</p>
+<p>If lifecycle identity does not standardize:</p>
+<ul>
+<li>stable route principal,</li>
+<li>stable subject identity,</li>
+<li>runtime subject generation,</li>
+<li>optional fencing context,</li>
+<li>capability identity,</li>
+<li>and binding identity,</li>
+</ul>
+<p>then each family will continue inventing its own stale-token and stale-owner logic.</p>
+<h2 id="3-issuer-routed-redemption-is-already-real-but-it-is-still-an-accidental-protocol">3. Issuer-routed redemption is already real, but it is still an accidental protocol<a class="headerlink" href="#3-issuer-routed-redemption-is-already-real-but-it-is-still-an-accidental-protocol" title="Permanent link">&para;</a></h2>
+<p>Today <code>payload_ref</code> already behaves like an issuer-routed capability:</p>
+<ul>
+<li>the credential names an issuer daemon,</li>
+<li>the non-issuer side resolves the issuer endpoint,</li>
+<li>and the issuer performs the final capability validation and data realization.</li>
+</ul>
+<p><code>0060</code> already needs the same rule for issuer-scoped retention handles.</p>
+<p>But the repository still lacks a first-class redemption protocol that says:</p>
+<ul>
+<li>what the front door must preserve from the original credential,</li>
+<li>what request facts must survive routing,</li>
+<li>what the non-issuer side may and may not rewrite,</li>
+<li>and what happens when the issuer disappears or leadership changes.</li>
+</ul>
+<p>Without that seam, every remote-redeemable front door will continue to grow ad hoc routing behavior.</p>
+<h2 id="4-workflow-companion-state-is-declared-out-of-lifecycle-but-not-yet-modeled-as-a-protocol">4. Workflow companion state is declared "out of lifecycle", but not yet modeled as a protocol<a class="headerlink" href="#4-workflow-companion-state-is-declared-out-of-lifecycle-but-not-yet-modeled-as-a-protocol" title="Permanent link">&para;</a></h2>
+<p>The old draft correctly said that:</p>
+<ul>
+<li>publish currentness,</li>
+<li>publish replay,</li>
+<li><code>0055</code> operation replay and status,</li>
+<li>and future queue visibility or fencing</li>
+</ul>
+<p>are not lifecycle truth.</p>
+<p>But it only named that boundary.</p>
+<p>It did not define a reusable admission protocol between:</p>
+<ul>
+<li>lifecycle capability resolution,</li>
+<li>and workflow-owned semantic checks.</li>
+</ul>
+<p>As a result, current code still mixes them together in places such as publish admission.</p>
+<h2 id="5-compatibility-wire-shapes-are-still-being-mistaken-for-long-term-architecture">5. Compatibility wire shapes are still being mistaken for long-term architecture<a class="headerlink" href="#5-compatibility-wire-shapes-are-still-being-mistaken-for-long-term-architecture" title="Permanent link">&para;</a></h2>
+<p>Some current front doors are already the right long-term shape:</p>
+<ul>
+<li>signed self-describing credentials such as <code>payload_ref</code>.</li>
+</ul>
+<p>Some are only compatibility adapters:</p>
+<ul>
+<li>local opaque tokens,</li>
+<li>Unix-socket peer-credential flows,</li>
+<li>and mixed signed-token or opaque-token placement paths.</li>
+</ul>
+<p>Those distinctions matter.</p>
+<p>If the design treats every current wire shape as a permanent repository concept, then Phase 3 will overfit to today's
+adapters instead of converging on stable family semantics.</p>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Define one repo-wide lifecycle constitution that is implemented as issuer-local daemon kernel state.</li>
+<li>Define the lifecycle kernel as the issuer-local volatile protection kernel, not as a second semantic-truth plane.</li>
+<li>Reuse <code>SessionLifecycleManager</code> as the only bounded-lifetime substrate in this phase.</li>
+<li>Standardize the runtime identity hierarchy for lifecycle promises:</li>
+<li>stable <code>route_principal</code>,</li>
+<li><code>subject_id</code>,</li>
+<li><code>subject_generation</code>,</li>
+<li>optional <code>FencingContext</code>,</li>
+<li><code>capability_id</code>,</li>
+<li>optional <code>binding_id</code>.</li>
+<li>Standardize structured workflow references through <code>WorkflowCompanionRef</code> rather than raw <code>workflow_ref</code> strings.</li>
+<li>Standardize one shared redemption seam:</li>
+<li>front-door parse or decode,</li>
+<li>then one or more <code>0100</code>-declared distributed stages when the path is non-local,</li>
+<li>with lifecycle admission or adopted protection applied where the declared path requires it,</li>
+<li>family realization into shared execution.</li>
+<li>Standardize an admission transaction that atomically checks active lifecycle state and acquires runtime protection
+  before family realization starts.</li>
+<li>Keep raw token parsing, peer-credential checks, and local transport security in front-door adapters.</li>
+<li>Keep family-specific runtime realization and shared dataplane handoff outside the kernel.</li>
+<li>Distinguish stable family semantics from transient front-door compatibility profiles.</li>
+<li>Standardize both credential carriage kinds and binding-resolution modes.</li>
+<li>Preserve <code>0093</code> by treating <code>ServingCapability</code> as the <code>serve</code>-family projection of the shared lifecycle contract.</li>
+<li>Preserve <code>0089</code> and <code>0092</code> by keeping execution and transport ordering outside the lifecycle kernel.</li>
+<li>Preserve the explicit non-recoverability of issued capability state in this phase.</li>
+<li>Make the long-term split with <code>0100</code> and <code>0096</code> explicit instead of leaving it implicit.</li>
+</ul>
+<h2 id="non-goals">Non-Goals<a class="headerlink" href="#non-goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Introduce a cluster-global capability registry.</li>
+<li>Introduce recovered or transferred issued capabilities in this phase.</li>
+<li>Make raw token bytes, protobuf parsing, <code>SO_PEERCRED</code>, <code>SCM_RIGHTS</code>, or other local transport checks part of the
+  lifecycle kernel.</li>
+<li>Turn workflow replay, currentness, leader fencing, wait, cancel, or status into lifecycle truth.</li>
+<li>Freeze today's front-door compatibility adapters forever.</li>
+<li>Force every profile onto one signed wire shape immediately.</li>
+<li>Move transport-path selection or shared copy execution into the lifecycle kernel.</li>
+<li>Replace <code>StorePolicy</code>, <code>SourcePolicy</code>, or existing shared dataplane contracts with a second policy surface.</li>
+</ul>
+<h1 id="architecture-interfaces">Architecture &amp; Interfaces<a class="headerlink" href="#architecture-interfaces" title="Permanent link">&para;</a></h1>
+<h2 id="1-constitutional-split">1. Constitutional split<a class="headerlink" href="#1-constitutional-split" title="Permanent link">&para;</a></h2>
+<p>Phase 3 is the lifecycle layer between truth and realization.</p>
+<p>In this repository, "lifecycle kernel" now means one very specific thing:</p>
+<ul>
+<li>the volatile protection kernel that turns a mintable truth decision into an active issuer-local runtime promise,</li>
+<li>the owner of admission, renewal, drain, release, and finalization for that promise,</li>
+<li>not the owner of replay, currentness, route discovery, or future truth after restart or handoff.</li>
+</ul>
+<pre class="mermaid"><code>flowchart LR
+  A["Semantic truth&lt;br&gt;0090 0091 0093"] --&gt; B["Volatile protection kernel&lt;br&gt;0094"]
+  C["Workflow semantic state&lt;br&gt;0055 0060 0096"] --&gt; B
+  B --&gt; D["Family resolver"]
+  D --&gt; E["Shared dataplane&lt;br&gt;0089 0092"]
+  B -. issuer-routed redemption .-&gt; F["0100"]
+  A --&gt; G["Future recovery or handoff"]
+  C --&gt; G
+  B -. not recovered in phase 3 .-&gt; G</code></pre>
+<p>Phase 3 standardizes six adjacent categories:</p>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Question answered</th>
+<th>Owner after Phase 3</th>
+<th>Recoverable</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>semantic truth</td>
+<td>may a future request honestly mint a promise</td>
+<td><code>0090</code>, <code>0091</code>, <code>0093</code>, persistence, Global Store</td>
+<td>yes or explicitly phase-scoped</td>
+</tr>
+<tr>
+<td>workflow semantic state</td>
+<td>what is replayable, current, fenced, cancellable, or waiting</td>
+<td><code>0055</code>, <code>0060</code>, family workflow owners, <code>0096</code></td>
+<td>only if separately designed</td>
+</tr>
+<tr>
+<td>local lifecycle subject</td>
+<td>what runtime subject is protected now</td>
+<td>issuer-local lifecycle kernel</td>
+<td>no</td>
+</tr>
+<tr>
+<td>local lifecycle capability</td>
+<td>what bounded promise exists now</td>
+<td>issuer-local lifecycle kernel over <code>SessionLifecycleManager</code></td>
+<td>no</td>
+</tr>
+<tr>
+<td>redemption protocol context</td>
+<td>how a credential is parsed, routed, and admitted</td>
+<td>front-door adapters plus <code>0100</code> and <code>0096</code> seams</td>
+<td>no</td>
+</tr>
+<tr>
+<td>runtime realization</td>
+<td>how an admitted capability becomes loader, export, pin, or publish admission</td>
+<td>family resolvers plus shared dataplane</td>
+<td>no</td>
+</tr>
+</tbody>
+</table>
+<p>Normative rules:</p>
+<ol>
+<li><code>0093</code> remains authoritative for whether a new promise may be minted honestly.</li>
+<li><code>0094</code> is authoritative for how a mintable promise is represented, admitted, renewed, drained, and released once it
+   exists.</li>
+<li><code>0100</code> is authoritative for issuer-routed redemption and the handoff or recovery boundary for issued capabilities.</li>
+<li><code>0096</code> is authoritative for workflow admission, currentness, replay, fencing, and the declared recovery boundary for
+   those semantic outcomes.</li>
+<li><code>0089</code> and <code>0092</code> remain authoritative for transport ordering, lowering, and execution seams.</li>
+</ol>
+<h2 id="2-local-kernel-shared-redemption-seam-and-family-realization">2. Local kernel, shared redemption seam, and family realization<a class="headerlink" href="#2-local-kernel-shared-redemption-seam-and-family-realization" title="Permanent link">&para;</a></h2>
+<p>The lifecycle kernel is local by design.</p>
+<p>There is:</p>
+<ul>
+<li>one repo-wide lifecycle constitution,</li>
+<li>one issuer-local lifecycle kernel per daemon process,</li>
+<li>one shared redemption seam used by all families,</li>
+<li>and zero cluster-global capability ledgers in Phase 3.</li>
+</ul>
+<p>The long-term runtime shape is:</p>
+<pre class="mermaid"><code>flowchart LR
+  A["Credential bytes&lt;br&gt;or local transport request"] --&gt; B["Front-door adapter&lt;br&gt;parse or decode"]
+  B --&gt; C["ParsedCredential"]
+  C --&gt; D{"issuer local?"}
+  D -- yes --&gt; E["admit_redemption&lt;br&gt;resolve plus protect"]
+  D -- no --&gt; F["route to issuer&lt;br&gt;0100"]
+  F --&gt; E
+  E --&gt; G["workflow admission&lt;br&gt;0096 when required"]
+  G --&gt; H["family realization"]
+  H --&gt; I["shared loader export pin publish path"]</code></pre>
+<p>Responsibilities by layer:</p>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Owns</th>
+<th>Does not own</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>front-door adapter</td>
+<td>raw credential bytes, local transport checks, opaque-token decode, request-local holder facts</td>
+<td>capability truth, workflow truth, shared execution</td>
+</tr>
+<tr>
+<td>lifecycle kernel</td>
+<td>local capability records, subject records, binding records, redemption admission, use-guard release, renewal, release, finalization</td>
+<td>raw credential parsing, remote routing, workflow semantic truth, shared copy execution</td>
+</tr>
+<tr>
+<td>workflow semantic plane</td>
+<td>replay, currentness, fencing, wait, cancel, status, other workflow-side semantic gates</td>
+<td>capability lifetime, transport-path choice, finalizers</td>
+</tr>
+<tr>
+<td>family resolver</td>
+<td>runtime realization and shared dataplane handoff</td>
+<td>durable truth, raw transport credentials, workflow truth</td>
+</tr>
+</tbody>
+</table>
+<p>Required kernel mission:</p>
+<ol>
+<li>a family-facing lifecycle API must expose admission, not only naked lookup,</li>
+<li>lifecycle admission must atomically validate active state and acquire runtime protection before family realization
+   begins,</li>
+<li>workflow semantic checks may still reject after lifecycle admission, but they must do so while that runtime
+   protection remains held or after explicitly releasing it,</li>
+<li>helper registries may remain physically separate in the first cut, but they must no longer define independent
+   admission semantics.</li>
+</ol>
+<p>Required implementation boundary in current daemon:</p>
+<ul>
+<li>the lifecycle kernel belongs under <code>daemon/state</code>,</li>
+<li><code>DaemonKernel</code> remains the composition root,</li>
+<li>controllers and adapters consume the kernel through <code>DaemonKernel</code>,</li>
+<li><code>WorkerDirectoryCache</code> or equivalent route caches remain routing helpers, not capability owners,</li>
+<li>local opaque-token decode tables remain compatibility adapters, not semantic truth owners.</li>
+</ul>
+<h2 id="3-identity-fencing-and-non-reuse-rules">3. Identity, fencing, and non-reuse rules<a class="headerlink" href="#3-identity-fencing-and-non-reuse-rules" title="Permanent link">&para;</a></h2>
+<p>Phase 3 standardizes six separate identity or fencing carriers.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Scope</th>
+<th>Answers</th>
+<th>Mutation rule</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>route_principal</code></td>
+<td>stable authority routing scope</td>
+<td>which authority-owned lifecycle kernel is the canonical redemption owner</td>
+<td>changes only when authority ownership itself changes</td>
+</tr>
+<tr>
+<td><code>subject_id</code></td>
+<td>issuer-local</td>
+<td>which runtime subject is being protected</td>
+<td>stable while the same logical runtime subject exists</td>
+</tr>
+<tr>
+<td><code>subject_generation</code></td>
+<td>issuer-local</td>
+<td>which binding of that subject is current</td>
+<td>increments when the same subject is rebound or reused in a way that old credentials must not silently follow</td>
+</tr>
+<tr>
+<td><code>fencing_context</code></td>
+<td>truth or workflow scoped</td>
+<td>which fenced principal and epoch minted or admitted the promise</td>
+<td>changes only when that principal's fenced epoch changes</td>
+</tr>
+<tr>
+<td><code>capability_id</code></td>
+<td>issuer-local</td>
+<td>which bounded promise exists</td>
+<td>new promise semantics require a new id</td>
+</tr>
+<tr>
+<td><code>binding_id</code></td>
+<td>issuer-local, binding-record mode only</td>
+<td>which independently revocable or auditable binding is being redeemed</td>
+<td>new independently revocable binding gets a new id</td>
+</tr>
+</tbody>
+</table>
+<p>Normative rules:</p>
+<ol>
+<li><code>route_principal</code> is the stable authority reference; it is not front-door identity.</li>
+<li><code>subject_id</code> is not a capability id.</li>
+<li><code>capability_id</code> is not a stable subject identifier.</li>
+<li><code>subject_generation</code> is required whenever the same <code>subject_id</code> may be rebound in place.</li>
+<li><code>FencingContext</code> is required whenever routed authority turnover, leader fencing, or workflow authority changes would
+   otherwise let a stale credential keep mutating correctness-relevant state.</li>
+<li>Distinct fenced principals remain distinct even when they all use an <code>epoch</code> field:</li>
+<li>issuer authority fencing,</li>
+<li>queue-leader fencing,</li>
+<li>operation fencing,</li>
+<li>and workflow-side fencing
+   must not be collapsed into one anonymous counter.</li>
+<li>A family may omit <code>FencingContext</code> only if its mint or admission authority is not fenced in Phase 3.</li>
+<li>A redeemable credential must carry enough generation or fencing claims, directly or indirectly, to prevent silent
+   rebinding when the family semantics require fencing.</li>
+<li>If a family intentionally tolerates bounded overlap until credential expiry, that overlap must be stated explicitly
+   in the profile contract and must not be described as revocation.</li>
+<li>A profile may satisfy wire-level generation carriage either:</li>
+<li>explicitly by serializing <code>subject_generation</code>,</li>
+<li>or implicitly through a canonical locator that is guaranteed to be single-generation within one issuer.
+   The profile contract must say which form it uses.</li>
+<li>Structured workflow identity is separate from lifecycle identity:<ul>
+<li><code>WorkflowCompanionRef</code> may be attached to lifecycle records,</li>
+<li>but it does not replace <code>route_principal</code>, <code>subject_generation</code>, or <code>capability_id</code>.</li>
+</ul>
+</li>
+</ol>
+<p>Examples from adjacent designs:</p>
+<ul>
+<li><code>0011</code> already uses lease and guard generations,</li>
+<li><code>0093</code> already requires <code>{BackingIdentity, instance_generation}</code> for live backing capability binding,</li>
+<li><code>0060</code> already requires queue epoch fencing for split-brain prevention.</li>
+</ul>
+<p>Phase 3 does not collapse those into one physical counter.
+It standardizes the vocabulary that all of them project into.</p>
+<h2 id="4-core-object-model">4. Core object model<a class="headerlink" href="#4-core-object-model" title="Permanent link">&para;</a></h2>
+<h3 id="41-lifecyclerouteprincipal">4.1 <code>LifecycleRoutePrincipal</code><a class="headerlink" href="#41-lifecyclerouteprincipal" title="Permanent link">&para;</a></h3>
+<p><code>LifecycleRoutePrincipal</code> is the stable authority-routing identity used by the lifecycle layer.</p>
+<p>Required fields:</p>
+<ul>
+<li><code>principal_kind</code></li>
+<li><code>principal_id</code></li>
+</ul>
+<p>Notes:</p>
+<ul>
+<li>in the first cut, issuer-local lifecycle kernels primarily use <code>issuer_daemon</code> principals,</li>
+<li>front-door adapter kind is intentionally not part of this identity,</li>
+<li>future routed owners may extend principal kinds, but they must remain stable authority identities rather than
+  endpoint-flavored adapter names.</li>
+</ul>
+<h3 id="42-fencingcontext-and-lifecycleepochs">4.2 <code>FencingContext</code> and <code>LifecycleEpochs</code><a class="headerlink" href="#42-fencingcontext-and-lifecycleepochs" title="Permanent link">&para;</a></h3>
+<p><code>FencingContext</code> is the shared fencing carrier.</p>
+<p>Required fields:</p>
+<ul>
+<li><code>principal_kind</code></li>
+<li><code>principal_id</code></li>
+<li><code>epoch</code></li>
+</ul>
+<p><code>LifecycleEpochs</code> remains the lifecycle-side generation carrier.</p>
+<p>Required fields:</p>
+<ul>
+<li><code>subject_generation</code></li>
+<li>optional <code>fencing_context</code></li>
+</ul>
+<p>Notes:</p>
+<ul>
+<li><code>subject_generation</code> is local runtime non-reuse state,</li>
+<li>kernel state materializes <code>subject_generation</code> explicitly even when a profile carries it only implicitly on the wire,</li>
+<li><code>fencing_context</code> is minted by a truth owner or workflow owner when required,</li>
+<li>queue-leader fencing, issuer fencing, operation fencing, and workflow fencing remain distinct because
+  <code>principal_kind/principal_id</code> are part of the contract.</li>
+</ul>
+<h3 id="43-workflowcompanionref">4.3 <code>WorkflowCompanionRef</code><a class="headerlink" href="#43-workflowcompanionref" title="Permanent link">&para;</a></h3>
+<p><code>WorkflowCompanionRef</code> is the structured lifecycle-facing handle to workflow-owned semantic state.</p>
+<p>Required fields:</p>
+<ul>
+<li><code>owner_kind</code></li>
+<li><code>workflow_id</code></li>
+<li>optional <code>currentness_key</code></li>
+<li>optional <code>operation_id</code></li>
+<li>optional <code>fencing_context</code></li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li><code>WorkflowCompanionRef</code> replaces raw <code>workflow_ref</code> strings in lifecycle records.</li>
+<li>The lifecycle kernel may carry this reference, but it does not own the semantic state it names.</li>
+<li><code>WorkflowCompanionRef</code> is structured precisely so publish, <code>0055</code>, and <code>0060</code> do not have to overload one
+   free-form string with owner, replay, and fencing identity.</li>
+</ol>
+<h3 id="44-lifecyclesubjectrecord">4.4 <code>LifecycleSubjectRecord</code><a class="headerlink" href="#44-lifecyclesubjectrecord" title="Permanent link">&para;</a></h3>
+<p><code>LifecycleSubjectRecord</code> is the issuer-local runtime anchor for a protected subject.</p>
+<p>Required common fields:</p>
+<ul>
+<li><code>subject_id</code></li>
+<li><code>epochs</code></li>
+<li><code>subject_kind</code></li>
+<li><code>created_at</code></li>
+<li><code>last_observed_at</code></li>
+<li>optional <code>artifact_id</code></li>
+<li>optional <code>verified_content_descriptor</code> when the subject is byte-producing</li>
+<li>optional <code>semantic_ref_id</code></li>
+<li>optional <code>workflow_companion</code></li>
+<li><code>caller_visible</code></li>
+</ul>
+<p>Executable note:</p>
+<ul>
+<li>the landed <code>0094</code> baseline uses <code>semantic_ref_id</code> in <code>daemon/state/lifecycle_kernel.h</code>,</li>
+<li>a richer typed semantic projection remains a possible later follow-up only if multiple families need more than the
+  current string carrier.</li>
+</ul>
+<p>Required <code>subject_kind</code> values in this phase:</p>
+<table>
+<thead>
+<tr>
+<th><code>subject_kind</code></th>
+<th>Meaning</th>
+<th>Typical truth or workflow anchor</th>
+<th>Caller-visible family use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>backing</code></td>
+<td>live local retained backing</td>
+<td><code>BackingIdentity</code> from <code>0093</code></td>
+<td><code>serve</code>, <code>export</code></td>
+</tr>
+<tr>
+<td><code>policy_source</code></td>
+<td>actionable policy-backed source</td>
+<td><code>PolicyVisibilityRef</code> from <code>0093</code></td>
+<td><code>serve</code></td>
+</tr>
+<tr>
+<td><code>inline_snapshot</code></td>
+<td>explicitly ephemeral copied snapshot</td>
+<td>local payload storage id plus descriptor</td>
+<td><code>serve</code></td>
+</tr>
+<tr>
+<td><code>placement_target</code></td>
+<td>replica pinned for placement-sensitive work</td>
+<td><code>ReplicaKey</code></td>
+<td><code>placement</code></td>
+</tr>
+<tr>
+<td><code>selection_target</code></td>
+<td>retention target for one selection</td>
+<td><code>SelectionIdentity</code> plus resolved target</td>
+<td><code>retention</code></td>
+</tr>
+<tr>
+<td><code>publication_target</code></td>
+<td>staged bounded publish-admission subject</td>
+<td>publication staging record</td>
+<td><code>publish</code></td>
+</tr>
+<tr>
+<td><code>commit_target</code></td>
+<td>device-unique commit or join ownership subject</td>
+<td>commit key or registration ownership record</td>
+<td>internal only</td>
+</tr>
+</tbody>
+</table>
+<p>Projection note:</p>
+<ul>
+<li><code>LifecycleSubjectRecord.subject_kind</code> is the kernel's internal runtime taxonomy.</li>
+<li>It is not required to equal <code>ServingCapabilitySubjectKind</code> in <code>daemon/service/body_backing_types.h</code>.</li>
+<li>Current <code>serve</code>-family projection crosswalk is:</li>
+<li><code>backing</code> -&gt; <code>ServingCapabilitySubjectKind::kBacking</code></li>
+<li><code>policy_source</code> -&gt; <code>ServingCapabilitySubjectKind::kPolicyBackedPath</code></li>
+<li><code>inline_snapshot</code> -&gt; <code>ServingCapabilitySubjectKind::kCopiedPayload</code></li>
+<li><code>placement_target</code>, <code>selection_target</code>, <code>publication_target</code>, and <code>commit_target</code> are lifecycle-subject kinds with no
+  direct <code>ServingCapability</code> projection.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>Subject records are runtime anchors, not semantic truth objects.</li>
+<li><code>backing</code> and <code>policy_source</code> remain projections over <code>0093</code> truth.</li>
+<li><code>inline_snapshot</code> remains explicitly ephemeral and process-scoped.</li>
+<li><code>publication_target</code> is bounded admission subject state, not publish replay or currentness truth.</li>
+<li>Future subject kinds are allowed only if the design states:</li>
+<li>which truth or workflow authority they reference,</li>
+<li>which family may use them,</li>
+<li>what generation or fencing claims apply,</li>
+<li>what recovery boundary applies,</li>
+<li>and whether they are caller-visible.</li>
+</ol>
+<h3 id="45-lifecyclecapabilityrecord">4.5 <code>LifecycleCapabilityRecord</code><a class="headerlink" href="#45-lifecyclecapabilityrecord" title="Permanent link">&para;</a></h3>
+<p><code>LifecycleCapabilityRecord</code> is the issuer-local bounded promise.</p>
+<p>Required fields:</p>
+<ul>
+<li><code>capability_id</code></li>
+<li><code>family</code></li>
+<li><code>subject_id</code></li>
+<li><code>epochs</code></li>
+<li><code>lease_id</code></li>
+<li>optional <code>lease_generation_or_equivalent</code></li>
+<li><code>issuer_daemon_id</code></li>
+<li><code>issued_at</code></li>
+<li><code>capability_expires_at</code></li>
+<li><code>state</code></li>
+</ul>
+<p>Recommended scope and adapter-metadata fields:</p>
+<ul>
+<li><code>front_door_kind</code></li>
+<li><code>workflow_companion</code></li>
+<li><code>holder_scope</code></li>
+<li><code>resolution_hints</code></li>
+<li><code>direction</code></li>
+<li><code>local_only</code></li>
+</ul>
+<p>Required meanings:</p>
+<ul>
+<li><code>capability_id</code> is issuer-local opaque identity for one bounded promise,</li>
+<li><code>capability_id</code> is not required to appear on the wire,</li>
+<li>reissuing a credential for the same bounded promise does not imply a new <code>capability_id</code>,</li>
+<li>changing the protected subject binding, family semantics, or fencing set requires a new <code>capability_id</code>,</li>
+<li><code>front_door_kind</code> may be recorded for observability or adapter compatibility, but it is not part of route identity,</li>
+<li>the authoritative lifecycle object is the capability record, not the external credential.</li>
+</ul>
+<p>Compatibility note:</p>
+<ul>
+<li>current <code>ServingCapability</code> in <code>daemon/service/body_backing_types.h</code> remains the <code>serve</code>-family projection of this
+  shared record in Phase 3,</li>
+<li>current <code>backing_instance_generation</code> is the <code>serve</code> projection of <code>epochs.subject_generation</code>.</li>
+</ul>
+<h3 id="46-capabilitybindingaddress">4.6 <code>CapabilityBindingAddress</code><a class="headerlink" href="#46-capabilitybindingaddress" title="Permanent link">&para;</a></h3>
+<p>Every credential must locate a capability through one logical binding address.</p>
+<p>Required fields:</p>
+<ul>
+<li><code>route_principal</code></li>
+<li><code>family</code></li>
+<li><code>binding_space</code></li>
+<li><code>binding_key_kind</code></li>
+<li><code>binding_key</code></li>
+<li><code>epochs</code></li>
+</ul>
+<p>Optional fields:</p>
+<ul>
+<li><code>binding_id</code></li>
+</ul>
+<p><code>CapabilityBindingAddress</code> answers:</p>
+<ul>
+<li>which authority-owned lifecycle kernel owns the promise,</li>
+<li>which stable capability family and binding namespace are being resolved,</li>
+<li>what canonical key or binding id should be resolved,</li>
+<li>and which generation or fencing claims must match.</li>
+</ul>
+<p>It intentionally does not include <code>front_door_kind</code>.</p>
+<p>It does not by itself answer:</p>
+<ul>
+<li>whether the credential is within its own expiry,</li>
+<li>whether peer or holder constraints are satisfied,</li>
+<li>whether workflow companion state admits the request,</li>
+<li>whether a transport path should be local export, remote source, or chunk fallback.</li>
+</ul>
+<h3 id="47-lifecyclebindingrecord">4.7 <code>LifecycleBindingRecord</code><a class="headerlink" href="#47-lifecyclebindingrecord" title="Permanent link">&para;</a></h3>
+<p><code>LifecycleBindingRecord</code> is the logical binding record used when a profile needs explicit binding state.</p>
+<p>Required fields:</p>
+<ul>
+<li><code>binding_id</code></li>
+<li><code>capability_id</code></li>
+<li><code>address</code></li>
+<li><code>issued_at</code></li>
+<li><code>credential_expires_at</code></li>
+<li><code>state</code></li>
+<li>optional <code>binding_fencing_context</code></li>
+</ul>
+<p>Required <code>state</code> values:</p>
+<ul>
+<li><code>active</code></li>
+<li><code>expired</code></li>
+<li><code>revoked</code></li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>A binding record is not the capability record.</li>
+<li>Binding expiry does not by itself expire the capability.</li>
+<li>Capability release must invalidate all bindings that point at it.</li>
+<li>Binding records are logical state, not necessarily a separate physical table.</li>
+<li>A profile that promises:</li>
+<li>per-binding revocation,</li>
+<li>independent binding audit,</li>
+<li>single-live reissue semantics,</li>
+<li>or opaque-token compatibility that requires explicit decode state
+   must use binding-record mode.</li>
+</ol>
+<h3 id="48-deferred-generalization-lifecycleinternalrecord">4.8 Deferred generalization: <code>LifecycleInternalRecord</code><a class="headerlink" href="#48-deferred-generalization-lifecycleinternalrecord" title="Permanent link">&para;</a></h3>
+<p><code>LifecycleInternalRecord</code> remains a reserved follow-up concept.
+It is not implemented in the accepted <code>0094</code> executable surface, and no <code>0094</code> completion criteria depend on it.</p>
+<p><code>LifecycleInternalRecord</code> is a non-tokenized bounded runtime record that still uses the same lifecycle vocabulary.</p>
+<p>Required fields:</p>
+<ul>
+<li><code>record_id</code></li>
+<li><code>record_kind</code></li>
+<li><code>subject_id</code></li>
+<li><code>epochs</code></li>
+<li><code>lease_id</code></li>
+<li><code>issuer_daemon_id</code></li>
+<li><code>issued_at</code></li>
+<li>optional <code>expires_at</code></li>
+<li><code>state</code></li>
+</ul>
+<p>Examples if a later cut introduces this surface:</p>
+<ul>
+<li>commit ownership for <code>VRAM_LEASED</code>,</li>
+<li>join or staging drain guards,</li>
+<li>internal bounded publication or registration guards.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>Internal records are first-class lifecycle state.</li>
+<li>Internal records must not silently become semantic truth.</li>
+<li>Internal records must not silently become workflow replay or status truth.</li>
+</ol>
+<h3 id="49-workflow-semantic-state">4.9 Workflow semantic state<a class="headerlink" href="#49-workflow-semantic-state" title="Permanent link">&para;</a></h3>
+<p>Workflow semantic state is explicitly outside lifecycle ownership.</p>
+<p>Typical examples:</p>
+<table>
+<thead>
+<tr>
+<th>Example</th>
+<th>What it owns</th>
+<th>Owner after Phase 3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>publish current-for-target index</td>
+<td>whether a publication is still the current winner</td>
+<td>publish workflow companion</td>
+</tr>
+<tr>
+<td>publish replay state</td>
+<td>repeated call behavior for the same <code>publication_id</code></td>
+<td>publish workflow companion</td>
+</tr>
+<tr>
+<td><code>0055</code> operation records</td>
+<td>wait, cancel, status, idempotent replay, join semantics</td>
+<td>operation plane</td>
+</tr>
+<tr>
+<td>future queue work state</td>
+<td>delivery, visibility, attempts, redelivery, leader fencing</td>
+<td>queue workflow owner</td>
+</tr>
+</tbody>
+</table>
+<p>Normative rules:</p>
+<ol>
+<li>If state changes replay, currentness, idempotency, fencing, wait, cancel, or status semantics, it is not lifecycle
+   state.</li>
+<li>Capability records may point to workflow state through <code>WorkflowCompanionRef</code>, but they must not replace it.</li>
+<li>No lifecycle table may become the only owner of publish replay, queue visibility, or <code>0055</code> operation replay.</li>
+</ol>
+<h2 id="5-credential-model-and-shared-redemption-seam">5. Credential model and shared redemption seam<a class="headerlink" href="#5-credential-model-and-shared-redemption-seam" title="Permanent link">&para;</a></h2>
+<h3 id="51-parsedcredential">5.1 <code>ParsedCredential</code><a class="headerlink" href="#51-parsedcredential" title="Permanent link">&para;</a></h3>
+<p><code>ParsedCredential</code> is the output of the front-door adapter.</p>
+<p>Required fields:</p>
+<ul>
+<li><code>address</code></li>
+<li><code>front_door_kind</code></li>
+<li><code>credential_expires_at</code></li>
+<li><code>carriage_kind</code></li>
+<li><code>binding_mode</code></li>
+<li><code>constraint_claims</code></li>
+</ul>
+<p><code>front_door_kind</code> remains adapter metadata.
+It helps the issuer reason about profile-specific checks or observability, but it is not part of the binding address.</p>
+<p>The front-door adapter is responsible for producing it from:</p>
+<ul>
+<li>signed token bytes,</li>
+<li>local opaque compatibility tokens,</li>
+<li>Unix-domain transport requests,</li>
+<li>or another front-door-specific request surface.</li>
+</ul>
+<h3 id="52-credential-carriage-kinds">5.2 Credential carriage kinds<a class="headerlink" href="#52-credential-carriage-kinds" title="Permanent link">&para;</a></h3>
+<p>Phase 3 standardizes two carriage kinds.</p>
+<h4 id="self_describing"><code>self_describing</code><a class="headerlink" href="#self_describing" title="Permanent link">&para;</a></h4>
+<p>The adapter can recover the binding address directly from credential bytes plus local request facts.</p>
+<p>Examples:</p>
+<ul>
+<li>signed capability envelopes such as <code>payload_ref</code>,</li>
+<li>signed placement envelopes,</li>
+<li>retention handle envelopes,</li>
+<li>target publication envelopes.</li>
+</ul>
+<h4 id="opaque_local_compat"><code>opaque_local_compat</code><a class="headerlink" href="#opaque_local_compat" title="Permanent link">&para;</a></h4>
+<p>The credential is a local opaque token that requires adapter-local decode state to recover the binding address or
+binding id.</p>
+<p>Examples:</p>
+<ul>
+<li>local Unix-domain export tokens,</li>
+<li>current local placement compatibility tokens.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>Opaque decode state is a front-door compatibility adapter, not semantic truth.</li>
+<li>Opaque decode state must not become the long-term owner of lifecycle semantics.</li>
+<li>Opaque compatibility profiles may remain in Phase 3 when required for wire compatibility or local transport
+   security.</li>
+</ol>
+<h3 id="53-binding-resolution-modes">5.3 Binding-resolution modes<a class="headerlink" href="#53-binding-resolution-modes" title="Permanent link">&para;</a></h3>
+<p>Phase 3 standardizes two binding-resolution modes.</p>
+<h4 id="address_derived"><code>address_derived</code><a class="headerlink" href="#address_derived" title="Permanent link">&para;</a></h4>
+<p><code>address_derived</code> means:</p>
+<ul>
+<li>the credential yields a <code>CapabilityBindingAddress</code>,</li>
+<li>the kernel resolves that address directly to the active capability context,</li>
+<li>there is no independently revocable binding record.</li>
+</ul>
+<p><code>address_derived</code> is allowed only when all of the following are true:</p>
+<ol>
+<li>the canonical binding key is sufficient to locate the live promise within one issuer,</li>
+<li>the profile does not promise independent per-binding revocation,</li>
+<li>any allowed overlap is explicitly documented,</li>
+<li>the credential carries enough generation or fencing claims to prevent silent rebinding when the family requires it.</li>
+</ol>
+<h4 id="binding_record"><code>binding_record</code><a class="headerlink" href="#binding_record" title="Permanent link">&para;</a></h4>
+<p><code>binding_record</code> means:</p>
+<ul>
+<li>the credential resolves to a <code>LifecycleBindingRecord</code>,</li>
+<li>the binding record points at the capability record,</li>
+<li>and the kernel uses binding-record state to apply revocation, single-live, or opaque-token decode semantics.</li>
+</ul>
+<p>Required rules:</p>
+<ol>
+<li><code>binding_record</code> is mandatory when the public contract implies per-binding revocation or single-live semantics.</li>
+<li><code>address_derived</code> must never be described as revocable if the implementation does not provide revocation.</li>
+<li>A profile may tolerate bounded overlap under <code>address_derived</code>, but must say so explicitly.</li>
+</ol>
+<h3 id="54-remote-redemption-and-issuer-routing">5.4 Remote redemption and issuer routing<a class="headerlink" href="#54-remote-redemption-and-issuer-routing" title="Permanent link">&para;</a></h3>
+<p>Repository-wide redemption becomes a five-step contract:</p>
+<ol>
+<li>front-door parse or decode:</li>
+<li>raw credential or local transport request -&gt; <code>ParsedCredential</code>,</li>
+<li>distributed path-family execution when the path is non-local:</li>
+<li><code>0100</code> declares the legal owner stages, ordering, and reply transitions,</li>
+<li>lifecycle admission or adopted protection:</li>
+<li>the owning stage acquires <code>LifecycleUseGuard</code> or an explicit adopted equivalent before irreversible realization,</li>
+<li>family realization or handoff:</li>
+<li>admitted or adopted context -&gt; loader, export, pin, or publish admission,</li>
+<li>release or adopt the runtime protection:</li>
+<li>explicit release on reject,</li>
+<li>or handoff to the family-owned execution path.</li>
+</ol>
+<p>Cross-daemon redemption is explicit:</p>
+<ul>
+<li>if the issuer is local, the local kernel resolves the address directly,</li>
+<li>if the issuer is remote, the caller routes redemption to the issuer according to <code>0100</code>,</li>
+<li>remote consumers do not become lifecycle co-owners of issuer-owned capability state.</li>
+</ul>
+<p>Critical security rule:</p>
+<ul>
+<li>if a profile is remote-redeemable, the routed request must preserve the original credential or an equivalent
+  authenticated parsed form plus all request facts needed for issuer revalidation.</li>
+</ul>
+<p>The non-issuer side must not down-convert a remote redemption to only:</p>
+<ul>
+<li><code>binding_key</code>,</li>
+<li><code>route_principal</code>,</li>
+<li>or another lossy locator</li>
+</ul>
+<p>if that would drop:</p>
+<ul>
+<li>digest claims,</li>
+<li>direction claims,</li>
+<li>operation ids,</li>
+<li>holder facts,</li>
+<li>or other security-relevant constraints.</li>
+</ul>
+<p>That rule matches current <code>payload_ref</code> behavior and is deliberately part of the long-term design.</p>
+<h2 id="6-shared-lifecycle-kernel-surface">6. Shared lifecycle kernel surface<a class="headerlink" href="#6-shared-lifecycle-kernel-surface" title="Permanent link">&para;</a></h2>
+<p>Recommended logical surface:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="k">struct</span><span class="w"> </span><span class="nc">LifecycleRoutePrincipal</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="n">LifecycleRoutePrincipalKind</span><span class="w"> </span><span class="n">principal_kind</span><span class="p">;</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">principal_id</span><span class="p">;</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="p">};</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="k">struct</span><span class="w"> </span><span class="nc">FencingContext</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">  </span><span class="n">FencingPrincipalKind</span><span class="w"> </span><span class="n">principal_kind</span><span class="p">;</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">principal_id</span><span class="p">;</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">epoch</span><span class="p">;</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="p">};</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="k">struct</span><span class="w"> </span><span class="nc">LifecycleEpochs</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">subject_generation</span><span class="p">;</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">FencingContext</span><span class="o">&gt;</span><span class="w"> </span><span class="n">fencing_context</span><span class="p">;</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="p">};</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="k">struct</span><span class="w"> </span><span class="nc">WorkflowCompanionRef</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a><span class="w">  </span><span class="n">WorkflowOwnerKind</span><span class="w"> </span><span class="n">owner_kind</span><span class="p">;</span>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">workflow_id</span><span class="p">;</span>
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;</span><span class="w"> </span><span class="n">currentness_key</span><span class="p">;</span>
+</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;</span><span class="w"> </span><span class="n">operation_id</span><span class="p">;</span>
+</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">FencingContext</span><span class="o">&gt;</span><span class="w"> </span><span class="n">fencing_context</span><span class="p">;</span>
+</span><span id="__span-0-23"><a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a><span class="p">};</span>
+</span><span id="__span-0-24"><a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a>
+</span><span id="__span-0-25"><a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a><span class="k">struct</span><span class="w"> </span><span class="nc">CapabilityBindingAddress</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-26"><a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a><span class="w">  </span><span class="n">LifecycleRoutePrincipal</span><span class="w"> </span><span class="n">route_principal</span><span class="p">;</span>
+</span><span id="__span-0-27"><a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a><span class="w">  </span><span class="n">LifecycleCapabilityFamily</span><span class="w"> </span><span class="n">family</span><span class="p">;</span>
+</span><span id="__span-0-28"><a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a><span class="w">  </span><span class="n">LifecycleBindingSpace</span><span class="w"> </span><span class="n">binding_space</span><span class="p">;</span>
+</span><span id="__span-0-29"><a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a><span class="w">  </span><span class="n">BindingKeyKind</span><span class="w"> </span><span class="n">binding_key_kind</span><span class="p">;</span>
+</span><span id="__span-0-30"><a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">binding_key</span><span class="p">;</span>
+</span><span id="__span-0-31"><a id="__codelineno-0-31" name="__codelineno-0-31" href="#__codelineno-0-31"></a><span class="w">  </span><span class="n">LifecycleEpochs</span><span class="w"> </span><span class="n">epochs</span><span class="p">;</span>
+</span><span id="__span-0-32"><a id="__codelineno-0-32" name="__codelineno-0-32" href="#__codelineno-0-32"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;</span><span class="w"> </span><span class="n">binding_id</span><span class="p">;</span>
+</span><span id="__span-0-33"><a id="__codelineno-0-33" name="__codelineno-0-33" href="#__codelineno-0-33"></a><span class="p">};</span>
+</span><span id="__span-0-34"><a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a>
+</span><span id="__span-0-35"><a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a><span class="k">struct</span><span class="w"> </span><span class="nc">ParsedCredential</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-36"><a id="__codelineno-0-36" name="__codelineno-0-36" href="#__codelineno-0-36"></a><span class="w">  </span><span class="n">CapabilityBindingAddress</span><span class="w"> </span><span class="n">address</span><span class="p">;</span>
+</span><span id="__span-0-37"><a id="__codelineno-0-37" name="__codelineno-0-37" href="#__codelineno-0-37"></a><span class="w">  </span><span class="n">LifecycleFrontDoorKind</span><span class="w"> </span><span class="n">front_door_kind</span><span class="p">;</span>
+</span><span id="__span-0-38"><a id="__codelineno-0-38" name="__codelineno-0-38" href="#__codelineno-0-38"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">Time</span><span class="w"> </span><span class="n">credential_expires_at</span><span class="p">;</span>
+</span><span id="__span-0-39"><a id="__codelineno-0-39" name="__codelineno-0-39" href="#__codelineno-0-39"></a><span class="w">  </span><span class="n">CredentialCarriageKind</span><span class="w"> </span><span class="n">carriage_kind</span><span class="p">;</span>
+</span><span id="__span-0-40"><a id="__codelineno-0-40" name="__codelineno-0-40" href="#__codelineno-0-40"></a><span class="w">  </span><span class="n">LifecycleBindingMode</span><span class="w"> </span><span class="n">binding_mode</span><span class="p">;</span>
+</span><span id="__span-0-41"><a id="__codelineno-0-41" name="__codelineno-0-41" href="#__codelineno-0-41"></a><span class="w">  </span><span class="n">ConstraintClaims</span><span class="w"> </span><span class="n">constraint_claims</span><span class="p">;</span>
+</span><span id="__span-0-42"><a id="__codelineno-0-42" name="__codelineno-0-42" href="#__codelineno-0-42"></a><span class="p">};</span>
+</span><span id="__span-0-43"><a id="__codelineno-0-43" name="__codelineno-0-43" href="#__codelineno-0-43"></a>
+</span><span id="__span-0-44"><a id="__codelineno-0-44" name="__codelineno-0-44" href="#__codelineno-0-44"></a><span class="k">struct</span><span class="w"> </span><span class="nc">BindingResolution</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-45"><a id="__codelineno-0-45" name="__codelineno-0-45" href="#__codelineno-0-45"></a><span class="w">  </span><span class="n">LifecycleCapabilityRecord</span><span class="w"> </span><span class="n">capability</span><span class="p">;</span>
+</span><span id="__span-0-46"><a id="__codelineno-0-46" name="__codelineno-0-46" href="#__codelineno-0-46"></a><span class="w">  </span><span class="n">LifecycleSubjectRecord</span><span class="w"> </span><span class="n">subject</span><span class="p">;</span>
+</span><span id="__span-0-47"><a id="__codelineno-0-47" name="__codelineno-0-47" href="#__codelineno-0-47"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">LifecycleBindingRecord</span><span class="o">&gt;</span><span class="w"> </span><span class="n">binding_record</span><span class="p">;</span>
+</span><span id="__span-0-48"><a id="__codelineno-0-48" name="__codelineno-0-48" href="#__codelineno-0-48"></a><span class="p">};</span>
+</span><span id="__span-0-49"><a id="__codelineno-0-49" name="__codelineno-0-49" href="#__codelineno-0-49"></a>
+</span><span id="__span-0-50"><a id="__codelineno-0-50" name="__codelineno-0-50" href="#__codelineno-0-50"></a><span class="k">struct</span><span class="w"> </span><span class="nc">LifecycleUseGuard</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-51"><a id="__codelineno-0-51" name="__codelineno-0-51" href="#__codelineno-0-51"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">guard_id</span><span class="p">;</span>
+</span><span id="__span-0-52"><a id="__codelineno-0-52" name="__codelineno-0-52" href="#__codelineno-0-52"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">capability_id</span><span class="p">;</span>
+</span><span id="__span-0-53"><a id="__codelineno-0-53" name="__codelineno-0-53" href="#__codelineno-0-53"></a><span class="p">};</span>
+</span><span id="__span-0-54"><a id="__codelineno-0-54" name="__codelineno-0-54" href="#__codelineno-0-54"></a>
+</span><span id="__span-0-55"><a id="__codelineno-0-55" name="__codelineno-0-55" href="#__codelineno-0-55"></a><span class="k">struct</span><span class="w"> </span><span class="nc">AdmittedCapabilityUse</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-56"><a id="__codelineno-0-56" name="__codelineno-0-56" href="#__codelineno-0-56"></a><span class="w">  </span><span class="n">LifecycleCapabilityRecord</span><span class="w"> </span><span class="n">capability</span><span class="p">;</span>
+</span><span id="__span-0-57"><a id="__codelineno-0-57" name="__codelineno-0-57" href="#__codelineno-0-57"></a><span class="w">  </span><span class="n">LifecycleSubjectRecord</span><span class="w"> </span><span class="n">subject</span><span class="p">;</span>
+</span><span id="__span-0-58"><a id="__codelineno-0-58" name="__codelineno-0-58" href="#__codelineno-0-58"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">LifecycleBindingRecord</span><span class="o">&gt;</span><span class="w"> </span><span class="n">binding_record</span><span class="p">;</span>
+</span><span id="__span-0-59"><a id="__codelineno-0-59" name="__codelineno-0-59" href="#__codelineno-0-59"></a><span class="w">  </span><span class="n">LifecycleUseGuard</span><span class="w"> </span><span class="n">use_guard</span><span class="p">;</span>
+</span><span id="__span-0-60"><a id="__codelineno-0-60" name="__codelineno-0-60" href="#__codelineno-0-60"></a><span class="p">};</span>
+</span><span id="__span-0-61"><a id="__codelineno-0-61" name="__codelineno-0-61" href="#__codelineno-0-61"></a>
+</span><span id="__span-0-62"><a id="__codelineno-0-62" name="__codelineno-0-62" href="#__codelineno-0-62"></a><span class="k">class</span><span class="w"> </span><span class="nc">LifecycleKernel</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-63"><a id="__codelineno-0-63" name="__codelineno-0-63" href="#__codelineno-0-63"></a><span class="w"> </span><span class="k">public</span><span class="o">:</span>
+</span><span id="__span-0-64"><a id="__codelineno-0-64" name="__codelineno-0-64" href="#__codelineno-0-64"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">StatusOr</span><span class="o">&lt;</span><span class="n">LifecycleCapabilityRecord</span><span class="o">&gt;</span><span class="w"> </span><span class="n">mint_capability</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">MintCapabilityRequest</span><span class="o">&amp;</span><span class="w"> </span><span class="n">request</span><span class="p">);</span>
+</span><span id="__span-0-65"><a id="__codelineno-0-65" name="__codelineno-0-65" href="#__codelineno-0-65"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">StatusOr</span><span class="o">&lt;</span><span class="n">LifecycleCapabilityRecord</span><span class="o">&gt;</span><span class="w"> </span><span class="n">renew_capability</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">RenewCapabilityRequest</span><span class="o">&amp;</span><span class="w"> </span><span class="n">request</span><span class="p">);</span>
+</span><span id="__span-0-66"><a id="__codelineno-0-66" name="__codelineno-0-66" href="#__codelineno-0-66"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">StatusOr</span><span class="o">&lt;</span><span class="n">AdmittedCapabilityUse</span><span class="o">&gt;</span><span class="w"> </span><span class="n">admit_redemption</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">ParsedCredential</span><span class="o">&amp;</span><span class="w"> </span><span class="n">credential</span><span class="p">);</span>
+</span><span id="__span-0-67"><a id="__codelineno-0-67" name="__codelineno-0-67" href="#__codelineno-0-67"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">Status</span><span class="w"> </span><span class="nf">release_use_guard</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">LifecycleUseGuard</span><span class="o">&amp;</span><span class="w"> </span><span class="n">use_guard</span><span class="p">);</span>
+</span><span id="__span-0-68"><a id="__codelineno-0-68" name="__codelineno-0-68" href="#__codelineno-0-68"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">Status</span><span class="w"> </span><span class="nf">revoke_binding_record</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">binding_id</span><span class="p">);</span>
+</span><span id="__span-0-69"><a id="__codelineno-0-69" name="__codelineno-0-69" href="#__codelineno-0-69"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">Status</span><span class="w"> </span><span class="nf">release_capability</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">capability_id</span><span class="p">);</span>
+</span><span id="__span-0-70"><a id="__codelineno-0-70" name="__codelineno-0-70" href="#__codelineno-0-70"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">StatusOr</span><span class="o">&lt;</span><span class="n">LifecycleCapabilityRecord</span><span class="o">&gt;</span><span class="w"> </span><span class="n">inspect_capability</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">capability_id</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+</span><span id="__span-0-71"><a id="__codelineno-0-71" name="__codelineno-0-71" href="#__codelineno-0-71"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">StatusOr</span><span class="o">&lt;</span><span class="n">LifecycleBindingRecord</span><span class="o">&gt;</span><span class="w"> </span><span class="n">inspect_binding</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">binding_id</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+</span><span id="__span-0-72"><a id="__codelineno-0-72" name="__codelineno-0-72" href="#__codelineno-0-72"></a><span class="p">};</span>
+</span></code></pre></div>
+<p>This is a logical contract, not a mandatory first-cut class shape.</p>
+<p>Implementations may still factor pure lookup helpers internally.
+The family-facing contract must nevertheless be admission, not naked resolve, because admission is the point where the
+kernel turns current local state into protected runtime use.</p>
+<p>Critical boundary rule:</p>
+<ul>
+<li><code>LifecycleUseGuard</code> is owner-local runtime protection.</li>
+<li>It is not a public SDK object.</li>
+<li>It is not a distributed routing primitive.</li>
+<li>It is not serializable or forwardable across daemon hops.</li>
+<li>Cross-owner paths must convert admitted use into an explicitly adopted equivalent before returning to ingress.</li>
+</ul>
+<p>Executable-scope note:</p>
+<ul>
+<li>the accepted <code>0094</code> baseline does not include a standalone generic <code>issue_binding_record(...)</code> API;
+  binding-record profiles currently materialize binding state through <code>mint_capability(...)</code>,</li>
+<li>the accepted <code>0094</code> baseline also does not include a generic <code>LifecycleInternalRecord</code> API surface;
+  internal-only guard convergence remains a later follow-up only if multiple subsystems require one shared shape.</li>
+</ul>
+<p>Deliberate design points:</p>
+<ul>
+<li>raw token bytes stay outside the kernel,</li>
+<li>local peer-credential checks stay outside the kernel,</li>
+<li>remote routing stays outside the kernel and is specified by <code>0100</code>,</li>
+<li>workflow semantic ownership stays outside the kernel and is specified by <code>0096</code>,</li>
+<li>distributed stage ordering stays outside the kernel and is specified by <code>0100</code>,</li>
+<li>transport-path and loader choice stay outside the kernel,</li>
+<li>lifecycle record indexing, generation or fencing checks, admission, renewal, release, and finalization stay inside
+  the kernel.</li>
+<li>family realization begins only after <code>admit_redemption</code> returns an active <code>LifecycleUseGuard</code> or an equivalent adopted
+  protection.</li>
+<li>that adopted protection must be explicit; for byte-moving distributed paths, <code>0093</code> defines the canonical bridge as
+  <code>ResolvedSourceCapability.serving_capability</code>.</li>
+</ul>
+<h2 id="7-state-machines-and-clocks">7. State machines and clocks<a class="headerlink" href="#7-state-machines-and-clocks" title="Permanent link">&para;</a></h2>
+<h3 id="71-capability-state-machine">7.1 Capability state machine<a class="headerlink" href="#71-capability-state-machine" title="Permanent link">&para;</a></h3>
+<p>The accepted <code>0094</code> baseline standardizes this state machine for capability records.
+Any later internal-record surface should reuse the same lifecycle progression rather than invent a second one.</p>
+<p>Required states:</p>
+<ul>
+<li><code>minting</code></li>
+<li><code>active</code></li>
+<li><code>draining</code></li>
+<li><code>expired</code></li>
+<li><code>released</code></li>
+</ul>
+<pre class="mermaid"><code>stateDiagram-v2
+  [*] --&gt; minting
+  minting --&gt; active: lease and subject binding acquired
+  minting --&gt; released: mint rolled back
+  active --&gt; draining: explicit release
+  active --&gt; expired: capability lifetime or lease protection ended
+  draining --&gt; released: finalizers complete
+  expired --&gt; released: finalizers complete</code></pre>
+<p>Required rules:</p>
+<ol>
+<li>No credential may be handed out while a capability is <code>minting</code>.</li>
+<li><code>draining</code>, <code>expired</code>, and <code>released</code> capabilities must not admit new work.</li>
+<li>Finalizers run under the shared lease substrate, not under front-door-private maps.</li>
+<li>Generation or fencing mismatch must fail closed; it must not silently retarget an old credential to a new promise.</li>
+</ol>
+<h3 id="72-admission-and-use-guard-transaction">7.2 Admission and use-guard transaction<a class="headerlink" href="#72-admission-and-use-guard-transaction" title="Permanent link">&para;</a></h3>
+<p>Lifecycle admission is not a naked read.</p>
+<p>It is the transaction that:</p>
+<ol>
+<li>validates active capability state and generation or fencing equality,</li>
+<li>acquires or attaches runtime protection over the admitted use,</li>
+<li>returns a stable runtime snapshot to the caller,</li>
+<li>and guarantees that concurrent drain, expiry, or explicit release cannot silently turn that admitted use into an
+   unprotected operation.</li>
+</ol>
+<p>Required rules:</p>
+<ol>
+<li>no family may start irreversible realization without an admitted <code>LifecycleUseGuard</code> or an equivalent protection that
+   was explicitly adopted from it,</li>
+<li>if admission races with drain, expiry, or release, exactly one side wins and the loser fails closed,</li>
+<li>whether workflow semantic checks happen before or after lifecycle admission is path-family-owned by <code>0100</code>, not by
+   <code>0094</code>,</li>
+<li>workflow semantic checks that run after lifecycle admission must either:</li>
+<li>keep the <code>LifecycleUseGuard</code> held while they decide,</li>
+<li>or explicitly release it before returning a non-admit outcome,</li>
+<li>the concrete implementation may map <code>LifecycleUseGuard</code> onto <code>SessionLifecycleManager</code> guards, lease refs, or an
+   equivalent direct successor, but the semantic contract must be shared.</li>
+<li>any equivalent adopted protection must be named by the owning design; it must not be implied by a private owner-local
+   execution state.</li>
+<li><code>LifecycleUseGuard</code> itself must never cross a daemon hop; distributed designs return only an adopted equivalent.</li>
+</ol>
+<h3 id="73-binding-record-state-machine">7.3 Binding-record state machine<a class="headerlink" href="#73-binding-record-state-machine" title="Permanent link">&para;</a></h3>
+<p>Binding records use:</p>
+<ul>
+<li><code>active</code></li>
+<li><code>expired</code></li>
+<li><code>revoked</code></li>
+</ul>
+<p><code>address_derived</code> profiles do not own an independent binding-record state machine.</p>
+<p>Their effective redemption state is computed from:</p>
+<ul>
+<li>credential expiry,</li>
+<li>capability state,</li>
+<li>generation or fencing equality,</li>
+<li>and front-door or workflow checks.</li>
+</ul>
+<h3 id="74-three-clocks">7.4 Three clocks<a class="headerlink" href="#74-three-clocks" title="Permanent link">&para;</a></h3>
+<p>Phase 3 standardizes three clocks:</p>
+<table>
+<thead>
+<tr>
+<th>Clock</th>
+<th>Owner</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>semantic validity window</td>
+<td>truth owner</td>
+<td>whether new capabilities may still be minted honestly</td>
+</tr>
+<tr>
+<td>capability lifetime</td>
+<td>lifecycle kernel</td>
+<td>how long the bounded promise and finalizers remain active</td>
+</tr>
+<tr>
+<td>credential lifetime</td>
+<td>front-door profile or binding record</td>
+<td>how long one credential remains redeemable</td>
+</tr>
+</tbody>
+</table>
+<p><code>FencingContext.epoch</code> is not a clock.
+It is a fence scoped by <code>principal_kind</code> and <code>principal_id</code>.</p>
+<p>Required rules:</p>
+<ol>
+<li>Capability lifetime is authoritative for resource protection and finalization.</li>
+<li>Credential lifetime is authoritative only for one redeemable credential.</li>
+<li>Credential expiry does not by itself expire the capability.</li>
+<li>A credential must never remain usable after the capability it addresses becomes inactive.</li>
+<li>Authority or workflow fencing must reject stale credentials even if their credential lifetime has not elapsed.</li>
+<li>Renewal of a capability and reissue of a credential are separate lifecycle operations, even if one public API
+   performs both.</li>
+</ol>
+<h2 id="8-capability-families-and-front-door-profiles">8. Capability families and front-door profiles<a class="headerlink" href="#8-capability-families-and-front-door-profiles" title="Permanent link">&para;</a></h2>
+<h3 id="81-family-summary">8.1 Family summary<a class="headerlink" href="#81-family-summary" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Family</th>
+<th>Allowed subject kinds</th>
+<th>Primary runtime effect</th>
+<th>Workflow companion requirement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>serve</code></td>
+<td><code>backing</code>, <code>policy_source</code>, <code>inline_snapshot</code></td>
+<td>bounded source-producing promise</td>
+<td>none by default</td>
+</tr>
+<tr>
+<td><code>export</code></td>
+<td><code>backing</code></td>
+<td>bounded local zero-copy export</td>
+<td>none by default</td>
+</tr>
+<tr>
+<td><code>placement</code></td>
+<td><code>placement_target</code></td>
+<td>bounded placement pin</td>
+<td>none in this phase</td>
+</tr>
+<tr>
+<td><code>retention</code></td>
+<td><code>selection_target</code></td>
+<td>bounded retention intent</td>
+<td>none in ordinary SDK paths; issuer-routed control workflows may add one</td>
+</tr>
+<tr>
+<td><code>publish</code></td>
+<td><code>publication_target</code></td>
+<td>bounded publish admission</td>
+<td>required</td>
+</tr>
+<tr>
+<td>internal-only area</td>
+<td><code>commit_target</code> and similar</td>
+<td>bounded internal ownership</td>
+<td>workflow-specific and non-tokenized</td>
+</tr>
+</tbody>
+</table>
+<h3 id="82-phase-3-front-door-profile-matrix">8.2 Phase-3 front-door profile matrix<a class="headerlink" href="#82-phase-3-front-door-profile-matrix" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Front door</th>
+<th>Family</th>
+<th>Binding space</th>
+<th>Carriage kind</th>
+<th>Binding mode</th>
+<th>Canonical locator</th>
+<th>Generation / fencing claims</th>
+<th>Remote redemption</th>
+<th>Workflow companion</th>
+<th>Phase-3 notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>payload_ref</code></td>
+<td><code>serve</code></td>
+<td><code>payload</code></td>
+<td><code>self_describing</code></td>
+<td><code>address_derived</code></td>
+<td><code>payload_id</code></td>
+<td><code>subject_generation</code> implicit in unique <code>payload_id</code>; no ordinary <code>FencingContext</code></td>
+<td>yes, issuer-routed</td>
+<td>none by default</td>
+<td>remains GET/PUT aware; token does not dictate final transport mode</td>
+</tr>
+<tr>
+<td><code>local_cpu_memfd_export</code></td>
+<td><code>export</code></td>
+<td><code>export_handle</code></td>
+<td><code>opaque_local_compat</code></td>
+<td><code>binding_record</code></td>
+<td>local token or binding id</td>
+<td>binding-record state; local-only</td>
+<td>no</td>
+<td>none</td>
+<td>keeps <code>SO_PEERCRED</code> and <code>SCM_RIGHTS</code> outside kernel</td>
+</tr>
+<tr>
+<td><code>local_cuda_ipc_export</code></td>
+<td><code>export</code></td>
+<td><code>export_handle</code></td>
+<td><code>opaque_local_compat</code></td>
+<td><code>binding_record</code></td>
+<td>local token or binding id</td>
+<td>binding-record state; local-only</td>
+<td>no</td>
+<td>none</td>
+<td>keeps local transport checks outside kernel</td>
+</tr>
+<tr>
+<td><code>placement_lease_envelope</code></td>
+<td><code>placement</code></td>
+<td><code>placement_lease</code></td>
+<td><code>self_describing</code></td>
+<td><code>address_derived</code></td>
+<td><code>lease_id</code></td>
+<td><code>subject_generation</code> implicit in unique <code>lease_id</code>; no ordinary <code>FencingContext</code></td>
+<td>issuer-local only</td>
+<td>none</td>
+<td>explicit <code>bounded_overlap</code> when renewed credentials coexist until expiry</td>
+</tr>
+<tr>
+<td><code>placement_lease_local_token</code></td>
+<td><code>placement</code></td>
+<td><code>placement_lease</code></td>
+<td><code>opaque_local_compat</code></td>
+<td><code>binding_record</code></td>
+<td>local token</td>
+<td>binding-record state; local-only</td>
+<td>no</td>
+<td>none</td>
+<td>compatibility profile for current non-envelope path</td>
+</tr>
+<tr>
+<td><code>retention_handle_token</code></td>
+<td><code>retention</code></td>
+<td><code>retention_handle</code></td>
+<td><code>self_describing</code></td>
+<td><code>address_derived</code></td>
+<td><code>handle_id</code></td>
+<td><code>subject_generation</code> implicit in unique <code>handle_id</code>; no ordinary <code>FencingContext</code> in ordinary phase-3 control flows</td>
+<td>yes, control-path issuer routing allowed</td>
+<td>optional in higher-level workflows</td>
+<td>refreshed credentials may overlap until old expiry</td>
+</tr>
+<tr>
+<td><code>target_publication_token</code></td>
+<td><code>publish</code></td>
+<td><code>publication</code></td>
+<td><code>self_describing</code></td>
+<td><code>address_derived</code></td>
+<td><code>publication_id</code></td>
+<td><code>subject_generation</code> implicit in unique <code>publication_id</code>; no ordinary <code>FencingContext</code></td>
+<td>issuer-local only in Phase 3</td>
+<td>required</td>
+<td>currentness and replay stay in workflow companion, not in lifecycle tables</td>
+</tr>
+</tbody>
+</table>
+<p>Why this matrix matters:</p>
+<ul>
+<li>family semantics stay stable even if wire shapes evolve,</li>
+<li>binding space stays stable even if multiple front doors converge on the same authority-owned namespace,</li>
+<li>opaque compatibility profiles are treated as adapters rather than as permanent architecture,</li>
+<li>binding mode stays explicit,</li>
+<li>generation or fencing requirements stay explicit,</li>
+<li>workflow companion requirements stay explicit.</li>
+</ul>
+<p>When a row says "implicit", it means the wire profile does not serialize a separate numeric generation field because the
+canonical locator is itself single-generation within one issuer.
+Kernel state still materializes <code>epochs.subject_generation</code> explicitly.</p>
+<h3 id="83-serve-family-resolver-contract">8.3 <code>serve</code> family resolver contract<a class="headerlink" href="#83-serve-family-resolver-contract" title="Permanent link">&para;</a></h3>
+<p>The <code>serve</code> family owns bounded source production and adopts <code>0089</code>'s shared ordering after lifecycle resolution and any
+required workflow admission.</p>
+<p>Required resolution order:</p>
+<ol>
+<li>standard local loader or source when valid and allowed,</li>
+<li>local zero-copy path when the caller only needs an internal resolution mode and the path is valid,</li>
+<li>communicator-backed remote source when allowed and a shared remote source exists,</li>
+<li>chunk fallback only when no shared source path applies or the object is intentionally tiny.</li>
+</ol>
+<p>Normative rules:</p>
+<ol>
+<li><code>payload_ref</code> is one <code>serve</code> front door, not a second lifetime system.</li>
+<li><code>payload_ref</code> may keep GET and PUT direction semantics.</li>
+<li>The token does not permanently dictate the transport path.</li>
+<li>A caller-visible reusable export handle is still an <code>export</code> capability, even if <code>serve</code> internally realizes through
+   a local zero-copy path.</li>
+<li><code>SourcePolicy</code> remains the transport-policy input where current APIs expose it.</li>
+</ol>
+<h3 id="84-export-family">8.4 <code>export</code> family<a class="headerlink" href="#84-export-family" title="Permanent link">&para;</a></h3>
+<p>CPU memfd, CUDA IPC, and other local zero-copy exposure are export overlays on one <code>backing</code> subject.</p>
+<p>Required rules:</p>
+<ol>
+<li>Export overlays do not create a second backing truth.</li>
+<li>Local transport checks such as <code>SO_PEERCRED</code>, uid match, and <code>SCM_RIGHTS</code> handoff remain front-door adapter
+   behavior.</li>
+<li><code>HandleLeaseRegistry</code> and <code>LocalHandleServer</code> may remain physical adapters in the first cut, but not long-term
+   lifecycle owners.</li>
+</ol>
+<h3 id="85-placement-and-retention">8.5 <code>placement</code> and <code>retention</code><a class="headerlink" href="#85-placement-and-retention" title="Permanent link">&para;</a></h3>
+<p>Placement and retention remain distinct because they protect different subjects and different correctness concerns:</p>
+<ul>
+<li><code>placement</code> protects residency pin intent over <code>placement_target</code>,</li>
+<li><code>retention</code> protects bounded retention intent over <code>selection_target</code>.</li>
+</ul>
+<p>Required rules:</p>
+<ol>
+<li>Renewal routes through the shared lifecycle kernel.</li>
+<li>Phase-3 profile contracts must make overlap semantics explicit:</li>
+<li>placement renewed envelopes may overlap until old credential expiry,</li>
+<li>retention refreshed credentials may overlap until old credential expiry.</li>
+<li>Public APIs must not imply per-token revocation if the implementation does not provide it.</li>
+<li>Long-term issuer-routed retention control flows must route by stable <code>route_principal</code>; they must not assume that the
+   current workflow leader is also the retention issuer.</li>
+</ol>
+<h3 id="86-publish">8.6 <code>publish</code><a class="headerlink" href="#86-publish" title="Permanent link">&para;</a></h3>
+<p><code>publish</code> protects bounded admission over a staged <code>publication_target</code>.</p>
+<p>Required boundary:</p>
+<ul>
+<li>bounded admission and cleanup belong to lifecycle,</li>
+<li>current-for-target belongs to workflow companion state,</li>
+<li>replay by <code>publication_id</code> belongs to workflow companion state,</li>
+<li>operation-id and request-shape matching remain front-door or workflow checks,</li>
+<li>lifecycle release must not erase publish workflow truth.</li>
+</ul>
+<p>No implementation in this phase may describe <code>publish</code> as "single-live binding revocation" if the actual rule is:</p>
+<ul>
+<li>unique <code>publication_id</code> admission plus workflow currentness.</li>
+</ul>
+<h3 id="87-internal-only-lifecycle-area">8.7 Internal-only lifecycle area<a class="headerlink" href="#87-internal-only-lifecycle-area" title="Permanent link">&para;</a></h3>
+<p>Commit or join ownership remains allowed as internal lifecycle state without becoming caller-visible capability tokens.</p>
+<h2 id="9-required-subsystem-integration">9. Required subsystem integration<a class="headerlink" href="#9-required-subsystem-integration" title="Permanent link">&para;</a></h2>
+<h3 id="91-payloadtransportbroker">9.1 <code>PayloadTransportBroker</code><a class="headerlink" href="#91-payloadtransportbroker" title="Permanent link">&para;</a></h3>
+<p>After Phase 3:</p>
+<ul>
+<li>remains responsible for <code>payload_ref</code> parsing, inline snapshot cache, and chunk fallback,</li>
+<li>no longer remains the primary lifecycle owner for serving promises,</li>
+<li>continues supporting issuer-routed redemption through <code>WorkerDirectoryCache</code> or its <code>0100</code>-defined successor,</li>
+<li>broker-local maps become capability records or adapter caches rather than a second semantic lifecycle system.</li>
+</ul>
+<p>Current grounding:</p>
+<ul>
+<li><code>PayloadTransportBroker::resolve_payload_ref_capability(...)</code> already verifies the envelope and projects a
+  <code>ServingCapability</code>,</li>
+<li>but that projection still behaves like a response helper, not like the shared lifecycle admission transaction defined
+  above.</li>
+</ul>
+<p>Required end state:</p>
+<ul>
+<li><code>payload_ref</code> parse yields <code>ParsedCredential</code>,</li>
+<li>issuer-local lifecycle state owns capability validity,</li>
+<li>routed redemption preserves original credential claims and request facts,</li>
+<li><code>0089</code> resolution order remains intact.</li>
+</ul>
+<h3 id="92-handleleaseregistry-and-localhandleserver">9.2 <code>HandleLeaseRegistry</code> and <code>LocalHandleServer</code><a class="headerlink" href="#92-handleleaseregistry-and-localhandleserver" title="Permanent link">&para;</a></h3>
+<p>After Phase 3:</p>
+<ul>
+<li>remain responsible for overlay activation, FD handoff, and local transport security,</li>
+<li>no longer remain authoritative lifecycle ledgers,</li>
+<li>local opaque export tokens are explicit compatibility front doors over shared lifecycle state.</li>
+</ul>
+<h3 id="93-leasecontroller-placementleasetokens-and-retentionregistry">9.3 <code>LeaseController</code>, <code>PlacementLeaseTokens</code>, and <code>RetentionRegistry</code><a class="headerlink" href="#93-leasecontroller-placementleasetokens-and-retentionregistry" title="Permanent link">&para;</a></h3>
+<p>After Phase 3:</p>
+<ul>
+<li>placement and retention RPCs remain front doors,</li>
+<li>placement explicitly documents both:</li>
+<li>signed envelope profile,</li>
+<li>local opaque compatibility profile,</li>
+<li>retention explicitly documents issuer-scoped validation and any issuer-routed control-path use,</li>
+<li>derived overlap behavior is documented instead of being described as revocation.</li>
+</ul>
+<p>Current grounding:</p>
+<ul>
+<li><code>LeaseController</code> already creates placement protection through <code>SessionLifecycleManager</code>,</li>
+<li><code>RetentionRegistry</code> already creates, renews, and releases retention protection through <code>SessionLifecycleManager</code>,</li>
+<li>the remaining convergence work is shared lifecycle admission and shared family semantics, not a second lease
+  substrate.</li>
+</ul>
+<h3 id="94-targetmaterializationservice-targetpublishservice-and-targetpublicationregistry">9.4 <code>TargetMaterializationService</code>, <code>TargetPublishService</code>, and <code>TargetPublicationRegistry</code><a class="headerlink" href="#94-targetmaterializationservice-targetpublishservice-and-targetpublicationregistry" title="Permanent link">&para;</a></h3>
+<p>After Phase 3:</p>
+<ul>
+<li>publication staging remains allowed,</li>
+<li>bounded publish admission becomes lifecycle-owned <code>publish</code> capability state,</li>
+<li><code>latest_by_target_</code> remains workflow companion state,</li>
+<li>replay by <code>publication_id</code> remains workflow companion state,</li>
+<li>current code may remain physically co-located in one registry on the first cut, but the logical split must be explicit.</li>
+</ul>
+<p>Current grounding:</p>
+<ul>
+<li><code>TargetPublishService</code> already validates <code>publication_id</code> plus request-shape constraints,</li>
+<li><code>TargetPublicationRegistry::lookup(...)</code> already answers "does this bounded admission subject still exist",</li>
+<li><code>TargetPublicationRegistry::is_current_for_target(...)</code> already answers workflow currentness rather than lifecycle
+  existence.</li>
+</ul>
+<h3 id="95-registration-or-lip-commit-paths">9.5 Registration or LIP commit paths<a class="headerlink" href="#95-registration-or-lip-commit-paths" title="Permanent link">&para;</a></h3>
+<p>After the accepted <code>0094</code> cut:</p>
+<ul>
+<li>PID-bound cleanup continues to use <code>SessionLifecycleManager</code>,</li>
+<li>internal-only commit or join guards may remain on existing owners rather than on a generic <code>LifecycleInternalRecord</code>
+  API,</li>
+<li>no internal-only guard state becomes a public capability merely to fit the model,</li>
+<li>a generic internal-record surface remains reserved follow-up work only if later cuts prove it is needed across
+  multiple subsystems.</li>
+</ul>
+<h2 id="10-relationship-to-0055-0060-0100-0096-and-future-recovery">10. Relationship to <code>0055</code>, <code>0060</code>, <code>0100</code>, <code>0096</code>, and future recovery<a class="headerlink" href="#10-relationship-to-0055-0060-0100-0096-and-future-recovery" title="Permanent link">&para;</a></h2>
+<p><code>0055</code> remains authoritative for:</p>
+<ul>
+<li>wait,</li>
+<li>cancel,</li>
+<li>status,</li>
+<li>idempotency,</li>
+<li>operation replay,</li>
+<li>and other operation-plane semantics.</li>
+</ul>
+<p><code>0060</code> remains authoritative for:</p>
+<ul>
+<li>queue leadership leases,</li>
+<li>leader epochs,</li>
+<li>queue fencing,</li>
+<li>delivery semantics,</li>
+<li>and issuer-routing requirements for queue-managed issuer-scoped resources.</li>
+</ul>
+<p><code>0100</code> is the companion design for:</p>
+<ul>
+<li>distributed-authority ingress,</li>
+<li>portable credential or evidence routing rules,</li>
+<li>issuer-routed redemption,</li>
+<li>route directory semantics,</li>
+<li>stale-route refresh,</li>
+<li>and the handoff or recovery boundary for issued capabilities.</li>
+</ul>
+<p><code>0096</code> is the companion design for:</p>
+<ul>
+<li>workflow admission,</li>
+<li>currentness,</li>
+<li>replay,</li>
+<li>status projection,</li>
+<li>and workflow fencing.</li>
+</ul>
+<p>Phase 3 therefore keeps future recovery honest:</p>
+<ul>
+<li>no issued capability or binding state becomes recoverable truth by implication,</li>
+<li>no remote daemon fabricates co-ownership of issuer-local capability state,</li>
+<li>any future recovered or transferred capability requires an explicit design for:</li>
+<li>handoff log,</li>
+<li>recovered capability registry,</li>
+<li>or another durable authority.</li>
+</ul>
+<h2 id="11-observability">11. Observability<a class="headerlink" href="#11-observability" title="Permanent link">&para;</a></h2>
+<p>Phase 3 requires one shared lifecycle observability vocabulary.</p>
+<p>Minimum required dimensions:</p>
+<ul>
+<li><code>record_projection</code></li>
+<li><code>capability</code></li>
+<li><code>binding_record</code></li>
+<li><code>internal</code></li>
+<li><code>family</code></li>
+<li><code>binding_space</code></li>
+<li><code>route_principal_kind</code></li>
+<li><code>front_door_kind</code></li>
+<li><code>subject_kind</code></li>
+<li><code>state</code></li>
+<li><code>binding_mode</code></li>
+<li><code>carriage_kind</code></li>
+<li><code>resolution_route</code></li>
+<li><code>issuer_local</code></li>
+<li><code>issuer_remote</code></li>
+<li><code>workflow_gate</code></li>
+<li><code>none</code></li>
+<li><code>required</code></li>
+<li><code>reject_reason</code></li>
+</ul>
+<p>Minimum required events or metrics:</p>
+<ul>
+<li>capability mint, renew, release, expiry,</li>
+<li>binding-record issue, revoke, expiry,</li>
+<li>generation or fencing mismatch rejects,</li>
+<li>remote redemption routing success or failure,</li>
+<li>workflow-gate rejects by class,</li>
+<li>finalizer failures and cleanup lag,</li>
+<li><code>serve</code> resolution mode chosen,</li>
+<li>export overlay activation and deactivation,</li>
+<li>token verification failures by audience, holder, or constraint type.</li>
+</ul>
+<h1 id="invariants-error-model">Invariants &amp; Error Model<a class="headerlink" href="#invariants-error-model" title="Permanent link">&para;</a></h1>
+<p>Required invariants:</p>
+<ol>
+<li>A lifecycle record must never be treated as semantic truth.</li>
+<li>An external credential must never be treated as the authoritative capability record.</li>
+<li>A capability must not outlive its underlying lease protection.</li>
+<li>No family may start irreversible realization without an admitted use guard or an explicitly adopted equivalent.</li>
+<li>Admission must fail closed if it races with drain, expiry, or release.</li>
+<li>Subject reuse must not silently preserve capability validity unless the profile explicitly documents bounded overlap.</li>
+<li>Authority turnover must not be approximated by "best effort" local routing; stale <code>FencingContext</code> values must
+   reject stale credentials when the family requires fencing.</li>
+<li>Remote redemption must not drop security-relevant claims while routing to the issuer.</li>
+<li>Remote redemption must not forward <code>LifecycleUseGuard</code>; it may only return an explicitly adopted equivalent.</li>
+<li>Workflow companion state must not be inferred from capability presence alone.</li>
+<li>Family adapters may cache results, but authoritative validity must still come from issuer-local lifecycle state plus
+   required workflow admission.</li>
+<li>Opaque-token decode state must not become the hidden owner of long-term lifecycle semantics.</li>
+</ol>
+<p>Required error split:</p>
+<ul>
+<li>raw credential parse failure</li>
+<li>reject as invalid credential</li>
+<li>opaque compatibility token decode failure</li>
+<li>reject as invalid or stale compatibility token</li>
+<li>holder or constraint-claim failure</li>
+<li>reject as invalid holder or failed precondition, not lifecycle-not-found</li>
+<li>front door unavailable by configuration</li>
+<li>reject as failed precondition</li>
+<li>issuer route unavailable</li>
+<li>reject as unavailable</li>
+<li>lifecycle admission lost a race with drain, release, or expiry</li>
+<li>reject as stale lifecycle reference or failed precondition</li>
+<li>binding address or binding record not found</li>
+<li>reject as stale lifecycle reference or not found</li>
+<li>binding record expired or revoked</li>
+<li>reject as expired or revoked credential</li>
+<li>derived credential expired</li>
+<li>reject as expired credential</li>
+<li>subject-generation mismatch</li>
+<li>reject as stale lifecycle reference or failed precondition</li>
+<li>fencing-context mismatch</li>
+<li>reject as stale or fenced credential</li>
+<li>capability inactive</li>
+<li>reject as expired or failed precondition</li>
+<li>subject no longer mintable under semantic truth</li>
+<li>reject mint through the truth owner, not by inventing lifecycle truth</li>
+<li>workflow companion rejects the request</li>
+<li>reject as workflow failure, replay, stale-current, or fenced outcome, not lifecycle-not-found, and release any
+    lifecycle use guard acquired for that attempt</li>
+<li>finalizer failure</li>
+<li>surface as lifecycle cleanup failure and metric event</li>
+</ul>
+<h1 id="alternatives-rationale">Alternatives &amp; Rationale<a class="headerlink" href="#alternatives-rationale" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Introduce a cluster-global lifecycle registry for all issued capabilities.</li>
+<li>Rejected because it conflicts with Phase-3 non-recoverability, issuer-local ownership, and the layering from
+    <code>0090</code>, <code>0092</code>, and <code>0093</code>.</li>
+<li>Let each front door keep its own lifecycle ledger and merely share lease helpers.</li>
+<li>Rejected because it preserves today's fragmentation and blocks new families from converging on one kernel.</li>
+<li>Omit generation and fencing fields from the shared lifecycle vocabulary.</li>
+<li>Rejected because <code>0011</code>, <code>0093</code>, and <code>0060</code> already require anti-ABA or fencing semantics in adjacent layers.</li>
+<li>Make the lifecycle kernel own token protobuf parsing and raw credential bytes.</li>
+<li>Rejected because token bytes and local transport security are front-door concerns, not core lifecycle concerns.</li>
+<li>Make the lifecycle kernel own remote routing and transport-path selection.</li>
+<li>Rejected because routing belongs to <code>0100</code> and shared execution belongs to <code>0089</code> and <code>0092</code>.</li>
+<li>Force every compatibility profile onto one wire shape immediately.</li>
+<li>Rejected because local opaque-token adapters are still required for local security and compatibility in Phase 3.</li>
+<li>Keep the public lifecycle API as pure lookup plus later use.</li>
+<li>Rejected because it preserves a TOCTOU gap between resolution and use exactly where <code>0011</code> already gives the repo a
+    shared guard substrate.</li>
+</ul>
+<h1 id="naming-compliance">Naming Compliance<a class="headerlink" href="#naming-compliance" title="Permanent link">&para;</a></h1>
+<p>Planned interface names introduced or clarified by this phase:</p>
+<table>
+<thead>
+<tr>
+<th>Interface</th>
+<th>Language</th>
+<th>Rule</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>LifecycleKernel</code></td>
+<td>C++ class</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>LifecycleRoutePrincipal</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>FencingContext</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>LifecycleEpochs</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>WorkflowCompanionRef</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>LifecycleSubjectRecord</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>LifecycleCapabilityRecord</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>CapabilityBindingAddress</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>LifecycleBindingRecord</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>ParsedCredential</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>ConstraintClaims</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>BindingResolution</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>LifecycleUseGuard</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>AdmittedCapabilityUse</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>CredentialCarriageKind</code></td>
+<td>C++ enum class</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>LifecycleBindingMode</code></td>
+<td>C++ enum class</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>LifecycleBindingSpace</code></td>
+<td>C++ enum class</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>LifecycleRoutePrincipalKind</code></td>
+<td>C++ enum class</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>FencingPrincipalKind</code></td>
+<td>C++ enum class</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>WorkflowOwnerKind</code></td>
+<td>C++ enum class</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>MintCapabilityRequest</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>RenewCapabilityRequest</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>mint_capability</code></td>
+<td>C++ function</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>renew_capability</code></td>
+<td>C++ function</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>admit_redemption</code></td>
+<td>C++ function</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>release_use_guard</code></td>
+<td>C++ function</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>revoke_binding_record</code></td>
+<td>C++ function</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>release_capability</code></td>
+<td>C++ function</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>inspect_capability</code></td>
+<td>C++ function</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>inspect_binding</code></td>
+<td>C++ function</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+</tbody>
+</table>
+<h1 id="schema-changes">Schema Changes<a class="headerlink" href="#schema-changes" title="Permanent link">&para;</a></h1>
+<p>No persistent schema changes are required for Phase 3 itself.</p>
+<p>This phase standardizes:</p>
+<ul>
+<li>issuer-local in-memory subject state,</li>
+<li>issuer-local capability state,</li>
+<li>explicit route-principal, generation, and fencing vocabulary,</li>
+<li>binding-resolution and credential-carriage semantics,</li>
+<li>front-door adapter boundaries,</li>
+<li>and shared observability semantics.</li>
+</ul>
+<p>Any future durable handoff or recovered-capability work belongs to <code>0100</code> or a later follow-up design and must define
+its own schema changes explicitly.</p>
+<h1 id="trade-offs-risks">Trade-offs &amp; Risks<a class="headerlink" href="#trade-offs-risks" title="Permanent link">&para;</a></h1>
+<ul>
+<li>This rewrite makes the local-kernel versus shared-protocol split explicit.
+  That is the right increase in precision because current code already behaves that way.</li>
+<li>Explicit route-principal, generation, and fencing vocabulary adds one more concept family.
+  The trade-off is worthwhile because it prevents hidden ABA and hidden split-brain behavior from being reimplemented per
+  family.</li>
+<li>Keeping opaque local compatibility profiles is intentionally incremental.
+  The trade-off is extra adapter complexity, but it avoids pretending today's local security paths are already
+  self-describing repository primitives.</li>
+<li>Splitting workflow admission into <code>0096</code> adds one more protocol seam.
+  That seam already exists in practice; the rewrite just makes it reviewable and reusable.</li>
+<li>If this design overreaches into recovery, workflow replay, or transport execution, it will recreate the second control
+  plane that <code>0092</code> explicitly forbids.</li>
+</ul>
+<h1 id="compatibility-acceptance-criteria">Compatibility &amp; Acceptance Criteria<a class="headerlink" href="#compatibility-acceptance-criteria" title="Permanent link">&para;</a></h1>
+<p>This is an internal convergence phase.</p>
+<p>Front-door RPCs and token envelopes may remain stable, but subsystem-private lifecycle ownership must not remain the
+long-term contract.</p>
+<p>Acceptance criteria:</p>
+<ul>
+<li>the repository has one shared lifecycle vocabulary for:</li>
+<li>route principals,</li>
+<li>subject records,</li>
+<li>capability records,</li>
+<li>fencing claims,</li>
+<li>binding addresses,</li>
+<li>optional binding records,</li>
+<li>and workflow companion references</li>
+<li><code>SessionLifecycleManager</code> or a direct successor remains the only bounded-lifetime substrate</li>
+<li>Phase 3 introduces issuer-local lifecycle kernel state rather than a cluster-global capability registry</li>
+<li>no implementation in this phase persists issued capabilities or binding records as recoverable truth</li>
+<li>front-door redemption flows use an admission transaction that atomically validates active lifecycle state and acquires
+  runtime protection before family realization starts</li>
+<li>raw token bytes, local peer-credential checks, opaque-token decode, and remote routing remain outside the lifecycle
+  kernel</li>
+<li>every Phase-3 front door declares:</li>
+<li>family,</li>
+<li>binding space,</li>
+<li>carriage kind,</li>
+<li>binding mode,</li>
+<li>canonical locator,</li>
+<li>required generation or fencing claims,</li>
+<li>remote-redemption behavior,</li>
+<li>and workflow-companion requirement</li>
+<li><code>payload_ref</code> remains documented and implemented as an issuer-routed <code>serve</code> front door</li>
+<li>CPU memfd and CUDA IPC remain <code>export</code> capabilities over <code>backing</code> subjects while preserving local transport security</li>
+<li>placement explicitly documents both signed-envelope and local-token compatibility profiles</li>
+<li>placement and retention renew and release through shared lifecycle ownership and explicitly document their overlap
+  semantics</li>
+<li>the kernel-internal <code>LifecycleSubjectRecord.subject_kind</code> taxonomy and the existing <code>ServingCapabilitySubjectKind</code>
+  projection are explicitly cross-walked rather than being left to drift independently</li>
+<li>publish bounded admission is lifecycle-owned while currentness and replay remain workflow-owned</li>
+<li>the accepted <code>0094</code> baseline is the code-adjacent lifecycle surface in <code>daemon/state/lifecycle_kernel.h</code>; follow-up
+  designs may extend it, but must not fork it in prose</li>
+<li>generic internal-record and standalone binding-issuance APIs are explicitly treated as reserved follow-up work rather
+  than as hidden completion criteria for <code>0094</code></li>
+<li>no implementation in this phase is accepted if it:</li>
+<li>introduces a cluster-global capability registry,</li>
+<li>makes remote daemons fabricate local capability truth for issuer-owned state,</li>
+<li>strips security-relevant claims during issuer routing,</li>
+<li>leaves front-door-private lifecycle maps as the long-term primary owner of bounded promise semantics,</li>
+<li>turns the lifecycle kernel into token parsing or transport-path ownership,</li>
+<li>erases the boundary between lifecycle state and workflow replay or currentness,</li>
+<li>violates <code>0089</code>'s shared source-resolution rule.</li>
+</ul>
+<h1 id="post-0094-follow-ups">Post-0094 Follow-Ups<a class="headerlink" href="#post-0094-follow-ups" title="Permanent link">&para;</a></h1>
+<p>The accepted <code>0094</code> baseline is intentionally narrow.
+The following work remains on top of it:</p>
+<ul>
+<li><code>0100</code> must finish the daemon-owned distributed-authority protocol on top of <code>LifecycleRoutePrincipal</code>:</li>
+<li>stable route identity must be expressed through the shared route-principal vocabulary rather than through an
+    adapter-specific <code>issuer_daemon_id</code> shape,</li>
+<li>route resolution must remain daemon-owned so SDK clients continue to connect only to their node-local daemon,</li>
+<li>issuer-loss and stale-route behavior must remain explicit fail-closed outcomes rather than implicit recovery.</li>
+<li><code>0096</code> must finish the workflow protocol on top of <code>WorkflowCompanionRef</code> and lifecycle use-guards:</li>
+<li>workflow gate and workflow observation semantics should be separated cleanly enough to represent replay, currentness,
+    fencing, join, wait, cancel, and status without collapsing them into lifecycle state,</li>
+<li>any persisted workflow binding must be representable in the code-adjacent lifecycle surface rather than existing only
+    as a prose-only concept,</li>
+<li>owner and recovery boundaries must remain explicit for every workflow semantic state that changes future outcomes.</li>
+<li>If later work still needs a generic internal-record surface or richer semantic references, that work must extend the
+  code-adjacent lifecycle object model directly and update this design in lockstep.</li>
+<li>Cross-layer error mapping and observability should continue converging so route, lifecycle, and workflow failures remain
+  distinct all the way to RPC and SDK-visible outcomes.</li>
+</ul>
+<h1 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h1>
+<ul>
+<li><code>0011</code> for the shared lease, guard, generation, and finalizer substrate.</li>
+<li><code>0055</code> for operation-plane replay, wait, cancel, status, and the current capability-token envelope context.</li>
+<li><code>0060</code> for epoch-fenced workflow semantics and issuer-routed retention requirements.</li>
+<li><code>0089</code> for shared body-source resolution ordering and <code>payload_ref</code> convergence.</li>
+<li><code>0090</code> for routed authority semantics and phase-scoped recovery honesty.</li>
+<li><code>0091</code> for shared selection and content truth.</li>
+<li><code>0092</code> for the repository-wide lifecycle-versus-truth-versus-execution constitution.</li>
+<li><code>0093</code> for backing truth, <code>PolicyVisibilityRef</code>, and <code>ServingCapability</code>.</li>
+<li><code>0100</code> for distributed-authority ingress, issuer-routed redemption, route directories, and the handoff or recovery
+  boundary for issued capabilities.</li>
+<li><code>0096</code> for workflow-companion admission, currentness, replay, and fencing.</li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,2828 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0012-uma-dvmp-transactional-transfer/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>统一内存权威 V3 与内存系统重构（设计） - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              统一内存权威 V3 与内存系统重构（设计）
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p>本设计定义面向未来的<strong>统一内存权威 V3</strong>（Unified Memory Authority，UMA）与围绕其展开的系统重构。核心思想是：<br />
+- <strong>UMA 成为唯一权威账本</strong>，掌管块级驻留、传输锁、租约、导出等状态与策略；<br />
+- <strong>Virtual Address Space（VS）</strong> 收敛为 CPU 侧 <strong>VA 与 IO 基座</strong>，不再维护权威状态；<br />
+- 引入<strong>传输会话事务</strong> <code>Plan → Execute → Commit or Abort</code>；<br />
+- 以 <code>ArtifactLayout</code> 统一 <strong>Chunk 与 Slice</strong> 对齐；<br />
+- 数据面由 <strong>Transfer Engine</strong> 承担，支持直写授权（DirectWriteGrant）与自动回退；<br />
+- <strong>Replica Orchestrator</strong> 仅负责编排，不做长耗时与状态变更；<br />
+- 导出能力集中在 <strong>Memory Export Registry</strong>，租约与导出标志由 UMA 托管。</p>
+<p>该设计明确接口、并发与错误模型、可观测性与验收标准，并给出与现有实现的对应关系与迁移要求。</p>
+<pre class="mermaid"><code>flowchart LR
+  RO["Replica Orchestrator&lt;br&gt;编排与外部 API"] --&gt; UMA["Unified Memory Authority&lt;br&gt;账本 与 策略"]
+  RO --&gt; TE["Transfer Engine&lt;br&gt;泵 与 拷贝"]
+  UMA --&gt; VS["Virtual Address Space&lt;br&gt;CPU VA 与 IO"]
+  TE --&gt; SINKS["Sinks&lt;br&gt;CpuVaSink 与 GpuMemorySink"]
+  TE --&gt; SOURCES["Sources&lt;br&gt;File 与 Remote"]
+  UMA --&gt; REG["Memory Export Registry&lt;br&gt;导出注册 与 keepalive"]
+  REG --&gt; COMM["Communicator&lt;br&gt;P2P 注册"]
+
+  SINKS -.positioned writes.-&gt; VS
+  UMA -.grants leases.-&gt; VS</code></pre>
+<hr />
+<h1 id="goals-nongoals">Goals / Non‑Goals<a class="headerlink" href="#goals-nongoals" title="Permanent link">&para;</a></h1>
+<h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>单一事实来源</strong>：UMA 为唯一权威账本，消除 UMA 与 VS 的双写与同步漂移。</li>
+<li><strong>事务化传输</strong>：传输会话具备计划、执行、提交与回滚，幂等可重试。</li>
+<li><strong>统一对齐</strong>：以 <code>ArtifactLayout</code> 统一 <code>artifact_chunk_bytes</code> 与 <code>transfer_slice_bytes</code>，Pump 不跨 Chunk。</li>
+<li><strong>明确职责</strong>：Orchestrator 仅编排；UMA 管账本与策略；VS 管 VA 与 IO；TE 管数据面；Export 只做注册。</li>
+<li><strong>可观测性</strong>：端到端会话 ID，统一指标与结构化日志。</li>
+<li><strong>可扩展性</strong>：直写授权滑窗化、GPU 复制调度，预留 GDS 与 RDMA 直写后端。</li>
+</ul>
+<h2 id="nongoals">Non‑Goals<a class="headerlink" href="#nongoals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>不引入新外部公共 API（保持 Artifact 外部接口语义不变）。</li>
+<li>不在本设计中定义持久化数据库或远端全局目录（无 schema 变更）。</li>
+<li>不实现新的全局作业调度器与跨节点数据分发。</li>
+</ul>
+<hr />
+<h1 id="current-snapshot-reality">Current Snapshot (Reality)<a class="headerlink" href="#current-snapshot-reality" title="Permanent link">&para;</a></h1>
+<p>为确保方案可落地，先给出现状与命名映射：</p>
+<ul>
+<li>VS（Virtual Address Space）已为最终命名；对外提供 <code>write_at</code>、<code>map_file_segments</code>、<code>pin_range</code> 等。<code>lock_chunks/unlock_chunks</code> 已弃用并实现为无副作用（no‑op）。</li>
+<li>UMA 仍以 <code>ReplicaMemoryCoordinator</code> 命名，持有部分账本；CPU 块状态在多处有“同步”路径；GPU 状态在 UMA 更新。</li>
+<li>Orchestrator 命名为 <code>ReplicaLoadController</code>（原 MemoryManager，已完成更名），承担编排和部分状态门面；历史上存在对 VS 的直连（如锁），现已移除。</li>
+<li>Transfer 数据面以 <code>TransferService</code> + <code>pump_ranges()</code> 实现；会话内使用 <code>StreamingPinnedBuffer</code> + <code>PinnedBufferPool</code>。</li>
+<li>直写授权统一为 <code>DirectWriteGrant</code>，承载 <code>Window{va_offset, local_addr, length}</code> 与 <code>keepalive</code>（滑动窗口）。</li>
+<li>导出路径命名为 <code>MemoryExportRegistry</code>，注册信息通过 Communicator；UMA 托管导出标志与 CPU 导出租约（keepalive）。</li>
+<li><code>MemoryLocation</code> 包含 <code>CPU</code>（而非最终方案中的 <code>CPU</code> 简化名）；广泛使用 <code>device_id</code> 标识 GPU。</li>
+</ul>
+<p>本设计在不打断现有路径的前提下，定义目标命名与边界，同时通过两个子计划（Sub‑0/1）完成“别名→落地→清理”的迁移闭环。</p>
+<hr />
+<h1 id="naming-structure">Naming &amp; Structure<a class="headerlink" href="#naming-structure" title="Permanent link">&para;</a></h1>
+<h2 id="uma">UMA 的全称与定位<a class="headerlink" href="#uma" title="Permanent link">&para;</a></h2>
+<ul>
+<li>UMA = Unified Memory Authority（统一内存权威）</li>
+<li>Unified：统一 CPU/VRAM/导出/直写授权等跨位置的逻辑账本。</li>
+<li>Memory：覆盖驻留（residency）、锁、租约、导出等内存语义。</li>
+<li>Authority：唯一事实来源（Single Source of Truth）；所有状态更改通过它的事务提交。</li>
+</ul>
+<p>说明：旧名 <code>ReplicaMemoryCoordinator</code> 更像“调度/协商者”，而不是“权威/账本”。重构后 UMA 直指职责本质。</p>
+<h2 id="_1">命名原则（适用于所有模块）<a class="headerlink" href="#_1" title="Permanent link">&para;</a></h2>
+<ul>
+<li>职责优先：类名反映“它对外提供什么”，方法名反映“它改变了什么”。</li>
+<li>后缀语义统一：</li>
+<li>Authority：唯一权威账本/策略执行者（可持久化/事务）。</li>
+<li>Orchestrator：编排/粘合层，不持久化状态，不做重工作。</li>
+<li>Engine：执行数据面或算法（传输/拷贝/调度）。</li>
+<li>Registry：注册/反注册与 keep‑alive。</li>
+<li>Sink/Source：字节流的目标/来源；<code>Positioned</code> 表示有全局偏移写能力；<code>Async</code> 表示异步。</li>
+<li>Grant/Lease/Token：Grant（写授权）、Lease（驻留/Pin 生命周期）、Token（可携带序列化信息的授权载体）。</li>
+<li>Layout/Record/Plan/Session：Layout（结构），Record（账本行），Plan（不可执行蓝图），Session（一次执行上下文）。</li>
+<li>名词单义化：Chunk 指 Artifact 的对齐分片；Slice 指传输小块（不跨 Chunk）。</li>
+<li>跨模块前缀：统一以功能做前缀，避免历史缩写（如 DVMP）造成误解。</li>
+<li>尽量避免技术泄露：如不必要，不在顶层对外暴露 Cuda，而暴露 Gpu 抽象。</li>
+</ul>
+<h2 id="_2">统一术语词汇表（面向代码）<a class="headerlink" href="#_2" title="Permanent link">&para;</a></h2>
+<ul>
+<li>ArtifactLayout：Artifact 总大小、Chunk 大小（artifact_chunk_bytes）、传输 Slice 大小（transfer_slice_bytes，整除 chunk）。</li>
+<li>Chunk：UMA 账本的基本对齐单位（如 256MiB），所有锁、导出、直写授权均以 Chunk 为边界。</li>
+<li>Slice：Pump 生产消费的小粒度传输块（如 16–64MiB），不跨 Chunk。</li>
+<li>ChunkRecord：UMA 账本记录：CpuResidency、GpuResidency[dev]、Lock、PinRefcnt、Exported、LastAccess。</li>
+<li>TransferPlan：UMA 生成的不可执行计划（含 ranges、来源偏好、授权 Grant、锁域）。</li>
+<li>TransferSession：一次执行上下文（Plan 的 SessionId + 执行期度量）。</li>
+<li>DirectWriteGrant：对 VA 区间的直写授权（带滑窗/keepalive），由 UMA 签发。</li>
+<li>PinLease：对 Chunk 的驻留/页面 pin 租约（RAII），由 VS 执行，UMA 统一持有与释放。</li>
+</ul>
+<h2 id="_3">旧名 → 新名（分层改名清单）<a class="headerlink" href="#_3" title="Permanent link">&para;</a></h2>
+<p>权威与编排层
+- ReplicaMemoryCoordinator → UnifiedMemoryAuthority（权威账本）
+- MemoryManager → ReplicaLoadController（编排门面）
+- MemoryState → ReplicaLoadState（副本在某位置的加载状态）</p>
+<p>VA 与底座层（VS）
+- DistributedVirtualMemoryPool → VirtualAddressSpace（VaSpace）
+- DvmpRegion → VaRegion
+- ChunkResidencyLease → CpuPinLease
+- chunk_snapshot/ChunkMeta.state → chunk_telemetry_snapshot（ChunkTelemetry）
+- lock_chunks/unlock_chunks → 弃用；UMA 账本记录锁，VS 仅做 pin_range</p>
+<p>传输与泵
+- TransferService（保留）
+- pump_ranges（函数）→ RangePump::run（类化）
+- StreamingPinnedBuffer（保留）
+- PinnedMemoryPool → PinnedBufferPool
+- GPUMemorySink → GpuMemorySink
+- DVMPRegionSink → CpuVaSink
+- DirectWritableSink → DirectWriteCapable
+- DirectWriteToken → DirectWriteGrant（内部可携 GrantToken）</p>
+<p>导出与通信
+- ChunkExportService → MemoryExportRegistry 或 P2PExportRegistry
+- CommRegistrationInfo → ExportRegistration
+- Communicator → CommEngine 或 Communicator</p>
+<p>Loader / Source / Sink
+- IArtifactLoader → ArtifactLoader（纯虚接口）
+- SeekableSource/PositionedSink/AsyncPositionedSink（保留）
+- FilePartitionSource/SafetensorsSource（保留）
+- MultiSafetensorsSource → MultiFileSafetensorsSource</p>
+<p>GPU 内存
+- GpuDeviceMemory → GpuDeviceMemory（内部实现可为 CudaDeviceMemory）
+- get_ipc_handle → get_ipc_handle
+- device_id → gpu_id</p>
+<p>交叉结构与模型
+- ChunkState（单枚举）→ 拆分为 CpuResidency/GpuResidency/TransferLockState/exported/pin_refcnt
+- ChunkMeta → ChunkTelemetry（VS 仅保留热度/时间戳等遥测）
+- MemoryLocation::CPU/GPU → MemoryLocation::CPU/GPU（对外简化；内部实现体现 pageable）
+- VaRange（保留）与 ByteRange（源侧）</p>
+<h2 id="_4">目录与命名空间建议<a class="headerlink" href="#_4" title="Permanent link">&para;</a></h2>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>core/
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>  memory/
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>    virtual_address_space.{h,cc}
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>    pinned_buffer_pool.{h,cc}
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>    streaming_pinned_buffer.{h,cc}
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    gpu_device_memory.{h,cc}
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>  store/
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    replica/
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>      unified_memory_authority.{h,cc}
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>      replica_load_controller.{h,cc}
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>      memory_export_registry.{h,cc}
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>      transfer/
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>        transfer_engine.{h,cc}
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>        range_pump.{h,cc}
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>        sinks/
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>          cpu_va_sink.{h,cc}
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>          gpu_memory_sink.{h,cc}
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a>        sources/
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>          file_partition_source.{h,cc}
+</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>          safetensors_source.{h,cc}
+</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>          multi_file_safetensors_source.{h,cc}
+</span><span id="__span-0-23"><a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a>      types/
+</span><span id="__span-0-24"><a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a>        artifact_layout.h
+</span><span id="__span-0-25"><a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a>        chunk_record.h
+</span><span id="__span-0-26"><a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a>        direct_write_grant.h
+</span><span id="__span-0-27"><a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a>        export_registration.h
+</span></code></pre></div>
+<p>命名空间：<code>tensorcast::common::memory</code>（底座）与 <code>tensorcast::store::replica</code>（账本/编排/导出/传输）。</p>
+<hr />
+<h2 id="_5">不合理命名点（点名并修复）<a class="headerlink" href="#_5" title="Permanent link">&para;</a></h2>
+<ul>
+<li>DVMP（DistributedVirtualMemoryPool）：误导“分布式/池”，职责是单机 CPU VA；改为 <code>VirtualAddressSpace</code>。</li>
+<li>ReplicaMemoryCoordinator：不是“协调者”，而是“权威账本 + 策略执行者”；改为 <code>UnifiedMemoryAuthority</code>。</li>
+<li>MemoryManager：职责是编排门面，不“管理内存”本体；改为 <code>ReplicaLoadController</code>。</li>
+<li>ChunkState（单枚举）：把锁/导出/驻留绑死在一起，易形成非法组合；改为正交维度 <code>ChunkRecord</code>。</li>
+<li>GPUMemorySink 大小写与抽象不一致；改为 <code>GpuMemorySink</code>。</li>
+<li>DVMPRegionSink 暗含 DVMP 缩写，且强调实现细节；改为 <code>CpuVaSink</code>。</li>
+<li>PinnedMemoryPool 名称中没有“Buffer”；与 <code>StreamingPinnedBuffer</code> 不对齐；改为 <code>PinnedBufferPool</code>。</li>
+<li>DirectWriteToken 的“Token”更像凭据，不像权限；改为 <code>DirectWriteGrant</code>（授权），内部可携 <code>GrantToken</code>。</li>
+<li>lock_chunks/unlock_chunks 容易与 OS mlock 混淆、与 UMA 锁语义冲突；弃用，统一由 UMA 账本记录锁，VS 只负责 <code>pin_range</code>。</li>
+</ul>
+<hr />
+<h1 id="architecture-interfaces">Architecture &amp; Interfaces<a class="headerlink" href="#architecture-interfaces" title="Permanent link">&para;</a></h1>
+<h2 id="1">1. 模块边界与交互<a class="headerlink" href="#1" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>sequenceDiagram
+  autonumber
+  participant RO as Orchestrator
+  participant UMA as UMA
+  participant TE as Transfer Engine
+  participant SNK as Sink
+  participant VS as VA Space
+  participant SRC as Source
+  participant REG as Export Registry
+  participant COM as Communicator
+
+  %% ===== Planning Phase =====
+  RO-&gt;&gt;UMA: plan_load(target, gpu_id?, chunk_ids?)
+  Note over UMA: 1) Calculate chunk boundary ranges&lt;br/&gt;2) Evaluate source preferences (LOCAL/REMOTE/DISK)&lt;br/&gt;3) (If needed) Request DirectWriteGrant (for CPU target)&lt;br/&gt;4) Establish session lock_scope (for unified pin/lease management)&lt;br/&gt;5) (For GPU target) Ensure VRAM allocation is ready
+  UMA--&gt;&gt;RO: TransferPlan{session_id, ranges(chunk-aligned), grant?, lock_scope, layout}
+
+  %% ===== Execution Phase =====
+  RO-&gt;&gt;TE: execute(plan, SRC, SinkFactory)
+  Note over TE: Select Sink based on target: CPU=CpuVaSink, GPU=GpuMemorySink
+  TE-&gt;&gt;SNK: open() from SinkFactory
+
+  alt target == CPU
+    Note over TE,SRC: Prefer "Direct Write", automatically fall back to staged transfer if not supported
+    alt SRC.supports_direct_write &amp;&amp; SNK is DirectWriteCapable &amp;&amp; plan.grant
+      loop for each range in plan.ranges
+        TE-&gt;&gt;SRC: read_into(dest_va_offset, bytes, plan.grant)
+        Note over SRC: Producer writes directly to the VA window authorized by UMA (sliding/renewal optional)
+        SRC--&gt;&gt;TE: ok
+      end
+    else staged fallback
+      par up to N producers
+        loop for slices in range (no cross-chunk)
+          TE-&gt;&gt;SRC: read_at(file_off, bytes)  %% Read into SPB slice
+          SRC--&gt;&gt;TE: slice
+          TE-&gt;&gt;SNK: write_at(dest_va_offset, slice)
+          SNK-&gt;&gt;VS: write_at(offset, len)
+          Note over VS: Transparently rehydrate (mprotect/mmap) when needed, and update local telemetry
+        end
+      and
+        Note over TE: Multiple producers in parallel + backpressure: controlled by SPB capacity/ready queue
+      end
+    end
+  else target == GPU
+    alt SNK supports AsyncPositionedSink
+      par up to K streams
+        loop for slices in range (no cross-chunk)
+          TE-&gt;&gt;SNK: write_at_async(dest_dev_off, slice)
+          Note right of SNK: H2D cudaMemcpyAsync&lt;br/&gt;SPB slot can be reclaimed after CopyHandle completes
+        end
+      and
+        TE-&gt;&gt;TE: await all CopyHandle  %% Synchronization point
+      end
+    else sync path
+      loop for slices in range (no cross-chunk)
+        TE-&gt;&gt;SNK: write_at(dest_dev_off, slice)
+      end
+    end
+  end
+
+  %% ===== Report Execution Result =====
+  TE--&gt;&gt;RO: status{ok|fail, details(completed_chunks)}
+
+  %% ===== Commit/Rollback + State Machine Finalization =====
+  alt ok
+    RO-&gt;&gt;UMA: commit(session_id, target, committed_chunks)
+    Note over UMA: 1) Update ledger: CPU/GPU residency, unlock/release lease&lt;br/&gt;2) Record last_access_ns&lt;br/&gt;3) (If necessary) Unpin/unlock at VS layer
+    RO-&gt;&gt;RO: finalize_load_state(target, OK)  %% Facade state visible: LOADING→LOADED
+    RO-&gt;&gt;UMA: apply_post_load_policy(policy, bytes_hint)
+    alt policy == EvictCPU
+      UMA-&gt;&gt;VS: evict_tail_bytes(bytes_hint)
+    else policy == MarkPreemptible
+      UMA-&gt;&gt;VS: mark_preemptible(chunks)
+    else Keep
+      Note over UMA: Keep current state, do not touch VS
+    end
+  else fail
+    RO-&gt;&gt;UMA: abort(session_id)  %% Idempotent rollback: release lock_scope/lease
+    RO-&gt;&gt;RO: finalize_load_state(target, FAILED)
+  end
+
+  %% ===== Export Registration (Optional) =====
+  opt Export (optional later)
+    RO-&gt;&gt;UMA: set_exported(chunks, true)
+    Note over UMA: Request export lease (reason=Export), merge into aligned ranges
+    UMA--&gt;&gt;REG: register(ranges, keepalive)
+    REG--&gt;&gt;COM: register keys (P2P/IPC/memory registration)
+    REG--&gt;&gt;UMA: registration handles
+    UMA--&gt;&gt;RO: ExportRegistration (return to upper layer for keepalive)
+  end
+
+  %% ===== Unregistration/Unload (Optional) =====
+  opt Unexport/Release (optional later)
+    RO-&gt;&gt;UMA: set_exported(chunks, false)
+    UMA--&gt;&gt;REG: unregister(handles)
+    REG--&gt;&gt;COM: unregister keys
+    Note over UMA: "Release export lease, ledger exported=false"
+  end</code></pre>
+<h3 id="_6">职责对齐<a class="headerlink" href="#_6" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Unified Memory Authority（UMA）</strong>：唯一账本与策略；生成 <code>TransferPlan</code>；在 <code>commit/abort</code> 内集中修改状态与释放锁租。</li>
+<li><strong>Virtual Address Space（VS）</strong>：CPU 侧 VA 与 IO；<code>write_at</code> 与 <code>map_file_segments</code>；<code>pin_range</code>；保留遥测，不持权威状态。</li>
+<li>API 命名：对外仅暴露“遥测”语义的读取接口，例如 <code>StoreEngine::get_chunk_states_telemetry(artifact_id)</code> 与 <code>ReplicaLoadController::chunk_telemetry_snapshot()</code>；不再保留旧名兼容层。</li>
+<li><strong>Transfer Engine（TE）</strong>：执行字节流传输；定位写入 sink；支持异步写与在飞复制调度；不触碰状态。</li>
+<li><strong>Replica Orchestrator（RO）</strong>：捕获请求，调用 UMA 与 TE，处理最终 <code>finalize_load_state</code> 与策略。</li>
+<li><strong>Memory Export Registry（REG）</strong>：用 UMA 的导出标志与租约进行注册与 keepalive；与 Communicator 对接。</li>
+</ul>
+<h2 id="2">2. 数据模型<a class="headerlink" href="#2" title="Permanent link">&para;</a></h2>
+<h3 id="21-artifactlayout">2.1 ArtifactLayout<a class="headerlink" href="#21-artifactlayout" title="Permanent link">&para;</a></h3>
+<div class="language-c++ highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">struct</span><span class="w"> </span><span class="nc">ArtifactLayout</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">artifact_bytes</span><span class="p">;</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">artifact_chunk_bytes</span><span class="p">;</span><span class="w">     </span><span class="c1">// 例如 256 MiB（遵循 VS 配置）</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">transfer_slice_bytes</span><span class="p">;</span><span class="w">     </span><span class="c1">// 例如 16~64 MiB，必须整除 artifact_chunk_bytes</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="p">};</span>
+</span></code></pre></div>
+<h3 id="22-chunkrecord">2.2 ChunkRecord（正交维度）<a class="headerlink" href="#22-chunkrecord" title="Permanent link">&para;</a></h3>
+<div class="language-c++ highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">struct</span><span class="w"> </span><span class="nc">ChunkRecord</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span><span class="k">enum</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">CpuResidency</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="kt">uint8_t</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">Absent</span><span class="p">,</span><span class="w"> </span><span class="n">ResidentRW</span><span class="p">,</span><span class="w"> </span><span class="n">PlaceholderRO</span><span class="p">,</span><span class="w"> </span><span class="n">Preemptible</span><span class="w"> </span><span class="p">};</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">  </span><span class="k">enum</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">GpuResidency</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="kt">uint8_t</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">Absent</span><span class="p">,</span><span class="w"> </span><span class="n">Present</span><span class="w"> </span><span class="p">};</span><span class="w">          </span><span class="c1">// 每设备一份</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">  </span><span class="k">enum</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">TransferLockState</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="kt">uint8_t</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">Unlocked</span><span class="p">,</span><span class="w"> </span><span class="n">LockedTx</span><span class="w"> </span><span class="p">};</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w">  </span><span class="kt">uint16_t</span><span class="w"> </span><span class="n">pin_refcnt</span><span class="p">{</span><span class="mi">0</span><span class="p">};</span><span class="w">                                         </span><span class="c1">// 累积租约</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">exported</span><span class="p">{</span><span class="nb">false</span><span class="p">};</span><span class="w">                                           </span><span class="c1">// 是否处于导出注册</span>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="w">  </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">last_access_ns</span><span class="p">{</span><span class="mi">0</span><span class="p">};</span>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="w">  </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">version</span><span class="p">{</span><span class="mi">0</span><span class="p">};</span><span class="w">                                            </span><span class="c1">// 乐观并发</span>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="p">};</span>
+</span></code></pre></div>
+<blockquote>
+<p>说明：VS 的 <code>ChunkMeta.state</code> 仅保留为<strong>遥测</strong>，账本以 UMA 为准。</p>
+</blockquote>
+<h2 id="3">3. 关键接口<a class="headerlink" href="#3" title="Permanent link">&para;</a></h2>
+<h3 id="31-umaunified-memory-authority">3.1 UMA（Unified Memory Authority）<a class="headerlink" href="#31-umaunified-memory-authority" title="Permanent link">&para;</a></h3>
+<div class="language-c++ highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">UnifiedMemoryAuthority</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="k">public</span><span class="o">:</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">Status</span><span class="w"> </span><span class="n">allocate</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">ReplicaKey</span><span class="o">&amp;</span><span class="p">,</span><span class="w"> </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">bytes</span><span class="p">);</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">  </span><span class="n">ArtifactLayout</span><span class="w"> </span><span class="nf">get_layout</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">ReplicaKey</span><span class="o">&amp;</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">  </span><span class="k">struct</span><span class="w"> </span><span class="nc">TransferPlan</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">    </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">session_id</span><span class="p">;</span>
+</span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="w">    </span><span class="c1">// Chunk 对齐范围（offset, length）</span>
+</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">pair</span><span class="o">&lt;</span><span class="kt">uint64_t</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">ranges</span><span class="p">;</span>
+</span><span id="__span-3-10"><a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="w">    </span><span class="c1">// 参与会话的 Chunk 索引</span>
+</span><span id="__span-3-11"><a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a><span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">uint32_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">chunk_indices</span><span class="p">;</span>
+</span><span id="__span-3-12"><a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a><span class="w">    </span><span class="c1">// CPU 目标可选直写授权（由 UMA 内部保持租约生命周期）</span>
+</span><span id="__span-3-13"><a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a><span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">DirectWriteGrant</span><span class="o">&gt;</span><span class="w"> </span><span class="n">cpu_direct_grant</span><span class="p">;</span>
+</span><span id="__span-3-14"><a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a><span class="w">  </span><span class="p">};</span>
+</span><span id="__span-3-15"><a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a>
+</span><span id="__span-3-16"><a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">StatusOr</span><span class="o">&lt;</span><span class="n">TransferPlan</span><span class="o">&gt;</span><span class="w"> </span><span class="n">plan_load</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">ReplicaKey</span><span class="o">&amp;</span><span class="p">,</span>
+</span><span id="__span-3-17"><a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a><span class="w">                                         </span><span class="n">common</span><span class="o">::</span><span class="n">memory</span><span class="o">::</span><span class="n">MemoryLocation</span><span class="w"> </span><span class="n">target</span><span class="p">,</span>
+</span><span id="__span-3-18"><a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a><span class="w">                                         </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">gpu_id</span><span class="p">,</span>
+</span><span id="__span-3-19"><a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a><span class="w">                                         </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">absl</span><span class="o">::</span><span class="n">Span</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="kt">uint32_t</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">chunk_indices</span><span class="p">);</span>
+</span><span id="__span-3-20"><a id="__codelineno-3-20" name="__codelineno-3-20" href="#__codelineno-3-20"></a>
+</span><span id="__span-3-21"><a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">Status</span><span class="w"> </span><span class="nf">commit</span><span class="p">(</span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">session_id</span><span class="p">,</span>
+</span><span id="__span-3-22"><a id="__codelineno-3-22" name="__codelineno-3-22" href="#__codelineno-3-22"></a><span class="w">                      </span><span class="n">common</span><span class="o">::</span><span class="n">memory</span><span class="o">::</span><span class="n">MemoryLocation</span><span class="w"> </span><span class="n">target</span><span class="p">,</span>
+</span><span id="__span-3-23"><a id="__codelineno-3-23" name="__codelineno-3-23" href="#__codelineno-3-23"></a><span class="w">                      </span><span class="n">absl</span><span class="o">::</span><span class="n">Span</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="kt">uint32_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">committed_chunks</span><span class="p">,</span>
+</span><span id="__span-3-24"><a id="__codelineno-3-24" name="__codelineno-3-24" href="#__codelineno-3-24"></a><span class="w">                      </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">device_id</span><span class="p">);</span><span class="w"> </span><span class="c1">// 幂等</span>
+</span><span id="__span-3-25"><a id="__codelineno-3-25" name="__codelineno-3-25" href="#__codelineno-3-25"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">Status</span><span class="w"> </span><span class="nf">abort</span><span class="p">(</span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">session_id</span><span class="p">);</span><span class="w">              </span><span class="c1">// 幂等</span>
+</span><span id="__span-3-26"><a id="__codelineno-3-26" name="__codelineno-3-26" href="#__codelineno-3-26"></a>
+</span><span id="__span-3-27"><a id="__codelineno-3-27" name="__codelineno-3-27" href="#__codelineno-3-27"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">Status</span><span class="w"> </span><span class="nf">set_exported</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">ReplicaKey</span><span class="o">&amp;</span><span class="p">,</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">Span</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="kt">uint32_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">chunks</span><span class="p">,</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">on</span><span class="p">);</span>
+</span><span id="__span-3-28"><a id="__codelineno-3-28" name="__codelineno-3-28" href="#__codelineno-3-28"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">Status</span><span class="w"> </span><span class="nf">apply_post_load_policy</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">ReplicaKey</span><span class="o">&amp;</span><span class="p">,</span>
+</span><span id="__span-3-29"><a id="__codelineno-3-29" name="__codelineno-3-29" href="#__codelineno-3-29"></a><span class="w">                                      </span><span class="n">common</span><span class="o">::</span><span class="n">memory</span><span class="o">::</span><span class="n">MemoryLocation</span><span class="w"> </span><span class="n">target</span><span class="p">,</span>
+</span><span id="__span-3-30"><a id="__codelineno-3-30" name="__codelineno-3-30" href="#__codelineno-3-30"></a><span class="w">                                      </span><span class="n">PostGpuLoadPolicy</span><span class="w"> </span><span class="n">policy</span><span class="p">,</span>
+</span><span id="__span-3-31"><a id="__codelineno-3-31" name="__codelineno-3-31" href="#__codelineno-3-31"></a><span class="w">                                      </span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes_hint</span><span class="p">);</span>
+</span><span id="__span-3-32"><a id="__codelineno-3-32" name="__codelineno-3-32" href="#__codelineno-3-32"></a><span class="p">};</span>
+</span></code></pre></div>
+<p>实现与兼容性说明
+- UMA::lock_chunks_for_transfer() 在 V3 中保持存在但为 no-op（仅更新 last_access/version），接口已标注 [[deprecated]]；当所有调用方切换到 plan_load/commit 后（P3）删除。
+- Orchestrator 在需要生成 [0..N-1] chunk 列表时，改用 UMA 的 get_artifact_size() 与 get_chunk_size()（或 get_layout()）计算总块数，不再依赖 VS 的 chunk_snapshot 尺寸，确保与 VS 实际 chunk_size 对齐一致。
+- 测试命名保留历史：如 replica_memory_coordinator_test.cc、MockDistributedVirtualMemoryPool 等，归为 P3 清理项。</p>
+<p>接口与现状的差异/对齐说明
+- <code>DirectWriteGrant</code> 当前代码命名为 <code>DirectWriteToken</code>；在 Sub‑1 中切换命名并引入滑动窗口。
+- <code>MemoryLocation::CPU</code> 在现实现中为 <code>CPU</code>；Sub‑1 清理阶段统一外显枚举名。
+- UMA 的 <code>plan/commit/abort</code> 以轻量会话表与幂等语义实现；UMA 内部持有会话期的锁域与租约（不随计划返回“lock_scope”给调用方）。
+- 直写授权粒度：设计允许在 <code>plan_load()</code> 随计划携带 <code>DirectWriteGrant</code>；当前实现也支持在泵的窗口化阶段（per‑window）由 Sink→UMA 动态申请授权，功能等价且粒度更细。</p>
+<h3 id="32-vsvirtual-address-space">3.2 VS（Virtual Address Space）<a class="headerlink" href="#32-vsvirtual-address-space" title="Permanent link">&para;</a></h3>
+<div class="language-c++ highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">VirtualAddressSpace</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="k">public</span><span class="o">:</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">  </span><span class="k">struct</span><span class="w"> </span><span class="nc">VirtualRegion</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">cpu_base</span><span class="p">;</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes</span><span class="p">;</span><span class="w"> </span><span class="p">};</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">StatusOr</span><span class="o">&lt;</span><span class="n">VirtualRegion</span><span class="o">&gt;</span><span class="w"> </span><span class="n">allocate</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">artifact_id</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes</span><span class="p">);</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">StatusOr</span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">VaRegion</span><span class="o">&gt;</span><span class="w"> </span><span class="n">open</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">artifact_id</span><span class="p">);</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">StatusOr</span><span class="o">&lt;</span><span class="n">VirtualRegion</span><span class="o">&gt;</span><span class="w"> </span><span class="n">region_info</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">artifact_id</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>
+</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="w">  </span><span class="c1">// Expose the configured CPU chunk size (bytes) used for VS alignment</span>
+</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a><span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="nf">chunk_size</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>
+</span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">Status</span><span class="w"> </span><span class="nf">write_at</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">artifact_id</span><span class="p">,</span><span class="w"> </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">va_off</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">src</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes</span><span class="p">);</span>
+</span><span id="__span-4-12"><a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">Status</span><span class="w"> </span><span class="nf">map_file_segments</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">artifact_id</span><span class="p">,</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">Span</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">FileSegment</span><span class="o">&gt;</span><span class="w"> </span><span class="n">segs</span><span class="p">);</span>
+</span><span id="__span-4-13"><a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a>
+</span><span id="__span-4-14"><a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">StatusOr</span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">CpuPinLease</span><span class="o">&gt;</span><span class="w"> </span><span class="n">pin_range</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">artifact_id</span><span class="p">,</span><span class="w"> </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">off</span><span class="p">,</span><span class="w"> </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">bytes</span><span class="p">,</span>
+</span><span id="__span-4-15"><a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a><span class="w">                                             </span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">reason</span><span class="p">);</span>
+</span><span id="__span-4-16"><a id="__codelineno-4-16" name="__codelineno-4-16" href="#__codelineno-4-16"></a>
+</span><span id="__span-4-17"><a id="__codelineno-4-17" name="__codelineno-4-17" href="#__codelineno-4-17"></a><span class="w">  </span><span class="c1">// 预抢占与尾部回收</span>
+</span><span id="__span-4-18"><a id="__codelineno-4-18" name="__codelineno-4-18" href="#__codelineno-4-18"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">Status</span><span class="w"> </span><span class="nf">mark_preemptible</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">artifact_id</span><span class="p">,</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">Span</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="kt">uint32_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">chunks</span><span class="p">);</span>
+</span><span id="__span-4-19"><a id="__codelineno-4-19" name="__codelineno-4-19" href="#__codelineno-4-19"></a><span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="nf">evict_tail_bytes</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">artifact_id</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes</span><span class="p">);</span>
+</span><span id="__span-4-20"><a id="__codelineno-4-20" name="__codelineno-4-20" href="#__codelineno-4-20"></a>
+</span><span id="__span-4-21"><a id="__codelineno-4-21" name="__codelineno-4-21" href="#__codelineno-4-21"></a><span class="w">  </span><span class="c1">// 可选：写入回调用于 UMA 更新 last_access</span>
+</span><span id="__span-4-22"><a id="__codelineno-4-22" name="__codelineno-4-22" href="#__codelineno-4-22"></a><span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">register_write_hook</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">function</span><span class="o">&lt;</span><span class="kt">void</span><span class="p">(</span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">off</span><span class="p">,</span><span class="w"> </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">len</span><span class="p">)</span><span class="o">&gt;</span><span class="w"> </span><span class="n">cb</span><span class="p">);</span>
+</span><span id="__span-4-23"><a id="__codelineno-4-23" name="__codelineno-4-23" href="#__codelineno-4-23"></a><span class="p">};</span>
+</span></code></pre></div>
+<h3 id="33-transfer-engine-sink">3.3 Transfer Engine 与 Sink<a class="headerlink" href="#33-transfer-engine-sink" title="Permanent link">&para;</a></h3>
+<div class="language-c++ highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">TransferEngine</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="k">public</span><span class="o">:</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">Status</span><span class="w"> </span><span class="n">execute</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">UnifiedMemoryAuthority</span><span class="o">::</span><span class="n">TransferPlan</span><span class="o">&amp;</span><span class="w"> </span><span class="n">plan</span><span class="p">,</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">                       </span><span class="n">loader</span><span class="o">::</span><span class="n">SeekableSource</span><span class="o">&amp;</span><span class="w"> </span><span class="n">source</span><span class="p">,</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="w">                       </span><span class="n">PositionedSinkFactory</span><span class="o">&amp;</span><span class="w"> </span><span class="n">sink_factory</span><span class="p">);</span><span class="w"> </span><span class="c1">// 仅数据面</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="w">  </span><span class="c1">// 内部：GPU 复制调度，限制在飞字节与在飞拷贝数，广泛使用 write_at_async</span>
+</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a><span class="p">};</span>
+</span></code></pre></div>
+<ul>
+<li><strong>CpuVaSink</strong>：定位写入 VS 的 VA 范围；支持 <code>DirectWriteCapable</code> 接口，承接 <code>DirectWriteGrant</code>。</li>
+<li><strong>GpuMemorySink</strong>：定位写入 GPU base + offset；支持 <code>AsyncPositionedSink</code>。</li>
+</ul>
+<h3 id="34-directwritegrant">3.4 DirectWriteGrant（直写授权）<a class="headerlink" href="#34-directwritegrant" title="Permanent link">&para;</a></h3>
+<div class="language-c++ highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="k">struct</span><span class="w"> </span><span class="nc">DirectWriteGrant</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="w">  </span><span class="k">struct</span><span class="w"> </span><span class="nc">Window</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">va_offset</span><span class="p">;</span><span class="w"> </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">local_addr</span><span class="p">;</span><span class="w"> </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">length</span><span class="p">;</span><span class="w"> </span><span class="p">};</span>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">Window</span><span class="o">&gt;</span><span class="w"> </span><span class="n">windows</span><span class="p">;</span><span class="w">             </span><span class="c1">// 可滑窗</span>
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">shared_ptr</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">&gt;</span><span class="w"> </span><span class="n">keepalive</span><span class="p">;</span><span class="w">         </span><span class="c1">// 持有租约与必要注册</span>
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="p">};</span>
+</span></code></pre></div>
+<h3 id="35-replica-orchestrator">3.5 Replica Orchestrator<a class="headerlink" href="#35-replica-orchestrator" title="Permanent link">&para;</a></h3>
+<div class="language-c++ highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">ReplicaLoadController</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="n">absl</span><span class="o">::</span><span class="n">Status</span><span class="o">&gt;</span><span class="w"> </span><span class="n">ensure_loaded_async</span><span class="p">(</span><span class="n">common</span><span class="o">::</span><span class="n">memory</span><span class="o">::</span><span class="n">MemoryLocation</span><span class="w"> </span><span class="n">target</span><span class="p">,</span>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="w">                                                </span><span class="kt">int</span><span class="w"> </span><span class="n">concurrency</span><span class="p">,</span>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="w">                                                </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">device_id</span><span class="p">);</span>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">Status</span><span class="w"> </span><span class="nf">finalize_load_state</span><span class="p">(</span><span class="n">common</span><span class="o">::</span><span class="n">memory</span><span class="o">::</span><span class="n">MemoryLocation</span><span class="w"> </span><span class="n">target</span><span class="p">,</span>
+</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="w">                                   </span><span class="k">const</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">Status</span><span class="o">&amp;</span><span class="w"> </span><span class="n">final_status</span><span class="p">);</span><span class="w"> </span><span class="c1">// 仅门面状态</span>
+</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="p">};</span>
+</span></code></pre></div>
+<h3 id="36-export-registry">3.6 Export Registry<a class="headerlink" href="#36-export-registry" title="Permanent link">&para;</a></h3>
+<div class="language-c++ highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">MemoryExportRegistry</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="k">public</span><span class="o">:</span>
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">StatusOr</span><span class="o">&lt;</span><span class="n">ExportRegistration</span><span class="o">&gt;</span><span class="w"> </span><span class="n">register_ranges</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">ReplicaKey</span><span class="o">&amp;</span><span class="p">,</span>
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="w">                                                     </span><span class="n">common</span><span class="o">::</span><span class="n">memory</span><span class="o">::</span><span class="n">MemoryLocation</span><span class="p">,</span>
+</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="w">                                                     </span><span class="n">absl</span><span class="o">::</span><span class="n">Span</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">pair</span><span class="o">&lt;</span><span class="kt">uint32_t</span><span class="p">,</span><span class="kt">uint32_t</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">chunk_ranges</span><span class="p">);</span>
+</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">Status</span><span class="w"> </span><span class="nf">unregister</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">ExportRegistration</span><span class="o">&amp;</span><span class="p">);</span>
+</span><span id="__span-8-7"><a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="p">};</span>
+</span></code></pre></div>
+<h3 id="37">3.7 典型流程（可读性示例）<a class="headerlink" href="#37" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>sequenceDiagram
+  participant RO as ReplicaLoadController
+  participant UMA as UnifiedMemoryAuthority
+  participant TX as TransferService
+  participant VS as VirtualAddressSpace
+  participant REG as MemoryExportRegistry
+
+  RO-&gt;&gt;UMA: plan_load(CPU, chunks=…)
+  UMA--&gt;&gt;RO: TransferPlan{ranges, DirectWriteGrant, session_id}
+  RO-&gt;&gt;TX: execute(plan, source, sink_factory)
+  TX-&gt;&gt;VS: write_at(offset, data) via CpuVaSink
+  TX--&gt;&gt;RO: OK
+  RO-&gt;&gt;UMA: commit(session_id, CPU, committed_chunks)
+  RO-&gt;&gt;RO: finalize_load_state(CPU, OK)
+  RO-&gt;&gt;UMA: apply_post_load_policy(EvictCPU/Preempt/Keep)</code></pre>
+<h2 id="4">4. 并发、锁序与事务<a class="headerlink" href="#4" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>全局锁序</strong>：UMA → VS → Export Registry → Communicator。</li>
+<li><strong>会话事务</strong>：<code>plan_load</code> 内 UMA 统一获取需要的锁与租约（UMA 内部持有），在 <code>commit</code> 或 <code>abort</code> 释放。</li>
+<li><strong>Orchestrator</strong> 不在持锁时调用外部；<strong>Transfer</strong> 不触碰状态与锁。</li>
+<li><strong>幂等</strong>：<code>commit</code> 可多次提交同一子集；<code>abort</code> 对同一会话可重复调用。</li>
+</ul>
+<h2 id="5">5. 错误模型<a class="headerlink" href="#5" title="Permanent link">&para;</a></h2>
+<ul>
+<li>源或泵错误 → <code>execute</code> 返回非 OK → Orchestrator <strong>只调用一次</strong> <code>abort(session)</code>。</li>
+<li>部分成功：允许对已完成块多次 <code>commit(session, subset)</code>，最终以 <code>finalize_load_state</code> 的返回作为对外结果。</li>
+<li>VS <code>write_at</code> 出界与不可写 → <code>InvalidArgument</code> 或 <code>FailedPrecondition</code>；异常会传导至 <code>execute</code>。</li>
+<li>租约不足或导出注册失败 → <code>ResourceExhausted</code> 或 <code>Unavailable</code>，不改变账本，<code>abort</code> 清理。</li>
+</ul>
+<p>错误映射与重试策略（幂等键：<code>session_id + sorted(chunks)</code>）</p>
+<table>
+<thead>
+<tr>
+<th>错误类型</th>
+<th>典型场景</th>
+<th>建议重试策略</th>
+<th>幂等键</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ResourceExhausted</td>
+<td>UMA 租约不足（<code>pin_range</code> 失败）；<code>DirectWriteGrant</code> 窗口不足/续期失败；GPU 在飞拷贝/字节达上限</td>
+<td>短暂退避（jitter）+ 有界重试；直写同一窗口连续失败 M 次→会话内粘性降级至 staged；必要时缩小窗口或降低并发</td>
+<td><code>session_id + sorted(chunk 集合)</code></td>
+</tr>
+<tr>
+<td>Unavailable</td>
+<td>Export 注册失败；Communicator 暂不可用；远端 P2P 键失效/超时</td>
+<td>指数退避重试；超过阈值对本会话切本地/磁盘回退；仅对已完成块执行 <code>commit</code></td>
+<td><code>session_id + sorted(chunk 集合)</code></td>
+</tr>
+<tr>
+<td>FailedPrecondition</td>
+<td>VS 写入越界/不可写；VA 未分配/已释放</td>
+<td>不重试；立即 <code>abort(session)</code>；修正调用方参数或状态机</td>
+<td><code>session_id + sorted(chunk 集合)</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="tradeoffs-risks">Trade‑offs &amp; Risks<a class="headerlink" href="#tradeoffs-risks" title="Permanent link">&para;</a></h1>
+<ul>
+<li><strong>VS 去权威化</strong>带来一次性较大改动
+  取舍：中长期降低复杂度和竞态风险；历史阶段通过灰度与审计控制迁移风险（现已处于最终态，无需开关）。</li>
+<li><strong>事务化引入的控制路径</strong>增加
+  取舍：换取状态幂等与错误语义清晰；微小的编排开销可忽略。</li>
+<li><strong>GPU 并发调度</strong>可能在极端下放大在飞内存
+  缓解：限额可配；以 conservative 默认起步；指标可观测并快速回退。</li>
+<li><strong>直写滑窗</strong>窗口过小影响吞吐
+  缓解：窗口大小与 Pump 批次对齐，允许按设备类型自适应。</li>
+</ul>
+<hr />
+<h1 id="compatibility-acceptance-criteria">Compatibility &amp; Acceptance Criteria<a class="headerlink" href="#compatibility-acceptance-criteria" title="Permanent link">&para;</a></h1>
+<h2 id="_7">兼容性<a class="headerlink" href="#_7" title="Permanent link">&para;</a></h2>
+<ul>
+<li>外部 Artifact API 行为保持；内部类名与接口按本设计统一，<strong>不保留最终兼容层</strong>。</li>
+<li>迁移期以别名与编译开关过渡，最终在收尾阶段移除。</li>
+</ul>
+<h2 id="_8">验收标准<a class="headerlink" href="#_8" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>一致性</strong>：不存在任何从 VS 读取权威块状态的代码路径；账本仅在 UMA。</li>
+<li><strong>对齐</strong>：Pump 生成的 Slice 不跨 Chunk；<code>artifact_chunk_bytes</code> 与 <code>transfer_slice_bytes</code> 一致生效。</li>
+<li><strong>事务</strong>：三条路径 DISK→CPU、DISK→GPU、CPU↔GPU 均走 <code>Plan→Execute→Commit or Abort</code>，且幂等。</li>
+<li><strong>性能</strong>：GPU 在飞复制调度上线后吞吐不低于基线，p99 延迟下降或持平；RSS 峰值不高于基线。</li>
+<li><strong>导出</strong>：导出注册与反注册幂等，无租约泄漏；崩溃恢复不悬挂。</li>
+<li><strong>可观测性</strong>：会话级指标与日志完整；核心仪表盘齐备。</li>
+<li><strong>清理</strong>：别名与过渡开关全部移除；目录与命名一致。</li>
+</ul>
+<hr />
+<h1 id="observability">Observability<a class="headerlink" href="#observability" title="Permanent link">&para;</a></h1>
+<ul>
+<li>
+<p><strong>计量前缀</strong></p>
+</li>
+<li>
+<p>UMA：<code>tc_um_*</code>；VS：<code>tc_va_*</code>；Transfer：<code>tc_tx_*</code>；Export：<code>tc_ex_*</code>。</p>
+</li>
+<li>
+<p><strong>建议指标</strong></p>
+</li>
+<li>
+<p><code>tc_um_commit_duration_ms{target}</code>、<code>tc_um_commit_chunks_total{target}</code></p>
+</li>
+<li><code>tc_tx_bytes_total{path,mode}</code>、<code>tc_tx_duration_ms{path}</code>、<code>tc_tx_inflight_bytes_gauge{gpu}</code></li>
+<li><code>tc_va_write_bytes_total</code>、<code>tc_va_pin_leases_total{reason}</code></li>
+<li><code>tc_ex_registrations_total{location}</code>、<code>tc_ex_keepalive_gauge</code></li>
+<li><strong>日志键</strong>：<code>artifact_id, session_id, gpu_id, range_id, target, status, latency_ms, bytes, chunks</code>.</li>
+</ul>
+<hr />
+<h1 id="migration-status">Migration Status（已完成 / 最终态）<a class="headerlink" href="#migration-status" title="Permanent link">&para;</a></h1>
+<ul>
+<li>本设计对应的迁移已完成，当前代码处于最终态：</li>
+<li>VS 完成重命名与收敛：<code>DistributedVirtualMemoryPool</code> → <code>VirtualAddressSpace</code>，删除旧 BUILD 目标与头文件；</li>
+<li>UMA 文件命名完成：<code>replica_memory_coordinator.{h,cc}</code> → <code>unified_memory_authority.{h,cc}</code>，删除 <code>core/store/uma/*</code> 别名头；</li>
+<li>导出路径收敛为 <code>MemoryExportRegistry</code>，导出租约由 UMA 托管；</li>
+<li>事务化传输 <code>Plan → Execute → Commit/Abort</code> 全路径生效，幂等可重试；</li>
+<li>删除全部 <code>TCAST_V3_*</code> 环境开关与桥接逻辑，最终态逻辑常开；</li>
+<li>指标命名统一（<code>tc_va_*</code>、<code>tc_um_*</code>、<code>tc_tx_*</code>、<code>tc_ex_*</code>），日志键一致。</li>
+</ul>
+<p>回退：采用 Git revert 对应提交集；无运行时灰度/开关。</p>
+<hr />
+<h1 id="alternatives-and-rationale">Alternatives and Rationale<a class="headerlink" href="#alternatives-and-rationale" title="Permanent link">&para;</a></h1>
+<ul>
+<li>
+<p><strong>保留 VS 为权威</strong>：继续在 UMA 与 VS 双边同步</p>
+</li>
+<li>
+<p>否决：同步与并发复杂度过高，错误难以界定。</p>
+</li>
+<li>
+<p><strong>不做事务</strong>：在 Transfer 中直接改状态</p>
+</li>
+<li>
+<p>否决：错误路径杂糅，无法保证幂等；回滚困难。</p>
+</li>
+<li>
+<p><strong>继续单 GPU 单会话门闩</strong></p>
+</li>
+<li>
+<p>否决：吞吐与覆盖受限，难以吃满硬件能力。</p>
+</li>
+</ul>
+<hr />
+<h1 id="ownership-reviews-and-status-lifecycle">Ownership, Reviews, and Status Lifecycle<a class="headerlink" href="#ownership-reviews-and-status-lifecycle" title="Permanent link">&para;</a></h1>
+<ul>
+<li><strong>Owners</strong>：store‑runtime 负责 Orchestrator 与 Transfer；memory‑systems 负责 UMA 与 VS；communicator 负责 Export 对接。</li>
+<li><strong>评审</strong>：涉及区域的 codeowners 为必选评审。</li>
+<li><strong>状态流转</strong>：<code>draft → proposed → accepted → retired</code>；设计被接受后在迁移计划全部完成时置为 <code>accepted</code> 并记录决策要点。</li>
+</ul>
+<hr />
+<h1 id="decision-summary-accepted">Decision Summary (Accepted)<a class="headerlink" href="#decision-summary-accepted" title="Permanent link">&para;</a></h1>
+<ul>
+<li>UMA 作为唯一账本落地：<code>plan → execute → commit/abort</code> 事务在 CPU/GPU 路径均生效，Transfer 与 Orchestrator 不直接改账本。</li>
+<li>导出租约归 UMA 托管：Registry 仅做注册与 keepalive；计量与结构化日志齐备。</li>
+<li>数据面异步化：Pump 基于 <code>AsyncPositionedSink</code> + <code>AsyncCopyManager</code>，GPU 在飞/限流由调度器与 Sink 协同完成。</li>
+<li>直写授权 V2：引入 <code>DirectWriteGrant</code> 与滑动窗口；能力协商与自动回退落地；指标与日志完善。</li>
+<li>VS 去权威化：UMA 账本为唯一事实来源；与 VS 的同步路径已删除，UMA 为唯一权威。</li>
+<li>命名收敛：引入 <code>MemoryLocation::CPU</code>（兼容 <code>CPU</code>），别名头到目标命名保持一致；目录重构计划纳入下一轮清理窗口。</li>
+</ul>
+<hr />
+<h1 id="guardrails">Guardrails<a class="headerlink" href="#guardrails" title="Permanent link">&para;</a></h1>
+<ul>
+<li><strong>锁序</strong>：UMA 先于 VS；禁止在持 VS 锁时对外调用；Transfer 不得直接操作 UMA 或 VS 的锁。</li>
+<li><strong>不变量</strong>：账本仅在 UMA；所有状态变更只发生在 <code>commit</code> 或 <code>abort</code>；Slice 不跨 Chunk。</li>
+<li><strong>文档同步</strong>：任何改变行为的 PR 必须更新最近的 README 与本设计或对应计划。</li>
+</ul>
+<hr />
+<h1 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h1>
+<ul>
+<li>现有实现与接口：<code>virtual_address_space.*</code>、<code>unified_memory_authority.*</code>、<code>memory_manager.*</code>、<code>transfer_service.*</code>、<code>memory_export_registry.*</code>、<code>loader/*</code>、<code>sink.*</code>、<code>pump.*</code></li>
+<li>子计划：<code>../plans/0012-sub-0-unified-memory-architecture-v3.md</code>、<code>../plans/0012-sub-1-unified-memory-architecture-v3.md</code></li>
+</ul>
+<h1 id="open-questions">Open Questions<a class="headerlink" href="#open-questions" title="Permanent link">&para;</a></h1>
+<ul>
+<li>VS 的 <code>write_at</code> 写入回调是否需要批量聚合与节流，以降低 UMA 端锁竞争。</li>
+<li>是否需要在 UMA 侧引入轻量的会话状态持久化以在崩溃后恢复未提交的锁域清理。</li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

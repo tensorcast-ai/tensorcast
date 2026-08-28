@@ -1,0 +1,3020 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/plans/0118-progressive-replica-dissemination/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Progressive Replica Dissemination Plan - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#objective" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Progressive Replica Dissemination Plan
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../designs/" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../designs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="objective">Objective<a class="headerlink" href="#objective" title="Permanent link">&para;</a></h1>
+<p>Implement progressive partial-source dissemination as a separate follow-on to
+group realization:</p>
+<ul>
+<li>in-progress receivers report verified prefix coverage;</li>
+<li>Global Store exposes that coverage only through a progressive atomic
+  assignment path;</li>
+<li>targets read safe prefix segments and repeat until complete;</li>
+<li>ordinary complete-replica availability remains unchanged.</li>
+</ul>
+<h1 id="current-state-and-grounding">Current State And Grounding<a class="headerlink" href="#current-state-and-grounding" title="Permanent link">&para;</a></h1>
+<p>The current repository already contains:</p>
+<ul>
+<li>complete replica availability in <code>artifact_replicas</code>;</li>
+<li>source selection in <code>ReplicaRepository.find_available_for_transport</code>;</li>
+<li>group dispatch and source spread metrics from <code>0083</code>;</li>
+<li>transport completion outcomes and request idempotency;</li>
+<li>export metadata and worker heartbeat checks.</li>
+<li>Global Store control-plane saturation evidence from current code and
+  benchmark notes: repository transactions are serialized under the global DB
+  execution lock, ordinary transport dispatch already has a centralized
+  dispatch lock, and request-rate/write-amplification pressure can saturate the
+  server.</li>
+</ul>
+<p>Important gaps:</p>
+<ul>
+<li>closed in the 2026-05-15 control-plane pass: progressive coverage tables,
+  coverage identity fields, durable assignment/counter tables, Global Store
+  repository/service/RPC paths, source-claim fencing, and default cross-domain
+  TCP seed skipping;</li>
+<li>closed in the 2026-05-15 daemon/benchmark pass: target progressive segment
+  read loop, typed requester/source-domain derivation, source read failure
+  retirement, and cross-host WeightPublisher runner switches for the progressive
+  lane;</li>
+<li>closed in the 2026-05-15 deep review continuation: complete target
+  publications preserve grouped progressive identity and report terminal
+  byte-prefix coverage only after ordinary registration plus state-sync barrier
+  success;</li>
+<li>still open: repeated multi-host benchmark results and safe non-terminal
+  in-flight source publication. The Global Store control plane accepts and
+  schedules non-terminal verified-prefix coverage, but the daemon currently
+  reports only terminal verified coverage for completed materializations and
+  complete target publications because incomplete target/replica memory has no
+  progressive-only remote-export contract. Publishing those buffers through
+  ordinary <code>artifact_replicas</code> would violate the ordinary availability boundary.</li>
+</ul>
+<h1 id="latest-progress">Latest Progress<a class="headerlink" href="#latest-progress" title="Permanent link">&para;</a></h1>
+<h2 id="2026-05-15-control-plane-pass">2026-05-15 Control-Plane Pass<a class="headerlink" href="#2026-05-15-control-plane-pass" title="Permanent link">&para;</a></h2>
+<p>Completed:</p>
+<ul>
+<li>Added <code>replica_progress_coverage</code>, <code>progressive_source_assignments</code>, and
+  <code>progressive_source_counters</code> to the canonical root <code>schema.sql</code>.</li>
+<li>Added progressive coverage identity, coverage report, source claim,
+  assignment completion, retirement, and expiration RPCs to
+  <code>ClusterRuntimeService</code>.</li>
+<li>Added Global Store progressive config and daemon progressive reporting config
+  proto fields. Daemon <code>verify_before_report</code> uses proto presence so an omitted
+  value keeps the safe default.</li>
+<li>Implemented <code>ProgressiveCoverageRepository</code>,
+  <code>ProgressiveReplicationService</code>, and <code>ProgressiveRpcHandler</code>.</li>
+<li>Wired the progressive repository/service/RPC handler into
+  <code>GlobalStoreServicer</code>, the ClusterRuntime mixin, maintenance expiration, and
+  Prometheus metrics.</li>
+<li>Added C++ <code>GlobalStoreClient</code> wrappers for report, claim, assignment
+  completion, coverage retirement, and expiration.</li>
+<li>Added <code>StoreEngineOptions</code> and <code>DaemonOptions</code> progressive config hooks, and
+  mapped daemon config into both option structs.</li>
+<li>Added Python tests for schema presence, ordinary source-selection isolation,
+  monotonic coverage updates, report throttling, durable replay,
+  source-cap/counter separation, heartbeat/export-generation fencing,
+  assignment/coverage expiration, cross-domain TCP seed skipping, and RPC
+  report/claim wiring.</li>
+</ul>
+<p>Validation run:</p>
+<ul>
+<li><code>source .venv/bin/activate &amp;&amp; pytest tests/python/global_store/test_progressive_replication.py</code>
+  passed: 9 tests.</li>
+<li><code>source .venv/bin/activate &amp;&amp; pytest tests/python/global_store/test_services.py tests/python/global_store/test_grpc_service.py</code>
+  passed: 113 tests.</li>
+<li><code>source .venv/bin/activate &amp;&amp; ruff check tensorcast/global_store tests/python/global_store/test_progressive_replication.py</code>
+  passed.</li>
+<li><code>source .venv/bin/activate &amp;&amp; ruff format --check tensorcast/global_store tests/python/global_store/test_progressive_replication.py</code>
+  passed.</li>
+<li><code>bazel build //core/store:global_store_client --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel build //daemon:tensorcast_daemon --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel test //proto/... --test_output=streamed --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel test //core/store:store_engine_test --test_env=TENSORCAST_CUDA_BACKEND=fake --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+</ul>
+<p>Known validation caveat:</p>
+<ul>
+<li><code>bash tools/build_proto_python.sh</code> still fails because the Buf remote plugin
+  server reports unavailable. Python stubs were regenerated with the local
+  <code>grpc_tools.protoc</code> fallback using the same proto input set.</li>
+</ul>
+<h2 id="2026-05-15-daemon-terminal-coverage-pass">2026-05-15 Daemon Terminal Coverage Pass<a class="headerlink" href="#2026-05-15-daemon-terminal-coverage-pass" title="Permanent link">&para;</a></h2>
+<p>Completed:</p>
+<ul>
+<li>Wired daemon progressive replication config into the materialization
+  controller and replica materialization service.</li>
+<li>Added daemon-side terminal coverage reporting for canonical byte-prefix
+  materialization. The daemon reports only after materialization succeeds,
+  verification is known when <code>verify_before_report=true</code>, Global Store is
+  connected, the replica has a Global Store replica id, and remote export is
+  active with a non-zero export generation.</li>
+<li>Derived <code>source_domain</code> from typed daemon/worker topology (<code>node_id</code>, falling
+  back to <code>daemon_id</code>) rather than request-provided free-form strings for daemon
+  coverage reports.</li>
+<li>Populated Global Store memory-replica registration transport metadata with
+  the actual export generation. Progressive source claims fence against
+  <code>artifact_replicas.export_generation</code>, so C++ registration must preserve this
+  value for source eligibility.</li>
+<li>Added a C++ metadata gateway regression test that verifies memory-replica
+  registration preserves the runtime export generation used by progressive
+  fencing.</li>
+<li>Extended progressive source assignments to return source <code>MemoryInfo</code>
+  metadata. This gives the future target read loop the exact source endpoint,
+  memory keys, buffer sizes, byte space, and export generation from the
+  progressive claim instead of re-entering ordinary complete-replica source
+  selection.</li>
+</ul>
+<p>Validation run:</p>
+<ul>
+<li><code>bazel build //core/store:global_store_client --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel build //daemon:tensorcast_daemon --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel test //core/store/runtime/metadata:metadata_gateway_test --test_env=TENSORCAST_CUDA_BACKEND=fake --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel test //core/store:store_engine_test --test_env=TENSORCAST_CUDA_BACKEND=fake --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel test //proto/... --test_output=streamed --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>source .venv/bin/activate &amp;&amp; pytest tests/python/global_store/test_progressive_replication.py</code>
+  passed: 9 tests.</li>
+<li><code>source .venv/bin/activate &amp;&amp; ruff check tensorcast/global_store tests/python/global_store/test_progressive_replication.py</code>
+  passed.</li>
+<li><code>source .venv/bin/activate &amp;&amp; ruff format --check tensorcast/global_store tests/python/global_store/test_progressive_replication.py</code>
+  passed.</li>
+<li><code>git diff --check</code> passed.</li>
+</ul>
+<h2 id="2026-05-15-target-loop-and-benchmark-lane-pass">2026-05-15 Target Loop And Benchmark Lane Pass<a class="headerlink" href="#2026-05-15-target-loop-and-benchmark-lane-pass" title="Permanent link">&para;</a></h2>
+<p>Completed:</p>
+<ul>
+<li>Added the <code>MaterializeIntoTarget</code> progressive byte-prefix read loop. When
+  daemon progressive replication is enabled, the target path constructs the same
+  canonical coverage identity as daemon coverage reports, claims the next safe
+  prefix from Global Store, copies only the assigned byte range through
+  <code>P2PLoader</code> and StoreEngine mapped target writes, completes durable
+  assignments, and repeats until the target is complete.</li>
+<li>Kept progressive source selection separate from ordinary complete-replica
+  selection. If no progressive source is available before any progressive write,
+  the path falls back only to the existing ordinary policy; once progressive has
+  written target bytes, failures return a hard error and poison the target
+  lease.</li>
+<li>Enforced identity and range invariants at the target loop: canonical
+  byte-prefix only, no view transform/subset, matching selection/layout/hash
+  identity, monotonic prefix cursor, and terminal-tail assignment semantics.</li>
+<li>Retired failed source coverage after progressive source read/setup failures
+  and completed assignment counters for both success and failure paths.</li>
+<li>Derived requester <code>source_domain</code> from daemon worker topology
+  (<code>node_id</code>, falling back to <code>daemon_id</code>) for target claims.</li>
+<li>Added explicit progressive benchmark lane switches to
+  <code>examples/cross_host/cross_host_weight_publisher_runner.py</code> and
+  <code>examples/cross_host/run_multihost_weight_publisher_suite.sh</code>, plus default
+  disabled progressive config stanzas in the cross-host Global Store and daemon
+  configs.</li>
+<li>Updated WeightPublisher deployment docs with the progressive benchmark lane
+  controls.</li>
+<li>Updated Global Store and daemon READMEs with default-off progressive
+  replication config, enablement requirements, and source/target behavior
+  boundaries.</li>
+<li>Confirmed the remaining non-terminal in-flight coverage item is blocked on a
+  separate progressive-only publication/export contract, not on the Global Store
+  assignment path. The current implementation does not mark incomplete targets
+  as ordinary available replicas.</li>
+</ul>
+<p>Validation run:</p>
+<ul>
+<li><code>bazel build //daemon:target_materialization_service_lib --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel build //daemon:tensorcast_daemon --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>source .venv/bin/activate &amp;&amp; pytest tests/python/global_store/test_progressive_replication.py tests/python/global_store/test_services.py tests/python/global_store/test_grpc_service.py tests/python/tools/test_cross_host_weight_publisher_runner_transport_probe.py</code>
+  passed: 148 tests.</li>
+<li><code>bazel test //proto/... --test_output=streamed --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel test //daemon:materialize_into_target_validation_test --test_env=TENSORCAST_CUDA_BACKEND=fake --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel test //core/store/runtime/metadata:metadata_gateway_test //core/store:store_engine_test //daemon:owned_binding_service_test --test_env=TENSORCAST_CUDA_BACKEND=fake --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>source .venv/bin/activate &amp;&amp; ruff check examples/cross_host/cross_host_weight_publisher_runner.py tests/python/tools/test_cross_host_weight_publisher_runner_transport_probe.py tensorcast/global_store tests/python/global_store/test_progressive_replication.py</code>
+  passed.</li>
+<li><code>source .venv/bin/activate &amp;&amp; ruff format --check examples/cross_host/cross_host_weight_publisher_runner.py tests/python/tools/test_cross_host_weight_publisher_runner_transport_probe.py tensorcast/global_store tests/python/global_store/test_progressive_replication.py</code>
+  passed.</li>
+<li><code>bash -n examples/cross_host/run_multihost_weight_publisher_suite.sh</code>
+  passed.</li>
+<li><code>git diff --check</code> passed.</li>
+</ul>
+<p>Known validation caveat:</p>
+<ul>
+<li><code>source .venv/bin/activate &amp;&amp; bash tools/build_proto_python.sh</code> still fails
+  with <code>Failure: the server hosted at that remote is unavailable.</code> The local
+  <code>grpc_tools.protoc</code> fallback was rerun successfully after the failed official
+  script attempt.</li>
+</ul>
+<h2 id="2026-05-15-failure-injection-benchmark-lane-pass">2026-05-15 Failure-Injection Benchmark Lane Pass<a class="headerlink" href="#2026-05-15-failure-injection-benchmark-lane-pass" title="Permanent link">&para;</a></h2>
+<p>Completed:</p>
+<ul>
+<li>Added an explicit failure-injection plan to the cross-host WeightPublisher
+  runner. <code>--failure-injection-mode stop-daemon</code> currently supports
+  <code>receiver:&lt;zero-based-index&gt;</code> targets, waits a configured delay after
+  publisher start, stops the selected receiver daemon, records injection
+  timing/status in the case summary, and excludes the expected interrupted
+  receiver from ordinary completion/probe gates while keeping the remaining
+  receivers strict.</li>
+<li>Added suite controls for an optional standalone failure-injection case:
+  <code>TC_WP_FAILURE_INJECTION_ENABLE</code>,
+  <code>TC_WP_FAILURE_INJECTION_MODE</code>,
+  <code>TC_WP_FAILURE_INJECTION_TARGET</code>,
+  <code>TC_WP_FAILURE_INJECTION_DELAY_S</code>, and
+  <code>TC_WP_FAILURE_INJECTION_RECEIVER_COUNT</code>. The lane is skipped with an
+  explicit manifest entry unless enabled and at least two receivers are
+  available.</li>
+<li>Updated WeightPublisher deployment docs with failure-injection controls and
+  delay-tuning guidance.</li>
+<li>Added runner unit tests for failure-injection target resolution and daemon
+  stop execution.</li>
+</ul>
+<p>Validation run:</p>
+<ul>
+<li><code>source .venv/bin/activate &amp;&amp; pytest tests/python/tools/test_cross_host_weight_publisher_runner_transport_probe.py</code>
+  passed: 29 tests.</li>
+<li><code>source .venv/bin/activate &amp;&amp; pytest tests/python/global_store/test_progressive_replication.py tests/python/tools/test_cross_host_weight_publisher_runner_transport_probe.py</code>
+  passed: 38 tests.</li>
+<li><code>source .venv/bin/activate &amp;&amp; pytest tests/python/global_store/test_services.py tests/python/global_store/test_grpc_service.py</code>
+  passed: 113 tests.</li>
+<li><code>source .venv/bin/activate &amp;&amp; ruff check examples/cross_host/cross_host_weight_publisher_runner.py tests/python/tools/test_cross_host_weight_publisher_runner_transport_probe.py</code>
+  passed.</li>
+<li><code>source .venv/bin/activate &amp;&amp; ruff format --check examples/cross_host/cross_host_weight_publisher_runner.py tests/python/tools/test_cross_host_weight_publisher_runner_transport_probe.py</code>
+  passed.</li>
+<li><code>bash -n examples/cross_host/run_multihost_weight_publisher_suite.sh</code>
+  passed.</li>
+<li><code>bazel test //daemon:materialize_into_target_validation_test --test_env=TENSORCAST_CUDA_BACKEND=fake --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel test //core/store/runtime/metadata:metadata_gateway_test //core/store:store_engine_test //daemon:owned_binding_service_test --test_env=TENSORCAST_CUDA_BACKEND=fake --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel test //proto/... --test_output=streamed --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>source .venv/bin/activate &amp;&amp; bash tools/build_proto_python.sh</code> still failed
+  with <code>Failure: the server hosted at that remote is unavailable.</code></li>
+<li><code>source .venv/bin/activate &amp;&amp; python -m grpc_tools.protoc ...</code> local fallback
+  regeneration succeeded.</li>
+<li><code>git diff --check</code> passed.</li>
+</ul>
+<h2 id="2026-05-15-benchmark-report-tooling-pass">2026-05-15 Benchmark Report Tooling Pass<a class="headerlink" href="#2026-05-15-benchmark-report-tooling-pass" title="Permanent link">&para;</a></h2>
+<p>Completed:</p>
+<ul>
+<li>Added progressive/failure-injection metadata to cross-host WeightPublisher
+  case JSON summaries and params so benchmark artifacts are self-describing.</li>
+<li>Extended <code>examples/cross_host/summarize_scaleout_suite.py</code> to classify TP
+  cases as baseline, progressive, failure-injection, or
+  progressive-failure-injection lanes and to emit per-lane aggregate metrics for
+  source concentration, publish-to-apply p95, and peak active throughput.</li>
+<li>Added a summarizer unit test with synthetic baseline/progressive/failure
+  case JSON.</li>
+<li>Updated WeightPublisher deployment docs to point at the summarizer for
+  progressive on/off reports.</li>
+</ul>
+<p>Validation run:</p>
+<ul>
+<li><code>source .venv/bin/activate &amp;&amp; pytest tests/python/tools/test_summarize_scaleout_suite.py tests/python/tools/test_cross_host_weight_publisher_runner_transport_probe.py</code>
+  passed: 30 tests.</li>
+<li><code>source .venv/bin/activate &amp;&amp; ruff check examples/cross_host/summarize_scaleout_suite.py examples/cross_host/cross_host_weight_publisher_runner.py tests/python/tools/test_summarize_scaleout_suite.py tests/python/tools/test_cross_host_weight_publisher_runner_transport_probe.py</code>
+  passed.</li>
+<li><code>source .venv/bin/activate &amp;&amp; ruff format --check examples/cross_host/summarize_scaleout_suite.py examples/cross_host/cross_host_weight_publisher_runner.py tests/python/tools/test_summarize_scaleout_suite.py tests/python/tools/test_cross_host_weight_publisher_runner_transport_probe.py</code>
+  passed.</li>
+<li><code>git diff --check</code> passed.</li>
+</ul>
+<h2 id="2026-05-15-review-hardening-pass">2026-05-15 Review Hardening Pass<a class="headerlink" href="#2026-05-15-review-hardening-pass" title="Permanent link">&para;</a></h2>
+<p>Completed:</p>
+<ul>
+<li>Strengthened Global Store progressive report validation so same-<code>coverage_id</code>
+  updates cannot change replica identity, source export generation,
+  materialization attempt identity, or total coverage bounds even when a report
+  would otherwise be coalesced by throttling.</li>
+<li>Changed report throttling to always persist export-state transitions; a source
+  moving from in-progress exportable to complete exportable is no longer hidden by
+  byte-delta/time-interval coalescing.</li>
+<li>Enforced typed <code>source_domain</code> at the service boundary. Source reports and
+  requester claims now require the supplied domain to match the corresponding
+  worker directory entry (<code>node_id</code>, falling back to <code>daemon_id</code>), so the
+  cross-domain policy cannot be bypassed with request-provided strings. Disabled
+  source claims still return the cheap <code>progressive_disabled</code> result without
+  requiring a requester directory row.</li>
+<li>Extended default cross-domain seed protection to the daemon-reported <code>p2p</code>
+  seed kind as well as explicit <code>tcp</code>, because terminal daemon coverage currently
+  records <code>MaterializationSource::kP2P</code> rather than a lower-level communicator
+  protocol.</li>
+<li>Rechecked source worker directory state at assignment time. Candidate coverage
+  is no longer eligible if the source worker's current daemon/domain or replica
+  owner no longer matches the coverage row.</li>
+<li>Tightened request-fingerprint replay so a durable assignment is replayed only
+  for the same coverage identity, requester, materialization attempt, and cursor;
+  mismatched reuse returns <code>request_fingerprint_conflict</code>.</li>
+<li>Fixed expiration cleanup for active assignments whose coverage expires first.
+  Coverage expiration now cancels those assignments and releases
+  <code>progressive_source_counters</code> in the same sweep.</li>
+<li>Removed the physical DuckDB foreign key from
+  <code>progressive_source_assignments.coverage_id</code>. DuckDB rejects updates to a
+  referenced coverage row even for non-key state changes, so coverage retirement
+  keeps the relationship as an indexed application-level invariant.</li>
+<li>Hardened the target progressive read loop against idempotent terminal
+  assignment replays. <code>CLAIMED</code> and <code>READING</code> assignments remain readable;
+  terminal assignment states are not treated as new source segments.</li>
+<li>Added tests for throttling-vs-identity updates, export-state transition
+  persistence, worker-directory source-domain validation, <code>tcp</code>/<code>p2p</code>
+  cross-domain seed skipping, disabled-claim fast path, directory-drift
+  ineligibility, fingerprint replay conflicts, coverage-expiration assignment
+  cleanup, and terminal assignment replay after completion.</li>
+</ul>
+<p>Validation run:</p>
+<ul>
+<li><code>source .venv/bin/activate &amp;&amp; pytest tests/python/global_store/test_progressive_replication.py</code>
+  passed: 15 tests.</li>
+<li><code>source .venv/bin/activate &amp;&amp; pytest tests/python/global_store/test_progressive_replication.py tests/python/global_store/test_services.py tests/python/global_store/test_grpc_service.py tests/python/tools/test_cross_host_weight_publisher_runner_transport_probe.py tests/python/tools/test_summarize_scaleout_suite.py</code>
+  passed: 158 tests.</li>
+<li><code>source .venv/bin/activate &amp;&amp; ruff check tensorcast/global_store examples/cross_host tests/python/global_store/test_progressive_replication.py tests/python/tools/test_cross_host_weight_publisher_runner_transport_probe.py tests/python/tools/test_summarize_scaleout_suite.py</code>
+  passed.</li>
+<li><code>source .venv/bin/activate &amp;&amp; ruff format --check tensorcast/global_store examples/cross_host tests/python/global_store/test_progressive_replication.py tests/python/tools/test_cross_host_weight_publisher_runner_transport_probe.py tests/python/tools/test_summarize_scaleout_suite.py</code>
+  passed.</li>
+<li><code>bazel build //daemon:target_materialization_service_lib --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel test //daemon:materialize_into_target_validation_test --test_env=TENSORCAST_CUDA_BACKEND=fake --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel test //proto/... --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>git diff --check</code> passed.</li>
+</ul>
+<h2 id="2026-05-15-compatibility-cleanup-pass">2026-05-15 Compatibility Cleanup Pass<a class="headerlink" href="#2026-05-15-compatibility-cleanup-pass" title="Permanent link">&para;</a></h2>
+<p>Completed:</p>
+<ul>
+<li>Standardized progressive assignment payloads on
+  <code>MemoryInfo.transport.remote_memory_keys</code>, <code>buffer_sizes</code>, and
+  <code>verification_json</code>. Removed the legacy flat <code>MemoryInfo</code> transport fields
+  from the common proto and reserved their field numbers/names.</li>
+<li>Removed the daemon progressive P2P source fallback that accepted flat
+  <code>MemoryInfo.remote_memory_keys</code>/<code>buffer_sizes</code>. Progressive reads now require
+  explicit <code>transport</code> metadata and validate key/size cardinality, non-zero
+  buffer sizes, and total buffer bytes against <code>memory_size</code>.</li>
+<li>Standardized replica memory serialization on the same transport metadata path.
+  <code>replica_to_memory_info</code> now writes export metadata only under
+  <code>MemoryInfo.transport</code>, and <code>GlobalStoreClient::convert_from_proto_memory_info</code>
+  reads communicator keys only from <code>transport</code>.</li>
+<li>Removed the <code>preserve_transport</code> update path from replica registration. Ordinary
+  C++ <code>register_replica</code> requests now send an explicit presence-only transport,
+  and Global Store updates transport state from each request through one path.</li>
+<li>Simplified recovery inventory fingerprinting and reconcile updates so
+  transport metadata is compared and rewritten through the canonical
+  <code>MemoryInfo.transport</code> path instead of mirroring legacy flat fields.</li>
+<li>Replaced the internal flattened <code>ProgressiveAssignment.source_*</code> source-memory
+  fields with <code>source_memory</code> and <code>source_memory.transport</code>, matching the RPC
+  payload shape and removing another source of parallel naming.</li>
+<li>Updated tests to assert transport metadata through <code>MemoryInfo.transport</code>.</li>
+<li>Attempted the official <code>bash tools/build_proto_python.sh</code> generation path; Buf
+  remote plugins were still unavailable. Regenerated the affected Python common
+  proto locally with <code>grpc_tools.protoc</code>.</li>
+</ul>
+<p>Validation run:</p>
+<ul>
+<li><code>source .venv/bin/activate &amp;&amp; pytest tests/python/global_store/test_replica_memory_codec.py tests/python/global_store/test_progressive_replication.py tests/python/global_store/test_services.py tests/python/global_store/test_grpc_service.py</code>
+  passed: 133 tests.</li>
+<li><code>source .venv/bin/activate &amp;&amp; pytest tests/python/global_store</code>
+  passed: 349 tests.</li>
+<li><code>source .venv/bin/activate &amp;&amp; pytest tests/python/global_store tests/python/test_transport.py</code>
+  passed: 353 tests.</li>
+<li><code>source .venv/bin/activate &amp;&amp; python -m grpc_tools.protoc -I proto --python_out=proto/gen/python --grpc_python_out=proto/gen/python --pyi_out=proto/gen/python proto/tensorcast/common/v1/common.proto</code>
+  passed after the official Buf remote generation path returned unavailable.</li>
+<li><code>source .venv/bin/activate &amp;&amp; ruff check tensorcast/global_store tests/python/global_store/test_progressive_replication.py tests/python/global_store/test_replica_memory_codec.py</code>
+  passed.</li>
+<li><code>source .venv/bin/activate &amp;&amp; ruff format --check tensorcast/global_store tests/python/global_store/test_progressive_replication.py tests/python/global_store/test_replica_memory_codec.py</code>
+  passed.</li>
+<li><code>source .venv/bin/activate &amp;&amp; ruff check tensorcast/global_store tests/python/global_store/test_progressive_replication.py tests/python/global_store/test_replica_memory_codec.py tests/python/test_transport.py</code>
+  passed.</li>
+<li><code>source .venv/bin/activate &amp;&amp; ruff format --check tensorcast/global_store tests/python/global_store/test_progressive_replication.py tests/python/global_store/test_replica_memory_codec.py tests/python/test_transport.py</code>
+  passed.</li>
+<li><code>bazel build //core/store:global_store_client //daemon:target_materialization_service_lib --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel test //daemon:materialize_into_target_validation_test --test_env=TENSORCAST_CUDA_BACKEND=fake --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel test //proto/... --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>git diff --check</code> passed.</li>
+</ul>
+<h2 id="2026-05-15-deep-review-hardening-pass">2026-05-15 Deep Review Hardening Pass<a class="headerlink" href="#2026-05-15-deep-review-hardening-pass" title="Permanent link">&para;</a></h2>
+<p>Completed:</p>
+<ul>
+<li>Rejected progressive coverage reports when Global Store progressive
+  replication is disabled, while keeping disabled source claims as cheap
+  no-source responses.</li>
+<li>Required explicit progressive visibility state and export state at the RPC
+  boundary. The handler no longer infers verified/exportable state from byte
+  counts when enum fields are unspecified.</li>
+<li>Capped client-supplied coverage and assignment deadlines by the configured
+  Global Store TTLs so request budgets cannot extend source visibility or keep
+  progressive counters held beyond policy.</li>
+<li>Made same-epoch coverage report retries idempotent only for exact replayed
+  content, and made <code>daemon_id</code>, <code>worker_id</code>, and <code>source_domain</code> immutable for
+  an existing coverage row.</li>
+<li>Changed invalid <code>source_domain_policy</code> values to fail closed before candidate
+  scanning instead of behaving like an implicit allow mode.</li>
+<li>Added a claim-path identity index covering the hot progressive candidate
+  predicates used by <code>find_progressive_source</code>.</li>
+<li>Changed the daemon byte-prefix coverage order marker to a SHA-256 digest and
+  changed target request fingerprints to length-prefixed binary fields so
+  binary selection/layout hashes cannot collide through delimiter ambiguity.</li>
+<li>Added terminal progressive coverage reporting for completed target
+  publications. Target publication records now preserve grouped coverage
+  identity, and the publish path reports coverage only for canonical full
+  byte-space publications after ordinary registration and state-sync barrier
+  success.</li>
+</ul>
+<p>Validation and profiling run:</p>
+<ul>
+<li><code>source .venv/bin/activate &amp;&amp; pytest tests/python/global_store/test_progressive_replication.py -q</code>
+  passed: 20 tests.</li>
+<li><code>source .venv/bin/activate &amp;&amp; ruff check tensorcast/global_store/services/progressive_service.py tensorcast/global_store/rpc/progressive_rpc_handler.py tests/python/global_store/test_progressive_replication.py</code>
+  passed.</li>
+<li><code>source .venv/bin/activate &amp;&amp; ruff format --check tensorcast/global_store/services/progressive_service.py tensorcast/global_store/rpc/progressive_rpc_handler.py tests/python/global_store/test_progressive_replication.py</code>
+  passed.</li>
+<li><code>source .venv/bin/activate &amp;&amp; pytest tests/python/global_store/test_progressive_replication.py tests/python/global_store/test_services.py tests/python/global_store/test_grpc_service.py -q</code>
+  passed: 133 tests.</li>
+<li><code>bazel test //proto/... --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel build //daemon:replica_materialization_service_lib --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel test //daemon:materialize_into_target_validation_test --test_env=TENSORCAST_CUDA_BACKEND=fake --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel test //daemon:grpc_service_impl_publish_target_replica_test --test_env=TENSORCAST_CUDA_BACKEND=fake --test_output=errors --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>bazel build //daemon:tensorcast_daemon --noshow_progress --noshow_loading_progress --ui_event_filters=warning,error</code>
+  passed.</li>
+<li><code>git diff --check</code> passed.</li>
+<li>In-memory DuckDB microbenchmark with 512 coverage rows and 256
+  claim/complete cycles: report mean/p95 <code>4.96/5.70 ms</code>, claim mean/p95
+  <code>17.60/19.90 ms</code>, complete mean/p95 <code>3.78/3.92 ms</code>. This keeps the expected
+  control-plane budget acceptable for coalesced byte-prefix segments, but
+  confirms the design should not report at chunk, tensor, or CUDA-event
+  granularity.</li>
+</ul>
+<h1 id="phases-and-milestones">Phases And Milestones<a class="headerlink" href="#phases-and-milestones" title="Permanent link">&para;</a></h1>
+<ul>
+<li>[ ] Phase 0: Dependency and baseline closure</li>
+<li>[x] Milestone 0.1: Confirm <code>0117</code> staged publish barrier and
+        <code>GroupVersionSet</code> part-selection identity are stable before grouped
+        serving benchmark lanes enter rollout.</li>
+<li>[x] Milestone 0.2: Re-run the <code>0117</code> drift audit and require no active
+        <code>tp_version</code>, <code>#tcg:</code>, operation-id group metadata, or relaxed
+        transport-group artifact/view semantics in code, tests, runners, proto,
+        or schema. Rechecked on 2026-05-15 with repository search excluding
+        docs.</li>
+<li>[ ] Milestone 0.3: Record old fanout baseline for source HHI, top-1 share,
+        p95/p99 apply latency, timeout count, and grouped transport ratio.</li>
+<li>[x] Milestone 0.4: Confirm v1.0 is byte-prefix only. Tensor-prefix waits for
+        canonical tensor order hash owners and tests.</li>
+<li>
+<p>[x] Milestone 0.5: Freeze the progressive control-plane budget:
+        coverage reports are coalesced by time/byte delta, source claims are
+        indexed bounded atomic claims, target loops do not poll while reads are
+        in flight, and no Global Store operation is proportional to copy chunks,
+        RDMA completions, tensor count, or bytes inside an assigned segment.</p>
+</li>
+<li>
+<p>[x] Phase 1: Schema, proto, and config foundation</p>
+</li>
+<li>[x] Milestone 1.1: Add <code>replica_progress_coverage</code> to
+        <code>tensorcast/schema.sql</code> with one active row per materialization attempt,
+        replica, and source export generation.</li>
+<li>[x] Milestone 1.2: Add <code>progressive_source_assignments</code> to
+        <code>tensorcast/schema.sql</code>, plus <code>progressive_source_counters</code> for source
+        cap admission separate from ordinary <code>replica_counters</code>.</li>
+<li>[x] Milestone 1.3: Add schema smoke tests for coverage identity fields,
+        active-row constraints, assignment idempotency, indexes, and insert
+        constraints.</li>
+<li>[x] Milestone 1.4: Add proto messages for coverage identity, coverage
+        reporting, atomic source claim, assignment completion, retirement, and
+        failure.</li>
+<li>[x] Milestone 1.4a: Include <code>group_version_set_id</code> and <code>group_part_id</code> in
+        coverage identity. They are required for grouped flows and empty only for
+        ungrouped single-artifact fanout.</li>
+<li>[x] Milestone 1.5: Add Global Store and daemon config proto fields for
+        progressive enablement, TTLs, report cadence, source caps, and
+        cross-domain seed policy, including minimum/maximum assignment bytes,
+        maximum assignments per materialization, candidate scan limit, claim
+        QPS cap per daemon, and cleanup batch size.</li>
+<li>
+<p>[x] Milestone 1.6: Run <code>bash tools/build_proto_python.sh</code>.
+        Attempted on 2026-05-15; blocked by Buf remote plugin server
+        unavailability. Local <code>grpc_tools.protoc</code> fallback succeeded.</p>
+</li>
+<li>
+<p>[x] Phase 2: Global Store progressive coverage observation</p>
+</li>
+<li>[x] Milestone 2.1: Implement <code>ProgressiveCoverageRepository</code>.</li>
+<li>[x] Milestone 2.2: Implement <code>report_progressive_coverage</code> with monotonic
+        coverage epoch and verified-prefix validation.</li>
+<li>[x] Milestone 2.3: Define verified prefix as completed writes plus
+        sink-side commit plus known verification state.
+        The Global Store service rejects reports where verified units/bytes
+        exceed completed units/bytes. Daemon terminal reports enforce known
+        verification before reporting when <code>verify_before_report=true</code>;
+        non-terminal daemon publication still requires a separate
+        progressive-only remote-export contract.</li>
+<li>[x] Milestone 2.4: Keep progressive coverage out of ordinary replica source
+        selection and ordinary availability.</li>
+<li>[x] Milestone 2.5: Implement failure, retirement, and expiration cleanup.</li>
+<li>[x] Milestone 2.6: Implement report coalescing and throttling. The daemon
+        and Global Store accept terminal transitions, but non-terminal coverage
+        updates must satisfy configured byte-delta or time-interval thresholds.
+        Export-state transitions always bypass throttling.</li>
+<li>
+<p>[x] Milestone 2.7: Add metrics for throttled reports, report QPS, DB
+        conflict retries, and cleanup batch sizes.</p>
+</li>
+<li>
+<p>[x] Phase 3: Daemon coverage reporting</p>
+</li>
+<li>[x] Milestone 3.1: Add materialization attempt identity and coverage identity
+        construction in daemon/core materialization paths. Current support is
+        terminal canonical byte-prefix coverage for completed materializations.</li>
+<li>[x] Milestone 3.2: Report verified byte-prefix coverage after commit and
+        verification. The daemon skips reports when verification is not known
+        and <code>verify_before_report=true</code>.</li>
+<li>[x] Milestone 3.3: Stop reporting coverage on source export generation
+        changes or daemon shutdown. Reports are one-shot terminal reports and
+        are skipped during daemon shutdown or when no current remote export
+        generation is active.</li>
+<li>
+<p>[x] Milestone 3.4: Ensure <code>ReportProgressiveCoverage(completed=true)</code> does
+        not publish ordinary replica availability. The RPC path is isolated;
+        ordinary availability still comes only from the existing full-replica
+        registration path.</p>
+</li>
+<li>
+<p>[x] Phase 4: Progressive assignment claim</p>
+</li>
+<li>[x] Milestone 4.1: Add C++ Global Store client wrappers for progressive
+        report/claim/complete/failure RPCs.</li>
+<li>[x] Milestone 4.2: Implement atomic <code>find_progressive_source</code> claim that
+        creates or replays a durable assignment. Target reads accept only active
+        <code>claimed</code>/<code>reading</code> assignments and do not treat terminal replay states as
+        readable segments. Replays are accepted only when the request fingerprint
+        also matches the same coverage identity, requester, materialization
+        attempt, and cursor.</li>
+<li>[x] Milestone 4.3: Enforce source heartbeat, current exportability,
+        <code>artifact_replicas.export_generation</code>, source caps, and source-domain
+        policy at assignment time.</li>
+<li>[x] Milestone 4.4: Maintain progressive outgoing caps separately from
+        ordinary complete-replica transport counters through
+        <code>progressive_source_counters</code>.</li>
+<li>[x] Milestone 4.5: Implement assignment timeout, completion, failure, and
+        expiration cleanup. Coverage expiration also cancels still-active
+        assignments and releases progressive counters.</li>
+<li>[x] Milestone 4.6: Bound source claim scans by config and indexes. The
+        progressive path must not add another global dispatcher, reuse
+        <code>_dispatch_loop_lock</code>, or scan all coverage rows under request load.</li>
+<li>
+<p>[x] Milestone 4.7: Enforce minimum assignment bytes unless returning the
+        terminal tail segment, so tiny-segment workloads cannot create a Global
+        Store write storm.</p>
+</li>
+<li>
+<p>[x] Phase 5: Target progressive read loop</p>
+</li>
+<li>[x] Milestone 5.1: Add target loop that requests the next uncovered prefix,
+        reads only assigned safe coverage, completes the assignment, verifies it,
+        and re-queries.</li>
+<li>[x] Milestone 5.2: Ensure the loop refuses identity changes across artifact,
+        byte space, selection hash, layout hash, hash-space, order hash,
+        <code>group_version_set_id</code>, and <code>group_part_id</code>.</li>
+<li>[x] Milestone 5.3: Publish ordinary replica availability only through the
+        existing full materialization path.</li>
+<li>
+<p>[x] Milestone 5.4: Invalidate or retire source coverage on failed source
+        read, stale heartbeat, export generation change, and visibility-fence
+        violation.</p>
+</li>
+<li>
+<p>[x] Phase 6: Failure and topology policy</p>
+</li>
+<li>[x] Milestone 6.1: Implement cross-domain TCP seed smart skipping.</li>
+<li>[x] Milestone 6.2: Source domain must come from typed daemon/worker topology
+        metadata or config, not request-provided free-form strings. Daemon
+        terminal coverage reports and target claims now derive source domain
+        from worker topology (<code>node_id</code>, falling back to <code>daemon_id</code>), and Global
+        Store validates reported/requested domains against the worker directory
+        and rechecks current source directory state during assignment.</li>
+<li>
+<p>[x] Milestone 6.3: Add diagnostics for skipped source reasons and recovery
+        path.</p>
+</li>
+<li>
+<p>[ ] Phase 7: Benchmarks and rollout</p>
+</li>
+<li>[x] Milestone 7.1: Enable progressive coverage reporting in observation-only
+        benchmark lanes.</li>
+<li>[x] Milestone 7.2: Enable progressive assignment claim for canonical full
+        byte-prefix WeightPublisher fanout.</li>
+<li>[ ] Milestone 7.3: Compare source HHI, top-1 share, p95/p99 latency, timeout
+        count, correctness failures, and Global Store control-plane telemetry
+        against complete-replica transport.</li>
+<li>
+<p>[ ] Milestone 7.4: Enable grouped serving prefetch/staged publication lanes
+        only after <code>0117</code> publish-barrier gates pass.</p>
+</li>
+<li>
+<p>[ ] Phase 8: Cleanup and documentation</p>
+</li>
+<li>[ ] Milestone 8.1: Update benchmark reports with progressive on/off results.
+        Report tooling now emits baseline/progressive/failure-injection lane
+        summaries; concrete result tables still require repeated multi-host
+        runs.</li>
+<li>[x] Milestone 8.2: Update Global Store and daemon READMEs when operator
+        behavior becomes visible.</li>
+<li>[ ] Milestone 8.3: Keep progressive disabled by default until acceptance
+        gates pass in repeated multi-host runs.</li>
+<li>[x] Milestone 8.4: Remove 0118 compatibility transport duplication and keep
+        replica/progressive memory metadata on the canonical
+        <code>MemoryInfo.transport</code> path.</li>
+</ul>
+<h1 id="test-plan">Test Plan<a class="headerlink" href="#test-plan" title="Permanent link">&para;</a></h1>
+<p>Python tests:</p>
+<ul>
+<li><code>source .venv/bin/activate &amp;&amp; pytest tests/python/global_store/test_services.py</code></li>
+<li><code>source .venv/bin/activate &amp;&amp; pytest tests/python/global_store/test_grpc_service.py</code></li>
+<li>Add new tests under <code>tests/python/global_store/</code> for:</li>
+<li>coverage identity exact-match source eligibility;</li>
+<li>progressive coverage ignored by ordinary source selection;</li>
+<li>monotonic coverage epoch and prefix growth;</li>
+<li>one active source-eligible coverage row per materialization attempt,
+    replica, and source export generation;</li>
+<li>atomic assignment claim and idempotent replay by request fingerprint;</li>
+<li>assignment timeout and completion cleanup;</li>
+<li>export generation invalidation;</li>
+<li>assignment-time export generation mismatch rejection;</li>
+<li>heartbeat stale filtering;</li>
+<li>progressive source cap enforcement independent from ordinary transport caps;</li>
+<li>progressive counter increment/decrement exactly once across success,
+    failure, expiration, cancellation, and replay;</li>
+<li>candidate scan limit prevents broad coverage-table scans under request load;</li>
+<li>non-terminal coverage reports are throttled until byte-delta or
+    time-interval thresholds are met;</li>
+<li>cross-domain TCP seed skipping.</li>
+</ul>
+<p>C++ tests:</p>
+<ul>
+<li><code>bazel test //core/store:store_engine_test --test_env=TENSORCAST_CUDA_BACKEND=fake</code></li>
+<li>Add or extend daemon/core tests for:</li>
+<li>coverage identity construction;</li>
+<li>daemon report cadence and minimum delta;</li>
+<li>target loop segment bounds;</li>
+<li>identity mismatch fail-fast;</li>
+<li>verified prefix report requires completed writes, sink commit, and known
+    verification state;</li>
+<li>source read failure and retry.</li>
+</ul>
+<p>Proto/schema checks:</p>
+<ul>
+<li><code>bash tools/build_proto_python.sh</code></li>
+<li><code>bazel test //proto/... --test_output=streamed</code></li>
+</ul>
+<p>Benchmarks:</p>
+<ul>
+<li>replay WeightPublisher fanout matrix with progressive disabled and enabled;</li>
+<li>include at least one cross-domain seed case;</li>
+<li>compare source top-1 share, HHI, p95/p99 publish-to-apply, timeout count, and
+  transport outcome distribution;</li>
+<li>record Global Store control-plane telemetry and progressive metrics:
+  report QPS, throttled reports, assignment claim latency, claim candidate
+  rows, DB conflict retries, active progressive counters, executor queue depth,
+  and inflight requests;</li>
+<li>assert progressive control writes scale with coverage-report cadence and
+  assignment count, not copy chunks, RDMA completions, tensor count, or bytes
+  inside assigned segments;</li>
+<li>run the failure-injection lane with progressive enabled and tune the selected
+  receiver/delay so an in-progress source fails mid-read.</li>
+</ul>
+<p>Cross-document consistency tests:</p>
+<ul>
+<li>after a group transaction freezes a key target, all parts continue using the
+  frozen <code>version_set_id</code> even if the key is swapped before later members join;</li>
+<li>after a progressive source export generation bump, an old coverage assignment
+  fails instead of rebinding to the same source's new generation.</li>
+</ul>
+<h1 id="acceptance-gates">Acceptance Gates<a class="headerlink" href="#acceptance-gates" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Progressive coverage is never returned by ordinary complete-replica selection.</li>
+<li>Progressive assignments are durable atomic claims and never cross verified
+  prefix boundaries.</li>
+<li>Coverage has one active source-eligible row per materialization attempt,
+  replica, and source export generation.</li>
+<li>Target loop fails fast on artifact, byte-space, selection-hash, layout-hash,
+  hash-space, or order-hash mismatch.</li>
+<li>Source export generation changes retire older coverage and make old
+  assignments fail rather than silently rebinding to the new generation.</li>
+<li>Assignment-time eligibility rechecks heartbeat, exportability, ordinary
+  replica export generation, source cap, and typed source domain.</li>
+<li>Sources used by progressive assignment obey the shared source visibility fence.</li>
+<li>V1.0 supports byte-prefix only.</li>
+<li>Source failure mid-read recovers from another eligible source or returns a
+  clear unavailable error.</li>
+<li>Slow cross-domain TCP seed sources are skipped by default.</li>
+<li>Progressive fanout improves at least one high-fanout concentration metric
+  without increasing correctness failures or timeout rate.</li>
+<li>Coverage reporting is coalesced; non-terminal report QPS is bounded by
+  configured byte-delta and interval thresholds.</li>
+<li>Source claims are indexed bounded atomic claims using progressive counters,
+  not a second global dispatcher or ordinary <code>replica_counters</code>.</li>
+<li>Progressive dissemination introduces no Global Store writes proportional to
+  copy chunks, RDMA completions, tensor count, CUDA events, or bytes inside an
+  assigned segment.</li>
+</ul>
+<h1 id="rollout-and-backout">Rollout And Backout<a class="headerlink" href="#rollout-and-backout" title="Permanent link">&para;</a></h1>
+<p>Rollout:</p>
+<ol>
+<li>Land schema/proto/config with feature flags default off.</li>
+<li>Enable daemon coverage reporting in observation-only tests.</li>
+<li>Enable Global Store assignment claim in fake-CUDA integration tests.</li>
+<li>Enable target loop in benchmark-only lanes.</li>
+<li>Enable WeightPublisher canonical full byte-prefix artifact fanout lanes.</li>
+<li>Enable grouped serving prefetch/staged publication lanes after <code>0117</code>
+   publish-barrier gates pass.</li>
+<li>Promote after repeated correctness and concentration gates pass.</li>
+</ol>
+<p>Backout:</p>
+<ul>
+<li>disable progressive source eligibility in config;</li>
+<li>disable daemon coverage reporting if needed;</li>
+<li>keep additive schema/proto fields;</li>
+<li>expire or retire coverage rows and assignments;</li>
+<li>route materialization through ordinary complete-replica transport.</li>
+</ul>
+<h1 id="risks-and-tracking">Risks And Tracking<a class="headerlink" href="#risks-and-tracking" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Incorrect prefix identity could expose corrupt data.
+  Mitigation: v1 prefix-only, strict identity fields, verified-before-report.</li>
+<li>Coverage rows can become hot under large fanout.
+  Mitigation: report deltas, interval throttling, TTLs, bounded indexes, and
+  source caps.</li>
+<li>Assignment claims can turn Global Store into a segment scheduler bottleneck.
+  Mitigation: minimum assignment bytes, candidate scan limits, claim QPS caps,
+  progressive source counters, and stress gates that fail rollout when
+  control-plane saturation appears before data-path saturation.</li>
+<li>Progressive source caps can underutilize bandwidth.
+  Mitigation: start conservative, then tune with benchmark evidence.</li>
+<li>Cross-domain policy can accidentally serialize local fanout behind TCP seed.
+  Mitigation: smart skipping default and explicit skipped-source diagnostics.</li>
+</ul>
+<h1 id="owner-checklist">Owner Checklist<a class="headerlink" href="#owner-checklist" title="Permanent link">&para;</a></h1>
+<ul>
+<li>[x] <code>schema.sql</code> updated.</li>
+<li>[x] Schema smoke tests updated.</li>
+<li>[x] Global Store proto updated; generated Python stubs regenerated with local
+      <code>grpc_tools.protoc</code> fallback because Buf remote plugin was unavailable.</li>
+<li>[x] daemon proto updated; generated Python stubs regenerated with local
+      <code>grpc_tools.protoc</code> fallback because Buf remote plugin was unavailable.</li>
+<li>[x] Global Store and daemon config protos updated.</li>
+<li>[x] Progressive coverage repository/service added.</li>
+<li>[x] Progressive assignment repository/service added.</li>
+<li>[x] Python Global Store tests added.</li>
+<li>[x] C++ daemon/core tests added.</li>
+<li>[x] WeightPublisher progressive benchmark lane added.</li>
+<li>[x] Failure-injection benchmark lane added.</li>
+<li>[x] Public/operator docs updated when behavior becomes user-visible.</li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

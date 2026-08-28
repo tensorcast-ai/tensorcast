@@ -1,0 +1,3062 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0110-artifact-representation-contract-and-transform-unification/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Artifact Representation Semantic Core and Materialization Transform Unification - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Artifact Representation Semantic Core and Materialization Transform Unification
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p>Introduce one common semantic core for representation-changing tensor work inside
+TensorCast common runtime.</p>
+<ul>
+<li><code>Artifact</code> remains the only persisted public representation object.</li>
+<li><code>ArtifactSelection</code> remains the only public selection contract.</li>
+<li>ByteSpace semantics remain the only coordinate-system truth.</li>
+<li>a new <code>RepresentationTransformContract</code> family becomes the common semantic
+  truth for:</li>
+<li>mapped binding,</li>
+<li>mapped-target materialization,</li>
+<li>ordinary tensor-aware materialization lowering,</li>
+<li>source-bind startup lowering,</li>
+<li>source-to-serving builder lowering.</li>
+<li>executor choice remains downstream of semantic truth and source binding.</li>
+</ul>
+<p>This design intentionally narrows the first hard cut to the semantic core.</p>
+<ul>
+<li>It removes mapped-only semantic islands and executor-local semantic recovery.</li>
+<li>It does <strong>not</strong> make phase-1 common runtime own group-scoped TP4&lt;-&gt;TP8 reshard
+  execution.</li>
+<li>It does <strong>not</strong> make phase-1 own communicator or routing-aware participant
+  planning.</li>
+<li>It does <strong>not</strong> make phase-1 standardize durable artifact-catalog metadata for
+  every future representation family.</li>
+</ul>
+<p>Those follow-on concerns remain part of the long-term direction, but they should
+consume the semantic core defined here instead of being folded into the first
+contract cut.</p>
+<h1 id="execution-tracking">Execution Tracking<a class="headerlink" href="#execution-tracking" title="Permanent link">&para;</a></h1>
+<p>The semantic-core hard cut defined here is already landed in repo-local runtime.</p>
+<ul>
+<li>the deleted <code>0110</code> companion plan is no longer an active execution note;</li>
+<li>remaining producer-boundary convergence, topology-scoped follow-on extraction,
+  and Example TP Model closure dependencies now live in the <code>0113</code> design/plan pair;</li>
+<li>no future work should reintroduce executor-local semantic truth or a second
+  integration-private semantic stack under the banner of "finishing 0110".</li>
+</ul>
+<h1 id="target-state-alignment-with-0121">Target-State Alignment With <code>0121</code><a class="headerlink" href="#target-state-alignment-with-0121" title="Permanent link">&para;</a></h1>
+<p><code>0110</code> remains the representation semantic core. <code>0121</code> consumes it through
+<code>RepresentationAdmissionPlan</code>.</p>
+<p>The target interpretation is:</p>
+<ul>
+<li>representation compatibility is admitted before execution lowering, not
+  rediscovered inside TensorDict, binding, runtime, or TP paths;</li>
+<li>P2P and collective transport move compatible bytes only and must not hide
+  representation conversion;</li>
+<li>any required transform, reshaping, runtime-only tensor handling, or
+  topology-sensitive representation work must appear in the realization plan
+  before bytes move.</li>
+</ul>
+<pre class="mermaid"><code>flowchart LR
+  A["ArtifactSelection&lt;br&gt;selected artifact semantic object"] --&gt; B["Selected Artifact ByteSpaceRef&lt;br&gt;canonical or view"]
+  B --&gt; C["RepresentationTransformContract&lt;br&gt;normalized source to target tensor semantics"]
+  C --&gt; D["ResolvedSourceBinding&lt;br&gt;disk or p2p or local replica"]
+  D --&gt; E["RepresentationWorkPlan&lt;br&gt;executor-neutral lowering"]
+  E --&gt; F["TensorBatchedLocalExecutor"]
+  E --&gt; G["OwnerFileCollectiveExecutor"]
+  E --&gt; H["GenericByteRangeExecutor"]
+  C --&gt; I["Builder Or Publication Follow-on&lt;br&gt;source to serving compile or register"]
+  I --&gt; J["PublishedModelVersion&lt;br&gt;externally visible lineage from 0105"]</code></pre>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Keep <code>Artifact</code> as the only persisted public representation object.</li>
+<li>Keep <code>ArtifactSelection</code> as the only public selection contract.</li>
+<li>Keep ByteSpace semantics explicit and unchanged in role.</li>
+<li>Introduce one common semantic contract for representation-changing tensor work.</li>
+<li>Replace <code>MappedCopyContract</code> as the long-term shared semantic family.</li>
+<li>Make <code>0108</code> strategy lowering operate on one executor-neutral semantic family.</li>
+<li>Make <code>0109</code> owner-file collective consume shared lowering output rather than a
+  bespoke semantic recovery path.</li>
+<li>Define tensor-level semantic normalization for copy, slice, concat, scalar
+  fill-from-source, and constant fill forms.</li>
+<li>Define the boundary between:</li>
+<li>semantic transform truth,</li>
+<li>publication lineage,</li>
+<li>execution-time topology and participant planning.</li>
+<li>Preserve a clean path for future source-to-serving builder work and future
+  topology-scoped reshard execution without forcing those scopes into phase 1.</li>
+<li>Preserve the distinction between:</li>
+<li>selection identity,</li>
+<li>ByteSpace identity,</li>
+<li>representation identity,</li>
+<li>artifact content identity.</li>
+</ul>
+<h2 id="non-goals">Non-Goals<a class="headerlink" href="#non-goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Introduce a second public checkpoint shard object beside <code>Artifact</code>.</li>
+<li>Replace <code>ArtifactSelection</code> with a second public selector model.</li>
+<li>Treat representation identity as a substitute for <code>selection_hash</code> or
+  <code>logical_layout_hash</code>.</li>
+<li>Make executor-private ownership, batching, rank assignment, or routing
+  decisions part of semantic truth.</li>
+<li>Define the physical topology or communicator plan for future group-scoped
+  reshard execution.</li>
+<li>Define a durable artifact-catalog schema for all future representation
+  metadata in this phase.</li>
+<li>Collapse view transforms and compute transforms into one overloaded concept.</li>
+<li>Require one universal executor for all materialization requests.</li>
+<li>Force every runtime to consume raw source artifacts directly.</li>
+<li>Define the complete serving-publication contract for <code>vllm</code>; this
+  design only defines the TensorCast-side semantic core that later builder and
+  publication work will consume.</li>
+</ul>
+<h1 id="prior-constraints-reviewed">Prior Constraints Reviewed<a class="headerlink" href="#prior-constraints-reviewed" title="Permanent link">&para;</a></h1>
+<h2 id="0055-programmable-framework"><code>0055</code> Programmable framework<a class="headerlink" href="#0055-programmable-framework" title="Permanent link">&para;</a></h2>
+<p>Kept:</p>
+<ul>
+<li><code>TransformSpec</code> remains the public control-plane request for compute
+  transforms.</li>
+<li>compute transforms must still execute at a node-local safety boundary rather
+  than a central controller direct data-plane RPC.</li>
+</ul>
+<p>Revised:</p>
+<ul>
+<li><code>0055</code> stops at the request shape.</li>
+<li>this design adds the missing common resolved semantic layer below
+  <code>TransformSpec</code> and above executor choice.</li>
+<li>physical topology-aware reshard execution remains a later specialized executor
+  concern, not part of the phase-1 semantic core.</li>
+</ul>
+<h2 id="0078-selection-first-retrieval"><code>0078</code> Selection-first retrieval<a class="headerlink" href="#0078-selection-first-retrieval" title="Permanent link">&para;</a></h2>
+<p>Kept:</p>
+<ul>
+<li><code>ArtifactSelection</code> remains the only public selection contract.</li>
+<li>selection identity still answers which semantic object was selected.</li>
+</ul>
+<p>Revised:</p>
+<ul>
+<li>selection no longer needs to carry representation-changing semantics
+  indirectly through target-layout or integration-private side channels.</li>
+<li>representation change resolves after selection and before strategy lowering.</li>
+</ul>
+<h2 id="0084-binding-unified-model"><code>0084</code> Binding unified model<a class="headerlink" href="#0084-binding-unified-model" title="Permanent link">&para;</a></h2>
+<p>Kept:</p>
+<ul>
+<li>the artifact plane, binding plane, and assembly plane remain distinct.</li>
+<li><code>Binding</code> continues to represent a stable local target location.</li>
+<li>artifact-backed and local-only sealed values remain different categories.</li>
+</ul>
+<p>Revised:</p>
+<ul>
+<li><code>mapping=copy_plan</code> is no longer treated as a mapped-binding-only semantic
+  world.</li>
+<li>binding mapping becomes one producer into the common representation contract
+  family.</li>
+</ul>
+<h2 id="0085-and-0105-assembly-and-closeout-lineage"><code>0085</code> and <code>0105</code> assembly and closeout lineage<a class="headerlink" href="#0085-and-0105-assembly-and-closeout-lineage" title="Permanent link">&para;</a></h2>
+<p>Kept:</p>
+<ul>
+<li><code>PublishedModelVersion</code> remains the right externally visible lineage carrier.</li>
+<li>closeout truth remains separate from runtime transform semantics.</li>
+</ul>
+<p>Revised:</p>
+<ul>
+<li>this design does not try to replace closeout lineage with runtime materialize
+  contracts.</li>
+<li>source-to-serving builder and publication follow-on work should reuse the
+  semantic core defined here, then surface externally visible results through
+  <code>0105</code> closeout and <code>PublishedModelVersion</code>.</li>
+<li>any builder- or framework-versioned publication identity above the semantic
+  core must be introduced as a separate <code>0111</code>-owned digest rather than by
+  widening <code>representation_contract_hash</code>.</li>
+</ul>
+<h2 id="0088-and-0092-artifact-profiles-and-truth-layering"><code>0088</code> and <code>0092</code> artifact profiles and truth layering<a class="headerlink" href="#0088-and-0092-artifact-profiles-and-truth-layering" title="Permanent link">&para;</a></h2>
+<p>Kept:</p>
+<ul>
+<li>artifact profiles remain the repository-wide way to express persisted artifact
+  families.</li>
+<li>recoverable truth and volatile execution planning remain different categories.</li>
+</ul>
+<p>Revised:</p>
+<ul>
+<li>phase 1 defines internal semantic contracts first and does not yet standardize
+  new durable artifact-catalog metadata for every representation family.</li>
+<li>any later promotion of representation metadata into durable artifact truth
+  must come with its own schema and recovery design.</li>
+</ul>
+<h2 id="0108-tensor-aware-materialization-strategy-plane"><code>0108</code> Tensor-aware materialization strategy plane<a class="headerlink" href="#0108-tensor-aware-materialization-strategy-plane" title="Permanent link">&para;</a></h2>
+<p>Kept:</p>
+<ul>
+<li>the layered split between semantic truth, source acquisition, strategy
+  selection, and executor lowering.</li>
+<li>mixed execution remains the preferred execution model.</li>
+<li>executor-private planning artifacts remain executor-private.</li>
+</ul>
+<p>Revised:</p>
+<ul>
+<li><code>MappedCopyContract</code> is no longer the long-term target semantic family.</li>
+<li>the common runtime should consume a representation-transform contract that
+  applies to ordinary loads, mapped-target, binding mapping, and builder-side
+  lowering.</li>
+<li>topology-scoped group execution remains follow-on work above the same semantic
+  seam rather than part of the first <code>0108</code> convergence wave.</li>
+</ul>
+<h2 id="0109-batched-owner-file-collective-executor"><code>0109</code> Batched owner-file collective executor<a class="headerlink" href="#0109-batched-owner-file-collective-executor" title="Permanent link">&para;</a></h2>
+<p>Kept:</p>
+<ul>
+<li>owner-file collective remains one executor choice inside the strategy plane.</li>
+<li>file ownership remains execution strategy, not semantic truth.</li>
+</ul>
+<p>Revised:</p>
+<ul>
+<li>owner-file collective should no longer depend on a bespoke semantic recovery
+  path.</li>
+<li>it should consume the same common work items produced for the local tensor
+  executor and generic fallback.</li>
+<li>it is not the future topology-scoped reshard executor; that remains a
+  separate follow-on scope.</li>
+</ul>
+<h2 id="0058-communicator-topology-model"><code>0058</code> Communicator topology model<a class="headerlink" href="#0058-communicator-topology-model" title="Permanent link">&para;</a></h2>
+<p>Kept:</p>
+<ul>
+<li>topology reachability, routing, and transport execution are separate from
+  semantic transform intent.</li>
+</ul>
+<p>Revised:</p>
+<ul>
+<li>this design only carries logical topology assumptions that affect target
+  representation identity.</li>
+<li>physical topology mapping, route choice, and communicator orchestration remain
+  future execution-layer work that will consume this semantic core.</li>
+</ul>
+<h1 id="architecture-interfaces">Architecture &amp; Interfaces<a class="headerlink" href="#architecture-interfaces" title="Permanent link">&para;</a></h1>
+<h2 id="0-phase-boundary-and-ownership-split">0. Phase boundary and ownership split<a class="headerlink" href="#0-phase-boundary-and-ownership-split" title="Permanent link">&para;</a></h2>
+<p>This design draws three boundaries that must remain explicit.</p>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Canonical question answered</th>
+<th>Owner</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>semantic transform core</td>
+<td>how source bytes become target tensors or target layout</td>
+<td><code>0110</code></td>
+</tr>
+<tr>
+<td>publication lineage</td>
+<td>what externally visible source or serving result was published</td>
+<td><code>0105</code> / follow-on builder docs</td>
+</tr>
+<tr>
+<td>execution topology</td>
+<td>how the current node or rank group executes the transform</td>
+<td><code>0108</code> plus future topology-scoped executor design</td>
+</tr>
+</tbody>
+</table>
+<p>Repository rule:</p>
+<ul>
+<li>later layers may consume the semantic transform core,</li>
+<li>later layers must not redefine the semantic core in ad hoc local forms,</li>
+<li>and the semantic transform core must not absorb publication or communicator
+  topology responsibilities just because later layers depend on it.</li>
+</ul>
+<h2 id="1-relationship-to-artifactselection-and-bytespace">1. Relationship to <code>ArtifactSelection</code> and ByteSpace<a class="headerlink" href="#1-relationship-to-artifactselection-and-bytespace" title="Permanent link">&para;</a></h2>
+<h3 id="11-artifactselection-remains-unchanged-in-role">1.1 <code>ArtifactSelection</code> remains unchanged in role<a class="headerlink" href="#11-artifactselection-remains-unchanged-in-role" title="Permanent link">&para;</a></h3>
+<p><code>ArtifactSelection</code> still answers:</p>
+<ul>
+<li>which artifact id,</li>
+<li>which view identity,</li>
+<li>which subset identity.</li>
+</ul>
+<p>It does not answer:</p>
+<ul>
+<li>whether the target runtime expects TP4 or TP8 serving layout,</li>
+<li>how one fused checkpoint tensor becomes two runtime tensors,</li>
+<li>how a source artifact lowers into a serving artifact,</li>
+<li>or whether the result should later be published as a serving artifact.</li>
+</ul>
+<h3 id="12-bytespace-remains-explicit-coordinate-truth">1.2 ByteSpace remains explicit coordinate truth<a class="headerlink" href="#12-bytespace-remains-explicit-coordinate-truth" title="Permanent link">&para;</a></h3>
+<p>ByteSpace still answers where byte offsets are interpreted:</p>
+<ul>
+<li>canonical ByteSpace,</li>
+<li>view ByteSpace,</li>
+<li>or a future persisted representation artifact's canonical ByteSpace.</li>
+</ul>
+<p>The new contract must always name its input ByteSpace explicitly.</p>
+<p>Normative rules:</p>
+<ol>
+<li>representation identity must not replace ByteSpace identity,</li>
+<li>byte ranges are only meaningful relative to an explicit ByteSpace,</li>
+<li>a published representation artifact gets its own canonical ByteSpace and
+   ordinary artifact identity,</li>
+<li><code>representation_contract_hash</code> is not a ByteSpace identifier.</li>
+</ol>
+<h3 id="13-durable-artifact-metadata-is-follow-on-not-phase-1-scope">1.3 Durable artifact metadata is follow-on, not phase-1 scope<a class="headerlink" href="#13-durable-artifact-metadata-is-follow-on-not-phase-1-scope" title="Permanent link">&para;</a></h3>
+<p><code>Artifact</code> remains the only persisted public representation object.</p>
+<p>However, this phase only defines the internal semantic contract family and the
+builder or publication boundary around it.</p>
+<p>Required interpretation:</p>
+<ul>
+<li>persisted semantic objects still remain artifacts,</li>
+<li>phase-1 semantic contracts may describe target representation metadata without
+  forcing an immediate artifact-catalog schema cut,</li>
+<li>if a later design promotes any representation field into durable artifact or
+  profile truth, that later design must specify schema, recovery, and
+  compatibility explicitly.</li>
+</ul>
+<h2 id="2-new-common-semantic-family">2. New common semantic family<a class="headerlink" href="#2-new-common-semantic-family" title="Permanent link">&para;</a></h2>
+<h3 id="21-representationdescriptor">2.1 <code>RepresentationDescriptor</code><a class="headerlink" href="#21-representationdescriptor" title="Permanent link">&para;</a></h3>
+<p><code>RepresentationDescriptor</code> describes the target representation metadata that an
+ephemeral realization or future publishable artifact produces or expects.</p>
+<p>It answers:</p>
+<ul>
+<li>representation family,</li>
+<li>target tensor schema,</li>
+<li>logical topology assumptions when they affect target schema,</li>
+<li>representation identity.</li>
+</ul>
+<p>Representative fields:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="k">struct</span><span class="w"> </span><span class="nc">RepresentationDescriptor</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">family</span><span class="p">;</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">tensor_schema_hash</span><span class="p">;</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">representation_contract_hash</span><span class="p">;</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">TopologyContract</span><span class="o">&gt;</span><span class="w"> </span><span class="n">logical_topology</span><span class="p">;</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">  </span><span class="n">RealizationKind</span><span class="w"> </span><span class="n">realization_kind</span><span class="p">;</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="p">};</span>
+</span></code></pre></div>
+<p>Semantics:</p>
+<ul>
+<li><code>family</code> names the representation class such as source, runtime_serving, or
+  builder_intermediate.</li>
+<li><code>tensor_schema_hash</code> captures destination tensor names, dtype, shape, and
+  stride after semantic normalization.</li>
+<li><code>representation_contract_hash</code> is the canonical digest of normalized
+  representation-transform inputs and any pipeline-family assumptions that
+  affect resulting target bytes or tensor schema.</li>
+<li><code>representation_contract_hash</code> is owned entirely by this semantic layer. A
+  later builder or publication design may consume it and may define an
+  additional builder-identity digest above it, but must not silently redefine
+  or widen it with framework-adapter or publication-lineage fields.</li>
+<li><code>logical_topology</code> captures logical representation assumptions such as
+  tensor-parallel, pipeline-parallel, or expert-parallel world sizes and a
+  topology-family version when relevant.</li>
+<li><code>logical_topology</code> does <strong>not</strong> capture physical rank mapping, routing,
+  communicator channels, or device placement.</li>
+<li><code>realization_kind</code> distinguishes:</li>
+<li><code>ephemeral_into_target</code></li>
+<li><code>artifact_publishable</code></li>
+<li><code>local_seal_then_promote</code></li>
+</ul>
+<h3 id="22-representationtensorbinding">2.2 <code>RepresentationTensorBinding</code><a class="headerlink" href="#22-representationtensorbinding" title="Permanent link">&para;</a></h3>
+<p><code>RepresentationTensorBinding</code> is the per-destination-tensor semantic rule.</p>
+<p>It answers:</p>
+<ul>
+<li>which target tensor is being produced,</li>
+<li>which operation kind is semantically required,</li>
+<li>which source tensors or source fragments participate,</li>
+<li>whether the result has exact coverage or explicit residual fallback.</li>
+</ul>
+<p>Representative fields:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">enum</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">BindingOpKind</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kt">uint8_t</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span><span class="n">kExactCopy</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">  </span><span class="n">kSliceCopy</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="w">  </span><span class="n">kConcat</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">  </span><span class="n">kScalarFromSource</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="w">  </span><span class="n">kConstFill</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="p">};</span>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="k">struct</span><span class="w"> </span><span class="nc">RepresentationTensorBinding</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">dst_name</span><span class="p">;</span>
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="w">  </span><span class="n">TensorSpec</span><span class="w"> </span><span class="n">dst_spec</span><span class="p">;</span>
+</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="w">  </span><span class="n">BindingOpKind</span><span class="w"> </span><span class="n">op_kind</span><span class="p">;</span>
+</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">SourceFragment</span><span class="o">&gt;</span><span class="w"> </span><span class="n">sources</span><span class="p">;</span>
+</span><span id="__span-1-14"><a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">FillRule</span><span class="o">&gt;</span><span class="w"> </span><span class="n">fill_rule</span><span class="p">;</span>
+</span><span id="__span-1-15"><a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a><span class="w">  </span><span class="n">CoverageKind</span><span class="w"> </span><span class="n">coverage_kind</span><span class="p">;</span>
+</span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a><span class="p">};</span>
+</span></code></pre></div>
+<p><code>SourceFragment</code> must support:</p>
+<ul>
+<li>source tensor name,</li>
+<li>source range spec,</li>
+<li>source ByteSpace-relative coordinates,</li>
+<li>destination range spec,</li>
+<li>optional fragment role for concat or broadcast-equal assembly.</li>
+</ul>
+<p>Range specs must support:</p>
+<ul>
+<li>single-dimension range,</li>
+<li>multi-dimension range,</li>
+<li>exact scalar selection.</li>
+</ul>
+<p>This is required because existing mapped plans and builder traces already need:</p>
+<ul>
+<li>single-range copy,</li>
+<li>multi-range copy,</li>
+<li>scalar fill-from-source,</li>
+<li>fill-const operations.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>bindings for the same destination tensor must normalize into a stable order,</li>
+<li>normalized bindings for the same destination tensor must not overlap on the
+   destination coordinate space,</li>
+<li><code>kConstFill</code> requires <code>fill_rule</code> and no source fragments,</li>
+<li>copy or concat forms require at least one source fragment,</li>
+<li>exact coverage versus residual fallback must remain explicit rather than
+   inferred separately inside executors.</li>
+</ol>
+<h3 id="23-representationtransformcontract">2.3 <code>RepresentationTransformContract</code><a class="headerlink" href="#23-representationtransformcontract" title="Permanent link">&para;</a></h3>
+<p><code>RepresentationTransformContract</code> is the common semantic object resolved after
+selection and before executor choice.</p>
+<p>Representative fields:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">struct</span><span class="w"> </span><span class="nc">RepresentationTransformContract</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span><span class="n">ByteSpaceRef</span><span class="w"> </span><span class="n">source_byte_space</span><span class="p">;</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">  </span><span class="n">RepresentationDescriptor</span><span class="w"> </span><span class="n">target_representation</span><span class="p">;</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">RepresentationTensorBinding</span><span class="o">&gt;</span><span class="w"> </span><span class="n">tensor_bindings</span><span class="p">;</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w">  </span><span class="n">loader</span><span class="o">::</span><span class="n">ByteRangeMap</span><span class="w"> </span><span class="n">residual_fallback_map</span><span class="p">;</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="p">};</span>
+</span></code></pre></div>
+<p>Normative rules:</p>
+<ol>
+<li>this contract becomes the only common semantic truth for
+   representation-changing materialization in the phase-1 scope,</li>
+<li>executor-private candidate shapes must not live in this contract,</li>
+<li>residual generic fallback coverage must remain explicit,</li>
+<li>every byte removed from residual fallback must be covered by a semantically
+   equivalent normalized tensor binding or a derived work item,</li>
+<li>semantically equivalent producer outputs must normalize to the same
+   <code>RepresentationTransformContract</code> before <code>representation_contract_hash</code> is
+   computed.</li>
+</ol>
+<h2 id="3-logical-topology-versus-physical-execution-topology">3. Logical topology versus physical execution topology<a class="headerlink" href="#3-logical-topology-versus-physical-execution-topology" title="Permanent link">&para;</a></h2>
+<h3 id="31-logical-topology-may-affect-representation-identity">3.1 Logical topology may affect representation identity<a class="headerlink" href="#31-logical-topology-may-affect-representation-identity" title="Permanent link">&para;</a></h3>
+<p>Some target representations are different because the target schema depends on
+logical topology assumptions such as:</p>
+<ul>
+<li>tensor-parallel world size,</li>
+<li>pipeline-parallel world size,</li>
+<li>expert-parallel world size,</li>
+<li>topology family version.</li>
+</ul>
+<p>Repository rule:</p>
+<ul>
+<li>if target tensor schema depends on logical topology, that logical topology
+  participates in <code>representation_contract_hash</code>,</li>
+<li>but logical topology still must not participate in <code>selection_hash</code>.</li>
+</ul>
+<h3 id="32-physical-execution-topology-is-follow-on-work">3.2 Physical execution topology is follow-on work<a class="headerlink" href="#32-physical-execution-topology-is-follow-on-work" title="Permanent link">&para;</a></h3>
+<p>This phase does <strong>not</strong> define:</p>
+<ul>
+<li>source participant sets,</li>
+<li>target participant sets,</li>
+<li>rank-to-device mapping,</li>
+<li>communicator or routing choices,</li>
+<li>group-scoped collective commit protocol,</li>
+<li>or cross-rank failure handling for topology-scoped reshard execution.</li>
+</ul>
+<p>Those concerns belong to a future specialized execution design that will consume
+the semantic core defined here together with <code>0108</code> strategy lowering and <code>0058</code>
+communicator topology facilities.</p>
+<h2 id="4-control-plane-transform-contract">4. Control-plane transform contract<a class="headerlink" href="#4-control-plane-transform-contract" title="Permanent link">&para;</a></h2>
+<p><code>0055</code> already defines <code>TransformSpec</code>.</p>
+<p>This design keeps that public request and clarifies its relation to the new
+semantic layer:</p>
+<ul>
+<li><code>TransformSpec</code> is the public request,</li>
+<li><code>RepresentationTransformContract</code> is the resolved semantic truth,</li>
+<li>builder or publication workflows may later consume the same resolved semantic
+  truth without changing the public request family.</li>
+</ul>
+<p>Two long-term execution shapes remain valid:</p>
+<ol>
+<li><code>transform_register(...)</code></li>
+<li>resolve <code>TransformSpec</code>,</li>
+<li>build <code>RepresentationTransformContract</code>,</li>
+<li>execute it,</li>
+<li>register or seal the result as a new artifact.</li>
+<li><code>transform_into(...)</code></li>
+<li>resolve <code>TransformSpec</code>,</li>
+<li>build <code>RepresentationTransformContract</code>,</li>
+<li>execute it directly into a local target layout or binding.</li>
+</ol>
+<p>This keeps reshard, source-to-serving compile, and future layout-seeded local
+execution on one programmable spine instead of inventing multiple request
+families.</p>
+<h2 id="5-0108-strategy-plane-convergence">5. <code>0108</code> strategy-plane convergence<a class="headerlink" href="#5-0108-strategy-plane-convergence" title="Permanent link">&para;</a></h2>
+<h3 id="51-replace-mapped-only-semantic-truth">5.1 Replace mapped-only semantic truth<a class="headerlink" href="#51-replace-mapped-only-semantic-truth" title="Permanent link">&para;</a></h3>
+<p><code>MappedCopyContract</code> is currently the closest thing to a common semantic
+contract, but it is too narrow and still mixed with executor-oriented artifacts.</p>
+<p>Hard-cut target:</p>
+<ul>
+<li>remove <code>MappedCopyContract</code> as the repository-wide semantic family,</li>
+<li>replace it with <code>RepresentationTransformContract</code>,</li>
+<li>treat mapped binding, mapped-target, source-bind startup, and builder lowering
+  as producers of that contract.</li>
+</ul>
+<h3 id="52-introduce-one-executor-neutral-typed-work-inventory">5.2 Introduce one executor-neutral typed work inventory<a class="headerlink" href="#52-introduce-one-executor-neutral-typed-work-inventory" title="Permanent link">&para;</a></h3>
+<p>The strategy plane should lower the resolved representation contract plus source
+binding into one executor-neutral typed work inventory, for example:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">struct</span><span class="w"> </span><span class="nc">RepresentationWorkItem</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="n">WorkItemKind</span><span class="w"> </span><span class="n">kind</span><span class="p">;</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">dst_name</span><span class="p">;</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">WorkSourceFragment</span><span class="o">&gt;</span><span class="w"> </span><span class="n">sources</span><span class="p">;</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">  </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">committed_bytes</span><span class="p">;</span>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="p">};</span>
+</span></code></pre></div>
+<p>Representative work kinds:</p>
+<ul>
+<li><code>tensor_copy</code></li>
+<li><code>concat_assemble</code></li>
+<li><code>scalar_broadcast_fill</code></li>
+<li><code>const_fill</code></li>
+<li><code>pad_fill</code></li>
+<li><code>residual_byte_range</code></li>
+</ul>
+<p>Normative rules:</p>
+<ul>
+<li>these work kinds describe target-semantic intent, not transport shape,</li>
+<li>executor-shaped forms such as direct span reads, staged pack, peer scatter,
+  or batch-local dedup remain strategy- or executor-private lowerings below this
+  shared work inventory,</li>
+<li><code>pad_fill</code> is derived during work-plan construction from coverage closure
+  implied by the semantic contract plus target layout, not by widening
+  <code>RepresentationTransformContract</code> into executor-shaped padding artifacts,</li>
+<li>a typed work item that a preferred executor cannot currently admit remains
+  typed in shared planning and diagnostics until a later lane or
+  executor-private lowering decides how to execute it,</li>
+<li>semantic contract hash stays attached to
+  <code>RepresentationTransformContract</code>, while plan hash may reflect derived
+  work-plan artifacts such as <code>pad_fill</code>,</li>
+<li>only bytes with no typed execution equivalent may remain
+  <code>residual_byte_range</code>.</li>
+</ul>
+<h3 id="53-executors-simplify-rather-than-multiply">5.3 Executors simplify rather than multiply<a class="headerlink" href="#53-executors-simplify-rather-than-multiply" title="Permanent link">&para;</a></h3>
+<p>This design does not collapse all execution into one executor.</p>
+<p>It simplifies the system by making executors consume the same work IR:</p>
+<ul>
+<li>tensor-batched local executor,</li>
+<li>owner-file collective executor,</li>
+<li>generic byte-range executor.</li>
+</ul>
+<p>What disappears is duplicated semantic recovery:</p>
+<ul>
+<li>no second semantic parser in <code>build_tensor_jobs(...)</code>,</li>
+<li>no mapped-only semantic island in
+  <code>materialization_mapped_copy_plan_utils.cc</code>,</li>
+<li>no need for executors to rediscover transform truth from
+  <code>source_index_json + view_index_json + variant_identity</code>.</li>
+</ul>
+<p>Future topology-scoped reshard execution may add another executor family, but it
+must still consume this semantic core rather than recreate a second semantic
+stack.</p>
+<h2 id="6-source-to-serving-builder-boundary">6. Source-to-serving builder boundary<a class="headerlink" href="#6-source-to-serving-builder-boundary" title="Permanent link">&para;</a></h2>
+<p>This design promotes a repository-wide distinction:</p>
+<p>Follow-on builder and publication details are owned by <code>0111</code>.</p>
+<ul>
+<li><strong>source artifact</strong></li>
+<li>checkpoint or training representation,</li>
+<li>may require representation-changing build steps to become runtime-serving
+    bytes.</li>
+<li><strong>serving artifact</strong></li>
+<li>postprocess-complete runtime representation,</li>
+<li>intended for steady-state runtime bind or swap.</li>
+</ul>
+<p>The semantic core defined here is the bridge between them.</p>
+<p>Normative rules:</p>
+<ol>
+<li>source-to-serving builder work is a producer of
+   <code>RepresentationTransformContract</code>,</li>
+<li>final externally visible publish lineage remains owned by <code>0105</code>
+   <code>PublishedModelVersion</code> and typed closeout contracts,</li>
+<li>mapped binding or copy-plan lowering may remain useful builder-side
+   mechanisms, but they must not remain the long-lived vllm semantic
+   truth.</li>
+<li>builder- or framework-version identity needed for serving publication must be
+   modeled as a distinct layer above <code>RepresentationTransformContract</code>; it must
+   not be retrofitted into <code>representation_contract_hash</code>.</li>
+</ol>
+<p>The detailed builder and publication-lineage design for this bridge is defined in
+<code>0111</code>.</p>
+<h1 id="invariants-and-error-model">Invariants And Error Model<a class="headerlink" href="#invariants-and-error-model" title="Permanent link">&para;</a></h1>
+<h2 id="invariants">Invariants<a class="headerlink" href="#invariants" title="Permanent link">&para;</a></h2>
+<ul>
+<li>one canonical owner answers each kind of truth,</li>
+<li><code>ArtifactSelection</code>, ByteSpace, representation identity, publication lineage,
+  and execution strategy remain distinct,</li>
+<li>semantically equivalent transform inputs normalize to the same representation
+  contract before hashing,</li>
+<li>typed work inventory and later lane planning remain distinct from
+  executor-private transport ops,</li>
+<li>executor-private shapes do not appear in the common semantic contract,</li>
+<li>destination coverage is either exact or has explicit residual fallback,</li>
+<li>physical topology planning does not leak into the phase-1 semantic core,</li>
+<li>and publication lineage is not inferred from materialization executor state.</li>
+</ul>
+<h2 id="error-model">Error Model<a class="headerlink" href="#error-model" title="Permanent link">&para;</a></h2>
+<ul>
+<li><code>INVALID_ARGUMENT</code></li>
+<li>malformed source or destination range spec</li>
+<li>overlapping normalized destination coverage</li>
+<li>invalid binding op form such as source-less copy or source-plus-const fill</li>
+<li>inconsistent hash input fields during normalization</li>
+<li><code>FAILED_PRECONDITION</code></li>
+<li>selected ByteSpace is inconsistent with required target layout semantics</li>
+<li>a requested transform depends on source schema facts that are absent from the
+    resolved selection or builder lowering</li>
+<li>publication is requested from a non-publishable realization kind</li>
+<li><code>UNIMPLEMENTED</code></li>
+<li>group-scoped participant planning</li>
+<li>communicator or routing-aware physical topology lowering</li>
+<li>topology-scoped collective commit logic outside existing executor families</li>
+<li><code>ABORTED</code> or <code>UNAVAILABLE</code></li>
+<li>execution-time source acquisition, routing, or node-local executor failures
+    remain owned by <code>0108</code>, <code>0055</code>, and follow-on execution designs rather than
+    by the semantic contract definition itself</li>
+</ul>
+<h1 id="alternatives-and-rationale">Alternatives And Rationale<a class="headerlink" href="#alternatives-and-rationale" title="Permanent link">&para;</a></h1>
+<h2 id="alternative-1-keep-mapped-target-semantics-separate-and-add-a-second-reshard-ir-later">Alternative 1: keep mapped-target semantics separate and add a second reshard IR later<a class="headerlink" href="#alternative-1-keep-mapped-target-semantics-separate-and-add-a-second-reshard-ir-later" title="Permanent link">&para;</a></h2>
+<p>Rejected.</p>
+<ul>
+<li>It preserves the exact duplication this design exists to remove.</li>
+<li>It keeps builder integrations and executors free to maintain private semantic
+  truth.</li>
+</ul>
+<h2 id="alternative-2-fold-topology-executor-design-into-the-first-semantic-core-cut">Alternative 2: fold topology executor design into the first semantic-core cut<a class="headerlink" href="#alternative-2-fold-topology-executor-design-into-the-first-semantic-core-cut" title="Permanent link">&para;</a></h2>
+<p>Rejected for phase 1.</p>
+<ul>
+<li>It mixes logical representation identity with physical execution topology.</li>
+<li>It forces communicator, participant, and failure-model concerns into a
+  contract that should stay executor-neutral.</li>
+<li>It would likely stall the more urgent cleanup of mapped-only and
+  executor-local semantic duplication.</li>
+</ul>
+<h2 id="alternative-3-solve-source-to-serving-publication-inside-materialization-runtime-docs-only">Alternative 3: solve source-to-serving publication inside materialization runtime docs only<a class="headerlink" href="#alternative-3-solve-source-to-serving-publication-inside-materialization-runtime-docs-only" title="Permanent link">&para;</a></h2>
+<p>Rejected.</p>
+<ul>
+<li>publication lineage already has a separate semantic home in <code>0105</code>.</li>
+<li>collapsing builder or publication semantics back into runtime materialization
+  would repeat the same cross-layer drift the repository is trying to remove.</li>
+</ul>
+<h1 id="schema-changes">Schema Changes<a class="headerlink" href="#schema-changes" title="Permanent link">&para;</a></h1>
+<p>None in this phase.</p>
+<p>This design defines the internal semantic contract family and the builder or
+publication boundary around it. It does not yet standardize new durable
+artifact-catalog schema for representation metadata.</p>
+<p>If a later design promotes any representation field into durable artifact or
+profile truth, that design must include explicit schema, recovery, and
+compatibility rules.</p>
+<h1 id="naming-compliance">Naming Compliance<a class="headerlink" href="#naming-compliance" title="Permanent link">&para;</a></h1>
+<p>Proposed interface names follow repository naming rules.</p>
+<table>
+<thead>
+<tr>
+<th>Symbol</th>
+<th>Kind</th>
+<th>Required style</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RepresentationDescriptor</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>RepresentationTensorBinding</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>RepresentationTransformContract</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>RepresentationWorkItem</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>TopologyContract</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>BindingOpKind</code></td>
+<td>C++ enum</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>pad_fill</code></td>
+<td>work-item field/value</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>transform_register</code></td>
+<td>Python method</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>transform_into</code></td>
+<td>Python method</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>representation_contract_hash</code></td>
+<td>field</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>tensor_schema_hash</code></td>
+<td>field</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>logical_topology</code></td>
+<td>field</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>realization_kind</code></td>
+<td>field</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+</tbody>
+</table>
+<h1 id="trade-offs-risks">Trade-offs &amp; Risks<a class="headerlink" href="#trade-offs-risks" title="Permanent link">&para;</a></h1>
+<h2 id="advantages">Advantages<a class="headerlink" href="#advantages" title="Permanent link">&para;</a></h2>
+<ul>
+<li>one semantic layer for mapped binding, mapped-target, ordinary tensor-aware
+  lowering, and builder-side source-to-serving lowering,</li>
+<li>cleaner separation between semantic truth, publication lineage, and execution
+  topology,</li>
+<li>simpler long-term executor architecture under <code>0108</code>,</li>
+<li>clearer integration boundary for <code>vllm</code> and other framework builders,</li>
+<li>preserves a forward path to future reshard execution without forcing
+  communicator planning into the first hard cut.</li>
+</ul>
+<h2 id="risks">Risks<a class="headerlink" href="#risks" title="Permanent link">&para;</a></h2>
+<ul>
+<li>the contract could still be over-generalized if normalization rules are left
+  vague,</li>
+<li>source-to-serving builder and publication follow-on work could drift if this
+  semantic core is not adopted quickly enough,</li>
+<li>future topology executor work will still need an additional design for
+  participant and failure semantics,</li>
+<li>accepted docs may drift if <code>0055</code>, <code>0108</code>, <code>0105</code>, and <code>0109</code> are not updated
+  together.</li>
+</ul>
+<h2 id="mitigations">Mitigations<a class="headerlink" href="#mitigations" title="Permanent link">&para;</a></h2>
+<ul>
+<li>keep the phase-1 contract explicitly tensor-semantic and executor-neutral,</li>
+<li>define normalization and coverage rules now rather than leaving them implicit,</li>
+<li>keep publication lineage anchored in <code>0105</code>,</li>
+<li>keep physical topology planning explicit follow-on work instead of letting it
+  leak into semantic structs by accident.</li>
+</ul>
+<h1 id="compatibility-acceptance-criteria">Compatibility &amp; Acceptance Criteria<a class="headerlink" href="#compatibility-acceptance-criteria" title="Permanent link">&para;</a></h1>
+<p>Compatibility strategy:</p>
+<ul>
+<li>hard cut only for the semantic core,</li>
+<li>no long-lived <code>MappedCopyContract</code> compatibility layer,</li>
+<li>no dual semantic stacks inside common runtime,</li>
+<li>explicit follow-on designs for durable publication metadata and topology-scoped
+  execution rather than undocumented scope creep.</li>
+</ul>
+<p>This design is accepted only when all of the following are true:</p>
+<ol>
+<li>common runtime semantic truth is expressed through
+   <code>RepresentationTransformContract</code> rather than <code>MappedCopyContract</code>,</li>
+<li>mapped-target, mapped binding, and ordinary tensor-aware lowering all resolve
+   through the same semantic family,</li>
+<li><code>0108</code> executor choice operates on one shared work IR rather than duplicate
+   semantic recovery code,</li>
+<li>owner-file collective remains executor-private and no longer carries a
+   bespoke semantic planner,</li>
+<li><code>TransformSpec</code> remains the public request and lowers into the same semantic
+   core,</li>
+<li>source-to-serving builder and publication work have an explicit boundary to
+   reuse this semantic core without overloading it,</li>
+<li>group-scoped topology execution is explicitly deferred to follow-on design
+   work rather than left as an ambiguous hole in the semantic layer.</li>
+</ol>
+<h1 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h1>
+<ul>
+<li><code>docs/designs/0055-programmable-framework.md</code></li>
+<li><code>docs/designs/0078-selection-first-artifact-retrieval.md</code></li>
+<li><code>docs/designs/0084-binding-unified-model-and-contract.md</code></li>
+<li><code>docs/designs/0085-distributed-binding-assembly-and-coordinator.md</code></li>
+<li><code>docs/designs/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md</code></li>
+<li><code>docs/designs/0108-tensor-aware-materialization-strategy-plane.md</code></li>
+<li><code>docs/designs/0109-batched-owner-file-collective-executor.md</code></li>
+<li><code>docs/designs/0111-source-to-serving-builder-and-representation-publication.md</code></li>
+<li><code>docs/designs/0058-communicator-topology-model.md</code></li>
+<li><code>docs/architecture/api/materialization-flow.md</code></li>
+<li><code>docs/internals/disk-load-strategy.md</code></li>
+<li><code>docs/internals/model-loading.md</code></li>
+<li><code>tensorcast/api/store/mapped_binding.py</code></li>
+<li><code>tensorcast/types.py</code></li>
+<li><code>proto/tensorcast/daemon/v2/store_daemon.proto</code></li>
+<li><code>daemon/service/controllers/representation_transform_builder.cc</code></li>
+<li><code>daemon/service/controllers/representation_layout_types.h</code></li>
+<li><code>core/store/replica/collective_disk_loader.cc</code></li>
+<li>external integration grounding:</li>
+<li><code>/opt/vllm/vllm/model_executor/model_loader/tensorcast_loader.py</code></li>
+<li><code>/opt/vllm/docs/design/tensorcast_torch_framework_integration.md</code></li>
+<li><code>/opt/vllm/docs/design/tensorcast_loader_bind_swap_upgrade_plan.md</code></li>
+<li><code>/opt/vllm/docs/design/tensorcast_serving_artifact_bind_swap_decision.md</code></li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
