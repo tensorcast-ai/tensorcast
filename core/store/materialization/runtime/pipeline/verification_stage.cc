@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <utility>
 
@@ -194,14 +195,29 @@ absl::Status handle_variant_verification(IngestionContext& ctx) {
   verification_view.location = ctx.target_location;
   verification_view.size_bytes = ctx.resolved_view_plan.has_value() ? ctx.resolved_view_plan->view_size_bytes : 0;
   verification_view.gpu_device_id = ctx.target_is_gpu ? std::optional<int>(ctx.target_device_id) : std::nullopt;
-  const auto data_ptrs = ctx.replica->get_data_pointer(ctx.target_location);
-  if (data_ptrs.empty() || data_ptrs[0] == nullptr) {
-    return absl::OkStatus();
+  std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation_guard;
+  if (ctx.target_is_gpu) {
+    // Verification outlives the controller lock. Keep the allocation alive
+    // while a concurrent unload removes it from the replica/UMA ledgers.
+    auto view_or = ctx.replica->get_memory_manager().get_gpu_allocation_view();
+    if (!view_or.ok()) {
+      // Preserve immediate-unload semantics: if release won the race there is
+      // no resident view left to verify, and materialization remains tolerant.
+      return absl::OkStatus();
+    }
+    gpu_allocation_guard = view_or->allocation;
+    verification_view.base_ptr = view_or->base_ptr;
+  } else {
+    const auto data_ptrs = ctx.replica->get_data_pointer(ctx.target_location);
+    if (data_ptrs.empty() || data_ptrs[0] == nullptr) {
+      return absl::OkStatus();
+    }
+    verification_view.base_ptr = data_ptrs[0];
   }
-  verification_view.base_ptr = data_ptrs[0];
 
   absl::Status verification_status = loader::verification::reuse_or_generate_verification_json(
       ctx.disk.artifact_path, expected_byte_space_id, verification_view);
+  (void)gpu_allocation_guard;
   if (!verification_status.ok()) {
     return verification_status;
   }
@@ -235,13 +251,34 @@ absl::Status handle_canonical_verification(IngestionContext& ctx) {
   }
   verification_view.size_bytes = view_size;
 
-  const auto data_ptrs = ctx.replica->get_data_pointer(ctx.target_location);
-  if (data_ptrs.empty() || data_ptrs[0] == nullptr || verification_view.size_bytes == 0) {
+  if (verification_view.size_bytes == 0) {
     return absl::OkStatus();
   }
 
-  verification_view.base_ptr = data_ptrs[0];
-  return loader::verification::reuse_or_generate_verification_json(ctx.disk.artifact_path, "", verification_view);
+  std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation_guard;
+  if (ctx.target_is_gpu) {
+    // Do not hand a bare GPU pointer to the verifier: unload_replica() may
+    // otherwise free the allocation before the verifier finishes reading it.
+    auto view_or = ctx.replica->get_memory_manager().get_gpu_allocation_view();
+    if (!view_or.ok()) {
+      // Preserve immediate-unload semantics: if release won the race there is
+      // no resident view left to verify, and materialization remains tolerant.
+      return absl::OkStatus();
+    }
+    gpu_allocation_guard = view_or->allocation;
+    verification_view.base_ptr = view_or->base_ptr;
+  } else {
+    const auto data_ptrs = ctx.replica->get_data_pointer(ctx.target_location);
+    if (data_ptrs.empty() || data_ptrs[0] == nullptr) {
+      return absl::OkStatus();
+    }
+    verification_view.base_ptr = data_ptrs[0];
+  }
+
+  auto status =
+      loader::verification::reuse_or_generate_verification_json(ctx.disk.artifact_path, "", verification_view);
+  (void)gpu_allocation_guard;
+  return status;
 }
 
 absl::Status verify_disk(IngestionContext& ctx) {
