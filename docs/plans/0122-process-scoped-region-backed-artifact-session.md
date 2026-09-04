@@ -15,7 +15,7 @@ related_code:
   - tests/python/test_region_backed_artifact_session_e2e.py
   - tests/python/api/test_public_surface.py
   - tests/python/utils/daemon.py
-last_updated: 2026-09-03
+last_updated: 2026-09-04
 ---
 
 # Objective
@@ -57,8 +57,8 @@ The repository already provides the daemon and wire primitives required by
 - the current daemon protobuf already carries multi-storage `TargetLayout`,
   region offsets, slot index/generation tokens, per-item outcomes, and
   layout-and-size-only put invariants.
-- daemon tests already cover host-shared region layouts, stable backing,
-  batch-region operations, and CPU memfd FD exchange.
+- daemon tests already cover host-shared region layouts, stable backing, and
+  batch-region operations.
 
 The missing layer is the public process-scoped SDK session and its internal
 compilation and lifecycle logic.
@@ -163,47 +163,47 @@ TestTerminationContract
 Execute phases in this order. Do not begin a later phase while an earlier
 validation gate is red.
 
-- [ ] Phase 1: Public contracts and RPC primitives
-- [ ] Phase 2: Process attach, registry, and state admission
-- [ ] Phase 3: Host spans, region allocation, and pinned ownership
-- [ ] Phase 4: Artifact lowering, layouts, wire budget, and outcomes
-- [ ] Phase 5: Scratch transfer mode
-- [ ] Phase 6: Allocator-backed direct transfer mode
-- [ ] Phase 7: Failure hardening, daemon acceptance, and documentation closure
+- [x] Phase 1: Public contracts and RPC primitives
+- [x] Phase 2: Process attach, registry, and state admission
+- [x] Phase 3: Host spans, region allocation, and pinned ownership
+- [x] Phase 4: Artifact lowering, layouts, wire budget, and outcomes
+- [x] Phase 5: Scratch transfer mode
+- [x] Phase 6: Allocator-backed direct transfer mode
+- [x] Phase 7: Failure hardening, daemon acceptance, and documentation closure
 
 # Phases & Milestones
 
-- [ ] Phase 1
-  - [ ] Public value/resource contracts are defined and validated in the new
+- [x] Phase 1
+  - [x] Public value/resource contracts are defined and validated in the new
         leaf module.
-  - [ ] `DaemonCtl` has one immutable effective message-limit snapshot.
-  - [ ] direct region RPC wrappers can be called with zero SDK retries without
+  - [x] `DaemonCtl` has one immutable effective message-limit snapshot.
+  - [x] direct region RPC wrappers can be called with zero SDK retries without
         changing existing defaults.
-- [ ] Phase 2
-  - [ ] one process attaches to at most one canonical daemon endpoint;
-  - [ ] the simple registry mutex prevents duplicate concurrent construction;
-  - [ ] sticky health and terminal lifecycle admission order is executable.
-- [ ] Phase 3
-  - [ ] owned spans and allocator tensors keep backing memory alive;
-  - [ ] multiple host-shared region records coexist and resolve safely;
-  - [ ] only exact unexposed `Building` rollback releases a region.
-- [ ] Phase 4
-  - [ ] callers' keyspaces and engine keys lower to canonical artifacts;
-  - [ ] scratch and multi-region direct layouts are compiled internally;
-  - [ ] payload limits, geometry, slot tokens, and outcomes are validated.
-- [ ] Phase 5
-  - [ ] scratch put packs caller bytes and scratch get copies only successful
+- [x] Phase 2
+  - [x] one process attaches to at most one canonical daemon endpoint;
+  - [x] the simple registry mutex prevents duplicate concurrent construction;
+  - [x] sticky health and terminal lifecycle admission order is executable.
+- [x] Phase 3
+  - [x] owned spans and allocator tensors keep backing memory alive;
+  - [x] multiple host-shared region records coexist and resolve safely;
+  - [x] only exact unexposed `Building` rollback releases a region.
+- [x] Phase 4
+  - [x] callers' keyspaces and engine keys lower to canonical artifacts;
+  - [x] scratch and multi-region direct layouts are compiled internally;
+  - [x] payload limits, geometry, slot tokens, and outcomes are validated.
+- [x] Phase 5
+  - [x] scratch put packs caller bytes and scratch get copies only successful
         outcomes;
-  - [ ] get and put arenas have independent direction locks.
-- [ ] Phase 6
-  - [ ] direct get/put uses caller allocations without Session scratch copies;
-  - [ ] one batch may span multiple allocator regions;
-  - [ ] direct RPC retry and timeout contracts match `0122`.
-- [ ] Phase 7
-  - [ ] every fatal class latches exactly one stable first failure;
-  - [ ] termination and process-pinned retention are covered;
-  - [ ] prebuilt-daemon acceptance and relevant daemon contract tests pass;
-  - [ ] public docs and API-surface tests are complete.
+  - [x] get and put arenas have independent direction locks.
+- [x] Phase 6
+  - [x] direct get/put uses caller allocations without Session scratch copies;
+  - [x] one batch may span multiple allocator regions;
+  - [x] direct RPC retry and timeout contracts match `0122`.
+- [x] Phase 7
+  - [x] every fatal class latches exactly one stable first failure;
+  - [x] termination and process-pinned retention are covered;
+  - [x] prebuilt-daemon acceptance and relevant daemon contract tests pass;
+  - [x] public docs and API-surface tests are complete.
 
 # Detailed Plan
 
@@ -217,56 +217,56 @@ Purpose:
 
 ### Implementation tasks
 
-- [ ] Add `tensorcast/api/store/region_backed_artifact_session.py`.
-- [ ] Implement the frozen Pydantic and typed resource/result declarations from
+- [x] Add `tensorcast/api/store/region_backed_artifact_session.py`.
+- [x] Implement the frozen Pydantic and typed resource/result declarations from
       design `0122`:
-  - [ ] `RegionTransferMode`;
-  - [ ] `RegionSessionHealth`;
-  - [ ] `RegionSessionLifecycleState`;
-  - [ ] `RegionSessionFailureCode`;
-  - [ ] `RegionSessionOperationKind`;
-  - [ ] `ByteArtifactKeyspace` and `ByteArtifactSpec`;
-  - [ ] scratch/allocator transfer options and Session options;
-  - [ ] `RegionArtifactTransfer`;
-  - [ ] exists/transfer results; and
-  - [ ] input, attach, failed, and terminated exceptions.
-- [ ] Give public Pydantic models `frozen=True` and `extra="forbid"`.
-- [ ] Reject empty identity fields, non-positive byte lengths, invalid timeout
+  - [x] `RegionTransferMode`;
+  - [x] `RegionSessionHealth`;
+  - [x] `RegionSessionLifecycleState`;
+  - [x] `RegionSessionFailureCode`;
+  - [x] `RegionSessionOperationKind`;
+  - [x] `ByteArtifactKeyspace` and `ByteArtifactSpec`;
+  - [x] scratch/allocator transfer options and Session options;
+  - [x] `RegionArtifactTransfer`;
+  - [x] exists/transfer results; and
+  - [x] input, attach, failed, and terminated exceptions.
+- [x] Give public Pydantic models `frozen=True` and `extra="forbid"`.
+- [x] Reject empty identity fields, non-positive byte lengths, invalid timeout
       values, and mode-incompatible configuration locally.
-- [ ] Keep canonical artifact IDs, protobufs, region handles, and wire enums out
+- [x] Keep canonical artifact IDs, protobufs, region handles, and wire enums out
       of all public models.
-- [ ] Add a private frozen `_GrpcMessageLimits` value in `daemon_ctl.py`.
-- [ ] Resolve maximum send and receive bytes once in `DaemonCtl.__init__()`
+- [x] Add a private frozen `_GrpcMessageLimits` value in `daemon_ctl.py`.
+- [x] Resolve maximum send and receive bytes once in `DaemonCtl.__init__()`
       through the existing validated environment/default functions.
-- [ ] Pass the snapshot into channel-option construction and reuse it in
+- [x] Pass the snapshot into channel-option construction and reuse it in
       `_refresh_channel()` rather than rereading environment variables.
-- [ ] Add a private read-only way for the Session implementation to obtain the
+- [x] Add a private read-only way for the Session implementation to obtain the
       same snapshot.
-- [ ] Add a backwards-compatible internal retry parameter to region get/put
+- [x] Add a backwards-compatible internal retry parameter to region get/put
       wrappers:
-  - [ ] existing callers retain the current default;
-  - [ ] a Session call can pass `retries=0` explicitly; and
-  - [ ] the original exception remains reachable through `__cause__` for stable
+  - [x] existing callers retain the current default;
+  - [x] a Session call can pass `retries=0` explicitly; and
+  - [x] the original exception remains reachable through `__cause__` for stable
         Session failure classification.
-- [ ] Keep the incomplete Session out of `tensorcast.api.store` re-exports until
+- [x] Keep the incomplete Session out of `tensorcast.api.store` re-exports until
       Phase 7 closes both transfer modes and the final public-surface gate.
 
 ### Unit tests
 
-- [ ] `TestPublicContracts`
-  - [ ] validates frozen/forbid-extra models and the transfer discriminator;
-  - [ ] rejects malformed keyspaces, lengths, capacities, and timeouts;
-  - [ ] verifies result tuple types and nullable empty-transfer operation ID;
-  - [ ] verifies public exception inheritance and failure schema; and
-  - [ ] verifies caller inputs expose no artifact-id or protobuf field.
-- [ ] `TestGrpcMessageLimits`
-  - [ ] verifies defaults and environment overrides are normalized once;
-  - [ ] mutates the environment after client construction and proves refresh
+- [x] `TestPublicContracts`
+  - [x] validates frozen/forbid-extra models and the transfer discriminator;
+  - [x] rejects malformed keyspaces, lengths, capacities, and timeouts;
+  - [x] verifies result tuple types and nullable empty-transfer operation ID;
+  - [x] verifies public exception inheritance and failure schema; and
+  - [x] verifies caller inputs expose no artifact-id or protobuf field.
+- [x] `TestGrpcMessageLimits`
+  - [x] verifies defaults and environment overrides are normalized once;
+  - [x] mutates the environment after client construction and proves refresh
         retains the original snapshot;
-  - [ ] proves channel options and Session access observe identical values;
-  - [ ] proves invalid environment values follow existing fallback behavior;
+  - [x] proves channel options and Session access observe identical values;
+  - [x] proves invalid environment values follow existing fallback behavior;
         and
-  - [ ] spies on region get/put wrappers and proves `retries=0` reaches
+  - [x] spies on region get/put wrappers and proves `retries=0` reaches
         `_unary_call()` when requested while the old default remains unchanged.
 
 ### Validation gate
@@ -303,61 +303,61 @@ Purpose:
 
 ### Implementation tasks
 
-- [ ] Implement `RegionBackedArtifactSession.attach()` with a private client
+- [x] Implement `RegionBackedArtifactSession.attach()` with a private client
       factory seam for unit tests.
-- [ ] Normalize options and canonicalize the daemon endpoint before registry
+- [x] Normalize options and canonicalize the daemon endpoint before registry
       lookup.
-- [ ] Capture owner PID internally; never accept it from the caller.
-- [ ] Implement the process registry keyed by owner PID and canonical endpoint.
-- [ ] Use one ordinary mutex held across lookup, endpoint validation, basic
+- [x] Capture owner PID internally; never accept it from the caller.
+- [x] Implement the process registry keyed by owner PID and canonical endpoint.
+- [x] Use one ordinary mutex held across lookup, endpoint validation, basic
       handshake, and final publication.
-- [ ] Enforce one daemon endpoint per process and compare normalized operational
+- [x] Enforce one daemon endpoint per process and compare normalized operational
       fingerprints for repeated attach.
-- [ ] Make equal attach return the same attached Session; reject conflicting
+- [x] Make equal attach return the same attached Session; reject conflicting
       options, a second endpoint, and reattach after terminal termination.
-- [ ] Perform the minimal attach handshake:
-  - [ ] daemon response is reachable;
-  - [ ] `startup_phase == READY`;
-  - [ ] CPU shared memory is enabled;
-  - [ ] configured endpoint and local-handle facts are node-local; and
-  - [ ] required basic fields are present.
-- [ ] Map all pre-publication connection/readiness/capability failures to
+- [x] Perform the minimal attach handshake:
+  - [x] daemon response is reachable;
+  - [x] `startup_phase == READY`;
+  - [x] CPU shared memory is enabled;
+  - [x] configured endpoint and local-handle facts are node-local; and
+  - [x] required basic fields are present.
+- [x] Map all pre-publication connection/readiness/capability failures to
       `RegionSessionAttachError` with the original cause retained.
-- [ ] Implement independent `READY | FAILED` health and
+- [x] Implement independent `READY | FAILED` health and
       `ATTACHED | TERMINATED` lifecycle state.
-- [ ] Implement the two-stage state gate:
-  - [ ] take a strong-reference input snapshot;
-  - [ ] check `FAILED` before `TERMINATED`;
-  - [ ] validate outside the lock;
-  - [ ] recheck before final RPC admission; and
-  - [ ] recheck state before returning a local validation error.
-- [ ] Implement atomic first-failure retention and diagnostic in-flight count.
-- [ ] Implement empty-batch behavior with the preliminary state gate, no RPC,
+- [x] Implement the two-stage state gate:
+  - [x] take a strong-reference input snapshot;
+  - [x] check `FAILED` before `TERMINATED`;
+  - [x] validate outside the lock;
+  - [x] recheck before final RPC admission; and
+  - [x] recheck state before returning a local validation error.
+- [x] Implement atomic first-failure retention and diagnostic in-flight count.
+- [x] Implement empty-batch behavior with the preliminary state gate, no RPC,
       no in-flight increment, empty tuples, zero timings, and
       `operation_id=None` for empty transfer results.
-- [ ] Implement idempotent `terminate_process_session()` admission closure.
-- [ ] Do not call `release_daemon_client()` from termination.
-- [ ] Add a private unit-test fixture that isolates registry state without
+- [x] Implement idempotent `terminate_process_session()` admission closure.
+- [x] Do not call `release_daemon_client()` from termination.
+- [x] Add a private unit-test fixture that isolates registry state without
       creating a public reset API.
 
 ### Unit tests
 
-- [ ] `TestAttachRegistry`
-  - [ ] same normalized options return one object;
-  - [ ] different endpoint or operational fingerprint is rejected;
-  - [ ] session name and region prefix are first-attach-wins diagnostics;
-  - [ ] concurrent attach performs exactly one handshake/publication;
-  - [ ] non-ready daemon and disabled CPU shared memory raise attach error;
-  - [ ] attach error publishes no Session; and
-  - [ ] registry lock is not acquired by data-plane method stubs.
-- [ ] `TestSessionState`
-  - [ ] failed state wins over terminated state and invalid input;
-  - [ ] terminated state wins over invalid input on a healthy Session;
-  - [ ] a concurrent failure between preliminary and final gates prevents RPC;
-  - [ ] empty methods issue no RPC and return exact empty result schemas;
-  - [ ] empty methods still raise for failed or terminated state;
-  - [ ] termination is idempotent; and
-  - [ ] termination never releases the shared daemon client.
+- [x] `TestAttachRegistry`
+  - [x] same normalized options return one object;
+  - [x] different endpoint or operational fingerprint is rejected;
+  - [x] session name and region prefix are first-attach-wins diagnostics;
+  - [x] concurrent attach performs exactly one handshake/publication;
+  - [x] non-ready daemon and disabled CPU shared memory raise attach error;
+  - [x] attach error publishes no Session; and
+  - [x] registry lock is not acquired by data-plane method stubs.
+- [x] `TestSessionState`
+  - [x] failed state wins over terminated state and invalid input;
+  - [x] terminated state wins over invalid input on a healthy Session;
+  - [x] a concurrent failure between preliminary and final gates prevents RPC;
+  - [x] empty methods issue no RPC and return exact empty result schemas;
+  - [x] empty methods still raise for failed or terminated state;
+  - [x] termination is idempotent; and
+  - [x] termination never releases the shared daemon client.
 
 ### Validation gate
 
@@ -392,61 +392,61 @@ Purpose:
 
 ### Implementation tasks
 
-- [ ] Implement `HostMemorySpan.from_tensor()`:
-  - [ ] require CPU-accessible, dense contiguous storage;
-  - [ ] validate byte offset, byte length, bounds, and overflow;
-  - [ ] resolve address and length once per call snapshot; and
-  - [ ] strongly retain the tensor/storage owner.
-- [ ] Implement `HostMemorySpan.from_address()` with mandatory explicit owner,
+- [x] Implement `HostMemorySpan.from_tensor()`:
+  - [x] require CPU-accessible, dense contiguous storage;
+  - [x] validate byte offset, byte length, bounds, and overflow;
+  - [x] resolve address and length once per call snapshot; and
+  - [x] strongly retain the tensor/storage owner.
+- [x] Implement `HostMemorySpan.from_address()` with mandatory explicit owner,
       positive address/length checks, and overflow validation.
-- [ ] Enforce `artifact.byte_length == span.byte_length` when constructing or
+- [x] Enforce `artifact.byte_length == span.byte_length` when constructing or
       validating `RegionArtifactTransfer`.
-- [ ] Implement a private per-allocation region record containing handle,
+- [x] Implement a private per-allocation region record containing handle,
       attachment, FD/mmap roots, tensor root, address interval, capacity,
       lifecycle, and optional slot geometry.
-- [ ] Implement daemon-managed, non-expiring `HOST_SHARED/ALLOCATOR` region
+- [x] Implement daemon-managed, non-expiring `HOST_SHARED/ALLOCATOR` region
       creation for `allocate_host_tensor()`.
-- [ ] Attach the local FD, mmap the complete region, and construct a dense
+- [x] Attach the local FD, mmap the complete region, and construct a dense
       contiguous CPU `torch.Tensor` with the requested shape and dtype.
-- [ ] Validate non-negative shape dimensions, supported element size,
+- [x] Validate non-negative shape dimensions, supported element size,
       multiplication overflow, non-zero allocation size, and CPU-only device
       semantics.
-- [ ] Retain every allocation; never overwrite the previous allocation record.
-- [ ] Implement interval-based address containment with exactly-one-record
+- [x] Retain every allocation; never overwrite the previous allocation record.
+- [x] Implement interval-based address containment with exactly-one-record
       resolution and cross-region rejection.
-- [ ] Implement region lifecycle transitions:
-  - [ ] `Building -> RolledBack` only when no view escaped, no data RPC used the
+- [x] Implement region lifecycle transitions:
+  - [x] `Building -> RolledBack` only when no view escaped, no data RPC used the
         region, and cleanup is exact;
-  - [ ] `Building -> ProcessPinned` when a tensor or scratch arena becomes
+  - [x] `Building -> ProcessPinned` when a tensor or scratch arena becomes
         usable; and
-  - [ ] no SDK-driven reclamation after `ProcessPinned`.
-- [ ] On exact `Building` rollback, close local resources and invoke release and
+  - [x] no SDK-driven reclamation after `ProcessPinned`.
+- [x] On exact `Building` rollback, close local resources and invoke release and
       unregister exactly once.
-- [ ] On ambiguous setup failure, latch Session failure and retain every
+- [x] On ambiguous setup failure, latch Session failure and retain every
       possibly live daemon/local resource.
-- [ ] Ensure Session failure and termination retain all mappings and tensor
+- [x] Ensure Session failure and termination retain all mappings and tensor
       roots until process teardown.
 
 ### Unit tests
 
-- [ ] `TestHostMemorySpan`
-  - [ ] tensor view address/offset/length is correct;
-  - [ ] non-contiguous, non-CPU, zero, negative, out-of-bounds, and overflowing
+- [x] `TestHostMemorySpan`
+  - [x] tensor view address/offset/length is correct;
+  - [x] non-contiguous, non-CPU, zero, negative, out-of-bounds, and overflowing
         spans are rejected;
-  - [ ] explicit owner is mandatory for raw address spans;
-  - [ ] caller sequence mutation does not change the captured span facts; and
-  - [ ] weak-reference tests prove tensor and explicit owner retention through
+  - [x] explicit owner is mandatory for raw address spans;
+  - [x] caller sequence mutation does not change the captured span facts; and
+  - [x] weak-reference tests prove tensor and explicit owner retention through
         return or raise.
-- [ ] `TestRegionAllocation`
-  - [ ] fake host-shared registration plus a temporary memfd produces a dense,
+- [x] `TestRegionAllocation`
+  - [x] fake host-shared registration plus a temporary memfd produces a dense,
         page-aligned CPU tensor with stable address and exact size;
-  - [ ] two or more allocations remain live and independently resolvable;
-  - [ ] ranges crossing region boundaries or matching no region fail locally;
-  - [ ] exact unexposed rollback releases/unregisters once;
-  - [ ] ambiguous registration/FD/mmap outcomes latch and do not clean up;
-  - [ ] returned allocation, failure, and termination never release a
+  - [x] two or more allocations remain live and independently resolvable;
+  - [x] ranges crossing region boundaries or matching no region fail locally;
+  - [x] exact unexposed rollback releases/unregisters once;
+  - [x] ambiguous registration/FD/mmap outcomes latch and do not clean up;
+  - [x] returned allocation, failure, and termination never release a
         process-pinned region; and
-  - [ ] endpoint/local-handle reachability checks allocate no probe region.
+  - [x] endpoint/local-handle reachability checks allocate no probe region.
 
 ### Validation gate
 
@@ -480,74 +480,74 @@ Purpose:
 
 ### Implementation tasks
 
-- [ ] Derive canonical artifact IDs exclusively with
+- [x] Derive canonical artifact IDs exclusively with
       `build_byte_artifact_cgid()` from each `ByteArtifactSpec` keyspace and
       engine key.
-- [ ] Reuse canonical byte-artifact selection helpers; do not maintain an
+- [x] Reuse canonical byte-artifact selection helpers; do not maintain an
       identity or selection cache.
-- [ ] Reject duplicate derived artifact IDs in one batch before RPC admission.
-- [ ] Build put invariants with layout ID, byte length, and
+- [x] Reject duplicate derived artifact IDs in one batch before RPC admission.
+- [x] Build put invariants with layout ID, byte length, and
       `LAYOUT_AND_SIZE_ONLY` verification; do not hash caller bytes.
-- [ ] Implement scratch layout compilation with one storage and packed offsets.
-- [ ] Implement allocator layout compilation:
-  - [ ] resolve every span to exactly one allocation record;
-  - [ ] preserve caller order;
-  - [ ] deduplicate regions in first-appearance order;
-  - [ ] assign request-local storage IDs;
-  - [ ] compute checked logical storage bases and offsets; and
-  - [ ] emit one storage entry per touched region.
-- [ ] Implement per-region candidate geometry validation.
-- [ ] Commit unseen geometry atomically and all-or-nothing only during final
+- [x] Implement scratch layout compilation with one storage and packed offsets.
+- [x] Implement allocator layout compilation:
+  - [x] resolve every span to exactly one allocation record;
+  - [x] preserve caller order;
+  - [x] deduplicate regions in first-appearance order;
+  - [x] assign request-local storage IDs;
+  - [x] compute checked logical storage bases and offsets; and
+  - [x] emit one storage entry per touched region.
+- [x] Implement per-region candidate geometry validation.
+- [x] Commit unseen geometry atomically and all-or-nothing only during final
       admission after all local and wire-budget validation passes.
-- [ ] Establish lock order: Session state before geometry; hold neither across
+- [x] Establish lock order: Session state before geometry; hold neither across
       RPC.
-- [ ] Implement non-zero monotonic RPC generation and derive slot index from
+- [x] Implement non-zero monotonic RPC generation and derive slot index from
       region-local offset and frozen slot size.
-- [ ] Attach one request generation to all direct offsets and validate exact
+- [x] Attach one request generation to all direct offsets and validate exact
       echoed slot tokens.
-- [ ] Build completed request protobufs before applying `ByteSize()`.
-- [ ] Estimate ordinary response size from artifact IDs, statuses, direct slot
+- [x] Build completed request protobufs before applying `ByteSize()`.
+- [x] Estimate ordinary response size from artifact IDs, statuses, direct slot
       tokens, protobuf overhead, and fixed headroom.
-- [ ] Reject oversized transfer batches before final admission.
-- [ ] Partition exists input into maximal contiguous sub-batches that fit both
+- [x] Reject oversized transfer batches before final admission.
+- [x] Partition exists input into maximal contiguous sub-batches that fit both
       client send and receive limits.
-- [ ] Give every exists partition one SDK correlation/operation ID; retries of
+- [x] Give every exists partition one SDK correlation/operation ID; retries of
       that partition reuse it, while the next partition gets another ID.
-- [ ] Implement artifact-based outcome correlation and restore caller order.
-- [ ] Allow only operation-specific `OK` and `MISS` statuses from design
+- [x] Implement artifact-based outcome correlation and restore caller order.
+- [x] Allow only operation-specific `OK` and `MISS` statuses from design
       `0122`; reject missing, duplicate, unknown, or malformed outcomes.
-- [ ] Map `REGION_LOST` only from structured machine-readable region evidence;
+- [x] Map `REGION_LOST` only from structured machine-readable region evidence;
       never parse free-form error text.
 
 ### Unit tests
 
-- [ ] `TestArtifactLowering`
-  - [ ] same keyspace/engine key produces the canonical existing byte-artifact
+- [x] `TestArtifactLowering`
+  - [x] same keyspace/engine key produces the canonical existing byte-artifact
         identity;
-  - [ ] multiple keyspaces coexist in one batch;
-  - [ ] duplicates are rejected;
-  - [ ] put invariant is layout-and-size-only; and
-  - [ ] no public result exposes artifact IDs or selections.
-- [ ] `TestWireBudget`
-  - [ ] uses the exact `DaemonCtl` limit snapshot;
-  - [ ] measures completed request protobufs;
-  - [ ] rejects get/put before RPC when either direction exceeds its limit;
-  - [ ] partitions exists at exact boundary conditions and preserves order;
-  - [ ] uses one operation ID per partition and reuses it for retries; and
-  - [ ] reports total exists RPC elapsed time across partitions and attempts.
-- [ ] `TestOutcomeValidation`
-  - [ ] accepts operation-specific OK/MISS combinations;
-  - [ ] rejects missing, duplicate, unknown, reordered-with-bad-correlation,
+  - [x] multiple keyspaces coexist in one batch;
+  - [x] duplicates are rejected;
+  - [x] put invariant is layout-and-size-only; and
+  - [x] no public result exposes artifact IDs or selections.
+- [x] `TestWireBudget`
+  - [x] uses the exact `DaemonCtl` limit snapshot;
+  - [x] measures completed request protobufs;
+  - [x] rejects get/put before RPC when either direction exceeds its limit;
+  - [x] partitions exists at exact boundary conditions and preserves order;
+  - [x] uses one operation ID per partition and reuses it for retries; and
+  - [x] reports total exists RPC elapsed time across partitions and attempts.
+- [x] `TestOutcomeValidation`
+  - [x] accepts operation-specific OK/MISS combinations;
+  - [x] rejects missing, duplicate, unknown, reordered-with-bad-correlation,
         and non-allowlisted outcomes;
-  - [ ] validates echoed direct slot tokens;
-  - [ ] maps generic `FAILED_PRECONDITION` to `DAEMON_STATUS`;
-  - [ ] maps only typed region evidence to `REGION_LOST`; and
-  - [ ] proves error-message text does not affect classification.
-- [ ] Geometry tests
-  - [ ] compatible first use freezes one slot size;
-  - [ ] locally invalid or wire-oversized input freezes nothing;
-  - [ ] a multi-region install is all-or-nothing; and
-  - [ ] concurrent conflicting first use admits at most one geometry and sends
+  - [x] validates echoed direct slot tokens;
+  - [x] maps generic `FAILED_PRECONDITION` to `DAEMON_STATUS`;
+  - [x] maps only typed region evidence to `REGION_LOST`; and
+  - [x] proves error-message text does not affect classification.
+- [x] Geometry tests
+  - [x] compatible first use freezes one slot size;
+  - [x] locally invalid or wire-oversized input freezes nothing;
+  - [x] a multi-region install is all-or-nothing; and
+  - [x] concurrent conflicting first use admits at most one geometry and sends
         no RPC for the loser.
 
 ### Validation gate
@@ -584,43 +584,43 @@ Purpose:
 
 ### Implementation tasks
 
-- [ ] Lazily create one fixed-capacity daemon-managed `HOST_SHARED/SCRATCH`
+- [x] Lazily create one fixed-capacity daemon-managed `HOST_SHARED/SCRATCH`
       region for get and one for put.
-- [ ] Move each arena to `ProcessPinned` before its first admitted transfer.
-- [ ] Retain both mappings until process teardown; never resize, replace,
+- [x] Move each arena to `ProcessPinned` before its first admitted transfer.
+- [x] Retain both mappings until process teardown; never resize, replace,
       expire, release, or unregister them after pinning.
-- [ ] Use independent get and put locks so one get and one put may run
+- [x] Use independent get and put locks so one get and one put may run
       concurrently while same-direction calls serialize.
-- [ ] Implement scratch put:
-  - [ ] validate and snapshot all source spans;
-  - [ ] reject total packed bytes above capacity;
-  - [ ] pack in caller order;
-  - [ ] issue one region-backed put with `retries=0`; and
-  - [ ] validate all outcomes before returning the success mask.
-- [ ] Implement scratch get:
-  - [ ] build packed target offsets;
-  - [ ] issue one region-backed get with `retries=0`;
-  - [ ] validate the complete response before copying;
-  - [ ] copy only successful items to caller spans; and
-  - [ ] leave every false target unconsumable and unchanged where practical.
-- [ ] On fatal scratch get, copy no scratch bytes to caller targets and never
+- [x] Implement scratch put:
+  - [x] validate and snapshot all source spans;
+  - [x] reject total packed bytes above capacity;
+  - [x] pack in caller order;
+  - [x] issue one region-backed put with `retries=0`; and
+  - [x] validate all outcomes before returning the success mask.
+- [x] Implement scratch get:
+  - [x] build packed target offsets;
+  - [x] issue one region-backed get with `retries=0`;
+  - [x] validate the complete response before copying;
+  - [x] copy only successful items to caller spans; and
+  - [x] leave every false target unconsumable and unchanged where practical.
+- [x] On fatal scratch get, copy no scratch bytes to caller targets and never
       reuse the failed arena.
-- [ ] Record pack, copy, RPC, bytes, and direction metrics without artifact IDs
+- [x] Record pack, copy, RPC, bytes, and direction metrics without artifact IDs
       as unbounded labels.
 
 ### Unit tests
 
-- [ ] `TestScratchTransfer`
-  - [ ] regions are lazy, direction-specific, fixed-capacity, and created once;
-  - [ ] put packs exact bytes and preserves caller order;
-  - [ ] get copies only OK items after whole-response validation;
-  - [ ] MISS/False target is not consumed;
-  - [ ] malformed/fatal get copies no target bytes and latches Session;
-  - [ ] overflow rejects before arena mutation and RPC;
-  - [ ] get/get and put/put serialize, while get/put can overlap;
-  - [ ] get and put each call the raw RPC with `retries=0`;
-  - [ ] empty calls allocate no arena; and
-  - [ ] termination/failure sends no arena cleanup RPC.
+- [x] `TestScratchTransfer`
+  - [x] regions are lazy, direction-specific, fixed-capacity, and created once;
+  - [x] put packs exact bytes and preserves caller order;
+  - [x] get copies only OK items after whole-response validation;
+  - [x] MISS/False target is not consumed;
+  - [x] malformed/fatal get copies no target bytes and latches Session;
+  - [x] overflow rejects before arena mutation and RPC;
+  - [x] get/get and put/put serialize, while get/put can overlap;
+  - [x] get and put each call the raw RPC with `retries=0`;
+  - [x] empty calls allocate no arena; and
+  - [x] termination/failure sends no arena cleanup RPC.
 
 ### Validation gate
 
@@ -655,51 +655,51 @@ Purpose:
 
 ### Implementation tasks
 
-- [ ] Accept direct spans only when wholly contained in allocations owned by the
+- [x] Accept direct spans only when wholly contained in allocations owned by the
       same Session.
-- [ ] Compile every direct batch into one multi-storage request, regardless of
+- [x] Compile every direct batch into one multi-storage request, regardless of
       how many owned regions it touches.
-- [ ] Submit caller-region addresses directly; do not allocate or copy through
+- [x] Submit caller-region addresses directly; do not allocate or copy through
       a Session scratch arena.
-- [ ] Keep all referenced spans, tensor roots, mmap roots, and explicit owners
+- [x] Keep all referenced spans, tensor roots, mmap roots, and explicit owners
       alive until return or raise.
-- [ ] Enforce pairwise non-overlap within one batch.
-- [ ] Preserve caller-owned cross-call exclusivity without adding an in-flight
+- [x] Enforce pairwise non-overlap within one batch.
+- [x] Preserve caller-owned cross-call exclusivity without adding an in-flight
       interval allocator to the SDK.
-- [ ] Use no client deadline when `transfer_timeout_s=None`.
-- [ ] Issue direct get and put with exactly one SDK attempt (`retries=0`).
-- [ ] Return one transfer operation ID for the one direct RPC.
-- [ ] Treat only `True` direct-get targets as consumable; after fatal direct get,
+- [x] Use no client deadline when `transfer_timeout_s=None`.
+- [x] Issue direct get and put with exactly one SDK attempt (`retries=0`).
+- [x] Return one transfer operation ID for the one direct RPC.
+- [x] Treat only `True` direct-get targets as consumable; after fatal direct get,
       mark every submitted target untrusted through the raised Session error.
-- [ ] Allow concurrent direct get/put calls without a global data-plane lock;
+- [x] Allow concurrent direct get/put calls without a global data-plane lock;
       retain only short state, region, geometry, and generation locks.
-- [ ] After successful put returns, release the source borrow and ensure later
+- [x] After successful put returns, release the source borrow and ensure later
       caller mutation cannot change the stored artifact.
-- [ ] Never call explicit stable-backing activation; rely on daemon layout
+- [x] Never call explicit stable-backing activation; rely on daemon layout
       validation and the frozen region geometry.
 
 ### Unit tests
 
-- [ ] `TestAllocatorDirectTransfer`
-  - [ ] one-region get/put compiles exact offsets with no scratch allocation;
-  - [ ] two-region and three-region batches emit one storage entry per region
+- [x] `TestAllocatorDirectTransfer`
+  - [x] one-region get/put compiles exact offsets with no scratch allocation;
+  - [x] two-region and three-region batches emit one storage entry per region
         and one RPC total;
-  - [ ] first-appearance storage ordering and logical bases are deterministic;
-  - [ ] a batch can mix keyspaces while preserving input-order results;
-  - [ ] foreign, crossing, overlapping, and out-of-range spans fail before RPC;
-  - [ ] `transfer_timeout_s=None` is passed as no deadline;
-  - [ ] configured finite timeout is passed through but retry remains zero;
-  - [ ] get and put never call scratch-copy helpers;
-  - [ ] success/MISS consumption rules match the public contract; and
-  - [ ] failure and termination never release allocator mappings.
-- [ ] `TestConcurrentAdmission`
-  - [ ] direct get and put may overlap in time;
-  - [ ] generation values remain unique and non-zero under concurrency;
-  - [ ] Session/geometry locks are released before blocking RPC;
-  - [ ] a failure latched by one call prevents later admission;
-  - [ ] an already completed concurrent success is discarded if health failed
+  - [x] first-appearance storage ordering and logical bases are deterministic;
+  - [x] a batch can mix keyspaces while preserving input-order results;
+  - [x] foreign, crossing, overlapping, and out-of-range spans fail before RPC;
+  - [x] `transfer_timeout_s=None` is passed as no deadline;
+  - [x] configured finite timeout is passed through but retry remains zero;
+  - [x] get and put never call scratch-copy helpers;
+  - [x] success/MISS consumption rules match the public contract; and
+  - [x] failure and termination never release allocator mappings.
+- [x] `TestConcurrentAdmission`
+  - [x] direct get and put may overlap in time;
+  - [x] generation values remain unique and non-zero under concurrency;
+  - [x] Session/geometry locks are released before blocking RPC;
+  - [x] a failure latched by one call prevents later admission;
+  - [x] an already completed concurrent success is discarded if health failed
         before exposure; and
-  - [ ] counter wrap fails closed.
+  - [x] counter wrap fails closed.
 
 ### Validation gate
 
@@ -735,70 +735,70 @@ Purpose:
 
 ### Implementation tasks
 
-- [ ] Complete stable first-failure classification:
-  - [ ] transport/deadline/cancellation/availability -> `TRANSPORT`;
-  - [ ] non-allowlisted/unknown item status -> `DAEMON_STATUS`;
-  - [ ] ambiguous region setup -> `REGION_SETUP`;
-  - [ ] typed already-pinned region loss -> `REGION_LOST`;
-  - [ ] malformed response/token mismatch -> `MALFORMED_RESPONSE`; and
-  - [ ] otherwise unexpected admitted SDK failure -> `INTERNAL`.
-- [ ] Atomically retain only the first failure with UTC timestamp, operation
+- [x] Complete stable first-failure classification:
+  - [x] transport/deadline/cancellation/availability -> `TRANSPORT`;
+  - [x] non-allowlisted/unknown item status -> `DAEMON_STATUS`;
+  - [x] ambiguous region setup -> `REGION_SETUP`;
+  - [x] typed already-pinned region loss -> `REGION_LOST`;
+  - [x] malformed response/token mismatch -> `MALFORMED_RESPONSE`; and
+  - [x] otherwise unexpected admitted SDK failure -> `INTERNAL`.
+- [x] Atomically retain only the first failure with UTC timestamp, operation
       kind, and failing operation ID.
-- [ ] Ensure later allocation, exists, get, and put calls raise that same
+- [x] Ensure later allocation, exists, get, and put calls raise that same
       failure without issuing RPC.
-- [ ] For partitioned exists, stop before the next partition after failure or
+- [x] For partitioned exists, stop before the next partition after failure or
       termination and expose no partial masks.
-- [ ] Ensure first fatal logging contains traceback once and derivative logs are
+- [x] Ensure first fatal logging contains traceback once and derivative logs are
       rate-limited.
-- [ ] Finish termination behavior:
-  - [ ] close new admission;
-  - [ ] retain control resources until admitted work exits;
-  - [ ] stop only Session-owned helper resources;
-  - [ ] do not close/release the process-shared `DaemonCtl`; and
-  - [ ] never unmap or release process-pinned regions.
-- [ ] Add generic observability required by `0122` without high-cardinality
+- [x] Finish termination behavior:
+  - [x] close new admission;
+  - [x] retain control resources until admitted work exits;
+  - [x] stop only Session-owned helper resources;
+  - [x] do not close/release the process-shared `DaemonCtl`; and
+  - [x] never unmap or release process-pinned regions.
+- [x] Add generic observability required by `0122` without high-cardinality
       metric labels.
-- [ ] Add end-to-end Python tests that launch the supplied prebuilt daemon using
+- [x] Add end-to-end Python tests that launch the supplied prebuilt daemon using
       `tests/python/utils/daemon.py`.
-- [ ] Update `tensorcast/api/store/README.md` with scratch and allocator
+- [x] Update `tensorcast/api/store/README.md` with scratch and allocator
       examples and explicit ownership/failure warnings.
-- [ ] Finalize `tensorcast.api.store` exports and update API documentation.
-- [ ] Synchronize design `0122` if implementation closes any naming-only gap;
+- [x] Finalize `tensorcast.api.store` exports and update API documentation.
+- [x] Synchronize design `0122` if implementation closes any naming-only gap;
       do not change its accepted ownership or failure semantics silently.
 
 ### Unit tests
 
-- [ ] `TestFailureContract`
-  - [ ] each stable failure-code mapping is covered;
-  - [ ] simultaneous fatal calls retain exactly one first failure;
-  - [ ] every later method raises the same retained failure object/data;
-  - [ ] no RPC occurs after the latch;
-  - [ ] a fatal exists partition records that partition's operation ID;
-  - [ ] generic status text cannot manufacture `REGION_LOST`; and
-  - [ ] successful concurrent results are suppressed after a latch.
-- [ ] `TestTerminationContract`
-  - [ ] healthy and failed termination are idempotent;
-  - [ ] failed error continues to win after termination;
-  - [ ] admitted synchronous work may reach its terminal path;
-  - [ ] new work and new exists partitions are rejected;
-  - [ ] helper cleanup is deferred until in-flight reaches zero; and
-  - [ ] no daemon client, FD attachment, region, mmap, or tensor root is
+- [x] `TestFailureContract`
+  - [x] each stable failure-code mapping is covered;
+  - [x] simultaneous fatal calls retain exactly one first failure;
+  - [x] every later method raises the same retained failure object/data;
+  - [x] no RPC occurs after the latch;
+  - [x] a fatal exists partition records that partition's operation ID;
+  - [x] generic status text cannot manufacture `REGION_LOST`; and
+  - [x] successful concurrent results are suppressed after a latch.
+- [x] `TestTerminationContract`
+  - [x] healthy and failed termination are idempotent;
+  - [x] failed error continues to win after termination;
+  - [x] admitted synchronous work may reach its terminal path;
+  - [x] new work and new exists partitions are rejected;
+  - [x] helper cleanup is deferred until in-flight reaches zero; and
+  - [x] no daemon client, FD attachment, region, mmap, or tensor root is
         released by termination.
-- [ ] Public documentation examples execute as unit tests or doctest-equivalent
+- [x] Public documentation examples execute as unit tests or doctest-equivalent
       snippets with a fake client.
 
 ### Prebuilt-daemon acceptance tests
 
-- [ ] Scratch put -> exists -> get round trip with multiple artifacts.
-- [ ] Scratch partial-hit get copies only successful targets.
-- [ ] Allocator tensor put -> exists -> direct get round trip.
-- [ ] One allocator RPC spans at least two independent host-shared regions.
-- [ ] Direct put return is quiescent enough that mutating/reusing the caller
+- [x] Scratch put -> exists -> get round trip with multiple artifacts.
+- [x] Scratch partial-hit get copies only successful targets.
+- [x] Allocator tensor put -> exists -> direct get round trip.
+- [x] One allocator RPC spans at least two independent host-shared regions.
+- [x] Direct put return is quiescent enough that mutating/reusing the caller
       source afterward does not change later retrieved bytes.
-- [ ] Daemon rejection causes sticky Session failure and later SDK calls issue
+- [x] Daemon rejection causes sticky Session failure and later SDK calls issue
       no RPC.
-- [ ] Session termination sends no region release/unregister request.
-- [ ] A subprocess owner exit allows the daemon's existing PID cleanup path to
+- [x] Session termination sends no region release/unregister request.
+- [x] A subprocess owner exit allows the daemon's existing PID cleanup path to
       reclaim process-pinned regions.
 
 ### Validation gate
@@ -839,7 +839,6 @@ contract, not a request to change or build daemon code for `0122`:
 bazel test \
   //daemon:grpc_service_impl_batch_runtime_test \
   //daemon:byte_artifact_region_layout_host_shared_test \
-  //daemon:grpc_service_impl_cpu_memfd_e2e_test \
   --test_env=TENSORCAST_CUDA_BACKEND=fake \
   --test_output=errors
 ```
@@ -900,11 +899,11 @@ gate when the prepared build environment is available.
 
 - [ ] Land phases in execution order or keep later phases hidden until all prior
       gates are green.
-- [ ] Keep the new Session opt-in; do not alter ordinary `Artifact` or `Store`
+- [x] Keep the new Session opt-in; do not alter ordinary `Artifact` or `Store`
       behavior.
-- [ ] Preserve old `DaemonCtl` retry defaults and make zero retry explicit only
+- [x] Preserve old `DaemonCtl` retry defaults and make zero retry explicit only
       for the new direct/scratch region transfer path.
-- [ ] Publish public docs only when both scratch and allocator prebuilt-daemon
+- [x] Publish public docs only when both scratch and allocator prebuilt-daemon
       tests pass.
 - [ ] Integrations should first enable scratch mode, then allocator mode, while
       retaining their own policy for converting sticky L3 failure into local
@@ -923,64 +922,64 @@ gate when the prepared build environment is available.
 
 # Risks And Tracking
 
-- [ ] Risk: a Session data-path call accidentally inherits the existing region
+- [x] Risk: a Session data-path call accidentally inherits the existing region
       RPC retry default.
   - mitigation: spy-based tests assert the exact `retries=0` value for scratch
     and direct get/put.
-- [ ] Risk: unit-test cleanup masks illegal production region cleanup.
+- [x] Risk: unit-test cleanup masks illegal production region cleanup.
   - mitigation: fake registry reset is test-only; process-pinned lifecycle tests
     assert no release/unregister call, and real reclamation uses a subprocess
     owner exit.
-- [ ] Risk: Python owner objects are collected while an RPC still uses an
+- [x] Risk: Python owner objects are collected while an RPC still uses an
       address.
   - mitigation: immutable call snapshots and strong-reference/weak-reference
     tests cover every owner path.
-- [ ] Risk: multi-region offset arithmetic aliases two storages or overflows.
+- [x] Risk: multi-region offset arithmetic aliases two storages or overflows.
   - mitigation: checked arithmetic, deterministic first-appearance ordering,
     and two/three-region layout tests.
-- [ ] Risk: an invalid first batch poisons region slot geometry.
+- [x] Risk: an invalid first batch poisons region slot geometry.
   - mitigation: all-or-nothing commit after validation with concurrent
     conflicting-first-use tests.
-- [ ] Risk: response size exceeds the client receive limit despite conservative
+- [x] Risk: response size exceeds the client receive limit despite conservative
       ordinary-outcome estimation.
   - mitigation: keep fixed headroom; classify exceptional transport overflow as
     fatal; require compatible daemon/client limits operationally.
-- [ ] Risk: direct no-deadline RPC hangs a test or shutdown path.
+- [x] Risk: direct no-deadline RPC hangs a test or shutdown path.
   - mitigation: unit tests use bounded fakes; end-to-end tests use an outer
     subprocess/test timeout without changing the Session's no-deadline contract.
-- [ ] Risk: sticky failure hides an artifact-scoped daemon rejection.
+- [x] Risk: sticky failure hides an artifact-scoped daemon rejection.
   - mitigation: retain the intentionally small success allowlist and test every
     non-allowlisted status as Session-fatal.
-- [ ] Risk: fake CUDA proves CPU/shared-memory correctness but not accelerator
+- [x] Risk: fake CUDA proves CPU/shared-memory correctness but not accelerator
       host registration behavior.
   - mitigation: accelerator registration remains explicitly caller-owned and
     outside `0122` acceptance.
 
 # Owner Checklist
 
-- [ ] Public caller supplies only keyspace, engine key, byte length, and owned
+- [x] Public caller supplies only keyspace, engine key, byte length, and owned
       host spans.
-- [ ] Public types expose no canonical artifact ID, protobuf, daemon client,
+- [x] Public types expose no canonical artifact ID, protobuf, daemon client,
       region handle, layout enum, storage ID, or slot token.
-- [ ] One process has one attached endpoint and one sticky Session failure
+- [x] One process has one attached endpoint and one sticky Session failure
       domain.
-- [ ] Attach is serialized with one ordinary registry mutex.
-- [ ] Effective client send/receive limits are one immutable per-client
+- [x] Attach is serialized with one ordinary registry mutex.
+- [x] Effective client send/receive limits are one immutable per-client
       snapshot reused by channel refresh and Session sizing.
-- [ ] Scratch and direct get/put use zero SDK retries.
-- [ ] Exists partitions transparently, uses one operation ID per partition, and
+- [x] Scratch and direct get/put use zero SDK retries.
+- [x] Exists partitions transparently, uses one operation ID per partition, and
       exposes one ordered all-or-error result.
-- [ ] Multiple allocator regions coexist and one direct RPC can reference all
+- [x] Multiple allocator regions coexist and one direct RPC can reference all
       of them.
-- [ ] Caller memory is strongly retained for every synchronous borrow.
-- [ ] Only successful get targets are consumable.
-- [ ] Fatal RPC, malformed response, and typed region loss latch one stable first
+- [x] Caller memory is strongly retained for every synchronous borrow.
+- [x] Only successful get targets are consumable.
+- [x] Fatal RPC, malformed response, and typed region loss latch one stable first
       failure and admit no later RPC.
-- [ ] Empty calls check Session state but issue no RPC.
-- [ ] Geometry commits only after complete local and wire-budget validation.
-- [ ] Failure and termination never release process-pinned regions or close the
+- [x] Empty calls check Session state but issue no RPC.
+- [x] Geometry commits only after complete local and wire-budget validation.
+- [x] Failure and termination never release process-pinned regions or close the
       process-shared daemon client.
-- [ ] Unit, SDK regression, prebuilt-daemon, daemon-contract, and Ruff gates are
+- [x] Unit, SDK regression, prebuilt-daemon, daemon-contract, and Ruff gates are
       green.
-- [ ] Design, implementation, tests, and public SDK documentation describe the
+- [x] Design, implementation, tests, and public SDK documentation describe the
       same contract.

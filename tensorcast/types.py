@@ -32,6 +32,7 @@ class ServerConfig(BaseModel):
     artifact_chunk_bytes: int = 0
     local_handle_socket_path: str = ""
     cpu_shared_memory_enabled: bool = True
+    startup_phase: int = 0
     source_bound_capability_flags: int = 0
     source_bound_contract_version: int = 0
 

@@ -98,6 +98,13 @@ _DEFAULT_FEED_VIEW_CHUNK_BYTES = 4 * 1024 * 1024
 _FEED_VIEW_CHUNK_HEADROOM_BYTES = 64 * 1024
 _DEFAULT_FEED_PROGRESS_LOG_INTERVAL_BYTES = 0
 
+
+@dataclass(frozen=True, slots=True)
+class _GrpcMessageLimits:
+    max_send_message_bytes: int
+    max_receive_message_bytes: int
+
+
 # -----------------------------------------------------------------------------
 # Client-side diagnostics (process-scoped)
 # -----------------------------------------------------------------------------
@@ -330,6 +337,13 @@ def _grpc_max_receive_message_bytes() -> int:
     )
 
 
+def _resolve_grpc_message_limits() -> _GrpcMessageLimits:
+    return _GrpcMessageLimits(
+        max_send_message_bytes=_grpc_max_send_message_bytes(),
+        max_receive_message_bytes=_grpc_max_receive_message_bytes(),
+    )
+
+
 @lru_cache(maxsize=1)
 def _feed_view_chunk_safe_max_bytes() -> int:
     configured_chunk = _parse_env_int(
@@ -504,11 +518,12 @@ class DaemonCtl:
         store_daemon_pb2.PERSISTENCE_STATE_FAILED: "failed",
     }
 
-    def __init__(self, server_address="127.0.0.1:8073"):
+    def __init__(self, server_address: str = "127.0.0.1:8073") -> None:
         # SDK-library safe: ensure OTel is active or ask app to init. No downgrade.
         ensure_client_otel("tensorcast-client", role="client")
 
         self.server_address = server_address
+        self._grpc_message_limits = _resolve_grpc_message_limits()
         self._ch_lock: RLock = RLock()
         self.channel = self._create_channel(server_address)
         self.stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(self.channel)
@@ -523,8 +538,14 @@ class DaemonCtl:
             logger.info("DaemonCtl configured to use host PID")
 
     # Channel helpers with sane keepalive defaults
+    @property
+    def _effective_grpc_message_limits(self) -> _GrpcMessageLimits:
+        return self._grpc_message_limits
+
     @staticmethod
-    def _channel_options() -> list[tuple[str, int]]:
+    def _channel_options(
+        message_limits: _GrpcMessageLimits,
+    ) -> list[tuple[str, int]]:
         # Long-running unary RPCs (e.g., full materialization) can legitimately run
         # for several minutes. Use conservative ping defaults to avoid transport
         # resets caused by overly aggressive keepalive probes.
@@ -558,11 +579,15 @@ class DaemonCtl:
             default=1,
             min_value=0,
         )
-        max_send_message_length = _grpc_max_send_message_bytes()
-        max_receive_message_length = _grpc_max_receive_message_bytes()
         return [
-            ("grpc.max_send_message_length", max_send_message_length),
-            ("grpc.max_receive_message_length", max_receive_message_length),
+            (
+                "grpc.max_send_message_length",
+                message_limits.max_send_message_bytes,
+            ),
+            (
+                "grpc.max_receive_message_length",
+                message_limits.max_receive_message_bytes,
+            ),
             ("grpc.keepalive_time_ms", keepalive_time_ms),
             ("grpc.keepalive_timeout_ms", keepalive_timeout_ms),
             ("grpc.keepalive_permit_without_calls", keepalive_permit_without_calls),
@@ -575,7 +600,10 @@ class DaemonCtl:
         ]
 
     def _create_channel(self, addr: str) -> grpc.Channel:
-        return grpc.insecure_channel(addr, options=self._channel_options())
+        return grpc.insecure_channel(
+            addr,
+            options=self._channel_options(self._grpc_message_limits),
+        )
 
     def _refresh_channel(self) -> None:
         with self._ch_lock:
@@ -1929,11 +1957,14 @@ class DaemonCtl:
         *,
         selections: Iterable[common_pb2.ArtifactSelection],
         timeout_s: float = 30.0,
+        operation_id: str | None = None,
     ) -> store_daemon_pb2.BatchExistsResponse:
         request = store_daemon_pb2.BatchExistsRequest()
         for selection in selections:
             request.selections.add().CopyFrom(selection)
         with self._client_span("Client/BatchExists") as span:
+            if operation_id:
+                span.set_attribute("tc.operation.id", str(operation_id))
             try:
                 response: store_daemon_pb2.BatchExistsResponse = self._unary_call(
                     self.stub_v2.BatchExists,
@@ -1957,8 +1988,11 @@ class DaemonCtl:
         pid: int,
         device_uuid: str,
         operation_id: str | None = None,
-        timeout_s: float = 600.0,
+        timeout_s: float | None = 600.0,
+        retries: int = 1,
     ) -> store_daemon_pb2.BatchGetIntoRegionResponse:
+        if retries < 0:
+            raise ValueError("retries must be non-negative")
         request = store_daemon_pb2.BatchGetIntoRegionRequest(
             target_layout=target_layout,
             pid=int(pid),
@@ -1974,9 +2008,9 @@ class DaemonCtl:
                     self._unary_call(
                         self.stub_v2.BatchGetIntoRegion,
                         request,
-                        timeout=float(timeout_s),
+                        timeout=(None if timeout_s is None else float(timeout_s)),
                         span=span,
-                        retries=1,
+                        retries=retries,
                     )
                 )
             except grpc.RpcError as e:  # noqa: BLE001
@@ -1995,8 +2029,11 @@ class DaemonCtl:
         device_uuid: str,
         ttl_ms: int | None = None,
         operation_id: str | None = None,
-        timeout_s: float = 600.0,
+        timeout_s: float | None = 600.0,
+        retries: int = 1,
     ) -> store_daemon_pb2.BatchPutIfAbsentFromRegionResponse:
+        if retries < 0:
+            raise ValueError("retries must be non-negative")
         request = store_daemon_pb2.BatchPutIfAbsentFromRegionRequest(
             source_layout=source_layout,
             pid=int(pid),
@@ -2014,9 +2051,9 @@ class DaemonCtl:
                     self._unary_call(
                         self.stub_v2.BatchPutIfAbsentFromRegion,
                         request,
-                        timeout=float(timeout_s),
+                        timeout=(None if timeout_s is None else float(timeout_s)),
                         span=span,
-                        retries=1,
+                        retries=retries,
                     )
                 )
             except grpc.RpcError as e:  # noqa: BLE001
@@ -2832,6 +2869,7 @@ class DaemonCtl:
                     ),
                     local_handle_socket_path=local_handle_socket_path,
                     cpu_shared_memory_enabled=cpu_shared_memory_enabled,
+                    startup_phase=int(getattr(response, "startup_phase", 0)),
                     source_bound_capability_flags=int(
                         getattr(response, "source_bound_capability_flags", 0)
                     ),
