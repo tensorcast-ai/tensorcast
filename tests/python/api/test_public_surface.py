@@ -8,6 +8,7 @@ import inspect
 from pathlib import Path
 
 import tensorcast as tc
+import tensorcast.api.store as store_api
 import tensorcast.artifact_runtime.diagnostics as tc_runtime_diagnostics
 import tensorcast.artifact_runtime.readiness as tc_runtime_readiness
 from tensorcast.api.store import (
@@ -88,6 +89,37 @@ from tensorcast.retained_realization import (
     retained_realization_claim_extra_from_handoff,
     retained_realization_claim_extra_json_from_handoff,
 )
+
+
+def test_region_backed_artifact_session_is_exported_from_store_namespace() -> None:
+    public_names = (
+        "AllocatorTransferOptions",
+        "ByteArtifactKeyspace",
+        "ByteArtifactSpec",
+        "HostMemorySpan",
+        "RegionArtifactExistsResult",
+        "RegionArtifactInputError",
+        "RegionArtifactTransfer",
+        "RegionArtifactTransferResult",
+        "RegionBackedArtifactSession",
+        "RegionBackedArtifactSessionOptions",
+        "RegionSessionAttachError",
+        "RegionSessionFailedError",
+        "RegionSessionFailure",
+        "RegionSessionFailureCode",
+        "RegionSessionHealth",
+        "RegionSessionLifecycleState",
+        "RegionSessionOperationKind",
+        "RegionSessionTerminatedError",
+        "RegionTransferMode",
+        "ScratchTransferOptions",
+    )
+
+    for public_name in public_names:
+        assert public_name in store_api.__all__
+        assert getattr(store_api, public_name).__module__ == (
+            "tensorcast.api.store.region_backed_artifact_session"
+        )
 
 
 def test_tensorcast_exports_artifact_helpers() -> None:

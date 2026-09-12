@@ -12,6 +12,10 @@ Design 0037 refactored `tensorcast.api.store` into a structured subpackage:
 - `store/registration.py` and `store/materialization.py` orchestrate register/put/view and artifact materialization flows with shared retry/error mapping.
 - `store/views.py` keeps view-spec parsing, placement defaults, and canonical index lookups isolated from the pipelines.
 - `store/async_ops.py` centralizes async helpers (`ArtifactFuture`, `TrackedExecutor`) so cancellation/confirm semantics are consistent across verbs.
+- `store/region_backed_artifact_session.py` provides the public, process-scoped
+  scratch and allocator transfer surface for immutable byte artifacts backed by
+  daemon-exposed host shared-memory regions. Callers import its symbols from
+  `tensorcast.api.store`; see [the Store SDK guide](store/README.md#region-backed-byte-artifact-sessions).
 - `store/__init__.py` is the public façade; it now eagerly wires runtime/registration/materialization without monkeypatch/override hooks or lazy rebuilds.
 
 Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a process-scoped `Store`. If you close that store (or invoke `shutdown_process_store()`), the next helper invocation transparently reinitializes a fresh instance instead of reusing the closed handle.

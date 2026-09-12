@@ -5,6 +5,148 @@ artifact handle surfaces. This module builds on the process-wide `Store`
 singleton (`tensorcast.store()`) so callers can reuse daemon sessions without
 managing clients manually.
 
+## Region-Backed Byte Artifact Sessions
+
+`RegionBackedArtifactSession` is the narrow synchronous API for applications
+that exchange immutable byte artifacts through StoreDaemon-exposed host shared
+memory. StoreDaemon must already be running on the same node with
+`startup_phase == READY` and CPU shared memory enabled. One process attaches to
+one daemon endpoint; the Session itself does not connect to Global Store.
+
+Scratch mode copies caller bytes through one fixed-capacity, Session-owned arena
+per direction:
+
+```python
+import torch
+
+from tensorcast.api.store import (
+    ByteArtifactKeyspace,
+    ByteArtifactSpec,
+    HostMemorySpan,
+    RegionArtifactTransfer,
+    RegionBackedArtifactSession,
+    RegionBackedArtifactSessionOptions,
+    ScratchTransferOptions,
+)
+
+session = RegionBackedArtifactSession.attach(
+    RegionBackedArtifactSessionOptions(
+        daemon_address="127.0.0.1:8073",
+        session_name="runtime-worker-0",
+        transfer=ScratchTransferOptions(capacity_bytes=64 * 1024 * 1024),
+    )
+)
+keyspace = ByteArtifactKeyspace(
+    namespace="serving",
+    engine="runtime",
+    model_id="model-a",
+    model_version="revision-42",
+    layout_id="cache-page-v1",
+)
+source = torch.arange(4096, dtype=torch.int32).view(torch.uint8)
+artifact = ByteArtifactSpec(
+    keyspace=keyspace,
+    engine_key=b"layer-0:page-17",
+    byte_length=source.numel(),
+)
+transfer = RegionArtifactTransfer(
+    artifact=artifact,
+    span=HostMemorySpan.from_tensor(
+        source,
+        offset_bytes=0,
+        byte_length=artifact.byte_length,
+    ),
+)
+put_result = session.batch_put_from([transfer])
+```
+
+Allocator mode asks StoreDaemon for each long-lived host-shared allocation and
+uses spans of those tensors directly, without a caller-to-scratch copy. One
+batch may span several independent allocations (for example K, V, and recurrent
+state regions):
+
+```python
+import torch
+
+from tensorcast.api.store import (
+    AllocatorTransferOptions,
+    ByteArtifactKeyspace,
+    ByteArtifactSpec,
+    HostMemorySpan,
+    RegionArtifactTransfer,
+    RegionBackedArtifactSession,
+    RegionBackedArtifactSessionOptions,
+)
+
+session = RegionBackedArtifactSession.attach(
+    RegionBackedArtifactSessionOptions(
+        daemon_address="127.0.0.1:8073",
+        session_name="runtime-worker-0",
+        transfer=AllocatorTransferOptions(),
+    )
+)
+keyspace = ByteArtifactKeyspace(
+    namespace="serving",
+    engine="runtime",
+    model_id="model-a",
+    model_version="revision-42",
+    layout_id="cache-page-v1",
+)
+k_region = session.allocate_host_tensor((1024,), torch.uint8, name="k-region")
+v_region = session.allocate_host_tensor((1024,), torch.uint8, name="v-region")
+transfers = tuple(
+    RegionArtifactTransfer(
+        artifact=ByteArtifactSpec(
+            keyspace=keyspace,
+            engine_key=engine_key,
+            byte_length=256,
+        ),
+        span=HostMemorySpan.from_tensor(
+            region,
+            offset_bytes=0,
+            byte_length=256,
+        ),
+    )
+    for engine_key, region in ((b"k:page-17", k_region), (b"v:page-17", v_region))
+)
+put_result = session.batch_put_from(transfers)
+exists_result = session.batch_exists([transfer.artifact for transfer in transfers])
+get_result = session.batch_get_into(transfers)
+```
+
+The result masks preserve caller order. For get, only targets whose
+`success_mask` entry is `True` are consumable. A `False` target is unspecified
+and must be discarded or reinitialized.
+
+Memory and failure ownership are intentionally strict:
+
+- Every span retains an owner, but the caller still owns synchronization. Do
+  not read, write, free, or reuse a submitted range until its synchronous call
+  returns.
+- Allocator mappings and scratch arenas become process-pinned. Neither an RPC
+  failure nor `terminate_process_session()` unmaps them, unregisters their
+  regions, releases their stable backing, or closes the process-shared daemon
+  client. Normal reclamation occurs through StoreDaemon's owner-PID cleanup
+  after the process exits.
+- A fatal RPC, non-allowlisted daemon status, typed region loss, or malformed
+  response permanently latches the first `RegionSessionFailure`. That call and
+  every later allocation/exists/get/put raise `RegionSessionFailedError` without
+  a retry or another RPC. Applications should disable this storage path and
+  continue with their own fallback; they should not terminate the process merely
+  to handle an L3 failure.
+- Region-backed get/put explicitly use zero SDK retries. Their default transfer
+  deadline is `None`, so deployment-level supervision must handle a daemon that
+  never completes an RPC.
+- `terminate_process_session()` only closes new admission and stops private
+  Session helpers after admitted work exits. It is terminal and cannot be used
+  to detach and reattach in the same process.
+
+Callers provide `ByteArtifactKeyspace` plus opaque `engine_key`; canonical
+artifact identities, protobuf layouts, storage IDs, region handles, and slot
+tokens remain SDK implementation details. See
+`../../../docs/designs/0122-process-scoped-region-backed-artifact-session.md`
+for the complete ownership and concurrency contract.
+
 ## Artifact Handles
 
 - `tensorcast.artifact(...)` and `Store.artifact(...)` return a lazy `Artifact`
